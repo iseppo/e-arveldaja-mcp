@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+.omc/
+*.log
+*.js.map
+*.d.ts.map

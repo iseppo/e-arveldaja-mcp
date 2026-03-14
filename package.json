@@ -1,0 +1,25 @@
+{
+  "name": "e-arveldaja-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Estonian e-arveldaja (e-Financials) API",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "dotenv": "^16.4.7",
+    "fastest-levenshtein": "^1.0.16",
+    "pdf-parse": "^1.1.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "@types/pdf-parse": "^1.1.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
