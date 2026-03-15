@@ -9,7 +9,7 @@ import { JournalsApi } from "./api/journals.api.js";
 import { TransactionsApi } from "./api/transactions.api.js";
 import { SaleInvoicesApi } from "./api/sale-invoices.api.js";
 import { PurchaseInvoicesApi } from "./api/purchase-invoices.api.js";
-import { ReadonlyApi } from "./api/readonly.api.js";
+import { ReadonlyApi, readonlyCache } from "./api/readonly.api.js";
 import { cache } from "./api/base-resource.js";
 import { registerCrudTools, type ApiContext } from "./tools/crud-tools.js";
 import { registerAccountBalanceTools } from "./tools/account-balance.js";
@@ -36,6 +36,8 @@ function buildApiContext(httpClient: HttpClient): ApiContext {
   };
 }
 
+// Safe because MCP stdio transport processes requests sequentially.
+// If switching to a concurrent transport, this would need per-request context.
 function switchApi(api: ApiContext, newApi: ApiContext): void {
   api.clients = newApi.clients;
   api.products = newApi.products;
@@ -75,9 +77,7 @@ async function main() {
       const connections = allConfigs.map((nc: NamedConfig, i: number) => ({
         index: i,
         name: nc.name,
-        file: nc.filePath ?? "(env vars)",
         active: i === activeIndex,
-        key_id: nc.config.apiKeyId,
         server: nc.config.baseUrl.includes("demo") ? "demo" : "live",
       }));
 
@@ -119,7 +119,6 @@ async function main() {
             type: "text",
             text: JSON.stringify({
               message: `Already connected to "${allConfigs[index]!.name}"`,
-              key_id: allConfigs[index]!.config.apiKeyId,
             }),
           }],
         };
@@ -129,6 +128,7 @@ async function main() {
 
       // Clear all cached data from previous connection
       cache.invalidate();
+      readonlyCache.invalidate();
 
       // Build new API context and swap into the shared object
       const newHttpClient = new HttpClient(target.config);
@@ -141,8 +141,6 @@ async function main() {
           type: "text",
           text: JSON.stringify({
             message: `Switched to "${target.name}"`,
-            key_id: target.config.apiKeyId,
-            file: target.filePath ?? "(env vars)",
             server: target.config.baseUrl.includes("demo") ? "demo" : "live",
             note: "Cache cleared. All tools now use the new connection.",
           }, null, 2),

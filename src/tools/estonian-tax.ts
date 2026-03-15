@@ -13,7 +13,7 @@ async function validateAccounts(api: ApiContext, ...accountIds: number[]): Promi
   return errors;
 }
 
-async function computeRetainedEarningsBalance(api: ApiContext, accountId: number): Promise<number> {
+async function computeRetainedEarningsBalance(api: ApiContext, accountId: number, asOfDate?: string): Promise<number> {
   const allJournals = await api.journals.listAllWithPostings();
   let debit = 0;
   let credit = 0;
@@ -21,6 +21,7 @@ async function computeRetainedEarningsBalance(api: ApiContext, accountId: number
   for (const journal of allJournals) {
     if (journal.is_deleted) continue;
     if (!journal.registered) continue;
+    if (asOfDate && journal.effective_date && journal.effective_date > asOfDate) continue;
 
     if (!journal.postings) continue;
 
@@ -79,7 +80,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const grossDividend = net_dividend + cit;
 
       // Check retained earnings balance
-      const retainedBalance = await computeRetainedEarningsBalance(api, retainedAccount);
+      const retainedBalance = await computeRetainedEarningsBalance(api, retainedAccount, effective_date);
       const warnings: string[] = [];
       if (retainedBalance < grossDividend) {
         if (!force) {

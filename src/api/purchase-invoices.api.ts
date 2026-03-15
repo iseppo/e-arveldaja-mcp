@@ -26,16 +26,16 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     const invoice = await this.get(id);
     const items = (invoice as any).items as Array<{ vat_amount?: number; total_net_price: number }> | undefined;
 
-    let vat = vatPrice ?? 0;
-    let gross = grossPrice ?? 0;
+    let vat = vatPrice !== undefined ? vatPrice : 0;
+    let gross = grossPrice !== undefined ? grossPrice : 0;
 
-    if (vat === 0 && items) {
+    if (vatPrice === undefined && items) {
       // Sum item-level VAT
       vat = items.reduce((sum, item) => sum + (item.vat_amount ?? 0), 0);
       vat = Math.round(vat * 100) / 100;
     }
-    if (gross === 0) {
-      const net = items?.reduce((sum, item) => sum + item.total_net_price, 0) ?? 0;
+    if (grossPrice === undefined) {
+      const net = items?.reduce((sum, item) => sum + (item.total_net_price ?? 0), 0) ?? 0;
       gross = Math.round((net + vat) * 100) / 100;
     }
 
@@ -56,7 +56,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       const items = (invoice as any).items as Array<{ vat_amount?: number; total_net_price: number }> | undefined;
       if (items) {
         const vat = Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100;
-        const net = Math.round(items.reduce((s, i) => s + i.total_net_price, 0) * 100) / 100;
+        const net = Math.round(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100;
         const gross = Math.round((net + vat) * 100) / 100;
         await this.update(id, { vat_price: vat, gross_price: gross, items } as any);
       }

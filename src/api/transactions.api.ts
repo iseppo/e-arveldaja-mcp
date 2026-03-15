@@ -21,15 +21,17 @@ export class TransactionsApi extends BaseResource<Transaction> {
     if (body.length > 0) {
       const tx = await this.get(id);
       if (!(tx as any).clients_id) {
-        const dist = body[0]!;
         let clientsId: number | undefined;
 
-        if (dist.related_table === "purchase_invoices" && dist.related_id) {
-          const inv = await this.client.get<any>(`/purchase_invoices/${dist.related_id}`);
-          clientsId = inv?.clients_id;
-        } else if (dist.related_table === "sale_invoices" && dist.related_id) {
-          const inv = await this.client.get<any>(`/sale_invoices/${dist.related_id}`);
-          clientsId = inv?.clients_id;
+        for (const dist of body) {
+          if (dist.related_table === "purchase_invoices" && dist.related_id) {
+            const inv = await this.client.get<any>(`/purchase_invoices/${dist.related_id}`);
+            clientsId = inv?.clients_id;
+          } else if (dist.related_table === "sale_invoices" && dist.related_id) {
+            const inv = await this.client.get<any>(`/sale_invoices/${dist.related_id}`);
+            clientsId = inv?.clients_id;
+          }
+          if (clientsId) break;
         }
 
         if (clientsId) {

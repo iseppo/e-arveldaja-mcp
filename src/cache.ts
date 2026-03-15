@@ -20,6 +20,9 @@ export class Cache {
       this.store.delete(key);
       return undefined;
     }
+    // LRU: move to end of Map insertion order
+    this.store.delete(key);
+    this.store.set(key, entry);
     return entry.data as T;
   }
 

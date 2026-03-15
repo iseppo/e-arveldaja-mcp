@@ -20,13 +20,22 @@ export class JournalsApi extends BaseResource<Journal> {
     const all = await this.listAll();
     const enriched: Journal[] = [];
 
+    // Separate journals that need individual fetch
+    const needFetch: Journal[] = [];
     for (const journal of all) {
       if (journal.postings && journal.postings.length > 0) {
         enriched.push(journal);
       } else {
-        const detailed = await this.get(journal.id!);
-        enriched.push(detailed);
+        needFetch.push(journal);
       }
+    }
+
+    // Fetch in parallel batches of 5 (respects rate limiter in HttpClient)
+    const batchSize = 5;
+    for (let i = 0; i < needFetch.length; i += batchSize) {
+      const batch = needFetch.slice(i, i + batchSize);
+      const results = await Promise.all(batch.map(j => this.get(j.id!)));
+      enriched.push(...results);
     }
 
     cache.set(cacheKey, enriched, 120);

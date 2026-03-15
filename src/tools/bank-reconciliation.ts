@@ -17,17 +17,22 @@ interface MatchCandidate {
 
 function matchScore(
   tx: Transaction,
-  invoice: { gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string },
+  invoice: { gross_price?: number; base_gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string },
   txAmount: number
 ): { confidence: number; reasons: string[] } {
   let confidence = 0;
   const reasons: string[] = [];
 
-  // Amount match
+  // Amount match (check both local and base currency amounts)
   const invoiceAmount = invoice.gross_price ?? 0;
+  const baseAmount = (tx as any).base_amount ?? txAmount;
+  const baseInvoiceAmount = invoice.base_gross_price ?? invoiceAmount;
   if (Math.abs(txAmount - invoiceAmount) < 0.01) {
     confidence += 40;
     reasons.push("exact_amount");
+  } else if (Math.abs(baseAmount - baseInvoiceAmount) < 0.01 && baseAmount !== txAmount) {
+    confidence += 40;
+    reasons.push("exact_base_amount");
   } else if (Math.abs(txAmount - invoiceAmount) < 1) {
     confidence += 20;
     reasons.push("close_amount");
