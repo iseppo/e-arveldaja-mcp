@@ -9,20 +9,23 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
 
   async confirm(id: number): Promise<ApiResponse> {
     cache.invalidate(this.basePath);
-    return this.client.patch<ApiResponse>(`/purchase_invoices/${id}/confirm`, {});
+    return this.client.patch<ApiResponse>(`/purchase_invoices/${id}/register`, {});
   }
 
   async getDocument(id: number): Promise<ApiFile> {
-    return this.client.get<ApiFile>(`/purchase_invoices/${id}/document`);
+    return this.client.get<ApiFile>(`/purchase_invoices/${id}/document_user`);
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
     cache.invalidate(this.basePath);
-    return this.client.post<ApiResponse>(`/purchase_invoices/${id}/document`, { name, contents });
+    return this.client.request<ApiResponse>(`/purchase_invoices/${id}/document_user`, {
+      method: "PUT",
+      body: { name, contents },
+    });
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
     cache.invalidate(this.basePath);
-    return this.client.delete<ApiResponse>(`/purchase_invoices/${id}/document`);
+    return this.client.delete<ApiResponse>(`/purchase_invoices/${id}/document_user`);
   }
 }

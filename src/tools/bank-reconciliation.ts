@@ -1,6 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { closest } from "fastest-levenshtein";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 
@@ -75,12 +74,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       // Get unpaid invoices (exclude partially paid - amount won't match)
       const allSales = await api.saleInvoices.listAll();
       const openSales = allSales.filter((inv: SaleInvoice) =>
-        inv.payment_status === "UNPAID" && inv.status === "CONFIRMED"
+        inv.payment_status === "NOT_PAID" && inv.status === "CONFIRMED"
       );
 
       const allPurchases = await api.purchaseInvoices.listAll();
       const openPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.payment_status === "UNPAID" && inv.status === "CONFIRMED"
+        inv.payment_status === "NOT_PAID" && inv.status === "CONFIRMED"
       );
 
       const results = [];
@@ -180,12 +179,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
       const allSales = await api.saleInvoices.listAll();
       const openSales = allSales.filter((inv: SaleInvoice) =>
-        inv.payment_status === "UNPAID" && inv.status === "CONFIRMED"
+        inv.payment_status === "NOT_PAID" && inv.status === "CONFIRMED"
       );
 
       const allPurchases = await api.purchaseInvoices.listAll();
       const openPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.payment_status === "UNPAID" && inv.status === "CONFIRMED"
+        inv.payment_status === "NOT_PAID" && inv.status === "CONFIRMED"
       );
 
       const confirmed = [];

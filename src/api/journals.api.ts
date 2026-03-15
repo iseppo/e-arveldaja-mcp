@@ -9,20 +9,23 @@ export class JournalsApi extends BaseResource<Journal> {
 
   async confirm(id: number): Promise<ApiResponse> {
     cache.invalidate(this.basePath);
-    return this.client.patch<ApiResponse>(`/journals/${id}/confirm`, {});
+    return this.client.patch<ApiResponse>(`/journals/${id}/register`, {});
   }
 
   async getDocument(id: number): Promise<ApiFile> {
-    return this.client.get<ApiFile>(`/journals/${id}/document`);
+    return this.client.get<ApiFile>(`/journals/${id}/document_user`);
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
     cache.invalidate(this.basePath);
-    return this.client.post<ApiResponse>(`/journals/${id}/document`, { name, contents });
+    return this.client.request<ApiResponse>(`/journals/${id}/document_user`, {
+      method: "PUT",
+      body: { name, contents },
+    });
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
     cache.invalidate(this.basePath);
-    return this.client.delete<ApiResponse>(`/journals/${id}/document`);
+    return this.client.delete<ApiResponse>(`/journals/${id}/document_user`);
   }
 }

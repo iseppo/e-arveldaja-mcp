@@ -87,8 +87,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("delete_client", "Soft-delete a client", idParam.shape, async ({ id }) => {
-    const result = await api.clients.delete(id);
+  server.tool("delete_client", "Deactivate a client (can be restored with restore_client)", idParam.shape, async ({ id }) => {
+    const result = await api.clients.deactivate(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
@@ -145,8 +145,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("delete_product", "Soft-delete a product", idParam.shape, async ({ id }) => {
-    const result = await api.products.delete(id);
+  server.tool("delete_product", "Deactivate a product (can be restored with restore_product)", idParam.shape, async ({ id }) => {
+    const result = await api.products.deactivate(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 

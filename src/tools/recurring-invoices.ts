@@ -37,9 +37,6 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
       }
 
       // Get next invoice numbers
-      const series = await api.readonly.getInvoiceSeries();
-      const activeSeries = series.find(s => s.is_default && s.is_active);
-
       const results = [];
 
       // Track used number suffixes per prefix to avoid collisions within this run
@@ -87,9 +84,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
               amount: item.amount,
               unit: item.unit,
               unit_net_price: item.unit_net_price,
-              // Clone tax-critical item-level fields
-              cl_sale_articles_id: item.cl_sale_articles_id,
-              vat_rate: item.vat_rate,
+              // cl_sale_articles_id and vat_rate are readOnly per spec — set via products_id
               discount_percent: item.discount_percent,
               discount_amount: item.discount_amount,
             })),

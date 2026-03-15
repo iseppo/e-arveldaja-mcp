@@ -1,7 +1,7 @@
 import type { Config } from "./config.js";
 import { createAuthHeaders } from "./auth.js";
 
-export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
+export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export interface RequestOptions {
   method?: HttpMethod;

@@ -216,7 +216,12 @@ function parseCapitalGains(csv: string): CapitalGainsRow[] {
  * Excludes BRICEKSP (money market cash fund) trades.
  * Consumed conversions are tracked to prevent double-matching.
  */
-function extractTrades(rows: AccountStatementRow[]): InvestmentTrade[] {
+interface TradeExtractionResult {
+  trades: InvestmentTrade[];
+  warnings: string[];
+}
+
+function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
   // Index conversion rows by reference for quick lookup
   const conversionsByRef = new Map<string, AccountStatementRow[]>();
   for (const row of rows) {
@@ -229,6 +234,7 @@ function extractTrades(rows: AccountStatementRow[]): InvestmentTrade[] {
 
   // Track consumed conversion references to prevent reuse
   const consumedConversions = new Set<string>();
+  const fxWarnings: string[] = [];
 
   const trades: InvestmentTrade[] = [];
 
@@ -264,6 +270,8 @@ function extractTrades(rows: AccountStatementRow[]): InvestmentTrade[] {
       let matched = false;
       const orderDatePrefix = row.date.split(" ")[0]; // DD/MM/YYYY
 
+      // Collect all candidate conversions to detect ambiguity
+      const candidates: Array<{ ref: string; eurConv: AccountStatementRow; fgnConv: AccountStatementRow }> = [];
       for (const [ref, convRows] of conversionsByRef) {
         if (consumedConversions.has(ref)) continue;
 
@@ -271,20 +279,31 @@ function extractTrades(rows: AccountStatementRow[]): InvestmentTrade[] {
         const fgnConv = convRows.find(c => c.ccy === row.ccy);
 
         if (eurConv && fgnConv) {
-          // Verify: same date and matching foreign notional
           const convDatePrefix = fgnConv.date.split(" ")[0];
           if (convDatePrefix !== orderDatePrefix) continue;
 
           if (Math.abs(Math.abs(fgnConv.gross_amount) - Math.abs(row.gross_amount)) < 0.02) {
-            trade.eur_amount = Math.abs(eurConv.gross_amount);
-            trade.fx_rate = eurConv.fx_rate || fgnConv.fx_rate || null;
-            trade.fx_fee_eur = Math.abs(eurConv.fee);
-            trade.conversion_ref = ref;
-            consumedConversions.add(ref);
-            matched = true;
-            break;
+            candidates.push({ ref, eurConv, fgnConv });
           }
         }
+      }
+
+      if (candidates.length > 1) {
+        fxWarnings.push(
+          `${row.reference} (${row.ticker} ${row.ccy} ${Math.abs(row.gross_amount)}): ` +
+          `${candidates.length} FX conversions match by date+amount — using first (${candidates[0]!.ref}). ` +
+          `Verify EUR amount is correct.`
+        );
+      }
+
+      if (candidates.length > 0) {
+        const best = candidates[0]!;
+        trade.eur_amount = Math.abs(best.eurConv.gross_amount);
+        trade.fx_rate = best.eurConv.fx_rate || best.fgnConv.fx_rate || null;
+        trade.fx_fee_eur = Math.abs(best.eurConv.fee);
+        trade.conversion_ref = best.ref;
+        consumedConversions.add(best.ref);
+        matched = true;
       }
 
       if (!matched) {
@@ -298,7 +317,7 @@ function extractTrades(rows: AccountStatementRow[]): InvestmentTrade[] {
 
   // Sort by date ascending
   trades.sort((a, b) => a.date.localeCompare(b.date) || a.datetime.localeCompare(b.datetime));
-  return trades;
+  return { trades, warnings: fxWarnings };
 }
 
 /**
@@ -391,7 +410,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);
-      const trades = extractTrades(rows);
+      const { trades, warnings: fxWarnings } = extractTrades(rows);
       const distributions = extractDistributions(rows);
 
       // Summarize deposits/withdrawals
@@ -422,7 +441,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         };
       }
 
-      const warnings: string[] = [];
+      const warnings: string[] = [...fxWarnings];
       if (unmatchedFx.length > 0) {
         warnings.push(
           `${unmatchedFx.length} foreign currency trade(s) could not be matched to FX conversion entries: ` +
@@ -555,7 +574,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);
-      const trades = extractTrades(rows).filter(t => !skipSet.has(t.ticker));
+      const extraction = extractTrades(rows);
+      const trades = extraction.trades.filter(t => !skipSet.has(t.ticker));
 
       // Parse capital gains if provided
       let gainsMap = new Map<string, CapitalGainsRow>();
@@ -586,7 +606,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         skip_reason?: string;
       }> = [];
 
-      const warnings: string[] = [];
+      const warnings: string[] = [...extraction.warnings];
 
       for (const trade of newTrades) {
         // Skip unmatched FX trades
@@ -782,7 +802,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   server.tool("book_lightyear_distributions",
     "Create journal entries for Lightyear dividend/interest distributions. " +
     "Checks for duplicates using reference IDs. " +
-    "Books: Debit broker account (net received), Credit income account (gross). " +
+    "Books: Debit broker account (net received), Credit income account. " +
+    "Income = gross when tax_account and fee_account are both provided, otherwise net (with warnings). " +
     "Withheld tax (tax_amount) booked to tax_account. Platform fee booked to fee_account.",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
@@ -856,10 +877,13 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         // Dr fee_account: platform fee (fee from CSV)
         if (dist.fee > 0 && fee_account) {
           postings.push({ accounts_id: fee_account, type: "D", amount: dist.fee });
+        } else if (dist.fee > 0) {
+          warnings.push(`Distribution ${dist.reference}: fee ${dist.fee} EUR charged but no fee_account configured — fee reduces booked income.`);
         }
 
-        // Cr income_account: gross amount
-        // gross = net + tax + fee
+        // Cr income_account: must equal sum of all debits so journal balances
+        // If tax/fee accounts are configured, income = gross (net + tax + fee)
+        // If not configured, income = only what's debited (understated vs actual gross)
         const creditAmount = dist.net_amount +
           (dist.tax_amount > 0 && tax_account ? dist.tax_amount : 0) +
           (dist.fee > 0 && fee_account ? dist.fee : 0);
@@ -930,7 +954,18 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);
-      const trades = extractTrades(rows);
+      const { trades, warnings: fxWarnings } = extractTrades(rows);
+
+      // Check for unmatched FX trades that will have zero cost basis
+      const unmatchedFx = trades.filter(t => t.ccy !== "EUR" && t.eur_amount === 0);
+      const portfolioWarnings: string[] = [...fxWarnings];
+      if (unmatchedFx.length > 0) {
+        portfolioWarnings.push(
+          `${unmatchedFx.length} foreign currency trade(s) have no matched FX conversion (eur_amount=0). ` +
+          `Holdings and cost basis for affected tickers may be understated: ` +
+          unmatchedFx.map(t => `${t.reference} (${t.ticker} ${t.type} ${t.quantity})`).join(", ")
+        );
+      }
 
       // Compute holdings using weighted average cost (WAC)
       const holdings = new Map<string, {
@@ -1011,6 +1046,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               total_realized_gain_loss_eur: Math.round(portfolio.reduce((s, p) => s + p.realized_gain_loss_eur, 0) * 100) / 100,
               closed_positions: closed.length,
             },
+            ...(portfolioWarnings.length > 0 && { warnings: portfolioWarnings }),
             note: "Cost basis computed using weighted average cost (WAC) method. " +
               "For tax reporting, use parse_lightyear_capital_gains which uses FIFO.",
           }, null, 2),

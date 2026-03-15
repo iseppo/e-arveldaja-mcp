@@ -57,8 +57,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       retained_earnings_account: z.number().optional().describe("Retained earnings account (default 3020)"),
       dividend_payable_account: z.number().optional().describe("Dividend payable account (default 2370)"),
       tax_payable_account: z.number().optional().describe("CIT payable account (default 2540)"),
+      force: z.boolean().optional().describe("Create journal even if retained earnings are insufficient (default false)"),
     },
-    async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account }) => {
+    async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, force }) => {
       const retainedAccount = retained_earnings_account ?? 3020;
       const payableAccount = dividend_payable_account ?? 2370;
       const taxAccount = tax_payable_account ?? 2540;
@@ -87,9 +88,24 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const retainedBalance = await computeRetainedEarningsBalance(api, retainedAccount);
       const warnings: string[] = [];
       if (retainedBalance < grossDividend) {
+        if (!force) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "Insufficient retained earnings",
+                retained_earnings_balance: retainedBalance,
+                gross_dividend_required: Math.round(grossDividend * 100) / 100,
+                shortfall: Math.round((grossDividend - retainedBalance) * 100) / 100,
+                calculation: { net_dividend, cit_rate: "22/78", cit_amount: cit, gross_dividend: Math.round(grossDividend * 100) / 100 },
+                hint: "Distribution may be unlawful per ÄS § 157. Set force=true to create the journal anyway.",
+              }, null, 2),
+            }],
+          };
+        }
         warnings.push(
           `Retained earnings balance (${retainedBalance} EUR) is less than gross dividend (${Math.round(grossDividend * 100) / 100} EUR). ` +
-          `Verify that distribution is lawful per ÄS § 157.`
+          `Verify that distribution is lawful per ÄS § 157. Journal created because force=true.`
         );
       }
 

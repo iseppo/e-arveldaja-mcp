@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
-import type { Journal, Account, SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import type { Account, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 
 interface AccountBalance {
   account_id: number;
@@ -78,6 +78,23 @@ async function computeAllBalances(
   return result;
 }
 
+/**
+ * Sum balances for a category, accounting for contra-accounts.
+ * "D" categories (Varad, Kulud): D-type adds, C-type subtracts (contra-accounts).
+ * "C" categories (Kohustused, Omakapital, Tulud): C-type adds, D-type subtracts.
+ */
+function sumCategory(accounts: AccountBalance[], normalType: "D" | "C"): number {
+  let total = 0;
+  for (const a of accounts) {
+    if (a.balance_type === normalType) {
+      total += a.balance;
+    } else {
+      total -= a.balance; // contra-account
+    }
+  }
+  return total;
+}
+
 export function registerFinancialStatementTools(server: McpServer, api: ApiContext): void {
 
   server.tool("compute_trial_balance",
@@ -124,15 +141,15 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       const liabilities = balances.filter(b => b.account_type_est === "Kohustused");
       const equity = balances.filter(b => b.account_type_est === "Omakapital");
 
-      const totalAssets = assets.reduce((s, b) => s + b.balance, 0);
-      const totalLiabilities = liabilities.reduce((s, b) => s + b.balance, 0);
-      const totalEquity = equity.reduce((s, b) => s + b.balance, 0);
+      const totalAssets = sumCategory(assets, "D");
+      const totalLiabilities = sumCategory(liabilities, "C");
+      const totalEquity = sumCategory(equity, "C");
 
       // Retained earnings from P&L
       const revenue = balances.filter(b => b.account_type_est === "Tulud");
       const expenses = balances.filter(b => b.account_type_est === "Kulud");
-      const totalRevenue = revenue.reduce((s, b) => s + b.balance, 0);
-      const totalExpenses = expenses.reduce((s, b) => s + b.balance, 0);
+      const totalRevenue = sumCategory(revenue, "C");
+      const totalExpenses = sumCategory(expenses, "D");
       const retainedEarnings = totalRevenue - totalExpenses;
 
       return {
@@ -177,8 +194,8 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       const revenue = balances.filter(b => b.account_type_est === "Tulud");
       const expenses = balances.filter(b => b.account_type_est === "Kulud");
 
-      const totalRevenue = revenue.reduce((s, b) => s + b.balance, 0);
-      const totalExpenses = expenses.reduce((s, b) => s + b.balance, 0);
+      const totalRevenue = sumCategory(revenue, "C");
+      const totalExpenses = sumCategory(expenses, "D");
 
       return {
         content: [{
@@ -201,8 +218,8 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
   );
 
   server.tool("month_end_close_checklist",
-    "Generate month-end close checklist: unconfirmed entries, unreconciled bank lines, " +
-    "overdue invoices, missing documents, unusual balances.",
+    "Generate month-end close checklist: unconfirmed journals/invoices, " +
+    "unreconciled bank transactions, overdue receivables/payables.",
     {
       month: z.string().describe("Month to check (YYYY-MM, e.g. 2026-02)"),
     },

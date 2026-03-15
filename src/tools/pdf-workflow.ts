@@ -5,7 +5,7 @@ import { resolve, extname } from "path";
 import pdf from "pdf-parse";
 import { closest } from "fastest-levenshtein";
 import type { ApiContext } from "./crud-tools.js";
-import type { Client, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
+import type { PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
 
 const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50 MB
 

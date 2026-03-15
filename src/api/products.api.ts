@@ -7,6 +7,12 @@ export class ProductsApi extends BaseResource<Product> {
     super(client, "/products", "products_id");
   }
 
+  async deactivate(id: number): Promise<ApiResponse> {
+    cache.invalidate(this.basePath);
+    return this.client.patch<ApiResponse>(`/products/${id}/deactivate`, {});
+  }
+
+  /** Not in OpenAPI spec — endpoint may not exist on all API versions */
   async merge(targetId: number, sourceId: number): Promise<ApiResponse> {
     cache.invalidate(this.basePath);
     return this.client.post<ApiResponse>(`/products/${targetId}/merge/${sourceId}`, {});

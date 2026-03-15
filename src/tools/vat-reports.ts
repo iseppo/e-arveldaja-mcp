@@ -9,6 +9,7 @@ interface KmdLine {
   description_est: string;
   description_eng: string;
   amount: number;
+  computed: boolean;
 }
 
 // EU member state country codes for VD report filtering
@@ -68,23 +69,23 @@ export function registerVatReportTools(server: McpServer, api: ApiContext): void
 
       // KMD lines per EMTA form 2025-07
       const lines: KmdLine[] = [
-        { line: "1", description_est: "24% määraga maksustatav käive", description_eng: "24% taxable supply", amount: r(netAt24) },
-        { line: "2", description_est: "9% määraga maksustatav käive", description_eng: "9% taxable supply", amount: r(netAt9) },
-        { line: "3", description_est: "0% määraga maksustatav käive (mahaarvatav)", description_eng: "0% taxable supply (deductible)", amount: 0 },
-        { line: "3.1", description_est: "0% määraga käive (mittemahaarvatav)", description_eng: "0% supply (non-deductible)", amount: 0 },
-        { line: "4", description_est: "Käibemaks kokku (1×24% + 2×9% + 21×5% + 22×13%)", description_eng: "Total output VAT", amount: r(totalOutputVat) },
-        { line: "5", description_est: "Sisendkäibemaks kokku", description_eng: "Total input VAT", amount: r(inputVat) },
-        { line: "6", description_est: "Ühendusesisene kaupade soetamine", description_eng: "Intra-Community acquisition of goods", amount: 0 },
-        { line: "7", description_est: "Ühendusesisene kaupade soetamise käibemaks", description_eng: "VAT on intra-Community acquisition", amount: 0 },
-        { line: "10", description_est: "Tasumisele kuuluv käibemaks (rida 4-5+7)", description_eng: "VAT payable (line 4-5+7)", amount: r(totalOutputVat - inputVat) },
-        { line: "21", description_est: "5% määraga maksustatav käive", description_eng: "5% taxable supply", amount: r(netAt5) },
-        { line: "22", description_est: "13% määraga maksustatav käive", description_eng: "13% taxable supply", amount: 0 },
+        { line: "1", description_est: "24% määraga maksustatav käive", description_eng: "24% taxable supply", amount: r(netAt24), computed: true },
+        { line: "2", description_est: "9% määraga maksustatav käive", description_eng: "9% taxable supply", amount: r(netAt9), computed: true },
+        { line: "3", description_est: "0% määraga maksustatav käive (mahaarvatav)", description_eng: "0% taxable supply (deductible)", amount: 0, computed: false },
+        { line: "3.1", description_est: "0% määraga käive (mittemahaarvatav)", description_eng: "0% supply (non-deductible)", amount: 0, computed: false },
+        { line: "4", description_est: "Käibemaks kokku (1×24% + 2×9% + 21×5% + 22×13%)", description_eng: "Total output VAT", amount: r(totalOutputVat), computed: true },
+        { line: "5", description_est: "Sisendkäibemaks kokku", description_eng: "Total input VAT", amount: r(inputVat), computed: true },
+        { line: "6", description_est: "Ühendusesisene kaupade soetamine", description_eng: "Intra-Community acquisition of goods", amount: 0, computed: false },
+        { line: "7", description_est: "Ühendusesisene kaupade soetamise käibemaks", description_eng: "VAT on intra-Community acquisition", amount: 0, computed: false },
+        { line: "10", description_est: "Tasumisele kuuluv käibemaks (rida 4-5+7)", description_eng: "VAT payable (line 4-5+7)", amount: r(totalOutputVat - inputVat), computed: true },
+        { line: "21", description_est: "5% määraga maksustatav käive", description_eng: "5% taxable supply", amount: r(netAt5), computed: true },
+        { line: "22", description_est: "13% määraga maksustatav käive", description_eng: "13% taxable supply", amount: 0, computed: false },
       ];
 
       const warnings = [
         "This is a DRAFT. Review all lines before submitting to EMTA.",
-        "Intra-Community supply (lines 6-7) and reverse charge must be verified manually.",
-        "Lines 3/3.1 (0% supply) require manual classification.",
+        "Lines marked computed=false are NOT calculated from invoice data and require manual input: 3, 3.1 (0% supply classification), 6-7 (intra-Community acquisition), 22 (13% supply).",
+        "Lines 1/2/21 are derived by dividing aggregate VAT by the rate — mixed-rate invoices may be misallocated.",
       ];
       if (netRemaining > 0.01) {
         warnings.push(`Unclassified net amount: ${r(netRemaining)} EUR — may be 0% or 13% supply. Check invoice items.`);
@@ -111,7 +112,7 @@ export function registerVatReportTools(server: McpServer, api: ApiContext): void
   );
 
   server.tool("validate_vat_coding",
-    "Check VAT coding issues: missing VAT numbers, wrong rates, invoices without VAT articles.",
+    "Check invoice-level VAT issues: missing VAT numbers on EU supply, zero VAT on domestic sales, missing supplier registry codes.",
     {
       date_from: z.string().describe("Period start (YYYY-MM-DD)"),
       date_to: z.string().describe("Period end (YYYY-MM-DD)"),
@@ -363,13 +364,18 @@ export function registerVatReportTools(server: McpServer, api: ApiContext): void
         issues.push(`${nonEuForeign.length} non-EU foreign invoice(s) excluded from VD (these are exports, not intra-Community supply).`);
       }
 
+      // Compute totals only from invoices that made it into the report (i.e., had VAT numbers)
+      const reportedInvoiceCount = rows.reduce((s, c) => s + c.partners.reduce((s2, p) => s2 + p.invoices, 0), 0);
+      const reportedAmount = r(rows.reduce((s, c) => s + c.partners.reduce((s2, p) => s2 + p.amount, 0), 0));
+
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
             period: { from: date_from, to: date_to },
-            total_eu_invoices: euSales.length,
-            total_amount: r(euSales.reduce((s: number, inv: SaleInvoice) => s + (inv.base_net_price ?? inv.net_price ?? 0), 0)),
+            total_eu_invoices: reportedInvoiceCount,
+            total_amount: reportedAmount,
+            excluded_no_vat_number: euSales.length - reportedInvoiceCount,
             by_country: rows,
             issues,
             note: "DRAFT VD report. Only includes invoices with intra_community_supply=true to EU member states. Verify VAT numbers before EMTA submission.",

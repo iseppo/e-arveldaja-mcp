@@ -9,7 +9,7 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
 
   async confirm(id: number): Promise<ApiResponse> {
     cache.invalidate(this.basePath);
-    return this.client.patch<ApiResponse>(`/sale_invoices/${id}/confirm`, {});
+    return this.client.patch<ApiResponse>(`/sale_invoices/${id}/register`, {});
   }
 
   async getDeliveryOptions(id: number): Promise<SaleInvoiceDeliveryOptions> {
@@ -17,10 +17,27 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   }
 
   async getDocument(id: number): Promise<ApiFile> {
-    return this.client.get<ApiFile>(`/sale_invoices/${id}/document`);
+    return this.client.get<ApiFile>(`/sale_invoices/${id}/pdf_system`);
+  }
+
+  async getUploadedDocument(id: number): Promise<ApiFile> {
+    return this.client.get<ApiFile>(`/sale_invoices/${id}/document_user`);
+  }
+
+  async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
+    cache.invalidate(this.basePath);
+    return this.client.request<ApiResponse>(`/sale_invoices/${id}/document_user`, {
+      method: "PUT",
+      body: { name, contents },
+    });
+  }
+
+  async deleteDocument(id: number): Promise<ApiResponse> {
+    cache.invalidate(this.basePath);
+    return this.client.delete<ApiResponse>(`/sale_invoices/${id}/document_user`);
   }
 
   async sendEinvoice(id: number, request: SaleInvoiceDeliveryRequest): Promise<ApiResponse> {
-    return this.client.post<ApiResponse>(`/sale_invoices/${id}/send_einvoice`, request);
+    return this.client.patch<ApiResponse>(`/sale_invoices/${id}/deliver`, request);
   }
 }
