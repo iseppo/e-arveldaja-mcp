@@ -46,18 +46,7 @@ npm run dev            # tsx src/index.ts (development)
 
 ### Claude Code integration
 
-Add to your `~/.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "e-arveldaja": {
-      "command": "node",
-      "args": ["/path/to/e-arveldaja-mcp/dist/index.js"]
-    }
-  }
-}
-```
+Ask Claude Code to add the e-arveldaja MCP server to your settings — it knows how to do it.
 
 See [CLAUDE.md](CLAUDE.md) for architecture details and full documentation.
 
