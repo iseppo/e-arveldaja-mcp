@@ -1,5 +1,6 @@
 import { stat, realpath } from "fs/promises";
-import { resolve, extname } from "path";
+import { resolve, extname, isAbsolute } from "path";
+import { existsSync } from "fs";
 import { homedir } from "os";
 
 /**
@@ -15,6 +16,47 @@ function getAllowedRoots(): string[] {
 }
 
 /**
+ * Get the project root (directory containing package.json).
+ * Falls back to process.cwd().
+ */
+function getProjectRoot(): string {
+  // When running from dist/ or src/, go up until we find package.json
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 5; i++) {
+    if (existsSync(resolve(dir, "package.json"))) return dir;
+    const parent = resolve(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return process.cwd();
+}
+
+/**
+ * Resolve a file path. For relative paths, tries:
+ * 1. Parent of project root (where accounting documents typically live)
+ * 2. Project root
+ * 3. Current working directory (fallback)
+ */
+function resolveFilePath(filePath: string): string {
+  if (isAbsolute(filePath)) return resolve(filePath);
+
+  const projectRoot = getProjectRoot();
+  const searchBases = [
+    resolve(projectRoot, ".."),  // parent dir (e.g. e_arveldaja/)
+    projectRoot,                 // project root (e.g. e-arveldaja-mcp/)
+    process.cwd(),               // cwd fallback
+  ];
+
+  for (const base of searchBases) {
+    const candidate = resolve(base, filePath);
+    if (existsSync(candidate)) return candidate;
+  }
+
+  // Nothing found — return resolved from parent dir for the best error message
+  return resolve(searchBases[0]!, filePath);
+}
+
+/**
  * Validate a file path: extension check, symlink resolution, allowed directory,
  * size limit. Returns the resolved real path.
  */
@@ -23,7 +65,7 @@ export async function validateFilePath(
   allowedExtensions: string[],
   maxSize: number,
 ): Promise<string> {
-  const resolved = resolve(filePath);
+  const resolved = resolveFilePath(filePath);
   const ext = extname(resolved).toLowerCase();
   if (!allowedExtensions.includes(ext)) {
     throw new Error(`Only ${allowedExtensions.join("/")} files are allowed, got: ${ext}`);
