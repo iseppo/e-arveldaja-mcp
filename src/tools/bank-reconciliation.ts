@@ -10,6 +10,7 @@ interface MatchCandidate {
   client_name: string;
   clients_id: number;
   gross_price: number;
+  payment_status: string;
   ref_number?: string | null;
   confidence: number;
   match_reasons: string[];
@@ -17,7 +18,7 @@ interface MatchCandidate {
 
 function matchScore(
   tx: Transaction,
-  invoice: { gross_price?: number; base_gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string },
+  invoice: { gross_price?: number; base_gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
   txAmount: number
 ): { confidence: number; reasons: string[] } {
   let confidence = 0;
@@ -36,6 +37,10 @@ function matchScore(
   } else if (Math.abs(txAmount - invoiceAmount) < 1) {
     confidence += 20;
     reasons.push("close_amount");
+  } else if (invoice.payment_status === "PARTIALLY_PAID" && txAmount > 0 && txAmount < invoiceAmount) {
+    // Partial payment: tx amount is less than invoice gross — plausible remaining balance
+    confidence += 15;
+    reasons.push("partial_payment_plausible");
   }
 
   // Reference number match
@@ -76,15 +81,15 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       const txPage = await api.transactions.list({ page: page ?? 1 });
       const unconfirmed = txPage.items.filter(tx => tx.status !== "CONFIRMED" && !tx.is_deleted);
 
-      // Get unpaid invoices (exclude partially paid - amount won't match)
+      // Get unpaid invoices (including partially paid)
       const allSales = await api.saleInvoices.listAll();
       const openSales = allSales.filter((inv: SaleInvoice) =>
-        inv.payment_status === "NOT_PAID" && inv.status === "CONFIRMED"
+        inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
 
       const allPurchases = await api.purchaseInvoices.listAll();
       const openPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.payment_status === "NOT_PAID" && inv.status === "CONFIRMED"
+        inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
 
       const results = [];
@@ -104,6 +109,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
                 client_name: inv.client_name ?? "",
                 clients_id: inv.clients_id,
                 gross_price: inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
                 ref_number: inv.bank_ref_number,
                 confidence,
                 match_reasons: reasons,
@@ -124,6 +130,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
                 client_name: inv.client_name,
                 clients_id: inv.clients_id,
                 gross_price: inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
                 ref_number: inv.bank_ref_number,
                 confidence,
                 match_reasons: reasons,
@@ -184,12 +191,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
       const allSales = await api.saleInvoices.listAll();
       const openSales = allSales.filter((inv: SaleInvoice) =>
-        inv.payment_status === "NOT_PAID" && inv.status === "CONFIRMED"
+        inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
 
       const allPurchases = await api.purchaseInvoices.listAll();
       const openPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.payment_status === "NOT_PAID" && inv.status === "CONFIRMED"
+        inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
 
       const confirmed = [];
@@ -220,6 +227,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               client_name: inv.client_name ?? "",
               clients_id: inv.clients_id,
               gross_price: inv.gross_price ?? 0,
+              payment_status: (inv as any).payment_status ?? "NOT_PAID",
               confidence,
               match_reasons: reasons,
             });
