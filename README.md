@@ -30,10 +30,10 @@ For the demo server, set the environment variable `EARVELDAJA_SERVER=demo`.
 ## Setup
 
 ```bash
+git clone https://github.com/iseppo/e-arveldaja-mcp.git
+cd e-arveldaja-mcp
 npm install
 npm run build          # tsc -> dist/
-npm run start          # node dist/index.js (stdio transport)
-npm run dev            # tsx src/index.ts (development)
 ```
 
 ### Claude Code integration
