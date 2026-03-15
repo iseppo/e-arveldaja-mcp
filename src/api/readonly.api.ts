@@ -34,7 +34,10 @@ async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promis
     allItems = [...first.items];
     let page = 2;
     const maxPages = 200;
-    while (page <= first.total_pages && page <= maxPages) {
+    while (page <= first.total_pages) {
+      if (page > maxPages) {
+        throw new Error(`Reference data ${path} exceeds ${maxPages} pages (${allItems.length} items loaded).`);
+      }
       const next = await client.get<PaginatedResponse<T>>(path, { page });
       allItems.push(...next.items);
       page++;

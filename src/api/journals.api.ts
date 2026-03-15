@@ -18,28 +18,28 @@ export class JournalsApi extends BaseResource<Journal> {
     if (cached) return cached;
 
     const all = await this.listAll();
-    const enriched: Journal[] = [];
 
-    // Separate journals that need individual fetch
-    const needFetch: Journal[] = [];
-    for (const journal of all) {
-      if (journal.postings && journal.postings.length > 0) {
-        enriched.push(journal);
-      } else {
-        needFetch.push(journal);
+    // Identify which journals need individual fetch (missing postings)
+    const fetchIndices: number[] = [];
+    for (let i = 0; i < all.length; i++) {
+      const journal = all[i]!;
+      if (!journal.postings || journal.postings.length === 0) {
+        fetchIndices.push(i);
       }
     }
 
-    // Fetch in parallel batches of 5 (respects rate limiter in HttpClient)
+    // Fetch in sequential batches of 5 to limit concurrent API calls
     const batchSize = 5;
-    for (let i = 0; i < needFetch.length; i += batchSize) {
-      const batch = needFetch.slice(i, i + batchSize);
-      const results = await Promise.all(batch.map(j => this.get(j.id!)));
-      enriched.push(...results);
+    for (let i = 0; i < fetchIndices.length; i += batchSize) {
+      const batch = fetchIndices.slice(i, i + batchSize);
+      const results = await Promise.all(batch.map(idx => this.get(all[idx]!.id!)));
+      for (let j = 0; j < batch.length; j++) {
+        all[batch[j]!] = results[j]!;
+      }
     }
 
-    cache.set(cacheKey, enriched, 120);
-    return enriched;
+    cache.set(cacheKey, all, 120);
+    return all;
   }
 
   async confirm(id: number): Promise<ApiResponse> {

@@ -36,8 +36,6 @@ function buildApiContext(httpClient: HttpClient): ApiContext {
   };
 }
 
-// Safe because MCP stdio transport processes requests sequentially.
-// If switching to a concurrent transport, this would need per-request context.
 function switchApi(api: ApiContext, newApi: ApiContext): void {
   api.clients = newApi.clients;
   api.products = newApi.products;
@@ -97,7 +95,8 @@ async function main() {
 
   server.tool("switch_connection",
     "Switch to a different e-arveldaja connection (company). " +
-    "Clears all cached data. Use list_connections to see available indices.",
+    "Clears all cached data. Use list_connections to see available indices. " +
+    "WARNING: Do not switch while another tool call is in progress.",
     {
       index: z.number().describe("Connection index from list_connections"),
     },

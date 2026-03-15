@@ -32,16 +32,16 @@ export class BaseResource<T> {
     let totalPages = 1;
 
     do {
-      const response = await this.list({ ...params, page });
-      allItems.push(...response.items);
-      totalPages = response.total_pages;
-      page++;
       if (page > maxPages) {
         throw new Error(
           `Data exceeds ${maxPages} pages (${allItems.length} items loaded). ` +
           `Use date filters to narrow the query.`
         );
       }
+      const response = await this.list({ ...params, page });
+      allItems.push(...response.items);
+      totalPages = response.total_pages;
+      page++;
     } while (page <= totalPages);
 
     return allItems;
