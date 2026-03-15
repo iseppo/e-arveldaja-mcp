@@ -65,6 +65,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - Body is a **top-level JSON array** of `TransactionsDistribution` objects (not wrapped in `{items: [...]}`)
 - Each distribution: `{related_table, amount, related_id?, related_sub_id?}`
 - Example: `PATCH /transactions/{id}/register` with body `[{"related_table":"purchase_invoices","related_id":123,"amount":59.94}]`
+- **Card payments often have `clients_id: null`** — confirmation fails with "buyer or supplier is missing". `TransactionsApi.confirm()` auto-fixes this by looking up the client from the linked invoice.
 
 ### Purchase invoice creation (non-VAT company)
 - Do **not** pass `gross_price` at creation — the API computes it
