@@ -148,7 +148,7 @@ All mutating API methods (`create`, `update`, `delete`, `confirm`, `merge`, `dea
 - **KMD INF**: Partner detail annex, threshold 1000 EUR net per partner
 - **VD**: Intra-community supply declaration (EU only)
 - **CIT on dividends**: 22/78 corporate income tax rate
-- **Capital gains**: Securities taxed at 20% income tax (TSD Lisa 8.1)
+- **Capital gains**: Securities taxed at 20% income tax
 
 ## Development
 

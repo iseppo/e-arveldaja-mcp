@@ -519,9 +519,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               capital_gains_eur: Math.round(totalGains * 100) / 100,
               fees_eur: Math.round(gains.reduce((s, g) => s + g.fees_eur, 0) * 100) / 100,
             },
-            note: "Capital gains calculated using FIFO method. " +
-              "For Estonian tax (TSD Lisa 8.1), report each sale separately. " +
-              "Capital gains from securities are taxed at 20% income tax.",
+            note: "Capital gains calculated using FIFO method.",
           }, null, 2),
         }],
       };
