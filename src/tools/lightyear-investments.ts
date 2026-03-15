@@ -1,8 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { readFile, stat, realpath } from "fs/promises";
-import { resolve, extname } from "path";
+import { readFile } from "fs/promises";
 import type { ApiContext } from "./crud-tools.js";
+import { validateFilePath } from "../file-validation.js";
 
 const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -124,24 +124,7 @@ function validateHeaders(actual: string[], expected: string[], label: string): v
 }
 
 async function readCsvFile(filePath: string): Promise<string> {
-  const resolved = resolve(filePath);
-  const ext = extname(resolved).toLowerCase();
-  if (ext !== ".csv") {
-    throw new Error(`Only CSV files are allowed, got: ${ext}`);
-  }
-  // Resolve symlinks to get the real path and prevent symlink traversal
-  const real = await realpath(resolved);
-  const realExt = extname(real).toLowerCase();
-  if (realExt !== ".csv") {
-    throw new Error(`Symlink target is not a CSV file`);
-  }
-  const info = await stat(real);
-  if (!info.isFile()) {
-    throw new Error(`Not a file`);
-  }
-  if (info.size > MAX_CSV_SIZE) {
-    throw new Error(`File too large: ${(info.size / 1024 / 1024).toFixed(1)} MB (max ${MAX_CSV_SIZE / 1024 / 1024} MB)`);
-  }
+  const real = await validateFilePath(filePath, [".csv"], MAX_CSV_SIZE);
   return readFile(real, "utf-8");
 }
 
