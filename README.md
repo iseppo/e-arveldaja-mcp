@@ -81,4 +81,4 @@ Claude will parse the trades, pair foreign currency conversions, calculate capit
 
 ## License
 
-Private / All rights reserved.
+[The Unlicense](LICENSE) — public domain. Do whatever you want with it.
