@@ -1,6 +1,46 @@
 import type { HttpClient } from "../http-client.js";
-import type { PurchaseInvoice, ApiResponse, ApiFile } from "../types/api.js";
+import type { PurchaseInvoice, PurchaseInvoiceItem, ApiResponse, ApiFile } from "../types/api.js";
 import { BaseResource, cache } from "./base-resource.js";
+
+const roundMoney = (v: number): number => Math.round(v * 100) / 100;
+
+/**
+ * For non-VAT (mitte-KMD) companies: set project_no_vat_gross_price on items
+ * so the API computes item-level vat_amount for informational tracking.
+ * Without this field, item vat_amount stays 0 and gross_price = net_price.
+ */
+function normalizeItemsForNonVat(
+  items: PurchaseInvoiceItem[] | undefined,
+  isVatRegistered: boolean,
+  grossPrice?: number,
+): PurchaseInvoiceItem[] | undefined {
+  if (!items || isVatRegistered) return items;
+
+  return items.map(item => {
+    // Preserve caller-provided value
+    if (item.project_no_vat_gross_price != null) return item;
+
+    const net = item.total_net_price
+      ?? (item.unit_net_price !== undefined && item.amount !== undefined
+        ? roundMoney(item.unit_net_price * item.amount)
+        : undefined);
+
+    const rate = item.vat_rate_dropdown === "-" ? 0
+      : item.vat_rate_dropdown !== undefined
+        ? Number(item.vat_rate_dropdown.replace(",", "."))
+        : undefined;
+
+    // Single-item invoice: use explicit gross_price if available
+    const derivedGross =
+      items.length === 1 && grossPrice !== undefined ? grossPrice :
+      net !== undefined && rate !== undefined && Number.isFinite(rate) ? roundMoney(net * (1 + rate / 100)) :
+      undefined;
+
+    if (derivedGross === undefined) return item; // best-effort: skip if not derivable
+
+    return { ...item, project_no_vat_gross_price: derivedGross };
+  });
+}
 
 export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   constructor(client: HttpClient) {
@@ -15,6 +55,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
    *
    * For non-VAT companies (isVatRegistered=false): invoice-level vat_price stays 0
    * because input VAT is not deductible. gross_price is still set to actual payable amount.
+   * Items get project_no_vat_gross_price set for VAT tracking.
    */
   async createAndSetTotals(
     data: Partial<PurchaseInvoice>,
@@ -22,7 +63,15 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     grossPrice?: number,
     isVatRegistered = true,
   ): Promise<PurchaseInvoice> {
-    const response = await this.create(data);
+    const createData = {
+      ...data,
+      items: normalizeItemsForNonVat(
+        data.items as PurchaseInvoiceItem[] | undefined,
+        isVatRegistered,
+        grossPrice,
+      ),
+    };
+    const response = await this.create(createData);
     const id = response.created_object_id;
     if (!id) throw new Error("Purchase invoice created but no ID returned");
 
@@ -33,15 +82,9 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     const itemVat = items ? Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100 : 0;
     const itemNet = items ? Math.round(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100 : 0;
 
-    // Invoice-level VAT: explicit value wins, then KMD computes from items, mitte-KMD stays 0
-    let vat: number;
-    if (vatPrice !== undefined) {
-      vat = vatPrice;
-    } else if (isVatRegistered) {
-      vat = itemVat;
-    } else {
-      vat = 0;
-    }
+    // Invoice-level VAT: explicit value wins, otherwise compute from items.
+    // Non-KMD companies also need vat_price set (informational) so net + vat = gross.
+    const vat = vatPrice !== undefined ? vatPrice : itemVat;
 
     // Invoice-level gross: explicit value wins, otherwise net + actual item VAT
     const gross = grossPrice !== undefined

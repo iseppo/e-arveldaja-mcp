@@ -369,15 +369,23 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       bank_ref_number: z.string().optional().describe("Payment reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
     }, async (params) => {
-      const items = (safeJsonParse(params.items, "items") as PurchaseInvoiceItem[]).map(item => ({
-        cl_fringe_benefits_id: 1,
-        vat_accounts_id: 1510,
-        cl_vat_articles_id: 1,
-        amount: 1,
-        ...item,
-      }));
-
       const isVatReg = await isCompanyVatRegistered(api);
+      const items = (safeJsonParse(params.items, "items") as PurchaseInvoiceItem[]).map(item => {
+        const merged = {
+          cl_fringe_benefits_id: 1,
+          amount: 1,
+          ...(isVatReg
+            ? { vat_accounts_id: 1510, cl_vat_articles_id: 1 }
+            : { vat_rate_dropdown: "-" }),
+          ...item,
+        } as PurchaseInvoiceItem;
+        // Non-KMD: if caller set a numeric VAT rate, auto-set vat_accounts_id to expense account
+        if (!isVatReg && merged.vat_rate_dropdown && merged.vat_rate_dropdown !== "-") {
+          merged.vat_accounts_id ??= merged.purchase_accounts_id;
+          merged.cl_vat_articles_id ??= 11;
+        }
+        return merged;
+      });
       const result = await api.purchaseInvoices.createAndSetTotals(
         {
           clients_id: params.clients_id,

@@ -451,13 +451,23 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     async (params) => {
       const supplier = await api.clients.get(params.supplier_client_id);
 
-      const items = (safeJsonParse(params.items, "items") as PurchaseInvoiceItem[]).map(item => ({
-        cl_fringe_benefits_id: 1,
-        vat_accounts_id: 1510,
-        cl_vat_articles_id: 1,
-        amount: 1,
-        ...item,
-      }));
+      const isVatReg = await isCompanyVatRegistered(api);
+      const items = (safeJsonParse(params.items, "items") as PurchaseInvoiceItem[]).map(item => {
+        const merged = {
+          cl_fringe_benefits_id: 1,
+          amount: 1,
+          ...(isVatReg
+            ? { vat_accounts_id: 1510, cl_vat_articles_id: 1 }
+            : { vat_rate_dropdown: "-" }),
+          ...item,
+        } as PurchaseInvoiceItem;
+        // Non-KMD: if caller set a numeric VAT rate, auto-set vat_accounts_id to expense account
+        if (!isVatReg && merged.vat_rate_dropdown && merged.vat_rate_dropdown !== "-") {
+          merged.vat_accounts_id ??= merged.purchase_accounts_id;
+          merged.cl_vat_articles_id ??= 11;
+        }
+        return merged;
+      });
 
       const invoiceData = {
         clients_id: params.supplier_client_id,
@@ -474,7 +484,6 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         items,
       };
 
-      const isVatReg = await isCompanyVatRegistered(api);
       const result = await api.purchaseInvoices.createAndSetTotals(
         invoiceData as any,
         params.vat_price,
