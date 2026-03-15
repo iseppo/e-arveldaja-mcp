@@ -430,6 +430,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
 
+  server.tool("invalidate_purchase_invoice",
+    "Invalidate (reverse) a confirmed purchase invoice. Returns it to PROJECT status for editing.",
+    idParam.shape, async ({ id }) => {
+      const result = await api.purchaseInvoices.invalidate(id);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    });
+
   // =====================
   // REFERENCE DATA (read-only)
   // =====================

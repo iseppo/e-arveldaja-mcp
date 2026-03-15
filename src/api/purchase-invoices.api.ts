@@ -123,6 +123,11 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     return this.client.patch<ApiResponse>(`/purchase_invoices/${id}/register`, {});
   }
 
+  async invalidate(id: number): Promise<ApiResponse> {
+    cache.invalidate(this.basePath);
+    return this.client.patch<ApiResponse>(`/purchase_invoices/${id}/invalidate`, {});
+  }
+
   async getDocument(id: number): Promise<ApiFile> {
     return this.client.get<ApiFile>(`/purchase_invoices/${id}/document_user`);
   }
