@@ -538,12 +538,13 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       capital_gains_file: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sell entries)"),
       investment_account: z.number().describe("Investment/securities account (e.g. 1550 Finantsinvesteeringud)"),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
-      gain_loss_account: z.number().optional().describe("Realized gain/loss account (required for sell entries)"),
+      gain_loss_account: z.number().optional().describe("Realized gain account (credit for gains; also used for losses if loss_account not set)"),
+      loss_account: z.number().optional().describe("Realized loss account (debit for losses). If omitted, losses go to gain_loss_account."),
       fee_account: z.number().optional().describe("Fee expense account (default: fees included in investment cost)"),
       skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
-    async ({ file_path, capital_gains_file, investment_account, broker_account, gain_loss_account, fee_account, skip_tickers, dry_run }) => {
+    async ({ file_path, capital_gains_file, investment_account, broker_account, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
       const isDryRun = dry_run !== false;
       const skipSet = new Set(
         (skip_tickers ?? CASH_FUND_TICKER).split(",").map(t => t.trim())
@@ -557,6 +558,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       if (!accountIds.has(broker_account)) errors.push(`Broker account ${broker_account} not found`);
       if (fee_account && !accountIds.has(fee_account)) errors.push(`Fee account ${fee_account} not found`);
       if (gain_loss_account && !accountIds.has(gain_loss_account)) errors.push(`Gain/loss account ${gain_loss_account} not found`);
+      if (loss_account && !accountIds.has(loss_account)) errors.push(`Loss account ${loss_account} not found`);
 
       if (errors.length > 0) {
         return {
@@ -681,7 +683,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           if (gainLoss > 0) {
             postings.push({ accounts_id: gain_loss_account, type: "C", amount: gainLoss });
           } else if (gainLoss < 0) {
-            postings.push({ accounts_id: gain_loss_account, type: "D", amount: Math.abs(gainLoss) });
+            const lossAcct = loss_account ?? gain_loss_account;
+            postings.push({ accounts_id: lossAcct, type: "D", amount: Math.abs(gainLoss) });
           }
 
           if (fee_account && feeTotal > 0) {
@@ -785,7 +788,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             accounts: {
               investment: investment_account,
               broker: broker_account,
-              gain_loss: gain_loss_account ?? "not configured (sells will be skipped)",
+              gain: gain_loss_account ?? "not configured (sells will be skipped)",
+              loss: loss_account ?? gain_loss_account ?? "not configured",
               fee: fee_account ?? "included in cost",
             },
             ...(warnings.length > 0 && { warnings }),
