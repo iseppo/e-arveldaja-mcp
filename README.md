@@ -19,19 +19,11 @@ By using this software you acknowledge that:
 2. Go to **Seadistused** → **Üldised seadistused** → **Lisa uus juurdepääsuluba** (Settings → General settings → Add new access token)
 3. Enter any name for the token
 4. Find your public IP address (e.g. at [whatismyipaddress.com](https://whatismyipaddress.com/)) and enter it in the allowed IP field
-5. Save — you will receive an API Key ID, public value, and password
+5. Save — download the `apikey.txt` file and place it next to the project directory (i.e. in the parent folder)
 
 If you don't have a static IP address, you will need to update the allowed IP in e-arveldaja settings whenever your IP changes.
 
-Create an `apikey.txt` file next to the project directory (i.e. in the parent folder) with the following format:
-
-```
-ApiKey ID: <your_key_id>
-ApiKey public value: <your_public_value>
-Password: <your_password>
-```
-
-**Never commit this file to git.**
+**Never commit the `apikey.txt` file to git.**
 
 For the demo server, set the environment variable `EARVELDAJA_SERVER=demo`.
 
