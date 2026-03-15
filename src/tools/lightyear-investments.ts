@@ -369,16 +369,23 @@ async function findExistingJournalsByRef(api: ApiContext, references: string[]):
 }
 
 /**
- * Match sell trades to capital gains entries by date + ticker + quantity.
+ * Match sell trades to capital gains entries by date + ticker + quantity + proceeds.
+ * Falls back to date + ticker + quantity if proceeds don't match (FX rounding).
+ * Warns on ambiguous matches (multiple gains rows for same criteria).
  */
 function matchSellsToCapitalGains(
   sells: InvestmentTrade[],
-  gains: CapitalGainsRow[]
+  gains: CapitalGainsRow[],
+  warnings: string[] = []
 ): Map<string, CapitalGainsRow> {
   const result = new Map<string, CapitalGainsRow>();
   const consumedGains = new Set<number>();
 
   for (const sell of sells) {
+    // Try strict match first: date + ticker + quantity + proceeds
+    let matchIdx = -1;
+    let ambiguousCount = 0;
+
     for (let i = 0; i < gains.length; i++) {
       if (consumedGains.has(i)) continue;
       const gain = gains[i]!;
@@ -387,10 +394,27 @@ function matchSellsToCapitalGains(
       if (gainDate === sell.date &&
           gain.ticker === sell.ticker &&
           Math.abs(gain.quantity - sell.quantity) < 0.000001) {
-        result.set(sell.reference, gain);
-        consumedGains.add(i);
-        break;
+        // Proceeds tiebreaker (0.02 EUR tolerance for FX rounding)
+        if (Math.abs(gain.proceeds_eur - sell.eur_amount) < 0.02) {
+          matchIdx = i;
+          break; // Exact match on all four criteria
+        }
+        ambiguousCount++;
+        if (matchIdx === -1) matchIdx = i; // fallback to first date+ticker+qty match
       }
+    }
+
+    if (ambiguousCount > 1 && matchIdx !== -1) {
+      const gain = gains[matchIdx]!;
+      warnings.push(
+        `Ambiguous FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
+        `${ambiguousCount} gains rows match date+ticker+qty. Using proceeds ${gain.proceeds_eur} EUR as tiebreaker.`
+      );
+    }
+
+    if (matchIdx !== -1) {
+      result.set(sell.reference, gains[matchIdx]!);
+      consumedGains.add(matchIdx);
     }
   }
 
@@ -588,11 +612,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
       // Parse capital gains if provided
       let gainsMap = new Map<string, CapitalGainsRow>();
+      const gainsWarnings: string[] = [];
       if (capital_gains_file) {
         const gainsCsv = await readCsvFile(capital_gains_file);
         const gainsRows = parseCapitalGains(gainsCsv);
         const sells = trades.filter(t => t.type === "Sell");
-        gainsMap = matchSellsToCapitalGains(sells, gainsRows);
+        gainsMap = matchSellsToCapitalGains(sells, gainsRows, gainsWarnings);
       }
 
       // Check for duplicates
@@ -615,7 +640,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         skip_reason?: string;
       }> = [];
 
-      const warnings: string[] = [...extraction.warnings];
+      const warnings: string[] = [...extraction.warnings, ...gainsWarnings];
 
       for (const trade of newTrades) {
         // Skip unmatched FX trades
