@@ -44,125 +44,48 @@ async function validatePdfPath(filePath: string): Promise<string> {
   return real;
 }
 
-interface ExtractedInvoice {
-  supplier_name?: string;
+interface PdfHints {
   supplier_reg_code?: string;
   supplier_vat_no?: string;
   supplier_iban?: string;
-  invoice_number?: string;
-  invoice_date?: string;
-  due_date?: string;
-  total_net?: number;
-  total_vat?: number;
-  total_gross?: number;
   ref_number?: string;
-  items: Array<{
-    description: string;
-    amount?: number;
-    unit_price?: number;
-    total?: number;
-    vat_rate?: number;
-  }>;
   raw_text: string;
 }
 
-function extractInvoiceData(text: string): ExtractedInvoice {
-  const result: ExtractedInvoice = { items: [], raw_text: text };
+/**
+ * Extract machine-readable identifiers from PDF text.
+ * Amounts, dates, items, and supplier names are left to the LLM —
+ * regex is unreliable for those in varied PDF layouts.
+ */
+function extractPdfHints(text: string): PdfHints {
+  const result: PdfHints = { raw_text: text };
 
-  // Registry code patterns
+  // Registry code (8 digits)
   const regCodeMatch = text.match(/(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry code)[:\s]*(\d{8})/i);
   if (regCodeMatch) result.supplier_reg_code = regCodeMatch[1];
 
-  // VAT number
+  // VAT number (EE + digits)
   const vatMatch = text.match(/(?:KMKR|VAT|KM\s*nr)[:\s]*(EE\d+)/i);
   if (vatMatch) result.supplier_vat_no = vatMatch[1];
 
-  // IBAN — digits-only BBAN pattern (covers Estonian and most European IBANs).
-  // Minimum 15 chars (country + 13 digits) excludes VAT numbers (EE + 9 digits).
-  // Negative lookahead prevents matching into concatenated bank names (e.g. "EE91...8531Swedbank").
+  // IBAN (country code + 13-30 digits)
   const ibanMatch = text.match(/\b([A-Z]{2}\d{13,30})(?!\d)/);
   if (ibanMatch) result.supplier_iban = ibanMatch[1];
-
-  // Invoice number — Estonian and English patterns
-  const invMatch = text.match(
-    /(?:Arve|Invoice|müügipakkumine|meeldetuletus|pakkumine|kreeditarve|ettemaksuarve)\s*(?:nr|no|number|#)[.:\s]*([A-Z0-9-]+)/i
-  ) ?? text.match(/\bnr\.?\s+(\d{5,})\b/i); // fallback: standalone "nr." + 5+ digit number
-  if (invMatch) result.invoice_number = invMatch[1];
-
-  // Dates (DD.MM.YYYY)
-  const datePattern = /(\d{2}[./-]\d{2}[./-]\d{4})/g;
-  const dates = text.match(datePattern) ?? [];
-  if (dates.length > 0) {
-    result.invoice_date = convertDate(dates[0]!);
-    if (dates.length > 1) result.due_date = convertDate(dates[1]!);
-  }
 
   // Reference number
   const refMatch = text.match(/(?:Viitenumber|Viitenr|Ref\.?\s*(?:nr|number)|viitenumbrit)[:\s]*(\d+)/i);
   if (refMatch) result.ref_number = refMatch[1];
 
-  // Totals — PDF table layouts often render as "amount + label" (amount before keyword)
-  // or "label: amount" (amount after keyword). Try both directions.
-  const grossAfter = text.match(/(?:Kokku|Total|Summa|Tasuda|Tasumiseks)[:\s]*(\d[\d\s]*[.,]\d{2})\s*(?:€|EUR)?/i);
-  const grossBefore = text.match(/(\d[\d\s]*[.,]\d{2})\s*(?:Kokku|Total|Summa|Tasuda|Tasumiseks)\b/i);
-  if (grossAfter) result.total_gross = parseAmount(grossAfter[1]);
-  else if (grossBefore) result.total_gross = parseAmount(grossBefore[1]);
-
-  const netAfter = text.match(/(?:Summa ilma KM|Käibemaksuta|Net|Neto|Maksumuseta)[:\s]*(\d[\d\s]*[.,]\d{2})/i);
-  const netBefore = text.match(/(\d[\d\s]*[.,]\d{2})\s*(?:Käibemaksuta|Summa ilma KM|Maksumuseta)\b/i);
-  if (netAfter) result.total_net = parseAmount(netAfter[1]);
-  else if (netBefore) result.total_net = parseAmount(netBefore[1]);
-
-  // Negative lookahead prevents matching "Käibemaksuta" (without VAT) as "Käibemaks"
-  const vatAfter = text.match(/(?:Käibemaks(?!uta|eta)|KMS|VAT)\s*(?:\(\d+%\)\s*)?[:\s]*(\d[\d\s]*[.,]\d{2})/i);
-  const vatBefore = text.match(/(\d[\d\s]*[.,]\d{2})\s*(?:Käibemaks(?!uta|eta)|KMS|VAT)\s*(?:\(\d+%\))?/i);
-  if (vatBefore) result.total_vat = parseAmount(vatBefore[1]);
-  else if (vatAfter) result.total_vat = parseAmount(vatAfter[1]);
-
-  // Supplier name detection (multi-strategy):
-  const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 2);
-
-  // Strategy 1: Line immediately before the registry code (most reliable)
-  if (result.supplier_reg_code) {
-    const regCodeIdx = lines.findIndex(l => l.includes(result.supplier_reg_code!));
-    if (regCodeIdx > 0) {
-      result.supplier_name = lines[regCodeIdx - 1];
-    }
-  }
-
-  // Strategy 2: Line with Estonian company prefix/suffix
-  if (!result.supplier_name) {
-    const companyLine = lines.find(l =>
-      /\b(?:AS|OÜ|MTÜ|SA|TÜ|FIE|aktsiaselts|osaühing)\b/i.test(l)
-    );
-    if (companyLine) result.supplier_name = companyLine;
-  }
-
-  // Strategy 3: Fallback to first non-empty line
-  if (!result.supplier_name && lines.length > 0) {
-    result.supplier_name = lines[0];
-  }
-
   return result;
-}
-
-function parseAmount(s: string): number {
-  return parseFloat(s.replace(/\s/g, "").replace(",", "."));
-}
-
-function convertDate(d: string): string {
-  const parts = d.split(/[./-]/);
-  if (parts.length === 3 && parts[2].length === 4) {
-    return `${parts[2]}-${parts[1]}-${parts[0]}`; // DD.MM.YYYY -> YYYY-MM-DD
-  }
-  return d;
 }
 
 export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): void {
 
   server.tool("extract_pdf_invoice",
-    "Extract invoice data from a PDF file. Returns structured data (supplier, amounts, items) " +
-    "and the raw text for AI to review and correct.",
+    "Extract text and machine-readable identifiers from a PDF invoice. " +
+    "Returns raw text + detected IBAN, registry code, VAT number, reference number. " +
+    "YOU must read the raw_text and extract: supplier name, invoice number, dates, " +
+    "amounts (net, VAT, gross), and line items. Then call validate_invoice_data to verify.",
     {
       file_path: z.string().describe("Absolute path to the PDF file"),
     },
@@ -170,15 +93,120 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const resolved = await validatePdfPath(file_path);
       const buffer = await readFile(resolved);
       const pdfData = await pdf(buffer);
-      const extracted = extractInvoiceData(pdfData.text);
+      const hints = extractPdfHints(pdfData.text);
 
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
-            extracted,
+            hints,
             page_count: pdfData.numpages,
-            note: "Review the extracted data and raw_text. Use resolve_supplier to match or create the supplier, then suggest_booking to find similar past invoices.",
+            instructions: "Read raw_text carefully. Extract supplier name, invoice number, dates, " +
+              "net/VAT/gross amounts, and line items. Then call validate_invoice_data to check " +
+              "that numbers add up before creating the invoice.",
+          }, null, 2),
+        }],
+      };
+    }
+  );
+
+  server.tool("validate_invoice_data",
+    "Validate extracted invoice data before creating a purchase invoice. " +
+    "Checks that net + VAT = gross, item totals match invoice total, " +
+    "dates are valid, and required fields are present. " +
+    "Call this BEFORE create_purchase_invoice_from_pdf.",
+    {
+      total_net: z.number().describe("Invoice total net amount"),
+      total_vat: z.number().describe("Invoice total VAT amount"),
+      total_gross: z.number().describe("Invoice total gross amount"),
+      items: z.string().describe("JSON array of items with at least {total_net_price, vat_rate_dropdown?} each"),
+      invoice_date: z.string().optional().describe("Invoice date (YYYY-MM-DD)"),
+      due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
+    },
+    async ({ total_net, total_vat, total_gross, items, invoice_date, due_date }) => {
+      const errors: string[] = [];
+      const warnings: string[] = [];
+      const parsedItems = safeJsonParse(items, "items") as Array<{
+        total_net_price?: number;
+        vat_rate_dropdown?: string;
+        custom_title?: string;
+      }>;
+
+      // Check net + vat = gross (within 2 cents for rounding)
+      const computedGross = Math.round((total_net + total_vat) * 100) / 100;
+      const diff = Math.abs(computedGross - total_gross);
+      if (diff > 0.02) {
+        errors.push(`net (${total_net}) + VAT (${total_vat}) = ${computedGross}, but gross is ${total_gross} (diff: ${diff.toFixed(2)})`);
+      } else if (diff > 0) {
+        warnings.push(`Minor rounding: net + VAT = ${computedGross}, gross = ${total_gross} (diff: ${diff.toFixed(2)})`);
+      }
+
+      // Check item totals sum to invoice net
+      if (parsedItems.length > 0) {
+        const itemNetSum = Math.round(parsedItems.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100;
+        const netDiff = Math.abs(itemNetSum - total_net);
+        if (netDiff > 0.02) {
+          errors.push(`Item net sum (${itemNetSum}) does not match invoice net (${total_net}) (diff: ${netDiff.toFixed(2)})`);
+        } else if (netDiff > 0) {
+          warnings.push(`Minor item rounding: sum ${itemNetSum} vs net ${total_net} (diff: ${netDiff.toFixed(2)})`);
+        }
+      }
+
+      // Check VAT rate consistency
+      for (let idx = 0; idx < parsedItems.length; idx++) {
+        const item = parsedItems[idx]!;
+        if (item.vat_rate_dropdown) {
+          const rate = parseInt(item.vat_rate_dropdown, 10);
+          if (![0, 5, 9, 13, 22, 24].includes(rate)) {
+            warnings.push(`Item ${idx + 1} "${item.custom_title ?? ""}": unusual VAT rate ${rate}%`);
+          }
+        }
+        if (item.total_net_price !== undefined && item.total_net_price < 0) {
+          warnings.push(`Item ${idx + 1} "${item.custom_title ?? ""}": negative net price ${item.total_net_price}`);
+        }
+      }
+
+      // Validate dates
+      const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+      if (invoice_date) {
+        if (!dateRe.test(invoice_date)) {
+          errors.push(`Invalid invoice_date format: "${invoice_date}" (expected YYYY-MM-DD)`);
+        } else {
+          const d = new Date(invoice_date);
+          if (isNaN(d.getTime())) errors.push(`Invalid invoice_date: "${invoice_date}"`);
+        }
+      }
+      if (due_date) {
+        if (!dateRe.test(due_date)) {
+          errors.push(`Invalid due_date format: "${due_date}" (expected YYYY-MM-DD)`);
+        } else if (invoice_date && due_date < invoice_date) {
+          warnings.push(`due_date (${due_date}) is before invoice_date (${invoice_date})`);
+        }
+      }
+
+      // Zero/negative totals
+      if (total_gross <= 0) warnings.push(`Gross amount is ${total_gross} (zero or negative)`);
+      if (total_net <= 0) warnings.push(`Net amount is ${total_net} (zero or negative)`);
+
+      const valid = errors.length === 0;
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            valid,
+            errors,
+            warnings,
+            summary: {
+              total_net,
+              total_vat,
+              total_gross,
+              computed_gross: computedGross,
+              item_count: parsedItems.length,
+            },
+            ...(valid
+              ? { note: "Validation passed. Proceed with create_purchase_invoice_from_pdf." }
+              : { note: "Fix the errors above before creating the invoice." }),
           }, null, 2),
         }],
       };
