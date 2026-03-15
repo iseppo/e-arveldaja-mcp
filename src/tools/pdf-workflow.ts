@@ -77,12 +77,16 @@ function extractInvoiceData(text: string): ExtractedInvoice {
   const vatMatch = text.match(/(?:KMKR|VAT|KM\s*nr)[:\s]*(EE\d+)/i);
   if (vatMatch) result.supplier_vat_no = vatMatch[1];
 
-  // IBAN
-  const ibanMatch = text.match(/([A-Z]{2}\d{2}[A-Z0-9]{4,30})/);
+  // IBAN — digits-only BBAN pattern (covers Estonian and most European IBANs).
+  // Minimum 15 chars (country + 13 digits) excludes VAT numbers (EE + 9 digits).
+  // Negative lookahead prevents matching into concatenated bank names (e.g. "EE91...8531Swedbank").
+  const ibanMatch = text.match(/\b([A-Z]{2}\d{13,30})(?!\d)/);
   if (ibanMatch) result.supplier_iban = ibanMatch[1];
 
-  // Invoice number
-  const invMatch = text.match(/(?:Arve|Invoice)\s*(?:nr|no|number|#)[.:\s]*([A-Z0-9-]+)/i);
+  // Invoice number — Estonian and English patterns
+  const invMatch = text.match(
+    /(?:Arve|Invoice|müügipakkumine|meeldetuletus|pakkumine|kreeditarve|ettemaksuarve)\s*(?:nr|no|number|#)[.:\s]*([A-Z0-9-]+)/i
+  ) ?? text.match(/\bnr\.?\s+(\d{5,})\b/i); // fallback: standalone "nr." + 5+ digit number
   if (invMatch) result.invoice_number = invMatch[1];
 
   // Dates (DD.MM.YYYY)
@@ -94,23 +98,48 @@ function extractInvoiceData(text: string): ExtractedInvoice {
   }
 
   // Reference number
-  const refMatch = text.match(/(?:Viitenumber|Ref\.?\s*(?:nr|number))[:\s]*(\d+)/i);
+  const refMatch = text.match(/(?:Viitenumber|Viitenr|Ref\.?\s*(?:nr|number)|viitenumbrit)[:\s]*(\d+)/i);
   if (refMatch) result.ref_number = refMatch[1];
 
-  // Totals
-  const grossMatch = text.match(/(?:Kokku|Total|Summa|Tasuda)[:\s]*(\d[\d\s]*[.,]\d{2})\s*(?:€|EUR)?/i);
-  if (grossMatch) result.total_gross = parseAmount(grossMatch[1]);
+  // Totals — PDF table layouts often render as "amount + label" (amount before keyword)
+  // or "label: amount" (amount after keyword). Try both directions.
+  const grossAfter = text.match(/(?:Kokku|Total|Summa|Tasuda|Tasumiseks)[:\s]*(\d[\d\s]*[.,]\d{2})\s*(?:€|EUR)?/i);
+  const grossBefore = text.match(/(\d[\d\s]*[.,]\d{2})\s*(?:Kokku|Total|Summa|Tasuda|Tasumiseks)\b/i);
+  if (grossAfter) result.total_gross = parseAmount(grossAfter[1]);
+  else if (grossBefore) result.total_gross = parseAmount(grossBefore[1]);
 
-  const netMatch = text.match(/(?:Summa ilma KM|Net|Neto)[:\s]*(\d[\d\s]*[.,]\d{2})/i);
-  if (netMatch) result.total_net = parseAmount(netMatch[1]);
+  const netAfter = text.match(/(?:Summa ilma KM|Käibemaksuta|Net|Neto|Maksumuseta)[:\s]*(\d[\d\s]*[.,]\d{2})/i);
+  const netBefore = text.match(/(\d[\d\s]*[.,]\d{2})\s*(?:Käibemaksuta|Summa ilma KM|Maksumuseta)\b/i);
+  if (netAfter) result.total_net = parseAmount(netAfter[1]);
+  else if (netBefore) result.total_net = parseAmount(netBefore[1]);
 
-  const vatAmountMatch = text.match(/(?:KM|KMS|VAT|Käibemaks)\s*(?:\d+%?\s*)?[:\s]*(\d[\d\s]*[.,]\d{2})/i);
-  if (vatAmountMatch) result.total_vat = parseAmount(vatAmountMatch[1]);
+  // Negative lookahead prevents matching "Käibemaksuta" (without VAT) as "Käibemaks"
+  const vatAfter = text.match(/(?:Käibemaks(?!uta|eta)|KMS|VAT)\s*(?:\(\d+%\)\s*)?[:\s]*(\d[\d\s]*[.,]\d{2})/i);
+  const vatBefore = text.match(/(\d[\d\s]*[.,]\d{2})\s*(?:Käibemaks(?!uta|eta)|KMS|VAT)\s*(?:\(\d+%\))?/i);
+  if (vatBefore) result.total_vat = parseAmount(vatBefore[1]);
+  else if (vatAfter) result.total_vat = parseAmount(vatAfter[1]);
 
-  // Try to find supplier name from the first meaningful lines
+  // Supplier name detection (multi-strategy):
   const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 2);
-  if (lines.length > 0) {
-    // First non-empty line is often the company name
+
+  // Strategy 1: Line immediately before the registry code (most reliable)
+  if (result.supplier_reg_code) {
+    const regCodeIdx = lines.findIndex(l => l.includes(result.supplier_reg_code!));
+    if (regCodeIdx > 0) {
+      result.supplier_name = lines[regCodeIdx - 1];
+    }
+  }
+
+  // Strategy 2: Line with Estonian company prefix/suffix
+  if (!result.supplier_name) {
+    const companyLine = lines.find(l =>
+      /\b(?:AS|OÜ|MTÜ|SA|TÜ|FIE|aktsiaselts|osaühing)\b/i.test(l)
+    );
+    if (companyLine) result.supplier_name = companyLine;
+  }
+
+  // Strategy 3: Fallback to first non-empty line
+  if (!result.supplier_name && lines.length > 0) {
     result.supplier_name = lines[0];
   }
 
