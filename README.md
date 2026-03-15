@@ -13,15 +13,53 @@ By using this software you acknowledge that:
 - You should test thoroughly on the demo server before using with live data
 - This is experimental software with no warranty of any kind
 
+## Getting an API Key
+
+1. Log in to [e-arveldaja](https://www.earveldaja.ee/)
+2. Go to **Seadistused** → **Üldised seadistused** → **Lisa uus juurdepääsuluba** (Settings → General settings → Add new access token)
+3. Enter any name for the token
+4. Find your public IP address (e.g. at [whatismyipaddress.com](https://whatismyipaddress.com/)) and enter it in the allowed IP field
+5. Save — you will receive an API Key ID, public value, and password
+
+If you don't have a static IP address, you will need to update the allowed IP in e-arveldaja settings whenever your IP changes.
+
+Create an `apikey.txt` file next to the project directory (i.e. in the parent folder) with the following format:
+
+```
+ApiKey ID: <your_key_id>
+ApiKey public value: <your_public_value>
+Password: <your_password>
+```
+
+**Never commit this file to git.**
+
+For the demo server, set the environment variable `EARVELDAJA_SERVER=demo`.
+
 ## Setup
 
-See [CLAUDE.md](CLAUDE.md) for architecture, credentials, and usage details.
-
 ```bash
+npm install
 npm run build          # tsc -> dist/
 npm run start          # node dist/index.js (stdio transport)
 npm run dev            # tsx src/index.ts (development)
 ```
+
+### Claude Code integration
+
+Add to your `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "e-arveldaja": {
+      "command": "node",
+      "args": ["/path/to/e-arveldaja-mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+See [CLAUDE.md](CLAUDE.md) for architecture details and full documentation.
 
 ## License
 
