@@ -4,7 +4,7 @@ import { readFile, stat, realpath } from "fs/promises";
 import { resolve, extname } from "path";
 import pdf from "pdf-parse";
 import { closest } from "fastest-levenshtein";
-import type { ApiContext } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
 
 const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50 MB
@@ -474,10 +474,12 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         items,
       };
 
+      const isVatReg = await isCompanyVatRegistered(api);
       const result = await api.purchaseInvoices.createAndSetTotals(
         invoiceData as any,
         params.vat_price,
         params.gross_price,
+        isVatReg,
       );
 
       return {

@@ -12,11 +12,15 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
    * The API does not auto-compute vat_price/gross_price at invoice level,
    * so we PATCH them after creation based on item-level VAT amounts.
    * If explicit vatPrice/grossPrice are given, those are used (to match the original invoice exactly).
+   *
+   * For non-VAT companies (isVatRegistered=false): invoice-level vat_price stays 0
+   * because input VAT is not deductible. gross_price is still set to actual payable amount.
    */
   async createAndSetTotals(
     data: Partial<PurchaseInvoice>,
     vatPrice?: number,
     grossPrice?: number,
+    isVatRegistered = true,
   ): Promise<PurchaseInvoice> {
     const response = await this.create(data);
     const id = response.created_object_id;
@@ -26,18 +30,23 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     const invoice = await this.get(id);
     const items = (invoice as any).items as Array<{ vat_amount?: number; total_net_price: number }> | undefined;
 
-    let vat = vatPrice !== undefined ? vatPrice : 0;
-    let gross = grossPrice !== undefined ? grossPrice : 0;
+    const itemVat = items ? Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100 : 0;
+    const itemNet = items ? Math.round(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100 : 0;
 
-    if (vatPrice === undefined && items) {
-      // Sum item-level VAT
-      vat = items.reduce((sum, item) => sum + (item.vat_amount ?? 0), 0);
-      vat = Math.round(vat * 100) / 100;
+    // Invoice-level VAT: explicit value wins, then KMD computes from items, mitte-KMD stays 0
+    let vat: number;
+    if (vatPrice !== undefined) {
+      vat = vatPrice;
+    } else if (isVatRegistered) {
+      vat = itemVat;
+    } else {
+      vat = 0;
     }
-    if (grossPrice === undefined) {
-      const net = items?.reduce((sum, item) => sum + (item.total_net_price ?? 0), 0) ?? 0;
-      gross = Math.round((net + vat) * 100) / 100;
-    }
+
+    // Invoice-level gross: explicit value wins, otherwise net + actual item VAT
+    const gross = grossPrice !== undefined
+      ? grossPrice
+      : Math.round((itemNet + itemVat) * 100) / 100;
 
     if (vat > 0 || gross > 0) {
       await this.update(id, { vat_price: vat, gross_price: gross, items: (invoice as any).items } as any);
@@ -49,15 +58,17 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
 
   /**
    * Confirm a purchase invoice. Automatically fixes vat_price/gross_price if needed.
+   * For non-VAT companies: only fixes gross_price, leaves vat_price at 0.
    */
-  async confirmWithTotals(id: number): Promise<ApiResponse> {
+  async confirmWithTotals(id: number, isVatRegistered = true): Promise<ApiResponse> {
     const invoice = await this.get(id);
     if ((invoice as any).gross_price === 0 || (invoice as any).gross_price === null) {
       const items = (invoice as any).items as Array<{ vat_amount?: number; total_net_price: number }> | undefined;
       if (items) {
-        const vat = Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100;
+        const itemVat = Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100;
         const net = Math.round(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100;
-        const gross = Math.round((net + vat) * 100) / 100;
+        const vat = isVatRegistered ? itemVat : 0;
+        const gross = Math.round((net + itemVat) * 100) / 100;
         await this.update(id, { vat_price: vat, gross_price: gross, items } as any);
       }
     }

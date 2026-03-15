@@ -19,6 +19,12 @@ export interface ApiContext {
   readonly: ReadonlyApi;
 }
 
+/** Check if company is VAT-registered (KMD-kohustuslane) via /vat_info */
+export async function isCompanyVatRegistered(api: ApiContext): Promise<boolean> {
+  const vatInfo = await api.readonly.getVatInfo();
+  return !!vatInfo.vat_number;
+}
+
 const MAX_JSON_INPUT_SIZE = 1024 * 1024; // 1 MB
 
 function safeJsonParse(input: string, label: string): unknown {
@@ -371,6 +377,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         ...item,
       }));
 
+      const isVatReg = await isCompanyVatRegistered(api);
       const result = await api.purchaseInvoices.createAndSetTotals(
         {
           clients_id: params.clients_id,
@@ -388,6 +395,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         } as any,
         params.vat_price,
         params.gross_price,
+        isVatReg,
       );
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
@@ -409,7 +417,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     "Confirm a purchase invoice. IRREVERSIBLE — locks the invoice for editing. " +
     "Automatically fixes vat_price/gross_price if they are zero.",
     idParam.shape, async ({ id }) => {
-      const result = await api.purchaseInvoices.confirmWithTotals(id);
+      const isVatReg = await isCompanyVatRegistered(api);
+      const result = await api.purchaseInvoices.confirmWithTotals(id, isVatReg);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
 
