@@ -548,15 +548,25 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         (skip_tickers ?? CASH_FUND_TICKER).split(",").map(t => t.trim())
       );
 
-      // Validate accounts exist
+      // Validate accounts exist and are active
       const accounts = await api.readonly.getAccounts();
-      const accountIds = new Set(accounts.map(a => a.id));
+      const accountMap = new Map(accounts.map(a => [a.id, a]));
       const errors: string[] = [];
-      if (!accountIds.has(investment_account)) errors.push(`Investment account ${investment_account} not found`);
-      if (!accountIds.has(broker_account)) errors.push(`Broker account ${broker_account} not found`);
-      if (fee_account && !accountIds.has(fee_account)) errors.push(`Fee account ${fee_account} not found`);
-      if (gain_loss_account && !accountIds.has(gain_loss_account)) errors.push(`Gain/loss account ${gain_loss_account} not found`);
-      if (loss_account && !accountIds.has(loss_account)) errors.push(`Loss account ${loss_account} not found`);
+
+      function checkAccount(id: number, label: string): void {
+        const acc = accountMap.get(id);
+        if (!acc) {
+          errors.push(`${label} ${id} not found in chart of accounts. Activate it in e-arveldaja: Seaded → Kontoplaan → find account ${id} and enable it.`);
+        } else if (!acc.is_valid) {
+          errors.push(`${label} ${id} (${acc.name_est}) is inactive. Activate it in e-arveldaja: Seaded → Kontoplaan → ${acc.name_est} → mark as active.`);
+        }
+      }
+
+      checkAccount(investment_account, "Investment account");
+      checkAccount(broker_account, "Broker account");
+      if (fee_account) checkAccount(fee_account, "Fee account");
+      if (gain_loss_account) checkAccount(gain_loss_account, "Gain/loss account");
+      if (loss_account) checkAccount(loss_account, "Loss account");
 
       if (errors.length > 0) {
         return {
@@ -804,27 +814,38 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     "Create journal entries for Lightyear dividend/interest distributions. " +
     "Checks for duplicates using reference IDs. " +
     "Books: Debit broker account (net received), Credit income account. " +
-    "Income = gross when tax_account and fee_account are both provided, otherwise net (with warnings). " +
-    "Withheld tax (tax_amount) booked to tax_account. Platform fee booked to fee_account.",
+    "Income = gross (net + tax + fee). " +
+    "Withheld tax (tax_amount) booked to tax_account. Platform fee booked to fee_account (default 8610).",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
-      income_account: z.number().describe("Investment income account (e.g. 6550 Intressitulu, 6500 Dividenditulu)"),
+      income_account: z.number().describe("Investment income account (e.g. 8320 Tulu fondiosakutelt, 8400 Intressitulu)"),
       tax_account: z.number().optional().describe("Withheld tax receivable/expense account (for tax_amount from CSV)"),
-      fee_account: z.number().optional().describe("Platform fee expense account (for fee from CSV)"),
+      fee_account: z.number().optional().describe("Platform fee expense account (default 8610 Muud finantskulud)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
-    async ({ file_path, broker_account, income_account, tax_account, fee_account, dry_run }) => {
+    async ({ file_path, broker_account, income_account, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
+      const fee_account = fee_account_param ?? 8610;
 
-      // Validate accounts
+      // Validate accounts exist and are active
       const accounts = await api.readonly.getAccounts();
-      const accountIds = new Set(accounts.map(a => a.id));
+      const accountMap = new Map(accounts.map(a => [a.id, a]));
       const errors: string[] = [];
-      if (!accountIds.has(broker_account)) errors.push(`Broker account ${broker_account} not found`);
-      if (!accountIds.has(income_account)) errors.push(`Income account ${income_account} not found`);
-      if (tax_account && !accountIds.has(tax_account)) errors.push(`Tax account ${tax_account} not found`);
-      if (fee_account && !accountIds.has(fee_account)) errors.push(`Fee account ${fee_account} not found`);
+
+      function checkAccount(id: number, label: string): void {
+        const acc = accountMap.get(id);
+        if (!acc) {
+          errors.push(`${label} ${id} not found in chart of accounts. Activate it in e-arveldaja: Seaded → Kontoplaan → find account ${id} and enable it.`);
+        } else if (!acc.is_valid) {
+          errors.push(`${label} ${id} (${acc.name_est}) is inactive. Activate it in e-arveldaja: Seaded → Kontoplaan → ${acc.name_est} → mark as active.`);
+        }
+      }
+
+      checkAccount(broker_account, "Broker account");
+      checkAccount(income_account, "Income account");
+      if (tax_account) checkAccount(tax_account, "Tax account");
+      checkAccount(fee_account, "Fee account");
 
       if (errors.length > 0) {
         return {
@@ -876,18 +897,14 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         }
 
         // Dr fee_account: platform fee (fee from CSV)
-        if (dist.fee > 0 && fee_account) {
+        if (dist.fee > 0) {
           postings.push({ accounts_id: fee_account, type: "D", amount: dist.fee });
-        } else if (dist.fee > 0) {
-          warnings.push(`Distribution ${dist.reference}: fee ${dist.fee} EUR charged but no fee_account configured — fee reduces booked income.`);
         }
 
-        // Cr income_account: must equal sum of all debits so journal balances
-        // If tax/fee accounts are configured, income = gross (net + tax + fee)
-        // If not configured, income = only what's debited (understated vs actual gross)
+        // Cr income_account: gross amount (net + tax + fee)
         const creditAmount = dist.net_amount +
           (dist.tax_amount > 0 && tax_account ? dist.tax_amount : 0) +
-          (dist.fee > 0 && fee_account ? dist.fee : 0);
+          dist.fee;
         postings.push({ accounts_id: income_account, type: "C", amount: creditAmount });
 
         const title = `Lightyear tulu: ${dist.ticker} (${dist.isin})`;
