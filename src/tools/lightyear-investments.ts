@@ -442,7 +442,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         summary[ticker] = {
           buys: buys.length,
           sells: sells.length,
-          total_invested_eur: Math.round(buys.reduce((s, t) => s + t.eur_amount + t.fee_eur + t.fx_fee_eur, 0) * 100) / 100,
+          total_invested_eur: Math.round(buys.reduce((s, t) => {
+            const tradeFeeEur = t.fee_eur > 0 && t.fx_rate ? t.fee_eur / t.fx_rate : t.fee_eur;
+            return s + t.eur_amount + tradeFeeEur;
+          }, 0) * 100) / 100,
           total_sold_eur: Math.round(sells.reduce((s, t) => s + t.eur_amount, 0) * 100) / 100,
         };
       }
@@ -542,14 +545,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
       capital_gains_file: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sell entries)"),
       investment_account: z.number().describe("Investment/securities account (e.g. 1550 Finantsinvesteeringud)"),
+      investment_dimension_id: z.number().optional().describe("Dimension ID for investment account (accounts_dimensions_id)"),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
+      broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
       gain_loss_account: z.number().optional().describe("Realized gain account (credit for gains; also used for losses if loss_account not set)"),
       loss_account: z.number().optional().describe("Realized loss account (debit for losses). If omitted, losses go to gain_loss_account."),
       fee_account: z.number().optional().describe("Fee expense account (default: fees included in investment cost)"),
       skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
-    async ({ file_path, capital_gains_file, investment_account, broker_account, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
+    async ({ file_path, capital_gains_file, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
       const isDryRun = dry_run !== false;
       const skipSet = new Set(
         (skip_tickers ?? CASH_FUND_TICKER).split(",").map(t => t.trim())
@@ -640,20 +645,25 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           continue;
         }
 
-        const feeTotal = Math.round((trade.fee_eur + trade.fx_fee_eur) * 100) / 100;
-        const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [];
+        // eur_amount (from EUR conversion gross) already includes FX fee.
+        // Only trade.fee_eur is an additional cost (converted to EUR for foreign trades).
+        const tradeFeeEur = trade.fee_eur > 0 && trade.fx_rate
+          ? Math.round((trade.fee_eur / trade.fx_rate) * 100) / 100
+          : trade.fee_eur;
+        const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
 
         if (trade.type === "Buy") {
-          const totalCostEur = Math.round((trade.eur_amount + trade.fee_eur + trade.fx_fee_eur) * 100) / 100;
+          // totalCostEur = EUR conversion gross (includes FX fee) + trade fee in EUR
+          const totalCostEur = Math.round((trade.eur_amount + tradeFeeEur) * 100) / 100;
 
-          if (fee_account && feeTotal > 0) {
-            postings.push({ accounts_id: investment_account, type: "D", amount: trade.eur_amount });
-            postings.push({ accounts_id: fee_account, type: "D", amount: feeTotal });
-            postings.push({ accounts_id: broker_account, type: "C", amount: totalCostEur });
+          if (fee_account && tradeFeeEur > 0) {
+            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: trade.eur_amount });
+            postings.push({ accounts_id: fee_account, type: "D", amount: tradeFeeEur });
+            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: totalCostEur });
           } else {
             // Fees included in investment cost
-            postings.push({ accounts_id: investment_account, type: "D", amount: totalCostEur });
-            postings.push({ accounts_id: broker_account, type: "C", amount: totalCostEur });
+            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: totalCostEur });
+            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: totalCostEur });
           }
         } else {
           // Sell: need cost basis from capital gains file
@@ -693,8 +703,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           // Dr broker_account: proceeds (what we receive)
           // Cr investment_account: cost_basis (what we originally paid)
           // Cr/Dr gain_loss_account: gain (credit) or loss (debit)
-          postings.push({ accounts_id: broker_account, type: "D", amount: proceeds });
-          postings.push({ accounts_id: investment_account, type: "C", amount: costBasis });
+          postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "D", amount: proceeds });
+          postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "C", amount: costBasis });
 
           if (gainLoss > 0) {
             postings.push({ accounts_id: gain_loss_account, type: "C", amount: gainLoss });
@@ -703,9 +713,9 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             postings.push({ accounts_id: lossAcct, type: "D", amount: Math.abs(gainLoss) });
           }
 
-          if (fee_account && feeTotal > 0) {
-            postings.push({ accounts_id: fee_account, type: "D", amount: feeTotal });
-            postings.push({ accounts_id: broker_account, type: "C", amount: feeTotal });
+          if (fee_account && tradeFeeEur > 0) {
+            postings.push({ accounts_id: fee_account, type: "D", amount: tradeFeeEur });
+            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: tradeFeeEur });
           }
 
           // Store cost basis info in result
@@ -827,12 +837,13 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
+      broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
       income_account: z.number().describe("Investment income account (e.g. 8320 Tulu fondiosakutelt, 8400 Intressitulu)"),
       tax_account: z.number().optional().describe("Withheld tax receivable/expense account (for tax_amount from CSV)"),
       fee_account: z.number().optional().describe("Platform fee expense account (default 8610 Muud finantskulud)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
-    async ({ file_path, broker_account, income_account, tax_account, fee_account: fee_account_param, dry_run }) => {
+    async ({ file_path, broker_account, broker_dimension_id, income_account, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
       const fee_account = fee_account_param ?? 8610;
 
@@ -900,11 +911,11 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       }> = [];
 
       for (const dist of newDist) {
-        const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [];
+        const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
 
         // Dr broker_account: net received amount
         if (dist.net_amount > 0) {
-          postings.push({ accounts_id: broker_account, type: "D", amount: dist.net_amount });
+          postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "D", amount: dist.net_amount });
         }
 
         // Dr tax_account: withheld tax (tax_amount from CSV, NOT fee)
@@ -1023,12 +1034,20 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         };
 
         if (trade.type === "Buy") {
-          h.total_cost_eur += trade.eur_amount + trade.fee_eur + trade.fx_fee_eur;
+          // eur_amount (EUR conversion gross) already includes FX fee;
+          // only add trade fee converted to EUR
+          const tradeFeeEur = trade.fee_eur > 0 && trade.fx_rate
+            ? trade.fee_eur / trade.fx_rate
+            : trade.fee_eur;
+          h.total_cost_eur += trade.eur_amount + tradeFeeEur;
           h.quantity += trade.quantity;
           h.buy_count++;
         } else {
           // Sell: remove proportional cost basis using weighted average cost
-          const proceeds = trade.eur_amount - trade.fee_eur - trade.fx_fee_eur;
+          const tradeFeeEur = trade.fee_eur > 0 && trade.fx_rate
+            ? trade.fee_eur / trade.fx_rate
+            : trade.fee_eur;
+          const proceeds = trade.eur_amount - tradeFeeEur;
           h.total_proceeds_eur += proceeds;
           h.sell_count++;
 
