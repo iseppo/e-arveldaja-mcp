@@ -1,6 +1,6 @@
 import type { HttpClient } from "../http-client.js";
 import type { SaleInvoice, SaleInvoiceDeliveryOptions, SaleInvoiceDeliveryRequest, ApiResponse, ApiFile } from "../types/api.js";
-import { BaseResource, cache } from "./base-resource.js";
+import { BaseResource } from "./base-resource.js";
 
 export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   constructor(client: HttpClient) {
@@ -8,7 +8,7 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   }
 
   async confirm(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.patch<ApiResponse>(`/sale_invoices/${id}/register`, {});
   }
 
@@ -25,7 +25,7 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.request<ApiResponse>(`/sale_invoices/${id}/document_user`, {
       method: "PUT",
       body: { name, contents },
@@ -33,7 +33,7 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.delete<ApiResponse>(`/sale_invoices/${id}/document_user`);
   }
 

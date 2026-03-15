@@ -81,11 +81,14 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
           });
 
           let confirmed = false;
+          let confirmError: string | undefined;
           if (auto_confirm && result.created_object_id) {
             try {
               await api.saleInvoices.confirm(result.created_object_id);
               confirmed = true;
-            } catch { /* leave as draft */ }
+            } catch (err: any) {
+              confirmError = err instanceof Error ? err.message : String(err);
+            }
           }
 
           results.push({
@@ -94,6 +97,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             client: full.client_name,
             created_id: result.created_object_id,
             confirmed,
+            ...(confirmError ? { confirm_error: confirmError } : {}),
             status: "ok",
           });
         } catch (err: any) {

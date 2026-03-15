@@ -11,6 +11,7 @@ interface MatchCandidate {
   clients_id: number;
   gross_price: number;
   payment_status: string;
+  partially_paid_warning: boolean;
   ref_number?: string | null;
   confidence: number;
   match_reasons: string[];
@@ -20,7 +21,7 @@ function matchScore(
   tx: Transaction,
   invoice: { gross_price?: number; base_gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
   txAmount: number
-): { confidence: number; reasons: string[] } {
+): { confidence: number; reasons: string[]; partiallyPaidWarning: boolean } {
   let confidence = 0;
   const reasons: string[] = [];
 
@@ -37,10 +38,6 @@ function matchScore(
   } else if (Math.abs(txAmount - invoiceAmount) < 1) {
     confidence += 20;
     reasons.push("close_amount");
-  } else if (invoice.payment_status === "PARTIALLY_PAID" && txAmount > 0 && txAmount < invoiceAmount) {
-    // Partial payment: tx amount is less than invoice gross — plausible remaining balance
-    confidence += 15;
-    reasons.push("partial_payment_plausible");
   }
 
   // Reference number match
@@ -62,7 +59,13 @@ function matchScore(
     }
   }
 
-  return { confidence: Math.min(confidence, 100), reasons };
+  const partiallyPaidWarning = invoice.payment_status === "PARTIALLY_PAID";
+  if (partiallyPaidWarning) {
+    confidence = Math.max(0, confidence - 15);
+    reasons.push("partially_paid_warning");
+  }
+
+  return { confidence: Math.min(confidence, 100), reasons, partiallyPaidWarning };
 }
 
 export function registerBankReconciliationTools(server: McpServer, api: ApiContext): void {
@@ -100,7 +103,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         // Match against sale invoices (incoming payments - type D)
         if (tx.type === "D") {
           for (const inv of openSales) {
-            const { confidence, reasons } = matchScore(tx, inv, tx.amount);
+            const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
             if (confidence >= threshold) {
               candidates.push({
                 type: "sale_invoice",
@@ -110,6 +113,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
                 clients_id: inv.clients_id,
                 gross_price: inv.gross_price ?? 0,
                 payment_status: inv.payment_status ?? "NOT_PAID",
+                partially_paid_warning: partiallyPaidWarning,
                 ref_number: inv.bank_ref_number,
                 confidence,
                 match_reasons: reasons,
@@ -121,7 +125,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         // Match against purchase invoices (outgoing payments - type C)
         if (tx.type === "C") {
           for (const inv of openPurchases) {
-            const { confidence, reasons } = matchScore(tx, inv, tx.amount);
+            const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
             if (confidence >= threshold) {
               candidates.push({
                 type: "purchase_invoice",
@@ -131,6 +135,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
                 clients_id: inv.clients_id,
                 gross_price: inv.gross_price ?? 0,
                 payment_status: inv.payment_status ?? "NOT_PAID",
+                partially_paid_warning: partiallyPaidWarning,
                 ref_number: inv.bank_ref_number,
                 confidence,
                 match_reasons: reasons,
@@ -216,6 +221,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         const table = tx.type === "D" ? "sale_invoices" : "purchase_invoices";
 
         for (const inv of invoices) {
+          if (inv.payment_status === "PARTIALLY_PAID") continue;
           const invKey = `${tx.type === "D" ? "sale" : "purchase"}:${inv.id!}`;
           if (consumedInvoiceKeys.has(invKey)) continue;
           const { confidence, reasons } = matchScore(tx, inv, tx.amount);
@@ -228,6 +234,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               clients_id: inv.clients_id,
               gross_price: inv.gross_price ?? 0,
               payment_status: (inv as any).payment_status ?? "NOT_PAID",
+              partially_paid_warning: false,
               confidence,
               match_reasons: reasons,
             });

@@ -8,17 +8,26 @@ import { Cache } from "../cache.js";
 
 export const readonlyCache = new Cache(600); // 10 min cache for reference data
 
+function readonlyCacheKey(client: HttpClient, key: string): string {
+  return `${client.cacheNamespace}:${key}`;
+}
+
+function invalidateReadonlyCache(client: HttpClient, pattern?: string): void {
+  readonlyCache.invalidate(pattern ? readonlyCacheKey(client, pattern) : undefined);
+}
+
 async function readonlyCachedGet<T>(client: HttpClient, path: string): Promise<T> {
-  const readonlyCached = readonlyCache.get<T>(path);
+  const cacheKey = readonlyCacheKey(client, path);
+  const readonlyCached = readonlyCache.get<T>(cacheKey);
   if (readonlyCached) return readonlyCached;
   const result = await client.get<T>(path);
-  readonlyCache.set(path, result, 600);
+  readonlyCache.set(cacheKey, result, 600);
   return result;
 }
 
 async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promise<T[]> {
-  const readonlyCacheKey = `${path}:all`;
-  const readonlyCached = readonlyCache.get<T[]>(readonlyCacheKey);
+  const cacheKey = readonlyCacheKey(client, `${path}:all`);
+  const readonlyCached = readonlyCache.get<T[]>(cacheKey);
   if (readonlyCached) return readonlyCached;
 
   // First request - detect if paginated or plain array
@@ -46,7 +55,7 @@ async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promis
     throw new Error(`Unexpected response shape from ${path}: ${JSON.stringify(first).substring(0, 200)}`);
   }
 
-  readonlyCache.set(readonlyCacheKey, allItems, 600);
+  readonlyCache.set(cacheKey, allItems, 600);
   return allItems;
 }
 
@@ -94,7 +103,7 @@ export class ReadonlyApi {
   }
 
   async updateInvoiceInfo(data: Partial<CompanyInvoiceInfo>): Promise<ApiResponse> {
-    readonlyCache.invalidate("/invoice_info");
+    invalidateReadonlyCache(this.client, "/invoice_info");
     return this.client.patch<ApiResponse>("/invoice_info", data);
   }
 
@@ -118,17 +127,17 @@ export class ReadonlyApi {
   }
 
   async createInvoiceSeries(data: Partial<InvoiceSeries>): Promise<ApiResponse> {
-    readonlyCache.invalidate("/invoice_series");
+    invalidateReadonlyCache(this.client, "/invoice_series");
     return this.client.post<ApiResponse>("/invoice_series", data);
   }
 
   async updateInvoiceSeries(id: number, data: Partial<InvoiceSeries>): Promise<ApiResponse> {
-    readonlyCache.invalidate("/invoice_series");
+    invalidateReadonlyCache(this.client, "/invoice_series");
     return this.client.patch<ApiResponse>(`/invoice_series/${id}`, data);
   }
 
   async deleteInvoiceSeries(id: number): Promise<ApiResponse> {
-    readonlyCache.invalidate("/invoice_series");
+    invalidateReadonlyCache(this.client, "/invoice_series");
     return this.client.delete<ApiResponse>(`/invoice_series/${id}`);
   }
 
@@ -142,17 +151,17 @@ export class ReadonlyApi {
   }
 
   async createBankAccount(data: Partial<BankAccount>): Promise<ApiResponse> {
-    readonlyCache.invalidate("/bank_accounts");
+    invalidateReadonlyCache(this.client, "/bank_accounts");
     return this.client.post<ApiResponse>("/bank_accounts", data);
   }
 
   async updateBankAccount(id: number, data: Partial<BankAccount>): Promise<ApiResponse> {
-    readonlyCache.invalidate("/bank_accounts");
+    invalidateReadonlyCache(this.client, "/bank_accounts");
     return this.client.patch<ApiResponse>(`/bank_accounts/${id}`, data);
   }
 
   async deleteBankAccount(id: number): Promise<ApiResponse> {
-    readonlyCache.invalidate("/bank_accounts");
+    invalidateReadonlyCache(this.client, "/bank_accounts");
     return this.client.delete<ApiResponse>(`/bank_accounts/${id}`);
   }
 }

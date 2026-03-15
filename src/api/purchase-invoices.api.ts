@@ -1,6 +1,6 @@
 import type { HttpClient } from "../http-client.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, ApiResponse, ApiFile } from "../types/api.js";
-import { BaseResource, cache } from "./base-resource.js";
+import { BaseResource } from "./base-resource.js";
 
 const roundMoney = (v: number): number => Math.round(v * 100) / 100;
 
@@ -95,25 +95,27 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
 
     if (vat > 0 || gross > 0) {
       await this.update(id, { vat_price: vat, gross_price: gross, items: (invoice as any).items } as any);
-      cache.invalidate(this.basePath);
+      this.invalidateCache();
     }
 
     return this.get(id);
   }
 
   /**
-   * Confirm a purchase invoice. Automatically fixes vat_price/gross_price if needed.
+   * Confirm a purchase invoice. Automatically fixes vat_price/gross_price if missing or inconsistent.
    * For non-VAT companies: only fixes gross_price, leaves vat_price at 0.
    */
   async confirmWithTotals(id: number, isVatRegistered = true): Promise<ApiResponse> {
     const invoice = await this.get(id);
-    if ((invoice as any).gross_price === 0 || (invoice as any).gross_price === null) {
-      const items = (invoice as any).items as Array<{ vat_amount?: number; total_net_price: number }> | undefined;
-      if (items) {
-        const itemVat = Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100;
-        const net = Math.round(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100;
-        const vat = isVatRegistered ? itemVat : 0;
-        const gross = Math.round((net + itemVat) * 100) / 100;
+    const items = (invoice as any).items as Array<{ vat_amount?: number; total_net_price: number }> | undefined;
+    if (items) {
+      const itemVat = Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100;
+      const net = Math.round(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100;
+      const vat = isVatRegistered ? itemVat : 0;
+      const gross = Math.round((net + itemVat) * 100) / 100;
+      const currentGross = (invoice as any).gross_price as number | null | undefined;
+      const shouldRepair = !currentGross || Math.abs(currentGross - gross) > 0.02;
+      if (shouldRepair) {
         await this.update(id, { vat_price: vat, gross_price: gross, items } as any);
       }
     }
@@ -121,12 +123,12 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   }
 
   async confirm(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.patch<ApiResponse>(`/purchase_invoices/${id}/register`, {});
   }
 
   async invalidate(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.patch<ApiResponse>(`/purchase_invoices/${id}/invalidate`, {});
   }
 
@@ -135,7 +137,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.request<ApiResponse>(`/purchase_invoices/${id}/document_user`, {
       method: "PUT",
       body: { name, contents },
@@ -143,7 +145,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.delete<ApiResponse>(`/purchase_invoices/${id}/document_user`);
   }
 }

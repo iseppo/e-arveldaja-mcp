@@ -3,8 +3,8 @@ import { z } from "zod";
 import { readFile } from "fs/promises";
 import pdf from "pdf-parse";
 import { closest } from "fastest-levenshtein";
-import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
-import type { PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
+import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems } from "./crud-tools.js";
+import type { PurchaseInvoice } from "../types/api.js";
 import { validateFilePath } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 
@@ -25,6 +25,15 @@ function safeJsonParse(input: string, label: string): unknown {
 
 async function validatePdfPath(filePath: string): Promise<string> {
   return validateFilePath(filePath, [".pdf"], MAX_PDF_SIZE);
+}
+
+function parseVatRate(rateValue?: string): number | undefined {
+  if (rateValue === undefined) return undefined;
+  const normalized = rateValue.trim();
+  if (normalized === "-") return 0;
+
+  const rate = Number(normalized.replace("%", "").replace(",", ".").trim());
+  return Number.isFinite(rate) ? rate : undefined;
 }
 
 interface PdfHints {
@@ -123,6 +132,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         vat_rate_dropdown?: string;
         custom_title?: string;
       }>;
+      let computedItemVat = 0;
+      let itemVatInputs = 0;
 
       // Check net + vat = gross (within 2 cents for rounding)
       const computedGross = Math.round((total_net + total_vat) * 100) / 100;
@@ -147,14 +158,26 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       // Check VAT rate consistency
       for (let idx = 0; idx < parsedItems.length; idx++) {
         const item = parsedItems[idx]!;
-        if (item.vat_rate_dropdown) {
-          const rate = parseInt(item.vat_rate_dropdown, 10);
+        const rate = parseVatRate(item.vat_rate_dropdown);
+        if (rate !== undefined) {
           if (![0, 5, 9, 13, 22, 24].includes(rate)) {
             warnings.push(`Item ${idx + 1} "${item.custom_title ?? ""}": unusual VAT rate ${rate}%`);
           }
         }
         if (item.total_net_price !== undefined && item.total_net_price < 0) {
           warnings.push(`Item ${idx + 1} "${item.custom_title ?? ""}": negative net price ${item.total_net_price}`);
+        }
+        if (item.total_net_price !== undefined && rate !== undefined) {
+          computedItemVat += Math.round(item.total_net_price * (rate / 100) * 100) / 100;
+          itemVatInputs++;
+        }
+      }
+
+      if (itemVatInputs > 0) {
+        computedItemVat = Math.round(computedItemVat * 100) / 100;
+        const itemVatDiff = Math.abs(computedItemVat - total_vat);
+        if (itemVatDiff > 0.05) {
+          warnings.push(`Summed per-item VAT (${computedItemVat}) does not match total VAT (${total_vat}) (diff: ${itemVatDiff.toFixed(2)})`);
         }
       }
 
@@ -441,7 +464,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
 
       const isVatReg = await isCompanyVatRegistered(api);
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
-      const rawItems = safeJsonParse(params.items, "items") as PurchaseInvoiceItem[];
+      const rawItems = parsePurchaseInvoiceItems(params.items);
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
 
       const invoiceData = {

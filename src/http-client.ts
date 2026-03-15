@@ -10,19 +10,32 @@ export interface RequestOptions {
 }
 
 export class HttpClient {
-  private lastRequestTime = 0;
+  private lastRequest = Promise.resolve();
+  private nextAllowedAt = 0;
   private readonly minIntervalMs = 100; // Max ~10 req/sec
 
-  constructor(private config: Config) {}
+  constructor(
+    private config: Config,
+    public readonly cacheNamespace = "connection:0",
+  ) {}
+
+  private async waitForRateLimitTurn(): Promise<void> {
+    const waitTurn = this.lastRequest
+      .catch(() => undefined)
+      .then(async () => {
+        const delayMs = Math.max(0, this.nextAllowedAt - Date.now());
+        if (delayMs > 0) {
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+        this.nextAllowedAt = Date.now() + this.minIntervalMs;
+      });
+
+    this.lastRequest = waitTurn;
+    await waitTurn;
+  }
 
   async request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
-    // Rate limiting: enforce minimum interval between requests
-    const now = Date.now();
-    const elapsed = now - this.lastRequestTime;
-    if (elapsed < this.minIntervalMs) {
-      await new Promise(r => setTimeout(r, this.minIntervalMs - elapsed));
-    }
-    this.lastRequestTime = Date.now();
+    await this.waitForRateLimitTurn();
 
     const { method = "GET", body, params } = options;
 

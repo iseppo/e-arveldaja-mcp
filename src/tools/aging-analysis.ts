@@ -7,7 +7,7 @@ interface AgingBucket {
   label: string;
   count: number;
   total: number;
-  invoices: Array<{ id: number; number: string; client: string; amount: number; days_overdue: number }>;
+  invoices: Array<{ id: number; number: string; client: string; amount: number; payment_status: string; days_overdue: number }>;
 }
 
 function daysBetween(dateStr: string, today: string): number {
@@ -41,6 +41,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
     },
     async ({ as_of_date }) => {
       const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
+      const usesDefaultUtcDate = !as_of_date;
 
       const allSales = await api.saleInvoices.listAll();
       const unpaid = allSales.filter((inv: SaleInvoice) =>
@@ -65,6 +66,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
           number: inv.number ?? "",
           client: inv.client_name ?? "",
           amount: Math.round(amount * 100) / 100,
+          payment_status: inv.payment_status ?? "NOT_PAID",
           days_overdue: Math.max(0, daysOverdue),
         });
         buckets.set(label, bucket);
@@ -90,6 +92,9 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
       const warnings = [];
       if (partiallyPaidCount > 0) {
         warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full amount — outstanding balance may be lower.`);
+      }
+      if (usesDefaultUtcDate) {
+        warnings.push("Default as_of_date uses the server's UTC calendar date. Pass as_of_date explicitly if you need a local cutoff.");
       }
 
       return {
@@ -117,6 +122,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
     },
     async ({ as_of_date }) => {
       const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
+      const usesDefaultUtcDate = !as_of_date;
 
       const allPurchases = await api.purchaseInvoices.listAll();
       const unpaid = allPurchases.filter((inv: PurchaseInvoice) =>
@@ -141,6 +147,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
           number: inv.number,
           client: inv.client_name,
           amount: Math.round(amount * 100) / 100,
+          payment_status: inv.payment_status ?? "NOT_PAID",
           days_overdue: Math.max(0, daysOverdue),
         });
         buckets.set(label, bucket);
@@ -166,6 +173,9 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
       const warnings = [];
       if (partiallyPaidCount > 0) {
         warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full amount — outstanding balance may be lower.`);
+      }
+      if (usesDefaultUtcDate) {
+        warnings.push("Default as_of_date uses the server's UTC calendar date. Pass as_of_date explicitly if you need a local cutoff.");
       }
 
       return {

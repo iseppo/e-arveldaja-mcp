@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -23,6 +24,16 @@ import { registerDocumentAuditTools } from "./tools/document-audit.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerResources } from "./resources/static-resources.js";
 
+interface ConnectionState {
+  activeIndex: number;
+  generation: number;
+}
+
+interface ConnectionSnapshot {
+  index: number;
+  generation: number;
+}
+
 function buildApiContext(httpClient: HttpClient): ApiContext {
   return {
     clients: new ClientsApi(httpClient),
@@ -35,22 +46,67 @@ function buildApiContext(httpClient: HttpClient): ApiContext {
   };
 }
 
-function switchApi(api: ApiContext, newApi: ApiContext): void {
-  api.clients = newApi.clients;
-  api.products = newApi.products;
-  api.journals = newApi.journals;
-  api.transactions = newApi.transactions;
-  api.saleInvoices = newApi.saleInvoices;
-  api.purchaseInvoices = newApi.purchaseInvoices;
-  api.readonly = newApi.readonly;
+function captureSnapshot(state: ConnectionState): ConnectionSnapshot {
+  return {
+    index: state.activeIndex,
+    generation: state.generation,
+  };
+}
+
+function assertSnapshotCurrent(state: ConnectionState, snapshot: ConnectionSnapshot): void {
+  if (snapshot.generation !== state.generation) {
+    throw new Error("Active connection changed during tool execution. Retry the tool on the intended connection.");
+  }
+}
+
+function clearAllCaches(connectionIndex: number): void {
+  const connectionPrefix = `connection:${connectionIndex}:`;
+  cache.invalidate(connectionPrefix);
+  readonlyCache.invalidate(connectionPrefix);
+}
+
+function createScopedApiContext(
+  state: ConnectionState,
+  contexts: ApiContext[],
+  invocationStorage: AsyncLocalStorage<ConnectionSnapshot>,
+): ApiContext {
+  const api = {} as ApiContext;
+  const keys: Array<keyof ApiContext> = [
+    "clients",
+    "products",
+    "journals",
+    "transactions",
+    "saleInvoices",
+    "purchaseInvoices",
+    "readonly",
+  ];
+
+  for (const key of keys) {
+    Object.defineProperty(api, key, {
+      enumerable: true,
+      configurable: false,
+      get() {
+        const snapshot = invocationStorage.getStore();
+        if (snapshot) {
+          assertSnapshotCurrent(state, snapshot);
+          return contexts[snapshot.index]![key];
+        }
+        return contexts[state.activeIndex]![key];
+      },
+    });
+  }
+
+  return api;
 }
 
 async function main() {
   const allConfigs = loadAllConfigs();
-  let activeIndex = 0;
-
-  const httpClient = new HttpClient(allConfigs[0]!.config);
-  const api: ApiContext = buildApiContext(httpClient);
+  const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
+  const invocationStorage = new AsyncLocalStorage<ConnectionSnapshot>();
+  const connectionContexts = allConfigs.map((namedConfig, index) =>
+    buildApiContext(new HttpClient(namedConfig.config, `connection:${index}`))
+  );
+  const api = createScopedApiContext(connectionState, connectionContexts, invocationStorage);
 
   const server = new McpServer({
     name: "e-arveldaja",
@@ -74,7 +130,7 @@ async function main() {
       const connections = allConfigs.map((nc: NamedConfig, i: number) => ({
         index: i,
         name: nc.name,
-        active: i === activeIndex,
+        active: i === connectionState.activeIndex,
         server: nc.config.baseUrl.includes("demo") ? "demo" : "live",
       }));
 
@@ -83,7 +139,7 @@ async function main() {
           type: "text",
           text: JSON.stringify({
             connections,
-            active: activeIndex,
+            active: connectionState.activeIndex,
             total: allConfigs.length,
             hint: "Use switch_connection with the index to switch between accounts.",
           }, null, 2),
@@ -94,8 +150,8 @@ async function main() {
 
   server.tool("switch_connection",
     "Switch to a different e-arveldaja connection (company). " +
-    "Clears all cached data. Use list_connections to see available indices. " +
-    "WARNING: Do not switch while another tool call is in progress.",
+    "Clears cached data atomically. Use list_connections to see available indices. " +
+    "In-flight tool calls will fail fast and should be retried on the intended connection.",
     {
       index: z.number().describe("Connection index from list_connections"),
     },
@@ -111,7 +167,7 @@ async function main() {
         };
       }
 
-      if (index === activeIndex) {
+      if (index === connectionState.activeIndex) {
         return {
           content: [{
             type: "text",
@@ -123,16 +179,13 @@ async function main() {
       }
 
       const target = allConfigs[index]!;
+      const previousIndex = connectionState.activeIndex;
 
-      // Clear all cached data from previous connection
-      cache.invalidate();
-      readonlyCache.invalidate();
+      clearAllCaches(previousIndex);
+      connectionState.activeIndex = index;
+      connectionState.generation += 1;
 
-      // Build new API context and swap into the shared object
-      const newHttpClient = new HttpClient(target.config);
-      const newApi = buildApiContext(newHttpClient);
-      switchApi(api, newApi);
-      activeIndex = index;
+      const snapshot = captureSnapshot(connectionState);
 
       return {
         content: [{
@@ -140,12 +193,71 @@ async function main() {
           text: JSON.stringify({
             message: `Switched to "${target.name}"`,
             server: target.config.baseUrl.includes("demo") ? "demo" : "live",
-            note: "Cache cleared. All tools now use the new connection.",
+            generation: snapshot.generation,
+            note: "Caches cleared atomically. New tool calls use the new connection; in-flight calls must be retried.",
           }, null, 2),
         }],
       };
     }
   );
+
+  const originalTool = server.tool.bind(server) as any;
+  const wrapToolHandler = (handler: unknown) => {
+    if (typeof handler !== "function") {
+      return handler;
+    }
+
+    return async (...handlerArgs: unknown[]) => {
+      const snapshot = captureSnapshot(connectionState);
+      return invocationStorage.run(snapshot, async () => {
+        const result = await (handler as (...args: unknown[]) => Promise<unknown> | unknown)(...handlerArgs);
+        assertSnapshotCurrent(connectionState, snapshot);
+        return result;
+      });
+    };
+  };
+
+  (server as McpServer & { tool: typeof server.tool }).tool = ((...toolArgs: unknown[]) => {
+    if (toolArgs.length === 4) {
+      const [name, descriptionOrParamsSchema, paramsSchemaOrAnnotations, handler] = toolArgs;
+      return originalTool(
+        name,
+        descriptionOrParamsSchema,
+        paramsSchemaOrAnnotations,
+        wrapToolHandler(handler),
+      );
+    }
+
+    if (toolArgs.length === 3) {
+      const [name, descriptionOrParamsSchema, handler] = toolArgs;
+      return originalTool(
+        name,
+        descriptionOrParamsSchema,
+        wrapToolHandler(handler),
+      );
+    }
+
+    if (toolArgs.length === 5) {
+      const [name, description, paramsSchema, annotations, handler] = toolArgs;
+      return originalTool(
+        name,
+        description,
+        paramsSchema,
+        annotations,
+        wrapToolHandler(handler),
+      );
+    }
+
+    if (toolArgs.length === 2) {
+      const [name, handler] = toolArgs;
+      return originalTool(
+        name,
+        wrapToolHandler(handler),
+      );
+    }
+
+    return originalTool(...toolArgs);
+  }) as typeof server.tool;
 
   // Register all tools
   registerCrudTools(server, api);

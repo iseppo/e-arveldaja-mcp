@@ -16,8 +16,16 @@ export class BaseResource<T> {
     protected idParam: string
   ) {}
 
+  protected cacheKey(key: string): string {
+    return `${this.client.cacheNamespace}:${key}`;
+  }
+
+  protected invalidateCache(pattern = this.basePath): void {
+    cache.invalidate(this.cacheKey(pattern));
+  }
+
   async list(params?: ListParams): Promise<PaginatedResponse<T>> {
-    const cacheKey = `${this.basePath}:list:${JSON.stringify(params ?? {})}`;
+    const cacheKey = this.cacheKey(`${this.basePath}:list:${JSON.stringify(params ?? {})}`);
     const cached = cache.get<PaginatedResponse<T>>(cacheKey);
     if (cached) return cached;
 
@@ -48,7 +56,7 @@ export class BaseResource<T> {
   }
 
   async get(id: number): Promise<T> {
-    const cacheKey = `${this.basePath}:${id}`;
+    const cacheKey = this.cacheKey(`${this.basePath}:${id}`);
     const cached = cache.get<T>(cacheKey);
     if (cached) return cached;
 
@@ -58,17 +66,17 @@ export class BaseResource<T> {
   }
 
   async create(data: Partial<T>): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.post<ApiResponse>(this.basePath, data);
   }
 
   async update(id: number, data: Partial<T>): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.patch<ApiResponse>(`${this.basePath}/${id}`, data);
   }
 
   async delete(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.delete<ApiResponse>(`${this.basePath}/${id}`);
   }
 

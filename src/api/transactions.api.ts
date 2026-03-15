@@ -1,6 +1,6 @@
 import type { HttpClient } from "../http-client.js";
 import type { Transaction, TransactionDistribution, ApiResponse, ApiFile } from "../types/api.js";
-import { BaseResource, cache } from "./base-resource.js";
+import { BaseResource } from "./base-resource.js";
 
 export class TransactionsApi extends BaseResource<Transaction> {
   constructor(client: HttpClient) {
@@ -14,7 +14,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
    * rejects confirmation with "buyer or supplier is missing".
    */
   async confirm(id: number, distributions?: TransactionDistribution[]): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     const body = distributions ?? [];
 
     // Auto-fix missing clients_id from linked invoice
@@ -48,7 +48,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.request<ApiResponse>(`/transactions/${id}/document_user`, {
       method: "PUT",
       body: { name, contents },
@@ -56,7 +56,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.delete<ApiResponse>(`/transactions/${id}/document_user`);
   }
 }

@@ -39,6 +39,74 @@ function safeJsonParse(input: string, label: string): unknown {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseJsonObject(input: string, label: string): Record<string, unknown> {
+  const parsed = safeJsonParse(input, label);
+  if (!isRecord(parsed)) {
+    throw new Error(`"${label}" must be a JSON object`);
+  }
+  return parsed;
+}
+
+function parseJsonObjectArray(input: string, label: string): Record<string, unknown>[] {
+  const parsed = safeJsonParse(input, label);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`"${label}" must be a JSON array`);
+  }
+
+  parsed.forEach((item, index) => {
+    if (!isRecord(item)) {
+      throw new Error(`"${label}" item ${index + 1} must be a JSON object`);
+    }
+  });
+
+  return parsed;
+}
+
+function requireFields(items: Record<string, unknown>[], label: string, fields: string[]): void {
+  items.forEach((item, index) => {
+    for (const field of fields) {
+      if (!(field in item) || item[field] === null || item[field] === undefined || item[field] === "") {
+        throw new Error(`"${label}" item ${index + 1} is missing required field "${field}"`);
+      }
+    }
+  });
+}
+
+function parsePostings(input: string): Posting[] {
+  const postings = parseJsonObjectArray(input, "postings");
+  requireFields(postings, "postings", ["accounts_id", "type", "amount"]);
+
+  postings.forEach((posting, index) => {
+    if (posting.type !== "D" && posting.type !== "C") {
+      throw new Error(`"postings" item ${index + 1} has invalid type "${String(posting.type)}" (expected "D" or "C")`);
+    }
+  });
+
+  return postings as unknown as Posting[];
+}
+
+function parseTransactionDistributions(input: string): TransactionDistribution[] {
+  const distributions = parseJsonObjectArray(input, "distributions");
+  requireFields(distributions, "distributions", ["related_table", "amount"]);
+  return distributions as unknown as TransactionDistribution[];
+}
+
+function parseSaleInvoiceItems(input: string): SaleInvoiceItem[] {
+  const items = parseJsonObjectArray(input, "items");
+  requireFields(items, "items", ["products_id", "custom_title", "amount"]);
+  return items as unknown as SaleInvoiceItem[];
+}
+
+export function parsePurchaseInvoiceItems(input: string): PurchaseInvoiceItem[] {
+  const items = parseJsonObjectArray(input, "items");
+  requireFields(items, "items", ["cl_purchase_articles_id", "custom_title"]);
+  return items as unknown as PurchaseInvoiceItem[];
+}
+
 const pageParam = z.object({
   page: z.number().optional().describe("Page number (default 1)"),
   modified_since: z.string().optional().describe("Return only objects modified since this timestamp (ISO 8601)"),
@@ -90,7 +158,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     id: z.number().describe("Client ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, async ({ id, data }) => {
-    const result = await api.clients.update(id, safeJsonParse(data, "data") as Record<string, unknown>);
+    const result = await api.clients.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
@@ -148,7 +216,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     id: z.number().describe("Product ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, async ({ id, data }) => {
-    const result = await api.products.update(id, safeJsonParse(data, "data") as Record<string, unknown>);
+    const result = await api.products.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
@@ -187,7 +255,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     const result = await api.journals.create({
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
-      postings: safeJsonParse(params.postings, "postings") as Posting[],
+      postings: parsePostings(params.postings),
     });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -196,7 +264,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     id: z.number().describe("Journal ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, async ({ id, data }) => {
-    const result = await api.journals.update(id, safeJsonParse(data, "data") as Record<string, unknown>);
+    const result = await api.journals.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
@@ -246,7 +314,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     id: z.number().describe("Transaction ID"),
     distributions: z.string().optional().describe("JSON array of distribution rows: [{related_table, related_id?, amount}]"),
   }, async ({ id, distributions }) => {
-    const dist = distributions ? safeJsonParse(distributions, "distributions") as TransactionDistribution[] : undefined;
+    const dist = distributions ? parseTransactionDistributions(distributions) : undefined;
     const result = await api.transactions.confirm(id, dist);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -290,7 +358,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       cl_countries_id: params.cl_countries_id ?? "EST",
       sale_invoice_type: params.sale_invoice_type ?? "INVOICE",
       show_client_balance: params.show_client_balance ?? false,
-      items: safeJsonParse(params.items, "items") as SaleInvoiceItem[],
+      items: parseSaleInvoiceItems(params.items),
     });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -299,7 +367,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     id: z.number().describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
   }, async ({ id, data }) => {
-    const result = await api.saleInvoices.update(id, safeJsonParse(data, "data") as Record<string, unknown>);
+    const result = await api.saleInvoices.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
@@ -372,7 +440,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     }, async (params) => {
       const isVatReg = await isCompanyVatRegistered(api);
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
-      const rawItems = safeJsonParse(params.items, "items") as PurchaseInvoiceItem[];
+      const rawItems = parsePurchaseInvoiceItems(params.items);
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
       const result = await api.purchaseInvoices.createAndSetTotals(
         {
@@ -400,7 +468,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     id: z.number().describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
   }, async ({ id, data }) => {
-    const result = await api.purchaseInvoices.update(id, safeJsonParse(data, "data") as Record<string, unknown>);
+    const result = await api.purchaseInvoices.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
@@ -411,7 +479,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   server.tool("confirm_purchase_invoice",
     "Confirm a purchase invoice. IRREVERSIBLE — locks the invoice for editing. " +
-    "Automatically fixes vat_price/gross_price if they are zero.",
+    "Automatically fixes vat_price/gross_price if they are missing or inconsistent with the item totals.",
     idParam.shape, async ({ id }) => {
       const isVatReg = await isCompanyVatRegistered(api);
       const result = await api.purchaseInvoices.confirmWithTotals(id, isVatReg);

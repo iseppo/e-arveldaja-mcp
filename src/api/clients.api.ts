@@ -1,6 +1,6 @@
 import type { HttpClient } from "../http-client.js";
 import type { Client, ApiResponse } from "../types/api.js";
-import { BaseResource, cache } from "./base-resource.js";
+import { BaseResource } from "./base-resource.js";
 
 export class ClientsApi extends BaseResource<Client> {
   constructor(client: HttpClient) {
@@ -8,18 +8,18 @@ export class ClientsApi extends BaseResource<Client> {
   }
 
   async deactivate(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.patch<ApiResponse>(`/clients/${id}/deactivate`, {});
   }
 
   async restore(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.patch<ApiResponse>(`/clients/${id}/reactivate`, {});
   }
 
   /** Not in OpenAPI spec — endpoint may not exist on all API versions */
   async merge(targetId: number, sourceId: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.post<ApiResponse>(`/clients/${targetId}/merge/${sourceId}`, {});
   }
 

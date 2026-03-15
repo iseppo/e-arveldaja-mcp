@@ -13,7 +13,7 @@ export class JournalsApi extends BaseResource<Journal> {
    * journals as needed and caches the enriched result for 120s.
    */
   async listAllWithPostings(): Promise<Journal[]> {
-    const cacheKey = `${this.basePath}:allWithPostings`;
+    const cacheKey = this.cacheKey(`${this.basePath}:allWithPostings`);
     const cached = cache.get<Journal[]>(cacheKey);
     if (cached) return cached;
 
@@ -43,7 +43,7 @@ export class JournalsApi extends BaseResource<Journal> {
   }
 
   async confirm(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.patch<ApiResponse>(`/journals/${id}/register`, {});
   }
 
@@ -52,7 +52,7 @@ export class JournalsApi extends BaseResource<Journal> {
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.request<ApiResponse>(`/journals/${id}/document_user`, {
       method: "PUT",
       body: { name, contents },
@@ -60,7 +60,7 @@ export class JournalsApi extends BaseResource<Journal> {
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
+    this.invalidateCache();
     return this.client.delete<ApiResponse>(`/journals/${id}/document_user`);
   }
 }

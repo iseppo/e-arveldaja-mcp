@@ -90,6 +90,11 @@ function sumCategory(accounts: AccountBalance[], normalType: "D" | "C"): number 
   return total;
 }
 
+function getMonthLastDay(month: string): number {
+  const [year, monthNumber] = month.split("-").map(Number);
+  return new Date(Date.UTC(year!, monthNumber!, 0)).getUTCDate();
+}
+
 export function registerFinancialStatementTools(server: McpServer, api: ApiContext): void {
 
   server.tool("compute_trial_balance",
@@ -235,7 +240,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     },
     async ({ month }) => {
       const dateFrom = `${month}-01`;
-      const lastDay = new Date(parseInt(month.split("-")[0]!), parseInt(month.split("-")[1]!), 0).getDate();
+      const lastDay = getMonthLastDay(month);
       const dateTo = `${month}-${String(lastDay).padStart(2, "0")}`;
 
       // Unconfirmed journals
@@ -280,6 +285,18 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
         return d.toISOString().split("T")[0]! < dateTo;
       });
 
+      const partiallyPaidReceivables = overdueReceivables.filter((inv: SaleInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
+      const partiallyPaidPayables = overduePayables.filter((inv: PurchaseInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
+      const warnings: string[] = [
+        "Month-end due-date checks use UTC calendar dates. Borderline local-midnight cases may need manual review.",
+      ];
+      if (partiallyPaidReceivables > 0) {
+        warnings.push(`${partiallyPaidReceivables} overdue receivable(s) are PARTIALLY_PAID and shown at full invoice amount; remaining balance may be lower.`);
+      }
+      if (partiallyPaidPayables > 0) {
+        warnings.push(`${partiallyPaidPayables} overdue payable(s) are PARTIALLY_PAID and shown at full invoice amount; remaining balance may be lower.`);
+      }
+
       return {
         content: [{
           type: "text",
@@ -295,21 +312,45 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             unconfirmed_sale_invoices: {
               count: unconfirmedSales.length,
-              items: unconfirmedSales.map((inv: SaleInvoice) => ({ id: inv.id, number: inv.number, client: inv.client_name, gross: inv.gross_price })),
+              items: unconfirmedSales.map((inv: SaleInvoice) => ({
+                id: inv.id,
+                number: inv.number,
+                client: inv.client_name,
+                gross: inv.base_gross_price ?? inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
+              })),
             },
             unconfirmed_purchase_invoices: {
               count: unconfirmedPurchases.length,
-              items: unconfirmedPurchases.map((inv: PurchaseInvoice) => ({ id: inv.id, number: inv.number, client: inv.client_name, gross: inv.gross_price })),
+              items: unconfirmedPurchases.map((inv: PurchaseInvoice) => ({
+                id: inv.id,
+                number: inv.number,
+                client: inv.client_name,
+                gross: inv.base_gross_price ?? inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
+              })),
             },
             overdue_receivables: {
               count: overdueReceivables.length,
-              total: Math.round(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + (inv.gross_price ?? 0), 0) * 100) / 100,
-              items: overdueReceivables.slice(0, 10).map((inv: SaleInvoice) => ({ id: inv.id, number: inv.number, client: inv.client_name, gross: inv.gross_price })),
+              total: Math.round(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0) * 100) / 100,
+              items: overdueReceivables.slice(0, 10).map((inv: SaleInvoice) => ({
+                id: inv.id,
+                number: inv.number,
+                client: inv.client_name,
+                gross: inv.base_gross_price ?? inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
+              })),
             },
             overdue_payables: {
               count: overduePayables.length,
-              total: Math.round(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + (inv.gross_price ?? 0), 0) * 100) / 100,
-              items: overduePayables.slice(0, 10).map((inv: PurchaseInvoice) => ({ id: inv.id, number: inv.number, client: inv.client_name, gross: inv.gross_price })),
+              total: Math.round(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0) * 100) / 100,
+              items: overduePayables.slice(0, 10).map((inv: PurchaseInvoice) => ({
+                id: inv.id,
+                number: inv.number,
+                client: inv.client_name,
+                gross: inv.base_gross_price ?? inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
+              })),
             },
             summary: {
               issues_found: unconfirmedJournals.length + unconfirmedTx.length +
@@ -318,6 +359,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               ready_to_close: unconfirmedJournals.length === 0 && unconfirmedTx.length === 0 &&
                 unconfirmedSales.length === 0 && unconfirmedPurchases.length === 0,
             },
+            warnings,
           }, null, 2),
         }],
       };
