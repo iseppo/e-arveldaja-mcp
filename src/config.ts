@@ -2,8 +2,6 @@ import dotenv from "dotenv";
 import { resolve } from "path";
 import { readFileSync, existsSync, statSync, readdirSync, realpathSync } from "fs";
 
-dotenv.config({ path: resolve(import.meta.dirname, "../.env") });
-
 export interface Config {
   apiKeyId: string;
   apiPublicValue: string;
@@ -21,6 +19,22 @@ const SERVERS = {
   live: "https://rmp-api.rik.ee/v1",
   demo: "https://demo-rmp-api.rik.ee/v1",
 } as const;
+
+/** Find project root by walking up from import.meta.dirname to package.json. */
+function getProjectRoot(): string {
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 5; i++) {
+    if (existsSync(resolve(dir, "package.json"))) return dir;
+    const parent = resolve(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return process.cwd();
+}
+
+const PROJECT_ROOT = getProjectRoot();
+
+dotenv.config({ path: resolve(PROJECT_ROOT, ".env") });
 
 function getBaseUrl(): string {
   const server = process.env.EARVELDAJA_SERVER || "live";
@@ -95,10 +109,10 @@ export function loadAllConfigs(): NamedConfig[] {
     }
   }
 
-  // 3. Scan directories for apikey*.txt files
+  // 3. Scan project root and its parent for apikey*.txt files
   const searchDirs = [
-    resolve(import.meta.dirname, ".."),
-    resolve(import.meta.dirname, "../.."),
+    PROJECT_ROOT,                    // project root (e-arveldaja-mcp/)
+    resolve(PROJECT_ROOT, ".."),     // parent dir (e.g. e_arveldaja/)
   ];
 
   for (const dir of searchDirs) {

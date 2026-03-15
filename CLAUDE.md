@@ -19,7 +19,7 @@ Credentials are loaded in this priority order (see `src/config.ts`):
 
 1. **Environment variables**: `EARVELDAJA_API_KEY_ID`, `EARVELDAJA_API_PUBLIC_VALUE`, `EARVELDAJA_API_PASSWORD`
 2. **`EARVELDAJA_API_KEY_FILE`** env var pointing to a specific file
-3. **`apikey*.txt` files** — scanned from `../` and `../../` relative to the project
+3. **`apikey*.txt` files** — scanned from the project root and its parent directory
 
 The `apikey.txt` format:
 ```
