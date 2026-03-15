@@ -860,6 +860,18 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const rows = parseAccountStatement(csv);
       const distributions = extractDistributions(rows);
 
+      if (!tax_account && distributions.some(dist => dist.tax_amount > 0)) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: "tax_account is required when distributions include withheld tax",
+              hint: "Provide tax_account so tax_amount can be booked separately for Lightyear distributions.",
+            }, null, 2),
+          }],
+        };
+      }
+
       // Check duplicates
       const allRefs = distributions.map(d => d.reference);
       const existingRefs = await findExistingJournalsByRef(api, allRefs);
@@ -879,8 +891,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         journal_id?: number;
       }> = [];
 
-      const warnings: string[] = [];
-
       for (const dist of newDist) {
         const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [];
 
@@ -892,8 +902,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         // Dr tax_account: withheld tax (tax_amount from CSV, NOT fee)
         if (dist.tax_amount > 0 && tax_account) {
           postings.push({ accounts_id: tax_account, type: "D", amount: dist.tax_amount });
-        } else if (dist.tax_amount > 0) {
-          warnings.push(`Distribution ${dist.reference}: tax ${dist.tax_amount} EUR withheld but no tax_account configured — included in income reduction.`);
         }
 
         // Dr fee_account: platform fee (fee from CSV)
@@ -902,9 +910,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         }
 
         // Cr income_account: gross amount (net + tax + fee)
-        const creditAmount = dist.net_amount +
-          (dist.tax_amount > 0 && tax_account ? dist.tax_amount : 0) +
-          dist.fee;
+        const creditAmount = dist.net_amount + dist.tax_amount + dist.fee;
         postings.push({ accounts_id: income_account, type: "C", amount: creditAmount });
 
         const title = `Lightyear tulu: ${dist.ticker} (${dist.isin})`;
@@ -952,7 +958,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             new_entries: newDist.length,
             duplicates_skipped: duplicates.length,
             results,
-            ...(warnings.length > 0 && { warnings }),
             note: isDryRun
               ? "Set dry_run=false to create journal entries."
               : "Journal entries created. Review and register when ready.",

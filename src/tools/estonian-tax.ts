@@ -1,13 +1,22 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { ApiContext } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
+import { computeAllBalances } from "./financial-statements.js";
 
 async function validateAccounts(api: ApiContext, ...accountIds: number[]): Promise<string[]> {
   const accounts = await api.readonly.getAccounts();
+  const accountMap = new Map(accounts.map(account => [account.id, account]));
   const errors: string[] = [];
-  for (const id of accountIds) {
-    if (!accounts.find(a => a.id === id)) {
+  for (const id of new Set(accountIds)) {
+    const account = accountMap.get(id);
+    if (!account) {
       errors.push(`Account ${id} not found in chart of accounts`);
+      continue;
+    }
+    if (!account.is_valid) {
+      errors.push(
+        `Account ${id} (${account.name_est}) is inactive. Activate in e-arveldaja: Seaded → Kontoplaan → ${account.name_est} → mark as active.`
+      );
     }
   }
   return errors;
@@ -52,15 +61,17 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       retained_earnings_account: z.number().optional().describe("Retained earnings account (default 3020)"),
       dividend_payable_account: z.number().optional().describe("Dividend payable account (default 2370)"),
       tax_payable_account: z.number().optional().describe("CIT payable account (default 2540)"),
+      share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default 3000)"),
       force: z.boolean().optional().describe("Create journal even if retained earnings are insufficient (default false)"),
     },
-    async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, force }) => {
+    async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, share_capital_account, force }) => {
       const retainedAccount = retained_earnings_account ?? 3020;
       const payableAccount = dividend_payable_account ?? 2370;
       const taxAccount = tax_payable_account ?? 2540;
+      const shareCapitalAccount = share_capital_account ?? 3000;
 
       // Validate all accounts exist in chart of accounts
-      const accountErrors = await validateAccounts(api, retainedAccount, payableAccount, taxAccount);
+      const accountErrors = await validateAccounts(api, retainedAccount, payableAccount, taxAccount, shareCapitalAccount);
       if (accountErrors.length > 0) {
         return {
           content: [{
@@ -104,6 +115,25 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         );
       }
 
+      const balances = await computeAllBalances(api, undefined, effective_date);
+      const totalAssets = balances
+        .filter(balance => balance.account_type_est === "Varad")
+        .reduce((sum, balance) => sum + (balance.balance_type === "D" ? balance.balance : -balance.balance), 0);
+      const totalLiabilities = balances
+        .filter(balance => balance.account_type_est === "Kohustused")
+        .reduce((sum, balance) => sum + (balance.balance_type === "C" ? balance.balance : -balance.balance), 0);
+      const shareCapital = balances.find(balance => balance.account_id === shareCapitalAccount)?.balance ?? 0;
+      const netAssetsBeforeDistribution = Math.round((totalAssets - totalLiabilities) * 100) / 100;
+      const netAssetsAfterDistribution = Math.round((netAssetsBeforeDistribution - grossDividend) * 100) / 100;
+      const roundedShareCapital = Math.round(shareCapital * 100) / 100;
+
+      if (netAssetsAfterDistribution < roundedShareCapital - 0.01) {
+        warnings.push(
+          `Net assets after distribution (${netAssetsAfterDistribution} EUR) would fall below share capital (${roundedShareCapital} EUR on account ${shareCapitalAccount}). ` +
+          `Verify compliance with ÄS § 157 before proceeding.`
+        );
+      }
+
       const shareholder = await api.clients.get(shareholder_client_id);
 
       // Journal entry: Debit retained earnings, Credit dividend payable + tax payable
@@ -137,6 +167,14 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               balance_before: retainedBalance,
               sufficient: retainedBalance >= grossDividend,
             },
+            net_assets_check: {
+              net_assets_before_distribution: netAssetsBeforeDistribution,
+              gross_dividend: Math.round(grossDividend * 100) / 100,
+              net_assets_after_distribution: netAssetsAfterDistribution,
+              share_capital_account: shareCapitalAccount,
+              share_capital: roundedShareCapital,
+              sufficient: netAssetsAfterDistribution >= roundedShareCapital,
+            },
             shareholder: { id: shareholder_client_id, name: shareholder.name },
             journal_entry: {
               api_response: result,
@@ -156,7 +194,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   server.tool("create_owner_expense_reimbursement",
     "Book an owner-paid business expense: expense account + VAT + payable to owner. " +
     "Common for micro-OÜs where the owner pays with personal funds. " +
-    "Validates accounts exist in chart of accounts.",
+    "Books input VAT separately only for VAT-registered companies and validates accounts in chart of accounts.",
     {
       owner_client_id: z.number().describe("Owner/shareholder client ID"),
       effective_date: z.string().describe("Expense date (YYYY-MM-DD)"),
@@ -170,13 +208,14 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       document_number: z.string().optional().describe("Receipt/document number"),
     },
     async ({ owner_client_id, effective_date, description, net_amount, vat_rate, vat_amount, expense_account, vat_account, payable_account, document_number }) => {
+      const vatRegistered = await isCompanyVatRegistered(api);
       const vatAcc = vat_account ?? 1510;
       const payAcc = payable_account ?? 2110;
 
       // Validate all accounts exist
       const accountsToCheck = [expense_account, payAcc];
       const vat = vat_amount ?? Math.round(net_amount * vat_rate * 100) / 100;
-      if (vat > 0) accountsToCheck.push(vatAcc);
+      if (vat > 0 && vatRegistered) accountsToCheck.push(vatAcc);
 
       const accountErrors = await validateAccounts(api, ...accountsToCheck);
       if (accountErrors.length > 0) {
@@ -193,12 +232,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       }
 
       const total = Math.round((net_amount + vat) * 100) / 100;
+      const expenseDebit = vatRegistered ? net_amount : total;
 
       const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [
-        { accounts_id: expense_account, type: "D", amount: net_amount },
+        { accounts_id: expense_account, type: "D", amount: expenseDebit },
       ];
 
-      if (vat > 0) {
+      if (vat > 0 && vatRegistered) {
         postings.push({ accounts_id: vatAcc, type: "D", amount: vat });
       }
 
@@ -223,6 +263,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               vat_rate: vat_amount !== undefined ? "custom" : `${vat_rate * 100}%`,
               vat,
               total,
+              vat_registered_company: vatRegistered,
+              expense_debited: expenseDebit,
             },
             journal_entry: {
               api_response: result,
@@ -232,7 +274,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
                 amount: p.amount,
               })),
             },
-            note: `Expense booked. Owner debt increased by ${total} EUR on account ${payAcc}.`,
+            note: vatRegistered
+              ? `Expense booked. Owner debt increased by ${total} EUR on account ${payAcc}.`
+              : `Expense booked. Company is not VAT-registered, so the full gross amount was debited to expense account ${expense_account}. Owner debt increased by ${total} EUR on account ${payAcc}.`,
           }, null, 2),
         }],
       };

@@ -331,6 +331,7 @@ export interface PurchaseInvoiceItem {
   vat_accounts_dimensions_id?: number | null;
   vat_rate_dropdown?: string;
   vat_rate?: number;
+  vat_amount?: number;
   custom_title: string;
   projects_project_id?: number | null;
   projects_location_id?: number | null;

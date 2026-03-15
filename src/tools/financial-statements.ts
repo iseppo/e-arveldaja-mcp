@@ -14,7 +14,7 @@ interface AccountBalance {
   balance: number;
 }
 
-async function computeAllBalances(
+export async function computeAllBalances(
   api: ApiContext,
   dateFrom?: string,
   dateTo?: string
@@ -140,19 +140,19 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       const totalLiabilities = sumCategory(liabilities, "C");
       const totalEquity = sumCategory(equity, "C");
 
-      // Current-year P&L (informational, NOT added to equity total to avoid
-      // double-counting when year-end closing entries have moved profit into equity)
+      // Current-year P&L is included in equity total for in-year balance sheet checks.
       const revenue = balances.filter(b => b.account_type_est === "Tulud");
       const expenses = balances.filter(b => b.account_type_est === "Kulud");
       const totalRevenue = sumCategory(revenue, "C");
       const totalExpenses = sumCategory(expenses, "D");
       const currentYearPL = totalRevenue - totalExpenses;
+      const totalEquityWithCurrentYearPL = totalEquity + currentYearPL;
 
       const warnings: string[] = [];
       if (Math.abs(currentYearPL) > 0.01) {
         warnings.push(
           `Open P&L accounts show ${Math.round(currentYearPL * 100) / 100} EUR net profit. ` +
-          `If year-end closing entries have NOT been posted, add this to equity for the true balance.`
+          `This amount is included in equity for the balance check and should normally be closed into equity at year-end.`
         );
       }
 
@@ -171,19 +171,18 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             equity: {
               items: equity.map(a => ({ id: a.account_id, name: a.name_est, balance: a.balance })),
-              total: Math.round(totalEquity * 100) / 100,
+              total: Math.round(totalEquityWithCurrentYearPL * 100) / 100,
             },
             current_year_pl: {
               revenue: Math.round(totalRevenue * 100) / 100,
               expenses: Math.round(totalExpenses * 100) / 100,
               net_profit: Math.round(currentYearPL * 100) / 100,
-              note: "Not included in equity total. Add manually if closing entries have not been posted.",
+              note: "Included in equity total and balance check.",
             },
             check: {
               assets: Math.round(totalAssets * 100) / 100,
-              liabilities_plus_equity: Math.round((totalLiabilities + totalEquity) * 100) / 100,
-              balanced: Math.abs(totalAssets - totalLiabilities - totalEquity) < 0.01,
-              balanced_with_pl: Math.abs(totalAssets - totalLiabilities - totalEquity - currentYearPL) < 0.01,
+              liabilities_plus_equity: Math.round((totalLiabilities + totalEquityWithCurrentYearPL) * 100) / 100,
+              balanced: Math.abs(totalAssets - totalLiabilities - totalEquityWithCurrentYearPL) < 0.01,
             },
             ...(warnings.length > 0 && { warnings }),
           }, null, 2),

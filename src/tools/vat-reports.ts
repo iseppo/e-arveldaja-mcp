@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { ApiContext } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 
 // EU member state country codes for VD report filtering
@@ -23,11 +23,17 @@ export function registerVatReportTools(server: McpServer, api: ApiContext): void
       date_to: z.string().describe("Period end (YYYY-MM-DD)"),
     },
     async ({ date_from, date_to }) => {
+      const vatRegistered = await isCompanyVatRegistered(api);
       const allSales = await api.saleInvoices.listAll();
       const allPurchases = await api.purchaseInvoices.listAll();
       const allClients = await api.clients.listAll();
 
       const issues: Array<{ severity: string; type: string; invoice_type: string; invoice_id: number; invoice_number: string; message: string }> = [];
+      const info: string[] = [];
+
+      if (!vatRegistered) {
+        info.push("Company is not VAT-registered (KMD), so domestic zero-VAT sales are not flagged.");
+      }
 
       // Check sale invoices
       for (const inv of allSales) {
@@ -48,7 +54,7 @@ export function registerVatReportTools(server: McpServer, api: ApiContext): void
 
         // Check zero VAT on domestic invoice
         const totalVat = (inv.vat20_price ?? 0) + (inv.vat9_price ?? 0) + (inv.vat5_price ?? 0);
-        if (totalVat === 0 && (inv.net_price ?? 0) > 0 && !inv.intra_community_supply && inv.cl_countries_id === "EST") {
+        if (vatRegistered && totalVat === 0 && (inv.net_price ?? 0) > 0 && !inv.intra_community_supply && inv.cl_countries_id === "EST") {
           issues.push({
             severity: "MEDIUM",
             type: "zero_vat_domestic",
@@ -96,6 +102,7 @@ export function registerVatReportTools(server: McpServer, api: ApiContext): void
               LOW: issues.filter(i => i.severity === "LOW").length,
             },
             issues,
+            ...(info.length > 0 && { info }),
           }, null, 2),
         }],
       };
@@ -112,6 +119,17 @@ export function registerVatReportTools(server: McpServer, api: ApiContext): void
       threshold: z.number().optional().describe("Reporting threshold in EUR net (default 1000)"),
     },
     async ({ date_from, date_to, threshold }) => {
+      if (!(await isCompanyVatRegistered(api))) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: "KMD INF is only for VAT-registered (KMD) companies",
+            }, null, 2),
+          }],
+        };
+      }
+
       const limit = threshold ?? 1000;
       const allClients = await api.clients.listAll();
 

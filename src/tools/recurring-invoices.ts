@@ -8,7 +8,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
   server.tool("create_recurring_sale_invoices",
     "Clone sale invoices from a previous month for recurring monthly billing. " +
     "Copies items, client, template from source invoices. Creates as DRAFT. " +
-    "WARNING: Invoice numbers are derived locally — do not run concurrently.",
+    "Invoice numbers are auto-assigned by the configured invoice series.",
     {
       source_month: z.string().describe("Source month to copy from (YYYY-MM)"),
       target_date: z.string().describe("New invoice date (YYYY-MM-DD)"),
@@ -37,30 +37,12 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
         );
       }
 
-      // Get next invoice numbers
       const results = [];
-
-      // Track used number suffixes per prefix to avoid collisions within this run
-      const usedNumbers = new Map<string, number>();
 
       for (const source of sourceInvoices) {
         // Fetch full invoice to get items
         const full = await api.saleInvoices.get(source.id!);
         if (!full.items || full.items.length === 0) continue;
-
-        // Determine next number suffix, accounting for numbers used in this run
-        const prefix = source.number_prefix ?? "";
-        let nextNumber: number;
-        if (usedNumbers.has(prefix)) {
-          nextNumber = usedNumbers.get(prefix)! + 1;
-        } else {
-          const existingNumbers = allSales
-            .filter((inv: SaleInvoice) => inv.number_prefix === prefix)
-            .map((inv: SaleInvoice) => parseInt(inv.number_suffix ?? "0"))
-            .filter(n => !isNaN(n));
-          nextNumber = existingNumbers.length > 0 ? Math.max(...existingNumbers) + 1 : 1;
-        }
-        usedNumbers.set(prefix, nextNumber);
 
         try {
           const result = await api.saleInvoices.create({
@@ -69,7 +51,6 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             clients_id: full.clients_id,
             cl_countries_id: full.cl_countries_id,
             number_prefix: full.number_prefix,
-            number_suffix: String(nextNumber),
             create_date: target_date,
             journal_date: target_journal_date,
             term_days: full.term_days,
