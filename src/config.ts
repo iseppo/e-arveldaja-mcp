@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { resolve } from "path";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, statSync } from "fs";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../.env") });
 
@@ -32,6 +32,17 @@ function loadFromApiKeyFile(): { keyId: string; publicValue: string; password: s
 
   for (const filePath of candidates) {
     if (!existsSync(filePath)) continue;
+
+    // Warn if credential file is world-readable
+    try {
+      const mode = statSync(filePath).mode;
+      if (mode & 0o004) {
+        process.stderr.write(
+          `WARNING: ${filePath} is world-readable (mode ${(mode & 0o777).toString(8)}). ` +
+          `Run: chmod 600 ${filePath}\n`
+        );
+      }
+    } catch { /* stat failed, continue anyway */ }
 
     const content = readFileSync(filePath, "utf-8");
     const keyIdMatch = content.match(/^ApiKey ID:\s*(.+)$/m);

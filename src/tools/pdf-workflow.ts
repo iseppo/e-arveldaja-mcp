@@ -166,8 +166,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       vat_no: z.string().optional().describe("VAT number (KMKR)"),
       iban: z.string().optional().describe("Bank account (IBAN)"),
       auto_create: z.boolean().optional().describe("Create client if not found (default false)"),
+      country: z.string().optional().describe("Country code for auto-create (default EST)"),
+      is_physical_entity: z.boolean().optional().describe("Natural person (default false = legal entity)"),
     },
-    async ({ name, reg_code, vat_no, iban, auto_create }) => {
+    async ({ name, reg_code, vat_no, iban, auto_create, country, is_physical_entity }) => {
       // 1. Search by registry code
       if (reg_code) {
         const byCode = await api.clients.findByCode(reg_code);
@@ -243,14 +245,15 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       // 4. Create new client if requested
       if (auto_create) {
         const clientName = registryData?.name ?? name ?? "Unknown";
+        const isPhysical = is_physical_entity ?? false;
         const result = await api.clients.create({
           name: clientName,
           code: reg_code ?? undefined,
           is_client: false,
           is_supplier: true,
-          cl_code_country: "EST",
-          is_juridical_entity: true,
-          is_physical_entity: false,
+          cl_code_country: country ?? "EST",
+          is_juridical_entity: !isPhysical,
+          is_physical_entity: isPhysical,
           is_member: false,
           send_invoice_to_email: false,
           send_invoice_to_accounting_email: false,

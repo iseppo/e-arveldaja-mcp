@@ -72,8 +72,5 @@ export class BaseResource<T> {
     return this.client.delete<ApiResponse>(`${this.basePath}/${id}`);
   }
 
-  async restore(id: number): Promise<ApiResponse> {
-    cache.invalidate(this.basePath);
-    return this.client.patch<ApiResponse>(`${this.basePath}/${id}/reactivate`, {});
-  }
+  // restore/reactivate is only supported by clients and products — implemented in those subclasses
 }

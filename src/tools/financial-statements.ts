@@ -145,12 +145,21 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       const totalLiabilities = sumCategory(liabilities, "C");
       const totalEquity = sumCategory(equity, "C");
 
-      // Retained earnings from P&L
+      // Current-year P&L (informational, NOT added to equity total to avoid
+      // double-counting when year-end closing entries have moved profit into equity)
       const revenue = balances.filter(b => b.account_type_est === "Tulud");
       const expenses = balances.filter(b => b.account_type_est === "Kulud");
       const totalRevenue = sumCategory(revenue, "C");
       const totalExpenses = sumCategory(expenses, "D");
-      const retainedEarnings = totalRevenue - totalExpenses;
+      const currentYearPL = totalRevenue - totalExpenses;
+
+      const warnings: string[] = [];
+      if (Math.abs(currentYearPL) > 0.01) {
+        warnings.push(
+          `Open P&L accounts show ${Math.round(currentYearPL * 100) / 100} EUR net profit. ` +
+          `If year-end closing entries have NOT been posted, add this to equity for the true balance.`
+        );
+      }
 
       return {
         content: [{
@@ -167,14 +176,21 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             equity: {
               items: equity.map(a => ({ id: a.account_id, name: a.name_est, balance: a.balance })),
-              retained_earnings: Math.round(retainedEarnings * 100) / 100,
-              total: Math.round((totalEquity + retainedEarnings) * 100) / 100,
+              total: Math.round(totalEquity * 100) / 100,
+            },
+            current_year_pl: {
+              revenue: Math.round(totalRevenue * 100) / 100,
+              expenses: Math.round(totalExpenses * 100) / 100,
+              net_profit: Math.round(currentYearPL * 100) / 100,
+              note: "Not included in equity total. Add manually if closing entries have not been posted.",
             },
             check: {
               assets: Math.round(totalAssets * 100) / 100,
-              liabilities_plus_equity: Math.round((totalLiabilities + totalEquity + retainedEarnings) * 100) / 100,
-              balanced: Math.abs(totalAssets - totalLiabilities - totalEquity - retainedEarnings) < 0.01,
+              liabilities_plus_equity: Math.round((totalLiabilities + totalEquity) * 100) / 100,
+              balanced: Math.abs(totalAssets - totalLiabilities - totalEquity) < 0.01,
+              balanced_with_pl: Math.abs(totalAssets - totalLiabilities - totalEquity - currentYearPL) < 0.01,
             },
+            ...(warnings.length > 0 && { warnings }),
           }, null, 2),
         }],
       };
@@ -245,13 +261,13 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       // Unconfirmed invoices
       const allSales = await api.saleInvoices.listAll();
       const unconfirmedSales = allSales.filter((inv: SaleInvoice) =>
-        inv.status !== "CONFIRMED" && inv.status !== "DELETED" &&
+        inv.status === "PROJECT" &&
         inv.create_date >= dateFrom && inv.create_date <= dateTo
       );
 
       const allPurchases = await api.purchaseInvoices.listAll();
       const unconfirmedPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.status !== "CONFIRMED" && inv.status !== "DELETED" &&
+        inv.status === "PROJECT" &&
         inv.create_date >= dateFrom && inv.create_date <= dateTo
       );
 

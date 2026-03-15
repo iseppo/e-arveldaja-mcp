@@ -62,9 +62,17 @@ export class HttpClient {
       });
 
       if (!response.ok) {
-        const text = await response.text();
-        const safeText = text.substring(0, 500);
-        throw new Error(`API request failed with status ${response.status}: ${safeText}`);
+        // Parse structured error if available, but don't expose raw upstream details
+        let errorMessage = `API request failed: ${method} ${path} → ${response.status}`;
+        try {
+          const body = await response.json() as { code?: number; messages?: string[] };
+          if (body.messages && Array.isArray(body.messages)) {
+            errorMessage += `: ${body.messages.join("; ")}`;
+          }
+        } catch {
+          // Non-JSON error body — don't expose raw text
+        }
+        throw new Error(errorMessage);
       }
 
       if (response.status === 204) {

@@ -95,7 +95,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       const allPurchases = await api.purchaseInvoices.listAll();
 
       const filtered = allPurchases.filter((inv: PurchaseInvoice) => {
-        if (inv.status === "DELETED") return false;
+        if (inv.status === "DELETED" || inv.status === "INVALIDATED") return false;
         if (clients_id && inv.clients_id !== clients_id) return false;
         if (date_from && inv.create_date < date_from) return false;
         if (date_to && inv.create_date > date_to) return false;

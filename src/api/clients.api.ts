@@ -12,6 +12,11 @@ export class ClientsApi extends BaseResource<Client> {
     return this.client.patch<ApiResponse>(`/clients/${id}/deactivate`, {});
   }
 
+  async restore(id: number): Promise<ApiResponse> {
+    cache.invalidate(this.basePath);
+    return this.client.patch<ApiResponse>(`/clients/${id}/reactivate`, {});
+  }
+
   /** Not in OpenAPI spec — endpoint may not exist on all API versions */
   async merge(targetId: number, sourceId: number): Promise<ApiResponse> {
     cache.invalidate(this.basePath);

@@ -86,6 +86,7 @@ export function registerVatReportTools(server: McpServer, api: ApiContext): void
         "This is a DRAFT. Review all lines before submitting to EMTA.",
         "Lines marked computed=false are NOT calculated from invoice data and require manual input: 3, 3.1 (0% supply classification), 6-7 (intra-Community acquisition), 22 (13% supply).",
         "Lines 1/2/21 are derived by dividing aggregate VAT by the rate — mixed-rate invoices may be misallocated.",
+        "Line 5 (input VAT) is a GROSS sum of all purchase invoice VAT — does not distinguish deductible vs non-deductible, exempt, private use, or reverse-charge.",
       ];
       if (netRemaining > 0.01) {
         warnings.push(`Unclassified net amount: ${r(netRemaining)} EUR — may be 0% or 13% supply. Check invoice items.`);

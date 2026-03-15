@@ -198,7 +198,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("confirm_journal", "Confirm/register a journal entry", idParam.shape, async ({ id }) => {
+  server.tool("confirm_journal", "Confirm/register a journal entry. IRREVERSIBLE — use invalidate to reverse if needed.", idParam.shape, async ({ id }) => {
     const result = await api.journals.confirm(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -301,7 +301,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("confirm_sale_invoice", "Confirm a sales invoice", idParam.shape, async ({ id }) => {
+  server.tool("confirm_sale_invoice", "Confirm a sales invoice. IRREVERSIBLE — locks the invoice for editing.", idParam.shape, async ({ id }) => {
     const result = await api.saleInvoices.confirm(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -311,7 +311,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("send_sale_invoice", "Send a sales invoice via e-invoice or email", {
+  server.tool("send_sale_invoice", "Send a sales invoice via e-invoice or email. DESTRUCTIVE — sends real documents to recipients.", {
     id: z.number().describe("Invoice ID"),
     send_einvoice: z.boolean().optional().describe("Send as e-invoice (machine-readable XML)"),
     send_email: z.boolean().optional().describe("Send as email (PDF)"),
@@ -377,7 +377,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("confirm_purchase_invoice", "Confirm a purchase invoice", idParam.shape, async ({ id }) => {
+  server.tool("confirm_purchase_invoice", "Confirm a purchase invoice. IRREVERSIBLE — locks the invoice for editing.", idParam.shape, async ({ id }) => {
     const result = await api.purchaseInvoices.confirm(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });

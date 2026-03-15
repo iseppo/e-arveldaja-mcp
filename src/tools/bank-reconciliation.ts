@@ -193,6 +193,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       const consumedInvoiceKeys = new Set<string>();
 
       for (const tx of unconfirmed) {
+        // Only process known transaction types
+        if (tx.type !== "D" && tx.type !== "C") {
+          skipped.push({ transaction_id: tx.id, reason: `Unknown transaction type "${tx.type}"` });
+          continue;
+        }
+
         const candidates: MatchCandidate[] = [];
         const invoices = tx.type === "D" ? openSales : openPurchases;
         const table = tx.type === "D" ? "sale_invoices" : "purchase_invoices";

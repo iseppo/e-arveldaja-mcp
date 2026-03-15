@@ -291,12 +291,11 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
       if (candidates.length > 1) {
         fxWarnings.push(
           `${row.reference} (${row.ticker} ${row.ccy} ${Math.abs(row.gross_amount)}): ` +
-          `${candidates.length} FX conversions match by date+amount — using first (${candidates[0]!.ref}). ` +
-          `Verify EUR amount is correct.`
+          `${candidates.length} FX conversions match by date+amount — SKIPPED (ambiguous). ` +
+          `Refs: ${candidates.map(c => c.ref).join(", ")}`
         );
-      }
-
-      if (candidates.length > 0) {
+        // Do NOT pick a candidate — leave eur_amount = 0 so trade is flagged as unmatched
+      } else if (candidates.length === 1) {
         const best = candidates[0]!;
         trade.eur_amount = Math.abs(best.eurConv.gross_amount);
         trade.fx_rate = best.eurConv.fx_rate || best.fgnConv.fx_rate || null;
@@ -1047,7 +1046,9 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               closed_positions: closed.length,
             },
             ...(portfolioWarnings.length > 0 && { warnings: portfolioWarnings }),
-            note: "Cost basis computed using weighted average cost (WAC) method. " +
+            note: "Cost basis computed using weighted average cost (WAC) method — for analytical purposes only. " +
+              "book_lightyear_trades uses FIFO cost basis from the capital gains file, so this summary " +
+              "may not match the investment account balance after booking sells. " +
               "For tax reporting, use parse_lightyear_capital_gains which uses FIFO.",
           }, null, 2),
         }],

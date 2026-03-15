@@ -7,7 +7,8 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
 
   server.tool("create_recurring_sale_invoices",
     "Clone sale invoices from a previous month for recurring monthly billing. " +
-    "Copies items, client, template from source invoices. Creates as DRAFT.",
+    "Copies items, client, template from source invoices. Creates as DRAFT. " +
+    "WARNING: Invoice numbers are derived locally — do not run concurrently.",
     {
       source_month: z.string().describe("Source month to copy from (YYYY-MM)"),
       target_date: z.string().describe("New invoice date (YYYY-MM-DD)"),
