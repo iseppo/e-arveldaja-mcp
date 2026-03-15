@@ -342,27 +342,55 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("create_purchase_invoice", "Create a purchase invoice", {
-    clients_id: z.number().describe("Supplier client ID"),
-    client_name: z.string().describe("Supplier name"),
-    number: z.string().describe("Invoice number"),
-    create_date: z.string().describe("Invoice date (YYYY-MM-DD)"),
-    journal_date: z.string().describe("Turnover date (YYYY-MM-DD)"),
-    term_days: z.number().describe("Payment term in days"),
-    cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
-    liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
-    gross_price: z.number().optional().describe("Total gross amount"),
-    items: z.string().describe("JSON array of items: [{custom_title, cl_purchase_articles_id?, total_net_price?, amount?, ...}]"),
-    notes: z.string().optional().describe("Notes"),
-  }, async (params) => {
-    const result = await api.purchaseInvoices.create({
-      ...params,
-      cl_currencies_id: params.cl_currencies_id ?? "EUR",
-      liability_accounts_id: params.liability_accounts_id ?? 2310,
-      items: safeJsonParse(params.items, "items") as PurchaseInvoiceItem[],
+  server.tool("create_purchase_invoice",
+    "Create a purchase invoice. Pass the EXACT vat_price and gross_price from the original invoice " +
+    "to ensure amounts match for payment reconciliation. " +
+    "Items require cl_purchase_articles_id (use list_purchase_articles). " +
+    "cl_fringe_benefits_id defaults to 1 (not a fringe benefit).",
+    {
+      clients_id: z.number().describe("Supplier client ID"),
+      client_name: z.string().describe("Supplier name"),
+      number: z.string().describe("Invoice number"),
+      create_date: z.string().describe("Invoice date (YYYY-MM-DD)"),
+      journal_date: z.string().describe("Turnover date (YYYY-MM-DD)"),
+      term_days: z.number().describe("Payment term in days"),
+      vat_price: z.number().optional().describe("Total VAT amount from original invoice (EXACT, for payment matching)"),
+      gross_price: z.number().optional().describe("Total gross amount from original invoice (EXACT, for payment matching)"),
+      cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
+      liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
+      items: z.string().describe("JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, ...}]"),
+      notes: z.string().optional().describe("Notes"),
+      bank_ref_number: z.string().optional().describe("Payment reference number"),
+      bank_account_no: z.string().optional().describe("Supplier bank account"),
+    }, async (params) => {
+      const items = (safeJsonParse(params.items, "items") as PurchaseInvoiceItem[]).map(item => ({
+        cl_fringe_benefits_id: 1,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        amount: 1,
+        ...item,
+      }));
+
+      const result = await api.purchaseInvoices.createAndSetTotals(
+        {
+          clients_id: params.clients_id,
+          client_name: params.client_name,
+          number: params.number,
+          create_date: params.create_date,
+          journal_date: params.journal_date,
+          term_days: params.term_days,
+          cl_currencies_id: params.cl_currencies_id ?? "EUR",
+          liability_accounts_id: params.liability_accounts_id ?? 2310,
+          bank_ref_number: params.bank_ref_number,
+          bank_account_no: params.bank_account_no,
+          notes: params.notes,
+          items,
+        } as any,
+        params.vat_price,
+        params.gross_price,
+      );
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-  });
 
   server.tool("update_purchase_invoice", "Update a purchase invoice", {
     id: z.number().describe("Invoice ID"),
@@ -377,10 +405,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("confirm_purchase_invoice", "Confirm a purchase invoice. IRREVERSIBLE — locks the invoice for editing.", idParam.shape, async ({ id }) => {
-    const result = await api.purchaseInvoices.confirm(id);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-  });
+  server.tool("confirm_purchase_invoice",
+    "Confirm a purchase invoice. IRREVERSIBLE — locks the invoice for editing. " +
+    "Automatically fixes vat_price/gross_price if they are zero.",
+    idParam.shape, async ({ id }) => {
+      const result = await api.purchaseInvoices.confirmWithTotals(id);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    });
 
   // =====================
   // REFERENCE DATA (read-only)

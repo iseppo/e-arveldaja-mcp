@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-82 tools across 11 modules + 6 resources.
+84 tools across 11 modules + 6 resources. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -13,11 +13,13 @@ npm run dev            # tsx src/index.ts (development)
 
 ## Credentials
 
+All `apikey*.txt` files are scanned from the project root and its parent directory. Multiple files = multiple connections (companies).
+
 Credentials are loaded in this priority order (see `src/config.ts`):
 
 1. **Environment variables**: `EARVELDAJA_API_KEY_ID`, `EARVELDAJA_API_PUBLIC_VALUE`, `EARVELDAJA_API_PASSWORD`
-2. **`.env` file** in project root (via dotenv)
-3. **`apikey.txt` file** — checked at `EARVELDAJA_API_KEY_FILE` env var, then `../apikey.txt`, then `../../apikey.txt`
+2. **`EARVELDAJA_API_KEY_FILE`** env var pointing to a specific file
+3. **`apikey*.txt` files** — scanned from `../` and `../../` relative to the project
 
 The `apikey.txt` format:
 ```
@@ -27,6 +29,12 @@ Password: <password>
 ```
 
 Set `EARVELDAJA_SERVER=demo` for the demo API (default: `live`).
+
+### Multi-account (multiple companies)
+
+Place multiple `apikey*.txt` files (e.g. `apikey.txt`, `apikey (1).txt`) next to the project.
+Use `list_connections` to see all available accounts and `switch_connection` to switch between them.
+Switching clears all cached data to prevent cross-company data leaks.
 
 **NEVER commit `.env` or `apikey.txt` to git.** The `.gitignore` is configured to exclude them.
 

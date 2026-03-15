@@ -392,23 +392,32 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
 
   server.tool("create_purchase_invoice_from_pdf",
     "Full workflow: create a purchase invoice from extracted PDF data. " +
-    "Resolves supplier, suggests booking, creates the invoice as DRAFT.",
+    "Resolves supplier, suggests booking, creates the invoice as DRAFT. " +
+    "Pass EXACT vat_price and gross_price from the original invoice for payment matching.",
     {
       supplier_client_id: z.number().describe("Supplier client ID (from resolve_supplier)"),
       invoice_number: z.string().describe("Invoice number"),
       invoice_date: z.string().describe("Invoice date (YYYY-MM-DD)"),
       journal_date: z.string().describe("Turnover/booking date (YYYY-MM-DD)"),
       term_days: z.number().describe("Payment term days"),
-      items: z.string().describe("JSON array of items: [{custom_title, cl_purchase_articles_id, total_net_price, vat_rate_dropdown?, amount?}]"),
+      items: z.string().describe("JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, total_net_price, vat_rate_dropdown?, amount?}]"),
+      vat_price: z.number().optional().describe("EXACT total VAT from the original invoice"),
+      gross_price: z.number().optional().describe("EXACT total gross from the original invoice"),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
       notes: z.string().optional().describe("Notes (e.g. PDF filename)"),
-      gross_price: z.number().optional().describe("Total gross price"),
       ref_number: z.string().optional().describe("Reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
     },
     async (params) => {
-      // Get supplier name
       const supplier = await api.clients.get(params.supplier_client_id);
+
+      const items = (safeJsonParse(params.items, "items") as PurchaseInvoiceItem[]).map(item => ({
+        cl_fringe_benefits_id: 1,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        amount: 1,
+        ...item,
+      }));
 
       const invoiceData = {
         clients_id: params.supplier_client_id,
@@ -419,14 +428,17 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         term_days: params.term_days,
         cl_currencies_id: "EUR",
         liability_accounts_id: params.liability_accounts_id ?? 2310,
-        gross_price: params.gross_price,
         bank_ref_number: params.ref_number,
         bank_account_no: params.bank_account_no,
         notes: params.notes,
-        items: safeJsonParse(params.items, "items") as PurchaseInvoiceItem[],
+        items,
       };
 
-      const result = await api.purchaseInvoices.create(invoiceData);
+      const result = await api.purchaseInvoices.createAndSetTotals(
+        invoiceData as any,
+        params.vat_price,
+        params.gross_price,
+      );
 
       return {
         content: [{
@@ -434,7 +446,6 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           text: JSON.stringify({
             result,
             note: "Purchase invoice created as DRAFT. Review and use confirm_purchase_invoice to confirm.",
-            invoice_data: invoiceData,
           }, null, 2),
         }],
       };
