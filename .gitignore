@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+apikey*.txt
 node_modules/
 dist/
 .omc/
