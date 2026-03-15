@@ -56,8 +56,10 @@ async function main() {
   const server = new McpServer({
     name: "e-arveldaja",
     version: "1.0.0",
-    description: "MCP server for Estonian e-arveldaja (e-Financials) API. " +
-      "Provides full CRUD for clients, products, journals, transactions, " +
+    description: "EXPERIMENTAL, UNOFFICIAL MCP server for the Estonian e-arveldaja (e-Financials) API. " +
+      "NOT affiliated with or endorsed by RIK. Use entirely at your own risk — " +
+      "this software interacts with live financial data and can create, modify, and delete accounting records. " +
+      "Provides CRUD for clients, products, journals, transactions, " +
       "sale/purchase invoices. Includes account balance computation (D/C logic), " +
       "PDF invoice extraction, supplier resolution with business registry lookup, " +
       "and smart booking suggestions based on past invoices.",
