@@ -16,7 +16,6 @@ import { registerAccountBalanceTools } from "./tools/account-balance.js";
 import { registerPdfWorkflowTools } from "./tools/pdf-workflow.js";
 import { registerBankReconciliationTools } from "./tools/bank-reconciliation.js";
 import { registerFinancialStatementTools } from "./tools/financial-statements.js";
-import { registerVatReportTools } from "./tools/vat-reports.js";
 import { registerAgingTools } from "./tools/aging-analysis.js";
 import { registerRecurringInvoiceTools } from "./tools/recurring-invoices.js";
 import { registerEstonianTaxTools } from "./tools/estonian-tax.js";
@@ -154,7 +153,6 @@ async function main() {
   registerPdfWorkflowTools(server, api);
   registerBankReconciliationTools(server, api);
   registerFinancialStatementTools(server, api);
-  registerVatReportTools(server, api);
   registerAgingTools(server, api);
   registerRecurringInvoiceTools(server, api);
   registerEstonianTaxTools(server, api);

@@ -96,7 +96,6 @@ src/
     pdf-workflow.ts      # PDF text extraction, invoice validation, supplier resolution, booking suggestions
     bank-reconciliation.ts # Transaction matching and auto-confirmation
     financial-statements.ts # Trial balance, balance sheet, P&L, month-end close
-    vat-reports.ts       # KMD INF, VD reports, VAT coding validation
     aging-analysis.ts    # Receivables/payables aging buckets
     recurring-invoices.ts # Clone sale invoices for recurring billing
     estonian-tax.ts      # Dividend package, owner expense reimbursement
