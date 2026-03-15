@@ -3,15 +3,6 @@ import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 
-// Estonian KMD VAT return structure (EMTA form 2025-07)
-interface KmdLine {
-  line: string;
-  description_est: string;
-  description_eng: string;
-  amount: number;
-  computed: boolean;
-}
-
 // EU member state country codes for VD report filtering
 const EU_COUNTRY_CODES = new Set([
   "AUT", "BEL", "BGR", "HRV", "CYP", "CZE", "DNK", "FIN", "FRA", "DEU",
@@ -24,93 +15,6 @@ const EU_COUNTRY_CODES = new Set([
 ]);
 
 export function registerVatReportTools(server: McpServer, api: ApiContext): void {
-
-  server.tool("prepare_kmd_report",
-    "Prepare draft Estonian KMD (VAT return) from confirmed invoices for a period. " +
-    "Line mapping per EMTA form 2025-07: 1=24%, 2=9%, 21=5%, 22=13%. " +
-    "Note: API field vat20_price represents current standard rate (24%).",
-    {
-      date_from: z.string().describe("Period start (YYYY-MM-DD)"),
-      date_to: z.string().describe("Period end (YYYY-MM-DD)"),
-    },
-    async ({ date_from, date_to }) => {
-      const allSales = await api.saleInvoices.listAll();
-      const periodSales = allSales.filter((inv: SaleInvoice) =>
-        inv.status === "CONFIRMED" &&
-        inv.journal_date >= date_from && inv.journal_date <= date_to
-      );
-
-      const allPurchases = await api.purchaseInvoices.listAll();
-      const periodPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.status === "CONFIRMED" &&
-        inv.journal_date >= date_from && inv.journal_date <= date_to
-      );
-
-      // Output VAT by rate (vat20_price = standard rate, currently 24%)
-      const salesVat24 = periodSales.reduce((s: number, inv: SaleInvoice) => s + (inv.base_vat20_price ?? inv.vat20_price ?? 0), 0);
-      const salesVat9 = periodSales.reduce((s: number, inv: SaleInvoice) => s + (inv.base_vat9_price ?? inv.vat9_price ?? 0), 0);
-      const salesVat5 = periodSales.reduce((s: number, inv: SaleInvoice) => s + (inv.base_vat5_price ?? inv.vat5_price ?? 0), 0);
-      const totalOutputVat = salesVat24 + salesVat9 + salesVat5;
-
-      // Compute implied net per rate from VAT amounts
-      const netAt24 = salesVat24 > 0 ? Math.round(salesVat24 / 0.24 * 100) / 100 : 0;
-      const netAt9 = salesVat9 > 0 ? Math.round(salesVat9 / 0.09 * 100) / 100 : 0;
-      const netAt5 = salesVat5 > 0 ? Math.round(salesVat5 / 0.05 * 100) / 100 : 0;
-
-      // Total sales net
-      const salesNetTotal = periodSales.reduce((s: number, inv: SaleInvoice) => s + (inv.base_net_price ?? inv.net_price ?? 0), 0);
-      // Remaining net could be 0% or 13% supply
-      const netRemaining = salesNetTotal - netAt24 - netAt9 - netAt5;
-
-      // Input VAT from purchase invoices
-      const inputVat = periodPurchases.reduce((s: number, inv: PurchaseInvoice) => s + (inv.base_vat_price ?? inv.vat_price ?? 0), 0);
-
-      const r = (n: number) => Math.round(n * 100) / 100;
-
-      // KMD lines per EMTA form 2025-07
-      const lines: KmdLine[] = [
-        { line: "1", description_est: "24% määraga maksustatav käive", description_eng: "24% taxable supply", amount: r(netAt24), computed: true },
-        { line: "2", description_est: "9% määraga maksustatav käive", description_eng: "9% taxable supply", amount: r(netAt9), computed: true },
-        { line: "3", description_est: "0% määraga maksustatav käive (mahaarvatav)", description_eng: "0% taxable supply (deductible)", amount: 0, computed: false },
-        { line: "3.1", description_est: "0% määraga käive (mittemahaarvatav)", description_eng: "0% supply (non-deductible)", amount: 0, computed: false },
-        { line: "4", description_est: "Käibemaks kokku (1×24% + 2×9% + 21×5% + 22×13%)", description_eng: "Total output VAT", amount: r(totalOutputVat), computed: true },
-        { line: "5", description_est: "Sisendkäibemaks kokku", description_eng: "Total input VAT", amount: r(inputVat), computed: true },
-        { line: "6", description_est: "Ühendusesisene kaupade soetamine", description_eng: "Intra-Community acquisition of goods", amount: 0, computed: false },
-        { line: "7", description_est: "Ühendusesisene kaupade soetamise käibemaks", description_eng: "VAT on intra-Community acquisition", amount: 0, computed: false },
-        { line: "10", description_est: "Tasumisele kuuluv käibemaks (rida 4-5+7)", description_eng: "VAT payable (line 4-5+7)", amount: r(totalOutputVat - inputVat), computed: true },
-        { line: "21", description_est: "5% määraga maksustatav käive", description_eng: "5% taxable supply", amount: r(netAt5), computed: true },
-        { line: "22", description_est: "13% määraga maksustatav käive", description_eng: "13% taxable supply", amount: 0, computed: false },
-      ];
-
-      const warnings = [
-        "This is a DRAFT. Review all lines before submitting to EMTA.",
-        "Lines marked computed=false are NOT calculated from invoice data and require manual input: 3, 3.1 (0% supply classification), 6-7 (intra-Community acquisition), 22 (13% supply).",
-        "Lines 1/2/21 are derived by dividing aggregate VAT by the rate — mixed-rate invoices may be misallocated.",
-        "Line 5 (input VAT) is a GROSS sum of all purchase invoice VAT — does not distinguish deductible vs non-deductible, exempt, private use, or reverse-charge.",
-      ];
-      if (netRemaining > 0.01) {
-        warnings.push(`Unclassified net amount: ${r(netRemaining)} EUR — may be 0% or 13% supply. Check invoice items.`);
-      }
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            period: { from: date_from, to: date_to },
-            kmd_lines: lines,
-            source_data: {
-              sale_invoices: periodSales.length,
-              purchase_invoices: periodPurchases.length,
-              total_sales_net: r(salesNetTotal),
-              total_sales_gross: r(periodSales.reduce((s: number, inv: SaleInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0)),
-              total_purchases_gross: r(periodPurchases.reduce((s: number, inv: PurchaseInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0)),
-            },
-            warnings,
-          }, null, 2),
-        }],
-      };
-    }
-  );
 
   server.tool("validate_vat_coding",
     "Check invoice-level VAT issues: missing VAT numbers on EU supply, zero VAT on domestic sales, missing supplier registry codes.",

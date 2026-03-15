@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-85 tools across 11 modules + 6 resources. Supports multiple companies/accounts.
+84 tools across 11 modules + 6 resources. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -96,7 +96,7 @@ src/
     pdf-workflow.ts      # PDF text extraction, invoice validation, supplier resolution, booking suggestions
     bank-reconciliation.ts # Transaction matching and auto-confirmation
     financial-statements.ts # Trial balance, balance sheet, P&L, month-end close
-    vat-reports.ts       # KMD, KMD INF, VD reports, VAT coding validation
+    vat-reports.ts       # KMD INF, VD reports, VAT coding validation
     aging-analysis.ts    # Receivables/payables aging buckets
     recurring-invoices.ts # Clone sale invoices for recurring billing
     estonian-tax.ts      # Dividend package, owner expense reimbursement
@@ -144,8 +144,8 @@ All mutating API methods (`create`, `update`, `delete`, `confirm`, `merge`, `dea
 
 ## Estonian Tax Rules
 
-- **KMD**: VAT return (EMTA form), 20% standard rate
 - **KMD INF**: Partner detail annex, threshold 1000 EUR net per partner
+- **Standard VAT rate**: 24% (from 1.07.2025)
 - **VD**: Intra-community supply declaration (EU only)
 - **CIT on dividends**: 22/78 corporate income tax rate
 - **Capital gains**: Securities taxed at 22% income tax

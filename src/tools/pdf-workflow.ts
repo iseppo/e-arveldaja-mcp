@@ -126,7 +126,16 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     async ({ total_net, total_vat, total_gross, items, invoice_date, due_date }) => {
       const errors: string[] = [];
       const warnings: string[] = [];
-      const parsedItems = safeJsonParse(items, "items") as Array<{
+      const parsed = safeJsonParse(items, "items");
+      if (!Array.isArray(parsed)) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ valid: false, errors: ["items must be a JSON array"], warnings: [] }, null, 2),
+          }],
+        };
+      }
+      const parsedItems = parsed as Array<{
         total_net_price?: number;
         vat_rate_dropdown?: string;
         custom_title?: string;
@@ -166,19 +175,22 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         }
       }
 
-      // Validate dates
+      // Validate dates — check format AND that the date actually exists on the calendar
       const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+      function isValidCalendarDate(s: string): boolean {
+        if (!dateRe.test(s)) return false;
+        const [y, m, d] = s.split("-").map(Number);
+        const date = new Date(Date.UTC(y!, m! - 1, d!));
+        return date.getUTCFullYear() === y && date.getUTCMonth() === m! - 1 && date.getUTCDate() === d;
+      }
       if (invoice_date) {
-        if (!dateRe.test(invoice_date)) {
-          errors.push(`Invalid invoice_date format: "${invoice_date}" (expected YYYY-MM-DD)`);
-        } else {
-          const d = new Date(invoice_date);
-          if (isNaN(d.getTime())) errors.push(`Invalid invoice_date: "${invoice_date}"`);
+        if (!isValidCalendarDate(invoice_date)) {
+          errors.push(`Invalid invoice_date: "${invoice_date}" (expected valid YYYY-MM-DD)`);
         }
       }
       if (due_date) {
-        if (!dateRe.test(due_date)) {
-          errors.push(`Invalid due_date format: "${due_date}" (expected YYYY-MM-DD)`);
+        if (!isValidCalendarDate(due_date)) {
+          errors.push(`Invalid due_date: "${due_date}" (expected valid YYYY-MM-DD)`);
         } else if (invoice_date && due_date < invoice_date) {
           warnings.push(`due_date (${due_date}) is before invoice_date (${invoice_date})`);
         }
