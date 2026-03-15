@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
-import type { Journal, Posting } from "../types/api.js";
+import type { Journal } from "../types/api.js";
 
 interface BalanceDetail {
   journal_id: number;
@@ -17,10 +17,10 @@ async function computeAccountBalance(
   accountId: number,
   clientId?: number,
   dateFrom?: string,
-  dateTo?: string
+  dateTo?: string,
+  preloadedJournals?: Journal[]
 ): Promise<{ balance: number; debitTotal: number; creditTotal: number; entries: BalanceDetail[] }> {
-  // Fetch all journals (list may not include postings)
-  const allJournals = await api.journals.listAll();
+  const allJournals = preloadedJournals ?? await api.journals.listAllWithPostings();
 
   let debitTotal = 0;
   let creditTotal = 0;
@@ -28,31 +28,22 @@ async function computeAccountBalance(
 
   for (const journal of allJournals) {
     if (journal.is_deleted) continue;
-    if (!journal.registered) continue; // Only include registered/confirmed journals
+    if (!journal.registered) continue;
 
-    // Date filters
     if (dateFrom && journal.effective_date < dateFrom) continue;
     if (dateTo && journal.effective_date > dateTo) continue;
 
-    // Client filter
     if (clientId !== undefined && journal.clients_id !== clientId) continue;
 
-    // If list response doesn't include postings, fetch individual journal
-    let postings = journal.postings;
-    if (!postings || postings.length === 0) {
-      const detailed = await api.journals.get(journal.id!);
-      postings = detailed.postings;
-    }
-    if (!postings) continue;
+    if (!journal.postings) continue;
 
-    for (const posting of postings) {
+    for (const posting of journal.postings) {
       if (posting.accounts_id !== accountId) continue;
       if (posting.is_deleted) continue;
 
       const type = posting.type;
-      if (type !== "D" && type !== "C") continue; // skip malformed postings
+      if (type !== "D" && type !== "C") continue;
 
-      // Use base_amount (EUR) for multi-currency safety, fall back to amount
       const amount = posting.base_amount ?? posting.amount;
 
       if (type === "D") debitTotal += amount;
@@ -134,10 +125,13 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ? account_ids.split(",").map(s => parseInt(s.trim()))
         : [2110, 2310, 1210]; // short-term loans, accounts payable, accounts receivable
 
+      // Load journals once, share across all account balance computations
+      const allJournals = await api.journals.listAllWithPostings();
+
       const results = [];
       for (const accountId of ids) {
         const { balance, debitTotal, creditTotal, entries } = await computeAccountBalance(
-          api, accountId, client_id
+          api, accountId, client_id, undefined, undefined, allJournals
         );
         const account = await api.readonly.getAccount(accountId);
         results.push({

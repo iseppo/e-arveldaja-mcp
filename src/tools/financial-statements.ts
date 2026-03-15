@@ -20,24 +20,19 @@ async function computeAllBalances(
   dateTo?: string
 ): Promise<AccountBalance[]> {
   const accounts = await api.readonly.getAccounts();
-  const allJournals = await api.journals.listAll();
+  const allJournals = await api.journals.listAllWithPostings();
 
   const balances = new Map<number, { debit: number; credit: number }>();
 
   for (const journal of allJournals) {
     if (journal.is_deleted) continue;
-    if (!journal.registered) continue; // Only include registered/confirmed journals
+    if (!journal.registered) continue;
     if (dateFrom && journal.effective_date < dateFrom) continue;
     if (dateTo && journal.effective_date > dateTo) continue;
 
-    let postings = journal.postings;
-    if (!postings || postings.length === 0) {
-      const detailed = await api.journals.get(journal.id!);
-      postings = detailed.postings;
-    }
-    if (!postings) continue;
+    if (!journal.postings) continue;
 
-    for (const posting of postings) {
+    for (const posting of journal.postings) {
       if (posting.is_deleted) continue;
       if (posting.type !== "D" && posting.type !== "C") continue;
 

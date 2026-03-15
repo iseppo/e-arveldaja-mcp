@@ -1,7 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
-import type { Journal, Posting } from "../types/api.js";
 
 async function validateAccounts(api: ApiContext, ...accountIds: number[]): Promise<string[]> {
   const accounts = await api.readonly.getAccounts();
@@ -15,7 +14,7 @@ async function validateAccounts(api: ApiContext, ...accountIds: number[]): Promi
 }
 
 async function computeRetainedEarningsBalance(api: ApiContext, accountId: number): Promise<number> {
-  const allJournals = await api.journals.listAll();
+  const allJournals = await api.journals.listAllWithPostings();
   let debit = 0;
   let credit = 0;
 
@@ -23,14 +22,9 @@ async function computeRetainedEarningsBalance(api: ApiContext, accountId: number
     if (journal.is_deleted) continue;
     if (!journal.registered) continue;
 
-    let postings = journal.postings;
-    if (!postings || postings.length === 0) {
-      const detailed = await api.journals.get(journal.id!);
-      postings = detailed.postings;
-    }
-    if (!postings) continue;
+    if (!journal.postings) continue;
 
-    for (const posting of postings) {
+    for (const posting of journal.postings) {
       if (posting.accounts_id !== accountId) continue;
       if (posting.is_deleted) continue;
       const amount = posting.base_amount ?? posting.amount;
