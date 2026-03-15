@@ -78,7 +78,8 @@ function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string
 
 /**
  * Load all available API configurations from env vars and apikey*.txt files.
- * Scans the project root and its parent directory for apikey*.txt files.
+ * Scans the project root for apikey*.txt files.
+ * Set EARVELDAJA_SCAN_PARENT=true to also scan the parent directory.
  */
 export function loadAllConfigs(): NamedConfig[] {
   const baseUrl = getBaseUrl();
@@ -109,11 +110,11 @@ export function loadAllConfigs(): NamedConfig[] {
     }
   }
 
-  // 3. Scan project root and its parent for apikey*.txt files
-  const searchDirs = [
-    PROJECT_ROOT,                    // project root (e-arveldaja-mcp/)
-    resolve(PROJECT_ROOT, ".."),     // parent dir (e.g. e_arveldaja/)
-  ];
+  // 3. Scan project root only by default. Parent scan is opt-in.
+  const searchDirs = [PROJECT_ROOT];
+  if (process.env.EARVELDAJA_SCAN_PARENT === "true") {
+    searchDirs.push(resolve(PROJECT_ROOT, ".."));
+  }
 
   for (const dir of searchDirs) {
     if (!existsSync(dir)) continue;

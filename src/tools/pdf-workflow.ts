@@ -6,6 +6,7 @@ import { closest } from "fastest-levenshtein";
 import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
 import { validateFilePath } from "../file-validation.js";
+import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 
 const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50 MB
 
@@ -209,7 +210,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
 
   server.tool("resolve_supplier",
     "Find or create a supplier in e-arveldaja. First searches by registry code, " +
-    "then by name (fuzzy). If not found, optionally creates a new client. " +
+    "then VAT number, then name (fuzzy). If not found, optionally creates a new client. " +
     "Also looks up business registry (äriregister) data if available.",
     {
       name: z.string().optional().describe("Supplier name from invoice"),
@@ -234,7 +235,20 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         }
       }
 
-      // 2. Search by name (fuzzy)
+      // 2. Search by VAT number
+      if (vat_no) {
+        const byVatNo = await api.clients.findByVatNo(vat_no);
+        if (byVatNo) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ found: true, match_type: "vat_no", client: byVatNo }, null, 2),
+            }],
+          };
+        }
+      }
+
+      // 3. Search by name (fuzzy)
       if (name) {
         const allClients = await api.clients.listAll();
         const clientNames = allClients.filter(c => !c.is_deleted).map(c => c.name);
@@ -258,17 +272,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         }
       }
 
-      // 3. Try business registry lookup
+      // 4. Try business registry lookup for Estonian registry codes
       let registryData: Record<string, string> | null = null;
-      if (reg_code && !/^\d{8}$/.test(reg_code)) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ error: "Registry code must be exactly 8 digits" }, null, 2),
-          }],
-        };
-      }
-      if (reg_code) {
+      if (reg_code && (country ?? "EST") === "EST" && /^\d{8}$/.test(reg_code)) {
         try {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 10000);
@@ -293,7 +299,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         }
       }
 
-      // 4. Create new client if requested
+      // 5. Create new client if requested
       if (auto_create) {
         const clientName = registryData?.name ?? name ?? "Unknown";
         const isPhysical = is_physical_entity ?? false;
@@ -434,22 +440,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const supplier = await api.clients.get(params.supplier_client_id);
 
       const isVatReg = await isCompanyVatRegistered(api);
-      const items = (safeJsonParse(params.items, "items") as PurchaseInvoiceItem[]).map(item => {
-        const merged = {
-          cl_fringe_benefits_id: 1,
-          amount: 1,
-          ...(isVatReg
-            ? { vat_accounts_id: 1510, cl_vat_articles_id: 1 }
-            : { vat_rate_dropdown: "-" }),
-          ...item,
-        } as PurchaseInvoiceItem;
-        // Non-KMD: if caller set a numeric VAT rate, auto-set vat_accounts_id to expense account
-        if (!isVatReg && merged.vat_rate_dropdown && merged.vat_rate_dropdown !== "-") {
-          merged.vat_accounts_id ??= merged.purchase_accounts_id;
-          merged.cl_vat_articles_id ??= 11;
-        }
-        return merged;
-      });
+      const purchaseArticles = await getPurchaseArticlesWithVat(api);
+      const rawItems = safeJsonParse(params.items, "items") as PurchaseInvoiceItem[];
+      const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
 
       const invoiceData = {
         clients_id: params.supplier_client_id,

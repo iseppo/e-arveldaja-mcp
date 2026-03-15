@@ -33,4 +33,13 @@ export class ClientsApi extends BaseResource<Client> {
     const all = await this.listAll();
     return all.find(c => c.code === code && !c.is_deleted);
   }
+
+  async findByVatNo(vatNo: string): Promise<Client | undefined> {
+    const normalized = vatNo.replace(/\s+/g, "").toUpperCase();
+    const all = await this.listAll();
+    return all.find(c =>
+      !c.is_deleted &&
+      c.invoice_vat_no?.replace(/\s+/g, "").toUpperCase() === normalized
+    );
+  }
 }

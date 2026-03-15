@@ -62,13 +62,21 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             client_vat_no: full.client_vat_no,
             items: full.items.map(item => ({
               products_id: item.products_id,
+              cl_sale_articles_id: item.cl_sale_articles_id,
+              sale_accounts_id: item.sale_accounts_id,
+              sale_accounts_dimensions_id: item.sale_accounts_dimensions_id,
               custom_title: item.custom_title,
               amount: item.amount,
               unit: item.unit,
               unit_net_price: item.unit_net_price,
-              // cl_sale_articles_id and vat_rate are readOnly per spec — set via products_id
+              total_net_price: item.total_net_price,
+              vat_accounts_id: item.vat_accounts_id,
+              vat_rate: item.vat_rate,
               discount_percent: item.discount_percent,
               discount_amount: item.discount_amount,
+              projects_project_id: item.projects_project_id,
+              projects_location_id: item.projects_location_id,
+              projects_person_id: item.projects_person_id,
             })),
           });
 

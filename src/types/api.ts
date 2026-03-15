@@ -493,6 +493,10 @@ export interface PurchaseArticle {
   name_est: string;
   name_eng: string;
   accounts_id?: number;
+  vat_accounts_id?: number | null;
+  cl_vat_articles_id?: number | null;
+  vat_rate_dropdown?: string | null;
+  vat_rate?: number | null;
   priority?: number;
   cl_account_groups: string[];
   is_disabled?: boolean;

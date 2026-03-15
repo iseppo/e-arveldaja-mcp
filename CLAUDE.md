@@ -19,7 +19,7 @@ Credentials are loaded in this priority order (see `src/config.ts`):
 
 1. **Environment variables**: `EARVELDAJA_API_KEY_ID`, `EARVELDAJA_API_PUBLIC_VALUE`, `EARVELDAJA_API_PASSWORD`
 2. **`EARVELDAJA_API_KEY_FILE`** env var pointing to a specific file
-3. **`apikey*.txt` files** — scanned from the project root and its parent directory
+3. **`apikey*.txt` files** — scanned from the project root. Set `EARVELDAJA_SCAN_PARENT=true` to also scan the parent directory.
 
 The `apikey.txt` format:
 ```
@@ -92,6 +92,7 @@ src/
     readonly.api.ts      # Reference data (accounts, articles, templates, etc.)
   tools/
     crud-tools.ts        # ~50 CRUD tools for all entities + reference data
+    purchase-vat-defaults.ts # Purchase VAT article/account resolution from reference data
     account-balance.ts   # D/C balance computation, client debt
     pdf-workflow.ts      # PDF text extraction, invoice validation, supplier resolution, booking suggestions
     bank-reconciliation.ts # Transaction matching and auto-confirmation

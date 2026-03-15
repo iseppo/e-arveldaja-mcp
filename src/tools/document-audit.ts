@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
-import type { Journal, SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 
 export function registerDocumentAuditTools(server: McpServer, api: ApiContext): void {
 
@@ -40,12 +40,12 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
         return !inv.base_document_files_id && inv.status === "CONFIRMED";
       });
 
-      // Sale invoices without generated files
+      // Confirmed sale invoices always have a system PDF via /pdf_system
       const allSales = await api.saleInvoices.listAll();
-      const salesWithout = allSales.filter((inv: SaleInvoice) => {
+      const confirmedSalesWithSystemPdf = allSales.filter((inv: SaleInvoice) => {
         if (date_from && inv.create_date < date_from) return false;
         if (date_to && inv.create_date > date_to) return false;
-        return !inv.files_id && !inv.base_document_files_id && inv.status === "CONFIRMED";
+        return inv.status === "CONFIRMED";
       });
 
       return {
@@ -71,13 +71,14 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
                 id: inv.id, date: inv.create_date, number: inv.number, client: inv.client_name, gross: inv.gross_price,
               })),
             },
-            sale_invoices_without_files: {
-              count: salesWithout.length,
-              items: salesWithout.slice(0, 20).map((inv: SaleInvoice) => ({
+            sale_invoices_system_pdfs: {
+              count: confirmedSalesWithSystemPdf.length,
+              items: confirmedSalesWithSystemPdf.slice(0, 20).map((inv: SaleInvoice) => ({
                 id: inv.id, date: inv.create_date, number: inv.number, client: inv.client_name, gross: inv.gross_price,
               })),
+              note: "Confirmed sale invoices have a system-generated PDF available via /pdf_system and are not flagged as missing documents.",
             },
-            total_missing: journalsWithout.length + txWithout.length + purchasesWithout.length + salesWithout.length,
+            total_missing: journalsWithout.length + txWithout.length + purchasesWithout.length,
           }, null, 2),
         }],
       };
@@ -112,7 +113,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       }
 
       const duplicates = [];
-      for (const [key, invoices] of groups) {
+      for (const [, invoices] of groups) {
         if (invoices.length > 1) {
           duplicates.push({
             supplier: invoices[0]!.client_name,
@@ -138,7 +139,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
         amountGroups.set(key, group);
       }
 
-      for (const [key, invoices] of amountGroups) {
+      for (const [, invoices] of amountGroups) {
         if (invoices.length > 1) {
           const numbers = new Set(invoices.map(i => i.number));
           if (numbers.size > 1) { // Different invoice numbers but same amount+date

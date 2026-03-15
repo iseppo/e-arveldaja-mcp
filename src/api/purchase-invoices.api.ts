@@ -82,9 +82,11 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     const itemVat = items ? Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100 : 0;
     const itemNet = items ? Math.round(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100 : 0;
 
-    // Invoice-level VAT: explicit value wins, otherwise compute from items.
-    // Non-KMD companies also need vat_price set (informational) so net + vat = gross.
-    const vat = vatPrice !== undefined ? vatPrice : itemVat;
+    // Invoice-level VAT: explicit value wins for VAT-registered companies.
+    // Non-KMD companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
+    const vat = isVatRegistered
+      ? (vatPrice !== undefined ? vatPrice : itemVat)
+      : 0;
 
     // Invoice-level gross: explicit value wins, otherwise net + actual item VAT
     const gross = grossPrice !== undefined

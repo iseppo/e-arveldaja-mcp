@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
-import type { Account, SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 
 interface AccountBalance {
   account_id: number;
@@ -256,13 +256,13 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       const allSales = await api.saleInvoices.listAll();
       const unconfirmedSales = allSales.filter((inv: SaleInvoice) =>
         inv.status === "PROJECT" &&
-        inv.create_date >= dateFrom && inv.create_date <= dateTo
+        inv.journal_date >= dateFrom && inv.journal_date <= dateTo
       );
 
       const allPurchases = await api.purchaseInvoices.listAll();
       const unconfirmedPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
         inv.status === "PROJECT" &&
-        inv.create_date >= dateFrom && inv.create_date <= dateTo
+        inv.journal_date >= dateFrom && inv.journal_date <= dateTo
       );
 
       // Overdue receivables (compare to month-end date for reproducibility)

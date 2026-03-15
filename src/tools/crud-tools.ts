@@ -8,6 +8,7 @@ import type { SaleInvoicesApi } from "../api/sale-invoices.api.js";
 import type { PurchaseInvoicesApi } from "../api/purchase-invoices.api.js";
 import type { ReadonlyApi } from "../api/readonly.api.js";
 import type { Posting, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem } from "../types/api.js";
+import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 
 export interface ApiContext {
   clients: ClientsApi;
@@ -370,22 +371,9 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       bank_account_no: z.string().optional().describe("Supplier bank account"),
     }, async (params) => {
       const isVatReg = await isCompanyVatRegistered(api);
-      const items = (safeJsonParse(params.items, "items") as PurchaseInvoiceItem[]).map(item => {
-        const merged = {
-          cl_fringe_benefits_id: 1,
-          amount: 1,
-          ...(isVatReg
-            ? { vat_accounts_id: 1510, cl_vat_articles_id: 1 }
-            : { vat_rate_dropdown: "-" }),
-          ...item,
-        } as PurchaseInvoiceItem;
-        // Non-KMD: if caller set a numeric VAT rate, auto-set vat_accounts_id to expense account
-        if (!isVatReg && merged.vat_rate_dropdown && merged.vat_rate_dropdown !== "-") {
-          merged.vat_accounts_id ??= merged.purchase_accounts_id;
-          merged.cl_vat_articles_id ??= 11;
-        }
-        return merged;
-      });
+      const purchaseArticles = await getPurchaseArticlesWithVat(api);
+      const rawItems = safeJsonParse(params.items, "items") as PurchaseInvoiceItem[];
+      const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
       const result = await api.purchaseInvoices.createAndSetTotals(
         {
           clients_id: params.clients_id,
