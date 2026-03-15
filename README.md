@@ -42,6 +42,43 @@ Ask Claude Code to add the e-arveldaja MCP server to your settings — it knows 
 
 See [CLAUDE.md](CLAUDE.md) for architecture details and full documentation.
 
+## Usage Examples
+
+Once the MCP server is connected, just talk to Claude Code in natural language. Here are some things you can do:
+
+### Enter purchase invoices from PDF files
+
+Copy a folder of invoice PDFs into your project directory, then tell Claude Code:
+
+> "Lisa need arved e-arveldajasse ja seo tasumistega"
+> (Add these invoices to e-arveldaja and link them to payments)
+
+Claude will extract invoice data from the PDFs, create purchase invoices with the correct accounts and VAT rates, and match them to existing bank transactions.
+
+### Book Lightyear investment trades
+
+Download your Lightyear account statement CSV and capital gains report, place them in the project directory, then:
+
+> "Tee nende põhjal e-arveldaja kanded"
+> (Create e-arveldaja journal entries based on these)
+
+Claude will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts.
+
+### Generate financial reports
+
+> "Koosta kasumiaruanne ja bilanss seisuga 28.02.2026"
+> (Generate a P&L and balance sheet as of 28.02.2026)
+
+### Reconcile bank transactions
+
+> "Seo kinnitamata pangaliikumised arvetega"
+> (Match unconfirmed bank transactions to invoices)
+
+### VAT reporting
+
+> "Koosta KMD ja KMD INF veebruari kohta"
+> (Generate VAT return and partner annex for February)
+
 ## License
 
 Private / All rights reserved.
