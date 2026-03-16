@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-03-16
+
+### Fixed
+- **Reverse charge VAT** (`reversed_vat_id: 1`): Book-invoice skill and workflow now always check if supplier is outside Estonia and set reverse charge accordingly. Prevents missing pöördkäibemaks on foreign invoices.
+
 ## [0.2.0] - 2026-03-16
 
 ### Added
