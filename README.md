@@ -38,7 +38,9 @@ npm run build          # tsc -> dist/
 
 ### Connecting to your AI assistant
 
-This is a standard MCP server using stdio transport. Add it to your AI assistant's MCP configuration:
+This is a standard MCP server using stdio transport. Add it to your AI assistant's MCP configuration.
+
+**JSON-based config** (Claude Code, Cursor, Windsurf, Cline, Gemini CLI, Antigravity):
 
 ```json
 {
@@ -51,11 +53,25 @@ This is a standard MCP server using stdio transport. Add it to your AI assistant
 }
 ```
 
-Where this config file lives depends on your editor:
-- **Claude Code:** `~/.claude/settings.json` or project `.claude/settings.json`
-- **Cursor:** `.cursor/mcp.json` in your project
-- **Windsurf:** `~/.codeium/windsurf/mcp_config.json`
-- **Cline:** VS Code settings under `cline.mcpServers`
+**TOML-based config** (Codex CLI):
+
+```toml
+[mcp_servers.e-arveldaja]
+command = "node"
+args = ["/path/to/e-arveldaja-mcp/dist/index.js"]
+```
+
+Where this config file lives depends on your tool:
+
+| Tool | Config file |
+|---|---|
+| **Claude Code** | `~/.claude/settings.json` or project `.claude/settings.json` |
+| **Codex CLI** | `~/.codex/config.toml` or project `.codex/config.toml` |
+| **Gemini CLI** | `~/.gemini/settings.json` or project `.gemini/settings.json` |
+| **Google Antigravity** | MCP Store UI → Manage MCP Servers → View raw config (`mcp_config.json`) |
+| **Cursor** | `.cursor/mcp.json` in your project |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
+| **Cline** | VS Code settings under `cline.mcpServers` |
 
 See [CLAUDE.md](CLAUDE.md) for architecture details and full API documentation.
 
