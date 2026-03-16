@@ -77,6 +77,21 @@ If no past invoices exist, call `list_purchase_articles` and choose the most app
 | 49 | Konsultatsioon / Consultation | 5340 | Consulting fees |
 | 62 | Muud tegevuskulud / Other operating | 5990 | Catch-all |
 
+## Step 5b: Determine reverse charge VAT (pöördkäibemaks)
+
+ALWAYS check if reverse charge applies. Set `reversed_vat_id: 1` on items when:
+- Supplier is **outside Estonia** (EU or non-EU) AND provides services
+- Invoice mentions "reverse charge", "Article 196", "pöördkäibemaks", or has 0% VAT with a foreign supplier
+- Supplier country is NOT Estonia (check `cl_code_country`, VAT number prefix, or address)
+
+When reverse charge applies:
+- `vat_rate_dropdown`: `"0"`
+- `reversed_vat_id`: `1`
+
+When supplier is Estonian with regular VAT:
+- `vat_rate_dropdown`: the VAT rate (e.g. `"24"`)
+- `reversed_vat_id`: do not set
+
 ## Step 6: Create the purchase invoice
 
 Call `create_purchase_invoice_from_pdf`:
@@ -90,7 +105,8 @@ Call `create_purchase_invoice_from_pdf`:
   - `cl_purchase_articles_id`: from step 5
   - `purchase_accounts_id`: from step 5
   - `total_net_price`: net amount
-  - `vat_rate_dropdown`: VAT rate as string (e.g. `"24"`)
+  - `vat_rate_dropdown`: VAT rate as string (e.g. `"24"`, or `"0"` for reverse charge)
+  - `reversed_vat_id`: `1` if reverse charge applies (see step 5b)
   - `amount`: quantity
 - `vat_price`: **EXACT** total VAT from the original invoice
 - `gross_price`: **EXACT** total gross from the original invoice
