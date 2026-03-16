@@ -319,6 +319,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
+  server.tool("invalidate_transaction",
+    "Invalidate (unconfirm) a confirmed transaction. Returns it to unconfirmed status for editing or deletion.",
+    idParam.shape, async ({ id }) => {
+      const result = await api.transactions.invalidate(id);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    });
+
   server.tool("delete_transaction", "Delete a transaction", idParam.shape, async ({ id }) => {
     const result = await api.transactions.delete(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };

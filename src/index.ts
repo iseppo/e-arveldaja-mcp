@@ -23,6 +23,7 @@ import { registerRecurringInvoiceTools } from "./tools/recurring-invoices.js";
 import { registerEstonianTaxTools } from "./tools/estonian-tax.js";
 import { registerDocumentAuditTools } from "./tools/document-audit.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
+import { registerWiseImportTools } from "./tools/wise-import.js";
 import { registerResources } from "./resources/static-resources.js";
 
 interface ConnectionState {
@@ -271,6 +272,7 @@ async function main() {
   registerEstonianTaxTools(server, api);
   registerDocumentAuditTools(server, api);
   registerLightyearTools(server, api);
+  registerWiseImportTools(server, api);
 
   // Register resources
   registerResources(server, api);

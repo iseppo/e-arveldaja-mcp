@@ -43,6 +43,11 @@ export class TransactionsApi extends BaseResource<Transaction> {
     return this.client.patch<ApiResponse>(`/transactions/${id}/register`, body);
   }
 
+  async invalidate(id: number): Promise<ApiResponse> {
+    this.invalidateCache();
+    return this.client.patch<ApiResponse>(`/transactions/${id}/invalidate`, {});
+  }
+
   async getDocument(id: number): Promise<ApiFile> {
     return this.client.get<ApiFile>(`/transactions/${id}/document_user`);
   }
