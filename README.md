@@ -21,7 +21,7 @@ By using this software you acknowledge that:
 2. Go to **Seadistused** → **Üldised seadistused** → **Lisa uus juurdepääsuluba** (Settings → General settings → Add new access token)
 3. Enter any name for the token
 4. Find your public IP address (e.g. at [whatismyipaddress.com](https://whatismyipaddress.com/)) and enter it in the allowed IP field. Multiple IPs can be separated by `;`
-5. Save — download the `apikey.txt` file and place it next to the project directory (i.e. in the parent folder)
+5. Save — download the `apikey.txt` file and place it in the working directory where you run your AI assistant
 
 If you don't have a static IP address, you will need to update the allowed IP in e-arveldaja settings whenever your IP changes.
 
