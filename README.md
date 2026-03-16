@@ -42,6 +42,40 @@ Ask Claude Code to add the e-arveldaja MCP server to your settings — it knows 
 
 See [CLAUDE.md](CLAUDE.md) for architecture details and full documentation.
 
+## Skills (Slash Commands)
+
+The project includes Claude Code skills — guided workflows that orchestrate multiple MCP tools into complete accounting tasks.
+
+### Installation
+
+The skills live in `.claude/commands/` inside this repo. To make them available as slash commands in Claude Code:
+
+**Option A: Work from this directory** — if you run Claude Code from the `e-arveldaja-mcp` directory, the skills are automatically available as `/book-invoice`, `/reconcile-bank`, `/month-end`, `/new-supplier`.
+
+**Option B: Symlink into your project** — if you work from a different directory:
+
+```bash
+ln -s /path/to/e-arveldaja-mcp/.claude/commands/book-invoice.md ~/.claude/commands/book-invoice.md
+ln -s /path/to/e-arveldaja-mcp/.claude/commands/reconcile-bank.md ~/.claude/commands/reconcile-bank.md
+ln -s /path/to/e-arveldaja-mcp/.claude/commands/month-end.md ~/.claude/commands/month-end.md
+ln -s /path/to/e-arveldaja-mcp/.claude/commands/new-supplier.md ~/.claude/commands/new-supplier.md
+```
+
+**Option C: Copy to global commands** — for access from any project:
+
+```bash
+cp .claude/commands/*.md ~/.claude/commands/
+```
+
+### Available Skills
+
+| Command | Description |
+|---|---|
+| `/book-invoice <path.pdf>` | Book a purchase invoice from PDF: extract data, validate, find/create supplier, suggest accounts, create invoice, upload PDF, confirm |
+| `/reconcile-bank [auto\|review\|ID]` | Match unconfirmed bank transactions to open invoices and confirm matches |
+| `/month-end [YYYY-MM]` | Run month-end close checklist: blockers, missing docs, duplicates, trial balance, P&L, balance sheet |
+| `/new-supplier <name\|regcode>` | Create a supplier with Estonian business registry lookup and dedup check |
+
 ## Usage Examples
 
 Once the MCP server is connected, just talk to Claude Code in natural language. Here are some things you can do:
