@@ -1,6 +1,6 @@
 # e-arveldaja MCP Server
 
-MCP (Model Context Protocol) server for the Estonian e-arveldaja (RIK e-Financials) REST API.
+MCP (Model Context Protocol) server for the Estonian e-arveldaja (RIK e-Financials) REST API. Works with any MCP-compatible AI assistant — Claude Code, Cursor, Windsurf, Cline, and others.
 
 ## Disclaimer
 
@@ -18,7 +18,7 @@ By using this software you acknowledge that:
 1. Log in to [e-arveldaja](https://www.earveldaja.ee/)
 2. Go to **Seadistused** → **Üldised seadistused** → **Lisa uus juurdepääsuluba** (Settings → General settings → Add new access token)
 3. Enter any name for the token
-4. Find your public IP address (e.g. at [whatismyipaddress.com](https://whatismyipaddress.com/)) and enter it in the allowed IP field
+4. Find your public IP address (e.g. at [whatismyipaddress.com](https://whatismyipaddress.com/)) and enter it in the allowed IP field. Multiple IPs can be separated by `;`
 5. Save — download the `apikey.txt` file and place it next to the project directory (i.e. in the parent folder)
 
 If you don't have a static IP address, you will need to update the allowed IP in e-arveldaja settings whenever your IP changes.
@@ -36,82 +36,87 @@ npm install
 npm run build          # tsc -> dist/
 ```
 
-### Claude Code integration
+### Connecting to your AI assistant
 
-Ask Claude Code to add the e-arveldaja MCP server to your settings — it knows how to do it.
+This is a standard MCP server using stdio transport. Add it to your AI assistant's MCP configuration:
 
-See [CLAUDE.md](CLAUDE.md) for architecture details and full documentation.
-
-## Skills (Slash Commands)
-
-The project includes Claude Code skills — guided workflows that orchestrate multiple MCP tools into complete accounting tasks.
-
-### Installation
-
-The skills live in `.claude/commands/` inside this repo. To make them available as slash commands in Claude Code:
-
-**Option A: Work from this directory** — if you run Claude Code from the `e-arveldaja-mcp` directory, the skills are automatically available as `/book-invoice`, `/reconcile-bank`, `/month-end`, `/new-supplier`.
-
-**Option B: Symlink into your project** — if you work from a different directory:
-
-```bash
-ln -s /path/to/e-arveldaja-mcp/.claude/commands/book-invoice.md ~/.claude/commands/book-invoice.md
-ln -s /path/to/e-arveldaja-mcp/.claude/commands/reconcile-bank.md ~/.claude/commands/reconcile-bank.md
-ln -s /path/to/e-arveldaja-mcp/.claude/commands/month-end.md ~/.claude/commands/month-end.md
-ln -s /path/to/e-arveldaja-mcp/.claude/commands/new-supplier.md ~/.claude/commands/new-supplier.md
+```json
+{
+  "mcpServers": {
+    "e-arveldaja": {
+      "command": "node",
+      "args": ["/path/to/e-arveldaja-mcp/dist/index.js"]
+    }
+  }
+}
 ```
 
-**Option C: Copy to global commands** — for access from any project:
+Where this config file lives depends on your editor:
+- **Claude Code:** `~/.claude/settings.json` or project `.claude/settings.json`
+- **Cursor:** `.cursor/mcp.json` in your project
+- **Windsurf:** `~/.codeium/windsurf/mcp_config.json`
+- **Cline:** VS Code settings under `cline.mcpServers`
 
-```bash
-cp .claude/commands/*.md ~/.claude/commands/
-```
+See [CLAUDE.md](CLAUDE.md) for architecture details and full API documentation.
 
-### Available Skills
+## Workflows
 
-| Command | Description |
+The project includes step-by-step workflow guides in [`workflows/`](workflows/) that orchestrate multiple MCP tools into complete accounting tasks. These work with any MCP client — just paste the workflow into your AI assistant's prompt or follow the steps manually.
+
+| Workflow | Description |
 |---|---|
-| `/book-invoice <path.pdf>` | Book a purchase invoice from PDF: extract data, validate, find/create supplier, suggest accounts, create invoice, upload PDF, confirm |
-| `/reconcile-bank [auto\|review\|ID]` | Match unconfirmed bank transactions to open invoices and confirm matches |
-| `/month-end [YYYY-MM]` | Run month-end close checklist: blockers, missing docs, duplicates, trial balance, P&L, balance sheet |
-| `/new-supplier <name\|regcode>` | Create a supplier with Estonian business registry lookup and dedup check |
+| [book-invoice](workflows/book-invoice.md) | Book a purchase invoice from PDF: extract data, validate, find/create supplier, suggest accounts, create invoice, upload PDF, confirm |
+| [reconcile-bank](workflows/reconcile-bank.md) | Match unconfirmed bank transactions to open invoices and confirm matches |
+| [month-end](workflows/month-end.md) | Run month-end close checklist: blockers, missing docs, duplicates, trial balance, P&L, balance sheet |
+| [new-supplier](workflows/new-supplier.md) | Create a supplier with Estonian business registry lookup and dedup check |
+
+### Claude Code slash commands
+
+If you use Claude Code, the same workflows are also available as slash commands in `.claude/commands/`. To install:
+
+**Option A:** Run Claude Code from the `e-arveldaja-mcp` directory — skills are auto-detected.
+
+**Option B:** Symlink or copy to your global commands:
+
+```bash
+# Symlink (stays up to date)
+ln -s /path/to/e-arveldaja-mcp/.claude/commands/*.md ~/.claude/commands/
+
+# Or copy
+cp /path/to/e-arveldaja-mcp/.claude/commands/*.md ~/.claude/commands/
+```
+
+Then use `/book-invoice`, `/reconcile-bank`, `/month-end`, `/new-supplier` in any conversation.
 
 ## Usage Examples
 
-Once the MCP server is connected, just talk to Claude Code in natural language. Here are some things you can do:
+Once the MCP server is connected, just talk to your AI assistant in natural language:
 
 ### Enter purchase invoices from PDF files
 
-Copy a folder of invoice PDFs into your project directory, then tell Claude Code:
+> "Book this invoice PDF into e-arveldaja and match it to the bank payment"
 
-> "Lisa need arved e-arveldajasse ja seo tasumistega"
-> (Add these invoices to e-arveldaja and link them to payments)
-
-Claude will extract invoice data from the PDFs, create purchase invoices with the correct accounts and VAT rates, and match them to existing bank transactions.
+The assistant will extract invoice data from the PDF, create a purchase invoice with the correct accounts and VAT rates, and match it to existing bank transactions.
 
 ### Book Lightyear investment trades
 
-Download your Lightyear account statement CSV and capital gains report, place them in the project directory, then:
+Download your Lightyear account statement CSV and capital gains report, then:
 
-> "Tee nende põhjal e-arveldaja kanded"
-> (Create e-arveldaja journal entries based on these)
+> "Create e-arveldaja journal entries from these Lightyear CSVs"
 
-Claude will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts.
+The assistant will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts.
 
 ### Generate financial reports
 
-> "Koosta kasumiaruanne ja bilanss seisuga 28.02.2026"
-> (Generate a P&L and balance sheet as of 28.02.2026)
+> "Generate a P&L and balance sheet as of 28.02.2026"
 
 ### Reconcile bank transactions
 
-> "Seo kinnitamata pangaliikumised arvetega"
-> (Match unconfirmed bank transactions to invoices)
+> "Match unconfirmed bank transactions to invoices"
 
-### VAT reporting
+### Month-end close
 
-> "Koosta KMD ja KMD INF veebruari kohta"
-> (Generate VAT return and partner annex for February)
+> "Run the month-end close checklist for February 2026"
 
 ## License
 
