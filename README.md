@@ -138,6 +138,14 @@ Download your Lightyear account statement CSV and capital gains report, then:
 
 The assistant will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts.
 
+### Import Wise bank transactions
+
+Download your Wise transaction history CSV (Account → Statements → CSV), then:
+
+> "Import my Wise transactions from transaction-history.csv into e-arveldaja"
+
+The assistant will parse the CSV, create bank transactions with correct amounts, and separate Wise fees into their own entries for proper expense accounting. Supports EUR and foreign currency card payments (USD etc.).
+
 ### Generate financial reports
 
 > "Generate a P&L and balance sheet as of 28.02.2026"
