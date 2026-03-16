@@ -48,11 +48,9 @@ npm run build          # tsc -> dist/
 
 This is a standard MCP server using stdio transport. Most AI assistants can set this up themselves — just ask:
 
-> "Add the e-arveldaja MCP server from /path/to/e-arveldaja-mcp to my MCP configuration"
+> "Add the e-arveldaja-mcp npm package as an MCP server to my configuration, using npx"
 
-The assistant will read the config format it needs and add the server entry. You can also ask it to install the workflows:
-
-> "Copy the workflow files from /path/to/e-arveldaja-mcp/workflows/ into your commands so I can use them"
+The assistant will add `{"command": "npx", "args": ["-y", "e-arveldaja-mcp"]}` to its MCP config. No cloning or paths needed.
 
 If you prefer to configure manually:
 
