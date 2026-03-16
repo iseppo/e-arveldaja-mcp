@@ -1,6 +1,8 @@
 # e-arveldaja MCP Server
 
-MCP (Model Context Protocol) server for the Estonian e-arveldaja (RIK e-Financials) REST API. Works with any MCP-compatible AI assistant — Claude Code, Cursor, Windsurf, Cline, and others.
+[![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
+
+MCP (Model Context Protocol) server for the Estonian e-arveldaja (RIK e-Financials) REST API. Works with any MCP-compatible AI assistant — Claude Code, Codex CLI, Gemini CLI, Google Antigravity, Cursor, Windsurf, Cline, and others.
 
 ## Disclaimer
 
