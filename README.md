@@ -38,7 +38,15 @@ npm run build          # tsc -> dist/
 
 ### Connecting to your AI assistant
 
-This is a standard MCP server using stdio transport. Add it to your AI assistant's MCP configuration.
+This is a standard MCP server using stdio transport. Most AI assistants can set this up themselves — just ask:
+
+> "Add the e-arveldaja MCP server from /path/to/e-arveldaja-mcp to my MCP configuration"
+
+The assistant will read the config format it needs and add the server entry. You can also ask it to install the workflows:
+
+> "Copy the workflow files from /path/to/e-arveldaja-mcp/workflows/ into your commands so I can use them"
+
+If you prefer to configure manually:
 
 **JSON-based config** (Claude Code, Cursor, Windsurf, Cline, Gemini CLI, Antigravity):
 
