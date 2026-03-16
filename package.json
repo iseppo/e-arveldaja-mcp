@@ -1,13 +1,40 @@
 {
   "name": "e-arveldaja-mcp",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "MCP server for Estonian e-arveldaja (e-Financials) API",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "e-arveldaja-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "workflows/",
+    ".claude/commands/",
+    "LICENSE",
+    "README.md",
+    "CLAUDE.md"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "e-arveldaja",
+    "e-financials",
+    "estonia",
+    "accounting",
+    "invoicing",
+    "rik"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iseppo/e-arveldaja-mcp.git"
+  },
+  "license": "Unlicense",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

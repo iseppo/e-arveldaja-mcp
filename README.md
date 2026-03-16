@@ -29,6 +29,12 @@ For the demo server, set the environment variable `EARVELDAJA_SERVER=demo`.
 
 ## Setup
 
+### Option A: npx (no install needed)
+
+Just reference `npx e-arveldaja-mcp` in your MCP config — no cloning or building required. See configuration examples below.
+
+### Option B: From source
+
 ```bash
 git clone https://github.com/iseppo/e-arveldaja-mcp.git
 cd e-arveldaja-mcp
@@ -54,8 +60,8 @@ If you prefer to configure manually:
 {
   "mcpServers": {
     "e-arveldaja": {
-      "command": "node",
-      "args": ["/path/to/e-arveldaja-mcp/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "e-arveldaja-mcp"]
     }
   }
 }
@@ -65,9 +71,11 @@ If you prefer to configure manually:
 
 ```toml
 [mcp_servers.e-arveldaja]
-command = "node"
-args = ["/path/to/e-arveldaja-mcp/dist/index.js"]
+command = "npx"
+args = ["-y", "e-arveldaja-mcp"]
 ```
+
+If running from source, replace `"npx", "-y", "e-arveldaja-mcp"` with `"node", "/path/to/e-arveldaja-mcp/dist/index.js"`.
 
 Where this config file lives depends on your tool:
 
