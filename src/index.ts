@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadAllConfigs, type NamedConfig } from "./config.js";
+import { toolExtraStorage } from "./progress.js";
 import { HttpClient } from "./http-client.js";
 import { ClientsApi } from "./api/clients.api.js";
 import { ProductsApi } from "./api/products.api.js";
@@ -117,7 +118,7 @@ async function main() {
 
   const server = new McpServer({
     name: "e-arveldaja",
-    version: "0.3.0",
+    version: "0.3.1",
     description: "EXPERIMENTAL, UNOFFICIAL MCP server for the Estonian e-arveldaja (e-Financials) API. " +
       "NOT affiliated with or endorsed by RIK. Use entirely at your own risk — " +
       "this software interacts with live financial data and can create, modify, and delete accounting records. " +
@@ -125,6 +126,18 @@ async function main() {
       "sale/purchase invoices. Includes account balance computation (D/C logic), " +
       "PDF invoice extraction, supplier resolution with business registry lookup, " +
       "and smart booking suggestions based on past invoices.",
+  }, {
+    instructions: `Call get_vat_info first — VAT status affects purchase invoice booking.
+PDF workflow: extract_pdf_invoice → validate_invoice_data → resolve_supplier → suggest_booking → create_purchase_invoice_from_pdf → upload_invoice_document → confirm_purchase_invoice.
+Pass EXACT vat_price and gross_price from original invoices — never recalculate.
+Check detect_duplicate_purchase_invoice before creating purchase invoices.
+Use list_purchase_articles to find article IDs for expense accounts.
+Foreign suppliers (non-Estonian): check if reversed_vat_id=1 applies (reverse charge VAT).
+Bank reconciliation: reconcile_transactions first, then auto_confirm_exact_matches with dry_run before executing.
+Financial reports require all journals/invoices confirmed first for accurate results.
+Multi-company: list_connections / switch_connection. Caches cleared on switch.
+Batch operations (import, auto-confirm, recurring invoices) default to dry_run — preview before executing.
+Monetary amounts are EUR unless cl_currencies_id specifies otherwise.`,
   });
 
   // --- Multi-account tools ---
@@ -133,7 +146,7 @@ async function main() {
     "List all available e-arveldaja connections (API key files). " +
     "Shows which connection is currently active.",
     {},
-    readOnly,
+    { ...readOnly, title: "List Connections" },
     async () => {
       const connections = allConfigs.map((nc: NamedConfig, i: number) => ({
         index: i,
@@ -163,7 +176,7 @@ async function main() {
     {
       index: z.number().describe("Connection index from list_connections"),
     },
-    mutate,
+    { ...mutate, title: "Switch Connection" },
     async ({ index }) => {
       if (index < 0 || index >= allConfigs.length) {
         return {
@@ -216,9 +229,13 @@ async function main() {
   function wrapHandler<T extends (...args: any[]) => any>(handler: T): T {
     return (async (...args: unknown[]) => {
       const snapshot = captureSnapshot(connectionState);
+      const extra = args.length >= 2 ? args[1] as any : undefined;
       try {
         return await invocationStorage.run(snapshot, async () => {
-          const result = await handler(...args);
+          const runInExtra = extra
+            ? () => toolExtraStorage.run(extra, () => handler(...args))
+            : () => handler(...args);
+          const result = await runInExtra();
           assertSnapshotCurrent(connectionState, snapshot);
           return result;
         });

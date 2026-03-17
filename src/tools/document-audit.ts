@@ -13,7 +13,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
     },
-    readOnly,
+    { ...readOnly, title: "Find Missing Documents" },
     async ({ date_from, date_to }) => {
       // Journals without documents
       const allJournals = await api.journals.listAll();
@@ -94,7 +94,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       date_from: z.string().optional().describe("Start date"),
       date_to: z.string().optional().describe("End date"),
     },
-    readOnly,
+    { ...readOnly, title: "Detect Duplicate Invoices" },
     async ({ clients_id, date_from, date_to }) => {
       const allPurchases = await api.purchaseInvoices.listAll();
 

@@ -66,7 +66,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default 3000)"),
       force: z.boolean().optional().describe("Create journal even if retained earnings are insufficient (default false)"),
     },
-    create,
+    { ...create, title: "Prepare Dividend Package" },
     async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, share_capital_account, force }) => {
       const retainedAccount = retained_earnings_account ?? 3020;
       const payableAccount = dividend_payable_account ?? 2370;
@@ -210,7 +210,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       payable_account: z.number().optional().describe("Payable to owner account (default 2110)"),
       document_number: z.string().optional().describe("Receipt/document number"),
     },
-    create,
+    { ...create, title: "Book Owner Expense" },
     async ({ owner_client_id, effective_date, description, net_amount, vat_rate, vat_amount, expense_account, vat_account, payable_account, document_number }) => {
       const vatRegistered = await isCompanyVatRegistered(api);
       const vatAcc = vat_account ?? 1510;

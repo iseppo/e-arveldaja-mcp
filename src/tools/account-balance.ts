@@ -107,7 +107,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
       include_entries: z.boolean().optional().describe("Include individual entries in response (default false)"),
     },
-    readOnly,
+    { ...readOnly, title: "Compute Account Balance" },
     async ({ account_id, client_id, date_from, date_to, include_entries }) => {
       const result = await computeAccountBalance(api, account_id, client_id, date_from, date_to);
 
@@ -137,7 +137,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       client_id: z.number().describe("Client ID"),
       account_ids: z.string().optional().describe("Comma-separated account IDs to check (default: 2110,2310,1210)"),
     },
-    readOnly,
+    { ...readOnly, title: "Compute Client Debt" },
     async ({ client_id, account_ids }) => {
       const ids = account_ids
         ? account_ids.split(",").map(s => parseInt(s.trim()))

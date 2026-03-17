@@ -41,7 +41,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
     {
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },
-    readOnly,
+    { ...readOnly, title: "Receivables Aging Report" },
     async ({ as_of_date }) => {
       const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
       const usesDefaultUtcDate = !as_of_date;
@@ -123,7 +123,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
     {
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },
-    readOnly,
+    { ...readOnly, title: "Payables Aging Report" },
     async ({ as_of_date }) => {
       const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
       const usesDefaultUtcDate = !as_of_date;

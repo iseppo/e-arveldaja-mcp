@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.1] - 2026-03-17
+
+### Added
+- **Server instructions**: Global cross-tool guidance for LLMs — PDF workflow order, VAT checking, dry-run defaults, reverse charge rules. Injected via MCP `instructions` field.
+- **Tool titles**: All 85 tools have human-readable `title` annotations for better client UI rendering.
+- **Progress notifications**: MCP `notifications/progress` emitted during multi-page fetches (`listAll`), bank auto-confirmation, Wise import, and Lightyear trade booking.
+
+### Changed
+- Simplified README setup: leads with "ask your AI assistant" approach, one-liner `claude mcp add`, collapsible details for manual config. MCP prompts highlighted as primary workflow mechanism.
+
 ## [0.3.0] - 2026-03-17
 
 ### Added

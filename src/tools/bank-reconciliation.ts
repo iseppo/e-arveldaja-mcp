@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
+import { reportProgress } from "../progress.js";
 
 interface MatchCandidate {
   type: "sale_invoice" | "purchase_invoice";
@@ -77,7 +78,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
     {
       min_confidence: z.number().optional().describe("Minimum confidence threshold 0-100 (default 50)"),
     },
-    readOnly,
+    { ...readOnly, title: "Reconcile Transactions" },
     async ({ min_confidence }) => {
       const threshold = min_confidence ?? 50;
 
@@ -187,7 +188,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),
       min_confidence: z.number().optional().describe("Minimum confidence (default 90)"),
     },
-    batch,
+    { ...batch, title: "Auto-Confirm Matches" },
     async ({ execute, min_confidence }) => {
       const threshold = min_confidence ?? 90;
       const dryRun = execute !== true;
@@ -210,8 +211,11 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       const skipped = [];
       // Track consumed invoices to avoid double-matching (keyed by type:id to prevent cross-table collisions)
       const consumedInvoiceKeys = new Set<string>();
+      const total = unconfirmed.length;
 
-      for (const tx of unconfirmed) {
+      for (let i = 0; i < unconfirmed.length; i++) {
+        const tx = unconfirmed[i]!;
+        await reportProgress(i, total);
         // Only process known transaction types
         if (tx.type !== "D" && tx.type !== "C") {
           skipped.push({ transaction_id: tx.id, reason: `Unknown transaction type "${tx.type}"` });

@@ -5,6 +5,7 @@ import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
+import { reportProgress } from "../progress.js";
 
 const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -415,7 +416,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
     },
-    readOnly,
+    { ...readOnly, title: "Parse Lightyear Statement" },
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);
@@ -502,7 +503,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear CapitalGainsStatement CSV file"),
     },
-    readOnly,
+    { ...readOnly, title: "Parse Capital Gains" },
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const gains = parseCapitalGains(csv);
@@ -558,7 +559,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
-    batch,
+    { ...batch, title: "Book Lightyear Trades" },
     async ({ file_path, capital_gains_file, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
       const isDryRun = dry_run !== false;
       const skipSet = new Set(
@@ -634,8 +635,11 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       }> = [];
 
       const warnings: string[] = [...extraction.warnings, ...gainsWarnings];
+      const totalNewTrades = newTrades.length;
 
-      for (const trade of newTrades) {
+      for (let tradeIdx = 0; tradeIdx < newTrades.length; tradeIdx++) {
+        const trade = newTrades[tradeIdx]!;
+        await reportProgress(tradeIdx, totalNewTrades);
         // Skip unmatched FX trades
         if (trade.ccy !== "EUR" && trade.eur_amount === 0) {
           results.push({
@@ -848,7 +852,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       fee_account: z.number().optional().describe("Platform fee expense account (default 8610 Muud finantskulud)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
-    batch,
+    { ...batch, title: "Book Lightyear Distributions" },
     async ({ file_path, broker_account, broker_dimension_id, income_account, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
       const fee_account = fee_account_param ?? 8610;
@@ -999,7 +1003,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
     },
-    readOnly,
+    { ...readOnly, title: "Lightyear Portfolio Summary" },
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);

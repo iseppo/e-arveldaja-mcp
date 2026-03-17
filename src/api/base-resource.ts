@@ -2,6 +2,7 @@ import type { HttpClient } from "../http-client.js";
 import type { ApiResponse, PaginatedResponse } from "../types/api.js";
 import { Cache } from "../cache.js";
 import { log } from "../logger.js";
+import { reportProgress } from "../progress.js";
 
 export const cache = new Cache(300);
 
@@ -51,6 +52,9 @@ export class BaseResource<T> {
       totalPages = response.total_pages;
       if (totalPages > 1 && page === 1) {
         log("info", `${this.basePath}: fetching ${totalPages} pages...`);
+      }
+      if (totalPages > 1) {
+        await reportProgress(page - 1, totalPages);
       }
       page++;
     } while (page <= totalPages);

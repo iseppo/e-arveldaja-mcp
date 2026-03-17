@@ -33,6 +33,12 @@ For the demo server, set the environment variable `EARVELDAJA_SERVER=demo`.
 
 ### 1. Add the MCP server
 
+Most AI assistants can set this up for you — just ask:
+
+> "Add the e-arveldaja-mcp npm package as an MCP server"
+
+If you prefer to do it manually:
+
 **Claude Code:**
 ```bash
 claude mcp add e-arveldaja -- npx -y e-arveldaja-mcp

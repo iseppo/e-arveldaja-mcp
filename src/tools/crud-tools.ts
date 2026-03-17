@@ -120,12 +120,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // CLIENTS
   // =====================
 
-  server.tool("list_clients", "List all clients (buyers/suppliers). Paginated.", pageParam.shape, readOnly, async (params) => {
+  server.tool("list_clients", "List all clients (buyers/suppliers). Paginated.", pageParam.shape, { ...readOnly, title: "List Clients" }, async (params) => {
     const result = await api.clients.list(params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_client", "Get a single client by ID", idParam.shape, readOnly, async ({ id }) => {
+  server.tool("get_client", "Get a single client by ID", idParam.shape, { ...readOnly, title: "Get Client" }, async ({ id }) => {
     const result = await api.clients.get(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -144,7 +144,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     bank_account_no: z.string().optional().describe("Bank account (IBAN)"),
     invoice_vat_no: z.string().optional().describe("VAT number"),
     notes: z.string().optional().describe("Notes"),
-  }, create, async (params) => {
+  }, { ...create, title: "Create Client" }, async (params) => {
     const result = await api.clients.create({
       ...params,
       cl_code_country: params.cl_code_country ?? "EST",
@@ -158,31 +158,31 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   server.tool("update_client", "Update an existing client", {
     id: z.number().describe("Client ID"),
     data: z.string().describe("JSON object with fields to update"),
-  }, mutate, async ({ id, data }) => {
+  }, { ...mutate, title: "Update Client" }, async ({ id, data }) => {
     const result = await api.clients.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("deactivate_client", "Deactivate a client (can be restored with restore_client)", idParam.shape, mutate, async ({ id }) => {
+  server.tool("deactivate_client", "Deactivate a client (can be restored with restore_client)", idParam.shape, { ...mutate, title: "Deactivate Client" }, async ({ id }) => {
     const result = await api.clients.deactivate(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("restore_client", "Reactivate a deleted client", idParam.shape, mutate, async ({ id }) => {
+  server.tool("restore_client", "Reactivate a deleted client", idParam.shape, { ...mutate, title: "Restore Client" }, async ({ id }) => {
     const result = await api.clients.restore(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
   server.tool("search_client", "Search clients by name (fuzzy match)", {
     name: z.string().describe("Name to search for"),
-  }, readOnly, async ({ name }) => {
+  }, { ...readOnly, title: "Search Clients" }, async ({ name }) => {
     const results = await api.clients.findByName(name);
     return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
   });
 
   server.tool("find_client_by_code", "Find client by registry code", {
     code: z.string().describe("Business registry code or personal ID"),
-  }, readOnly, async ({ code }) => {
+  }, { ...readOnly, title: "Find Client by Code" }, async ({ code }) => {
     const result = await api.clients.findByCode(code);
     return { content: [{ type: "text", text: result ? JSON.stringify(result, null, 2) : "Not found" }] };
   });
@@ -191,12 +191,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // PRODUCTS
   // =====================
 
-  server.tool("list_products", "List all products/services. Paginated.", pageParam.shape, readOnly, async (params) => {
+  server.tool("list_products", "List all products/services. Paginated.", pageParam.shape, { ...readOnly, title: "List Products" }, async (params) => {
     const result = await api.products.list(params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_product", "Get a single product by ID", idParam.shape, readOnly, async ({ id }) => {
+  server.tool("get_product", "Get a single product by ID", idParam.shape, { ...readOnly, title: "Get Product" }, async ({ id }) => {
     const result = await api.products.get(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -208,7 +208,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     cl_purchase_articles_id: z.number().optional().describe("Purchase article ID"),
     sales_price: z.number().optional().describe("Sales price"),
     unit: z.string().optional().describe("Unit (e.g. tk, h, km)"),
-  }, create, async (params) => {
+  }, { ...create, title: "Create Product" }, async (params) => {
     const result = await api.products.create(params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -216,17 +216,17 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   server.tool("update_product", "Update a product", {
     id: z.number().describe("Product ID"),
     data: z.string().describe("JSON object with fields to update"),
-  }, mutate, async ({ id, data }) => {
+  }, { ...mutate, title: "Update Product" }, async ({ id, data }) => {
     const result = await api.products.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("deactivate_product", "Deactivate a product (can be restored with restore_product)", idParam.shape, mutate, async ({ id }) => {
+  server.tool("deactivate_product", "Deactivate a product (can be restored with restore_product)", idParam.shape, { ...mutate, title: "Deactivate Product" }, async ({ id }) => {
     const result = await api.products.deactivate(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("restore_product", "Reactivate a deleted product", idParam.shape, mutate, async ({ id }) => {
+  server.tool("restore_product", "Reactivate a deleted product", idParam.shape, { ...mutate, title: "Restore Product" }, async ({ id }) => {
     const result = await api.products.restore(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -235,12 +235,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // JOURNALS
   // =====================
 
-  server.tool("list_journals", "List journal entries. Paginated.", pageParam.shape, readOnly, async (params) => {
+  server.tool("list_journals", "List journal entries. Paginated.", pageParam.shape, { ...readOnly, title: "List Journals" }, async (params) => {
     const result = await api.journals.list(params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_journal", "Get a journal entry by ID (includes postings)", idParam.shape, readOnly, async ({ id }) => {
+  server.tool("get_journal", "Get a journal entry by ID (includes postings)", idParam.shape, { ...readOnly, title: "Get Journal" }, async ({ id }) => {
     const result = await api.journals.get(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -252,7 +252,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     document_number: z.string().optional().describe("Document number"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
     postings: z.string().describe("JSON array of postings: [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, ...}]"),
-  }, create, async (params) => {
+  }, { ...create, title: "Create Journal" }, async (params) => {
     const result = await api.journals.create({
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
@@ -264,24 +264,24 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   server.tool("update_journal", "Update a journal entry", {
     id: z.number().describe("Journal ID"),
     data: z.string().describe("JSON object with fields to update"),
-  }, mutate, async ({ id, data }) => {
+  }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
     const result = await api.journals.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("delete_journal", "Delete a journal entry", idParam.shape, destructive, async ({ id }) => {
+  server.tool("delete_journal", "Delete a journal entry", idParam.shape, { ...destructive, title: "Delete Journal" }, async ({ id }) => {
     const result = await api.journals.delete(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("confirm_journal", "Confirm/register a journal entry. IRREVERSIBLE — use invalidate_journal to reverse if needed.", idParam.shape, destructive, async ({ id }) => {
+  server.tool("confirm_journal", "Confirm/register a journal entry. IRREVERSIBLE — use invalidate_journal to reverse if needed.", idParam.shape, { ...destructive, title: "Confirm Journal" }, async ({ id }) => {
     const result = await api.journals.confirm(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
   server.tool("invalidate_journal",
     "Invalidate (reverse) a confirmed journal entry. Returns it to unconfirmed status for editing or deletion.",
-    idParam.shape, mutate, async ({ id }) => {
+    idParam.shape, { ...mutate, title: "Invalidate Journal" }, async ({ id }) => {
       const result = await api.journals.invalidate(id);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
@@ -290,12 +290,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // TRANSACTIONS
   // =====================
 
-  server.tool("list_transactions", "List bank transactions. Paginated.", pageParam.shape, readOnly, async (params) => {
+  server.tool("list_transactions", "List bank transactions. Paginated.", pageParam.shape, { ...readOnly, title: "List Transactions" }, async (params) => {
     const result = await api.transactions.list(params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_transaction", "Get a transaction by ID", idParam.shape, readOnly, async ({ id }) => {
+  server.tool("get_transaction", "Get a transaction by ID", idParam.shape, { ...readOnly, title: "Get Transaction" }, async ({ id }) => {
     const result = await api.transactions.get(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -310,7 +310,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     clients_id: z.number().optional().describe("Related client ID"),
     bank_account_name: z.string().optional().describe("Remitter/beneficiary name"),
     ref_number: z.string().optional().describe("Reference number"),
-  }, create, async (params) => {
+  }, { ...create, title: "Create Transaction" }, async (params) => {
     const result = await api.transactions.create({
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
@@ -321,7 +321,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   server.tool("confirm_transaction", "Confirm a transaction with distribution rows", {
     id: z.number().describe("Transaction ID"),
     distributions: z.string().optional().describe("JSON array of distribution rows: [{related_table, related_id?, amount}]"),
-  }, destructive, async ({ id, distributions }) => {
+  }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions }) => {
     const dist = distributions ? parseTransactionDistributions(distributions) : undefined;
     const result = await api.transactions.confirm(id, dist);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -329,12 +329,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   server.tool("invalidate_transaction",
     "Invalidate (unconfirm) a confirmed transaction. Returns it to unconfirmed status for editing or deletion.",
-    idParam.shape, mutate, async ({ id }) => {
+    idParam.shape, { ...mutate, title: "Invalidate Transaction" }, async ({ id }) => {
       const result = await api.transactions.invalidate(id);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
 
-  server.tool("delete_transaction", "Delete a transaction", idParam.shape, destructive, async ({ id }) => {
+  server.tool("delete_transaction", "Delete a transaction", idParam.shape, { ...destructive, title: "Delete Transaction" }, async ({ id }) => {
     const result = await api.transactions.delete(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -343,12 +343,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // SALE INVOICES
   // =====================
 
-  server.tool("list_sale_invoices", "List sales invoices. Paginated.", pageParam.shape, readOnly, async (params) => {
+  server.tool("list_sale_invoices", "List sales invoices. Paginated.", pageParam.shape, { ...readOnly, title: "List Sale Invoices" }, async (params) => {
     const result = await api.saleInvoices.list(params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_sale_invoice", "Get a sales invoice by ID (includes items, deliveries)", idParam.shape, readOnly, async ({ id }) => {
+  server.tool("get_sale_invoice", "Get a sales invoice by ID (includes items, deliveries)", idParam.shape, { ...readOnly, title: "Get Sale Invoice" }, async ({ id }) => {
     const result = await api.saleInvoices.get(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -366,7 +366,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     show_client_balance: z.boolean().optional().describe("Show client balance on invoice"),
     items: z.string().describe("JSON array of invoice items: [{products_id, custom_title, amount, unit_net_price, ...}]"),
     notes: z.string().optional().describe("Internal notes"),
-  }, create, async (params) => {
+  }, { ...create, title: "Create Sale Invoice" }, async (params) => {
     const result = await api.saleInvoices.create({
       ...params,
       number_suffix: params.number_suffix ?? "",
@@ -382,22 +382,22 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   server.tool("update_sale_invoice", "Update a sales invoice", {
     id: z.number().describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
-  }, mutate, async ({ id, data }) => {
+  }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
     const result = await api.saleInvoices.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("delete_sale_invoice", "Delete a sales invoice", idParam.shape, destructive, async ({ id }) => {
+  server.tool("delete_sale_invoice", "Delete a sales invoice", idParam.shape, { ...destructive, title: "Delete Sale Invoice" }, async ({ id }) => {
     const result = await api.saleInvoices.delete(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("confirm_sale_invoice", "Confirm a sales invoice. IRREVERSIBLE — locks the invoice for editing.", idParam.shape, destructive, async ({ id }) => {
+  server.tool("confirm_sale_invoice", "Confirm a sales invoice. IRREVERSIBLE — locks the invoice for editing.", idParam.shape, { ...destructive, title: "Confirm Sale Invoice" }, async ({ id }) => {
     const result = await api.saleInvoices.confirm(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_sale_invoice_delivery_options", "Get delivery options for a sales invoice", idParam.shape, readOnly, async ({ id }) => {
+  server.tool("get_sale_invoice_delivery_options", "Get delivery options for a sales invoice", idParam.shape, { ...readOnly, title: "Get Delivery Options" }, async ({ id }) => {
     const result = await api.saleInvoices.getDeliveryOptions(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -409,12 +409,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     email_addresses: z.string().optional().describe("Email addresses"),
     email_subject: z.string().optional().describe("Email subject"),
     email_body: z.string().optional().describe("Email body"),
-  }, send, async ({ id, ...request }) => {
+  }, { ...send, title: "Send Sale Invoice" }, async ({ id, ...request }) => {
     const result = await api.saleInvoices.sendEinvoice(id, request);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_sale_invoice_document", "Download sales invoice PDF (base64)", idParam.shape, readOnly, async ({ id }) => {
+  server.tool("get_sale_invoice_document", "Download sales invoice PDF (base64)", idParam.shape, { ...readOnly, title: "Download Invoice PDF" }, async ({ id }) => {
     const result = await api.saleInvoices.getDocument(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -423,12 +423,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // PURCHASE INVOICES
   // =====================
 
-  server.tool("list_purchase_invoices", "List purchase invoices. Paginated.", pageParam.shape, readOnly, async (params) => {
+  server.tool("list_purchase_invoices", "List purchase invoices. Paginated.", pageParam.shape, { ...readOnly, title: "List Purchase Invoices" }, async (params) => {
     const result = await api.purchaseInvoices.list(params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_purchase_invoice", "Get a purchase invoice by ID", idParam.shape, readOnly, async ({ id }) => {
+  server.tool("get_purchase_invoice", "Get a purchase invoice by ID", idParam.shape, { ...readOnly, title: "Get Purchase Invoice" }, async ({ id }) => {
     const result = await api.purchaseInvoices.get(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -453,7 +453,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       notes: z.string().optional().describe("Notes"),
       bank_ref_number: z.string().optional().describe("Payment reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
-    }, create, async (params) => {
+    }, { ...create, title: "Create Purchase Invoice" }, async (params) => {
       const isVatReg = await isCompanyVatRegistered(api);
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
       const rawItems = parsePurchaseInvoiceItems(params.items);
@@ -483,12 +483,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   server.tool("update_purchase_invoice", "Update a purchase invoice", {
     id: z.number().describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
-  }, mutate, async ({ id, data }) => {
+  }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
     const result = await api.purchaseInvoices.update(id, parseJsonObject(data, "data"));
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("delete_purchase_invoice", "Delete a purchase invoice", idParam.shape, destructive, async ({ id }) => {
+  server.tool("delete_purchase_invoice", "Delete a purchase invoice", idParam.shape, { ...destructive, title: "Delete Purchase Invoice" }, async ({ id }) => {
     const result = await api.purchaseInvoices.delete(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -496,7 +496,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   server.tool("confirm_purchase_invoice",
     "Confirm a purchase invoice. IRREVERSIBLE — locks the invoice for editing. " +
     "Automatically fixes vat_price/gross_price if they are missing or inconsistent with the item totals.",
-    idParam.shape, destructive, async ({ id }) => {
+    idParam.shape, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id }) => {
       const isVatReg = await isCompanyVatRegistered(api);
       const result = await api.purchaseInvoices.confirmWithTotals(id, isVatReg);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -504,7 +504,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   server.tool("invalidate_purchase_invoice",
     "Invalidate (reverse) a confirmed purchase invoice. Returns it to PROJECT status for editing.",
-    idParam.shape, mutate, async ({ id }) => {
+    idParam.shape, { ...mutate, title: "Invalidate Purchase Invoice" }, async ({ id }) => {
       const result = await api.purchaseInvoices.invalidate(id);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     });
@@ -513,53 +513,53 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // REFERENCE DATA (read-only)
   // =====================
 
-  server.tool("list_accounts", "Get chart of accounts (kontoplaani kontod)", {}, readOnly, async () => {
+  server.tool("list_accounts", "Get chart of accounts (kontoplaani kontod)", {}, { ...readOnly, title: "List Accounts" }, async () => {
     const result = await api.readonly.getAccounts();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("list_account_dimensions", "Get account dimensions (alamkontod)", {}, readOnly, async () => {
+  server.tool("list_account_dimensions", "Get account dimensions (alamkontod)", {}, { ...readOnly, title: "List Account Dimensions" }, async () => {
     const result = await api.readonly.getAccountDimensions();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("list_currencies", "Get available currencies", {}, readOnly, async () => {
+  server.tool("list_currencies", "Get available currencies", {}, { ...readOnly, title: "List Currencies" }, async () => {
     const result = await api.readonly.getCurrencies();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("list_sale_articles", "Get sales articles (müügiartiklid)", {}, readOnly, async () => {
+  server.tool("list_sale_articles", "Get sales articles (müügiartiklid)", {}, { ...readOnly, title: "List Sale Articles" }, async () => {
     const result = await api.readonly.getSaleArticles();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("list_purchase_articles", "Get purchase articles (ostuartiklid)", {}, readOnly, async () => {
+  server.tool("list_purchase_articles", "Get purchase articles (ostuartiklid)", {}, { ...readOnly, title: "List Purchase Articles" }, async () => {
     const result = await api.readonly.getPurchaseArticles();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("list_templates", "Get sales invoice templates", {}, readOnly, async () => {
+  server.tool("list_templates", "Get sales invoice templates", {}, { ...readOnly, title: "List Invoice Templates" }, async () => {
     const result = await api.readonly.getTemplates();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("list_projects", "Get cost/profit centers (projektid)", {}, readOnly, async () => {
+  server.tool("list_projects", "Get cost/profit centers (projektid)", {}, { ...readOnly, title: "List Projects" }, async () => {
     const result = await api.readonly.getProjects();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_invoice_info", "Get company invoice settings", {}, readOnly, async () => {
+  server.tool("get_invoice_info", "Get company invoice settings", {}, { ...readOnly, title: "Get Invoice Settings" }, async () => {
     const result = await api.readonly.getInvoiceInfo();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_vat_info", "Get company VAT information (KMKR)", {}, readOnly, async () => {
+  server.tool("get_vat_info", "Get company VAT information (KMKR)", {}, { ...readOnly, title: "Get VAT Info" }, async () => {
     const result = await api.readonly.getVatInfo();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
   // Invoice series CRUD
-  server.tool("list_invoice_series", "Get invoice numbering series", {}, readOnly, async () => {
+  server.tool("list_invoice_series", "Get invoice numbering series", {}, { ...readOnly, title: "List Invoice Series" }, async () => {
     const result = await api.readonly.getInvoiceSeries();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -571,13 +571,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     is_active: z.boolean().describe("Is active"),
     is_default: z.boolean().describe("Is default series"),
     overdue_charge: z.number().optional().describe("Delinquency charge per day"),
-  }, create, async (params) => {
+  }, { ...create, title: "Create Invoice Series" }, async (params) => {
     const result = await api.readonly.createInvoiceSeries(params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
   // Bank accounts CRUD
-  server.tool("list_bank_accounts", "Get company bank accounts", {}, readOnly, async () => {
+  server.tool("list_bank_accounts", "Get company bank accounts", {}, { ...readOnly, title: "List Bank Accounts" }, async () => {
     const result = await api.readonly.getBankAccounts();
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -588,7 +588,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     cl_banks_id: z.number().optional().describe("Bank ID"),
     swift_code: z.string().optional().describe("SWIFT/BIC code"),
     show_in_sale_invoices: z.boolean().optional().describe("Show on invoices"),
-  }, create, async (params) => {
+  }, { ...create, title: "Create Bank Account" }, async (params) => {
     const result = await api.readonly.createBankAccount(params);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });

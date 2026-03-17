@@ -106,7 +106,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       date_from: z.string().optional().describe("Period start (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Period end (YYYY-MM-DD)"),
     },
-    readOnly,
+    { ...readOnly, title: "Compute Trial Balance" },
     async ({ date_from, date_to }) => {
       const balances = await computeAllBalances(api, date_from, date_to);
 
@@ -137,7 +137,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     {
       date_to: z.string().optional().describe("Balance sheet date (YYYY-MM-DD, default: today)"),
     },
-    readOnly,
+    { ...readOnly, title: "Compute Balance Sheet" },
     async ({ date_to }) => {
       const balances = await computeAllBalances(api, undefined, date_to);
 
@@ -207,7 +207,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       date_from: z.string().describe("Period start (YYYY-MM-DD)"),
       date_to: z.string().describe("Period end (YYYY-MM-DD)"),
     },
-    readOnly,
+    { ...readOnly, title: "Compute Profit and Loss" },
     async ({ date_from, date_to }) => {
       const balances = await computeAllBalances(api, date_from, date_to);
 
@@ -243,7 +243,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     {
       month: z.string().describe("Month to check (YYYY-MM, e.g. 2026-02)"),
     },
-    readOnly,
+    { ...readOnly, title: "Month-End Close Checklist" },
     async ({ month }) => {
       const dateFrom = `${month}-01`;
       const lastDay = getMonthLastDay(month);
