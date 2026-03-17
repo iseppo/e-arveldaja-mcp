@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.0] - 2026-03-17
+
+### Added
+- **MCP tool annotations** on all 85 tools: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`. Clients can auto-approve read-only tools and require confirmation for destructive ones.
+- **7 MCP prompts**: `book-invoice`, `reconcile-bank`, `month-end-close`, `new-supplier`, `company-overview`, `quarterly-vat`, `lightyear-booking`. Client-agnostic workflow templates (unlike `.claude/commands/` which only work in Claude Code).
+- **6 dynamic resource templates**: `earveldaja://clients/{id}`, `products/{id}`, `journals/{id}`, `sale_invoices/{id}`, `purchase_invoices/{id}`, `transactions/{id}`. Direct resource access by ID.
+- **Structured error responses**: All tools return `{ isError: true }` on failure instead of throwing, letting clients distinguish tool errors from protocol errors.
+- **MCP protocol logging**: Configurable logger (`src/logger.ts`) that uses MCP `sendLoggingMessage` after connection, with stderr fallback during startup.
+- **Journal invalidation** (`invalidate_journal`): Reverse a confirmed journal entry back to editable state.
+- **Shared `roundMoney()` utility** (`src/money.ts`): Consistent 2-decimal rounding across all monetary calculations.
+- **`listAll()` progress logging**: Logs page count to stderr/MCP when fetching multi-page datasets.
+
+### Changed
+- **`number_suffix` optional** on `create_sale_invoice`: Omit for auto-assign from invoice series.
+- **`reconcile_transactions`** now fetches all pages (was single-page only).
+- **`fee_account_relation_id` required** on `import_wise_transactions`: No more hardcoded default; use `list_account_dimensions` to find the correct ID.
+- **Renamed** `delete_client` → `deactivate_client`, `delete_product` → `deactivate_product` to match actual behavior (soft-delete, reversible).
+- **Connection-scoping proxy** replaces fragile `server.tool` monkey-patching. Forward-compatible with any MCP SDK overload changes.
+- **`safeJsonParse`** exported from `crud-tools.ts`; duplicate in `pdf-workflow.ts` removed.
+- **Allowed path roots** in file validation now resolve symlinks (fixes `/tmp` → `/private/tmp` on macOS).
+- **Standardized logging**: `console.warn`/`console.error` replaced with `process.stderr.write` or MCP logger.
+
+### Fixed
+- **Floating-point money**: 60+ inline `Math.round(x * 100) / 100` replaced with shared `roundMoney()`.
+- **`(invoice as any)` casts** in `purchase-invoices.api.ts` replaced with proper `PurchaseInvoiceDetail` type.
+- **Redundant branch** in `normalizeVatRate`: both sides of a ternary were identical.
+- **Unused `idParam`** removed from `BaseResource` constructor and all subclasses.
+- **Version mismatch**: `index.ts` said `1.0.0` while `package.json` said `0.2.1`.
+- **Duplicate account lookup** in `computeAccountBalance`: account info now fetched once in parallel with journals.
+- **Recurring invoices** missing `number_suffix` field (could produce empty-numbered invoices).
+
 ## [0.2.1] - 2026-03-16
 
 ### Fixed
