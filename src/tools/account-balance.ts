@@ -96,10 +96,7 @@ async function computeAccountBalance(
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
 
   server.tool("compute_account_balance",
-    "Compute account balance from journal postings (D/C logic). " +
-    "For liability accounts (C-type): balance = credits - debits. " +
-    "For asset accounts (D-type): balance = debits - credits. " +
-    "Can filter by client and date range.",
+    "Compute an account balance from journal postings, with optional client and date filters. Applies the account's debit/credit direction automatically.",
     {
       account_id: z.number().describe("Account number (e.g. 2110 for short-term loans)"),
       client_id: z.number().optional().describe("Filter by client ID"),
@@ -130,14 +127,12 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
   );
 
   server.tool("compute_client_debt",
-    "Compute how much the company owes to a specific client (or vice versa). " +
-    "Checks accounts 2110 (short-term loans), 2310 (accounts payable), 1210 (accounts receivable) by default. " +
-    "Override account_ids for other accounts. Uses journal D/C postings.",
+    "Compute how much the company owes the client and vice versa across selected accounts (default: 2110, 2310, 1210). Uses journal D/C postings.",
     {
       client_id: z.number().describe("Client ID"),
       account_ids: z.string().optional().describe("Comma-separated account IDs to check (default: 2110,2310,1210)"),
     },
-    { ...readOnly, title: "Compute Client Debt" },
+    { ...readOnly, title: "Compute Client Net Position" },
     async ({ client_id, account_ids }) => {
       const ids = account_ids
         ? account_ids.split(",").map(s => parseInt(s.trim()))

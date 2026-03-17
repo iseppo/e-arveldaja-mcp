@@ -416,7 +416,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
     },
-    { ...readOnly, title: "Parse Lightyear Statement" },
+    { ...readOnly, title: "Parse Lightyear Account Statement" },
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);
@@ -503,7 +503,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear CapitalGainsStatement CSV file"),
     },
-    { ...readOnly, title: "Parse Capital Gains" },
+    { ...readOnly, title: "Parse Lightyear Capital Gains" },
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const gains = parseCapitalGains(csv);
@@ -838,11 +838,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   );
 
   server.tool("book_lightyear_distributions",
-    "Create journal entries for Lightyear dividend/interest distributions. " +
-    "Checks for duplicates using reference IDs. " +
-    "Books: Debit broker account (net received), Credit income account. " +
-    "Income = gross (net + tax + fee). " +
-    "Withheld tax (tax_amount) booked to tax_account. Platform fee booked to fee_account (default 8610).",
+    "Create journal entries for Lightyear dividend and interest distributions, including withheld tax. DRY RUN by default.",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
@@ -997,9 +993,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   );
 
   server.tool("lightyear_portfolio_summary",
-    "Compute current portfolio holdings and cost basis from Lightyear account statement. " +
-    "Uses weighted average cost method. Properly reduces cost basis on sells. " +
-    "Useful for verifying investment account balance.",
+    "Compute current holdings and cost basis from a Lightyear account statement. Useful for verifying investment account balance.",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
     },

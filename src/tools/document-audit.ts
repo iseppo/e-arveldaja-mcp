@@ -88,13 +88,13 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
   );
 
   server.tool("detect_duplicate_purchase_invoice",
-    "Check for potential duplicate purchase invoices based on supplier, invoice number, amount, and date.",
+    "Check for duplicate purchase invoices by supplier + invoice number, and by supplier + amount + date.",
     {
       clients_id: z.number().optional().describe("Filter by supplier ID"),
       date_from: z.string().optional().describe("Start date"),
       date_to: z.string().optional().describe("End date"),
     },
-    { ...readOnly, title: "Detect Duplicate Invoices" },
+    { ...readOnly, title: "Detect Duplicate Purchase Invoices" },
     async ({ clients_id, date_from, date_to }) => {
       const allPurchases = await api.purchaseInvoices.listAll();
 

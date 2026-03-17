@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.2] - 2026-03-17
+
+### Changed
+- **Server instructions** restructured into sections (Purchase invoices / Bank reconciliation / Reporting) for clearer LLM guidance.
+- **25 tool titles and descriptions improved** based on Codex review: more specific naming (e.g. "Find Client by Registry Code", "Extract Supplier Invoice PDF", "Compute Client Net Position"), clearer action descriptions, consistent terminology.
+
 ## [0.3.1] - 2026-03-17
 
 ### Added

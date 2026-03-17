@@ -168,7 +168,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("restore_client", "Reactivate a deleted client", idParam.shape, { ...mutate, title: "Restore Client" }, async ({ id }) => {
+  server.tool("restore_client", "Reactivate a deactivated client", idParam.shape, { ...mutate, title: "Restore Client" }, async ({ id }) => {
     const result = await api.clients.restore(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -180,9 +180,9 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
   });
 
-  server.tool("find_client_by_code", "Find client by registry code", {
+  server.tool("find_client_by_code", "Find a client by business registry code or personal ID", {
     code: z.string().describe("Business registry code or personal ID"),
-  }, { ...readOnly, title: "Find Client by Code" }, async ({ code }) => {
+  }, { ...readOnly, title: "Find Client by Registry Code" }, async ({ code }) => {
     const result = await api.clients.findByCode(code);
     return { content: [{ type: "text", text: result ? JSON.stringify(result, null, 2) : "Not found" }] };
   });
@@ -226,7 +226,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("restore_product", "Reactivate a deleted product", idParam.shape, { ...mutate, title: "Restore Product" }, async ({ id }) => {
+  server.tool("restore_product", "Reactivate a deactivated product", idParam.shape, { ...mutate, title: "Restore Product" }, async ({ id }) => {
     const result = await api.products.restore(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -318,7 +318,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("confirm_transaction", "Confirm a transaction with distribution rows", {
+  server.tool("confirm_transaction", "Confirm a bank transaction by providing distribution rows", {
     id: z.number().describe("Transaction ID"),
     distributions: z.string().optional().describe("JSON array of distribution rows: [{related_table, related_id?, amount}]"),
   }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions }) => {
@@ -397,7 +397,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 
-  server.tool("get_sale_invoice_delivery_options", "Get delivery options for a sales invoice", idParam.shape, { ...readOnly, title: "Get Delivery Options" }, async ({ id }) => {
+  server.tool("get_sale_invoice_delivery_options", "Get available delivery methods for a sales invoice (e-invoice or email)", idParam.shape, { ...readOnly, title: "Get Sale Invoice Delivery Options" }, async ({ id }) => {
     const result = await api.saleInvoices.getDeliveryOptions(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
@@ -434,10 +434,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   server.tool("create_purchase_invoice",
-    "Create a purchase invoice. Pass the EXACT vat_price and gross_price from the original invoice " +
-    "to ensure amounts match for payment reconciliation. " +
-    "Items require cl_purchase_articles_id (use list_purchase_articles). " +
-    "cl_fringe_benefits_id defaults to 1 (not a fringe benefit).",
+    "Create a draft purchase invoice with line items. Requires cl_purchase_articles_id (use list_purchase_articles). Pass EXACT vat_price and gross_price from the original invoice.",
     {
       clients_id: z.number().describe("Supplier client ID"),
       client_name: z.string().describe("Supplier name"),
@@ -494,8 +491,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   server.tool("confirm_purchase_invoice",
-    "Confirm a purchase invoice. IRREVERSIBLE — locks the invoice for editing. " +
-    "Automatically fixes vat_price/gross_price if they are missing or inconsistent with the item totals.",
+    "Confirm and lock a purchase invoice. Automatically fixes vat_price/gross_price if missing or inconsistent with item totals.",
     idParam.shape, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id }) => {
       const isVatReg = await isCompanyVatRegistered(api);
       const result = await api.purchaseInvoices.confirmWithTotals(id, isVatReg);
@@ -503,7 +499,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     });
 
   server.tool("invalidate_purchase_invoice",
-    "Invalidate (reverse) a confirmed purchase invoice. Returns it to PROJECT status for editing.",
+    "Return a confirmed purchase invoice to draft status for editing.",
     idParam.shape, { ...mutate, title: "Invalidate Purchase Invoice" }, async ({ id }) => {
       const result = await api.purchaseInvoices.invalidate(id);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };

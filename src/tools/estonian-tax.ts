@@ -52,10 +52,7 @@ async function computeRetainedEarningsBalance(api: ApiContext, accountId: number
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
 
   server.tool("prepare_dividend_package",
-    "Calculate dividend distribution and create draft journal entries. " +
-    "Estonian CIT on dividends: 22/78 (from 2025). " +
-    "Creates a debit to retained earnings and credit to payable + tax liability. " +
-    "Validates accounts exist and checks retained earnings balance before posting.",
+    "Calculate dividend tax (22/78 CIT) and create draft journal entries for dividend payable and tax liability. Validates retained earnings balance and net assets.",
     {
       net_dividend: z.number().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: z.number().describe("Shareholder client ID"),
@@ -66,7 +63,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default 3000)"),
       force: z.boolean().optional().describe("Create journal even if retained earnings are insufficient (default false)"),
     },
-    { ...create, title: "Prepare Dividend Package" },
+    { ...create, title: "Prepare Dividend Distribution" },
     async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, share_capital_account, force }) => {
       const retainedAccount = retained_earnings_account ?? 3020;
       const payableAccount = dividend_payable_account ?? 2370;
@@ -195,9 +192,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   );
 
   server.tool("create_owner_expense_reimbursement",
-    "Book an owner-paid business expense: expense account + VAT + payable to owner. " +
-    "Common for micro-OÜs where the owner pays with personal funds. " +
-    "Books input VAT separately only for VAT-registered companies and validates accounts in chart of accounts.",
+    "Create a journal for a business expense paid personally by the owner. Splits input VAT for VAT-registered companies.",
     {
       owner_client_id: z.number().describe("Owner/shareholder client ID"),
       effective_date: z.string().describe("Expense date (YYYY-MM-DD)"),
@@ -210,7 +205,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       payable_account: z.number().optional().describe("Payable to owner account (default 2110)"),
       document_number: z.string().optional().describe("Receipt/document number"),
     },
-    { ...create, title: "Book Owner Expense" },
+    { ...create, title: "Book Owner-Paid Expense" },
     async ({ owner_client_id, effective_date, description, net_amount, vat_rate, vat_amount, expense_account, vat_account, payable_account, document_number }) => {
       const vatRegistered = await isCompanyVatRegistered(api);
       const vatAcc = vat_account ?? 1510;

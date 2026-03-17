@@ -182,13 +182,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
   );
 
   server.tool("auto_confirm_exact_matches",
-    "Automatically confirm bank transactions that have a single high-confidence match (>=90). " +
-    "DRY RUN by default - set execute=true to actually confirm.",
+    "Batch-confirm bank transactions with a single high-confidence match (>=90). DRY RUN by default — set execute=true to confirm.",
     {
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),
       min_confidence: z.number().optional().describe("Minimum confidence (default 90)"),
     },
-    { ...batch, title: "Auto-Confirm Matches" },
+    { ...batch, title: "Auto-Confirm Bank Matches" },
     async ({ execute, min_confidence }) => {
       const threshold = min_confidence ?? 90;
       const dryRun = execute !== true;

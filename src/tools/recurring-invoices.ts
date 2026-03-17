@@ -17,7 +17,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
       invoice_ids: z.string().optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
       auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
     },
-    { ...batch, title: "Create Recurring Invoices" },
+    { ...batch, title: "Create Recurring Sale Invoices" },
     async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm }) => {
       // Get source invoices
       const allSales = await api.saleInvoices.listAll();

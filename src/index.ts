@@ -118,7 +118,7 @@ async function main() {
 
   const server = new McpServer({
     name: "e-arveldaja",
-    version: "0.3.1",
+    version: "0.3.2",
     description: "EXPERIMENTAL, UNOFFICIAL MCP server for the Estonian e-arveldaja (e-Financials) API. " +
       "NOT affiliated with or endorsed by RIK. Use entirely at your own risk — " +
       "this software interacts with live financial data and can create, modify, and delete accounting records. " +
@@ -127,17 +127,22 @@ async function main() {
       "PDF invoice extraction, supplier resolution with business registry lookup, " +
       "and smart booking suggestions based on past invoices.",
   }, {
-    instructions: `Call get_vat_info first — VAT status affects purchase invoice booking.
-PDF workflow: extract_pdf_invoice → validate_invoice_data → resolve_supplier → suggest_booking → create_purchase_invoice_from_pdf → upload_invoice_document → confirm_purchase_invoice.
-Pass EXACT vat_price and gross_price from original invoices — never recalculate.
-Check detect_duplicate_purchase_invoice before creating purchase invoices.
-Use list_purchase_articles to find article IDs for expense accounts.
-Foreign suppliers (non-Estonian): check if reversed_vat_id=1 applies (reverse charge VAT).
-Bank reconciliation: reconcile_transactions first, then auto_confirm_exact_matches with dry_run before executing.
-Financial reports require all journals/invoices confirmed first for accurate results.
-Multi-company: list_connections / switch_connection. Caches cleared on switch.
-Batch operations (import, auto-confirm, recurring invoices) default to dry_run — preview before executing.
-Monetary amounts are EUR unless cl_currencies_id specifies otherwise.`,
+    instructions: `Purchase invoices:
+- Before booking, call get_vat_info to check VAT registration status.
+- Before creating, call detect_duplicate_purchase_invoice.
+- Pass original vat_price and gross_price exactly — do not recalculate.
+- Use list_purchase_articles to resolve cl_purchase_articles_id.
+- For non-Estonian suppliers, check if reverse charge applies (reversed_vat_id=1).
+- PDF flow: extract_pdf_invoice → validate_invoice_data → resolve_supplier → suggest_booking → create_purchase_invoice_from_pdf → upload_invoice_document → confirm_purchase_invoice.
+
+Bank reconciliation:
+- Run reconcile_transactions first, then auto_confirm_exact_matches with dry_run before executing.
+
+Reporting:
+- Confirm all journals/invoices/transactions first for accurate financial reports.
+- list_connections / switch_connection for multi-company; switching clears caches.
+- Batch tools default to dry_run — preview before execute=true.
+- Amounts are EUR unless cl_currencies_id specifies otherwise.`,
   });
 
   // --- Multi-account tools ---
