@@ -44,7 +44,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseJsonObject(input: string, label: string): Record<string, unknown> {
+export function parseJsonObject(input: string, label: string): Record<string, unknown> {
   const parsed = safeJsonParse(input, label);
   if (!isRecord(parsed)) {
     throw new Error(`"${label}" must be a JSON object`);
@@ -52,7 +52,7 @@ function parseJsonObject(input: string, label: string): Record<string, unknown> 
   return parsed;
 }
 
-function parseJsonObjectArray(input: string, label: string): Record<string, unknown>[] {
+export function parseJsonObjectArray(input: string, label: string): Record<string, unknown>[] {
   const parsed = safeJsonParse(input, label);
   if (!Array.isArray(parsed)) {
     throw new Error(`"${label}" must be a JSON array`);
@@ -67,7 +67,7 @@ function parseJsonObjectArray(input: string, label: string): Record<string, unkn
   return parsed;
 }
 
-function requireFields(items: Record<string, unknown>[], label: string, fields: string[]): void {
+export function requireFields(items: Record<string, unknown>[], label: string, fields: string[]): void {
   items.forEach((item, index) => {
     for (const field of fields) {
       if (!(field in item) || item[field] === null || item[field] === undefined || item[field] === "") {

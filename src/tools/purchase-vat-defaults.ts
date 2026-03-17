@@ -35,7 +35,7 @@ function toNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function normalizeVatRate(value: unknown): string | undefined {
+export function normalizeVatRate(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
     return String(value);
   }
