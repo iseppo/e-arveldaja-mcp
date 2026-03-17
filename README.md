@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP (Model Context Protocol) server for the Estonian e-arveldaja (RIK e-Financials) REST API. Works with any MCP-compatible AI assistant — Claude Code, Codex CLI, Gemini CLI, Google Antigravity, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 85 tools, 7 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 ## Disclaimer
 
@@ -31,31 +31,14 @@ For the demo server, set the environment variable `EARVELDAJA_SERVER=demo`.
 
 ## Setup
 
-### Option A: npx (no install needed)
+### 1. Add the MCP server
 
-Just reference `npx e-arveldaja-mcp` in your MCP config — no cloning or building required. See configuration examples below.
-
-### Option B: From source
-
+**Claude Code:**
 ```bash
-git clone https://github.com/iseppo/e-arveldaja-mcp.git
-cd e-arveldaja-mcp
-npm install
-npm run build          # tsc -> dist/
+claude mcp add e-arveldaja -- npx -y e-arveldaja-mcp
 ```
 
-### Connecting to your AI assistant
-
-This is a standard MCP server using stdio transport. Most AI assistants can set this up themselves — just ask:
-
-> "Add the e-arveldaja-mcp npm package as an MCP server to my configuration, using npx"
-
-The assistant will add `{"command": "npx", "args": ["-y", "e-arveldaja-mcp"]}` to its MCP config. No cloning or paths needed.
-
-If you prefer to configure manually:
-
-**JSON-based config** (Claude Code, Cursor, Windsurf, Cline, Gemini CLI, Antigravity):
-
+**Other tools** (Cursor, Windsurf, Cline, Gemini CLI, Codex CLI, Antigravity) — add to your MCP config:
 ```json
 {
   "mcpServers": {
@@ -67,58 +50,65 @@ If you prefer to configure manually:
 }
 ```
 
-**TOML-based config** (Codex CLI):
-
-```toml
-[mcp_servers.e-arveldaja]
-command = "npx"
-args = ["-y", "e-arveldaja-mcp"]
-```
-
-If running from source, replace `"npx", "-y", "e-arveldaja-mcp"` with `"node", "/path/to/e-arveldaja-mcp/dist/index.js"`.
-
-Where this config file lives depends on your tool:
+<details>
+<summary>Config file locations by tool</summary>
 
 | Tool | Config file |
 |---|---|
 | **Claude Code** | `~/.claude/settings.json` or project `.claude/settings.json` |
-| **Codex CLI** | `~/.codex/config.toml` or project `.codex/config.toml` |
-| **Gemini CLI** | `~/.gemini/settings.json` or project `.gemini/settings.json` |
-| **Google Antigravity** | MCP Store UI → Manage MCP Servers → View raw config (`mcp_config.json`) |
+| **Codex CLI** | `~/.codex/config.toml` (TOML format) |
+| **Gemini CLI** | `~/.gemini/settings.json` |
+| **Google Antigravity** | MCP Store UI → Manage MCP Servers → raw config |
 | **Cursor** | `.cursor/mcp.json` in your project |
 | **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
 | **Cline** | VS Code settings under `cline.mcpServers` |
 
-See [CLAUDE.md](CLAUDE.md) for architecture details and full API documentation.
+</details>
 
-## Workflows
+### 2. Place your API key
 
-The project includes step-by-step workflow guides in [`workflows/`](workflows/) that orchestrate multiple MCP tools into complete accounting tasks. These work with any MCP client — just paste the workflow into your AI assistant's prompt or follow the steps manually.
+Put the downloaded `apikey.txt` in the working directory where you run your AI assistant. That's it — the server finds it automatically.
 
-| Workflow | Description |
-|---|---|
-| [book-invoice](workflows/book-invoice.md) | Book a purchase invoice from PDF: extract data, validate, find/create supplier, suggest accounts, create invoice, upload PDF, confirm |
-| [reconcile-bank](workflows/reconcile-bank.md) | Match unconfirmed bank transactions to open invoices and confirm matches |
-| [month-end](workflows/month-end.md) | Run month-end close checklist: blockers, missing docs, duplicates, trial balance, P&L, balance sheet |
-| [new-supplier](workflows/new-supplier.md) | Create a supplier with Estonian business registry lookup and dedup check |
+For multiple companies, place multiple files (`apikey.txt`, `apikey-company2.txt`, etc.) and use `list_connections` / `switch_connection` to switch between them.
 
-### Claude Code slash commands
-
-If you use Claude Code, the same workflows are also available as slash commands in `.claude/commands/`. To install:
-
-**Option A:** Run Claude Code from the `e-arveldaja-mcp` directory — skills are auto-detected.
-
-**Option B:** Symlink or copy to your global commands:
+<details>
+<summary>Alternative: environment variables</summary>
 
 ```bash
-# Symlink (stays up to date)
-ln -s /path/to/e-arveldaja-mcp/.claude/commands/*.md ~/.claude/commands/
-
-# Or copy
-cp /path/to/e-arveldaja-mcp/.claude/commands/*.md ~/.claude/commands/
+export EARVELDAJA_API_KEY_ID=...
+export EARVELDAJA_API_PUBLIC_VALUE=...
+export EARVELDAJA_API_PASSWORD=...
 ```
 
-Then use `/book-invoice`, `/reconcile-bank`, `/month-end`, `/new-supplier` in any conversation.
+</details>
+
+<details>
+<summary>Building from source</summary>
+
+```bash
+git clone https://github.com/iseppo/e-arveldaja-mcp.git
+cd e-arveldaja-mcp
+npm install && npm run build
+# Then use: "node", "/path/to/e-arveldaja-mcp/dist/index.js" instead of npx
+```
+
+</details>
+
+## Workflows (MCP Prompts)
+
+The server includes 7 built-in workflow prompts that any MCP client can discover and use. These guide the AI assistant through multi-step accounting tasks:
+
+| Prompt | Description |
+|---|---|
+| `book-invoice` | Book a purchase invoice from PDF: extract, validate, resolve supplier, create, upload, confirm |
+| `reconcile-bank` | Match bank transactions to invoices, auto-confirm or review manually |
+| `month-end-close` | Blockers, missing docs, duplicates, trial balance, P&L, balance sheet |
+| `new-supplier` | Create supplier with Estonian business registry lookup |
+| `company-overview` | Financial dashboard: balance sheet, P&L, receivables, payables |
+| `quarterly-vat` | Prepare KMD (VAT return) data for a quarter |
+| `lightyear-booking` | Book Lightyear investment trades and distributions from CSV |
+
+**Claude Code** also has these as slash commands: `/book-invoice`, `/reconcile-bank`, `/month-end`, `/new-supplier`.
 
 ## Usage Examples
 
