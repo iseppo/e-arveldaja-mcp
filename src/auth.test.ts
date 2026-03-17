@@ -55,4 +55,13 @@ describe("createAuthHeaders", () => {
     const h2 = createAuthHeaders({ ...config, apiPassword: "other-password" }, "/v1/clients");
     expect(h1["X-AUTH-KEY"]).not.toBe(h2["X-AUTH-KEY"]);
   });
+
+  it("computes the exact SHA-384 HMAC signature", async () => {
+    const { createHmac } = await import("crypto");
+    const headers = createAuthHeaders(config, "/v1/clients");
+    const expected = createHmac("sha384", config.apiPassword)
+      .update("test-key-id:2026-03-15T10:30:45:/v1/clients")
+      .digest("base64");
+    expect(headers["X-AUTH-KEY"]).toBe(`test-public-value:${expected}`);
+  });
 });

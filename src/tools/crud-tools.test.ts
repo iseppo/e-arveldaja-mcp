@@ -24,11 +24,11 @@ describe("safeJsonParse", () => {
     expect(() => safeJsonParse(huge, "test")).toThrow("exceeds maximum size");
   });
 
-  it("accepts input at exactly the size limit", () => {
-    const json = JSON.stringify("x".repeat(MAX_JSON_INPUT_SIZE - 4)); // account for quotes
-    if (json.length <= MAX_JSON_INPUT_SIZE) {
-      expect(() => safeJsonParse(json, "test")).not.toThrow();
-    }
+  it("accepts JSON whose length is exactly MAX_JSON_INPUT_SIZE", () => {
+    const value = "x".repeat(MAX_JSON_INPUT_SIZE - 2);
+    const json = `"${value}"`;
+    expect(json.length).toBe(MAX_JSON_INPUT_SIZE);
+    expect(safeJsonParse(json, "test")).toBe(value);
   });
 });
 

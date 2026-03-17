@@ -87,4 +87,22 @@ describe("Cache", () => {
     expect(cache.get("connection:0:/journals:list")).toBeUndefined();
     expect(cache.get("connection:1:/clients:list")).toBe(3);
   });
+
+  it("does not evict another key when overwriting an existing key at capacity", () => {
+    const cache = new Cache(300, 2);
+    cache.set("a", 1);
+    cache.set("b", 2);
+    cache.set("a", 3);
+    expect(cache.get("a")).toBe(3);
+    expect(cache.get("b")).toBe(2);
+  });
+
+  it("treats ttlSeconds=0 as falsy, using default TTL instead", () => {
+    const cache = new Cache(10); // 10 second default
+    cache.set("zero-ttl", "value", 0);
+    // 0 is falsy so falls through to default TTL (10s)
+    expect(cache.get("zero-ttl")).toBe("value");
+    vi.advanceTimersByTime(11_000);
+    expect(cache.get("zero-ttl")).toBeUndefined();
+  });
 });

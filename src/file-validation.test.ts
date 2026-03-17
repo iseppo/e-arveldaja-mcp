@@ -48,4 +48,36 @@ describe("validateFilePath", () => {
     const result = await validateFilePath(testPdf, [".pdf", ".csv"], 10 * 1024 * 1024);
     expect(result).toContain("invoice.pdf");
   });
+
+  it("rejects a .pdf symlink that points to a disallowed target extension", async () => {
+    const disguisedLink = join(testDir, "disguised.pdf");
+    try {
+      symlinkSync(testExe, disguisedLink);
+    } catch {
+      return; // symlinks may not work on all systems
+    }
+    try {
+      await expect(
+        validateFilePath(disguisedLink, [".pdf"], 10 * 1024 * 1024)
+      ).rejects.toThrow("Symlink target has disallowed extension");
+    } finally {
+      try { unlinkSync(disguisedLink); } catch {}
+    }
+  });
+
+  it("rejects files outside EARVELDAJA_ALLOWED_PATHS", async () => {
+    const previous = process.env.EARVELDAJA_ALLOWED_PATHS;
+    const restrictedDir = join(testDir, "restricted-root");
+    mkdirSync(restrictedDir, { recursive: true });
+    process.env.EARVELDAJA_ALLOWED_PATHS = restrictedDir;
+    try {
+      await expect(
+        validateFilePath(testPdf, [".pdf"], 10 * 1024 * 1024)
+      ).rejects.toThrow("outside allowed directories");
+    } finally {
+      if (previous === undefined) delete process.env.EARVELDAJA_ALLOWED_PATHS;
+      else process.env.EARVELDAJA_ALLOWED_PATHS = previous;
+      try { rmdirSync(restrictedDir); } catch {}
+    }
+  });
 });

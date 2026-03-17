@@ -19,4 +19,9 @@ describe("toolError", () => {
     expect(result.isError).toBe(true);
     expect((result.content[0] as { type: string; text: string }).text).toBe("[object Object]");
   });
+
+  it("handles null and undefined", () => {
+    expect(toolError(null).content[0]).toEqual({ type: "text", text: "null" });
+    expect(toolError(undefined).content[0]).toEqual({ type: "text", text: "undefined" });
+  });
 });

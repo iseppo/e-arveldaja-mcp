@@ -70,6 +70,31 @@ describe("applyPurchaseVatDefaults", () => {
     expect(result.cl_vat_articles_id).toBe(11);
   });
 
+  it("falls back to another article with matching VAT rate when selected has no defaults", () => {
+    const articles = [
+      { id: 10, name_est: "Internetikulu", name_eng: "Internet expense", vat_rate_dropdown: "24", priority: 1, cl_account_groups: [] },
+      { id: 99, name_est: "Sisendkäibemaks 24%", name_eng: "Input VAT 24%", vat_accounts_id: 1510, cl_vat_articles_id: 1, vat_rate: 24, priority: 1, cl_account_groups: [] },
+    ] as any[];
+
+    const result = applyPurchaseVatDefaults(
+      articles,
+      { custom_title: "Internet", cl_purchase_articles_id: 10, vat_rate_dropdown: "24" } as PurchaseInvoiceItem,
+      true,
+    );
+    expect(result.vat_accounts_id).toBe(1510);
+    expect(result.cl_vat_articles_id).toBe(1);
+  });
+
+  it("uses purchase_accounts_id as vat_accounts_id fallback for non-VAT with specific rate", () => {
+    const result = applyPurchaseVatDefaults(
+      [],
+      { custom_title: "Fuel", cl_purchase_articles_id: 1, purchase_accounts_id: 5230, vat_rate_dropdown: "24" } as PurchaseInvoiceItem,
+      false,
+    );
+    expect(result.vat_accounts_id).toBe(5230);
+    expect(result.cl_vat_articles_id).toBe(11);
+  });
+
   it("resolves defaults from matching purchase article", () => {
     const articles = [{
       id: 45,

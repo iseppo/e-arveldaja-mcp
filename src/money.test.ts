@@ -28,4 +28,11 @@ describe("roundMoney", () => {
     expect(roundMoney(1.23)).toBe(1.23);
     expect(roundMoney(100)).toBe(100);
   });
+
+  it("rounds values on both sides of the half-cent boundary", () => {
+    expect(roundMoney(1.2349)).toBe(1.23);
+    expect(roundMoney(1.2351)).toBe(1.24);
+    expect(roundMoney(-1.2349)).toBe(-1.23);
+    expect(roundMoney(-1.2351)).toBe(-1.24);
+  });
 });

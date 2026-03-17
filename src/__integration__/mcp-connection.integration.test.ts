@@ -61,4 +61,33 @@ describe.skipIf(!RUN_INTEGRATION)("MCP Server Integration", () => {
     const data = JSON.parse((result.content as any)[0].text);
     expect(data.totals.difference).toBe(0);
   });
+
+  it("exposes core tool names", async () => {
+    const { tools } = await client.listTools();
+    const names = tools.map(t => t.name);
+    expect(names).toEqual(expect.arrayContaining([
+      "list_connections",
+      "switch_connection",
+      "get_vat_info",
+      "create_purchase_invoice",
+      "compute_trial_balance",
+      "extract_pdf_invoice",
+      "reconcile_transactions",
+    ]));
+  });
+
+  it("switch_connection rejects invalid index without changing active connection", async () => {
+    const before = await client.callTool({ name: "list_connections", arguments: {} });
+    const beforeData = JSON.parse((before.content as any)[0].text);
+
+    const result = await client.callTool({ name: "switch_connection", arguments: { index: -1 } });
+    const resultData = JSON.parse((result.content as any)[0].text);
+
+    const after = await client.callTool({ name: "list_connections", arguments: {} });
+    const afterData = JSON.parse((after.content as any)[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(resultData.error).toMatch(/Invalid index/);
+    expect(afterData.active).toBe(beforeData.active);
+  });
 });
