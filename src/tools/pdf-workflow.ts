@@ -3,25 +3,14 @@ import { z } from "zod";
 import { readFile } from "fs/promises";
 import pdf from "pdf-parse";
 import { closest } from "fastest-levenshtein";
-import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse } from "./crud-tools.js";
 import type { PurchaseInvoice } from "../types/api.js";
 import { validateFilePath } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
+import { roundMoney } from "../money.js";
+import { readOnly, create, mutate } from "../annotations.js";
 
 const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50 MB
-
-const MAX_JSON_INPUT_SIZE = 1024 * 1024; // 1 MB
-
-function safeJsonParse(input: string, label: string): unknown {
-  if (input.length > MAX_JSON_INPUT_SIZE) {
-    throw new Error(`JSON input for "${label}" exceeds maximum size of ${MAX_JSON_INPUT_SIZE} bytes`);
-  }
-  try {
-    return JSON.parse(input);
-  } catch {
-    throw new Error(`Invalid JSON in "${label}"`);
-  }
-}
 
 async function validatePdfPath(filePath: string): Promise<string> {
   return validateFilePath(filePath, [".pdf"], MAX_PDF_SIZE);
@@ -81,6 +70,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     {
       file_path: z.string().describe("Absolute path to the PDF file"),
     },
+    readOnly,
     async ({ file_path }) => {
       const resolved = await validatePdfPath(file_path);
       const buffer = await readFile(resolved);
@@ -115,6 +105,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       invoice_date: z.string().optional().describe("Invoice date (YYYY-MM-DD)"),
       due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
     },
+    readOnly,
     async ({ total_net, total_vat, total_gross, items, invoice_date, due_date }) => {
       const errors: string[] = [];
       const warnings: string[] = [];
@@ -136,7 +127,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       let itemVatInputs = 0;
 
       // Check net + vat = gross (within 2 cents for rounding)
-      const computedGross = Math.round((total_net + total_vat) * 100) / 100;
+      const computedGross = roundMoney(total_net + total_vat);
       const diff = Math.abs(computedGross - total_gross);
       if (diff > 0.02) {
         errors.push(`net (${total_net}) + VAT (${total_vat}) = ${computedGross}, but gross is ${total_gross} (diff: ${diff.toFixed(2)})`);
@@ -146,7 +137,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
 
       // Check item totals sum to invoice net
       if (parsedItems.length > 0) {
-        const itemNetSum = Math.round(parsedItems.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100;
+        const itemNetSum = roundMoney(parsedItems.reduce((s, i) => s + (i.total_net_price ?? 0), 0));
         const netDiff = Math.abs(itemNetSum - total_net);
         if (netDiff > 0.02) {
           errors.push(`Item net sum (${itemNetSum}) does not match invoice net (${total_net}) (diff: ${netDiff.toFixed(2)})`);
@@ -168,13 +159,13 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           warnings.push(`Item ${idx + 1} "${item.custom_title ?? ""}": negative net price ${item.total_net_price}`);
         }
         if (item.total_net_price !== undefined && rate !== undefined) {
-          computedItemVat += Math.round(item.total_net_price * (rate / 100) * 100) / 100;
+          computedItemVat += roundMoney(item.total_net_price * (rate / 100));
           itemVatInputs++;
         }
       }
 
       if (itemVatInputs > 0) {
-        computedItemVat = Math.round(computedItemVat * 100) / 100;
+        computedItemVat = roundMoney(computedItemVat);
         const itemVatDiff = Math.abs(computedItemVat - total_vat);
         if (itemVatDiff > 0.05) {
           warnings.push(`Summed per-item VAT (${computedItemVat}) does not match total VAT (${total_vat}) (diff: ${itemVatDiff.toFixed(2)})`);
@@ -244,6 +235,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       country: z.string().optional().describe("Country code for auto-create (default EST)"),
       is_physical_entity: z.boolean().optional().describe("Natural person (default false = legal entity)"),
     },
+    create,
     async ({ name, reg_code, vat_no, iban, auto_create, country, is_physical_entity }) => {
       // 1. Search by registry code
       if (reg_code) {
@@ -377,6 +369,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       description: z.string().optional().describe("Invoice item description to match"),
       limit: z.number().optional().describe("Max past invoices to return (default 3)"),
     },
+    readOnly,
     async ({ clients_id, description, limit }) => {
       const maxResults = limit ?? 3;
       const allInvoices = await api.purchaseInvoices.listAll();
@@ -459,6 +452,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       ref_number: z.string().optional().describe("Reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
     },
+    create,
     async (params) => {
       const supplier = await api.clients.get(params.supplier_client_id);
 
@@ -507,6 +501,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       invoice_id: z.number().describe("Purchase invoice ID"),
       file_path: z.string().describe("Absolute path to the PDF file"),
     },
+    mutate,
     async ({ invoice_id, file_path }) => {
       const resolved = await validatePdfPath(file_path);
       const buffer = await readFile(resolved);

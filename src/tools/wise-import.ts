@@ -3,6 +3,7 @@ import { z } from "zod";
 import { readFile } from "fs/promises";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
+import { batch } from "../annotations.js";
 
 interface WiseRow {
   id: string;
@@ -114,17 +115,18 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
     {
       file_path: z.string().describe("Absolute path to Wise transaction-history.csv"),
       accounts_dimensions_id: z.number().describe("Bank account dimension ID for the Wise account in e-arveldaja"),
-      fee_account_relation_id: z.number().optional().describe("Relation ID for fee account distribution (default 861012637379 = 8610 Muud finantskulud)"),
+      fee_account_relation_id: z.number().describe("Relation ID for fee account distribution (e.g. accounts_dimensions_id for 8610 Muud finantskulud). Use list_account_dimensions to find the correct ID."),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: z.string().optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
     },
+    batch,
     async ({ file_path, accounts_dimensions_id, fee_account_relation_id, execute, date_from, date_to }) => {
       const resolved = await validateFilePath(file_path, [".csv"], 10 * 1024 * 1024);
       const csv = await readFile(resolved, "utf-8");
       const rows = parseWiseCSV(csv);
       const dryRun = execute !== true;
-      const feeRelationId = fee_account_relation_id ?? 861012637379; // 8610 Muud finantskulud
+      const feeRelationId = fee_account_relation_id;
 
       // Find Wise client for fee transactions
       let wiseClientId: number | undefined;

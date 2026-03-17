@@ -4,7 +4,7 @@ import { BaseResource } from "./base-resource.js";
 
 export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   constructor(client: HttpClient) {
-    super(client, "/sale_invoices", "sale_invoices_id");
+    super(client, "/sale_invoices");
   }
 
   async confirm(id: number): Promise<ApiResponse> {

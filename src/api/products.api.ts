@@ -4,7 +4,7 @@ import { BaseResource } from "./base-resource.js";
 
 export class ProductsApi extends BaseResource<Product> {
   constructor(client: HttpClient) {
-    super(client, "/products", "products_id");
+    super(client, "/products");
   }
 
   async deactivate(id: number): Promise<ApiResponse> {

@@ -1,8 +1,12 @@
 import type { HttpClient } from "../http-client.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, ApiResponse, ApiFile } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
+import { roundMoney } from "../money.js";
 
-const roundMoney = (v: number): number => Math.round(v * 100) / 100;
+/** Invoice as returned by GET — items include API-computed fields. */
+interface PurchaseInvoiceDetail extends PurchaseInvoice {
+  items?: Array<PurchaseInvoiceItem & { vat_amount?: number }>;
+}
 
 /**
  * For non-VAT (mitte-KMD) companies: set project_no_vat_gross_price on items
@@ -44,7 +48,7 @@ function normalizeItemsForNonVat(
 
 export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   constructor(client: HttpClient) {
-    super(client, "/purchase_invoices", "purchase_invoices_id");
+    super(client, "/purchase_invoices");
   }
 
   /**
@@ -76,11 +80,11 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     if (!id) throw new Error("Purchase invoice created but no ID returned");
 
     // Read back to get item-level VAT computed by API
-    const invoice = await this.get(id);
-    const items = (invoice as any).items as Array<{ vat_amount?: number; total_net_price: number }> | undefined;
+    const invoice = await this.get(id) as PurchaseInvoiceDetail;
+    const items = invoice.items;
 
-    const itemVat = items ? Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100 : 0;
-    const itemNet = items ? Math.round(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100 : 0;
+    const itemVat = items ? roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0)) : 0;
+    const itemNet = items ? roundMoney(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0)) : 0;
 
     // Invoice-level VAT: explicit value wins for VAT-registered companies.
     // Non-KMD companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
@@ -91,10 +95,10 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     // Invoice-level gross: explicit value wins, otherwise net + actual item VAT
     const gross = grossPrice !== undefined
       ? grossPrice
-      : Math.round((itemNet + itemVat) * 100) / 100;
+      : roundMoney(itemNet + itemVat);
 
     if (vat > 0 || gross > 0) {
-      await this.update(id, { vat_price: vat, gross_price: gross, items: (invoice as any).items } as any);
+      await this.update(id, { vat_price: vat, gross_price: gross, items: invoice.items } as Partial<PurchaseInvoice>);
       this.invalidateCache();
     }
 
@@ -106,17 +110,17 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
    * For non-VAT companies: only fixes gross_price, leaves vat_price at 0.
    */
   async confirmWithTotals(id: number, isVatRegistered = true): Promise<ApiResponse> {
-    const invoice = await this.get(id);
-    const items = (invoice as any).items as Array<{ vat_amount?: number; total_net_price: number }> | undefined;
+    const invoice = await this.get(id) as PurchaseInvoiceDetail;
+    const items = invoice.items;
     if (items) {
-      const itemVat = Math.round(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0) * 100) / 100;
-      const net = Math.round(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0) * 100) / 100;
+      const itemVat = roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0));
+      const net = roundMoney(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0));
       const vat = isVatRegistered ? itemVat : 0;
-      const gross = Math.round((net + itemVat) * 100) / 100;
-      const currentGross = (invoice as any).gross_price as number | null | undefined;
+      const gross = roundMoney(net + itemVat);
+      const currentGross = invoice.gross_price;
       const shouldRepair = !currentGross || Math.abs(currentGross - gross) > 0.02;
       if (shouldRepair) {
-        await this.update(id, { vat_price: vat, gross_price: gross, items } as any);
+        await this.update(id, { vat_price: vat, gross_price: gross, items } as Partial<PurchaseInvoice>);
       }
     }
     return this.confirm(id);

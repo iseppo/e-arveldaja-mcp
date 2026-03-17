@@ -4,7 +4,7 @@ import { BaseResource, cache } from "./base-resource.js";
 
 export class JournalsApi extends BaseResource<Journal> {
   constructor(client: HttpClient) {
-    super(client, "/journals", "journals_id");
+    super(client, "/journals");
   }
 
   /**
@@ -45,6 +45,11 @@ export class JournalsApi extends BaseResource<Journal> {
   async confirm(id: number): Promise<ApiResponse> {
     this.invalidateCache();
     return this.client.patch<ApiResponse>(`/journals/${id}/register`, {});
+  }
+
+  async invalidate(id: number): Promise<ApiResponse> {
+    this.invalidateCache();
+    return this.client.patch<ApiResponse>(`/journals/${id}/invalidate`, {});
   }
 
   async getDocument(id: number): Promise<ApiFile> {

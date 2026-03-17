@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
 import type { Journal } from "../types/api.js";
+import { roundMoney } from "../money.js";
+import { readOnly } from "../annotations.js";
 
 interface BalanceDetail {
   journal_id: number;
@@ -12,6 +14,14 @@ interface BalanceDetail {
   client_id?: number | null;
 }
 
+interface AccountBalanceResult {
+  account?: { id: number; name_est: string; name_eng: string; balance_type: string };
+  balance: number;
+  debitTotal: number;
+  creditTotal: number;
+  entries: BalanceDetail[];
+}
+
 async function computeAccountBalance(
   api: ApiContext,
   accountId: number,
@@ -19,8 +29,11 @@ async function computeAccountBalance(
   dateFrom?: string,
   dateTo?: string,
   preloadedJournals?: Journal[]
-): Promise<{ balance: number; debitTotal: number; creditTotal: number; entries: BalanceDetail[] }> {
-  const allJournals = preloadedJournals ?? await api.journals.listAllWithPostings();
+): Promise<AccountBalanceResult> {
+  const [allJournals, account] = await Promise.all([
+    preloadedJournals ?? api.journals.listAllWithPostings(),
+    api.readonly.getAccount(accountId),
+  ]);
 
   let debitTotal = 0;
   let creditTotal = 0;
@@ -60,8 +73,6 @@ async function computeAccountBalance(
     }
   }
 
-  // Get account to determine balance type
-  const account = await api.readonly.getAccount(accountId);
   const balanceType = account?.balance_type ?? "D";
 
   // For D-type accounts (assets, expenses): balance = debit - credit
@@ -73,7 +84,13 @@ async function computeAccountBalance(
   // Sort by date
   entries.sort((a, b) => a.date.localeCompare(b.date));
 
-  return { balance, debitTotal, creditTotal, entries };
+  return {
+    account: account ? { id: account.id, name_est: account.name_est, name_eng: account.name_eng, balance_type: account.balance_type } : undefined,
+    balance,
+    debitTotal,
+    creditTotal,
+    entries,
+  };
 }
 
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
@@ -90,17 +107,17 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
       include_entries: z.boolean().optional().describe("Include individual entries in response (default false)"),
     },
+    readOnly,
     async ({ account_id, client_id, date_from, date_to, include_entries }) => {
       const result = await computeAccountBalance(api, account_id, client_id, date_from, date_to);
 
-      const account = await api.readonly.getAccount(account_id);
       const summary = {
         account_id,
-        account_name: account ? `${account.name_est} / ${account.name_eng}` : "Unknown",
-        balance_type: account?.balance_type ?? "?",
-        balance: Math.round(result.balance * 100) / 100,
-        debit_total: Math.round(result.debitTotal * 100) / 100,
-        credit_total: Math.round(result.creditTotal * 100) / 100,
+        account_name: result.account ? `${result.account.name_est} / ${result.account.name_eng}` : "Unknown",
+        balance_type: result.account?.balance_type ?? "?",
+        balance: roundMoney(result.balance),
+        debit_total: roundMoney(result.debitTotal),
+        credit_total: roundMoney(result.creditTotal),
         entry_count: result.entries.length,
         ...(client_id !== undefined && { client_id }),
         ...(date_from && { date_from }),
@@ -120,6 +137,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       client_id: z.number().describe("Client ID"),
       account_ids: z.string().optional().describe("Comma-separated account IDs to check (default: 2110,2310,1210)"),
     },
+    readOnly,
     async ({ client_id, account_ids }) => {
       const ids = account_ids
         ? account_ids.split(",").map(s => parseInt(s.trim()))
@@ -130,18 +148,17 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
 
       const results = [];
       for (const accountId of ids) {
-        const { balance, debitTotal, creditTotal, entries } = await computeAccountBalance(
+        const r = await computeAccountBalance(
           api, accountId, client_id, undefined, undefined, allJournals
         );
-        const account = await api.readonly.getAccount(accountId);
         results.push({
           account_id: accountId,
-          account_name: account ? account.name_est : "Unknown",
-          balance_type: account?.balance_type,
-          balance: Math.round(balance * 100) / 100,
-          debit_total: Math.round(debitTotal * 100) / 100,
-          credit_total: Math.round(creditTotal * 100) / 100,
-          entry_count: entries.length,
+          account_name: r.account?.name_est ?? "Unknown",
+          balance_type: r.account?.balance_type,
+          balance: roundMoney(r.balance),
+          debit_total: roundMoney(r.debitTotal),
+          credit_total: roundMoney(r.creditTotal),
+          entry_count: r.entries.length,
         });
       }
 
@@ -160,9 +177,9 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
             client_id,
             accounts: results,
             summary: {
-              total_debt_to_client: Math.round(totalDebt * 100) / 100,
-              total_receivable_from_client: Math.round(totalReceivable * 100) / 100,
-              net_position: Math.round((totalReceivable - totalDebt) * 100) / 100,
+              total_debt_to_client: roundMoney(totalDebt),
+              total_receivable_from_client: roundMoney(totalReceivable),
+              net_position: roundMoney(totalReceivable - totalDebt),
             },
           }, null, 2),
         }],

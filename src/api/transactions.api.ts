@@ -4,7 +4,7 @@ import { BaseResource } from "./base-resource.js";
 
 export class TransactionsApi extends BaseResource<Transaction> {
   constructor(client: HttpClient) {
-    super(client, "/transactions", "transactions_id");
+    super(client, "/transactions");
   }
 
   /**

@@ -4,7 +4,7 @@ import { BaseResource } from "./base-resource.js";
 
 export class ClientsApi extends BaseResource<Client> {
   constructor(client: HttpClient) {
-    super(client, "/clients", "clients_id");
+    super(client, "/clients");
   }
 
   async deactivate(id: number): Promise<ApiResponse> {

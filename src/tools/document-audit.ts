@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import { readOnly } from "../annotations.js";
 
 export function registerDocumentAuditTools(server: McpServer, api: ApiContext): void {
 
@@ -12,6 +13,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
     },
+    readOnly,
     async ({ date_from, date_to }) => {
       // Journals without documents
       const allJournals = await api.journals.listAll();
@@ -92,6 +94,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       date_from: z.string().optional().describe("Start date"),
       date_to: z.string().optional().describe("End date"),
     },
+    readOnly,
     async ({ clients_id, date_from, date_to }) => {
       const allPurchases = await api.purchaseInvoices.listAll();
 

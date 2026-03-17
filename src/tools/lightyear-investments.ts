@@ -3,6 +3,8 @@ import { z } from "zod";
 import { readFile } from "fs/promises";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
+import { roundMoney } from "../money.js";
+import { readOnly, batch } from "../annotations.js";
 
 const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -413,6 +415,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
     },
+    readOnly,
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);
@@ -446,7 +449,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             const tradeFeeEur = t.fee_eur > 0 && t.fx_rate ? t.fee_eur / t.fx_rate : t.fee_eur;
             return s + t.eur_amount + tradeFeeEur;
           }, 0) * 100) / 100,
-          total_sold_eur: Math.round(sells.reduce((s, t) => s + t.eur_amount, 0) * 100) / 100,
+          total_sold_eur: roundMoney(sells.reduce((s, t) => s + t.eur_amount, 0)),
         };
       }
 
@@ -474,15 +477,15 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             },
             deposits: {
               count: deposits.length,
-              total_eur: Math.round(deposits.reduce((s, r) => s + r.gross_amount, 0) * 100) / 100,
+              total_eur: roundMoney(deposits.reduce((s, r) => s + r.gross_amount, 0)),
             },
             withdrawals: {
               count: withdrawals.length,
-              total_eur: Math.round(withdrawals.reduce((s, r) => s + Math.abs(r.gross_amount), 0) * 100) / 100,
+              total_eur: roundMoney(withdrawals.reduce((s, r) => s + Math.abs(r.gross_amount), 0)),
             },
             rewards: {
               count: rewards.length,
-              total_eur: Math.round(rewards.reduce((s, r) => s + r.gross_amount, 0) * 100) / 100,
+              total_eur: roundMoney(rewards.reduce((s, r) => s + r.gross_amount, 0)),
             },
             ...(warnings.length > 0 && { warnings }),
             note: "Review trades and use book_lightyear_trades to create journal entries. " +
@@ -499,6 +502,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear CapitalGainsStatement CSV file"),
     },
+    readOnly,
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const gains = parseCapitalGains(csv);
@@ -518,16 +522,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               isin: g.isin,
               country: g.country,
               quantity: g.quantity,
-              cost_basis_eur: Math.round(g.cost_basis_eur * 100) / 100,
-              proceeds_eur: Math.round(g.proceeds_eur * 100) / 100,
-              capital_gains_eur: Math.round(g.capital_gains_eur * 100) / 100,
+              cost_basis_eur: roundMoney(g.cost_basis_eur),
+              proceeds_eur: roundMoney(g.proceeds_eur),
+              capital_gains_eur: roundMoney(g.capital_gains_eur),
               fees_eur: g.fees_eur,
             })),
             totals: {
-              cost_basis_eur: Math.round(totalCostBasis * 100) / 100,
-              proceeds_eur: Math.round(totalProceeds * 100) / 100,
-              capital_gains_eur: Math.round(totalGains * 100) / 100,
-              fees_eur: Math.round(gains.reduce((s, g) => s + g.fees_eur, 0) * 100) / 100,
+              cost_basis_eur: roundMoney(totalCostBasis),
+              proceeds_eur: roundMoney(totalProceeds),
+              capital_gains_eur: roundMoney(totalGains),
+              fees_eur: roundMoney(gains.reduce((s, g) => s + g.fees_eur, 0)),
             },
             note: "Capital gains calculated using FIFO method.",
           }, null, 2),
@@ -554,6 +558,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
+    batch,
     async ({ file_path, capital_gains_file, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
       const isDryRun = dry_run !== false;
       const skipSet = new Set(
@@ -648,13 +653,13 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         // eur_amount (from EUR conversion gross) already includes FX fee.
         // Only trade.fee_eur is an additional cost (converted to EUR for foreign trades).
         const tradeFeeEur = trade.fee_eur > 0 && trade.fx_rate
-          ? Math.round((trade.fee_eur / trade.fx_rate) * 100) / 100
+          ? roundMoney(trade.fee_eur / trade.fx_rate)
           : trade.fee_eur;
         const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
 
         if (trade.type === "Buy") {
           // totalCostEur = EUR conversion gross (includes FX fee) + trade fee in EUR
-          const totalCostEur = Math.round((trade.eur_amount + tradeFeeEur) * 100) / 100;
+          const totalCostEur = roundMoney(trade.eur_amount + tradeFeeEur);
 
           if (fee_account && tradeFeeEur > 0) {
             postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: trade.eur_amount });
@@ -696,9 +701,9 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             continue;
           }
 
-          const costBasis = Math.round(gainEntry.cost_basis_eur * 100) / 100;
-          const proceeds = Math.round(gainEntry.proceeds_eur * 100) / 100;
-          const gainLoss = Math.round(gainEntry.capital_gains_eur * 100) / 100;
+          const costBasis = roundMoney(gainEntry.cost_basis_eur);
+          const proceeds = roundMoney(gainEntry.proceeds_eur);
+          const gainLoss = roundMoney(gainEntry.capital_gains_eur);
 
           // Dr broker_account: proceeds (what we receive)
           // Cr investment_account: cost_basis (what we originally paid)
@@ -843,6 +848,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       fee_account: z.number().optional().describe("Platform fee expense account (default 8610 Muud finantskulud)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
+    batch,
     async ({ file_path, broker_account, broker_dimension_id, income_account, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
       const fee_account = fee_account_param ?? 8610;
@@ -993,6 +999,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
     },
+    readOnly,
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);
@@ -1069,12 +1076,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           ticker: h.ticker,
           isin: h.isin,
           quantity_held: qtyHeld,
-          remaining_cost_eur: Math.round(h.total_cost_eur * 100) / 100,
+          remaining_cost_eur: roundMoney(h.total_cost_eur),
           avg_cost_per_unit: qtyHeld > 0.000001
-            ? Math.round((h.total_cost_eur / h.quantity) * 100) / 100
+            ? roundMoney(h.total_cost_eur / h.quantity)
             : null,
-          total_proceeds_eur: Math.round(h.total_proceeds_eur * 100) / 100,
-          realized_gain_loss_eur: Math.round(h.realized_gain_loss_eur * 100) / 100,
+          total_proceeds_eur: roundMoney(h.total_proceeds_eur),
+          realized_gain_loss_eur: roundMoney(h.realized_gain_loss_eur),
           buys: h.buy_count,
           sells: h.sell_count,
           fully_sold: Math.abs(h.quantity) < 0.000001,
@@ -1092,8 +1099,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             closed_positions: closed,
             totals: {
               active_positions: active.length,
-              total_remaining_cost_eur: Math.round(active.reduce((s, p) => s + p.remaining_cost_eur, 0) * 100) / 100,
-              total_realized_gain_loss_eur: Math.round(portfolio.reduce((s, p) => s + p.realized_gain_loss_eur, 0) * 100) / 100,
+              total_remaining_cost_eur: roundMoney(active.reduce((s, p) => s + p.remaining_cost_eur, 0)),
+              total_realized_gain_loss_eur: roundMoney(portfolio.reduce((s, p) => s + p.realized_gain_loss_eur, 0)),
               closed_positions: closed.length,
             },
             ...(portfolioWarnings.length > 0 && { warnings: portfolioWarnings }),

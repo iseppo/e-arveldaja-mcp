@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import { readOnly, batch } from "../annotations.js";
 
 interface MatchCandidate {
   type: "sale_invoice" | "purchase_invoice";
@@ -75,14 +76,14 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
     "Returns suggested matches with confidence scores and ready-to-use distribution data.",
     {
       min_confidence: z.number().optional().describe("Minimum confidence threshold 0-100 (default 50)"),
-      page: z.number().optional().describe("Transactions page to process (default 1)"),
     },
-    async ({ min_confidence, page }) => {
+    readOnly,
+    async ({ min_confidence }) => {
       const threshold = min_confidence ?? 50;
 
-      // Get unconfirmed transactions
-      const txPage = await api.transactions.list({ page: page ?? 1 });
-      const unconfirmed = txPage.items.filter(tx => tx.status !== "CONFIRMED" && !tx.is_deleted);
+      // Get all unconfirmed transactions
+      const allTx = await api.transactions.listAll();
+      const unconfirmed = allTx.filter(tx => tx.status !== "CONFIRMED" && !tx.is_deleted);
 
       // Get unpaid invoices (including partially paid)
       const allSales = await api.saleInvoices.listAll();
@@ -186,6 +187,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),
       min_confidence: z.number().optional().describe("Minimum confidence (default 90)"),
     },
+    batch,
     async ({ execute, min_confidence }) => {
       const threshold = min_confidence ?? 90;
       const dryRun = execute !== true;

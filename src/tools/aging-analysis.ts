@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import { roundMoney } from "../money.js";
+import { readOnly } from "../annotations.js";
 
 interface AgingBucket {
   label: string;
@@ -39,6 +41,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
     {
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },
+    readOnly,
     async ({ as_of_date }) => {
       const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
       const usesDefaultUtcDate = !as_of_date;
@@ -65,7 +68,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
           id: inv.id!,
           number: inv.number ?? "",
           client: inv.client_name ?? "",
-          amount: Math.round(amount * 100) / 100,
+          amount: roundMoney(amount),
           payment_status: inv.payment_status ?? "NOT_PAID",
           days_overdue: Math.max(0, daysOverdue),
         });
@@ -77,7 +80,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
         byClient.set(inv.clients_id, clientEntry);
       }
 
-      const r = (n: number) => Math.round(n * 100) / 100;
+      const r = roundMoney;
       const order = ["current", "1-30", "31-60", "61-90", "90+"];
       const sortedBuckets = order
         .map(label => buckets.get(label))
@@ -120,6 +123,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
     {
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },
+    readOnly,
     async ({ as_of_date }) => {
       const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
       const usesDefaultUtcDate = !as_of_date;
@@ -146,7 +150,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
           id: inv.id!,
           number: inv.number,
           client: inv.client_name,
-          amount: Math.round(amount * 100) / 100,
+          amount: roundMoney(amount),
           payment_status: inv.payment_status ?? "NOT_PAID",
           days_overdue: Math.max(0, daysOverdue),
         });
@@ -158,7 +162,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
         bySupplier.set(inv.clients_id, supplierEntry);
       }
 
-      const r = (n: number) => Math.round(n * 100) / 100;
+      const r = roundMoney;
       const order = ["current", "1-30", "31-60", "61-90", "90+"];
       const sortedBuckets = order
         .map(label => buckets.get(label))

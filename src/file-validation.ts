@@ -1,18 +1,22 @@
 import { stat, realpath } from "fs/promises";
 import { resolve, extname, isAbsolute } from "path";
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
 
 /**
  * Allowed root directories for file reads. Configurable via EARVELDAJA_ALLOWED_PATHS
  * (colon-separated list). Defaults to $HOME and /tmp.
+ * Roots are resolved through symlinks so that the check works even if
+ * e.g. /tmp is a symlink to /private/tmp (macOS).
  */
 function getAllowedRoots(): string[] {
-  const envPaths = process.env.EARVELDAJA_ALLOWED_PATHS;
-  if (envPaths) {
-    return envPaths.split(":").map(p => resolve(p));
-  }
-  return [homedir(), "/tmp"];
+  const raw = process.env.EARVELDAJA_ALLOWED_PATHS
+    ? process.env.EARVELDAJA_ALLOWED_PATHS.split(":").map(p => resolve(p))
+    : [homedir(), "/tmp"];
+
+  return raw.map(root => {
+    try { return realpathSync(root); } catch { return root; }
+  });
 }
 
 /**

@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
 import { computeAllBalances } from "./financial-statements.js";
+import { roundMoney } from "../money.js";
+import { create } from "../annotations.js";
 
 async function validateAccounts(api: ApiContext, ...accountIds: number[]): Promise<string[]> {
   const accounts = await api.readonly.getAccounts();
@@ -44,7 +46,7 @@ async function computeRetainedEarningsBalance(api: ApiContext, accountId: number
   }
 
   // Retained earnings is a C-type account: balance = credit - debit
-  return Math.round((credit - debit) * 100) / 100;
+  return roundMoney(credit - debit);
 }
 
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
@@ -64,6 +66,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default 3000)"),
       force: z.boolean().optional().describe("Create journal even if retained earnings are insufficient (default false)"),
     },
+    create,
     async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, share_capital_account, force }) => {
       const retainedAccount = retained_earnings_account ?? 3020;
       const payableAccount = dividend_payable_account ?? 2370;
@@ -87,7 +90,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
 
       // Estonian CIT rate on dividends: 22/78 of net dividend
       const taxRate = 22 / 78;
-      const cit = Math.round(net_dividend * taxRate * 100) / 100;
+      const cit = roundMoney(net_dividend * taxRate);
       const grossDividend = net_dividend + cit;
 
       // Check retained earnings balance
@@ -101,16 +104,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               text: JSON.stringify({
                 error: "Insufficient retained earnings",
                 retained_earnings_balance: retainedBalance,
-                gross_dividend_required: Math.round(grossDividend * 100) / 100,
-                shortfall: Math.round((grossDividend - retainedBalance) * 100) / 100,
-                calculation: { net_dividend, cit_rate: "22/78", cit_amount: cit, gross_dividend: Math.round(grossDividend * 100) / 100 },
+                gross_dividend_required: roundMoney(grossDividend),
+                shortfall: roundMoney(grossDividend - retainedBalance),
+                calculation: { net_dividend, cit_rate: "22/78", cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
                 hint: "Distribution may be unlawful per ÄS § 157. Set force=true to create the journal anyway.",
               }, null, 2),
             }],
           };
         }
         warnings.push(
-          `Retained earnings balance (${retainedBalance} EUR) is less than gross dividend (${Math.round(grossDividend * 100) / 100} EUR). ` +
+          `Retained earnings balance (${retainedBalance} EUR) is less than gross dividend (${roundMoney(grossDividend)} EUR). ` +
           `Verify that distribution is lawful per ÄS § 157. Journal created because force=true.`
         );
       }
@@ -123,9 +126,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         .filter(balance => balance.account_type_est === "Kohustused")
         .reduce((sum, balance) => sum + (balance.balance_type === "C" ? balance.balance : -balance.balance), 0);
       const shareCapital = balances.find(balance => balance.account_id === shareCapitalAccount)?.balance ?? 0;
-      const netAssetsBeforeDistribution = Math.round((totalAssets - totalLiabilities) * 100) / 100;
-      const netAssetsAfterDistribution = Math.round((netAssetsBeforeDistribution - grossDividend) * 100) / 100;
-      const roundedShareCapital = Math.round(shareCapital * 100) / 100;
+      const netAssetsBeforeDistribution = roundMoney(totalAssets - totalLiabilities);
+      const netAssetsAfterDistribution = roundMoney(netAssetsBeforeDistribution - grossDividend);
+      const roundedShareCapital = roundMoney(shareCapital);
 
       if (netAssetsAfterDistribution < roundedShareCapital - 0.01) {
         warnings.push(
@@ -160,7 +163,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               net_dividend,
               cit_rate: "22/78",
               cit_amount: cit,
-              gross_dividend: Math.round(grossDividend * 100) / 100,
+              gross_dividend: roundMoney(grossDividend),
             },
             retained_earnings_check: {
               account: retainedAccount,
@@ -169,7 +172,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             },
             net_assets_check: {
               net_assets_before_distribution: netAssetsBeforeDistribution,
-              gross_dividend: Math.round(grossDividend * 100) / 100,
+              gross_dividend: roundMoney(grossDividend),
               net_assets_after_distribution: netAssetsAfterDistribution,
               share_capital_account: shareCapitalAccount,
               share_capital: roundedShareCapital,
@@ -207,6 +210,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       payable_account: z.number().optional().describe("Payable to owner account (default 2110)"),
       document_number: z.string().optional().describe("Receipt/document number"),
     },
+    create,
     async ({ owner_client_id, effective_date, description, net_amount, vat_rate, vat_amount, expense_account, vat_account, payable_account, document_number }) => {
       const vatRegistered = await isCompanyVatRegistered(api);
       const vatAcc = vat_account ?? 1510;
@@ -214,7 +218,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
 
       // Validate all accounts exist
       const accountsToCheck = [expense_account, payAcc];
-      const vat = vat_amount ?? Math.round(net_amount * vat_rate * 100) / 100;
+      const vat = vat_amount ?? roundMoney(net_amount * vat_rate);
       if (vat > 0 && vatRegistered) accountsToCheck.push(vatAcc);
 
       const accountErrors = await validateAccounts(api, ...accountsToCheck);
@@ -231,7 +235,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         };
       }
 
-      const total = Math.round((net_amount + vat) * 100) / 100;
+      const total = roundMoney(net_amount + vat);
       const expenseDebit = vatRegistered ? net_amount : total;
 
       const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [

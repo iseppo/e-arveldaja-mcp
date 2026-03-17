@@ -1,6 +1,7 @@
 import type { HttpClient } from "../http-client.js";
 import type { ApiResponse, PaginatedResponse } from "../types/api.js";
 import { Cache } from "../cache.js";
+import { log } from "../logger.js";
 
 export const cache = new Cache(300);
 
@@ -13,7 +14,6 @@ export class BaseResource<T> {
   constructor(
     protected client: HttpClient,
     protected basePath: string,
-    protected idParam: string
   ) {}
 
   protected cacheKey(key: string): string {
@@ -49,6 +49,9 @@ export class BaseResource<T> {
       const response = await this.list({ ...params, page });
       allItems.push(...response.items);
       totalPages = response.total_pages;
+      if (totalPages > 1 && page === 1) {
+        log("info", `${this.basePath}: fetching ${totalPages} pages...`);
+      }
       page++;
     } while (page <= totalPages);
 

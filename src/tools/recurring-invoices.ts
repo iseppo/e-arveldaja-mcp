@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice } from "../types/api.js";
+import { batch } from "../annotations.js";
 
 export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext): void {
 
@@ -16,6 +17,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
       invoice_ids: z.string().optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
       auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
     },
+    batch,
     async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm }) => {
       // Get source invoices
       const allSales = await api.saleInvoices.listAll();
@@ -51,6 +53,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             clients_id: full.clients_id,
             cl_countries_id: full.cl_countries_id,
             number_prefix: full.number_prefix,
+            number_suffix: "", // empty = auto-assigned by invoice series
             create_date: target_date,
             journal_date: target_journal_date,
             term_days: full.term_days,

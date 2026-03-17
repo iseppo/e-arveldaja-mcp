@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import { roundMoney } from "../money.js";
+import { readOnly } from "../annotations.js";
 
 interface AccountBalance {
   account_id: number;
@@ -63,9 +65,9 @@ export async function computeAllBalances(
       name_eng: account.name_eng,
       balance_type: account.balance_type,
       account_type_est: account.account_type_est,
-      debit_total: Math.round(entry.debit * 100) / 100,
-      credit_total: Math.round(entry.credit * 100) / 100,
-      balance: Math.round(balance * 100) / 100,
+      debit_total: roundMoney(entry.debit),
+      credit_total: roundMoney(entry.credit),
+      balance: roundMoney(balance),
     });
   }
 
@@ -104,6 +106,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       date_from: z.string().optional().describe("Period start (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Period end (YYYY-MM-DD)"),
     },
+    readOnly,
     async ({ date_from, date_to }) => {
       const balances = await computeAllBalances(api, date_from, date_to);
 
@@ -117,9 +120,9 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             period: { from: date_from ?? "inception", to: date_to ?? "now" },
             accounts: balances,
             totals: {
-              debit: Math.round(totalDebit * 100) / 100,
-              credit: Math.round(totalCredit * 100) / 100,
-              difference: Math.round((totalDebit - totalCredit) * 100) / 100,
+              debit: roundMoney(totalDebit),
+              credit: roundMoney(totalCredit),
+              difference: roundMoney(totalDebit - totalCredit),
             },
             account_count: balances.length,
           }, null, 2),
@@ -134,6 +137,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     {
       date_to: z.string().optional().describe("Balance sheet date (YYYY-MM-DD, default: today)"),
     },
+    readOnly,
     async ({ date_to }) => {
       const balances = await computeAllBalances(api, undefined, date_to);
 
@@ -156,7 +160,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       const warnings: string[] = [];
       if (Math.abs(currentYearPL) > 0.01) {
         warnings.push(
-          `Open P&L accounts show ${Math.round(currentYearPL * 100) / 100} EUR net profit. ` +
+          `Open P&L accounts show ${roundMoney(currentYearPL)} EUR net profit. ` +
           `This amount is included in equity for the balance check and should normally be closed into equity at year-end.`
         );
       }
@@ -168,25 +172,25 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             date: date_to ?? "current",
             assets: {
               items: assets.map(a => ({ id: a.account_id, name: a.name_est, balance: a.balance })),
-              total: Math.round(totalAssets * 100) / 100,
+              total: roundMoney(totalAssets),
             },
             liabilities: {
               items: liabilities.map(a => ({ id: a.account_id, name: a.name_est, balance: a.balance })),
-              total: Math.round(totalLiabilities * 100) / 100,
+              total: roundMoney(totalLiabilities),
             },
             equity: {
               items: equity.map(a => ({ id: a.account_id, name: a.name_est, balance: a.balance })),
-              total: Math.round(totalEquityWithCurrentYearPL * 100) / 100,
+              total: roundMoney(totalEquityWithCurrentYearPL),
             },
             current_year_pl: {
-              revenue: Math.round(totalRevenue * 100) / 100,
-              expenses: Math.round(totalExpenses * 100) / 100,
-              net_profit: Math.round(currentYearPL * 100) / 100,
+              revenue: roundMoney(totalRevenue),
+              expenses: roundMoney(totalExpenses),
+              net_profit: roundMoney(currentYearPL),
               note: "Included in equity total and balance check.",
             },
             check: {
-              assets: Math.round(totalAssets * 100) / 100,
-              liabilities_plus_equity: Math.round((totalLiabilities + totalEquityWithCurrentYearPL) * 100) / 100,
+              assets: roundMoney(totalAssets),
+              liabilities_plus_equity: roundMoney(totalLiabilities + totalEquityWithCurrentYearPL),
               balanced: Math.abs(totalAssets - totalLiabilities - totalEquityWithCurrentYearPL) < 0.01,
             },
             ...(warnings.length > 0 && { warnings }),
@@ -203,6 +207,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       date_from: z.string().describe("Period start (YYYY-MM-DD)"),
       date_to: z.string().describe("Period end (YYYY-MM-DD)"),
     },
+    readOnly,
     async ({ date_from, date_to }) => {
       const balances = await computeAllBalances(api, date_from, date_to);
 
@@ -219,13 +224,13 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             period: { from: date_from, to: date_to },
             revenue: {
               items: revenue.map(a => ({ id: a.account_id, name: a.name_est, amount: a.balance })),
-              total: Math.round(totalRevenue * 100) / 100,
+              total: roundMoney(totalRevenue),
             },
             expenses: {
               items: expenses.map(a => ({ id: a.account_id, name: a.name_est, amount: a.balance })),
-              total: Math.round(totalExpenses * 100) / 100,
+              total: roundMoney(totalExpenses),
             },
-            net_profit: Math.round((totalRevenue - totalExpenses) * 100) / 100,
+            net_profit: roundMoney(totalRevenue - totalExpenses),
           }, null, 2),
         }],
       };
@@ -238,6 +243,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     {
       month: z.string().describe("Month to check (YYYY-MM, e.g. 2026-02)"),
     },
+    readOnly,
     async ({ month }) => {
       const dateFrom = `${month}-01`;
       const lastDay = getMonthLastDay(month);
@@ -332,7 +338,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             overdue_receivables: {
               count: overdueReceivables.length,
-              total: Math.round(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0) * 100) / 100,
+              total: roundMoney(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0)),
               items: overdueReceivables.slice(0, 10).map((inv: SaleInvoice) => ({
                 id: inv.id,
                 number: inv.number,
@@ -343,7 +349,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             overdue_payables: {
               count: overduePayables.length,
-              total: Math.round(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0) * 100) / 100,
+              total: roundMoney(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0)),
               items: overduePayables.slice(0, 10).map((inv: PurchaseInvoice) => ({
                 id: inv.id,
                 number: inv.number,

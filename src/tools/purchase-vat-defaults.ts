@@ -1,5 +1,6 @@
 import type { PurchaseArticle, PurchaseInvoiceItem } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
+import { log } from "../logger.js";
 
 const VAT_REGISTERED_FALLBACK = {
   vat_accounts_id: 1510,
@@ -27,7 +28,7 @@ interface PurchaseVatDefaults {
 function warnFallbackOnce(key: string, message: string): void {
   if (warnedFallbackKeys.has(key)) return;
   warnedFallbackKeys.add(key);
-  console.warn(message);
+  log("warning", `WARNING: ${message}`);
 }
 
 function toNumber(value: unknown): number | undefined {
@@ -36,7 +37,7 @@ function toNumber(value: unknown): number | undefined {
 
 function normalizeVatRate(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
-    return Number.isInteger(value) ? String(value) : String(value);
+    return String(value);
   }
   if (typeof value !== "string") return undefined;
 
@@ -47,7 +48,7 @@ function normalizeVatRate(value: unknown): string | undefined {
   const normalized = trimmed.replace(",", ".");
   const parsed = Number(normalized);
   if (!Number.isFinite(parsed)) return trimmed;
-  return Number.isInteger(parsed) ? String(parsed) : String(parsed);
+  return String(parsed);
 }
 
 function extractVatDefaults(article?: PurchaseArticleWithVat): PurchaseVatDefaults {

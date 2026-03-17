@@ -25,6 +25,11 @@ import { registerDocumentAuditTools } from "./tools/document-audit.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
 import { registerResources } from "./resources/static-resources.js";
+import { registerDynamicResources } from "./resources/dynamic-resources.js";
+import { registerPrompts } from "./prompts.js";
+import { toolError } from "./tool-error.js";
+import { setLogger } from "./logger.js";
+import { readOnly, mutate } from "./annotations.js";
 
 interface ConnectionState {
   activeIndex: number;
@@ -112,7 +117,7 @@ async function main() {
 
   const server = new McpServer({
     name: "e-arveldaja",
-    version: "1.0.0",
+    version: "0.2.1",
     description: "EXPERIMENTAL, UNOFFICIAL MCP server for the Estonian e-arveldaja (e-Financials) API. " +
       "NOT affiliated with or endorsed by RIK. Use entirely at your own risk — " +
       "this software interacts with live financial data and can create, modify, and delete accounting records. " +
@@ -128,6 +133,7 @@ async function main() {
     "List all available e-arveldaja connections (API key files). " +
     "Shows which connection is currently active.",
     {},
+    readOnly,
     async () => {
       const connections = allConfigs.map((nc: NamedConfig, i: number) => ({
         index: i,
@@ -157,6 +163,7 @@ async function main() {
     {
       index: z.number().describe("Connection index from list_connections"),
     },
+    mutate,
     async ({ index }) => {
       if (index < 0 || index >= allConfigs.length) {
         return {
@@ -203,89 +210,74 @@ async function main() {
     }
   );
 
-  const originalTool = server.tool.bind(server) as any;
-  const wrapToolHandler = (handler: unknown) => {
-    if (typeof handler !== "function") {
-      return handler;
-    }
-
-    return async (...handlerArgs: unknown[]) => {
+  // Wrap server.tool to pin each handler to a connection snapshot via AsyncLocalStorage.
+  // The wrapper captures the active connection at invocation time, runs the handler
+  // inside that snapshot, and asserts the connection hasn't changed on return.
+  function wrapHandler<T extends (...args: any[]) => any>(handler: T): T {
+    return (async (...args: unknown[]) => {
       const snapshot = captureSnapshot(connectionState);
-      return invocationStorage.run(snapshot, async () => {
-        const result = await (handler as (...args: unknown[]) => Promise<unknown> | unknown)(...handlerArgs);
-        assertSnapshotCurrent(connectionState, snapshot);
-        return result;
-      });
-    };
-  };
+      try {
+        return await invocationStorage.run(snapshot, async () => {
+          const result = await handler(...args);
+          assertSnapshotCurrent(connectionState, snapshot);
+          return result;
+        });
+      } catch (error) {
+        return toolError(error);
+      }
+    }) as unknown as T;
+  }
 
-  (server as McpServer & { tool: typeof server.tool }).tool = ((...toolArgs: unknown[]) => {
-    if (toolArgs.length === 4) {
-      const [name, descriptionOrParamsSchema, paramsSchemaOrAnnotations, handler] = toolArgs;
-      return originalTool(
-        name,
-        descriptionOrParamsSchema,
-        paramsSchemaOrAnnotations,
-        wrapToolHandler(handler),
-      );
-    }
+  // Create a proxy that intercepts server.tool() calls and wraps the last function argument.
+  // This is forward-compatible with any overload signature the SDK may add.
+  const scopedServer = new Proxy(server, {
+    get(target, prop, receiver) {
+      if (prop !== "tool") return Reflect.get(target, prop, receiver);
+      return (...toolArgs: unknown[]) => {
+        // The handler is always the last argument and always a function
+        const lastIdx = toolArgs.length - 1;
+        if (lastIdx >= 0 && typeof toolArgs[lastIdx] === "function") {
+          toolArgs[lastIdx] = wrapHandler(toolArgs[lastIdx] as any);
+        }
+        return (target.tool as any)(...toolArgs);
+      };
+    },
+  }) as McpServer;
 
-    if (toolArgs.length === 3) {
-      const [name, descriptionOrParamsSchema, handler] = toolArgs;
-      return originalTool(
-        name,
-        descriptionOrParamsSchema,
-        wrapToolHandler(handler),
-      );
-    }
-
-    if (toolArgs.length === 5) {
-      const [name, description, paramsSchema, annotations, handler] = toolArgs;
-      return originalTool(
-        name,
-        description,
-        paramsSchema,
-        annotations,
-        wrapToolHandler(handler),
-      );
-    }
-
-    if (toolArgs.length === 2) {
-      const [name, handler] = toolArgs;
-      return originalTool(
-        name,
-        wrapToolHandler(handler),
-      );
-    }
-
-    return originalTool(...toolArgs);
-  }) as typeof server.tool;
-
-  // Register all tools
-  registerCrudTools(server, api);
-  registerAccountBalanceTools(server, api);
-  registerPdfWorkflowTools(server, api);
-  registerBankReconciliationTools(server, api);
-  registerFinancialStatementTools(server, api);
-  registerAgingTools(server, api);
-  registerRecurringInvoiceTools(server, api);
-  registerEstonianTaxTools(server, api);
-  registerDocumentAuditTools(server, api);
-  registerLightyearTools(server, api);
-  registerWiseImportTools(server, api);
+  // Register all tools (via scopedServer so handlers get connection-pinned)
+  registerCrudTools(scopedServer, api);
+  registerAccountBalanceTools(scopedServer, api);
+  registerPdfWorkflowTools(scopedServer, api);
+  registerBankReconciliationTools(scopedServer, api);
+  registerFinancialStatementTools(scopedServer, api);
+  registerAgingTools(scopedServer, api);
+  registerRecurringInvoiceTools(scopedServer, api);
+  registerEstonianTaxTools(scopedServer, api);
+  registerDocumentAuditTools(scopedServer, api);
+  registerLightyearTools(scopedServer, api);
+  registerWiseImportTools(scopedServer, api);
 
   // Register resources
   registerResources(server, api);
+  registerDynamicResources(server, api);
+
+  // Register prompts
+  registerPrompts(server);
 
   // Start server
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
+  // Route log output through MCP logging protocol
+  setLogger((level, message) => {
+    server.sendLoggingMessage({ level, data: message });
+  });
+
   const names = allConfigs.map(c => c.name).join(", ");
-  console.error(`e-arveldaja MCP server started (${allConfigs.length} connection(s): ${names})`);
+  process.stderr.write(`e-arveldaja MCP server started (${allConfigs.length} connection(s): ${names})\n`);
 }
 
 main().catch((err) => {
-  console.error("Fatal error:", err);
+  process.stderr.write(`Fatal error: ${err instanceof Error ? err.message : String(err)}\n`);
   process.exit(1);
 });
