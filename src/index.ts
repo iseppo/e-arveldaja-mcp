@@ -22,6 +22,7 @@ import { registerFinancialStatementTools } from "./tools/financial-statements.js
 import { registerAgingTools } from "./tools/aging-analysis.js";
 import { registerRecurringInvoiceTools } from "./tools/recurring-invoices.js";
 import { registerEstonianTaxTools } from "./tools/estonian-tax.js";
+import { registerAnnualReportTools } from "./tools/annual-report.js";
 import { registerDocumentAuditTools } from "./tools/document-audit.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
@@ -277,6 +278,7 @@ Reporting:
   registerAgingTools(scopedServer, api);
   registerRecurringInvoiceTools(scopedServer, api);
   registerEstonianTaxTools(scopedServer, api);
+  registerAnnualReportTools(scopedServer, api);
   registerDocumentAuditTools(scopedServer, api);
   registerLightyearTools(scopedServer, api);
   registerWiseImportTools(scopedServer, api);
