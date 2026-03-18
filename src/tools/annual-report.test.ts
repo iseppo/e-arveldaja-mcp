@@ -1,0 +1,215 @@
+import { describe, expect, it } from "vitest";
+import type { Account, Journal, Posting } from "../types/api.js";
+import type { ApiContext } from "./crud-tools.js";
+import { buildAnnualReportData } from "./annual-report.js";
+
+function makeAccount(overrides: Partial<Account> & Pick<Account,
+  "id" |
+  "balance_type" |
+  "account_type_est" |
+  "account_type_eng" |
+  "name_est" |
+  "name_eng"
+>): Account {
+  return {
+    id: overrides.id,
+    balance_type: overrides.balance_type,
+    account_type_est: overrides.account_type_est,
+    account_type_eng: overrides.account_type_eng,
+    name_est: overrides.name_est,
+    name_eng: overrides.name_eng,
+    is_valid: true,
+    allows_deactivation: true,
+    is_vat_account: false,
+    is_fixed_asset: false,
+    transaction_in_bindable: false,
+    cl_account_groups: [],
+    default_disabled: false,
+    transaction_in_user_bindable: false,
+    transaction_out_user_bindable: false,
+    is_product_account: false,
+    ...overrides,
+  };
+}
+
+function makePosting(accounts_id: number, type: "D" | "C", amount: number): Posting {
+  return { accounts_id, type, amount };
+}
+
+function makeJournal(
+  effective_date: string,
+  postings: Posting[],
+  overrides: Partial<Journal> = {},
+): Journal {
+  return {
+    effective_date,
+    registered: true,
+    postings,
+    ...overrides,
+  };
+}
+
+function createApi(journals: Journal[]): ApiContext {
+  const accounts: Account[] = [
+    makeAccount({
+      id: 1000,
+      balance_type: "D",
+      account_type_est: "Varad",
+      account_type_eng: "Assets",
+      name_est: "Pangakonto",
+      name_eng: "Bank account",
+    }),
+    makeAccount({
+      id: 3000,
+      balance_type: "C",
+      account_type_est: "Omakapital",
+      account_type_eng: "Equity",
+      name_est: "Osakapital",
+      name_eng: "Share capital",
+    }),
+    makeAccount({
+      id: 3100,
+      balance_type: "C",
+      account_type_est: "Omakapital",
+      account_type_eng: "Equity",
+      name_est: "Agio",
+      name_eng: "Share premium",
+    }),
+    makeAccount({
+      id: 3200,
+      balance_type: "C",
+      account_type_est: "Omakapital",
+      account_type_eng: "Equity",
+      name_est: "Eelmiste perioodide jaotamata kasum",
+      name_eng: "Retained earnings",
+    }),
+    makeAccount({
+      id: 3310,
+      balance_type: "C",
+      account_type_est: "Omakapital",
+      account_type_eng: "Equity",
+      name_est: "Aruandeaasta kasum",
+      name_eng: "Current year profit",
+    }),
+    makeAccount({
+      id: 3001,
+      balance_type: "C",
+      account_type_est: "Tulud",
+      account_type_eng: "Revenue",
+      name_est: "Müügitulu",
+      name_eng: "Sales revenue",
+    }),
+    makeAccount({
+      id: 5000,
+      balance_type: "D",
+      account_type_est: "Kulud",
+      account_type_eng: "Expenses",
+      name_est: "Mitmesugused tegevuskulud",
+      name_eng: "Operating expenses",
+    }),
+  ];
+
+  return {
+    readonly: {
+      getAccounts: async () => accounts,
+      getInvoiceInfo: async () => ({
+        invoice_company_name: "Test Co",
+        address: null,
+        email: null,
+        phone: null,
+        webpage: null,
+      }),
+      getVatInfo: async () => ({
+        vat_number: null,
+      }),
+    },
+    clients: {
+      listAll: async () => [],
+    },
+    saleInvoices: {
+      listAll: async () => [],
+    },
+    purchaseInvoices: {
+      listAll: async () => [],
+    },
+    journals: {
+      listAllWithPostings: async () => journals,
+    },
+  } as unknown as ApiContext;
+}
+
+function extractEquity(report: Record<string, unknown>) {
+  return ((report.balance_sheet as { equity: unknown }).equity as {
+    accounts: Array<{ label: string; amount: number; source_accounts: Array<{ account_id: number }> }>;
+    current_year_result: { amount: number; source_accounts: Array<{ account_id: number; amount: number }> };
+    total_equity: number;
+  });
+}
+
+describe("buildAnnualReportData", () => {
+  const baseJournals: Journal[] = [
+    makeJournal("2024-01-01", [
+      makePosting(1000, "D", 100),
+      makePosting(3000, "C", 100),
+    ]),
+    makeJournal("2024-12-31", [
+      makePosting(1000, "D", 50),
+      makePosting(3200, "C", 50),
+    ]),
+    makeJournal("2025-01-01", [
+      makePosting(1000, "D", 20),
+      makePosting(3100, "C", 20),
+    ]),
+    makeJournal("2025-06-01", [
+      makePosting(1000, "D", 60),
+      makePosting(3001, "C", 60),
+    ]),
+    makeJournal("2025-06-15", [
+      makePosting(5000, "D", 10),
+      makePosting(1000, "C", 10),
+    ]),
+  ];
+
+  it("includes all equity accounts dynamically before closing while keeping current-year profit separate", async () => {
+    const report = await buildAnnualReportData(createApi(baseJournals), 2025);
+    const equity = extractEquity(report);
+
+    expect(equity.accounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: "Osakapital", amount: 100 }),
+      expect.objectContaining({ label: "Agio", amount: 20 }),
+      expect.objectContaining({ label: "Eelmiste perioodide jaotamata kasum", amount: 50 }),
+    ]));
+    expect(equity.accounts.flatMap((line) => line.source_accounts.map((account) => account.account_id))).not.toContain(3310);
+    expect(equity.current_year_result.amount).toBe(50);
+    expect(equity.current_year_result.source_accounts).toEqual([]);
+    expect(equity.total_equity).toBe(220);
+  });
+
+  it("keeps the income statement populated after YECL close journals and surfaces 3310 in the equity section", async () => {
+    const closingJournal = makeJournal("2025-12-31", [
+      makePosting(3001, "D", 60),
+      makePosting(5000, "C", 10),
+      makePosting(3310, "C", 50),
+    ], {
+      document_number: "YECL-2025",
+      title: "Aasta lõppkanne 2025",
+    });
+
+    const report = await buildAnnualReportData(createApi([...baseJournals, closingJournal]), 2025);
+    const equity = extractEquity(report);
+    const incomeStatement = report.income_statement_schema_1 as {
+      aruandeaasta_puhaskasum: { amount: number };
+    };
+
+    expect(incomeStatement.aruandeaasta_puhaskasum.amount).toBe(50);
+    expect(equity.current_year_result.amount).toBe(50);
+    expect(equity.current_year_result.source_accounts).toEqual([
+      {
+        account_id: 3310,
+        name: "Aruandeaasta kasum",
+        amount: 50,
+      },
+    ]);
+    expect(equity.total_equity).toBe(220);
+  });
+});

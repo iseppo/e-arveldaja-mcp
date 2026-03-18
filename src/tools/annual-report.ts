@@ -305,6 +305,10 @@ function buildUnresolvedItems(
   };
 }
 
+function isYearEndClosingJournal(journal: Pick<Journal, "document_number">): boolean {
+  return journal.document_number?.startsWith("YECL-") ?? false;
+}
+
 function findExistingYearEndCloseJournals(allJournals: Journal[], year: number): Journal[] {
   const documentNumber = `YECL-${year}`;
   const yearEndDate = `${year}-12-31`;
@@ -316,6 +320,76 @@ function findExistingYearEndCloseJournals(allJournals: Journal[], year: number):
     const title = journal.title?.toLowerCase() ?? "";
     return titleNeedles.some((needle) => title.includes(needle));
   });
+}
+
+function computeBalancesFromLoadedJournals(
+  accounts: Account[],
+  allJournals: Journal[],
+  dateFrom?: string,
+  dateTo?: string,
+  includeJournal: (journal: Journal) => boolean = () => true,
+): AccountBalance[] {
+  const balances = new Map<number, { debit: number; credit: number }>();
+
+  for (const journal of allJournals) {
+    if (journal.is_deleted || !journal.registered) continue;
+    if (dateFrom && journal.effective_date < dateFrom) continue;
+    if (dateTo && journal.effective_date > dateTo) continue;
+    if (!includeJournal(journal)) continue;
+    if (!journal.postings) continue;
+
+    for (const posting of journal.postings) {
+      if (posting.is_deleted) continue;
+      if (posting.type !== "D" && posting.type !== "C") continue;
+
+      const amount = posting.base_amount ?? posting.amount;
+      const entry = balances.get(posting.accounts_id) ?? { debit: 0, credit: 0 };
+
+      if (posting.type === "D") entry.debit += amount;
+      else entry.credit += amount;
+
+      balances.set(posting.accounts_id, entry);
+    }
+  }
+
+  const result: AccountBalance[] = [];
+  for (const account of accounts) {
+    const entry = balances.get(account.id);
+    if (!entry) continue;
+
+    const balance = account.balance_type === "D"
+      ? entry.debit - entry.credit
+      : entry.credit - entry.debit;
+
+    if (Math.abs(balance) < 0.005 && entry.debit === 0 && entry.credit === 0) continue;
+
+    result.push({
+      account_id: account.id,
+      name_est: account.name_est,
+      name_eng: account.name_eng,
+      balance_type: account.balance_type,
+      account_type_est: account.account_type_est,
+      debit_total: roundMoney(entry.debit),
+      credit_total: roundMoney(entry.credit),
+      balance: roundMoney(balance),
+    });
+  }
+
+  result.sort((a, b) => a.account_id - b.account_id);
+  return result;
+}
+
+function buildBalanceLine(balance: AccountBalance): StatementLine {
+  const amount = roundMoney(statementAmount(balance));
+  return {
+    label: balance.name_est,
+    amount,
+    source_accounts: [{
+      account_id: balance.account_id,
+      name: balance.name_est,
+      amount,
+    }],
+  };
 }
 
 function buildClosingProposal(
@@ -616,7 +690,7 @@ function computeCashFlowClassification(
   return totals;
 }
 
-async function buildAnnualReportData(api: ApiContext, year: number): Promise<Record<string, unknown>> {
+export async function buildAnnualReportData(api: ApiContext, year: number): Promise<Record<string, unknown>> {
   const { from, to, priorTo } = getYearBounds(year);
 
   const [accounts, invoiceInfo, vatInfo, allClients, allSales, allPurchases, allJournals] = await Promise.all([
@@ -629,11 +703,15 @@ async function buildAnnualReportData(api: ApiContext, year: number): Promise<Rec
     api.journals.listAllWithPostings(),
   ]);
 
-  const [yearEndBalances, priorYearEndBalances, yearProfitAndLossBalances] = await Promise.all([
-    computeAllBalances(api, undefined, to),
-    computeAllBalances(api, undefined, priorTo),
-    computeAllBalances(api, from, to),
-  ]);
+  const yearEndBalances = computeBalancesFromLoadedJournals(accounts, allJournals, undefined, to);
+  const priorYearEndBalances = computeBalancesFromLoadedJournals(accounts, allJournals, undefined, priorTo);
+  const yearProfitAndLossBalances = computeBalancesFromLoadedJournals(
+    accounts,
+    allJournals,
+    from,
+    to,
+    (journal) => !isYearEndClosingJournal(journal),
+  );
 
   const accountsById = new Map(accounts.map((account) => [account.id, account]));
   const warnings: string[] = [];
@@ -665,14 +743,12 @@ async function buildAnnualReportData(api: ApiContext, year: number): Promise<Rec
   );
   const totalLiabilities = sumStatementBalances(yearEndBalances, (balance) => balance.account_type_est === "Kohustused");
 
-  const shareCapital = buildStatementLine("Osakapital", yearEndBalances, (balance) =>
-    balance.account_type_est === "Omakapital" && balance.account_id === 3000,
-  );
-  const reserveCapital = buildStatementLine("Kohustuslik reservkapital", yearEndBalances, (balance) =>
-    balance.account_type_est === "Omakapital" && balance.account_id === 3010,
-  );
-  const retainedEarnings = buildStatementLine("Eelmiste perioodide jaotamata kasum", yearEndBalances, (balance) =>
-    balance.account_type_est === "Omakapital" && balance.account_id === 3200,
+  const equityAccountLines = yearEndBalances
+    .filter((balance) => balance.account_type_est === "Omakapital" && balance.account_id !== 3310)
+    .map((balance) => buildBalanceLine(balance))
+    .filter((line) => Math.abs(line.amount) >= 0.01);
+  const currentYearProfitAccountLine = buildStatementLine("Aruandeaasta kasum", yearEndBalances, (balance) =>
+    balance.account_type_est === "Omakapital" && balance.account_id === 3310,
   );
 
   const revenueLine = buildStatementLine("Müügitulu", yearProfitAndLossBalances, (balance) =>
@@ -716,7 +792,8 @@ async function buildAnnualReportData(api: ApiContext, year: number): Promise<Rec
   const profitBeforeTax = roundMoney(operatingProfit + financialIncomeExpenseLine.amount);
   const netProfit = roundMoney(profitBeforeTax - incomeTaxLine.amount);
 
-  const totalEquity = roundMoney(shareCapital.amount + reserveCapital.amount + retainedEarnings.amount + netProfit);
+  const totalEquityFromAccounts = sumStatementBalances(yearEndBalances, (balance) => balance.account_type_est === "Omakapital");
+  const totalEquity = roundMoney(totalEquityFromAccounts - currentYearProfitAccountLine.amount + netProfit);
   const balanceDifference = roundMoney(totalAssets - totalLiabilities - totalEquity);
 
   const mappedProfitAndLossAccounts = getMappedAccountIds([
@@ -746,7 +823,15 @@ async function buildAnnualReportData(api: ApiContext, year: number): Promise<Rec
   if (Math.abs(balanceDifference) >= 0.01) {
     warnings.push(`Mapped balance sheet lines do not fully balance. Difference: ${balanceDifference} EUR.`);
   }
-  warnings.push("Account 3010 was mapped to 'Kohustuslik reservkapital' per the requested mapping, but company charts often use this account differently. Verify before filing.");
+  if (
+    Math.abs(currentYearProfitAccountLine.amount) >= 0.01 &&
+    Math.abs(currentYearProfitAccountLine.amount - netProfit) >= 0.01
+  ) {
+    warnings.push(
+      `Account 3310 balance (${currentYearProfitAccountLine.amount} EUR) differs from computed current-year result ` +
+      `(${netProfit} EUR). YECL-* journals were excluded from the income statement, so review whether a partial close was posted.`,
+    );
+  }
   warnings.push("Loan accounts were split between current and non-current liabilities using account-name heuristics and the 21xx fallback.");
 
   const openingCash = sumStatementBalances(priorYearEndBalances, (balance) =>
@@ -845,9 +930,7 @@ async function buildAnnualReportData(api: ApiContext, year: number): Promise<Rec
   const openingEquity = roundMoney(
     sumStatementBalances(priorYearEndBalances, (balance) => balance.account_type_est === "Omakapital"),
   );
-  const closingEquity = roundMoney(
-    sumStatementBalances(yearEndBalances, (balance) => balance.account_type_est === "Omakapital") + netProfit,
-  );
+  const closingEquity = totalEquity;
   const averageEquity = roundMoney((openingEquity + closingEquity) / 2);
 
   return {
@@ -879,13 +962,11 @@ async function buildAnnualReportData(api: ApiContext, year: number): Promise<Rec
         total_liabilities: totalLiabilities,
       },
       equity: {
-        osakapital: shareCapital,
-        kohustuslik_reservkapital: reserveCapital,
-        eelmiste_perioodide_jaotamata_kasum: retainedEarnings,
-        aruandeaasta_kasum: {
+        accounts: equityAccountLines,
+        current_year_result: {
           label: "Aruandeaasta kasum",
           amount: netProfit,
-          source_accounts: [] as StatementLine["source_accounts"],
+          source_accounts: currentYearProfitAccountLine.source_accounts,
         },
         total_equity: totalEquity,
       },

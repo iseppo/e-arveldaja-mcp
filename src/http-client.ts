@@ -41,8 +41,8 @@ export class HttpClient {
     await new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  private static shouldRetryStatus(status: number): boolean {
-    return status === 429 || status >= 500;
+  private static shouldRetryStatus(method: HttpMethod, status: number): boolean {
+    return status === 429 || (method === "GET" && status >= 500);
   }
 
   private static isRetryableError(error: unknown): boolean {
@@ -101,7 +101,7 @@ export class HttpClient {
             signal: controller.signal,
           });
         } catch (error) {
-          if (HttpClient.isRetryableError(error) && attempt < MAX_RETRIES) {
+          if (method === "GET" && HttpClient.isRetryableError(error) && attempt < MAX_RETRIES) {
             await HttpClient.sleep(INITIAL_RETRY_DELAY_MS * (2 ** attempt));
             continue;
           }
@@ -109,7 +109,7 @@ export class HttpClient {
         }
 
         if (!response.ok) {
-          if (HttpClient.shouldRetryStatus(response.status) && attempt < MAX_RETRIES) {
+          if (HttpClient.shouldRetryStatus(method, response.status) && attempt < MAX_RETRIES) {
             await HttpClient.sleep(INITIAL_RETRY_DELAY_MS * (2 ** attempt));
             continue;
           }

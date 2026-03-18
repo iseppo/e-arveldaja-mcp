@@ -183,6 +183,91 @@ const sampleXml = `<?xml version="1.0" encoding="UTF-8"?>
   </BkToCstmrStmt>
 </Document>`;
 
+const batchedMixedCurrencyXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>batched-statement</Id>
+      <Acct>
+        <Id>
+          <IBAN>EE637700771011212909</IBAN>
+        </Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">27.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt>
+          <Dt>2026-02-03</Dt>
+        </BookgDt>
+        <AcctSvcrRef>BATCH-REF-001</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs>
+              <AcctSvcrRef>BATCH-REF-001-A</AcctSvcrRef>
+            </Refs>
+            <AmtDtls>
+              <TxAmt>
+                <Amt Ccy="USD">10.00</Amt>
+              </TxAmt>
+            </AmtDtls>
+            <RltdPties>
+              <Cdtr>
+                <Nm>Vendor One</Nm>
+              </Cdtr>
+            </RltdPties>
+            <RmtInf>
+              <Ustrd>Batch row 1</Ustrd>
+            </RmtInf>
+          </TxDtls>
+        </NtryDtls>
+        <NtryDtls>
+          <TxDtls>
+            <Refs>
+              <AcctSvcrRef>BATCH-REF-001-B</AcctSvcrRef>
+            </Refs>
+            <AmtDtls>
+              <TxAmt>
+                <Amt Ccy="USD">20.00</Amt>
+              </TxAmt>
+            </AmtDtls>
+            <RltdPties>
+              <Cdtr>
+                <Nm>Vendor Two</Nm>
+              </Cdtr>
+            </RltdPties>
+            <RmtInf>
+              <Ustrd>Batch row 2</Ustrd>
+            </RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+
+const multiStatementXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-1</Id>
+      <Acct>
+        <Id>
+          <IBAN>EE111111111111111111</IBAN>
+        </Id>
+      </Acct>
+    </Stmt>
+    <Stmt>
+      <Id>stmt-2</Id>
+      <Acct>
+        <Id>
+          <IBAN>EE222222222222222222</IBAN>
+        </Id>
+      </Acct>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+
 describe("parseCamt053Xml", () => {
   it("parses statement metadata and entry direction mapping data", () => {
     const result = parseCamt053Xml(sampleXml);
@@ -223,5 +308,38 @@ describe("parseCamt053Xml", () => {
       counterparty_name: undefined,
       counterparty_iban: undefined,
     });
+  });
+
+  it("splits batched entries across all NtryDtls blocks and keeps the booked entry amount in account currency", () => {
+    const result = parseCamt053Xml(batchedMixedCurrencyXml);
+
+    expect(result.summary.entry_count).toBe(2);
+    expect(result.summary.debit_total).toBe(27);
+    expect(result.entries).toMatchObject([
+      {
+        amount: 9,
+        currency: "EUR",
+        original_amount: 10,
+        original_currency: "USD",
+        counterparty_name: "Vendor One",
+        description: "Batch row 1",
+        bank_reference: "BATCH-REF-001-A",
+      },
+      {
+        amount: 18,
+        currency: "EUR",
+        original_amount: 20,
+        original_currency: "USD",
+        counterparty_name: "Vendor Two",
+        description: "Batch row 2",
+        bank_reference: "BATCH-REF-001-B",
+      },
+    ]);
+  });
+
+  it("suggests splitting the file when multiple statements are present", () => {
+    expect(() => parseCamt053Xml(multiStatementXml)).toThrow(
+      /Split multi-statement CAMT exports into separate XML files and import them one statement at a time/,
+    );
   });
 });

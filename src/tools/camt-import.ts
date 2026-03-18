@@ -6,6 +6,7 @@ import type { Client, Transaction } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { readOnly, batch } from "../annotations.js";
+import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -13,6 +14,7 @@ const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
+  processEntities: false,
   trimValues: true,
 });
 
@@ -44,6 +46,8 @@ export interface ParsedCamtEntry {
   amount: number;
   currency: string;
   direction: "CRDT" | "DBIT";
+  original_amount?: number;
+  original_currency?: string;
   counterparty_name?: string;
   counterparty_iban?: string;
   counterparty_reg_code?: string;
@@ -84,6 +88,21 @@ interface ClientResolutionCache {
   byCode: Map<string, ClientResolution>;
   byName: Map<string, ClientResolution>;
 }
+
+type CreateTransactionPayload = Pick<Transaction,
+  "accounts_dimensions_id" |
+  "type" |
+  "amount" |
+  "cl_currencies_id" |
+  "date"
+> & Partial<Pick<Transaction,
+  "description" |
+  "bank_account_name" |
+  "bank_account_no" |
+  "clients_id" |
+  "ref_number" |
+  "bank_ref_number"
+>>;
 
 function asArray<T>(value: T | T[] | undefined | null): T[] {
   if (value === undefined || value === null) return [];
@@ -168,6 +187,57 @@ function parseAmountNode(node: unknown, fallbackCurrency?: string): { amount: nu
   return { amount, currency };
 }
 
+function parseOriginalAmountNode(
+  txDetails: unknown,
+  fallbackCurrency?: string,
+): { amount: number; currency: string } | undefined {
+  return (
+    parseAmountNode(valueAt(txDetails, ["AmtDtls", "TxAmt", "Amt"]), fallbackCurrency) ??
+    parseAmountNode(valueAt(txDetails, ["AmtDtls", "InstdAmt", "Amt"]), fallbackCurrency)
+  );
+}
+
+function collectTransactionDetails(entryNode: unknown): Array<unknown | undefined> {
+  const detailNodes = asArray(valueAt(entryNode, ["NtryDtls"]))
+    .flatMap((detailBlock) => asArray(valueAt(detailBlock, ["TxDtls"])));
+
+  return detailNodes.length > 0 ? detailNodes : [undefined];
+}
+
+function splitBookedAmounts(totalAmount: number, txOriginalAmounts: Array<number | undefined>): number[] {
+  if (txOriginalAmounts.length <= 1) return [totalAmount];
+
+  const canSplitProportionally = txOriginalAmounts.every((amount) => amount !== undefined && amount > 0);
+  const weights = canSplitProportionally
+    ? txOriginalAmounts.map((amount) => amount!)
+    : txOriginalAmounts.map(() => 1);
+  const totalWeight = weights.reduce((sum, amount) => sum + amount, 0);
+
+  if (totalWeight <= 0) {
+    return txOriginalAmounts.map((_, index) =>
+      index === txOriginalAmounts.length - 1
+        ? roundMoney(totalAmount)
+        : 0,
+    );
+  }
+
+  const allocated: number[] = [];
+  let allocatedTotal = 0;
+
+  for (let index = 0; index < weights.length; index++) {
+    if (index === weights.length - 1) {
+      allocated.push(roundMoney(totalAmount - allocatedTotal));
+      continue;
+    }
+
+    const amount = roundMoney(totalAmount * (weights[index]! / totalWeight));
+    allocated.push(amount);
+    allocatedTotal = roundMoney(allocatedTotal + amount);
+  }
+
+  return allocated;
+}
+
 function extractOrgIdByScheme(party: unknown, schemeCode: string): string | undefined {
   const others = asArray(valueAt(party, ["Id", "OrgId", "Othr"]));
   for (const other of others) {
@@ -250,10 +320,6 @@ function findDuplicateTransactionIds(
   return [...matches].sort((left, right) => left - right);
 }
 
-function roundMoney(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
-}
-
 function summarizeEntries(entries: ParsedCamtEntry[]): CamtParseResult["summary"] {
   const summary = {
     entry_count: entries.length,
@@ -287,7 +353,10 @@ export function parseCamt053Xml(xml: string): CamtParseResult {
   const statements = asArray(valueAt(parsed, ["Document", "BkToCstmrStmt", "Stmt"]));
 
   if (statements.length !== 1) {
-    throw new Error(`Expected exactly one <Stmt> in CAMT.053 file, found ${statements.length}`);
+    throw new Error(
+      `Expected exactly one <Stmt> in CAMT.053 file, found ${statements.length}. ` +
+      "Split multi-statement CAMT exports into separate XML files and import them one statement at a time.",
+    );
   }
 
   const statement = statements[0];
@@ -327,29 +396,32 @@ export function parseCamt053Xml(xml: string): CamtParseResult {
       throw new Error("CAMT.053 entry is missing booking date");
     }
 
-    const txDetailsList = asArray(valueAt(entryNode, ["NtryDtls", "TxDtls"]));
-    const detailNodes = txDetailsList.length > 0 ? txDetailsList : [undefined];
+    const entryAmount = parseAmountNode(valueAt(entryNode, ["Amt"]), accountCurrency);
+    if (!entryAmount) {
+      throw new Error("CAMT.053 entry is missing amount");
+    }
 
-    for (const txDetails of detailNodes) {
-      const amount =
-        parseAmountNode(valueAt(txDetails, ["AmtDtls", "TxAmt", "Amt"]), accountCurrency) ??
-        parseAmountNode(valueAt(txDetails, ["AmtDtls", "InstdAmt", "Amt"]), accountCurrency) ??
-        parseAmountNode(valueAt(entryNode, ["Amt"]), accountCurrency);
+    const detailNodes = collectTransactionDetails(entryNode);
+    const originalAmounts = detailNodes.map((txDetails) => parseOriginalAmountNode(txDetails, accountCurrency));
+    const bookedAmounts = splitBookedAmounts(
+      entryAmount.amount,
+      originalAmounts.map((amount) => amount?.amount),
+    );
 
-      if (!amount) {
-        throw new Error("CAMT.053 entry is missing amount");
-      }
-
+    for (const [detailIndex, txDetails] of detailNodes.entries()) {
       const { party, account } = pickCounterparty(txDetails, direction);
       const structuredRef = asArray(valueAt(txDetails, ["RmtInf", "Strd"]))
         .map(node => textAt(node, ["CdtrRefInf", "Ref"]))
         .find((value): value is string => !!value);
+      const originalAmount = originalAmounts[detailIndex];
 
       entries.push({
         date: entryDate,
-        amount: amount.amount,
-        currency: amount.currency,
+        amount: bookedAmounts[detailIndex] ?? entryAmount.amount,
+        currency: entryAmount.currency,
         direction,
+        original_amount: originalAmount?.amount,
+        original_currency: originalAmount?.currency,
         counterparty_name: textAt(party, ["Nm"]),
         counterparty_iban: extractIban(account),
         counterparty_reg_code: extractOrgIdByScheme(party, "COID"),
@@ -587,9 +659,10 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         }
 
         const clientResolution = await resolveClientForEntry(api, entry, clientCache);
-        const payload = {
+        const transactionType = transactionTypeForDirection(entry.direction);
+        const payload: CreateTransactionPayload = {
           accounts_dimensions_id,
-          type: transactionTypeForDirection(entry.direction),
+          type: transactionType,
           amount: entry.amount,
           cl_currencies_id: entry.currency || "EUR",
           date: entry.date,
@@ -607,7 +680,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             date: entry.date,
             amount: entry.amount,
             currency: entry.currency,
-            type: payload.type,
+            type: transactionType,
             description: entry.description,
             counterparty: entry.counterparty_name,
             bank_reference: entry.bank_reference,
@@ -620,13 +693,13 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         }
 
         try {
-          const response = await api.transactions.create(payload as Transaction);
+          const response = await api.transactions.create(payload);
           results.push({
             status: "created",
             date: entry.date,
             amount: entry.amount,
             currency: entry.currency,
-            type: payload.type,
+            type: transactionType,
             description: entry.description,
             counterparty: entry.counterparty_name,
             bank_reference: entry.bank_reference,

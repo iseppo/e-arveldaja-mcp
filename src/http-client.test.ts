@@ -44,7 +44,7 @@ describe("HttpClient", () => {
     expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 2_000)).toBe(true);
   });
 
-  it("retries retryable network errors", async () => {
+  it("retries retryable network errors for GET requests", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError("fetch failed"))
@@ -56,6 +56,57 @@ describe("HttpClient", () => {
 
     const client = new HttpClient(config);
     const promise = client.get<{ ok: boolean }>("/clients");
+
+    await vi.runAllTimersAsync();
+
+    await expect(promise).resolves.toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry POST requests after network errors", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config);
+
+    await expect(client.post("/transactions", { amount: 10 })).rejects.toThrow(
+      /API request failed: POST \/transactions → network error: fetch failed/,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry POST requests after 5xx responses", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ messages: ["temporary failure"] }), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config);
+
+    await expect(client.post("/transactions", { amount: 10 })).rejects.toThrow(
+      /API request failed: POST \/transactions → 502: temporary failure/,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries POST requests on 429 responses", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ messages: ["rate limited"] }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config);
+    const promise = client.post<{ ok: boolean }>("/transactions", { amount: 10 });
 
     await vi.runAllTimersAsync();
 
