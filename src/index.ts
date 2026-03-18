@@ -26,6 +26,7 @@ import { registerAnnualReportTools } from "./tools/annual-report.js";
 import { registerDocumentAuditTools } from "./tools/document-audit.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
+import { registerCamtImportTools } from "./tools/camt-import.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
 import { registerPrompts } from "./prompts.js";
@@ -282,6 +283,7 @@ Reporting:
   registerDocumentAuditTools(scopedServer, api);
   registerLightyearTools(scopedServer, api);
   registerWiseImportTools(scopedServer, api);
+  registerCamtImportTools(scopedServer, api);
 
   // Register resources
   registerResources(server, api);
