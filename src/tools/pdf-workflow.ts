@@ -4,7 +4,7 @@ import { readFile } from "fs/promises";
 import pdf from "pdf-parse";
 import { closest } from "fastest-levenshtein";
 import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse } from "./crud-tools.js";
-import type { PurchaseInvoice } from "../types/api.js";
+import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { validateFilePath } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { roundMoney } from "../money.js";
@@ -442,6 +442,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       notes: z.string().optional().describe("Notes (e.g. PDF filename)"),
       ref_number: z.string().optional().describe("Reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
+      currency: z.string().optional().describe("Currency code (default EUR)"),
     },
     { ...create, title: "Create Purchase Invoice from PDF" },
     async (params) => {
@@ -452,14 +453,14 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const rawItems = parsePurchaseInvoiceItems(params.items);
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
 
-      const invoiceData = {
+      const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.supplier_client_id,
         client_name: supplier.name,
         number: params.invoice_number,
         create_date: params.invoice_date,
         journal_date: params.journal_date,
         term_days: params.term_days,
-        cl_currencies_id: "EUR",
+        cl_currencies_id: params.currency ?? "EUR",
         liability_accounts_id: params.liability_accounts_id ?? 2310,
         bank_ref_number: params.ref_number,
         bank_account_no: params.bank_account_no,
@@ -468,7 +469,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       };
 
       const result = await api.purchaseInvoices.createAndSetTotals(
-        invoiceData as any,
+        invoiceData,
         params.vat_price,
         params.gross_price,
         isVatReg,

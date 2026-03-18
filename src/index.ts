@@ -118,7 +118,7 @@ async function main() {
 
   const server = new McpServer({
     name: "e-arveldaja",
-    version: "0.3.2",
+    version: "0.4.0",
     description: "EXPERIMENTAL, UNOFFICIAL MCP server for the Estonian e-arveldaja (e-Financials) API. " +
       "NOT affiliated with or endorsed by RIK. Use entirely at your own risk — " +
       "this software interacts with live financial data and can create, modify, and delete accounting records. " +
@@ -208,9 +208,10 @@ Reporting:
       const target = allConfigs[index]!;
       const previousIndex = connectionState.activeIndex;
 
-      clearAllCaches(previousIndex);
-      connectionState.activeIndex = index;
       connectionState.generation += 1;
+      connectionState.activeIndex = index;
+      clearAllCaches(previousIndex);
+      clearAllCaches(index);
 
       const snapshot = captureSnapshot(connectionState);
 
@@ -245,6 +246,7 @@ Reporting:
           return result;
         });
       } catch (error) {
+        process.stderr.write(`Tool handler error: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
         return toolError(error);
       }
     }) as unknown as T;

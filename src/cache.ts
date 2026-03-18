@@ -27,12 +27,13 @@ export class Cache {
   }
 
   set<T>(key: string, data: T, ttlSeconds?: number): void {
+    if (ttlSeconds === 0) return; // Zero TTL = don't cache
     // Evict oldest entries if at capacity
     if (this.store.size >= this.maxEntries && !this.store.has(key)) {
       const firstKey = this.store.keys().next().value;
       if (firstKey) this.store.delete(firstKey);
     }
-    const ttlMs = ttlSeconds ? ttlSeconds * 1000 : this.defaultTtlMs;
+    const ttlMs = ttlSeconds !== undefined ? ttlSeconds * 1000 : this.defaultTtlMs;
     this.store.set(key, { data, expiresAt: Date.now() + ttlMs });
   }
 

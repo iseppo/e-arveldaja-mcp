@@ -97,12 +97,18 @@ describe("Cache", () => {
     expect(cache.get("b")).toBe(2);
   });
 
-  it("treats ttlSeconds=0 as falsy, using default TTL instead", () => {
+  it("treats ttlSeconds=0 as immediate expiry", () => {
     const cache = new Cache(10); // 10 second default
     cache.set("zero-ttl", "value", 0);
-    // 0 is falsy so falls through to default TTL (10s)
-    expect(cache.get("zero-ttl")).toBe("value");
-    vi.advanceTimersByTime(11_000);
+    // 0 means expire immediately
     expect(cache.get("zero-ttl")).toBeUndefined();
+  });
+
+  it("uses default TTL when ttlSeconds is omitted", () => {
+    const cache = new Cache(10);
+    cache.set("default-ttl", "value");
+    expect(cache.get("default-ttl")).toBe("value");
+    vi.advanceTimersByTime(11_000);
+    expect(cache.get("default-ttl")).toBeUndefined();
   });
 });

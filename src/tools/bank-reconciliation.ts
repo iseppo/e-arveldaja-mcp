@@ -29,7 +29,7 @@ function matchScore(
 
   // Amount match (check both local and base currency amounts)
   const invoiceAmount = invoice.gross_price ?? 0;
-  const baseAmount = (tx as any).base_amount ?? txAmount;
+  const baseAmount = tx.base_amount ?? txAmount;
   const baseInvoiceAmount = invoice.base_gross_price ?? invoiceAmount;
   if (Math.abs(txAmount - invoiceAmount) < 0.01) {
     confidence += 40;
@@ -248,9 +248,10 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
         // Only auto-confirm if exactly one high-confidence match
         if (candidates.length === 1) {
-          consumedInvoiceKeys.add(`${candidates[0]!.type.replace("_invoice", "")}:${candidates[0]!.id}`);
           const match = candidates[0]!;
+          const invoiceKey = `${match.type.replace("_invoice", "")}:${match.id}`;
           if (dryRun) {
+            consumedInvoiceKeys.add(invoiceKey);
             confirmed.push({
               transaction_id: tx.id,
               amount: tx.amount,
@@ -265,14 +266,15 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
                 related_id: match.id,
                 amount: tx.amount,
               }]);
+              consumedInvoiceKeys.add(invoiceKey);
               confirmed.push({
                 transaction_id: tx.id,
                 amount: tx.amount,
                 match: { type: match.type, id: match.id, number: match.number },
                 status: "confirmed",
               });
-            } catch (err: any) {
-              skipped.push({ transaction_id: tx.id, reason: err.message });
+            } catch (err: unknown) {
+              skipped.push({ transaction_id: tx.id, reason: err instanceof Error ? err.message : String(err) });
             }
           }
         }

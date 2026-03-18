@@ -1,12 +1,7 @@
 import type { HttpClient } from "../http-client.js";
-import type { PurchaseInvoice, PurchaseInvoiceItem, ApiResponse, ApiFile } from "../types/api.js";
+import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse, ApiFile } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
 import { roundMoney } from "../money.js";
-
-/** Invoice as returned by GET — items include API-computed fields. */
-interface PurchaseInvoiceDetail extends PurchaseInvoice {
-  items?: Array<PurchaseInvoiceItem & { vat_amount?: number }>;
-}
 
 /**
  * For non-VAT (mitte-KMD) companies: set project_no_vat_gross_price on items
@@ -14,10 +9,10 @@ interface PurchaseInvoiceDetail extends PurchaseInvoice {
  * Without this field, item vat_amount stays 0 and gross_price = net_price.
  */
 function normalizeItemsForNonVat(
-  items: PurchaseInvoiceItem[] | undefined,
+  items: PurchaseInvoiceItem[],
   isVatRegistered: boolean,
   grossPrice?: number,
-): PurchaseInvoiceItem[] | undefined {
+) : PurchaseInvoiceItem[] {
   if (!items || isVatRegistered) return items;
 
   return items.map(item => {
@@ -62,15 +57,15 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
    * Items get project_no_vat_gross_price set for VAT tracking.
    */
   async createAndSetTotals(
-    data: Partial<PurchaseInvoice>,
+    data: CreatePurchaseInvoiceData,
     vatPrice?: number,
     grossPrice?: number,
     isVatRegistered = true,
   ): Promise<PurchaseInvoice> {
-    const createData = {
+    const createData: CreatePurchaseInvoiceData = {
       ...data,
       items: normalizeItemsForNonVat(
-        data.items as PurchaseInvoiceItem[] | undefined,
+        data.items,
         isVatRegistered,
         grossPrice,
       ),
@@ -80,7 +75,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     if (!id) throw new Error("Purchase invoice created but no ID returned");
 
     // Read back to get item-level VAT computed by API
-    const invoice = await this.get(id) as PurchaseInvoiceDetail;
+    const invoice = await this.get(id);
     const items = invoice.items;
 
     const itemVat = items ? roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0)) : 0;
@@ -97,7 +92,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       ? grossPrice
       : roundMoney(itemNet + itemVat);
 
-    if (vat > 0 || gross > 0) {
+    if (vat !== undefined || gross !== undefined) {
       await this.update(id, { vat_price: vat, gross_price: gross, items: invoice.items } as Partial<PurchaseInvoice>);
       this.invalidateCache();
     }
@@ -110,7 +105,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
    * For non-VAT companies: only fixes gross_price, leaves vat_price at 0.
    */
   async confirmWithTotals(id: number, isVatRegistered = true): Promise<ApiResponse> {
-    const invoice = await this.get(id) as PurchaseInvoiceDetail;
+    const invoice = await this.get(id);
     const items = invoice.items;
     if (items) {
       const itemVat = roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0));
@@ -118,8 +113,10 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       const vat = isVatRegistered ? itemVat : 0;
       const gross = roundMoney(net + itemVat);
       const currentGross = invoice.gross_price;
-      const shouldRepair = !currentGross || Math.abs(currentGross - gross) > 0.02;
-      if (shouldRepair) {
+      const currentVat = invoice.vat_price;
+      const grossNeedsRepair = !currentGross || Math.abs(currentGross - gross) > 0.02;
+      const vatNeedsRepair = isVatRegistered && (currentVat === undefined || currentVat === null || Math.abs(currentVat - vat) > 0.02);
+      if (grossNeedsRepair || vatNeedsRepair) {
         await this.update(id, { vat_price: vat, gross_price: gross, items } as Partial<PurchaseInvoice>);
       }
     }

@@ -2,6 +2,7 @@ import { stat, realpath } from "fs/promises";
 import { resolve, extname, isAbsolute } from "path";
 import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
+import { getProjectRoot } from "./paths.js";
 
 /**
  * Allowed root directories for file reads. Configurable via EARVELDAJA_ALLOWED_PATHS
@@ -17,22 +18,6 @@ function getAllowedRoots(): string[] {
   return raw.map(root => {
     try { return realpathSync(root); } catch { return root; }
   });
-}
-
-/**
- * Get the project root (directory containing package.json).
- * Falls back to process.cwd().
- */
-function getProjectRoot(): string {
-  // When running from dist/ or src/, go up until we find package.json
-  let dir = import.meta.dirname;
-  for (let i = 0; i < 5; i++) {
-    if (existsSync(resolve(dir, "package.json"))) return dir;
-    const parent = resolve(dir, "..");
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return process.cwd();
 }
 
 /**

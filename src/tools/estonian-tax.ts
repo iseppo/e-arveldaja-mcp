@@ -4,25 +4,7 @@ import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
 import { computeAllBalances } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { create } from "../annotations.js";
-
-async function validateAccounts(api: ApiContext, ...accountIds: number[]): Promise<string[]> {
-  const accounts = await api.readonly.getAccounts();
-  const accountMap = new Map(accounts.map(account => [account.id, account]));
-  const errors: string[] = [];
-  for (const id of new Set(accountIds)) {
-    const account = accountMap.get(id);
-    if (!account) {
-      errors.push(`Account ${id} not found in chart of accounts`);
-      continue;
-    }
-    if (!account.is_valid) {
-      errors.push(
-        `Account ${id} (${account.name_est}) is inactive. Activate in e-arveldaja: Seaded → Kontoplaan → ${account.name_est} → mark as active.`
-      );
-    }
-  }
-  return errors;
-}
+import { validateAccounts } from "../account-validation.js";
 
 async function computeRetainedEarningsBalance(api: ApiContext, accountId: number, asOfDate?: string): Promise<number> {
   const allJournals = await api.journals.listAllWithPostings();
@@ -71,7 +53,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const shareCapitalAccount = share_capital_account ?? 3000;
 
       // Validate all accounts exist in chart of accounts
-      const accountErrors = await validateAccounts(api, retainedAccount, payableAccount, taxAccount, shareCapitalAccount);
+      const accounts = await api.readonly.getAccounts();
+      const accountErrors = validateAccounts(accounts, [
+        { id: retainedAccount, label: "Retained earnings account" },
+        { id: payableAccount, label: "Dividend payable account" },
+        { id: taxAccount, label: "Tax payable account" },
+        { id: shareCapitalAccount, label: "Share capital account" },
+      ]);
       if (accountErrors.length > 0) {
         return {
           content: [{
@@ -216,7 +204,12 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const vat = vat_amount ?? roundMoney(net_amount * vat_rate);
       if (vat > 0 && vatRegistered) accountsToCheck.push(vatAcc);
 
-      const accountErrors = await validateAccounts(api, ...accountsToCheck);
+      const accounts = await api.readonly.getAccounts();
+      const accountErrors = validateAccounts(accounts, [
+        { id: expense_account, label: "Expense account" },
+        ...(vat > 0 && vatRegistered ? [{ id: vatAcc, label: "VAT account" }] : []),
+        { id: payAcc, label: "Payable account" },
+      ]);
       if (accountErrors.length > 0) {
         return {
           content: [{

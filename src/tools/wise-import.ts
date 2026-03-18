@@ -5,6 +5,7 @@ import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
+import { parseCSVLine } from "../csv.js";
 
 interface WiseRow {
   id: string;
@@ -32,31 +33,6 @@ const EXPECTED_HEADERS = [
   "Target name", "Target amount (after fees)", "Target currency",
   "Exchange rate", "Reference", "Batch", "Created by", "Category", "Note",
 ];
-
-function parseCSVLine(line: string): string[] {
-  const fields: string[] = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]!;
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (ch === "," && !inQuotes) {
-      fields.push(current);
-      current = "";
-    } else {
-      current += ch;
-    }
-  }
-  fields.push(current);
-  return fields;
-}
 
 function parseWiseCSV(csv: string): WiseRow[] {
   const lines = csv.trim().split("\n").filter(l => l.trim());

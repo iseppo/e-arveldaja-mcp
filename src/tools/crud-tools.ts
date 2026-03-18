@@ -7,7 +7,7 @@ import type { TransactionsApi } from "../api/transactions.api.js";
 import type { SaleInvoicesApi } from "../api/sale-invoices.api.js";
 import type { PurchaseInvoicesApi } from "../api/purchase-invoices.api.js";
 import type { ReadonlyApi } from "../api/readonly.api.js";
-import type { Posting, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem } from "../types/api.js";
+import type { Posting, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem, CreatePurchaseInvoiceData } from "../types/api.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { readOnly, create, mutate, destructive, send } from "../annotations.js";
 
@@ -114,6 +114,9 @@ const pageParam = z.object({
 });
 
 const idParam = z.object({ id: z.number().describe("Object ID") });
+const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
+const isoDateString = (description: string) =>
+  z.string().regex(isoDateRegex, "Expected YYYY-MM-DD").describe(description);
 
 export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -247,7 +250,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   server.tool("create_journal", "Create a journal entry with postings", {
     title: z.string().optional().describe("Journal entry title"),
-    effective_date: z.string().describe("Entry date (YYYY-MM-DD)"),
+    effective_date: isoDateString("Entry date (YYYY-MM-DD)"),
     clients_id: z.number().optional().describe("Related client ID"),
     document_number: z.string().optional().describe("Document number"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
@@ -305,7 +308,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     type: z.string().describe("Transaction type: D (incoming) or C (outgoing)"),
     amount: z.number().describe("Transaction amount"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
-    date: z.string().describe("Transaction date (YYYY-MM-DD)"),
+    date: isoDateString("Transaction date (YYYY-MM-DD)"),
     description: z.string().optional().describe("Description"),
     clients_id: z.number().optional().describe("Related client ID"),
     bank_account_name: z.string().optional().describe("Remitter/beneficiary name"),
@@ -357,8 +360,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     clients_id: z.number().describe("Buyer client ID"),
     cl_templates_id: z.number().describe("Invoice template ID"),
     number_suffix: z.string().optional().describe("Invoice number suffix (omit or empty string for auto-assign from invoice series)"),
-    create_date: z.string().describe("Invoice date (YYYY-MM-DD)"),
-    journal_date: z.string().describe("Turnover date (YYYY-MM-DD)"),
+    create_date: isoDateString("Invoice date (YYYY-MM-DD)"),
+    journal_date: isoDateString("Turnover date (YYYY-MM-DD)"),
     term_days: z.number().describe("Payment term in days"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
     cl_countries_id: z.string().optional().describe("Country (default EST)"),
@@ -439,8 +442,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       clients_id: z.number().describe("Supplier client ID"),
       client_name: z.string().describe("Supplier name"),
       number: z.string().describe("Invoice number"),
-      create_date: z.string().describe("Invoice date (YYYY-MM-DD)"),
-      journal_date: z.string().describe("Turnover date (YYYY-MM-DD)"),
+      create_date: isoDateString("Invoice date (YYYY-MM-DD)"),
+      journal_date: isoDateString("Turnover date (YYYY-MM-DD)"),
       term_days: z.number().describe("Payment term in days"),
       vat_price: z.number().optional().describe("Total VAT amount from original invoice (EXACT, for payment matching)"),
       gross_price: z.number().optional().describe("Total gross amount from original invoice (EXACT, for payment matching)"),
@@ -455,21 +458,22 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
       const rawItems = parsePurchaseInvoiceItems(params.items);
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
+      const invoiceData: CreatePurchaseInvoiceData = {
+        clients_id: params.clients_id,
+        client_name: params.client_name,
+        number: params.number,
+        create_date: params.create_date,
+        journal_date: params.journal_date,
+        term_days: params.term_days,
+        cl_currencies_id: params.cl_currencies_id ?? "EUR",
+        liability_accounts_id: params.liability_accounts_id ?? 2310,
+        bank_ref_number: params.bank_ref_number,
+        bank_account_no: params.bank_account_no,
+        notes: params.notes,
+        items,
+      };
       const result = await api.purchaseInvoices.createAndSetTotals(
-        {
-          clients_id: params.clients_id,
-          client_name: params.client_name,
-          number: params.number,
-          create_date: params.create_date,
-          journal_date: params.journal_date,
-          term_days: params.term_days,
-          cl_currencies_id: params.cl_currencies_id ?? "EUR",
-          liability_accounts_id: params.liability_accounts_id ?? 2310,
-          bank_ref_number: params.bank_ref_number,
-          bank_account_no: params.bank_account_no,
-          notes: params.notes,
-          items,
-        } as any,
+        invoiceData,
         params.vat_price,
         params.gross_price,
         isVatReg,

@@ -3,7 +3,7 @@ import { roundMoney } from "./money.js";
 
 describe("roundMoney", () => {
   it("rounds to 2 decimal places", () => {
-    expect(roundMoney(1.005)).toBe(1);
+    expect(roundMoney(1.005)).toBe(1.01);
     expect(roundMoney(1.235)).toBe(1.24);
     expect(roundMoney(99.999)).toBe(100);
   });
@@ -21,6 +21,7 @@ describe("roundMoney", () => {
 
   it("handles large values", () => {
     expect(roundMoney(1000000.995)).toBe(1000001);
+    expect(roundMoney(1000000.005)).toBe(1000000.01);
     expect(roundMoney(123456.789)).toBe(123456.79);
   });
 

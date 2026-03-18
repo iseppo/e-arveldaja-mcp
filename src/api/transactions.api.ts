@@ -1,5 +1,5 @@
 import type { HttpClient } from "../http-client.js";
-import type { Transaction, TransactionDistribution, ApiResponse, ApiFile } from "../types/api.js";
+import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice, ApiResponse, ApiFile } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
 
 export class TransactionsApi extends BaseResource<Transaction> {
@@ -20,22 +20,22 @@ export class TransactionsApi extends BaseResource<Transaction> {
     // Auto-fix missing clients_id from linked invoice
     if (body.length > 0) {
       const tx = await this.get(id);
-      if (!(tx as any).clients_id) {
+      if (!tx.clients_id) {
         let clientsId: number | undefined;
 
         for (const dist of body) {
           if (dist.related_table === "purchase_invoices" && dist.related_id) {
-            const inv = await this.client.get<any>(`/purchase_invoices/${dist.related_id}`);
+            const inv = await this.client.get<PurchaseInvoice>(`/purchase_invoices/${dist.related_id}`);
             clientsId = inv?.clients_id;
           } else if (dist.related_table === "sale_invoices" && dist.related_id) {
-            const inv = await this.client.get<any>(`/sale_invoices/${dist.related_id}`);
+            const inv = await this.client.get<SaleInvoice>(`/sale_invoices/${dist.related_id}`);
             clientsId = inv?.clients_id;
           }
-          if (clientsId) break;
+          if (clientsId !== undefined) break;
         }
 
-        if (clientsId) {
-          await this.update(id, { clients_id: clientsId } as any);
+        if (clientsId !== undefined) {
+          await this.update(id, { clients_id: clientsId });
         }
       }
     }

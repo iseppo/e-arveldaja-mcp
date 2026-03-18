@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import { resolve } from "path";
 import { readFileSync, existsSync, statSync, readdirSync, realpathSync } from "fs";
+import { getProjectRoot } from "./paths.js";
 
 export interface Config {
   apiKeyId: string;
@@ -19,18 +20,6 @@ const SERVERS = {
   live: "https://rmp-api.rik.ee/v1",
   demo: "https://demo-rmp-api.rik.ee/v1",
 } as const;
-
-/** Find project root by walking up from import.meta.dirname to package.json. */
-function getProjectRoot(): string {
-  let dir = import.meta.dirname;
-  for (let i = 0; i < 5; i++) {
-    if (existsSync(resolve(dir, "package.json"))) return dir;
-    const parent = resolve(dir, "..");
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return process.cwd();
-}
 
 const PROJECT_ROOT = getProjectRoot();
 

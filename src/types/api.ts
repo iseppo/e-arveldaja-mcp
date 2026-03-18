@@ -380,6 +380,22 @@ export interface PurchaseInvoice {
   transactions?: number[];
 }
 
+export interface CreatePurchaseInvoiceData extends Pick<PurchaseInvoice,
+  "clients_id" |
+  "client_name" |
+  "number" |
+  "create_date" |
+  "journal_date" |
+  "term_days" |
+  "cl_currencies_id" |
+  "liability_accounts_id" |
+  "bank_ref_number" |
+  "bank_account_no" |
+  "notes"
+> {
+  items: PurchaseInvoiceItem[];
+}
+
 // === Invoice Series ===
 
 export interface InvoiceSeries {

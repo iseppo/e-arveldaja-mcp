@@ -6,6 +6,8 @@ import { validateFilePath } from "../file-validation.js";
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
+import { parseCSVLine } from "../csv.js";
+import { validateAccounts } from "../account-validation.js";
 
 const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -74,39 +76,6 @@ function parseLightyearDate(d: string): string {
     return `${parts[2]}-${parts[1]}-${parts[0]}`;
   }
   return d;
-}
-
-function parseCSVLine(line: string): string[] {
-  const fields: string[] = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]!;
-    if (inQuotes) {
-      if (ch === '"') {
-        if (i + 1 < line.length && line[i + 1] === '"') {
-          current += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        current += ch;
-      }
-    } else {
-      if (ch === '"') {
-        inQuotes = true;
-      } else if (ch === ",") {
-        fields.push(current);
-        current = "";
-      } else {
-        current += ch;
-      }
-    }
-  }
-  fields.push(current);
-  return fields;
 }
 
 function validateHeaders(actual: string[], expected: string[], label: string): void {
@@ -568,23 +537,13 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
       // Validate accounts exist and are active
       const accounts = await api.readonly.getAccounts();
-      const accountMap = new Map(accounts.map(a => [a.id, a]));
-      const errors: string[] = [];
-
-      function checkAccount(id: number, label: string): void {
-        const acc = accountMap.get(id);
-        if (!acc) {
-          errors.push(`${label} ${id} not found in chart of accounts. Activate it in e-arveldaja: Seaded → Kontoplaan → find account ${id} and enable it.`);
-        } else if (!acc.is_valid) {
-          errors.push(`${label} ${id} (${acc.name_est}) is inactive. Activate it in e-arveldaja: Seaded → Kontoplaan → ${acc.name_est} → mark as active.`);
-        }
-      }
-
-      checkAccount(investment_account, "Investment account");
-      checkAccount(broker_account, "Broker account");
-      if (fee_account) checkAccount(fee_account, "Fee account");
-      if (gain_loss_account) checkAccount(gain_loss_account, "Gain/loss account");
-      if (loss_account) checkAccount(loss_account, "Loss account");
+      const errors = validateAccounts(accounts, [
+        { id: investment_account, label: "Investment account" },
+        { id: broker_account, label: "Broker account" },
+        ...(fee_account ? [{ id: fee_account, label: "Fee account" }] : []),
+        ...(gain_loss_account ? [{ id: gain_loss_account, label: "Gain/loss account" }] : []),
+        ...(loss_account ? [{ id: loss_account, label: "Loss account" }] : []),
+      ]);
 
       if (errors.length > 0) {
         return {
@@ -855,22 +814,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
       // Validate accounts exist and are active
       const accounts = await api.readonly.getAccounts();
-      const accountMap = new Map(accounts.map(a => [a.id, a]));
-      const errors: string[] = [];
-
-      function checkAccount(id: number, label: string): void {
-        const acc = accountMap.get(id);
-        if (!acc) {
-          errors.push(`${label} ${id} not found in chart of accounts. Activate it in e-arveldaja: Seaded → Kontoplaan → find account ${id} and enable it.`);
-        } else if (!acc.is_valid) {
-          errors.push(`${label} ${id} (${acc.name_est}) is inactive. Activate it in e-arveldaja: Seaded → Kontoplaan → ${acc.name_est} → mark as active.`);
-        }
-      }
-
-      checkAccount(broker_account, "Broker account");
-      checkAccount(income_account, "Income account");
-      if (tax_account) checkAccount(tax_account, "Tax account");
-      checkAccount(fee_account, "Fee account");
+      const errors = validateAccounts(accounts, [
+        { id: broker_account, label: "Broker account" },
+        { id: income_account, label: "Income account" },
+        ...(tax_account ? [{ id: tax_account, label: "Tax account" }] : []),
+        { id: fee_account, label: "Fee account" },
+      ]);
 
       if (errors.length > 0) {
         return {

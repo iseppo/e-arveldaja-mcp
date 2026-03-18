@@ -97,6 +97,8 @@ function getMonthLastDay(month: string): number {
   return new Date(Date.UTC(year!, monthNumber!, 0)).getUTCDate();
 }
 
+const monthRegex = /^\d{4}-\d{2}$/;
+
 export function registerFinancialStatementTools(server: McpServer, api: ApiContext): void {
 
   server.tool("compute_trial_balance",
@@ -241,7 +243,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     "Generate month-end close checklist: unconfirmed journals/invoices, " +
     "unreconciled bank transactions, overdue receivables/payables.",
     {
-      month: z.string().describe("Month to check (YYYY-MM, e.g. 2026-02)"),
+      month: z.string().regex(monthRegex, "Expected YYYY-MM").describe("Month to check (YYYY-MM, e.g. 2026-02)"),
     },
     { ...readOnly, title: "Month-End Close Checklist" },
     async ({ month }) => {
@@ -249,28 +251,28 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       const lastDay = getMonthLastDay(month);
       const dateTo = `${month}-${String(lastDay).padStart(2, "0")}`;
 
-      // Unconfirmed journals
-      const allJournals = await api.journals.listAll();
+      const [allJournals, allTx, allSales, allPurchases] = await Promise.all([
+        api.journals.listAll(),
+        api.transactions.listAll(),
+        api.saleInvoices.listAll(),
+        api.purchaseInvoices.listAll(),
+      ]);
+
       const unconfirmedJournals = allJournals.filter(j =>
         !j.is_deleted && !j.registered &&
         j.effective_date >= dateFrom && j.effective_date <= dateTo
       );
 
-      // Unconfirmed transactions
-      const allTx = await api.transactions.listAll();
       const unconfirmedTx = allTx.filter(tx =>
         !tx.is_deleted && tx.status !== "CONFIRMED" &&
         tx.date >= dateFrom && tx.date <= dateTo
       );
 
-      // Unconfirmed invoices
-      const allSales = await api.saleInvoices.listAll();
       const unconfirmedSales = allSales.filter((inv: SaleInvoice) =>
         inv.status === "PROJECT" &&
         inv.journal_date >= dateFrom && inv.journal_date <= dateTo
       );
 
-      const allPurchases = await api.purchaseInvoices.listAll();
       const unconfirmedPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
         inv.status === "PROJECT" &&
         inv.journal_date >= dateFrom && inv.journal_date <= dateTo

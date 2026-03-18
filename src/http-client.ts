@@ -9,6 +9,9 @@ export interface RequestOptions {
   params?: Record<string, string | number | boolean | undefined>;
 }
 
+const MAX_RETRIES = 3;
+const INITIAL_RETRY_DELAY_MS = 1_000;
+
 export class HttpClient {
   private lastRequest = Promise.resolve();
   private nextAllowedAt = 0;
@@ -34,9 +37,28 @@ export class HttpClient {
     await waitTurn;
   }
 
-  async request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
-    await this.waitForRateLimitTurn();
+  private static async sleep(ms: number): Promise<void> {
+    await new Promise(resolve => setTimeout(resolve, ms));
+  }
 
+  private static shouldRetryStatus(status: number): boolean {
+    return status === 429 || status >= 500;
+  }
+
+  private static isRetryableError(error: unknown): boolean {
+    return error instanceof Error && (
+      error.name === "AbortError" ||
+      error.name === "TypeError" ||
+      /fetch failed|network/i.test(error.message)
+    );
+  }
+
+  private static formatNetworkError(method: HttpMethod, path: string, error: unknown): Error {
+    const suffix = error instanceof Error && error.message ? `: ${error.message}` : "";
+    return new Error(`API request failed: ${method} ${path} → network error${suffix}`);
+  }
+
+  async request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
     const { method = "GET", body, params } = options;
 
     // Build full URL: baseUrl already includes /v1
@@ -63,61 +85,81 @@ export class HttpClient {
       headers["Content-Type"] = "application/json";
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      await this.waitForRateLimitTurn();
 
-    try {
-      const response = await fetch(url.toString(), {
-        method,
-        headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
-      if (!response.ok) {
-        // Parse structured error if available, but don't expose raw upstream details
-        let errorMessage = `API request failed: ${method} ${path} → ${response.status}`;
+      try {
+        let response: Response;
         try {
-          const body = await response.json() as { code?: number; messages?: string[] };
-          if (body.messages && Array.isArray(body.messages)) {
-            errorMessage += `: ${body.messages.join("; ")}`;
+          response = await fetch(url.toString(), {
+            method,
+            headers,
+            body: body !== undefined ? JSON.stringify(body) : undefined,
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (HttpClient.isRetryableError(error) && attempt < MAX_RETRIES) {
+            await HttpClient.sleep(INITIAL_RETRY_DELAY_MS * (2 ** attempt));
+            continue;
           }
-        } catch {
-          // Non-JSON error body — don't expose raw text
+          throw HttpClient.formatNetworkError(method, path, error);
         }
 
-        if (response.status === 401) {
-          const publicIp = await HttpClient.getPublicIp();
-          errorMessage += `\n\nTroubleshooting 401 Unauthorized:\n` +
-            `  1. Is the API key downloaded and configured? Check apikey*.txt or environment variables.\n` +
-            `  2. Is this machine's IP address allowed in e-arveldaja API settings?\n` +
-            `     Your public IP: ${publicIp}\n` +
-            `  3. Add the IP above to: e-arveldaja → Seaded → API võtmed → Lubatud IP-aadressid\n` +
-            `     Multiple IP addresses can be added, separated by ;`;
+        if (!response.ok) {
+          if (HttpClient.shouldRetryStatus(response.status) && attempt < MAX_RETRIES) {
+            await HttpClient.sleep(INITIAL_RETRY_DELAY_MS * (2 ** attempt));
+            continue;
+          }
+
+          // Parse structured error if available, but don't expose raw upstream details
+          let errorMessage = `API request failed: ${method} ${path} → ${response.status}`;
+          try {
+            const body = await response.json() as { code?: number; messages?: string[] };
+            if (body.messages && Array.isArray(body.messages)) {
+              errorMessage += `: ${body.messages.join("; ")}`;
+            }
+          } catch {
+            // Non-JSON error body — don't expose raw text
+          }
+
+          if (response.status === 401) {
+            const publicIp = await HttpClient.getPublicIp();
+            errorMessage += `\n\nTroubleshooting 401 Unauthorized:\n` +
+              `  1. Is the API key downloaded and configured? Check apikey*.txt or environment variables.\n` +
+              `  2. Is this machine's IP address allowed in e-arveldaja API settings?\n` +
+              `     Your public IP: ${publicIp}\n` +
+              `  3. Add the IP above to: e-arveldaja → Seaded → API võtmed → Lubatud IP-aadressid\n` +
+              `     Multiple IP addresses can be added, separated by ;`;
+          }
+
+          throw new Error(errorMessage);
         }
 
-        throw new Error(errorMessage);
-      }
+        if (response.status === 204) {
+          return undefined as T;
+        }
 
-      if (response.status === 204) {
-        return undefined as T;
-      }
+        const contentType = response.headers.get("content-type") ?? "";
+        if (contentType.includes("application/json")) {
+          return response.json() as Promise<T>;
+        }
 
-      const contentType = response.headers.get("content-type") ?? "";
-      if (contentType.includes("application/json")) {
-        return response.json() as Promise<T>;
+        // Binary response (e.g. PDF document download) — return as ApiFile-compatible object
+        const arrayBuf = await response.arrayBuffer();
+        const base64 = Buffer.from(arrayBuf).toString("base64");
+        const disposition = response.headers.get("content-disposition") ?? "";
+        const nameMatch = disposition.match(/filename="?([^";\n]+)"?/);
+        const name = nameMatch?.[1] ?? "document";
+        return { name, contents: base64 } as T;
+      } finally {
+        clearTimeout(timeoutId);
       }
-
-      // Binary response (e.g. PDF document download) — return as ApiFile-compatible object
-      const arrayBuf = await response.arrayBuffer();
-      const base64 = Buffer.from(arrayBuf).toString("base64");
-      const disposition = response.headers.get("content-disposition") ?? "";
-      const nameMatch = disposition.match(/filename="?([^";\n]+)"?/);
-      const name = nameMatch?.[1] ?? "document";
-      return { name, contents: base64 } as T;
-    } finally {
-      clearTimeout(timeoutId);
     }
+
+    throw new Error(`API request failed: ${method} ${path} → retries exhausted`);
   }
 
   private static async getPublicIp(): Promise<string> {
