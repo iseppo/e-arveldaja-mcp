@@ -13,15 +13,28 @@ describe("roundMoney", () => {
     expect(roundMoney(2.675)).toBe(2.68);
   });
 
-  it("handles zero and negatives", () => {
+  it("handles zero, negatives, and special values", () => {
     expect(roundMoney(0)).toBe(0);
+    expect(Object.is(roundMoney(-0), 0)).toBe(true); // -0 returns +0
     expect(roundMoney(-1.235)).toBe(-1.24);
-    expect(roundMoney(-0) === 0).toBe(true); // -0 and +0 are equal under ===
+    expect(roundMoney(-0.005)).toBe(-0.01);
+    expect(roundMoney(NaN)).toBe(0);
+    expect(roundMoney(Infinity)).toBe(0);
+    expect(roundMoney(-Infinity)).toBe(0);
+  });
+
+  it("handles mid-range .005 boundaries correctly", () => {
+    expect(roundMoney(10000.005)).toBe(10000.01);
+    expect(roundMoney(-10000.005)).toBe(-10000.01);
+    expect(roundMoney(0.005)).toBe(0.01);
+    expect(roundMoney(100.005)).toBe(100.01);
   });
 
   it("handles large values", () => {
     expect(roundMoney(1000000.995)).toBe(1000001);
     expect(roundMoney(1000000.005)).toBe(1000000.01);
+    expect(roundMoney(999999.995)).toBe(1000000);
+    expect(roundMoney(-999999.995)).toBe(-1000000);
     expect(roundMoney(123456.789)).toBe(123456.79);
   });
 

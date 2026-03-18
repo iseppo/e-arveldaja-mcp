@@ -74,18 +74,20 @@ export class HttpClient {
 
     // Sign with path only (no query params)
     const signingPath = url.pathname;
-    const authHeaders = createAuthHeaders(this.config, signingPath);
-
-    const headers: Record<string, string> = {
-      ...authHeaders,
-      Accept: "application/json",
-    };
-
-    if (body !== undefined) {
-      headers["Content-Type"] = "application/json";
-    }
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      // Fresh auth headers for each attempt (timestamp must be current)
+      const authHeaders = createAuthHeaders(this.config, signingPath);
+
+      const headers: Record<string, string> = {
+        ...authHeaders,
+        Accept: "application/json",
+      };
+
+      if (body !== undefined) {
+        headers["Content-Type"] = "application/json";
+      }
+
       await this.waitForRateLimitTurn();
 
       const controller = new AbortController();

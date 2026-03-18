@@ -232,14 +232,14 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 description: feeDesc,
                 bank_account_name: "Wise",
                 clients_id: wiseClientId,
-              } as any);
+              });
               const feeId = feeResult.created_object_id;
 
               // Auto-confirm fee to expense account
               if (feeId && wiseClientId) {
                 try {
                   await api.transactions.confirm(feeId, [
-                    { related_table: "accounts", related_id: feeRelationId, amount: fee } as any,
+                    { related_table: "accounts", related_id: feeRelationId, amount: fee },
                   ]);
                   created.push({
                     wise_id: `FEE:${row.id}`,
@@ -247,11 +247,11 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                     status: "created_and_confirmed",
                     api_id: feeId,
                   });
-                } catch (confErr: any) {
+                } catch (confErr: unknown) {
                   created.push({
                     wise_id: `FEE:${row.id}`,
                     date, type, amount: fee, description: feeDesc,
-                    status: "created (confirm failed: " + confErr.message + ")",
+                    status: "created (confirm failed: " + (confErr instanceof Error ? confErr.message : String(confErr)) + ")",
                     api_id: feeId,
                   });
                 }
