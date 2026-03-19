@@ -415,10 +415,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         summary[ticker] = {
           buys: buys.length,
           sells: sells.length,
-          total_invested_eur: Math.round(buys.reduce((s, t) => {
+          total_invested_eur: roundMoney(buys.reduce((s, t) => {
             const tradeFeeEur = t.fee_eur > 0 && t.fx_rate ? t.fee_eur / t.fx_rate : t.fee_eur;
             return s + t.eur_amount + tradeFeeEur;
-          }, 0) * 100) / 100,
+          }, 0)),
           total_sold_eur: roundMoney(sells.reduce((s, t) => s + t.eur_amount, 0)),
         };
       }

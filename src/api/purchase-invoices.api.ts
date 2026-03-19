@@ -24,9 +24,10 @@ function normalizeItemsForNonVat(
         ? roundMoney(item.unit_net_price * item.amount)
         : undefined);
 
-    const rate = item.vat_rate_dropdown === "-" ? 0
-      : item.vat_rate_dropdown !== undefined
-        ? Number(item.vat_rate_dropdown.replace(",", "."))
+    const rateStr = item.vat_rate_dropdown !== undefined ? String(item.vat_rate_dropdown) : undefined;
+    const rate = rateStr === "-" ? 0
+      : rateStr !== undefined
+        ? Number(rateStr.replace(",", "."))
         : undefined;
 
     // Single-item invoice: use explicit gross_price if available
