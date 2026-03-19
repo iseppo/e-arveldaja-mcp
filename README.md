@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 85 tools, 7 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 90 tools, 7 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 ## Disclaimer
 
@@ -17,7 +17,7 @@ By using this software you acknowledge that:
 
 ## Getting an API Key
 
-1. Log in to [e-arveldaja](https://www.earveldaja.ee/)
+1. Log in to [e-arveldaja](https://e-arveldaja.rik.ee/)
 2. Go to **Seadistused** → **Üldised seadistused** → **Lisa uus juurdepääsuluba** (Settings → General settings → Add new access token)
 3. Enter any name for the token
 4. Find your public IP address (e.g. at [whatismyipaddress.com](https://whatismyipaddress.com/)) and enter it in the allowed IP field. Multiple IPs can be separated by `;`

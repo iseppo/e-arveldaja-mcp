@@ -24,6 +24,7 @@ import { registerRecurringInvoiceTools } from "./tools/recurring-invoices.js";
 import { registerEstonianTaxTools } from "./tools/estonian-tax.js";
 import { registerAnnualReportTools } from "./tools/annual-report.js";
 import { registerDocumentAuditTools } from "./tools/document-audit.js";
+import { registerReceiptInboxTools } from "./tools/receipt-inbox.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
 import { registerCamtImportTools } from "./tools/camt-import.js";
@@ -281,6 +282,7 @@ Reporting:
   registerEstonianTaxTools(scopedServer, api);
   registerAnnualReportTools(scopedServer, api);
   registerDocumentAuditTools(scopedServer, api);
+  registerReceiptInboxTools(scopedServer, api);
   registerLightyearTools(scopedServer, api);
   registerWiseImportTools(scopedServer, api);
   registerCamtImportTools(scopedServer, api);
