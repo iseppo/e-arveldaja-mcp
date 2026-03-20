@@ -17,9 +17,9 @@ export function registerPrompts(server: McpServer): void {
 
 Follow these steps in order:
 
-1. Call \`extract_pdf_invoice\` with file_path="${file_path}" to get the raw text and extraction hints.
+1. Call \`extract_pdf_invoice\` with file_path="${file_path}" to get \`hints.raw_text\` and extracted identifiers.
 
-2. Read the raw_text carefully and extract all of the following fields:
+2. Read \`hints.raw_text\` carefully and extract all of the following fields:
    - Supplier name and address
    - Supplier registry code (Estonian 8-digit code, if present)
    - Supplier VAT number (e.g. EE123456789, if present)
@@ -32,50 +32,79 @@ Follow these steps in order:
    - Supplier IBAN (bank account number)
    - Payment reference number
 
-3. Call \`validate_invoice_data\` with the extracted totals and line items to check arithmetic consistency.
-   Fix any rounding discrepancies before continuing.
+3. Call \`validate_invoice_data\` with:
+   - total_net: extracted net total
+   - total_vat: extracted VAT total
+   - total_gross: extracted gross total
+   - items: JSON array of extracted line items
+   - invoice_date and due_date
+   If validation returns \`valid=false\` or any errors, stop and ask the user to review the extraction before creating anything.
 
-4. Call \`detect_duplicate_purchase_invoice\` with the supplier name, invoice number, and invoice date to check for duplicates.
-   If a duplicate is found, stop and report it — do not create a new invoice.
-
-5. Call \`resolve_supplier\` with:
+4. Call \`resolve_supplier\` with:
    - name: supplier name
    - reg_code: registry code (if found)
    - vat_no: VAT number (if found)
    - iban: IBAN (if found)
-   - auto_create: true
-   This will find or create the supplier client record and return a client_id.
+   - auto_create: false
+   This either returns an existing supplier match or registry data for a new supplier.
 
-6. Call \`suggest_booking\` with:
-   - client_id: the supplier's client_id from step 5
+5. Duplicate check:
+   - If step 4 returned \`found=true\` with an existing client, call \`detect_duplicate_purchase_invoice\` with:
+     - clients_id: resolved client.id
+     - date_from: invoice_date
+     - date_to: invoice_date
+   - Inspect \`exact_duplicates\` and \`suspicious_same_amount_date\` for the same invoice number or the same gross amount on the same date.
+   - If a duplicate candidate matches this invoice, stop and report it.
+
+6. Ensure the supplier client exists:
+   - If step 4 returned \`found=true\`, use \`client.id\` as \`supplier_client_id\`.
+   - Otherwise call \`resolve_supplier\` again with the same identifiers and \`auto_create: true\`.
+   - Use \`api_response.created_object_id\` as \`supplier_client_id\`. If no client ID is returned, stop and report the failure.
+
+7. Call \`suggest_booking\` with:
+   - clients_id: supplier_client_id
    - description: the first line item description
-   This returns a suggested expense account (purchase_accounts_id).
+   Review \`past_invoices\` and reuse the most relevant \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, and VAT setup from a similar line.
+   If there is no suitable history, call \`list_purchase_articles\` or ask the user instead of inventing purchase article IDs.
 
-7. Determine if reverse charge VAT applies:
+8. Determine VAT treatment per line:
+   - For normal domestic invoices, keep the VAT treatment shown on the document.
    - Reverse charge applies when the supplier is foreign (non-Estonian VAT number or no Estonian registry code) AND the invoice is for services (not goods).
-   - If reverse charge applies, set reversed_vat_id: 1 on the invoice items.
+   - If reverse charge applies, set \`reversed_vat_id: 1\` on the affected service lines.
 
-8. Call \`create_purchase_invoice_from_pdf\` with ALL extracted data:
-   - supplier client_id from step 5
-   - invoice_number, invoice_date, due_date
-   - price (net amount), vat_price (EXACT value from invoice), gross_price (EXACT value from invoice)
-   - items array with purchase_accounts_id from step 6, quantities, prices, VAT rates
-   - reversed_vat_id: 1 if reverse charge applies (step 7)
-   - iban and reference number for payment tracking
-   IMPORTANT: Use the EXACT vat_price and gross_price from the invoice — do not recalculate.
+9. Derive the remaining invoice fields:
+   - journal_date: normally invoice_date unless a different turnover date is clearly stated on the invoice.
+   - term_days: the calendar-day difference between invoice_date and due_date.
+   - If due_date is missing, use \`term_days: 0\` and mention that assumption in the final summary.
 
-9. Call \`upload_invoice_document\` with:
-   - id: the invoice ID returned in step 8
+10. Call \`create_purchase_invoice_from_pdf\` with:
+   - supplier_client_id
+   - invoice_number
+   - invoice_date
+   - journal_date
+   - term_days
+   - items: JSON array with \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, quantities, totals, VAT fields, and \`reversed_vat_id\` when applicable
+   - vat_price: EXACT value from invoice
+   - gross_price: EXACT value from invoice
+   - ref_number
+   - bank_account_no
+   - notes: include the source PDF filename or any important assumptions
+   IMPORTANT: Use the EXACT \`vat_price\` and \`gross_price\` from the invoice. Do not recalculate them.
+
+11. Call \`upload_invoice_document\` with:
+   - invoice_id: the invoice ID returned in step 10
    - file_path: "${file_path}"
 
-10. Call \`confirm_purchase_invoice\` with the invoice ID from step 8.
+12. Call \`confirm_purchase_invoice\` with:
+   - id: the invoice ID from step 10
 
-11. Report a summary:
-    - Supplier name and client_id
+13. Report a summary:
+    - Supplier name and supplier_client_id
     - Invoice number, date, due date
     - Net / VAT / Gross amounts
-    - Booking account used
+    - Booking basis used (which past invoice/article/account was reused, or that it was chosen manually)
     - Whether reverse charge was applied
+    - Any validation warnings or assumptions
     - Invoice ID and confirmation status
 `,
         },
@@ -93,8 +122,8 @@ Follow these steps in order:
         messages: [{
           role: "user",
           content: {
-            type: "text",
-            text: `Reconcile bank transactions. Mode: ${effectiveMode}
+          type: "text",
+          text: `Reconcile bank transactions. Mode: ${effectiveMode}
 
 Follow these steps:
 
@@ -105,17 +134,22 @@ Follow these steps:
    - MEDIUM confidence (50–79%): These need a quick review
    - LOW confidence (<50%): These are uncertain — show for information only
 
-   For each match show: transaction date, amount, description, matched invoice number, supplier/client name, and confidence score.
+   For each match show: transaction_id, transaction date, amount, description, matched invoice number, supplier/client name, confidence score, and any partially paid warning.
 
 3. Based on the mode "${effectiveMode}":
-   ${effectiveMode === "auto" ? `- AUTO mode: First call \`auto_confirm_exact_matches\` with dry_run: true to preview what would be confirmed.
+   ${effectiveMode === "auto" ? `- AUTO mode: First call \`auto_confirm_exact_matches\` with \`execute: false\` to preview what would be confirmed.
    - Show the dry-run results and ask for approval.
-   - After approval, call \`auto_confirm_exact_matches\` with dry_run: false to execute.` :
+   - After approval, call \`auto_confirm_exact_matches\` with \`execute: true\` to execute.` :
    effectiveMode === "review" ? `- REVIEW mode: Show all matches (high, medium, low confidence) for manual review.
-   - For each match, ask the user to approve or skip.
-   - Call \`confirm_transaction\` for each approved match.` :
-   `- TRANSACTION ID mode: Show the match details for transaction ID ${effectiveMode}.
-   - Ask for confirmation, then call \`confirm_transaction\` if approved.`}
+   - For each approved match, call \`confirm_transaction\` with:
+     - id: transaction_id
+     - distributions: JSON.stringify([match.distribution])
+   - Only confirm one explicitly approved match at a time; do not auto-confirm ambiguous transactions.` :
+   `- TRANSACTION ID mode: Call \`reconcile_transactions\` with \`min_confidence: 0\`, then filter the returned matches to transaction ID ${effectiveMode}.
+   - If no match exists for that transaction, report that and stop.
+   - If the user approves a match, call \`confirm_transaction\` with:
+     - id: transaction_id
+     - distributions: JSON.stringify([match.distribution])`}
 
 4. List any unmatched transactions (no match found or confidence below threshold):
    - Show transaction date, amount, and description
@@ -136,7 +170,7 @@ Follow these steps:
   registerPrompt(server, 
     "month-end-close",
     "Run the month-end close checklist: check for blockers, find missing documents, detect duplicates, and generate financial statements.",
-    { month: z.string().describe('Month in YYYY-MM format, e.g. "2026-03"') },
+    { month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Expected YYYY-MM").describe('Month in YYYY-MM format, e.g. "2026-03"') },
     async ({ month }) => {
       // Parse month to get date range
       const [year, mm] = month.split("-");
@@ -160,21 +194,28 @@ Follow these steps in order:
 
 2. If there are blockers, list them explicitly and ask the user whether to continue anyway or fix them first.
 
-3. Call \`find_missing_documents\` for the date range ${startDate} to ${endDate}.
+3. Call \`find_missing_documents\` with:
+   - date_from: "${startDate}"
+   - date_to: "${endDate}"
    List any purchase invoices or journal entries that are missing supporting documents.
 
-4. Call \`detect_duplicate_purchase_invoice\` for the period to find any duplicate invoice entries.
-   List any duplicates found.
+4. Call \`detect_duplicate_purchase_invoice\` with:
+   - date_from: "${startDate}"
+   - date_to: "${endDate}"
+   Present both \`exact_duplicates\` and \`suspicious_same_amount_date\` findings.
 
-5. Call \`compute_trial_balance\` for the period (start_date: "${startDate}", end_date: "${endDate}").
+5. Call \`compute_trial_balance\` for the period:
+   - date_from: "${startDate}"
+   - date_to: "${endDate}"
    Check that debits equal credits. If not balanced, flag this as a blocker.
 
 6. Call \`compute_profit_and_loss\` for the year-to-date period:
-   - start_date: "${year}-01-01"
-   - end_date: "${endDate}"
+   - date_from: "${year}-01-01"
+   - date_to: "${endDate}"
    Show revenue, expenses, and net profit/loss YTD.
 
-7. Call \`compute_balance_sheet\` as of the month end (as_of_date: "${endDate}").
+7. Call \`compute_balance_sheet\` with:
+   - date_to: "${endDate}"
    Show assets, liabilities, and equity totals.
 
 8. Report a complete month-end summary:
@@ -212,34 +253,44 @@ Follow these steps:
 
 2. Search for the supplier in existing clients:
    - If it's a registry code: call \`find_client_by_code\` with code: "${identifier}"
-   - If it's a name: call \`search_client\` with query: "${identifier}"
+   - If it's a name: call \`search_client\` with name: "${identifier}"
 
-   If a match is found, show the existing client details and STOP — do not create a duplicate.
+   If a clear match is found, show the existing client details and STOP — do not create a duplicate.
 
 3. Call \`resolve_supplier\` with:
    - ${/^\d{8}$/.test(identifier) ? `reg_code: "${identifier}"` : `name: "${identifier}"`}
    - auto_create: false
    This will look up the Estonian Business Registry for company data without creating anything.
 
-4. Show the registry data found (company name, registry code, address, VAT number if any).
-   Then ask the user to provide any additional details needed:
-   - IBAN (bank account number for payments)
-   - VAT number (if not already found and company is VAT-registered)
-   - Email address (for invoice delivery)
-   - Any other relevant details
+4. If \`resolve_supplier\` returns \`found=true\`, show the matched client and STOP — do not create a duplicate.
 
-5. Once you have all the data, call \`create_client\` with:
+5. Show the registry data found (company name, registry code, address, VAT number if any).
+   Then ask the user to provide any additional details needed:
+   - bank_account_no (IBAN for payments)
+   - invoice_vat_no (if not already found and the supplier is VAT-registered)
+   - email
+   - telephone
+   - address_text (if the registry data is missing or incomplete)
+   - cl_code_country if the supplier is not Estonian
+   - Whether this is a natural person or a legal entity
+
+6. Once you have all the data, call \`create_client\` with:
    - name: company name
    - code: registry code
-   - invoice_vat_no: VAT number (if applicable)
-   - iban: IBAN (if provided)
-   - email: email (if provided)
-   - All other relevant fields from registry data
+   - is_client: false
+   - is_supplier: true
+   - cl_code_country
+   - is_physical_entity / is_juridical_entity
+   - invoice_vat_no
+   - bank_account_no
+   - email
+   - telephone
+   - address_text
 
-6. Report the created supplier:
+7. Report the created supplier:
    - Client ID assigned
    - Name, registry code, VAT number
-   - IBAN and email
+   - bank_account_no and email
    - Note any missing optional fields the user may want to add later
 `,
         },
@@ -251,7 +302,8 @@ Follow these steps:
     "company-overview",
     "Get a comprehensive dashboard overview of the company's current financial state.",
     async () => {
-      const today = new Date().toISOString().slice(0, 10);
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
       const yearStart = `${today.slice(0, 4)}-01-01`;
       return {
         messages: [{
@@ -262,23 +314,23 @@ Follow these steps:
 
 Follow these steps:
 
-1. Call \`get_vat_info\` to get the company VAT registration status and number.
-   Call \`get_invoice_info\` to get company name, address, and contact details.
-   (These two calls can be made in parallel.)
+1. Call \`get_vat_info\`, \`get_invoice_info\`, and \`list_connections\`.
+   These can be fetched in parallel.
 
-2. Call \`list_connections\` to show the active connection (company/account).
+2. Call \`compute_balance_sheet\` with:
+   - date_to: "${today}"
 
-3. Call \`compute_balance_sheet\` as of today (${today}) to get current financial position.
+3. Call \`compute_profit_and_loss\` for the current year:
+   - date_from: "${yearStart}"
+   - date_to: "${today}"
 
-4. Call \`compute_profit_and_loss\` for the current year:
-   - start_date: "${yearStart}"
-   - end_date: "${today}"
+4. Call \`compute_receivables_aging\` with:
+   - as_of_date: "${today}"
+   Call \`compute_payables_aging\` with:
+   - as_of_date: "${today}"
+   These can be fetched in parallel.
 
-5. Call \`compute_receivables_aging\` to see outstanding customer invoices by age bucket.
-   Call \`compute_payables_aging\` to see outstanding supplier invoices by age bucket.
-   (These two calls can be made in parallel.)
-
-6. Present a dashboard summary with these sections:
+5. Present a dashboard summary with these sections:
 
    **Company**
    - Name, VAT number, active connection
@@ -304,6 +356,8 @@ Follow these steps:
    **Key Ratios** (if calculable)
    - Current ratio (if current assets/liabilities available)
    - Quick summary: healthy / watch / attention needed
+
+   Also surface any warnings returned by the balance sheet or aging tools.
 `,
           },
         }],
@@ -321,8 +375,14 @@ Follow these steps:
       investment_account: z.string().describe("Investment asset account number (e.g. 1520)"),
       broker_account: z.string().describe("Broker cash account number (e.g. 1120)"),
       income_account: z.string().optional().describe("Distribution income account (e.g. 8320 or 8400)"),
+      gain_loss_account: z.string().optional().describe("Realized gain/loss account for sell trades"),
+      loss_account: z.string().optional().describe("Optional separate realized loss account"),
+      fee_account: z.string().optional().describe("Optional fee expense account"),
+      tax_account: z.string().optional().describe("Withheld tax account for distributions"),
+      investment_dimension_id: z.string().optional().describe("Optional dimension ID for the investment account"),
+      broker_dimension_id: z.string().optional().describe("Optional dimension ID for the broker account"),
     },
-    async ({ statement_path, capital_gains_path, investment_account, broker_account, income_account }) => ({
+    async ({ statement_path, capital_gains_path, investment_account, broker_account, income_account, gain_loss_account, loss_account, fee_account, tax_account, investment_dimension_id, broker_dimension_id }) => ({
       messages: [{
         role: "user",
         content: {
@@ -334,6 +394,12 @@ ${capital_gains_path ? `Capital gains CSV: ${capital_gains_path}` : "No capital 
 Investment account: ${investment_account}
 Broker account: ${broker_account}
 ${income_account ? `Income account: ${income_account}` : ""}
+${gain_loss_account ? `Gain/loss account: ${gain_loss_account}` : ""}
+${loss_account ? `Loss account: ${loss_account}` : ""}
+${fee_account ? `Fee account: ${fee_account}` : ""}
+${tax_account ? `Tax account: ${tax_account}` : ""}
+${investment_dimension_id ? `Investment dimension ID: ${investment_dimension_id}` : ""}
+${broker_dimension_id ? `Broker dimension ID: ${broker_dimension_id}` : ""}
 
 Follow these steps in order:
 
@@ -357,11 +423,21 @@ ${capital_gains_path ? `2. Call \`parse_lightyear_capital_gains\` with file_path
    Show the portfolio: ticker, quantity, remaining cost EUR, avg cost per share.
    This helps verify the investment account balance after booking.
 
-4. Call \`book_lightyear_trades\` with:
+4. Before booking trades:
+   - If the statement includes sell trades and no \`capital_gains_path\` is available, explain that sells will be skipped.
+   - If sell trades are present and no \`gain_loss_account\` is known, ask the user for it before booking sells.
+   - If the user wants fees expensed separately or dimensions applied, collect \`fee_account\`, \`investment_dimension_id\`, and \`broker_dimension_id\` before booking.
+
+5. Call \`book_lightyear_trades\` with:
    - file_path: "${statement_path}"
    ${capital_gains_path ? `- capital_gains_file: "${capital_gains_path}"` : ""}
    - investment_account: ${investment_account}
    - broker_account: ${broker_account}
+   ${gain_loss_account ? `- gain_loss_account: ${gain_loss_account}` : ""}
+   ${loss_account ? `- loss_account: ${loss_account}` : ""}
+   ${fee_account ? `- fee_account: ${fee_account}` : ""}
+   ${investment_dimension_id ? `- investment_dimension_id: ${investment_dimension_id}` : ""}
+   ${broker_dimension_id ? `- broker_dimension_id: ${broker_dimension_id}` : ""}
    - dry_run: true (ALWAYS preview first!)
 
    Review the dry run output:
@@ -371,13 +447,19 @@ ${capital_gains_path ? `2. Call \`parse_lightyear_capital_gains\` with file_path
 
    Present the preview and ask for confirmation before proceeding.
 
-5. After user confirms, call \`book_lightyear_trades\` again with dry_run: false.
+6. After user confirms, call \`book_lightyear_trades\` again with dry_run: false.
    Report: number of journals created, any errors.
 
-${income_account ? `6. Call \`book_lightyear_distributions\` with:
+${income_account ? `7. Before booking distributions:
+   - If the parsed distributions include withheld tax and no \`tax_account\` is known, ask the user for it before proceeding.
+
+   Call \`book_lightyear_distributions\` with:
    - file_path: "${statement_path}"
    - broker_account: ${broker_account}
    - income_account: ${income_account}
+   ${tax_account ? `- tax_account: ${tax_account}` : ""}
+   ${fee_account ? `- fee_account: ${fee_account}` : ""}
+   ${broker_dimension_id ? `- broker_dimension_id: ${broker_dimension_id}` : ""}
    - dry_run: true (preview first!)
 
    Review the distributions preview:
@@ -385,11 +467,12 @@ ${income_account ? `6. Call \`book_lightyear_distributions\` with:
    - Withheld tax amounts (if any)
 
    After user confirms, call again with dry_run: false.
-` : `6. If there are distributions in the statement, ask the user for an income_account number
+` : `7. If there are distributions in the statement, ask the user for an income_account number
    (e.g. 8320 for fund distributions, 8400 for interest income) before booking them
    with \`book_lightyear_distributions\`.
+   If the parsed distributions include withheld tax, also ask for \`tax_account\` before booking.
 `}
-7. Final summary:
+8. Final summary:
    - Trades booked: count and total EUR
    - Distributions booked: count and total EUR
    - Skipped entries: count and reasons

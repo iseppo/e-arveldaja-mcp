@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.1] - 2026-03-20
+
+### Fixed
+- **MCP prompt accuracy**:
+  - aligned `book-invoice`, `reconcile-bank`, `month-end-close`, `new-supplier`, `company-overview`, and `lightyear-booking` with the real tool names, parameter names, and output shapes
+  - fixed stale prompt guidance that previously referred to invalid fields such as `query`, `client_id`, `invoice_id`/`id` mixups, `start_date`/`end_date`, and `dry_run` flags where tools now expect `execute`
+  - improved Lightyear guidance around `gain_loss_account`, `tax_account`, dimensions, and preview/execute flow so prompts no longer encourage half-configured bookings
+- **Server instructions**:
+  - updated the global MCP instructions to match the corrected purchase-invoice and bank-reconciliation workflows
+
+### Changed
+- **Prompt regression coverage**:
+  - expanded prompt tests from name-only registration checks to content checks that validate the generated workflow text against actual tool schemas
+- **133 tests** total, up from 128 in v0.7.0
+- **Release metadata** updated to `0.7.1`
+
 ## [0.7.0] - 2026-03-20
 
 ### Fixed
