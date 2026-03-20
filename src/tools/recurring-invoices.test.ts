@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { registerRecurringInvoiceTools } from "./recurring-invoices.js";
 
 function buildSaleInvoice(overrides: Record<string, unknown> = {}) {
@@ -64,6 +65,7 @@ function setupRecurringTool(options: {
   if (!registration) throw new Error("Tool was not registered");
 
   return {
+    server,
     api,
     handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
   };
@@ -104,6 +106,40 @@ describe("recurring invoices tool", () => {
     expect(payload.mode).toBe("DRY_RUN");
     expect(payload.would_create).toBe(1);
     expect(api.saleInvoices.create).not.toHaveBeenCalled();
+  });
+
+  it("registers a schema that validates month/date formats and invoice_ids", () => {
+    const { server } = setupRecurringTool();
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "create_recurring_sale_invoices");
+    if (!registration) throw new Error("Tool was not registered");
+
+    const schema = z.object(registration[1].inputSchema);
+
+    expect(schema.safeParse({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+      invoice_ids: "1, 2,3",
+    }).success).toBe(true);
+
+    expect(schema.safeParse({
+      source_month: "2026-1",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+    }).success).toBe(false);
+
+    expect(schema.safeParse({
+      source_month: "2026-01",
+      target_date: "2026/02/01",
+      target_journal_date: "2026-02-01",
+    }).success).toBe(false);
+
+    expect(schema.safeParse({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+      invoice_ids: "1, nope, 3",
+    }).success).toBe(false);
   });
 
   it("skips an already cloned target invoice instead of creating a duplicate", async () => {
@@ -164,5 +200,32 @@ describe("recurring invoices tool", () => {
         confirm_error: "Confirm failed",
       }),
     ]);
+  });
+
+  it("reports an error instead of silently skipping source invoices without items", async () => {
+    const sourceWithoutItems = buildSaleInvoice({ items: [] });
+    const { api, handler } = setupRecurringTool({
+      listAllInvoices: [sourceWithoutItems],
+    });
+    api.saleInvoices.get.mockResolvedValue(sourceWithoutItems);
+
+    const result = await handler({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.created).toBe(0);
+    expect(payload.errors).toBe(1);
+    expect(payload.results).toEqual([
+      expect.objectContaining({
+        source_id: 1,
+        status: "error",
+        error: "Source invoice has no items to clone",
+      }),
+    ]);
+    expect(api.saleInvoices.create).not.toHaveBeenCalled();
   });
 });

@@ -46,15 +46,18 @@ Follow these steps in order:
    - vat_no: VAT number (if found)
    - iban: IBAN (if found)
    - auto_create: false
-   This either returns an existing supplier match or registry data for a new supplier.
+   This either returns an existing supplier match or, for Estonian registry-code lookups, registry data for a new supplier.
 
 5. Duplicate check:
-   - If step 4 returned \`found=true\` with an existing client, call \`detect_duplicate_purchase_invoice\` with:
-     - clients_id: resolved client.id
+   - Call \`detect_duplicate_purchase_invoice\` with:
      - date_from: invoice_date
      - date_to: invoice_date
-   - Inspect \`exact_duplicates\` and \`suspicious_same_amount_date\` for the same invoice number or the same gross amount on the same date.
-   - If a duplicate candidate matches this invoice, stop and report it.
+     - invoice_number: extracted invoice number
+     - gross_price: extracted gross total
+     - clients_id: resolved client.id if step 4 returned \`found=true\`
+   - Inspect \`candidate_invoice_number_matches\` and \`candidate_same_amount_date_matches\` first.
+   - Also inspect \`exact_duplicates\` and \`suspicious_same_amount_date\` as warning context for messy supplier histories.
+   - If a candidate match looks like the same invoice, stop and report it before creating anything.
 
 6. Ensure the supplier client exists:
    - If step 4 returned \`found=true\`, use \`client.id\` as \`supplier_client_id\`.
@@ -64,7 +67,8 @@ Follow these steps in order:
 7. Call \`suggest_booking\` with:
    - clients_id: supplier_client_id
    - description: the first line item description
-   Review \`past_invoices\` and reuse the most relevant \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, and VAT setup from a similar line.
+   Review \`past_invoices\` and reuse the most relevant \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, and VAT fields
+   (\`vat_rate_dropdown\`, \`vat_accounts_id\`, \`cl_vat_articles_id\`, \`reversed_vat_id\`) from a similar line.
    If there is no suitable history, call \`list_purchase_articles\` or ask the user instead of inventing purchase article IDs.
 
 8. Determine VAT treatment per line:
@@ -83,7 +87,8 @@ Follow these steps in order:
    - invoice_date
    - journal_date
    - term_days
-   - items: JSON array with \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, quantities, totals, VAT fields, and \`reversed_vat_id\` when applicable
+   - items: JSON array with \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, quantities, totals, VAT fields,
+     \`vat_accounts_id\`, \`cl_vat_articles_id\`, and \`reversed_vat_id\` when applicable
    - vat_price: EXACT value from invoice
    - gross_price: EXACT value from invoice
    - ref_number
@@ -102,7 +107,7 @@ Follow these steps in order:
     - Supplier name and supplier_client_id
     - Invoice number, date, due date
     - Net / VAT / Gross amounts
-    - Booking basis used (which past invoice/article/account was reused, or that it was chosen manually)
+    - Booking basis used (which past invoice/article/account/VAT config was reused, or that it was chosen manually)
     - Whether reverse charge was applied
     - Any validation warnings or assumptions
     - Invoice ID and confirmation status
@@ -135,21 +140,24 @@ Follow these steps:
    - LOW confidence (<50%): These are uncertain — show for information only
 
    For each match show: transaction_id, transaction date, amount, description, matched invoice number, supplier/client name, confidence score, and any partially paid warning.
+   If \`distribution_ready=false\` or a partially paid warning is present, say clearly that no ready-to-use distribution is provided and the remaining open balance must be checked manually first.
 
 3. Based on the mode "${effectiveMode}":
    ${effectiveMode === "auto" ? `- AUTO mode: First call \`auto_confirm_exact_matches\` with \`execute: false\` to preview what would be confirmed.
    - Show the dry-run results and ask for approval.
    - After approval, call \`auto_confirm_exact_matches\` with \`execute: true\` to execute.` :
    effectiveMode === "review" ? `- REVIEW mode: Show all matches (high, medium, low confidence) for manual review.
-   - For each approved match, call \`confirm_transaction\` with:
+   - For each approved match with \`distribution_ready=true\`, call \`confirm_transaction\` with:
      - id: transaction_id
      - distributions: JSON.stringify([match.distribution])
+   - If \`distribution_ready=false\` or the match is partially paid, inspect the invoice first and prepare the distribution manually instead of reusing \`match.distribution\`.
    - Only confirm one explicitly approved match at a time; do not auto-confirm ambiguous transactions.` :
    `- TRANSACTION ID mode: Call \`reconcile_transactions\` with \`min_confidence: 0\`, then filter the returned matches to transaction ID ${effectiveMode}.
    - If no match exists for that transaction, report that and stop.
-   - If the user approves a match, call \`confirm_transaction\` with:
+   - If the user approves a match and \`distribution_ready=true\`, call \`confirm_transaction\` with:
      - id: transaction_id
-     - distributions: JSON.stringify([match.distribution])`}
+     - distributions: JSON.stringify([match.distribution])
+   - If \`distribution_ready=false\`, inspect the invoice first and prepare the distribution manually instead of reusing \`match.distribution\``}
 
 4. List any unmatched transactions (no match found or confidence below threshold):
    - Show transaction date, amount, and description
@@ -260,14 +268,19 @@ Follow these steps:
 3. Call \`resolve_supplier\` with:
    - ${/^\d{8}$/.test(identifier) ? `reg_code: "${identifier}"` : `name: "${identifier}"`}
    - auto_create: false
-   This will look up the Estonian Business Registry for company data without creating anything.
+   ${/^\d{8}$/.test(identifier)
+    ? "This can look up Estonian Business Registry data without creating anything."
+    : "This can find an existing supplier match, but name-only lookup does not fetch Estonian Business Registry data."}
 
 4. If \`resolve_supplier\` returns \`found=true\`, show the matched client and STOP — do not create a duplicate.
 
-5. Show the registry data found (company name, registry code, address, VAT number if any).
+5. Review the result from step 3:
+   - If \`registry_data\` is present, show the company name, registry code, and address from the registry lookup.
+   - If \`registry_data\` is missing, say so explicitly. Name-only lookup does not provide registry data.
+   - \`resolve_supplier\` does not fetch a VAT number from the registry lookup, so ask for \`invoice_vat_no\` separately if needed.
    Then ask the user to provide any additional details needed:
    - bank_account_no (IBAN for payments)
-   - invoice_vat_no (if not already found and the supplier is VAT-registered)
+   - invoice_vat_no (if the supplier is VAT-registered)
    - email
    - telephone
    - address_text (if the registry data is missing or incomplete)
@@ -289,7 +302,7 @@ Follow these steps:
 
 7. Report the created supplier:
    - Client ID assigned
-   - Name, registry code, VAT number
+   - Name, registry code, VAT number (if provided)
    - bank_account_no and email
    - Note any missing optional fields the user may want to add later
 `,
@@ -421,6 +434,7 @@ ${capital_gains_path ? `2. Call \`parse_lightyear_capital_gains\` with file_path
 3. Call \`lightyear_portfolio_summary\` with file_path: "${statement_path}".
    This computes current holdings with weighted average cost.
    Show the portfolio: ticker, quantity, remaining cost EUR, avg cost per share.
+   Treat this as the current accounting carrying value / cost basis, not market value.
    This helps verify the investment account balance after booking.
 
 4. Before booking trades:
@@ -476,7 +490,7 @@ ${income_account ? `7. Before booking distributions:
    - Trades booked: count and total EUR
    - Distributions booked: count and total EUR
    - Skipped entries: count and reasons
-   - Current portfolio value (from step 3)
+   - Current portfolio carrying value / remaining cost basis (from step 3)
    - Suggest verifying the investment account balance with \`compute_account_balance\`
      using account_id: ${investment_account}
 `,

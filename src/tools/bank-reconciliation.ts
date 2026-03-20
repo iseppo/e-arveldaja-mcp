@@ -20,6 +20,21 @@ interface MatchCandidate {
   match_reasons: string[];
 }
 
+function buildSuggestedDistribution(
+  type: MatchCandidate["type"],
+  id: number,
+  amount: number,
+  partiallyPaidWarning: boolean,
+): { related_table: string; related_id: number; amount: number } | undefined {
+  if (partiallyPaidWarning) return undefined;
+
+  return {
+    related_table: type === "sale_invoice" ? "sale_invoices" : "purchase_invoices",
+    related_id: id,
+    amount,
+  };
+}
+
 function matchScore(
   tx: Transaction,
   invoice: { gross_price?: number; base_gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
@@ -149,6 +164,13 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
         if (candidates.length > 0) {
           candidates.sort((a, b) => b.confidence - a.confidence);
+          const bestMatch = candidates[0]!;
+          const distribution = buildSuggestedDistribution(
+            bestMatch.type,
+            bestMatch.id,
+            tx.amount,
+            bestMatch.partially_paid_warning,
+          );
           results.push({
             transaction_id: tx.id,
             date: tx.date,
@@ -157,13 +179,13 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             description: tx.description,
             bank_account_name: tx.bank_account_name,
             ref_number: tx.ref_number,
-            best_match: candidates[0],
+            best_match: bestMatch,
             other_candidates: candidates.slice(1, 3),
-            distribution: {
-              related_table: candidates[0].type === "sale_invoice" ? "sale_invoices" : "purchase_invoices",
-              related_id: candidates[0].id,
-              amount: tx.amount,
-            },
+            ...(distribution ? { distribution } : {}),
+            distribution_ready: distribution !== undefined,
+            ...(bestMatch.partially_paid_warning
+              ? { manual_review_required: "Invoice is PARTIALLY_PAID; verify the remaining open balance before confirming." }
+              : {}),
           });
         }
       }

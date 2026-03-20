@@ -220,7 +220,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     }
   );
   registerTool(server, "resolve_supplier",
-    "Match a supplier to an existing client by registry code, VAT number, or name (fuzzy). Optionally creates a new client. Looks up Estonian business registry data.",
+    "Match a supplier to an existing client by registry code, VAT number, or name (fuzzy). " +
+    "Optionally creates a new client. Looks up Estonian business registry data when an Estonian registry code is provided.",
     {
       name: z.string().optional().describe("Supplier name from invoice"),
       reg_code: z.string().optional().describe("Registry code (registrikood)"),
@@ -357,7 +358,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "suggest_booking",
-    "Suggest purchase articles and accounts for a new invoice based on similar confirmed invoices from the same supplier.",
+    "Suggest purchase articles, accounts, and VAT settings for a new invoice based on similar confirmed invoices from the same supplier.",
     {
       clients_id: z.number().describe("Supplier client ID"),
       description: z.string().optional().describe("Invoice item description to match"),
@@ -388,8 +389,12 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           items: full.items?.map(item => ({
             custom_title: item.custom_title,
             cl_purchase_articles_id: item.cl_purchase_articles_id,
+            purchase_accounts_id: item.purchase_accounts_id,
             total_net_price: item.total_net_price,
             vat_rate_dropdown: item.vat_rate_dropdown,
+            vat_accounts_id: item.vat_accounts_id,
+            cl_vat_articles_id: item.cl_vat_articles_id,
+            reversed_vat_id: item.reversed_vat_id,
           })),
         });
       }
@@ -420,7 +425,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
             supplier_id: clients_id,
             past_invoices: detailed,
             suggestion: detailed.length > 0
-              ? "Use the purchase article and account settings from the most recent similar invoice."
+              ? "Use the purchase article, account, and VAT settings from the most recent similar invoice."
               : "No past invoices found for this supplier. Use list_purchase_articles to find appropriate articles.",
           }, null, 2),
         }],

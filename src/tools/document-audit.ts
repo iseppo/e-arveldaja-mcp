@@ -89,15 +89,19 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
   );
 
   registerTool(server, "detect_duplicate_purchase_invoice",
-    "Check for duplicate purchase invoices by supplier + invoice number, and by supplier + amount + date.",
+    "Check for duplicate purchase invoices by supplier + invoice number, and by supplier + amount + date. " +
+    "Can also test an incoming invoice candidate against existing invoices.",
     {
       clients_id: z.number().optional().describe("Filter by supplier ID"),
       date_from: z.string().optional().describe("Start date"),
       date_to: z.string().optional().describe("End date"),
+      invoice_number: z.string().optional().describe("Incoming invoice number to match against existing invoices"),
+      gross_price: z.number().optional().describe("Incoming gross amount to match against existing invoices"),
     },
     { ...readOnly, title: "Detect Duplicate Purchase Invoices" },
-    async ({ clients_id, date_from, date_to }) => {
+    async ({ clients_id, date_from, date_to, invoice_number, gross_price }) => {
       const allPurchases = await api.purchaseInvoices.listAll();
+      const normalizedInvoiceNumber = invoice_number?.trim().toLowerCase();
 
       const filtered = allPurchases.filter((inv: PurchaseInvoice) => {
         if (inv.status === "DELETED" || inv.status === "INVALIDATED") return false;
@@ -161,6 +165,13 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
         }
       }
 
+      const candidateInvoiceNumberMatches = normalizedInvoiceNumber
+        ? filtered.filter(inv => inv.number.trim().toLowerCase() === normalizedInvoiceNumber)
+        : [];
+      const candidateSameAmountDateMatches = gross_price !== undefined
+        ? filtered.filter(inv => inv.gross_price !== undefined && Math.abs(inv.gross_price - gross_price) <= 0.02)
+        : [];
+
       return {
         content: [{
           type: "text",
@@ -173,6 +184,32 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
               count: amountDupes.length,
               items: amountDupes,
             },
+            candidate_invoice_number_matches: {
+              count: candidateInvoiceNumberMatches.length,
+              items: candidateInvoiceNumberMatches.map(inv => ({
+                id: inv.id,
+                supplier: inv.client_name,
+                supplier_id: inv.clients_id,
+                invoice_number: inv.number,
+                date: inv.create_date,
+                gross: inv.gross_price,
+                status: inv.status,
+              })),
+            },
+            candidate_same_amount_date_matches: {
+              count: candidateSameAmountDateMatches.length,
+              items: candidateSameAmountDateMatches.map(inv => ({
+                id: inv.id,
+                supplier: inv.client_name,
+                supplier_id: inv.clients_id,
+                invoice_number: inv.number,
+                date: inv.create_date,
+                gross: inv.gross_price,
+                status: inv.status,
+              })),
+            },
+            candidate_duplicate_risk:
+              candidateInvoiceNumberMatches.length > 0 || candidateSameAmountDateMatches.length > 0,
             total_invoices_checked: filtered.length,
           }, null, 2),
         }],

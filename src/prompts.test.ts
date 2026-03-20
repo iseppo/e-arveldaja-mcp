@@ -39,7 +39,7 @@ describe("registerPrompts", () => {
     ]);
   });
 
-  it("keeps the book-invoice prompt aligned with real tool parameter names", async () => {
+  it("keeps the book-invoice prompt aligned with real tool parameters and output fields", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "book-invoice", { file_path: "/tmp/invoice.pdf" });
 
@@ -49,6 +49,11 @@ describe("registerPrompts", () => {
     expect(text).toContain("invoice_id: the invoice ID returned in step 10");
     expect(text).toContain("term_days");
     expect(text).toContain("api_response.created_object_id");
+    expect(text).toContain("invoice_number: extracted invoice number");
+    expect(text).toContain("gross_price: extracted gross total");
+    expect(text).toContain("candidate_invoice_number_matches");
+    expect(text).toContain("vat_accounts_id");
+    expect(text).toContain("cl_vat_articles_id");
     expect(text).not.toContain("client_id: the supplier's client_id");
   });
 
@@ -60,6 +65,8 @@ describe("registerPrompts", () => {
     expect(autoText).toContain("execute: false");
     expect(autoText).toContain("execute: true");
     expect(reviewText).toContain("distributions: JSON.stringify([match.distribution])");
+    expect(reviewText).toContain("distribution_ready=false");
+    expect(reviewText).toContain("prepare the distribution manually");
   });
 
   it("uses the real reporting tool parameter names in month-end and overview prompts", async () => {
@@ -77,7 +84,7 @@ describe("registerPrompts", () => {
     expect(overviewText).not.toContain("end_date:");
   });
 
-  it("uses the real client search and creation field names in new-supplier", async () => {
+  it("keeps new-supplier honest about what registry and VAT data is actually available", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "new-supplier", { identifier: "Acme OU" });
 
@@ -85,11 +92,14 @@ describe("registerPrompts", () => {
     expect(text).toContain("bank_account_no");
     expect(text).toContain("is_client: false");
     expect(text).toContain("is_supplier: true");
+    expect(text).toContain("name-only lookup does not fetch Estonian Business Registry data");
+    expect(text).toContain("does not fetch a VAT number from the registry lookup");
     expect(text).not.toContain("query:");
     expect(text).not.toContain("iban:");
+    expect(text).not.toContain("VAT number if any");
   });
 
-  it("adds sell and tax-account guidance to the Lightyear workflow", async () => {
+  it("keeps the Lightyear workflow explicit that portfolio value means accounting cost basis", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "lightyear-booking", {
       statement_path: "/tmp/statement.csv",
@@ -101,5 +111,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("gain_loss_account");
     expect(text).toContain("tax_account");
     expect(text).toContain("If there are distributions in the statement, ask the user for an income_account number");
+    expect(text).toContain("current accounting carrying value / cost basis");
+    expect(text).toContain("Current portfolio carrying value / remaining cost basis");
+    expect(text).not.toContain("Current portfolio value (from step 3)");
   });
 });

@@ -7,6 +7,9 @@ import { batch } from "../annotations.js";
 
 const RECURRING_CLONE_MARKER_PREFIX = "RECURRING_SOURCE_INVOICE";
 const RECURRING_CLONE_MARKER_RE = /RECURRING_SOURCE_INVOICE:\d+:TARGET_DATE:\d{4}-\d{2}-\d{2}/g;
+const MONTH_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
+const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const COMMA_SEPARATED_IDS_REGEX = /^\d+(?:\s*,\s*\d+)*$/;
 
 function buildRecurringCloneMarker(sourceId: number, targetDate: string): string {
   return `${RECURRING_CLONE_MARKER_PREFIX}:${sourceId}:TARGET_DATE:${targetDate}`;
@@ -28,10 +31,10 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
     "Copies items, client, template from source invoices and creates DRAFT invoices. " +
     "Use dry_run=true to preview without creating. Invoice numbers are auto-assigned by the configured invoice series.",
     {
-      source_month: z.string().describe("Source month to copy from (YYYY-MM)"),
-      target_date: z.string().describe("New invoice date (YYYY-MM-DD)"),
-      target_journal_date: z.string().describe("New turnover date (YYYY-MM-DD)"),
-      invoice_ids: z.string().optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
+      source_month: z.string().regex(MONTH_REGEX, "Expected YYYY-MM").describe("Source month to copy from (YYYY-MM)"),
+      target_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New invoice date (YYYY-MM-DD)"),
+      target_journal_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New turnover date (YYYY-MM-DD)"),
+      invoice_ids: z.string().regex(COMMA_SEPARATED_IDS_REGEX, "Expected comma-separated numeric invoice IDs").optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
       auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
       dry_run: z.boolean().optional().describe("Preview without creating invoices (default false)"),
     },
@@ -93,7 +96,16 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
         }
 
         const full = await api.saleInvoices.get(source.id);
-        if (!full.items || full.items.length === 0) continue;
+        if (!full.items || full.items.length === 0) {
+          results.push({
+            source_id: source.id,
+            source_number: source.number,
+            client: full.client_name,
+            status: "error",
+            error: "Source invoice has no items to clone",
+          });
+          continue;
+        }
 
         if (isDryRun) {
           results.push({

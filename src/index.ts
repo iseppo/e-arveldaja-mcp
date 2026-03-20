@@ -139,11 +139,12 @@ async function main() {
   }, {
     instructions: `Purchase invoices:
 - Before booking, call get_vat_info to check VAT registration status.
-- Resolve the supplier first; if it matches an existing client, check duplicate risk for that client and invoice date before creating.
+- Resolve the supplier first, then check duplicate risk before creating.
+- If there is no existing supplier match yet, still run duplicate detection using invoice_number + gross_price + invoice_date filters.
 - Pass original vat_price and gross_price exactly — do not recalculate.
-- Use suggest_booking with clients_id to reuse past purchase article/account settings; use list_purchase_articles only when history is not sufficient.
+- Use suggest_booking with clients_id to reuse past purchase article/account/VAT settings; use list_purchase_articles only when history is not sufficient.
 - For non-Estonian suppliers, check if reverse charge applies (reversed_vat_id=1).
-- PDF flow: extract_pdf_invoice → validate_invoice_data → resolve_supplier → detect_duplicate_purchase_invoice (when supplier exists) → suggest_booking → create_purchase_invoice_from_pdf → upload_invoice_document → confirm_purchase_invoice.
+- PDF flow: extract_pdf_invoice → validate_invoice_data → resolve_supplier → detect_duplicate_purchase_invoice → suggest_booking → create_purchase_invoice_from_pdf → upload_invoice_document → confirm_purchase_invoice.
 
 Bank reconciliation:
 - Run reconcile_transactions first, then auto_confirm_exact_matches with execute=false before executing.
