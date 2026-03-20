@@ -13,7 +13,7 @@ import { reportProgress } from "../progress.js";
 import { getProjectRoot } from "../paths.js";
 import { readOnly, batch } from "../annotations.js";
 import { type ApiContext, isCompanyVatRegistered, safeJsonParse } from "./crud-tools.js";
-import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
+import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, normalizeVatRate } from "./purchase-vat-defaults.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -26,6 +26,57 @@ const SUPPORTED_EXTENSIONS = [...FILE_TYPE_EXTENSIONS.pdf, ...FILE_TYPE_EXTENSIO
 const DEFAULT_LIABILITY_ACCOUNT = 2310;
 const EXACT_MATCH_THRESHOLD = 90;
 const POSSIBLE_MATCH_THRESHOLD = 70;
+const AUTO_BOOKED_NET_DECIMALS = 6;
+const MAX_RECEIPT_FALLBACK_AMOUNT = 50_000;
+const RECEIPT_TOTAL_LABEL_RE = /(tasuda|maksta|kokku|total|grand total|summa kokku|maksmisele kuulub|to pay|payable|amount due)/i;
+const RECEIPT_VAT_LABEL_RE = /(käibemaks|km\b|vat\b)/i;
+const RECEIPT_NET_LABEL_RE = /(neto|subtotal|summa km-ta|käibemaksuta|without vat|total net)/i;
+const RECEIPT_REFERENCE_LINE_RE =
+  /\b(reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat\s*(?:nr|number|no\.?)|iban|viitenumber|viitenr|reference|ref\.?\s*(?:nr|number))\b/i;
+const RECEIPT_CURRENCY_PATTERNS = [
+  { code: "EUR", pattern: /\bEUR\b|€/i },
+  { code: "USD", pattern: /\bUSD\b|\bUS\$/i },
+  { code: "GBP", pattern: /\bGBP\b/i },
+  { code: "SEK", pattern: /\bSEK\b/i },
+  { code: "NOK", pattern: /\bNOK\b/i },
+  { code: "DKK", pattern: /\bDKK\b/i },
+  { code: "CHF", pattern: /\bCHF\b/i },
+  { code: "PLN", pattern: /\bPLN\b/i },
+] as const;
+const PERSON_COUNTERPARTY_COMPANY_WORD_RE =
+  /\b(limited|ltd|llc|inc|gmbh|ag|ab|oy|srl|bv|nv|sa|plc|ireland|operations|services|solutions|group|holding|capital|systems|technologies|media|digital|cloud|platform|company|corp|corporation)\b/i;
+const IBAN_COUNTRY_TO_CLIENT_COUNTRY: Record<string, string> = {
+  AT: "AUT",
+  BE: "BEL",
+  BG: "BGR",
+  CH: "CHE",
+  CY: "CYP",
+  CZ: "CZE",
+  DE: "DEU",
+  DK: "DNK",
+  EE: "EST",
+  ES: "ESP",
+  FI: "FIN",
+  FR: "FRA",
+  GB: "GBR",
+  GR: "GRC",
+  HR: "HRV",
+  HU: "HUN",
+  IE: "IRL",
+  IT: "ITA",
+  LT: "LTU",
+  LU: "LUX",
+  LV: "LVA",
+  MT: "MLT",
+  NL: "NLD",
+  NO: "NOR",
+  PL: "POL",
+  PT: "PRT",
+  RO: "ROU",
+  SE: "SWE",
+  SI: "SVN",
+  SK: "SVK",
+};
 
 type FileType = keyof typeof FILE_TYPE_EXTENSIONS;
 type ReceiptClassification = "purchase_invoice" | "owner_paid_expense_reimbursement" | "unclassifiable";
@@ -75,6 +126,7 @@ interface ExtractedReceiptFields {
   total_net?: number;
   total_vat?: number;
   total_gross?: number;
+  currency?: string;
   description?: string;
   raw_text?: string;
 }
@@ -168,6 +220,7 @@ interface TransactionGroup {
 
 export interface TransactionGroupClassificationInput {
   normalized_counterparty: string;
+  display_counterparty?: string;
   transactions: Array<Pick<Transaction, "type" | "amount" | "description" | "date" | "bank_subtype">>;
   owner_counterparties?: Set<string>;
 }
@@ -210,6 +263,17 @@ interface ClassifiedTransactionGroupResult {
     accounts_dimensions_id: number;
     clients_id?: number | null;
   }>;
+}
+
+interface ReceiptAmountCandidate {
+  amount: number;
+  blocked_as_reference: boolean;
+  has_currency_keyword: boolean;
+  has_total_like_label: boolean;
+}
+
+interface SupplierResolutionOptions {
+  classification_category?: TransactionClassificationCategory;
 }
 
 function getAllowedRoots(): string[] {
@@ -338,6 +402,55 @@ function extractAmountsFromLine(line: string): number[] {
   return [...new Set(amounts)];
 }
 
+function roundToDecimals(value: number, decimals: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Number(value.toFixed(decimals));
+}
+
+function hasAllCapsWord(value: string): boolean {
+  return value
+    .split(/\s+/)
+    .map(part => part.replace(/[^\p{L}]/gu, ""))
+    .some(part => part.length >= 2 && part === part.toUpperCase() && part !== part.toLowerCase());
+}
+
+export function getClientCountryFromIban(iban?: string | null): string | undefined {
+  const normalized = iban?.replace(/\s+/g, "").toUpperCase();
+  const countryCode = normalized?.slice(0, 2);
+  if (!countryCode || !/^[A-Z]{2}$/.test(countryCode)) return undefined;
+  return IBAN_COUNTRY_TO_CLIENT_COUNTRY[countryCode] ?? countryCode;
+}
+
+function isDomesticClientCountry(country?: string | null): boolean {
+  if (!country) return true;
+  const normalized = country.trim().toUpperCase();
+  return normalized === "EST" || normalized === "EE";
+}
+
+function scoreReceiptAmountFallbackCandidate(candidate: ReceiptAmountCandidate): number {
+  return (candidate.has_total_like_label ? 4 : 0) + (candidate.has_currency_keyword ? 2 : 0);
+}
+
+export function detectReceiptCurrency(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map(clampTextLine)
+    .filter(Boolean);
+  const prioritizedLines = [
+    ...lines.filter(line => RECEIPT_TOTAL_LABEL_RE.test(line) || extractAmountsFromLine(line).length > 0),
+    ...lines,
+  ];
+
+  for (const line of prioritizedLines) {
+    const matched = RECEIPT_CURRENCY_PATTERNS.find(currency => currency.pattern.test(line));
+    if (matched) {
+      return matched.code;
+    }
+  }
+
+  return "EUR";
+}
+
 function normalizeDate(raw: string): string | undefined {
   const trimmed = raw.trim();
 
@@ -454,7 +567,7 @@ function extractDates(text: string): { invoice_date?: string; due_date?: string 
   };
 }
 
-function extractAmounts(text: string): { total_net?: number; total_vat?: number; total_gross?: number } {
+export function extractAmounts(text: string): { total_net?: number; total_vat?: number; total_gross?: number } {
   const lines = text
     .split(/\r?\n/)
     .map(clampTextLine)
@@ -463,41 +576,60 @@ function extractAmounts(text: string): { total_net?: number; total_vat?: number;
   let totalGross: number | undefined;
   let totalVat: number | undefined;
   let totalNet: number | undefined;
-  const allAmounts: number[] = [];
+  const fallbackCandidates: ReceiptAmountCandidate[] = [];
 
   for (const line of lines) {
     const amounts = extractAmountsFromLine(line);
-    allAmounts.push(...amounts);
     if (amounts.length === 0) continue;
 
     const lineLower = line.toLowerCase();
     const picked = amounts[amounts.length - 1];
+    const blockedAsReference = RECEIPT_REFERENCE_LINE_RE.test(lineLower);
+    const hasCurrencyKeyword = RECEIPT_CURRENCY_PATTERNS.some(currency => currency.pattern.test(line));
+    const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower);
+
+    fallbackCandidates.push(...amounts.map(amount => ({
+      amount,
+      blocked_as_reference: blockedAsReference,
+      has_currency_keyword: hasCurrencyKeyword,
+      has_total_like_label: hasTotalLikeLabel,
+    })));
 
     if (
       totalGross === undefined &&
-      /(tasuda|maksta|kokku|total|grand total|summa kokku|maksmisele kuulub|to pay)/i.test(lineLower)
+      !blockedAsReference &&
+      hasTotalLikeLabel
     ) {
       totalGross = picked;
     }
 
     if (
       totalVat === undefined &&
-      /(käibemaks|km\b|vat\b)/i.test(lineLower)
+      !blockedAsReference &&
+      RECEIPT_VAT_LABEL_RE.test(lineLower)
     ) {
       totalVat = picked;
     }
 
     if (
       totalNet === undefined &&
-      /(neto|subtotal|summa km-ta|käibemaksuta|without vat|total net)/i.test(lineLower)
+      !blockedAsReference &&
+      RECEIPT_NET_LABEL_RE.test(lineLower)
     ) {
       totalNet = picked;
     }
   }
 
-  const deduped = [...new Set(allAmounts)].sort((a, b) => a - b);
   if (totalGross === undefined) {
-    totalGross = deduped[deduped.length - 1];
+    totalGross = [...fallbackCandidates]
+      .filter(candidate =>
+        candidate.amount <= MAX_RECEIPT_FALLBACK_AMOUNT &&
+        !candidate.blocked_as_reference,
+      )
+      .sort((a, b) =>
+        scoreReceiptAmountFallbackCandidate(b) - scoreReceiptAmountFallbackCandidate(a) ||
+        b.amount - a.amount,
+      )[0]?.amount;
   }
 
   if (totalNet === undefined && totalGross !== undefined && totalVat !== undefined) {
@@ -515,10 +647,10 @@ function extractAmounts(text: string): { total_net?: number; total_vat?: number;
   };
 }
 
-function extractPdfIdentifiers(text: string): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number"> {
+export function extractPdfIdentifiers(text: string): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number"> {
   const regCodeMatch = text.match(/(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry code)[:\s]*(\d{8})/i);
   const vatMatch = text.match(/(?:KMKR|VAT|KM\s*nr)[:\s]*(EE\d+)/i);
-  const ibanMatch = text.match(/\b([A-Z]{2}\d{13,30})(?!\d)/);
+  const ibanMatch = text.match(/\b([A-Z]{2}[0-9A-Z]{13,30})(?![0-9A-Z])/);
   const refMatch = text.match(/(?:viitenumber|viitenr|ref\.?\s*(?:nr|number)|viitenumbrit)[:\s]*(\d+)/i);
 
   return {
@@ -562,12 +694,75 @@ export function hasRecurringSimilarAmounts(amounts: number[]): boolean {
   return roundMoney(max - min) <= Math.max(2, roundMoney(avg * 0.05));
 }
 
-function looksLikePersonCounterparty(normalizedCounterparty: string): boolean {
-  if (/\b(limited|ltd|llc|inc|gmbh|company|corp|corporation)\b/i.test(normalizedCounterparty)) {
+export function looksLikePersonCounterparty(normalizedCounterparty: string, rawCounterparty?: string): boolean {
+  if (!normalizedCounterparty) {
+    return false;
+  }
+  if (PERSON_COUNTERPARTY_COMPANY_WORD_RE.test(normalizedCounterparty)) {
+    return false;
+  }
+  if (rawCounterparty && hasAllCapsWord(rawCounterparty)) {
     return false;
   }
   const parts = normalizedCounterparty.split(" ").filter(Boolean);
   return parts.length >= 2 && parts.length <= 4;
+}
+
+function parseVatRateDropdown(vatRateDropdown?: string): number | undefined {
+  const normalized = normalizeVatRate(vatRateDropdown);
+  if (!normalized || normalized === "-") return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function getAutoBookedVatConfig(
+  category: TransactionClassificationCategory,
+  supplierCountry?: string | null,
+): Pick<PurchaseInvoiceItem, "vat_rate_dropdown" | "reversed_vat_id"> {
+  if (category === "bank_fees") {
+    return { vat_rate_dropdown: "-" };
+  }
+
+  if (category === "saas_subscriptions" && !isDomesticClientCountry(supplierCountry)) {
+    return {
+      vat_rate_dropdown: "24",
+      reversed_vat_id: 1,
+    };
+  }
+
+  return { vat_rate_dropdown: isDomesticClientCountry(supplierCountry) ? "24" : "-" };
+}
+
+export function getAutoBookedVatRateDropdown(
+  category: TransactionClassificationCategory,
+  supplierCountry?: string | null,
+): string {
+  return getAutoBookedVatConfig(category, supplierCountry).vat_rate_dropdown ?? "-";
+}
+
+export function deriveAutoBookedNetAmount(
+  grossAmount: number,
+  vatConfig: Pick<PurchaseInvoiceItem, "vat_rate_dropdown" | "reversed_vat_id">,
+): number {
+  const rate = parseVatRateDropdown(vatConfig.vat_rate_dropdown);
+  if (!rate || vatConfig.reversed_vat_id) {
+    return roundMoney(grossAmount);
+  }
+  return roundToDecimals(grossAmount / (1 + rate / 100), AUTO_BOOKED_NET_DECIMALS);
+}
+
+export function deriveAutoBookedVatPrice(
+  grossAmount: number,
+  vatConfig: Pick<PurchaseInvoiceItem, "vat_rate_dropdown" | "reversed_vat_id">,
+): number {
+  if (vatConfig.reversed_vat_id) {
+    return 0;
+  }
+  const rate = parseVatRateDropdown(vatConfig.vat_rate_dropdown);
+  if (!rate) {
+    return 0;
+  }
+  return roundMoney(grossAmount - deriveAutoBookedNetAmount(grossAmount, vatConfig));
 }
 
 function isCardPurchase(transaction: Pick<Transaction, "bank_subtype" | "description">): boolean {
@@ -577,6 +772,7 @@ function isCardPurchase(transaction: Pick<Transaction, "bank_subtype" | "descrip
 
 export function categorizeTransactionGroup(input: TransactionGroupClassificationInput): TransactionGroupClassification {
   const counterparty = input.normalized_counterparty;
+  const displayCounterparty = input.display_counterparty;
   const sample = input.transactions[0];
   const amounts = input.transactions.map(transaction => Math.abs(transaction.amount));
   const recurring = input.transactions.length >= 2;
@@ -593,10 +789,29 @@ export function categorizeTransactionGroup(input: TransactionGroupClassification
     };
   }
 
-  if (sample.type === "D") {
-    reasons.push("incoming_without_sale_invoice");
+  const feeText = input.transactions
+    .map(transaction => `${transaction.description ?? ""} ${transaction.bank_subtype ?? ""}`.toLowerCase())
+    .join(" ");
+  if (
+    sample.type !== "D" &&
+    /(lhv|swedbank|seb|luminor|coop)/i.test(counterparty) &&
+    (/(fee|teenustasu|service charge|commission|monthly fee|haldustasu)/i.test(feeText) ||
+      Math.max(...amounts) <= 20)
+  ) {
+    reasons.push("bank_counterparty_with_fee_pattern");
     return {
-      category: "revenue_without_invoice",
+      category: "bank_fees",
+      apply_mode: "purchase_invoice",
+      recurring,
+      similar_amounts: similarAmounts,
+      reasons,
+    };
+  }
+
+  if (/(emta|maksu ja tolliamet)/i.test(counterparty)) {
+    reasons.push("matched_estonian_tax_authority");
+    return {
+      category: "tax_payments",
       apply_mode: "review_only",
       recurring,
       similar_amounts: similarAmounts,
@@ -615,10 +830,10 @@ export function categorizeTransactionGroup(input: TransactionGroupClassification
     };
   }
 
-  if (/(emta|maksu ja tolliamet)/i.test(counterparty)) {
-    reasons.push("matched_estonian_tax_authority");
+  if (sample.type === "D") {
+    reasons.push("incoming_without_sale_invoice");
     return {
-      category: "tax_payments",
+      category: "revenue_without_invoice",
       apply_mode: "review_only",
       recurring,
       similar_amounts: similarAmounts,
@@ -626,25 +841,7 @@ export function categorizeTransactionGroup(input: TransactionGroupClassification
     };
   }
 
-  const feeText = input.transactions
-    .map(transaction => `${transaction.description ?? ""} ${transaction.bank_subtype ?? ""}`.toLowerCase())
-    .join(" ");
-  if (
-    /(lhv|swedbank|seb|luminor|coop)/i.test(counterparty) &&
-    (/(fee|teenustasu|service charge|commission|monthly fee|haldustasu)/i.test(feeText) ||
-      Math.max(...amounts) <= 20)
-  ) {
-    reasons.push("bank_counterparty_with_fee_pattern");
-    return {
-      category: "bank_fees",
-      apply_mode: "purchase_invoice",
-      recurring,
-      similar_amounts: similarAmounts,
-      reasons,
-    };
-  }
-
-  if (recurring && similarAmounts && looksLikePersonCounterparty(counterparty)) {
+  if (recurring && similarAmounts && looksLikePersonCounterparty(counterparty, displayCounterparty)) {
     reasons.push("recurring_person_counterparty");
     return {
       category: "salary_payroll",
@@ -794,6 +991,7 @@ async function resolveSupplierInternal(
   clients: Client[],
   fields: ExtractedReceiptFields,
   execute: boolean,
+  options?: SupplierResolutionOptions,
 ): Promise<SupplierResolution> {
   if (fields.supplier_reg_code) {
     const byCode = clients.find(client => client.code === fields.supplier_reg_code && !client.is_deleted);
@@ -831,20 +1029,27 @@ async function resolveSupplierInternal(
     }
   }
 
-  const registryData = await fetchRegistryData(fields.supplier_reg_code, "EST", fields.supplier_name);
+  const supplierCountry = getClientCountryFromIban(fields.supplier_iban) ?? "EST";
+  const registryData = await fetchRegistryData(fields.supplier_reg_code, supplierCountry, fields.supplier_name);
   const clientName = registryData?.name ?? fields.supplier_name;
   if (!clientName) {
     return { found: false, created: false, registry_data: registryData };
   }
+
+  const isPhysicalEntity =
+    options?.classification_category !== "salary_payroll" &&
+    !fields.supplier_reg_code &&
+    !fields.supplier_vat_no &&
+    looksLikePersonCounterparty(normalizeCounterpartyName(clientName), clientName);
 
   const previewClient: Partial<Client> = {
     name: clientName,
     code: fields.supplier_reg_code,
     is_client: false,
     is_supplier: true,
-    cl_code_country: "EST",
-    is_juridical_entity: true,
-    is_physical_entity: false,
+    cl_code_country: supplierCountry,
+    is_juridical_entity: !isPhysicalEntity,
+    is_physical_entity: isPhysicalEntity,
     is_member: false,
     send_invoice_to_email: false,
     send_invoice_to_accounting_email: false,
@@ -1264,10 +1469,12 @@ async function extractReceiptFields(file: ReceiptFileInfo): Promise<ExtractedRec
   const { invoice_date, due_date } = extractDates(text);
   const supplierName = extractSupplierName(text, file.name);
   const amounts = extractAmounts(text);
+  const currency = detectReceiptCurrency(text);
 
   return {
     ...identifiers,
     ...amounts,
+    currency,
     supplier_name: supplierName,
     invoice_number: extractInvoiceNumber(text, file.name),
     invoice_date,
@@ -1292,6 +1499,10 @@ async function createAndMaybeMatchPurchaseInvoice(
   const supplier = supplierResolution.client;
   const supplierId = supplier?.id;
   const supplierName = supplier?.name ?? supplierResolution.preview_client?.name;
+  const invoiceCurrency = extracted.currency ?? "EUR";
+  const invoiceNotes = extracted.currency && extracted.currency !== "EUR" && extracted.total_gross !== undefined
+    ? `Receipt inbox import from ${file.name} | Original receipt amount: ${roundMoney(extracted.total_gross).toFixed(2)} ${extracted.currency}`
+    : `Receipt inbox import from ${file.name}`;
 
   if (!supplierName) {
     notes.push("Supplier resolution did not return a concrete client ID.");
@@ -1328,6 +1539,10 @@ async function createAndMaybeMatchPurchaseInvoice(
   const candidate = findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds);
   const canAutoLink = candidate !== undefined && candidate.confidence >= EXACT_MATCH_THRESHOLD;
 
+  if (invoiceCurrency !== "EUR") {
+    notes.push(`Detected non-EUR receipt currency ${invoiceCurrency}; invoice will use the source currency amount.`);
+  }
+
   if (!execute) {
     if (candidate) {
       notes.push(`Dry run: matched candidate transaction ${candidate.transaction_id} at confidence ${candidate.confidence}.`);
@@ -1357,11 +1572,11 @@ async function createAndMaybeMatchPurchaseInvoice(
       create_date: extracted.invoice_date!,
       journal_date: extracted.invoice_date!,
       term_days: computeTermDays(extracted.invoice_date, extracted.due_date),
-      cl_currencies_id: "EUR",
+      cl_currencies_id: invoiceCurrency,
       liability_accounts_id: DEFAULT_LIABILITY_ACCOUNT,
       bank_ref_number: extracted.ref_number,
       bank_account_no: extracted.supplier_iban,
-      notes: `Receipt inbox import from ${file.name}`,
+      notes: invoiceNotes,
       items: [item],
     },
     extracted.total_vat,
@@ -1378,7 +1593,9 @@ async function createAndMaybeMatchPurchaseInvoice(
   }
 
   if (createdInvoice.id) {
-    await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered);
+    await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered, {
+      preserveExistingTotals: true,
+    });
     notes.push("Confirmed created purchase invoice for booking and bank matching.");
   }
 
@@ -1462,6 +1679,7 @@ async function resolveSupplierFromTransaction(
   clients: Client[],
   transaction: Transaction,
   execute: boolean,
+  classificationCategory?: TransactionClassificationCategory,
 ): Promise<SupplierResolution> {
   if (transaction.clients_id) {
     const existingClient = clients.find(client => client.id === transaction.clients_id && !client.is_deleted);
@@ -1477,7 +1695,10 @@ async function resolveSupplierFromTransaction(
 
   return resolveSupplierInternal(api, clients, {
     supplier_name: transaction.bank_account_name ?? transaction.description ?? `Transaction ${transaction.id ?? ""}`.trim(),
-  }, execute);
+    supplier_iban: transaction.bank_account_no ?? undefined,
+  }, execute, {
+    classification_category: classificationCategory,
+  });
 }
 
 function extractClassificationGroups(payload: unknown): ClassifiedTransactionGroupResult[] {
@@ -1762,6 +1983,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       const classifiedGroups = groups.map(group => {
         const classification = categorizeTransactionGroup({
           normalized_counterparty: group.normalized_counterparty,
+          display_counterparty: group.display_counterparty,
           transactions: group.transactions,
           owner_counterparties: ownerCounterparties,
         });
@@ -1812,9 +2034,8 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       const parsed = safeJsonParse(classifications_json, "classifications_json");
       const groups = extractClassificationGroups(parsed);
 
-      const [clients, allTransactions, purchaseArticlesWithVat] = await Promise.all([
+      const [clients, purchaseArticlesWithVat] = await Promise.all([
         api.clients.listAll(),
-        api.transactions.listAll(),
         getPurchaseArticlesWithVat(api),
       ]);
       const isVatRegistered = await isCompanyVatRegistered(api);
@@ -1835,6 +2056,41 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         const transactionIds = group.transactions.map(transaction => transaction.id).filter((id): id is number => id !== undefined);
 
         try {
+          const freshTransactions: Transaction[] = [];
+          for (const transactionStub of group.transactions) {
+            if (!transactionStub.id) {
+              notes.push("Skipped a transaction without ID.");
+              continue;
+            }
+
+            try {
+              const transaction = await api.transactions.get(transactionStub.id);
+              if (transaction.is_deleted) {
+                notes.push(`Transaction ${transactionStub.id} was deleted since classification; skipped.`);
+                continue;
+              }
+              if (transaction.status === "CONFIRMED") {
+                notes.push(`Transaction ${transactionStub.id} was confirmed since classification; skipped.`);
+                continue;
+              }
+              freshTransactions.push(transaction);
+            } catch {
+              notes.push(`Transaction ${transactionStub.id} no longer exists.`);
+            }
+          }
+
+          if (freshTransactions.length === 0) {
+            notes.push("No unconfirmed transactions remain in this classification group.");
+            results.push({
+              category: group.category,
+              counterparty: group.display_counterparty,
+              status: "skipped",
+              notes,
+              transactions: transactionIds,
+            });
+            continue;
+          }
+
           if (group.apply_mode !== "purchase_invoice" || !shouldProcessExpenseAsPurchaseInvoice(group.category)) {
             notes.push(`Category ${group.category} is review-only and is not auto-booked as a purchase invoice.`);
             results.push({
@@ -1862,25 +2118,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           const createdInvoiceIds: number[] = [];
           const linkedTransactionIds: number[] = [];
 
-          for (const transactionStub of group.transactions) {
-            if (!transactionStub.id) {
-              notes.push("Skipped a transaction without ID.");
-              continue;
-            }
-
-            const transaction = allTransactions.find(candidate => candidate.id === transactionStub.id);
-            if (!transaction) {
-              notes.push(`Transaction ${transactionStub.id} no longer exists.`);
-              continue;
-            }
-            if (transaction.status === "CONFIRMED") {
-              notes.push(`Transaction ${transaction.id} is already confirmed; skipped.`);
-              continue;
-            }
-
-            const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun);
+          for (const transaction of freshTransactions) {
+            const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun, group.category);
             const supplier = supplierResolution.client;
             const supplierId = supplier?.id;
+            const supplierMetadata = supplierResolution.client ?? supplierResolution.preview_client;
+            const grossAmount = roundMoney(Math.abs(transaction.amount));
             if (!supplier?.id && dryRun) {
               notes.push(`Dry run: transaction ${transaction.id} would require creating a supplier for ${group.display_counterparty}.`);
             }
@@ -1890,15 +2133,18 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             }
 
             const article = purchaseArticlesWithVat.find(item => item.id === group.suggested_booking.purchase_article_id);
+            const vatConfig = getAutoBookedVatConfig(group.category, supplierMetadata?.cl_code_country);
+            const netAmount = deriveAutoBookedNetAmount(grossAmount, vatConfig);
             const purchaseItem = applyPurchaseVatDefaults(
               purchaseArticlesWithVat,
               {
                 cl_purchase_articles_id: group.suggested_booking.purchase_article_id,
                 purchase_accounts_id: group.suggested_booking.purchase_account_id ?? article?.accounts_id,
                 custom_title: transaction.description ?? `Auto-booked ${group.category}`,
-                total_net_price: Math.abs(transaction.amount),
+                unit_net_price: netAmount,
+                total_net_price: netAmount,
                 amount: 1,
-                vat_rate_dropdown: "-",
+                ...vatConfig,
               },
               isVatRegistered,
             );
@@ -1926,13 +2172,15 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
                 notes: `Auto-created from classified bank transaction ${transaction.id}`,
                 items: [purchaseItem],
               },
-              0,
-              Math.abs(transaction.amount),
+              deriveAutoBookedVatPrice(grossAmount, vatConfig),
+              grossAmount,
               isVatRegistered,
             );
 
             if (invoice.id) {
-              await api.purchaseInvoices.confirmWithTotals(invoice.id, isVatRegistered);
+              await api.purchaseInvoices.confirmWithTotals(invoice.id, isVatRegistered, {
+                preserveExistingTotals: true,
+              });
               await api.transactions.confirm(transaction.id!, [{
                 related_table: "purchase_invoices",
                 related_id: invoice.id,

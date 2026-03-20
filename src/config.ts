@@ -21,9 +21,7 @@ const SERVERS = {
   demo: "https://demo-rmp-api.rik.ee/v1",
 } as const;
 
-const PROJECT_ROOT = getProjectRoot();
-
-dotenv.config({ path: resolve(PROJECT_ROOT, ".env") });
+const PACKAGE_ROOT = getProjectRoot();
 
 function getBaseUrl(): string {
   const server = process.env.EARVELDAJA_SERVER || "live";
@@ -43,6 +41,44 @@ function warnIfWorldReadable(filePath: string): void {
       );
     }
   } catch { /* stat failed, continue anyway */ }
+}
+
+function toUniqueDirs(dirs: string[]): string[] {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+
+  for (const dir of dirs) {
+    const resolvedDir = resolve(dir);
+    let dedupeKey = resolvedDir;
+    try {
+      dedupeKey = realpathSync(resolvedDir);
+    } catch {
+      // Keep the resolved path if the directory does not exist yet.
+    }
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    unique.push(resolvedDir);
+  }
+
+  return unique;
+}
+
+export function getConfigSearchDirs(
+  scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true",
+  cwd = process.cwd(),
+  packageRoot = PACKAGE_ROOT,
+): string[] {
+  const dirs = [cwd, packageRoot];
+  if (scanParent) {
+    dirs.push(resolve(cwd, ".."), resolve(packageRoot, ".."));
+  }
+  return toUniqueDirs(dirs);
+}
+
+for (const dir of getConfigSearchDirs(false)) {
+  const envPath = resolve(dir, ".env");
+  warnIfWorldReadable(envPath);
+  dotenv.config({ path: envPath });
 }
 
 function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string; password: string } | null {
@@ -67,8 +103,8 @@ function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string
 
 /**
  * Load all available API configurations from env vars and apikey*.txt files.
- * Scans the project root for apikey*.txt files.
- * Set EARVELDAJA_SCAN_PARENT=true to also scan the parent directory.
+ * Scans the runtime working directory first, then the package root.
+ * Set EARVELDAJA_SCAN_PARENT=true to also scan parent directories.
  */
 export function loadAllConfigs(): NamedConfig[] {
   const baseUrl = getBaseUrl();
@@ -99,11 +135,9 @@ export function loadAllConfigs(): NamedConfig[] {
     }
   }
 
-  // 3. Scan project root only by default. Parent scan is opt-in.
-  const searchDirs = [PROJECT_ROOT];
-  if (process.env.EARVELDAJA_SCAN_PARENT === "true") {
-    searchDirs.push(resolve(PROJECT_ROOT, ".."));
-  }
+  // 3. Scan the runtime working directory first, then the package dir.
+  // Parent scan remains opt-in.
+  const searchDirs = getConfigSearchDirs();
 
   for (const dir of searchDirs) {
     if (!existsSync(dir)) continue;
@@ -134,7 +168,7 @@ export function loadAllConfigs(): NamedConfig[] {
   if (configs.length === 0) {
     throw new Error(
       "No API credentials found. Set EARVELDAJA_API_KEY_ID/EARVELDAJA_API_PUBLIC_VALUE/EARVELDAJA_API_PASSWORD " +
-      "environment variables, or place apikey*.txt files next to the project."
+      "environment variables, or place apikey*.txt files in the working directory."
     );
   }
 

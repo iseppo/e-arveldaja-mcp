@@ -3,6 +3,10 @@ import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, A
 import { BaseResource } from "./base-resource.js";
 import { roundMoney } from "../money.js";
 
+interface ConfirmPurchaseInvoiceOptions {
+  preserveExistingTotals?: boolean;
+}
+
 /**
  * For non-VAT (mitte-KMD) companies: set project_no_vat_gross_price on items
  * so the API computes item-level vat_amount for informational tracking.
@@ -102,11 +106,22 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   }
 
   /**
-   * Confirm a purchase invoice. Automatically fixes vat_price/gross_price if missing or inconsistent.
+   * Confirm a purchase invoice. Automatically fixes vat_price/gross_price when needed.
    * For non-VAT companies: only fixes gross_price, leaves vat_price at 0.
    */
-  async confirmWithTotals(id: number, isVatRegistered = true): Promise<ApiResponse> {
+  async confirmWithTotals(
+    id: number,
+    isVatRegistered = true,
+    options: ConfirmPurchaseInvoiceOptions = {},
+  ): Promise<ApiResponse> {
     const invoice = await this.get(id);
+    const hasInvoiceGross = invoice.gross_price !== undefined && invoice.gross_price !== null;
+    const hasInvoiceVat = invoice.vat_price !== undefined && invoice.vat_price !== null;
+
+    if (options.preserveExistingTotals && hasInvoiceGross && (hasInvoiceVat || !isVatRegistered)) {
+      return this.confirm(id);
+    }
+
     const items = invoice.items;
     if (items) {
       const itemVat = roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0));
