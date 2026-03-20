@@ -6,20 +6,24 @@ export function registerPrompts(server: McpServer): void {
 
   registerPrompt(server, 
     "book-invoice",
-    "Book a purchase invoice from a PDF file. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, and creates + confirms the invoice.",
-    { file_path: z.string().describe("Absolute path to the PDF invoice file") },
+    "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, and creates + confirms the invoice.",
+    { file_path: z.string().describe("Absolute path to the invoice document file (PDF/JPG/PNG)") },
     async ({ file_path }) => ({
       messages: [{
         role: "user",
         content: {
           type: "text",
-          text: `Book the purchase invoice from the PDF at: ${file_path}
+          text: `Book the purchase invoice from the source document at: ${file_path}
 
 Follow these steps in order:
 
-1. Call \`extract_pdf_invoice\` with file_path="${file_path}" to get \`hints.raw_text\` and extracted identifiers.
+1. Call \`extract_pdf_invoice\` with file_path="${file_path}" to get \`hints.raw_text\`, identifier hints, and \`llm_fallback\`.
 
-2. Read \`hints.raw_text\` carefully and extract all of the following fields:
+2. Treat \`hints.raw_text\` as the source of truth for the whole document.
+   - If \`llm_fallback.recommended=true\` or any identifier hint is missing, continue by reading \`hints.raw_text\` manually.
+   - Do not stop just because the regex identifier hints are incomplete.
+
+3. Read \`hints.raw_text\` carefully and extract all of the following fields:
    - Supplier name and address
    - Supplier registry code (Estonian 8-digit code, if present)
    - Supplier VAT number (e.g. EE123456789, if present)
@@ -32,7 +36,7 @@ Follow these steps in order:
    - Supplier IBAN (bank account number)
    - Payment reference number
 
-3. Call \`validate_invoice_data\` with:
+4. Call \`validate_invoice_data\` with:
    - total_net: extracted net total
    - total_vat: extracted VAT total
    - total_gross: extracted gross total
@@ -40,7 +44,7 @@ Follow these steps in order:
    - invoice_date and due_date
    If validation returns \`valid=false\` or any errors, stop and ask the user to review the extraction before creating anything.
 
-4. Call \`resolve_supplier\` with:
+5. Call \`resolve_supplier\` with:
    - name: supplier name
    - reg_code: registry code (if found)
    - vat_no: VAT number (if found)
@@ -48,7 +52,7 @@ Follow these steps in order:
    - auto_create: false
    This either returns an existing supplier match or, for Estonian registry-code lookups, registry data for a new supplier.
 
-5. Duplicate check:
+6. Duplicate check:
    - Call \`detect_duplicate_purchase_invoice\` with:
      - date_from: invoice_date
      - date_to: invoice_date
@@ -59,29 +63,29 @@ Follow these steps in order:
    - Also inspect \`exact_duplicates\` and \`suspicious_same_amount_date\` as warning context for messy supplier histories.
    - If a candidate match looks like the same invoice, stop and report it before creating anything.
 
-6. Ensure the supplier client exists:
+7. Ensure the supplier client exists:
    - If step 4 returned \`found=true\`, use \`client.id\` as \`supplier_client_id\`.
    - Otherwise call \`resolve_supplier\` again with the same identifiers and \`auto_create: true\`.
    - Use \`api_response.created_object_id\` as \`supplier_client_id\`. If no client ID is returned, stop and report the failure.
 
-7. Call \`suggest_booking\` with:
+8. Call \`suggest_booking\` with:
    - clients_id: supplier_client_id
    - description: the first line item description
    Review \`past_invoices\` and reuse the most relevant \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, and VAT fields
    (\`vat_rate_dropdown\`, \`vat_accounts_id\`, \`cl_vat_articles_id\`, \`reversed_vat_id\`) from a similar line.
    If there is no suitable history, call \`list_purchase_articles\` or ask the user instead of inventing purchase article IDs.
 
-8. Determine VAT treatment per line:
+9. Determine VAT treatment per line:
    - For normal domestic invoices, keep the VAT treatment shown on the document.
    - Reverse charge applies when the supplier is foreign (non-Estonian VAT number or no Estonian registry code) AND the invoice is for services (not goods).
    - If reverse charge applies, set \`reversed_vat_id: 1\` on the affected service lines.
 
-9. Derive the remaining invoice fields:
+10. Derive the remaining invoice fields:
    - journal_date: normally invoice_date unless a different turnover date is clearly stated on the invoice.
    - term_days: the calendar-day difference between invoice_date and due_date.
    - If due_date is missing, use \`term_days: 0\` and mention that assumption in the final summary.
 
-10. Call \`create_purchase_invoice_from_pdf\` with:
+11. Call \`create_purchase_invoice_from_pdf\` with:
    - supplier_client_id
    - invoice_number
    - invoice_date
@@ -96,14 +100,14 @@ Follow these steps in order:
    - notes: include the source PDF filename or any important assumptions
    IMPORTANT: Use the EXACT \`vat_price\` and \`gross_price\` from the invoice. Do not recalculate them.
 
-11. Call \`upload_invoice_document\` with:
+12. Call \`upload_invoice_document\` with:
    - invoice_id: the invoice ID returned in step 10
    - file_path: "${file_path}"
 
-12. Call \`confirm_purchase_invoice\` with:
+13. Call \`confirm_purchase_invoice\` with:
    - id: the invoice ID from step 10
 
-13. Report a summary:
+14. Report a summary:
     - Supplier name and supplier_client_id
     - Invoice number, date, due date
     - Net / VAT / Gross amounts

@@ -10,11 +10,15 @@ import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase
 import { roundMoney } from "../money.js";
 import { readOnly, create, mutate } from "../annotations.js";
 import { parseDocument } from "../document-parser.js";
+import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
+import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+import { extractReceiptFieldsFromText } from "./receipt-inbox.js";
 
-const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50 MB
+const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
+const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];
 
-async function validatePdfPath(filePath: string): Promise<string> {
-  return validateFilePath(filePath, [".pdf"], MAX_PDF_SIZE);
+async function validateInvoiceDocumentPath(filePath: string): Promise<string> {
+  return validateFilePath(filePath, INVOICE_DOCUMENT_EXTENSIONS, MAX_INVOICE_DOCUMENT_SIZE);
 }
 
 function parseVatRate(rateValue?: string): number | undefined {
@@ -40,50 +44,43 @@ interface PdfHints {
  * regex is unreliable for those in varied PDF layouts.
  */
 function extractPdfHints(text: string): PdfHints {
-  const result: PdfHints = { raw_text: text };
-
-  // Registry code (8 digits)
-  const regCodeMatch = text.match(/(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry code)[:\s]*(\d{8})/i);
-  if (regCodeMatch) result.supplier_reg_code = regCodeMatch[1];
-
-  // VAT number (EE + digits)
-  const vatMatch = text.match(/(?:KMKR|VAT|KM\s*nr)[:\s]*(EE\d+)/i);
-  if (vatMatch) result.supplier_vat_no = vatMatch[1];
-
-  // IBAN (country code + 13-30 alphanumeric characters)
-  const ibanMatch = text.match(/\b([A-Z]{2}[0-9A-Z]{13,30})(?![0-9A-Z])/);
-  if (ibanMatch) result.supplier_iban = ibanMatch[1];
-
-  // Reference number
-  const refMatch = text.match(/(?:Viitenumber|Viitenr|Ref\.?\s*(?:nr|number)|viitenumbrit)[:\s]*(\d+)/i);
-  if (refMatch) result.ref_number = refMatch[1];
-
-  return result;
+  return {
+    raw_text: text,
+    supplier_reg_code: extractRegistryCode(text),
+    supplier_vat_no: extractVatNumber(text),
+    supplier_iban: extractIban(text),
+    ref_number: extractReferenceNumber(text),
+  };
 }
 
 export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "extract_pdf_invoice",
-    "Extract text and key identifiers from a supplier invoice PDF using LiteParse local OCR/layout parsing. " +
+    "Extract text and key identifiers from a supplier invoice document (PDF/JPG/PNG) using LiteParse local OCR/layout parsing. " +
     "Returns raw text + detected IBAN, registry code, VAT number, reference number. " +
     "Read raw_text to extract all invoice fields, then call validate_invoice_data.",
     {
-      file_path: z.string().describe("Absolute path to the PDF file"),
+      file_path: z.string().describe("Absolute path to the invoice document (PDF/JPG/PNG)"),
     },
     { ...readOnly, openWorldHint: true, title: "Extract Supplier Invoice PDF" },
     async ({ file_path }) => {
-      const resolved = await validatePdfPath(file_path);
+      const resolved = await validateInvoiceDocumentPath(file_path);
       const parsedDocument = await parseDocument(resolved);
       const hints = extractPdfHints(parsedDocument.text);
+      const extracted = extractReceiptFieldsFromText(parsedDocument.text, resolved.split("/").pop() ?? "document");
+      const llmFallback = summarizeInvoiceExtraction(extracted);
 
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
             hints,
+            extracted,
+            llm_fallback: llmFallback,
             page_count: parsedDocument.pageCount,
             instructions: "Read raw_text carefully. Extract supplier name, invoice number, dates, " +
-              "net/VAT/gross amounts, and line items. Then call validate_invoice_data to check " +
+              "net/VAT/gross amounts, and line items. Deterministic extracted fields are only a preview; " +
+              "use raw_text as the source of truth and then call validate_invoice_data to check " +
               "that numbers add up before creating the invoice.",
           }, null, 2),
         }],
@@ -495,17 +492,17 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "upload_invoice_document",
-    "Upload a PDF document to an existing purchase invoice",
+    "Upload a source invoice document (PDF/JPG/PNG) to an existing purchase invoice",
     {
       invoice_id: z.number().describe("Purchase invoice ID"),
-      file_path: z.string().describe("Absolute path to the PDF file"),
+      file_path: z.string().describe("Absolute path to the invoice document (PDF/JPG/PNG)"),
     },
-    { ...mutate, openWorldHint: true, title: "Upload Purchase Invoice PDF" },
+    { ...mutate, openWorldHint: true, title: "Upload Purchase Invoice Document" },
     async ({ invoice_id, file_path }) => {
-      const resolved = await validatePdfPath(file_path);
+      const resolved = await validateInvoiceDocumentPath(file_path);
       const buffer = await readFile(resolved);
       const base64 = buffer.toString("base64");
-      const fileName = resolved.split("/").pop() ?? "document.pdf";
+      const fileName = resolved.split("/").pop() ?? "document";
       const result = await api.purchaseInvoices.uploadDocument(invoice_id, fileName, base64);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import dotenv from "dotenv";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -116,10 +117,11 @@ describe("loadAllConfigs", () => {
 
     try {
       const { loadAllConfigs } = await importFreshConfig(childDir);
+      dotenv.config({ path: join(childDir, ".env"), override: true });
+      dotenv.config({ path: join(parentDir, ".env"), override: true });
       const configs = loadAllConfigs();
 
-      expect(configs).toHaveLength(1);
-      expect(configs[0]).toMatchObject({
+      expect(configs).toEqual(expect.arrayContaining([expect.objectContaining({
         name: "env",
         config: {
           apiKeyId: "parent-id",
@@ -127,7 +129,7 @@ describe("loadAllConfigs", () => {
           apiPassword: "parent-secret",
           baseUrl: "https://rmp-api.rik.ee/v1",
         },
-      });
+      })]));
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });

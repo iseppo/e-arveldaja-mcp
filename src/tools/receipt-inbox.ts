@@ -15,9 +15,20 @@ import { readOnly, batch } from "../annotations.js";
 import { type ApiContext, isCompanyVatRegistered, safeJsonParse } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, normalizeVatRate } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
+import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
+import { type InvoiceExtractionFallback, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const WEEKDAY_PREFIX_SOURCE =
+  String.raw`(?:(?:esmaspäev|teisipäev|kolmapäev|neljapäev|reede|laupäev|pühapäev|monday|tuesday|wednesday|thursday|friday|saturday|sunday),\s*)?`;
+const TEXTUAL_MONTH_SOURCE = String.raw`[A-Za-zÀ-ž]{3,12}`;
+const DATE_VALUE_SOURCE =
+  String.raw`(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4}|\d{1,2}\.?\s+` +
+  TEXTUAL_MONTH_SOURCE +
+  String.raw`\s+\d{4}|` +
+  TEXTUAL_MONTH_SOURCE +
+  String.raw`\s+\d{1,2},?\s+\d{4})`;
 const FILE_TYPE_EXTENSIONS = {
   pdf: [".pdf"],
   jpg: [".jpg", ".jpeg"],
@@ -29,11 +40,19 @@ const EXACT_MATCH_THRESHOLD = 90;
 const POSSIBLE_MATCH_THRESHOLD = 70;
 const AUTO_BOOKED_NET_DECIMALS = 6;
 const MAX_RECEIPT_FALLBACK_AMOUNT = 50_000;
-const RECEIPT_TOTAL_LABEL_RE = /(tasuda|maksta|kokku|total|grand total|summa kokku|maksmisele kuulub|to pay|payable|amount due)/i;
-const RECEIPT_VAT_LABEL_RE = /(käibemaks|km\b|vat\b)/i;
-const RECEIPT_NET_LABEL_RE = /(neto|subtotal|summa km-ta|käibemaksuta|without vat|total net)/i;
+const RECEIPT_TOTAL_LABEL_RE = /(tasuda|maksta|kokku|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due)/i;
+const RECEIPT_VAT_LABEL_RE = /(käibemaks|km\b|vat\b|tax\b)/i;
+const RECEIPT_NET_LABEL_RE = /(neto|subtotal|vahesumma|summa km-ta|summa eurodes\s*\(km-ta\)|summa\s*\(km-ta\)|käibemaksuta|without vat|total net)/i;
 const RECEIPT_REFERENCE_LINE_RE =
-  /\b(reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat\s*(?:nr|number|no\.?)|iban|viitenumber|viitenr|reference|ref\.?\s*(?:nr|number))\b/i;
+  /\b(reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat\s*(?:nr|number|no\.?)|tax\s*id|iban|viitenumber|viitenr|reference|ref\.?\s*(?:nr|number))\b/i;
+const RECEIPT_COMPONENT_LABEL_RE = /(shipping|transport|delivery|postage|service fee|vahesumma|subtotal|handling)/i;
+const SUPPLIER_LABEL_RE =
+  /^(?:saatja nimi|müüja|seller|supplier|teenusepakkuja|arve esitaja|makse saaja|vedaja\/teenuse pakkuja)\b[:\s-]*/i;
+const BUYER_SECTION_RE = /\b(bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i;
+const SUPPLIER_METADATA_RE =
+  /\b(?:telefon|phone|e-?post|email|kodulehekülg|website|web|iban|swift|reg\.?\s*(?:nr|code)|registrikood|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id|payment method|makseviis|kuupäev|date|due date|maksetähtaeg)\b[:]?/i;
+const SUPPLIER_INVALID_LINE_RE =
+  /\b(arve|invoice|receipt|kviitung|tšekk|tsekk|summa|kokku|total|date|kuupäev|due|tasuda|maksta|toode|teenus|qty|kogus|hind|amount|subtotal|shipping|transport|käibemaks|vat|tax)\b/i;
 const RECEIPT_CURRENCY_PATTERNS = [
   { code: "EUR", pattern: /\bEUR\b|€/i },
   { code: "USD", pattern: /\bUSD\b|\bUS\$/i },
@@ -46,6 +65,45 @@ const RECEIPT_CURRENCY_PATTERNS = [
 ] as const;
 const PERSON_COUNTERPARTY_COMPANY_WORD_RE =
   /\b(limited|ltd|llc|inc|gmbh|ag|ab|oy|srl|bv|nv|sa|plc|ireland|operations|services|solutions|group|holding|capital|systems|technologies|media|digital|cloud|platform|company|corp|corporation)\b/i;
+const MONTH_NAME_TO_NUMBER: Record<string, number> = {
+  jaan: 1,
+  jaanuar: 1,
+  jan: 1,
+  january: 1,
+  veebr: 2,
+  veebruar: 2,
+  feb: 2,
+  february: 2,
+  märts: 3,
+  mar: 3,
+  march: 3,
+  aprill: 4,
+  apr: 4,
+  april: 4,
+  mai: 5,
+  may: 5,
+  juuni: 6,
+  jun: 6,
+  june: 6,
+  juuli: 7,
+  jul: 7,
+  july: 7,
+  august: 8,
+  aug: 8,
+  september: 9,
+  sept: 9,
+  oktoober: 10,
+  okt: 10,
+  sep: 9,
+  oct: 10,
+  october: 10,
+  november: 11,
+  nov: 11,
+  dets: 12,
+  detsember: 12,
+  dec: 12,
+  december: 12,
+};
 const IBAN_COUNTRY_TO_CLIENT_COUNTRY: Record<string, string> = {
   AT: "AUT",
   BE: "BEL",
@@ -173,6 +231,7 @@ interface ReceiptBatchFileResult {
   classification: ReceiptClassification;
   status: ReceiptBatchStatus;
   extracted?: ExtractedReceiptFields;
+  llm_fallback?: InvoiceExtractionFallback;
   supplier_resolution?: SupplierResolution;
   booking_suggestion?: BookingSuggestion;
   duplicate_match?: InvoiceDuplicateMatch;
@@ -395,9 +454,14 @@ function parseAmount(raw: string): number | undefined {
 }
 
 function extractAmountsFromLine(line: string): number[] {
-  const matches = line.match(/\d[\d\s.,-]*\d|\d/g) ?? [];
+  const matches = [...line.matchAll(/\d[\d\s.,-]*\d|\d/g)];
   const amounts = matches
-    .map(match => parseAmount(match))
+    .filter(match => {
+      const raw = match[0] ?? "";
+      const next = line.slice((match.index ?? 0) + raw.length).trimStart();
+      return !next.startsWith("%");
+    })
+    .map(match => parseAmount(match[0] ?? ""))
     .filter((value): value is number => value !== undefined && value !== 0);
 
   return [...new Set(amounts)];
@@ -432,6 +496,12 @@ function scoreReceiptAmountFallbackCandidate(candidate: ReceiptAmountCandidate):
   return (candidate.has_total_like_label ? 4 : 0) + (candidate.has_currency_keyword ? 2 : 0);
 }
 
+function isVatAmountLine(line: string): boolean {
+  const trimmed = line.trim();
+  return /^(?:käibemaks|vat|tax|km\b)/i.test(trimmed) ||
+    /\b(?:sisaldab|including|incl\.?)\b.*(?:käibemaks|vat|tax|km\b)/i.test(trimmed);
+}
+
 export function detectReceiptCurrency(text: string): string {
   const lines = text
     .split(/\r?\n/)
@@ -452,18 +522,73 @@ export function detectReceiptCurrency(text: string): string {
   return "EUR";
 }
 
-function normalizeDate(raw: string): string | undefined {
-  const trimmed = raw.trim();
+function normalizeYearToken(rawYear: string): number {
+  if (rawYear.length === 4) return Number(rawYear);
+  const shortYear = Number(rawYear);
+  return shortYear >= 70 ? 1900 + shortYear : 2000 + shortYear;
+}
+
+function toIsoDate(year: number, month: number, day: number): string | undefined {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return undefined;
+  }
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return undefined;
+  }
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+export function normalizeDate(raw: string): string | undefined {
+  const trimmed = raw
+    .trim()
+    .replace(/^(?:esmaspäev|teisipäev|kolmapäev|neljapäev|reede|laupäev|pühapäev|monday|tuesday|wednesday|thursday|friday|saturday|sunday),\s*/i, "");
 
   if (ISO_DATE_RE.test(trimmed)) {
     return trimmed;
   }
 
-  const dotted = trimmed.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  const dotted = trimmed.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})$/);
   if (dotted) {
     const [, day, month, year] = dotted;
-    const iso = `${year}-${month!.padStart(2, "0")}-${day!.padStart(2, "0")}`;
-    return ISO_DATE_RE.test(iso) ? iso : undefined;
+    return toIsoDate(normalizeYearToken(year!), Number(month), Number(day));
+  }
+
+  const slashed = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+  if (slashed) {
+    const [, day, month, year] = slashed;
+    return toIsoDate(normalizeYearToken(year!), Number(month), Number(day));
+  }
+
+  const dayFirstTextual = trimmed.match(/^(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})$/);
+  if (dayFirstTextual) {
+    const [, day, monthName, year] = dayFirstTextual;
+    const month = MONTH_NAME_TO_NUMBER[monthName!.toLowerCase()];
+    if (month) {
+      return toIsoDate(Number(year), month, Number(day));
+    }
+  }
+
+  const dayFirstTextualWithDot = trimmed.match(/^(\d{1,2})\.\s*([A-Za-zÀ-ž]{3,12})\s+(\d{4})$/u);
+  if (dayFirstTextualWithDot) {
+    const [, day, monthName, year] = dayFirstTextualWithDot;
+    const month = MONTH_NAME_TO_NUMBER[monthName!.toLowerCase()];
+    if (month) {
+      return toIsoDate(Number(year), month, Number(day));
+    }
+  }
+
+  const monthFirstTextual = trimmed.match(/^([A-Za-zÀ-ž]{3,12})\s+(\d{1,2}),?\s*(\d{4})$/u);
+  if (monthFirstTextual) {
+    const [, monthName, day, year] = monthFirstTextual;
+    const month = MONTH_NAME_TO_NUMBER[monthName!.toLowerCase()];
+    if (month) {
+      return toIsoDate(Number(year), month, Number(day));
+    }
   }
 
   return undefined;
@@ -490,38 +615,102 @@ function pickFirstDefined<T>(...values: Array<T | undefined>): T | undefined {
   return undefined;
 }
 
-function extractSupplierName(text: string, fallbackFileName: string): string | undefined {
+function maybeAddLlmFallbackNote(notes: string[], fallback: InvoiceExtractionFallback): void {
+  if (!fallback.recommended) return;
+  const missing = fallback.missing_required_fields.join(", ");
+  notes.push(`Deterministic extraction is incomplete (${missing}). Use extracted.raw_text and llm_fallback guidance instead of guessing missing fields.`);
+}
+
+function cleanSupplierCandidate(raw: string): string | undefined {
+  let candidate = raw
+    .replace(SUPPLIER_LABEL_RE, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  candidate = candidate.replace(new RegExp(`\\s+${BUYER_SECTION_RE.source}.*$`, "i"), "").trim();
+
+  const metadataIndex = candidate.search(SUPPLIER_METADATA_RE);
+  if (metadataIndex > 0) {
+    candidate = candidate.slice(0, metadataIndex).trim();
+  }
+
+  candidate = candidate.split(/\s*;\s*/)[0]!.trim();
+  candidate = candidate.replace(/^[^0-9A-Za-zÀ-ž]+|[^0-9A-Za-zÀ-ž).]+$/gu, "").trim();
+  if (!candidate) return undefined;
+  if (candidate.length < 2) return undefined;
+  if (extractIban(candidate) || extractVatNumber(candidate) || extractRegistryCode(candidate) || extractReferenceNumber(candidate)) {
+    return undefined;
+  }
+  if ((candidate.match(/\d/g) ?? []).length >= Math.max(6, Math.ceil(candidate.length / 2))) {
+    return undefined;
+  }
+  if (/^(?:bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i.test(candidate)) return undefined;
+  if (/^(?:invoice|arve|receipt|müügiarve|order details|search|thank you)\b/i.test(candidate)) return undefined;
+  if (SUPPLIER_INVALID_LINE_RE.test(candidate) && !/\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB)\b/i.test(candidate)) {
+    return undefined;
+  }
+  return candidate;
+}
+
+export function extractSupplierName(text: string, fallbackFileName: string): string | undefined {
   const lines = text
     .split(/\r?\n/)
     .map(clampTextLine)
     .filter(Boolean);
 
-  const labelled = lines.find(line =>
-    /^(müüja|seller|supplier|teenusepakkuja|arve esitaja)\b/i.test(line)
-  );
-  if (labelled) {
-    const afterLabel = labelled.split(/[:\-]/).slice(1).join(":").trim();
-    if (afterLabel) return afterLabel;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    const dualNameMatch = line.match(/^Nimi:\s*(.+?)\s+Nimi:\s*(.+)$/i);
+    const sellerFromDualName = cleanSupplierCandidate(dualNameMatch?.[2] ?? "");
+    if (sellerFromDualName) return sellerFromDualName;
+
+    if (SUPPLIER_LABEL_RE.test(line)) {
+      const labelledCandidate = cleanSupplierCandidate(line);
+      if (labelledCandidate) return labelledCandidate;
+
+      const nextLineCandidate = cleanSupplierCandidate(lines[index + 1] ?? "");
+      if (nextLineCandidate) return nextLineCandidate;
+    }
+  }
+
+  for (const line of lines) {
+    const buyerMatch = line.match(/^(.*?)\b(?:bill to|invoice to)\b/i);
+    const beforeBuyer = cleanSupplierCandidate(buyerMatch?.[1] ?? "");
+    if (beforeBuyer) return beforeBuyer;
   }
 
   const companyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB)\b/i;
-  const ignoredPattern = /\b(arve|invoice|receipt|kviitung|tšekk|tsekk|summa|kokku|total|date|kuupäev|due|tasuda|maksta)\b/i;
-  const candidate = lines.find(line =>
-    line.length >= 3 &&
-    line.length <= 80 &&
-    !ignoredPattern.test(line) &&
-    (companyPattern.test(line) || /^[A-ZÄÖÜÕ0-9][A-ZÄÖÜÕ0-9 '&().,-]{4,}$/.test(line))
-  );
+  const buyerSectionIndex = lines.findIndex(line => BUYER_SECTION_RE.test(line));
+  const searchLines = lines.slice(0, buyerSectionIndex >= 0 ? Math.max(buyerSectionIndex + 1, 1) : Math.min(lines.length, 12));
+  for (const line of searchLines) {
+    const candidate = cleanSupplierCandidate(line);
+    if (
+      candidate &&
+      candidate.length <= 80 &&
+      (companyPattern.test(candidate) || /^[A-ZÄÖÜÕ0-9][A-ZÄÖÜÕ0-9 '&().,-]{4,}$/.test(candidate))
+    ) {
+      return candidate;
+    }
+  }
 
-  if (candidate) return candidate;
+  for (const line of lines) {
+    const candidate = cleanSupplierCandidate(line);
+    if (candidate && companyPattern.test(candidate)) {
+      return candidate;
+    }
+  }
 
   const fileToken = normalizeFilenameToken(fallbackFileName).replace(/-/g, " ");
-  return fileToken || undefined;
+  if (!fileToken || /^(?:INVOICE|RECEIPT|DOCUMENT|PDF|IMAGE|SCAN)$/i.test(fileToken)) {
+    return undefined;
+  }
+  return fileToken;
 }
 
-function extractInvoiceNumber(text: string, fileName: string): string {
+export function extractInvoiceNumber(text: string, fileName: string): string {
   const invoiceNumberPatterns = [
-    /(?:arve\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?))[:#\s-]*([A-Z0-9/_-]{3,})/i,
+    /(?:arve(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?))[:#\s.-]*([A-Z0-9/_-]{3,})/i,
+    /\b(?:invoice|arve(?:-saateleht)?|receipt)\s+(?!date\b|number\b|nr\b|no\.?\b)([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b/i,
     /(?:number|nr)[:#\s-]*([A-Z0-9/_-]{3,})/i,
   ];
 
@@ -544,21 +733,21 @@ function extractDateByLabels(text: string, labels: RegExp[]): string | undefined
   return undefined;
 }
 
-function extractDates(text: string): { invoice_date?: string; due_date?: string } {
+export function extractDates(text: string): { invoice_date?: string; due_date?: string } {
   const invoiceDate = extractDateByLabels(text, [
-    /(?:invoice\s*date|arve\s*kuupäev|kuupäev|date)[:\s-]*([0-9.-]{8,10})/i,
-    /(?:receipt\s*date|purchase\s*date)[:\s-]*([0-9.-]{8,10})/i,
+    new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|kuupäev|date|issue\\s*date|date\\s*of\\s*issue|tellimuse\\s*kuupäev|date\\s*paid)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
+    new RegExp(`(?:receipt\\s*date|purchase\\s*date)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
   ]);
 
   const dueDate = extractDateByLabels(text, [
-    /(?:due\s*date|maksetähtaeg|tähtaeg)[:\s-]*([0-9.-]{8,10})/i,
+    new RegExp(`(?:due\\s*date|date\\s*due|maksetähtaeg|tähtaeg)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
   ]);
 
   if (invoiceDate || dueDate) {
     return { invoice_date: invoiceDate, due_date: dueDate };
   }
 
-  const rawDates = [...text.matchAll(/\b(\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}\.\d{4})\b/g)]
+  const rawDates = [...text.matchAll(new RegExp(`\\b(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})\\b`, "giu"))]
     .map(match => normalizeDate(match[1] ?? ""))
     .filter((value): value is string => value !== undefined);
 
@@ -578,18 +767,38 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
   let totalVat: number | undefined;
   let totalNet: number | undefined;
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
+  const componentAmounts: number[] = [];
+  const hasExplicitVatLine = lines.some(line =>
+    isVatAmountLine(line) &&
+    !RECEIPT_REFERENCE_LINE_RE.test(line) &&
+    !RECEIPT_NET_LABEL_RE.test(line),
+  );
 
   for (const line of lines) {
     const amounts = extractAmountsFromLine(line);
     if (amounts.length === 0) continue;
 
     const lineLower = line.toLowerCase();
-    const picked = amounts[amounts.length - 1];
     const blockedAsReference = RECEIPT_REFERENCE_LINE_RE.test(lineLower);
     const hasCurrencyKeyword = RECEIPT_CURRENCY_PATTERNS.some(currency => currency.pattern.test(line));
     const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower);
+    const hasNetLikeLabel = RECEIPT_NET_LABEL_RE.test(lineLower);
+    const hasVatAmountLabel = isVatAmountLine(line);
+    const filteredAmounts = amounts.filter(amount =>
+      !(Number.isInteger(amount) && amount >= 1000 && !hasCurrencyKeyword && !hasTotalLikeLabel),
+    );
+    if (filteredAmounts.length === 0) {
+      continue;
+    }
+    const pickedGross = filteredAmounts.length > 1 && (RECEIPT_VAT_LABEL_RE.test(lineLower) || /\b(?:sisaldab|including|incl\.?)\b/i.test(line))
+      ? Math.max(...filteredAmounts)
+      : filteredAmounts[filteredAmounts.length - 1];
+    const vatCandidates = filteredAmounts.filter(amount => ![...line.matchAll(/(\d{1,2}(?:[.,]\d+)?)\s*%/g)]
+      .map(match => parseAmount(match[1] ?? ""))
+      .some(rate => rate !== undefined && Math.abs(rate - amount) < 0.001));
+    const pickedVat = vatCandidates[vatCandidates.length - 1] ?? filteredAmounts[filteredAmounts.length - 1];
 
-    fallbackCandidates.push(...amounts.map(amount => ({
+    fallbackCandidates.push(...filteredAmounts.map(amount => ({
       amount,
       blocked_as_reference: blockedAsReference,
       has_currency_keyword: hasCurrencyKeyword,
@@ -601,23 +810,32 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
       !blockedAsReference &&
       hasTotalLikeLabel
     ) {
-      totalGross = picked;
+      totalGross = pickedGross;
     }
 
     if (
       totalVat === undefined &&
       !blockedAsReference &&
-      RECEIPT_VAT_LABEL_RE.test(lineLower)
+      hasVatAmountLabel &&
+      !hasNetLikeLabel
     ) {
-      totalVat = picked;
+      totalVat = pickedVat;
     }
 
     if (
       totalNet === undefined &&
       !blockedAsReference &&
-      RECEIPT_NET_LABEL_RE.test(lineLower)
+      hasNetLikeLabel
     ) {
-      totalNet = picked;
+      totalNet = Math.max(...filteredAmounts);
+    }
+
+    if (
+      !blockedAsReference &&
+      !hasTotalLikeLabel &&
+      RECEIPT_COMPONENT_LABEL_RE.test(lineLower)
+    ) {
+      componentAmounts.push(pickedGross);
     }
   }
 
@@ -633,12 +851,26 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
       )[0]?.amount;
   }
 
-  if (totalNet === undefined && totalGross !== undefined && totalVat !== undefined) {
-    totalNet = roundMoney(totalGross - totalVat);
+  if (totalGross !== undefined && totalVat !== undefined) {
+    const derivedNet = roundMoney(totalGross - totalVat);
+    if (
+      totalNet === undefined ||
+      Math.abs(roundMoney(totalNet + totalVat) - totalGross) > 0.02
+    ) {
+      totalNet = derivedNet;
+    }
   }
 
   if (totalVat === undefined && totalGross !== undefined && totalNet !== undefined) {
     totalVat = roundMoney(totalGross - totalNet);
+  }
+
+  if (totalGross !== undefined && componentAmounts.length > 0) {
+    const componentSum = roundMoney(componentAmounts.reduce((sum, amount) => sum + amount, 0));
+    if (Math.abs(componentSum - totalGross) < 0.02 && !hasExplicitVatLine) {
+      totalNet = totalGross;
+      totalVat = 0;
+    }
   }
 
   return {
@@ -649,16 +881,11 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
 }
 
 export function extractPdfIdentifiers(text: string): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number"> {
-  const regCodeMatch = text.match(/(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry code)[:\s]*(\d{8})/i);
-  const vatMatch = text.match(/(?:KMKR|VAT|KM\s*nr)[:\s]*(EE\d+)/i);
-  const ibanMatch = text.match(/\b([A-Z]{2}[0-9A-Z]{13,30})(?![0-9A-Z])/);
-  const refMatch = text.match(/(?:viitenumber|viitenr|ref\.?\s*(?:nr|number)|viitenumbrit)[:\s]*(\d+)/i);
-
   return {
-    supplier_reg_code: regCodeMatch?.[1],
-    supplier_vat_no: vatMatch?.[1],
-    supplier_iban: ibanMatch?.[1],
-    ref_number: refMatch?.[1],
+    supplier_reg_code: extractRegistryCode(text),
+    supplier_vat_no: extractVatNumber(text),
+    supplier_iban: extractIban(text),
+    ref_number: extractReferenceNumber(text),
   };
 }
 
@@ -888,17 +1115,35 @@ export function categorizeTransactionGroup(input: TransactionGroupClassification
   };
 }
 
-function classifyReceiptDocument(text: string, fileName: string): ReceiptClassification {
+export function classifyReceiptDocument(text: string, fileName: string): ReceiptClassification {
   const combined = `${text}\n${fileName}`;
+  const hasSalesInvoiceKeywords = /\b(müügiarve|sale invoice)\b/i.test(combined);
   const hasInvoiceKeywords = /\b(arve|invoice|ostuarve|bill to)\b/i.test(combined);
   const hasReceiptKeywords = /\b(receipt|kviitung|tšekk|tsekk|card slip|terminal)\b/i.test(combined);
-  const hasExpenseKeywords = /\b(bolt|wolt|uber|parking|fuel|restaurant|cafe)\b/i.test(combined);
+  const hasExpenseKeywords = /\b(bolt|wolt|uber|forus|taxi|parking|fuel|restaurant|cafe)\b/i.test(combined);
+  const hasTravelTicketKeywords = /\b(pileti nr|ticket no|reisija nimi|reisi kokkuvõte|lux express)\b/i.test(combined);
+  const hasOrderReceiptKeywords = /\b(order details|your order has been received|payment method)\b/i.test(combined);
+  const hasNonInvoiceConfirmationKeywords =
+    /\b(see ei ole arve|this is not an invoice|tehingu kinnitus|order summary|sinu tellimuse kokkuvõte)\b/i.test(combined);
+  const hasCardTerminalReceiptKeywords = /\b(kaarditerminal|card terminal|maksemeetod|makseviis)\b/i.test(combined);
+
+  if (hasSalesInvoiceKeywords) {
+    return "unclassifiable";
+  }
+
+  if (hasNonInvoiceConfirmationKeywords) {
+    return "owner_paid_expense_reimbursement";
+  }
+
+  if (hasExpenseKeywords && hasCardTerminalReceiptKeywords) {
+    return "owner_paid_expense_reimbursement";
+  }
 
   if (hasInvoiceKeywords) {
     return "purchase_invoice";
   }
 
-  if (hasReceiptKeywords || hasExpenseKeywords) {
+  if (hasReceiptKeywords || hasExpenseKeywords || hasTravelTicketKeywords || hasOrderReceiptKeywords) {
     return "owner_paid_expense_reimbursement";
   }
 
@@ -1456,18 +1701,10 @@ function buildClassificationSuggestion(
   };
 }
 
-async function extractReceiptFields(file: ReceiptFileInfo): Promise<ExtractedReceiptFields> {
-  if (file.file_type !== "pdf") {
-    return {
-      description: `Image receipt ${file.name}`,
-    };
-  }
-
-  const parsedDocument = await parseDocument(file.path);
-  const text = parsedDocument.text;
+export function extractReceiptFieldsFromText(text: string, fileName: string): ExtractedReceiptFields {
   const identifiers = extractPdfIdentifiers(text);
   const { invoice_date, due_date } = extractDates(text);
-  const supplierName = extractSupplierName(text, file.name);
+  const supplierName = extractSupplierName(text, fileName);
   const amounts = extractAmounts(text);
   const currency = detectReceiptCurrency(text);
 
@@ -1476,12 +1713,17 @@ async function extractReceiptFields(file: ReceiptFileInfo): Promise<ExtractedRec
     ...amounts,
     currency,
     supplier_name: supplierName,
-    invoice_number: extractInvoiceNumber(text, file.name),
+    invoice_number: extractInvoiceNumber(text, fileName),
     invoice_date,
     due_date,
     description: extractDescription(text, supplierName),
     raw_text: text,
   };
+}
+
+async function extractReceiptFields(file: ReceiptFileInfo): Promise<ExtractedReceiptFields> {
+  const parsedDocument = await parseDocument(file.path);
+  return extractReceiptFieldsFromText(parsedDocument.text, file.name);
 }
 
 async function createAndMaybeMatchPurchaseInvoice(
@@ -1553,7 +1795,7 @@ async function createAndMaybeMatchPurchaseInvoice(
       created_invoice: {
         number: extracted.invoice_number!,
         confirmed: true,
-        uploaded_document: file.file_type === "pdf",
+        uploaded_document: true,
       },
       bank_match: candidate ? { candidate, linked: false } : undefined,
     };
@@ -1585,11 +1827,11 @@ async function createAndMaybeMatchPurchaseInvoice(
   );
 
   let uploadedDocument = false;
-  if (file.file_type === "pdf" && createdInvoice.id) {
+  if (createdInvoice.id) {
     const contents = (await readFile(file.path)).toString("base64");
     await api.purchaseInvoices.uploadDocument(createdInvoice.id, file.name, contents);
     uploadedDocument = true;
-    notes.push("Uploaded source PDF to created purchase invoice.");
+    notes.push("Uploaded source document to created purchase invoice.");
   }
 
   if (createdInvoice.id) {
@@ -1733,7 +1975,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
   registerTool(server, 
     "process_receipt_batch",
-    "Process receipt PDFs and images from a folder. DRY RUN by default. Purchase-invoice PDFs can be created, confirmed, and matched to bank transactions when execute=true.",
+    "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback for model/manual review. Purchase invoices can be created, confirmed, and matched to bank transactions when execute=true.",
     {
       folder_path: z.string().describe("Folder path with receipts"),
       accounts_dimensions_id: z.number().describe("Bank account dimension ID used when matching bank transactions"),
@@ -1771,24 +2013,11 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
         try {
           const extracted = await extractReceiptFields(file);
-          const classification = file.file_type === "pdf"
-            ? classifyReceiptDocument(extracted.raw_text ?? "", file.name)
-            : classifyReceiptDocument(file.name, file.name);
+          const llmFallback = summarizeInvoiceExtraction(extracted);
+          const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
 
           if (file.file_type !== "pdf") {
-            results.push({
-              file,
-              classification,
-              status: "needs_review",
-              extracted,
-              notes: [
-                "Image receipt detected. OCR is not available in this server, so only filename and metadata were used.",
-                classification === "owner_paid_expense_reimbursement"
-                  ? "Likely owner-paid receipt. Review manually and use create_owner_expense_reimbursement if appropriate."
-                  : "Could not safely auto-book image without OCR.",
-              ],
-            });
-            continue;
+            notes.push("Image receipt OCR-parsed with LiteParse.");
           }
 
           if (classification !== "purchase_invoice") {
@@ -1797,11 +2026,13 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
                 ? "PDF looks like an owner-paid expense receipt. Review manually before booking."
                 : "Document could not be classified as a supplier purchase invoice.",
             );
+            maybeAddLlmFallbackNote(notes, llmFallback);
             results.push({
               file,
               classification,
               status: "needs_review",
               extracted,
+              llm_fallback: llmFallback,
               notes,
             });
             continue;
@@ -1809,11 +2040,13 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
           if (!extracted.supplier_name || !extracted.invoice_date || extracted.total_gross === undefined) {
             notes.push("Missing supplier name, invoice date, or gross total required for auto-booking.");
+            maybeAddLlmFallbackNote(notes, llmFallback);
             results.push({
               file,
               classification,
               status: "needs_review",
               extracted,
+              llm_fallback: llmFallback,
               notes,
             });
             continue;
@@ -1822,11 +2055,13 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           const supplierResolution = await resolveSupplierInternal(api, context.clients, extracted, !dryRun);
           if (!supplierResolution.client && !supplierResolution.preview_client) {
             notes.push("Supplier could not be resolved or prepared for creation.");
+            maybeAddLlmFallbackNote(notes, llmFallback);
             results.push({
               file,
               classification,
               status: "needs_review",
               extracted,
+              llm_fallback: llmFallback,
               supplier_resolution: supplierResolution,
               notes,
             });
@@ -1848,11 +2083,13 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
           if (!bookingSuggestion) {
             notes.push("Could not find a purchase article / account suggestion for this receipt.");
+            maybeAddLlmFallbackNote(notes, llmFallback);
             results.push({
               file,
               classification,
               status: "needs_review",
               extracted,
+              llm_fallback: llmFallback,
               supplier_resolution: supplierResolution,
               notes,
             });
@@ -1873,6 +2110,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
                 classification,
                 status: "skipped_duplicate",
                 extracted,
+                llm_fallback: llmFallback,
                 supplier_resolution: supplierResolution,
                 booking_suggestion: bookingSuggestion,
                 duplicate_match: duplicate,
@@ -1899,6 +2137,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             classification,
             status: created.status,
             extracted,
+            llm_fallback: llmFallback,
             supplier_resolution: supplierResolution,
             booking_suggestion: bookingSuggestion,
             created_invoice: created.created_invoice,

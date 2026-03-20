@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+  classifyReceiptDocument,
   categorizeTransactionGroup,
   detectReceiptCurrency,
   deriveAutoBookedNetAmount,
   deriveAutoBookedVatPrice,
   extractAmounts,
+  extractDates,
+  extractInvoiceNumber,
   extractPdfIdentifiers,
+  extractSupplierName,
   getAutoBookedVatConfig,
   getAutoBookedVatRateDropdown,
   getClientCountryFromIban,
   hasRecurringSimilarAmounts,
   looksLikePersonCounterparty,
+  normalizeDate,
   normalizeCounterpartyName,
 } from "./receipt-inbox.js";
 
@@ -59,6 +64,96 @@ describe("extractAmounts", () => {
 
     expect(result.total_gross).toBe(24.4);
   });
+
+  it("prefers the gross amount on VAT-inclusive total lines", () => {
+    const result = extractAmounts("Kokku €22.87 (sisaldab €4.12 käibemaksu)");
+
+    expect(result).toEqual({
+      total_net: 18.75,
+      total_vat: 4.12,
+      total_gross: 22.87,
+    });
+  });
+
+  it("treats component sums without VAT lines as zero-vat totals", () => {
+    const result = extractAmounts([
+      "Vahesumma €12.95",
+      "Transport €2.69",
+      "Kokku €15.64",
+    ].join("\n"));
+
+    expect(result).toEqual({
+      total_net: 15.64,
+      total_vat: 0,
+      total_gross: 15.64,
+    });
+  });
+
+  it("recomputes net amounts when OCR subtotal and gross collapse onto the same value", () => {
+    const result = extractAmounts([
+      "Subtotal €21.96",
+      "Tax 1 €3.96 €3.96",
+      "Total €21.96",
+    ].join("\n"));
+
+    expect(result).toEqual({
+      total_net: 18,
+      total_vat: 3.96,
+      total_gross: 21.96,
+    });
+  });
+
+  it("does not treat käibemaksuta lines as VAT amounts", () => {
+    const result = extractAmounts([
+      "Käibemaksuta: 10,47 €",
+      "Käibemaks 5%: 0,52 €",
+      "Summa kokku 10,99 €",
+    ].join("\n"));
+
+    expect(result).toEqual({
+      total_net: 10.47,
+      total_vat: 0.52,
+      total_gross: 10.99,
+    });
+  });
+
+  it("does not treat price lines with embedded KM percentages as VAT rows", () => {
+    const result = extractAmounts([
+      "Pileti(te) hind (KM 22%): 15,25 EUR",
+      "KM (22%): 3,35 EUR",
+      "Kokku 18,60 EUR",
+    ].join("\n"));
+
+    expect(result).toEqual({
+      total_net: 15.25,
+      total_vat: 3.35,
+      total_gross: 18.6,
+    });
+  });
+
+  it("extracts KM-ta and KM-ga summary rows used by IKEA-style invoices", () => {
+    const result = extractAmounts([
+      "Summa eurodes (KM-ta) 151,41",
+      "Summa eurodes (KM-ga) 181,69",
+    ].join("\n"));
+
+    expect(result).toEqual({
+      total_net: 151.41,
+      total_vat: 30.28,
+      total_gross: 181.69,
+    });
+  });
+
+  it("ignores years and ZIP codes as fallback gross amounts", () => {
+    const result = extractAmounts([
+      "Kuupäev 25. nov 2024",
+      "Tallinn, Estonia",
+      "51005",
+      "Makstud summa € 47",
+    ].join("\n"));
+
+    expect(result.total_gross).toBe(47);
+  });
 });
 
 describe("detectReceiptCurrency", () => {
@@ -76,6 +171,130 @@ describe("extractPdfIdentifiers", () => {
     const result = extractPdfIdentifiers("Supplier IBAN: IE29AIBK93115212345678");
 
     expect(result.supplier_iban).toBe("IE29AIBK93115212345678");
+  });
+
+  it("extracts foreign VAT numbers and normalizes spaced IBAN values", () => {
+    const result = extractPdfIdentifiers("KM-number: IE3668997OH\nIBAN: EE47 1000 0010 2014 5685");
+
+    expect(result.supplier_vat_no).toBe("IE3668997OH");
+    expect(result.supplier_iban).toBe("EE471000001020145685");
+  });
+
+  it("does not misclassify VAT numbers as IBANs", () => {
+    const result = extractPdfIdentifiers("KMKR: EE100576146 Narva mnt 13");
+
+    expect(result.supplier_vat_no).toBe("EE100576146");
+    expect(result.supplier_iban).toBeUndefined();
+  });
+
+  it("prefers supplier tax id before a bill-to section", () => {
+    const result = extractPdfIdentifiers([
+      "Fraqmented OÜ",
+      "Tax ID: EE102814482",
+      "Bill to",
+      "Seppo AI OÜ",
+      "Tax ID: EE102809963",
+    ].join("\n"));
+
+    expect(result.supplier_vat_no).toBe("EE102814482");
+  });
+});
+
+describe("normalizeDate", () => {
+  it("supports two-digit dotted dates and English month names", () => {
+    expect(normalizeDate("28.02.26")).toBe("2026-02-28");
+    expect(normalizeDate("16 March 2026")).toBe("2026-03-16");
+    expect(normalizeDate("February 20, 2026")).toBe("2026-02-20");
+    expect(normalizeDate("May 23,2024")).toBe("2024-05-23");
+    expect(normalizeDate("21/05/2024")).toBe("2024-05-21");
+  });
+
+  it("supports Estonian textual month names and weekday prefixes", () => {
+    expect(normalizeDate("pühapäev, 23. juuni 2024")).toBe("2024-06-23");
+  });
+});
+
+describe("extractInvoiceNumber", () => {
+  it("extracts bare invoice labels from LiteParse text", () => {
+    expect(extractInvoiceNumber("Invoice 171\nIssue Date: 16 March 2026", "fraqmented.pdf")).toBe("171");
+    expect(extractInvoiceNumber("Arve-saateleht nr.: 391929", "invoice.pdf")).toBe("391929");
+  });
+
+  it("does not treat section labels as invoice numbers", () => {
+    expect(extractInvoiceNumber("Arve Saatja nimi\nArve/Tehingu nr UPMPCA26F6IB", "delfi.pdf")).toBe("UPMPCA26F6IB");
+    expect(extractInvoiceNumber("Arve aadress:\nTellimuse number: E-H9J241K2", "ikea.pdf")).toBe("E-H9J241K2");
+  });
+});
+
+describe("extractDates", () => {
+  it("extracts textual issue and due dates from LiteParse text", () => {
+    expect(extractDates("Date of issue February 20, 2026\nDate due February 20, 2026")).toEqual({
+      invoice_date: "2026-02-20",
+      due_date: "2026-02-20",
+    });
+    expect(extractDates("Issue Date: 16 March 2026")).toEqual({
+      invoice_date: "2026-03-16",
+      due_date: undefined,
+    });
+  });
+
+  it("extracts Estonian textual invoice dates from transaction-style invoices", () => {
+    expect(extractDates("Arve kpv pühapäev, 23. juuni 2024")).toEqual({
+      invoice_date: "2024-06-23",
+      due_date: undefined,
+    });
+  });
+
+  it("extracts slash-separated order dates", () => {
+    expect(extractDates("Tellimuse kuupäev 21/05/2024")).toEqual({
+      invoice_date: "2024-05-21",
+      due_date: undefined,
+    });
+  });
+});
+
+describe("extractSupplierName", () => {
+  it("strips sender labels and buyer blocks from supplier names", () => {
+    expect(extractSupplierName("Saatja nimi Deli Meedia AS", "delfi.pdf")).toBe("Deli Meedia AS");
+    expect(extractSupplierName("Anthropic Bill to", "anthropic.pdf")).toBe("Anthropic");
+  });
+
+  it("extracts labelled supplier lines from ticket-like documents", () => {
+    expect(
+      extractSupplierName("Vedaja/Teenuse pakkuja: Lux Express Estonia AS; Lastekodu 46, Tallinn", "ticket.pdf"),
+    ).toBe("Lux Express Estonia AS");
+  });
+
+  it("does not treat buyer lines as supplier names", () => {
+    expect(
+      extractSupplierName("DIGITALL OÜ\nSeppo OÜ Vastuvõtja: Arve number: 202404068", "digitall.pdf"),
+    ).toBe("DIGITALL OÜ");
+  });
+
+  it("extracts the seller from split Ostja/Müüja name rows", () => {
+    expect(
+      extractSupplierName("Ostja Müüja\nNimi: Csik Timea Nimi: Runikon Retail OU", "ikea.pdf"),
+    ).toBe("Runikon Retail OU");
+  });
+});
+
+describe("classifyReceiptDocument", () => {
+  it("keeps sales invoices out of the purchase invoice flow", () => {
+    expect(classifyReceiptDocument("MÜÜGIARVE 2024_20\nKlient: Fopaa OÜ", "sale.pdf")).toBe("unclassifiable");
+  });
+
+  it("classifies travel tickets and order confirmations as reimbursement-style receipts", () => {
+    expect(classifyReceiptDocument("Pileti nr 241028846820\nLux Express Estonia AS", "ticket.pdf")).toBe("owner_paid_expense_reimbursement");
+    expect(classifyReceiptDocument("Order details\nPayment method: Pay with bank", "beep.png")).toBe("owner_paid_expense_reimbursement");
+  });
+
+  it("classifies non-invoice confirmations as reimbursement-style review items", () => {
+    expect(classifyReceiptDocument("See on sinu tehingu kinnitus\nPalun pane tähele, et see ei ole arve", "booking.pdf")).toBe("owner_paid_expense_reimbursement");
+    expect(classifyReceiptDocument("Sinu tellimuse kokkuvõte\nTellimuse number: E-H9J241K2", "ikea.pdf")).toBe("owner_paid_expense_reimbursement");
+  });
+
+  it("classifies taxi card-terminal receipts as reimbursement-style review items", () => {
+    expect(classifyReceiptDocument("Arve nr TG43882106\nMaksemeetod Kaarditerminal\nForus Taxi", "forus.pdf")).toBe("owner_paid_expense_reimbursement");
   });
 });
 

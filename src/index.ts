@@ -144,7 +144,9 @@ async function main() {
 - Pass original vat_price and gross_price exactly — do not recalculate.
 - Use suggest_booking with clients_id to reuse past purchase article/account/VAT settings; use list_purchase_articles only when history is not sufficient.
 - For non-Estonian suppliers, check if reverse charge applies (reversed_vat_id=1).
-- PDF flow: extract_pdf_invoice → validate_invoice_data → resolve_supplier → detect_duplicate_purchase_invoice → suggest_booking → create_purchase_invoice_from_pdf → upload_invoice_document → confirm_purchase_invoice.
+- Document flow (PDF/image): extract_pdf_invoice → validate_invoice_data → resolve_supplier → detect_duplicate_purchase_invoice → suggest_booking → create_purchase_invoice_from_pdf → upload_invoice_document → confirm_purchase_invoice.
+- If document extraction returns raw_text plus llm_fallback, use raw_text as the source of truth for any missing fields instead of guessing from partial regex hints.
+- process_receipt_batch OCR-parses PDFs and images; when deterministic extraction is incomplete, inspect extracted.raw_text + llm_fallback before deciding whether the result can be booked or must stay in review.
 
 Bank reconciliation:
 - Run reconcile_transactions first, then auto_confirm_exact_matches with execute=false before executing.

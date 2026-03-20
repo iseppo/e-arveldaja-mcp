@@ -44,6 +44,8 @@ describe("registerPrompts", () => {
     const text = await getPromptText(server, "book-invoice", { file_path: "/tmp/invoice.pdf" });
 
     expect(text).toContain("hints.raw_text");
+    expect(text).toContain("llm_fallback");
+    expect(text).toContain("source of truth");
     expect(text).toContain("clients_id: supplier_client_id");
     expect(text).toContain("supplier_client_id");
     expect(text).toContain("invoice_id: the invoice ID returned in step 10");
