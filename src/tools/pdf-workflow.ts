@@ -2,7 +2,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
-import pdf from "pdf-parse";
 import { closest } from "fastest-levenshtein";
 import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
@@ -10,6 +9,7 @@ import { validateFilePath } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { roundMoney } from "../money.js";
 import { readOnly, create, mutate } from "../annotations.js";
+import { parseDocument } from "../document-parser.js";
 
 const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50 MB
 
@@ -64,23 +64,24 @@ function extractPdfHints(text: string): PdfHints {
 export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "extract_pdf_invoice",
-    "Extract text and key identifiers from a supplier invoice PDF. Returns raw text + detected IBAN, registry code, VAT number, reference number. Read raw_text to extract all invoice fields, then call validate_invoice_data.",
+    "Extract text and key identifiers from a supplier invoice PDF using LiteParse local OCR/layout parsing. " +
+    "Returns raw text + detected IBAN, registry code, VAT number, reference number. " +
+    "Read raw_text to extract all invoice fields, then call validate_invoice_data.",
     {
       file_path: z.string().describe("Absolute path to the PDF file"),
     },
     { ...readOnly, openWorldHint: true, title: "Extract Supplier Invoice PDF" },
     async ({ file_path }) => {
       const resolved = await validatePdfPath(file_path);
-      const buffer = await readFile(resolved);
-      const pdfData = await pdf(buffer);
-      const hints = extractPdfHints(pdfData.text);
+      const parsedDocument = await parseDocument(resolved);
+      const hints = extractPdfHints(parsedDocument.text);
 
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
             hints,
-            page_count: pdfData.numpages,
+            page_count: parsedDocument.pageCount,
             instructions: "Read raw_text carefully. Extract supplier name, invoice number, dates, " +
               "net/VAT/gross amounts, and line items. Then call validate_invoice_data to check " +
               "that numbers add up before creating the invoice.",

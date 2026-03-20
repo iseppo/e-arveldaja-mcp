@@ -1,7 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
+import { validateFilePath } from "../file-validation.js";
+import { parseDocument } from "../document-parser.js";
 import { registerPdfWorkflowTools } from "./pdf-workflow.js";
 
-function setupSuggestBookingTool() {
+vi.mock("../file-validation.js", () => ({
+  validateFilePath: vi.fn(),
+}));
+
+vi.mock("../document-parser.js", () => ({
+  parseDocument: vi.fn(),
+}));
+
+const mockedValidateFilePath = vi.mocked(validateFilePath);
+const mockedParseDocument = vi.mocked(parseDocument);
+
+function setupPdfWorkflowTool(toolName: string) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
     purchaseInvoices: {
@@ -35,7 +48,7 @@ function setupSuggestBookingTool() {
 
   registerPdfWorkflowTools(server, api);
 
-  const registration = server.registerTool.mock.calls.find(([name]) => name === "suggest_booking");
+  const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
   if (!registration) {
     throw new Error("Tool was not registered");
   }
@@ -43,9 +56,34 @@ function setupSuggestBookingTool() {
   return registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
 }
 
-describe("suggest_booking", () => {
+describe("pdf workflow tools", () => {
+  it("extract_pdf_invoice uses LiteParse output for raw text and page count", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/invoice.pdf");
+    mockedParseDocument.mockResolvedValue({
+      text: "Registrikood 12345678\nVAT EE123456789\nEE471000001020145685\nViitenumber 12345",
+      pageCount: 2,
+      result: { text: "", pages: [] } as any,
+    });
+
+    const handler = setupPdfWorkflowTool("extract_pdf_invoice");
+
+    const response = await handler({ file_path: "/tmp/invoice.pdf" });
+    const payload = JSON.parse(response.content[0]!.text);
+
+    expect(mockedValidateFilePath).toHaveBeenCalledWith("/tmp/invoice.pdf", [".pdf"], 50 * 1024 * 1024);
+    expect(mockedParseDocument).toHaveBeenCalledWith("/tmp/invoice.pdf");
+    expect(payload.page_count).toBe(2);
+    expect(payload.hints).toEqual(expect.objectContaining({
+      raw_text: expect.stringContaining("Registrikood 12345678"),
+      supplier_reg_code: "12345678",
+      supplier_vat_no: "EE123456789",
+      supplier_iban: "EE471000001020145685",
+      ref_number: "12345",
+    }));
+  });
+
   it("returns purchase account and VAT metadata from similar invoices", async () => {
-    const handler = setupSuggestBookingTool();
+    const handler = setupPdfWorkflowTool("suggest_booking");
 
     const result = await handler({
       clients_id: 7,

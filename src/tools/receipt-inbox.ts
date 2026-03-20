@@ -3,7 +3,6 @@ import { readFile, readdir, realpath, stat } from "fs/promises";
 import { homedir } from "os";
 import { basename, extname, join, resolve } from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import pdf from "pdf-parse";
 import { closest } from "fastest-levenshtein";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
@@ -15,6 +14,7 @@ import { getProjectRoot } from "../paths.js";
 import { readOnly, batch } from "../annotations.js";
 import { type ApiContext, isCompanyVatRegistered, safeJsonParse } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, normalizeVatRate } from "./purchase-vat-defaults.js";
+import { parseDocument } from "../document-parser.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -1463,9 +1463,8 @@ async function extractReceiptFields(file: ReceiptFileInfo): Promise<ExtractedRec
     };
   }
 
-  const buffer = await readFile(file.path);
-  const pdfData = await pdf(buffer);
-  const text = pdfData.text;
+  const parsedDocument = await parseDocument(file.path);
+  const text = parsedDocument.text;
   const identifiers = extractPdfIdentifiers(text);
   const { invoice_date, due_date } = extractDates(text);
   const supplierName = extractSupplierName(text, file.name);
