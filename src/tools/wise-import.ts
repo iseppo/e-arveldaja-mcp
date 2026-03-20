@@ -82,6 +82,34 @@ function wiseDate(dateStr: string): string {
   return dateStr.split(" ")[0] ?? dateStr;
 }
 
+function normalizeWiseText(value?: string | null): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function stripWisePrefix(description?: string | null): string {
+  return (description ?? "").replace(/^WISE:(?:FEE:)?\S+\s*/i, "").trim();
+}
+
+function formatWiseAmount(amount: number): string {
+  return amount.toFixed(2);
+}
+
+function buildWiseTransactionSignature(
+  date: string,
+  amount: number,
+  bankAccountName?: string | null,
+  refNumber?: string | null,
+  description?: string | null,
+): string {
+  return [
+    date,
+    formatWiseAmount(amount),
+    normalizeWiseText(bankAccountName),
+    normalizeWiseText(refNumber),
+    normalizeWiseText(description),
+  ].join("|");
+}
+
 export function registerWiseImportTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "import_wise_transactions",
@@ -98,7 +126,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       date_from: z.string().optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
     },
-    { ...batch, title: "Import Wise Transactions" },
+    { ...batch, openWorldHint: true, title: "Import Wise Transactions" },
     async ({ file_path, accounts_dimensions_id, fee_account_relation_id, execute, date_from, date_to }) => {
       const resolved = await validateFilePath(file_path, [".csv"], 10 * 1024 * 1024);
       const csv = await readFile(resolved, "utf-8");
@@ -129,11 +157,17 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
 
       // Get existing transactions for duplicate detection
       const existingTx = await api.transactions.listAll();
-      const existingDescs = new Set(
-        existingTx.map(tx => `${tx.date}|${tx.amount}|${tx.description ?? ""}`)
+      const existingSignatures = new Set(
+        existingTx.map(tx => buildWiseTransactionSignature(
+          tx.date,
+          tx.amount,
+          tx.bank_account_name,
+          tx.ref_number,
+          stripWisePrefix(tx.description),
+        ))
       );
       // Also check by Wise ID in description
-      const existingByWiseId = new Set(
+      const seenWiseIds = new Set(
         existingTx
           .filter(tx => tx.description?.startsWith("WISE:"))
           .map(tx => tx.description!.split(" ")[0])
@@ -167,10 +201,23 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         if (row.targetCurrency !== "EUR" && row.targetCurrency !== row.sourceCurrency) {
           desc += ` [${row.targetAmount} ${row.targetCurrency} @ ${row.exchangeRate}]`;
         }
+        const legacyDesc = stripWisePrefix(desc);
+        const mainSignature = buildWiseTransactionSignature(
+          date,
+          amount,
+          row.targetName || undefined,
+          row.reference || undefined,
+          legacyDesc,
+        );
 
         // Duplicate check
-        if (existingByWiseId.has(wiseIdTag)) {
-          skipped.push({ wise_id: row.id, reason: "Already imported (Wise ID match)" });
+        if (seenWiseIds.has(wiseIdTag) || existingSignatures.has(mainSignature)) {
+          skipped.push({
+            wise_id: row.id,
+            reason: seenWiseIds.has(wiseIdTag)
+              ? "Already imported (Wise ID match)"
+              : "Already imported (date/amount/counterparty/reference match)",
+          });
           continue;
         }
 
@@ -184,6 +231,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             description: desc,
             status: "would_create",
           });
+          seenWiseIds.add(wiseIdTag);
+          existingSignatures.add(mainSignature);
         } else {
           try {
             const result = await api.transactions.create({
@@ -205,6 +254,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               status: "created",
               api_id: result.created_object_id,
             });
+            seenWiseIds.add(wiseIdTag);
+            existingSignatures.add(mainSignature);
           } catch (err: any) {
             skipped.push({ wise_id: row.id, reason: err.message });
           }
@@ -212,7 +263,25 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
 
         // Create separate fee transaction if fee > 0
         if (fee > 0) {
+          const feeWiseIdTag = `WISE:FEE:${row.id}`;
           const feeDesc = `WISE:FEE:${row.id} Wise teenustasu`;
+          const feeSignature = buildWiseTransactionSignature(
+            date,
+            fee,
+            "Wise",
+            undefined,
+            stripWisePrefix(feeDesc),
+          );
+          if (seenWiseIds.has(feeWiseIdTag) || existingSignatures.has(feeSignature)) {
+            skipped.push({
+              wise_id: `FEE:${row.id}`,
+              reason: seenWiseIds.has(feeWiseIdTag)
+                ? "Fee already imported (Wise ID match)"
+                : "Fee already imported (date/amount/counterparty match)",
+            });
+            continue;
+          }
+
           if (dryRun) {
             created.push({
               wise_id: `FEE:${row.id}`,
@@ -222,6 +291,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               description: feeDesc,
               status: "would_create",
             });
+            seenWiseIds.add(feeWiseIdTag);
+            existingSignatures.add(feeSignature);
           } else {
             try {
               const feeResult = await api.transactions.create({
@@ -248,6 +319,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                     status: "created_and_confirmed",
                     api_id: feeId,
                   });
+                  seenWiseIds.add(feeWiseIdTag);
+                  existingSignatures.add(feeSignature);
                 } catch (confErr: unknown) {
                   created.push({
                     wise_id: `FEE:${row.id}`,
@@ -255,6 +328,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                     status: "created (confirm failed: " + (confErr instanceof Error ? confErr.message : String(confErr)) + ")",
                     api_id: feeId,
                   });
+                  seenWiseIds.add(feeWiseIdTag);
+                  existingSignatures.add(feeSignature);
                 }
               } else {
                 created.push({
@@ -263,6 +338,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                   status: "created (needs manual confirm)",
                   api_id: feeId,
                 });
+                seenWiseIds.add(feeWiseIdTag);
+                existingSignatures.add(feeSignature);
               }
             } catch (err: any) {
               skipped.push({ wise_id: `FEE:${row.id}`, reason: err.message });

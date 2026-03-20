@@ -68,7 +68,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     {
       file_path: z.string().describe("Absolute path to the PDF file"),
     },
-    { ...readOnly, title: "Extract Supplier Invoice PDF" },
+    { ...readOnly, openWorldHint: true, title: "Extract Supplier Invoice PDF" },
     async ({ file_path }) => {
       const resolved = await validatePdfPath(file_path);
       const buffer = await readFile(resolved);
@@ -494,7 +494,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       invoice_id: z.number().describe("Purchase invoice ID"),
       file_path: z.string().describe("Absolute path to the PDF file"),
     },
-    { ...mutate, title: "Upload Purchase Invoice PDF" },
+    { ...mutate, openWorldHint: true, title: "Upload Purchase Invoice PDF" },
     async ({ invoice_id, file_path }) => {
       const resolved = await validatePdfPath(file_path);
       const buffer = await readFile(resolved);

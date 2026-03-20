@@ -1720,7 +1720,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       folder_path: z.string().describe("Folder path to scan"),
       file_types: z.array(z.enum(["pdf", "jpg", "png"])).optional().describe("Optional file type filter"),
     },
-    { ...readOnly, title: "Scan Receipt Folder" },
+    { ...readOnly, openWorldHint: true, title: "Scan Receipt Folder" },
     async ({ folder_path, file_types }) => {
       const result = await scanReceiptFolderInternal(folder_path, file_types);
       return {
@@ -1742,7 +1742,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
     },
-    { ...batch, title: "Process Receipt Batch" },
+    { ...batch, openWorldHint: true, title: "Process Receipt Batch" },
     async ({ folder_path, accounts_dimensions_id, execute, date_from, date_to }) => {
       const dryRun = execute !== true;
       const scan = await scanReceiptFolderInternal(folder_path, undefined, date_from, date_to);

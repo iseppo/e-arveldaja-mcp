@@ -387,7 +387,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
     },
-    { ...readOnly, title: "Parse Lightyear Account Statement" },
+    { ...readOnly, openWorldHint: true, title: "Parse Lightyear Account Statement" },
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);
@@ -474,7 +474,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear CapitalGainsStatement CSV file"),
     },
-    { ...readOnly, title: "Parse Lightyear Capital Gains" },
+    { ...readOnly, openWorldHint: true, title: "Parse Lightyear Capital Gains" },
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const gains = parseCapitalGains(csv);
@@ -530,7 +530,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
-    { ...batch, title: "Book Lightyear Trades" },
+    { ...batch, openWorldHint: true, title: "Book Lightyear Trades" },
     async ({ file_path, capital_gains_file, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
       const isDryRun = dry_run !== false;
       const skipSet = new Set(
@@ -804,7 +804,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       fee_account: z.number().optional().describe("Platform fee expense account (default 8610 Muud finantskulud)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
-    { ...batch, title: "Book Lightyear Distributions" },
+    { ...batch, openWorldHint: true, title: "Book Lightyear Distributions" },
     async ({ file_path, broker_account, broker_dimension_id, income_account, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
       const fee_account = fee_account_param ?? 8610;
@@ -936,7 +936,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
     },
-    { ...readOnly, title: "Lightyear Portfolio Summary" },
+    { ...readOnly, openWorldHint: true, title: "Lightyear Portfolio Summary" },
     async ({ file_path }) => {
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);

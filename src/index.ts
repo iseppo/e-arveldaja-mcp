@@ -151,7 +151,7 @@ Bank reconciliation:
 Reporting:
 - Confirm all journals/invoices/transactions first for accurate financial reports.
 - list_connections / switch_connection for multi-company; switching clears caches.
-- Batch tools default to dry_run — preview before execute=true.
+- Many batch tools support dry_run/execute preview flows — read each tool description before executing.
 - Amounts are EUR unless cl_currencies_id specifies otherwise.`,
   });
 

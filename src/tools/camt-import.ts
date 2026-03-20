@@ -557,7 +557,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     {
       file_path: z.string().describe("Absolute path to the CAMT.053 XML file"),
     },
-    { ...readOnly, title: "Parse CAMT.053" },
+    { ...readOnly, openWorldHint: true, title: "Parse CAMT.053" },
     async ({ file_path }) => {
       const parsed = await enrichWithDuplicates(await loadParsedCamt053(file_path), api);
       return {
@@ -579,7 +579,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
     },
-    { ...batch, title: "Import CAMT.053" },
+    { ...batch, openWorldHint: true, title: "Import CAMT.053" },
     async ({ file_path, accounts_dimensions_id, execute, date_from, date_to }) => {
       if (date_from && date_to && date_from > date_to) {
         throw new Error(`date_from ${date_from} must be on or before date_to ${date_to}`);

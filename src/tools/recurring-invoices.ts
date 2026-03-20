@@ -9,19 +9,19 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
 
   registerTool(server, "create_recurring_sale_invoices",
     "Clone sale invoices from a previous month for recurring monthly billing. " +
-    "Copies items, client, template from source invoices. Creates as DRAFT. " +
-    "Invoice numbers are auto-assigned by the configured invoice series.",
+    "Copies items, client, template from source invoices and creates DRAFT invoices. " +
+    "Use dry_run=true to preview without creating. Invoice numbers are auto-assigned by the configured invoice series.",
     {
       source_month: z.string().describe("Source month to copy from (YYYY-MM)"),
       target_date: z.string().describe("New invoice date (YYYY-MM-DD)"),
       target_journal_date: z.string().describe("New turnover date (YYYY-MM-DD)"),
       invoice_ids: z.string().optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
       auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
-      dry_run: z.boolean().optional().describe("Preview without creating invoices (default true)"),
+      dry_run: z.boolean().optional().describe("Preview without creating invoices (default false)"),
     },
     { ...batch, title: "Create Recurring Sale Invoices" },
     async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm, dry_run }) => {
-      const isDryRun = dry_run !== false;
+      const isDryRun = dry_run === true;
       // Get source invoices
       const allSales = await api.saleInvoices.listAll();
       const sourceFrom = `${source_month}-01`;
@@ -141,7 +141,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             created: isDryRun ? undefined : results.filter(r => r.status === "ok").length,
             errors: isDryRun ? undefined : results.filter(r => r.status === "error").length,
             results,
-            ...(isDryRun && { note: "Set dry_run=false to create the invoices." }),
+            ...(isDryRun && { note: "Preview only. Omit dry_run or set dry_run=false to create the invoices." }),
           }, null, 2),
         }],
       };
