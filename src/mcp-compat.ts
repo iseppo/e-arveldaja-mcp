@@ -20,7 +20,6 @@ const TITLE_WORD_OVERRIDES: Record<string, string> = {
   api: "API",
   csv: "CSV",
   iban: "IBAN",
-  kmd: "KMD",
   mcp: "MCP",
   pdf: "PDF",
   rtj: "RTJ",

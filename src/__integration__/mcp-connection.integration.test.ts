@@ -31,9 +31,9 @@ describe.skipIf(!RUN_INTEGRATION)("MCP Server Integration", () => {
     }
   });
 
-  it("lists 7 prompts", async () => {
+  it("lists 6 prompts", async () => {
     const { prompts } = await client.listPrompts();
-    expect(prompts.length).toBe(7);
+    expect(prompts.length).toBe(6);
     for (const prompt of prompts) {
       expect(prompt.title, `${prompt.name} missing title`).toBeTruthy();
     }

@@ -290,6 +290,7 @@ export interface SaleInvoice {
   additional_info_content?: string | null;
   bank_payment_orders_id?: number | null;
   bank_accounts_id?: number | null;
+  is_deleted?: boolean;
   items?: SaleInvoiceItem[];
   deliveries?: SaleInvoiceDelivery[];
   credit_invoices?: number[];

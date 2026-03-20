@@ -8,7 +8,7 @@ interface ConfirmPurchaseInvoiceOptions {
 }
 
 /**
- * For non-VAT (mitte-KMD) companies: set project_no_vat_gross_price on items
+ * For non-VAT companies: set project_no_vat_gross_price on items
  * so the API computes item-level vat_amount for informational tracking.
  * Without this field, item vat_amount stays 0 and gross_price = net_price.
  */
@@ -87,7 +87,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     const itemNet = items ? roundMoney(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0)) : 0;
 
     // Invoice-level VAT: explicit value wins for VAT-registered companies.
-    // Non-KMD companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
+    // Non-VAT companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
     const vat = isVatRegistered
       ? (vatPrice !== undefined ? vatPrice : itemVat)
       : 0;

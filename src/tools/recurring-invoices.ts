@@ -5,6 +5,22 @@ import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice } from "../types/api.js";
 import { batch } from "../annotations.js";
 
+const RECURRING_CLONE_MARKER_PREFIX = "RECURRING_SOURCE_INVOICE";
+const RECURRING_CLONE_MARKER_RE = /RECURRING_SOURCE_INVOICE:\d+:TARGET_DATE:\d{4}-\d{2}-\d{2}/g;
+
+function buildRecurringCloneMarker(sourceId: number, targetDate: string): string {
+  return `${RECURRING_CLONE_MARKER_PREFIX}:${sourceId}:TARGET_DATE:${targetDate}`;
+}
+
+function extractRecurringCloneMarkers(notes?: string | null): string[] {
+  return notes?.match(RECURRING_CLONE_MARKER_RE) ?? [];
+}
+
+function appendRecurringCloneMarker(notes: string | null | undefined, marker: string): string {
+  if (notes?.includes(marker)) return notes;
+  return notes ? `${notes}\n${marker}` : marker;
+}
+
 export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "create_recurring_sale_invoices",
@@ -22,11 +38,18 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
     { ...batch, title: "Create Recurring Sale Invoices" },
     async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm, dry_run }) => {
       const isDryRun = dry_run === true;
-      // Get source invoices
       const allSales = await api.saleInvoices.listAll();
       const sourceFrom = `${source_month}-01`;
       const sourceLastDay = new Date(parseInt(source_month.split("-")[0]!), parseInt(source_month.split("-")[1]!), 0).getDate();
       const sourceTo = `${source_month}-${String(sourceLastDay).padStart(2, "0")}`;
+      const existingCloneMarkers = new Map<string, { id?: number; number?: string }>();
+
+      for (const invoice of allSales) {
+        if (invoice.create_date !== target_date || invoice.is_deleted) continue;
+        for (const marker of extractRecurringCloneMarkers(invoice.notes)) {
+          existingCloneMarkers.set(marker, { id: invoice.id, number: invoice.number });
+        }
+      }
 
       let sourceInvoices: SaleInvoice[];
       if (invoice_ids) {
@@ -42,11 +65,34 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
         );
       }
 
-      const results = [];
+      const results: Array<Record<string, unknown> & { status: string }> = [];
 
       for (const source of sourceInvoices) {
-        // Fetch full invoice to get items
-        const full = await api.saleInvoices.get(source.id!);
+        if (!source.id) {
+          results.push({
+            source_number: source.number,
+            client: source.client_name,
+            status: "error",
+            error: "Source invoice is missing an ID",
+          });
+          continue;
+        }
+
+        const recurringMarker = buildRecurringCloneMarker(source.id, target_date);
+        const existingClone = existingCloneMarkers.get(recurringMarker);
+        if (existingClone) {
+          results.push({
+            source_id: source.id,
+            source_number: source.number,
+            client: source.client_name,
+            existing_id: existingClone.id,
+            existing_number: existingClone.number,
+            status: isDryRun ? "would_skip_existing" : "skipped_existing",
+          });
+          continue;
+        }
+
+        const full = await api.saleInvoices.get(source.id);
         if (!full.items || full.items.length === 0) continue;
 
         if (isDryRun) {
@@ -58,6 +104,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             gross_price: full.gross_price,
             status: "would_create",
           });
+          existingCloneMarkers.set(recurringMarker, {});
           continue;
         }
 
@@ -78,6 +125,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             // Clone tax-critical invoice-level fields
             intra_community_supply: full.intra_community_supply,
             client_vat_no: full.client_vat_no,
+            notes: appendRecurringCloneMarker(full.notes, recurringMarker),
             items: full.items.map(item => ({
               products_id: item.products_id,
               cl_sale_articles_id: item.cl_sale_articles_id,
@@ -97,15 +145,19 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
               projects_person_id: item.projects_person_id,
             })),
           });
+          existingCloneMarkers.set(recurringMarker, { id: result.created_object_id });
 
           let confirmed = false;
           let confirmError: string | undefined;
+          let status = "created";
           if (auto_confirm && result.created_object_id) {
             try {
               await api.saleInvoices.confirm(result.created_object_id);
               confirmed = true;
+              status = "confirmed";
             } catch (err: any) {
               confirmError = err instanceof Error ? err.message : String(err);
+              status = "confirm_error";
             }
           }
 
@@ -116,7 +168,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             created_id: result.created_object_id,
             confirmed,
             ...(confirmError ? { confirm_error: confirmError } : {}),
-            status: "ok",
+            status,
           });
         } catch (err: any) {
           results.push({
@@ -129,6 +181,14 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
         }
       }
 
+      const createdCount = results.filter(r => ["created", "confirmed", "confirm_error"].includes(r.status)).length;
+      const confirmedCount = results.filter(r => r.status === "confirmed").length;
+      const skippedExistingCount = results.filter(r => r.status === "skipped_existing").length;
+      const createErrorsCount = results.filter(r => r.status === "error").length;
+      const confirmErrorsCount = results.filter(r => r.status === "confirm_error").length;
+      const wouldCreateCount = results.filter(r => r.status === "would_create").length;
+      const wouldSkipExistingCount = results.filter(r => r.status === "would_skip_existing").length;
+
       return {
         content: [{
           type: "text",
@@ -137,9 +197,14 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             source_month,
             target_date,
             source_count: sourceInvoices.length,
-            would_create: isDryRun ? results.length : undefined,
-            created: isDryRun ? undefined : results.filter(r => r.status === "ok").length,
-            errors: isDryRun ? undefined : results.filter(r => r.status === "error").length,
+            would_create: isDryRun ? wouldCreateCount : undefined,
+            would_skip_existing: isDryRun ? wouldSkipExistingCount : undefined,
+            created: isDryRun ? undefined : createdCount,
+            confirmed: isDryRun ? undefined : confirmedCount,
+            skipped_existing: isDryRun ? undefined : skippedExistingCount,
+            errors: isDryRun ? undefined : createErrorsCount + confirmErrorsCount,
+            create_errors: isDryRun ? undefined : createErrorsCount,
+            confirm_errors: isDryRun ? undefined : confirmErrorsCount,
             results,
             ...(isDryRun && { note: "Preview only. Omit dry_run or set dry_run=false to create the invoices." }),
           }, null, 2),

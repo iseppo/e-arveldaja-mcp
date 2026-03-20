@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerRecurringInvoiceTools } from "./recurring-invoices.js";
 
-function buildSaleInvoice() {
+function buildSaleInvoice(overrides: Record<string, unknown> = {}) {
   return {
     id: 1,
     status: "CONFIRMED",
@@ -19,6 +19,7 @@ function buildSaleInvoice() {
     receivable_accounts_id: 1200,
     intra_community_supply: false,
     client_vat_no: "EE123456789",
+    notes: "Original internal note",
     items: [{
       products_id: 99,
       cl_sale_articles_id: 5,
@@ -37,18 +38,23 @@ function buildSaleInvoice() {
       projects_location_id: null,
       projects_person_id: null,
     }],
+    ...overrides,
   };
 }
 
-function setupRecurringTool() {
+function setupRecurringTool(options: {
+  listAllInvoices?: unknown[];
+  createImpl?: ReturnType<typeof vi.fn>;
+  confirmImpl?: ReturnType<typeof vi.fn>;
+} = {}) {
   const server = { registerTool: vi.fn() } as any;
   const fullInvoice = buildSaleInvoice();
   const api = {
     saleInvoices: {
-      listAll: vi.fn().mockResolvedValue([fullInvoice]),
+      listAll: vi.fn().mockResolvedValue(options.listAllInvoices ?? [fullInvoice]),
       get: vi.fn().mockResolvedValue(fullInvoice),
-      create: vi.fn().mockResolvedValue({ created_object_id: 321 }),
-      confirm: vi.fn().mockResolvedValue({}),
+      create: options.createImpl ?? vi.fn().mockResolvedValue({ created_object_id: 321 }),
+      confirm: options.confirmImpl ?? vi.fn().mockResolvedValue({}),
     },
   } as any;
 
@@ -78,6 +84,9 @@ describe("recurring invoices tool", () => {
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.created).toBe(1);
     expect(api.saleInvoices.create).toHaveBeenCalledTimes(1);
+    expect(api.saleInvoices.create).toHaveBeenCalledWith(expect.objectContaining({
+      notes: expect.stringContaining("RECURRING_SOURCE_INVOICE:1:TARGET_DATE:2026-02-01"),
+    }));
   });
 
   it("supports explicit preview mode without creating invoices", async () => {
@@ -95,5 +104,65 @@ describe("recurring invoices tool", () => {
     expect(payload.mode).toBe("DRY_RUN");
     expect(payload.would_create).toBe(1);
     expect(api.saleInvoices.create).not.toHaveBeenCalled();
+  });
+
+  it("skips an already cloned target invoice instead of creating a duplicate", async () => {
+    const sourceInvoice = buildSaleInvoice();
+    const existingClone = buildSaleInvoice({
+      id: 99,
+      status: "DRAFT",
+      create_date: "2026-02-01",
+      number: "ARV-99",
+      notes: "RECURRING_SOURCE_INVOICE:1:TARGET_DATE:2026-02-01",
+    });
+    const { api, handler } = setupRecurringTool({
+      listAllInvoices: [sourceInvoice, existingClone],
+    });
+
+    const result = await handler({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.created).toBe(0);
+    expect(payload.skipped_existing).toBe(1);
+    expect(payload.results).toEqual([
+      expect.objectContaining({
+        source_id: 1,
+        existing_id: 99,
+        existing_number: "ARV-99",
+        status: "skipped_existing",
+      }),
+    ]);
+    expect(api.saleInvoices.create).not.toHaveBeenCalled();
+  });
+
+  it("reports auto-confirm failures as errors instead of success-only results", async () => {
+    const { handler } = setupRecurringTool({
+      confirmImpl: vi.fn().mockRejectedValue(new Error("Confirm failed")),
+    });
+
+    const result = await handler({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+      auto_confirm: true,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.created).toBe(1);
+    expect(payload.confirmed).toBe(0);
+    expect(payload.errors).toBe(1);
+    expect(payload.confirm_errors).toBe(1);
+    expect(payload.results).toEqual([
+      expect.objectContaining({
+        status: "confirm_error",
+        confirm_error: "Confirm failed",
+      }),
+    ]);
   });
 });

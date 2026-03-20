@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.7.0] - 2026-03-20
+
+### Fixed
+- **Recurring invoice safety**:
+  - `create_recurring_sale_invoices` is now idempotent for reruns by marking created clones and skipping already-created target-period copies
+  - auto-confirm failures are now counted and reported as errors instead of being folded into success-only output
+- **Wise import retry behavior**:
+  - missing fee rows can now be backfilled on rerun even when the main Wise transaction already exists
+  - fee rows are no longer created if main transaction creation fails, preventing orphan fee entries
+- **Runtime config discovery**:
+  - `EARVELDAJA_SCAN_PARENT=true` now applies to `.env` loading as well as `apikey*.txt` discovery
+
+### Removed
+- **KMD workflow prompt**:
+  - removed the MCP KMD/VAT-declaration prompt and related documentation as unnecessary, because e-arveldaja already handles KMD declarations in its own product
+  - prompt surface is now back to **6 MCP prompts**
+
+### Changed
+- **Test coverage**:
+  - regression tests added for recurring invoice idempotency and confirm-error reporting, Wise partial-import recovery, parent `.env` discovery, and prompt registration
+- **128 tests** total, up from 122 in v0.6.0
+- **Release metadata** updated to `0.7.0`
+
 ## [0.6.0] - 2026-03-20
 
 ### Added
@@ -115,7 +138,7 @@
 
 ### Added
 - **MCP tool annotations** on all 85 tools: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`. Clients can auto-approve read-only tools and require confirmation for destructive ones.
-- **7 MCP prompts**: `book-invoice`, `reconcile-bank`, `month-end-close`, `new-supplier`, `company-overview`, `quarterly-vat`, `lightyear-booking`. Client-agnostic workflow templates (unlike `.claude/commands/` which only work in Claude Code).
+- **6 MCP prompts**: `book-invoice`, `reconcile-bank`, `month-end-close`, `new-supplier`, `company-overview`, `lightyear-booking`. Client-agnostic workflow templates (unlike `.claude/commands/` which only work in Claude Code).
 - **6 dynamic resource templates**: `earveldaja://clients/{id}`, `products/{id}`, `journals/{id}`, `sale_invoices/{id}`, `purchase_invoices/{id}`, `transactions/{id}`. Direct resource access by ID.
 - **Structured error responses**: All tools return `{ isError: true }` on failure instead of throwing, letting clients distinguish tool errors from protocol errors.
 - **MCP protocol logging**: Configurable logger (`src/logger.ts`) that uses MCP `sendLoggingMessage` after connection, with stderr fallback during startup.

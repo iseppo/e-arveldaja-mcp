@@ -102,7 +102,7 @@ npm install && npm run build
 
 ## Workflows (MCP Prompts)
 
-The server includes 7 built-in workflow prompts that any MCP client can discover and use. These guide the AI assistant through multi-step accounting tasks:
+The server includes 6 built-in workflow prompts that any MCP client can discover and use. These guide the AI assistant through multi-step accounting tasks:
 
 | Prompt | Description |
 |---|---|
@@ -111,7 +111,6 @@ The server includes 7 built-in workflow prompts that any MCP client can discover
 | `month-end-close` | Blockers, missing docs, duplicates, trial balance, P&L, balance sheet |
 | `new-supplier` | Create supplier with Estonian business registry lookup |
 | `company-overview` | Financial dashboard: balance sheet, P&L, receivables, payables |
-| `quarterly-vat` | Prepare KMD (VAT return) data for a quarter |
 | `lightyear-booking` | Book Lightyear investment trades and distributions from CSV |
 
 **Claude Code** also has these as slash commands: `/book-invoice`, `/reconcile-bank`, `/month-end`, `/new-supplier`.

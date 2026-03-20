@@ -75,11 +75,34 @@ export function getConfigSearchDirs(
   return toUniqueDirs(dirs);
 }
 
-for (const dir of getConfigSearchDirs(false)) {
-  const envPath = resolve(dir, ".env");
-  warnIfWorldReadable(envPath);
-  dotenv.config({ path: envPath });
+function loadDotenvFiles(): void {
+  const loaded = new Set<string>();
+
+  const loadFromDirs = (dirs: string[]): void => {
+    for (const dir of dirs) {
+      const envPath = resolve(dir, ".env");
+      let dedupeKey = envPath;
+      try {
+        dedupeKey = realpathSync(envPath);
+      } catch {
+        // Keep the resolved path if the file does not exist.
+      }
+      if (loaded.has(dedupeKey)) continue;
+      loaded.add(dedupeKey);
+
+      warnIfWorldReadable(envPath);
+      dotenv.config({ path: envPath });
+    }
+  };
+
+  loadFromDirs(getConfigSearchDirs(false));
+
+  if (process.env.EARVELDAJA_SCAN_PARENT === "true") {
+    loadFromDirs(getConfigSearchDirs(true));
+  }
 }
+
+loadDotenvFiles();
 
 function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string; password: string } | null {
   if (!existsSync(filePath)) return null;

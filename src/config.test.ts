@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -23,16 +23,23 @@ function restoreConfigEnv(): void {
   }
 }
 
-async function importFreshConfig() {
+async function importFreshConfig(packageRoot?: string) {
   vi.resetModules();
+  vi.doUnmock("./paths.js");
+  if (packageRoot) {
+    vi.doMock("./paths.js", () => ({
+      getProjectRoot: () => packageRoot,
+    }));
+  }
   return import("./config.js");
 }
 
-afterEach(() => {
-  process.chdir(ORIGINAL_CWD);
-  restoreConfigEnv();
-  vi.resetModules();
-});
+  afterEach(() => {
+    process.chdir(ORIGINAL_CWD);
+    restoreConfigEnv();
+    vi.doUnmock("./paths.js");
+    vi.resetModules();
+  });
 
 describe("getConfigSearchDirs", () => {
   it("prioritizes the current working directory before the package root", async () => {
@@ -67,7 +74,7 @@ describe("loadAllConfigs", () => {
     process.chdir(tempDir);
 
     try {
-      const { loadAllConfigs } = await importFreshConfig();
+      const { loadAllConfigs } = await importFreshConfig(tempDir);
       const configs = loadAllConfigs();
 
       expect(configs).toHaveLength(1);
@@ -78,6 +85,46 @@ describe("loadAllConfigs", () => {
           apiKeyId: "key-id",
           apiPublicValue: "public-value",
           apiPassword: "secret-password",
+          baseUrl: "https://rmp-api.rik.ee/v1",
+        },
+      });
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads parent .env values when parent scanning is enabled from the runtime .env", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-parent-env-"));
+    const parentDir = join(tempDir, "parent");
+    const childDir = join(parentDir, "child");
+
+    mkdirSync(childDir, { recursive: true });
+    writeFileSync(join(childDir, ".env"), "EARVELDAJA_SCAN_PARENT=true\n");
+    writeFileSync(join(parentDir, ".env"), [
+      "EARVELDAJA_API_KEY_ID=parent-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=parent-public",
+      "EARVELDAJA_API_PASSWORD=parent-secret",
+      "",
+    ].join("\n"));
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+
+    process.chdir(childDir);
+
+    try {
+      const { loadAllConfigs } = await importFreshConfig(childDir);
+      const configs = loadAllConfigs();
+
+      expect(configs).toHaveLength(1);
+      expect(configs[0]).toMatchObject({
+        name: "env",
+        config: {
+          apiKeyId: "parent-id",
+          apiPublicValue: "parent-public",
+          apiPassword: "parent-secret",
           baseUrl: "https://rmp-api.rik.ee/v1",
         },
       });

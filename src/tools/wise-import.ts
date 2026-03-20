@@ -209,60 +209,69 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
           row.reference || undefined,
           legacyDesc,
         );
+        const mainAlreadyImported = seenWiseIds.has(wiseIdTag) || existingSignatures.has(mainSignature);
+        let mainAvailableForFee = false;
 
-        // Duplicate check
-        if (seenWiseIds.has(wiseIdTag) || existingSignatures.has(mainSignature)) {
+        if (mainAlreadyImported) {
           skipped.push({
             wise_id: row.id,
             reason: seenWiseIds.has(wiseIdTag)
               ? "Already imported (Wise ID match)"
               : "Already imported (date/amount/counterparty/reference match)",
           });
-          continue;
-        }
-
-        // Create the main transaction (net amount, without fee)
-        if (dryRun) {
-          created.push({
-            wise_id: row.id,
-            date,
-            type,
-            amount,
-            description: desc,
-            status: "would_create",
-          });
-          seenWiseIds.add(wiseIdTag);
-          existingSignatures.add(mainSignature);
+          mainAvailableForFee = true;
         } else {
-          try {
-            const result = await api.transactions.create({
-              accounts_dimensions_id,
-              type,
-              amount,
-              cl_currencies_id: "EUR",
-              date,
-              description: desc,
-              bank_account_name: row.targetName || undefined,
-              ref_number: row.reference || undefined,
-            });
+          if (dryRun) {
             created.push({
               wise_id: row.id,
               date,
               type,
               amount,
               description: desc,
-              status: "created",
-              api_id: result.created_object_id,
+              status: "would_create",
             });
             seenWiseIds.add(wiseIdTag);
             existingSignatures.add(mainSignature);
-          } catch (err: any) {
-            skipped.push({ wise_id: row.id, reason: err.message });
+            mainAvailableForFee = true;
+          } else {
+            try {
+              const result = await api.transactions.create({
+                accounts_dimensions_id,
+                type,
+                amount,
+                cl_currencies_id: "EUR",
+                date,
+                description: desc,
+                bank_account_name: row.targetName || undefined,
+                ref_number: row.reference || undefined,
+              });
+              created.push({
+                wise_id: row.id,
+                date,
+                type,
+                amount,
+                description: desc,
+                status: "created",
+                api_id: result.created_object_id,
+              });
+              seenWiseIds.add(wiseIdTag);
+              existingSignatures.add(mainSignature);
+              mainAvailableForFee = true;
+            } catch (err: any) {
+              skipped.push({ wise_id: row.id, reason: err.message });
+            }
           }
         }
 
-        // Create separate fee transaction if fee > 0
         if (fee > 0) {
+          if (!mainAvailableForFee) {
+            skipped.push({
+              wise_id: `FEE:${row.id}`,
+              reason: "Skipped because main transaction was not created",
+            });
+            continue;
+          }
+
           const feeWiseIdTag = `WISE:FEE:${row.id}`;
           const feeDesc = `WISE:FEE:${row.id} Wise teenustasu`;
           const feeSignature = buildWiseTransactionSignature(

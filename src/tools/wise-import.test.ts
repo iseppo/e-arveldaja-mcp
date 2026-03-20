@@ -124,4 +124,76 @@ describe("wise import tool", () => {
       { wise_id: "FEE:abc-2", reason: "Fee already imported (date/amount/counterparty match)" },
     ]);
   });
+
+  it("can create a missing fee row on rerun even when the main Wise transaction already exists", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "abc-3", "COMPLETED", "OUT", "2026-01-12 09:00:00", "2026-01-12 09:00:00",
+      "1.5", "EUR", "0", "EUR",
+      "Seppo OU", "40", "EUR",
+      "Acme Ltd", "40", "EUR",
+      "1", "INV-3", "", "", "General", "",
+    ]));
+
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9003 });
+    const { api, handler } = setupWiseTool([{
+      date: "2026-01-12",
+      amount: 40,
+      bank_account_name: "Acme Ltd",
+      ref_number: "INV-3",
+      description: "Acme Ltd",
+    }], create);
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_relation_id: 9,
+      execute: true,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
+      description: "WISE:FEE:abc-3 Wise teenustasu",
+    }));
+    expect(payload.skipped_details).toContainEqual({
+      wise_id: "abc-3",
+      reason: "Already imported (date/amount/counterparty/reference match)",
+    });
+    expect(payload.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        wise_id: "FEE:abc-3",
+        status: "created_and_confirmed",
+      }),
+    ]));
+  });
+
+  it("does not create an orphan fee row when main transaction creation fails", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "abc-4", "COMPLETED", "OUT", "2026-01-13 09:00:00", "2026-01-13 09:00:00",
+      "2.5", "EUR", "0", "EUR",
+      "Seppo OU", "50", "EUR",
+      "Acme Ltd", "50", "EUR",
+      "1", "INV-4", "", "", "General", "",
+    ]));
+
+    const create = vi.fn().mockRejectedValue(new Error("Main create failed"));
+    const { api, handler } = setupWiseTool([], create);
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_relation_id: 9,
+      execute: true,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(payload.results).toEqual([]);
+    expect(payload.skipped_details).toEqual(expect.arrayContaining([
+      { wise_id: "abc-4", reason: "Main create failed" },
+      { wise_id: "FEE:abc-4", reason: "Skipped because main transaction was not created" },
+    ]));
+  });
 });
