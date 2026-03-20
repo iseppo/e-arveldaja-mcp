@@ -59,7 +59,7 @@ async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promis
   return allItems;
 }
 
-export class ReadonlyApi {
+export class ReferenceDataApi {
   constructor(private client: HttpClient) {}
 
   // Chart of accounts

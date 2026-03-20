@@ -26,21 +26,30 @@ describe.skipIf(!RUN_INTEGRATION)("MCP Server Integration", () => {
   it("all tools have annotations with title", async () => {
     const { tools } = await client.listTools();
     for (const tool of tools) {
-      expect(tool.annotations?.title, `${tool.name} missing title`).toBeTruthy();
-      expect(tool.annotations?.openWorldHint, `${tool.name} missing openWorldHint`).toBe(true);
+      expect(tool.title, `${tool.name} missing title`).toBeTruthy();
+      expect(typeof tool.annotations?.openWorldHint, `${tool.name} missing openWorldHint`).toBe("boolean");
     }
   });
 
   it("lists 7 prompts", async () => {
     const { prompts } = await client.listPrompts();
     expect(prompts.length).toBe(7);
+    for (const prompt of prompts) {
+      expect(prompt.title, `${prompt.name} missing title`).toBeTruthy();
+    }
   });
 
   it("lists 6 static resources and 6 templates", async () => {
     const { resources } = await client.listResources();
     expect(resources.length).toBe(6);
+    for (const resource of resources) {
+      expect(resource.title, `${resource.name} missing title`).toBeTruthy();
+    }
     const { resourceTemplates } = await client.listResourceTemplates();
     expect(resourceTemplates.length).toBe(6);
+    for (const resourceTemplate of resourceTemplates) {
+      expect(resourceTemplate.title, `${resourceTemplate.name} missing title`).toBeTruthy();
+    }
   });
 
   it("get_vat_info returns data", async () => {
@@ -86,7 +95,7 @@ describe.skipIf(!RUN_INTEGRATION)("MCP Server Integration", () => {
     const after = await client.callTool({ name: "list_connections", arguments: {} });
     const afterData = JSON.parse((after.content as any)[0].text);
 
-    expect(result.isError).toBeFalsy();
+    expect(result.isError).toBe(true);
     expect(resultData.error).toMatch(/Invalid index/);
     expect(afterData.active).toBe(beforeData.active);
   });

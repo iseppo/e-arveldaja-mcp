@@ -1,12 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
 
 export function registerDocumentAuditTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("find_missing_documents",
+  registerTool(server, "find_missing_documents",
     "Find journals, transactions, and invoices without attached base documents. " +
     "Important for audit trail compliance.",
     {
@@ -87,7 +88,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
     }
   );
 
-  server.tool("detect_duplicate_purchase_invoice",
+  registerTool(server, "detect_duplicate_purchase_invoice",
     "Check for duplicate purchase invoices by supplier + invoice number, and by supplier + amount + date.",
     {
       clients_id: z.number().optional().describe("Filter by supplier ID"),

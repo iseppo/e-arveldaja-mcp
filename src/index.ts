@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { registerTool } from "./mcp-compat.js";
 import { loadAllConfigs, type NamedConfig } from "./config.js";
 import { toolExtraStorage } from "./progress.js";
 import { HttpClient } from "./http-client.js";
@@ -12,8 +14,9 @@ import { JournalsApi } from "./api/journals.api.js";
 import { TransactionsApi } from "./api/transactions.api.js";
 import { SaleInvoicesApi } from "./api/sale-invoices.api.js";
 import { PurchaseInvoicesApi } from "./api/purchase-invoices.api.js";
-import { ReadonlyApi, readonlyCache } from "./api/readonly.api.js";
+import { ReferenceDataApi, readonlyCache } from "./api/readonly.api.js";
 import { cache } from "./api/base-resource.js";
+import { clearVatWarnings } from "./tools/purchase-vat-defaults.js";
 import { registerCrudTools, type ApiContext } from "./tools/crud-tools.js";
 import { registerAccountBalanceTools } from "./tools/account-balance.js";
 import { registerPdfWorkflowTools } from "./tools/pdf-workflow.js";
@@ -35,6 +38,9 @@ import { toolError } from "./tool-error.js";
 import { setLogger } from "./logger.js";
 import { readOnly, mutate } from "./annotations.js";
 
+const require = createRequire(import.meta.url);
+const { version: PKG_VERSION } = require("../package.json") as { version: string };
+
 interface ConnectionState {
   activeIndex: number;
   generation: number;
@@ -53,7 +59,7 @@ function buildApiContext(httpClient: HttpClient): ApiContext {
     transactions: new TransactionsApi(httpClient),
     saleInvoices: new SaleInvoicesApi(httpClient),
     purchaseInvoices: new PurchaseInvoicesApi(httpClient),
-    readonly: new ReadonlyApi(httpClient),
+    readonly: new ReferenceDataApi(httpClient),
   };
 }
 
@@ -74,6 +80,7 @@ function clearAllCaches(connectionIndex: number): void {
   const connectionPrefix = `connection:${connectionIndex}:`;
   cache.invalidate(connectionPrefix);
   readonlyCache.invalidate(connectionPrefix);
+  clearVatWarnings();
 }
 
 function createScopedApiContext(
@@ -121,7 +128,7 @@ async function main() {
 
   const server = new McpServer({
     name: "e-arveldaja",
-    version: "0.5.0",
+    version: PKG_VERSION,
     description: "EXPERIMENTAL, UNOFFICIAL MCP server for the Estonian e-arveldaja (e-Financials) API. " +
       "NOT affiliated with or endorsed by RIK. Use entirely at your own risk — " +
       "this software interacts with live financial data and can create, modify, and delete accounting records. " +
@@ -150,7 +157,7 @@ Reporting:
 
   // --- Multi-account tools ---
 
-  server.tool("list_connections",
+  registerTool(server, "list_connections",
     "List all available e-arveldaja connections (API key files). " +
     "Shows which connection is currently active.",
     {},
@@ -177,7 +184,7 @@ Reporting:
     }
   );
 
-  server.tool("switch_connection",
+  registerTool(server, "switch_connection",
     "Switch to a different e-arveldaja connection (company). " +
     "Clears cached data atomically. Use list_connections to see available indices. " +
     "In-flight tool calls will fail fast and should be retried on the intended connection.",
@@ -187,14 +194,9 @@ Reporting:
     { ...mutate, title: "Switch Connection" },
     async ({ index }) => {
       if (index < 0 || index >= allConfigs.length) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              error: `Invalid index ${index}. Valid range: 0-${allConfigs.length - 1}`,
-            }),
-          }],
-        };
+        return toolError({
+          error: `Invalid index ${index}. Valid range: 0-${allConfigs.length - 1}`,
+        });
       }
 
       if (index === connectionState.activeIndex) {
@@ -232,10 +234,7 @@ Reporting:
     }
   );
 
-  // Wrap server.tool to pin each handler to a connection snapshot via AsyncLocalStorage.
-  // The wrapper captures the active connection at invocation time, runs the handler
-  // inside that snapshot, and asserts the connection hasn't changed on return.
-  function wrapHandler<T extends (...args: any[]) => any>(handler: T): T {
+  function wrapToolHandler<T extends (...args: any[]) => any>(handler: T): T {
     return (async (...args: unknown[]) => {
       const snapshot = captureSnapshot(connectionState);
       const extra = args.length >= 2 ? args[1] as any : undefined;
@@ -255,19 +254,41 @@ Reporting:
     }) as unknown as T;
   }
 
-  // Create a proxy that intercepts server.tool() calls and wraps the last function argument.
-  // This is forward-compatible with any overload signature the SDK may add.
+  function wrapResourceHandler<T extends (...args: any[]) => any>(handler: T): T {
+    return (async (...args: unknown[]) => {
+      const snapshot = captureSnapshot(connectionState);
+      return invocationStorage.run(snapshot, async () => {
+        const result = await handler(...args);
+        assertSnapshotCurrent(connectionState, snapshot);
+        return result;
+      });
+    }) as unknown as T;
+  }
+
+  // Create a proxy that pins tool and resource handlers to a connection snapshot.
   const scopedServer = new Proxy(server, {
     get(target, prop, receiver) {
-      if (prop !== "tool") return Reflect.get(target, prop, receiver);
-      return (...toolArgs: unknown[]) => {
-        // The handler is always the last argument and always a function
-        const lastIdx = toolArgs.length - 1;
-        if (lastIdx >= 0 && typeof toolArgs[lastIdx] === "function") {
-          toolArgs[lastIdx] = wrapHandler(toolArgs[lastIdx] as any);
-        }
-        return (target.tool as any)(...toolArgs);
-      };
+      if (prop === "registerTool") {
+        return (...toolArgs: unknown[]) => {
+          const lastIdx = toolArgs.length - 1;
+          if (lastIdx >= 0 && typeof toolArgs[lastIdx] === "function") {
+            toolArgs[lastIdx] = wrapToolHandler(toolArgs[lastIdx] as any);
+          }
+          return (target.registerTool as any)(...toolArgs);
+        };
+      }
+
+      if (prop === "registerResource") {
+        return (...resourceArgs: unknown[]) => {
+          const lastIdx = resourceArgs.length - 1;
+          if (lastIdx >= 0 && typeof resourceArgs[lastIdx] === "function") {
+            resourceArgs[lastIdx] = wrapResourceHandler(resourceArgs[lastIdx] as any);
+          }
+          return (target.registerResource as any)(...resourceArgs);
+        };
+      }
+
+      return Reflect.get(target, prop, receiver);
     },
   }) as McpServer;
 
@@ -287,9 +308,9 @@ Reporting:
   registerWiseImportTools(scopedServer, api);
   registerCamtImportTools(scopedServer, api);
 
-  // Register resources
-  registerResources(server, api);
-  registerDynamicResources(server, api);
+  // Register resources via scopedServer so reads stay pinned to the selected connection
+  registerResources(scopedServer, api);
+  registerDynamicResources(scopedServer, api);
 
   // Register prompts
   registerPrompts(server);

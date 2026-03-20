@@ -2,6 +2,7 @@ import { readFile } from "fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import type { Client, Transaction } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
@@ -550,7 +551,7 @@ const isoDateString = (description: string) =>
   z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe(description);
 
 export function registerCamtImportTools(server: McpServer, api: ApiContext): void {
-  server.tool(
+  registerTool(server, 
     "parse_camt053",
     "Parse a CAMT.053 bank statement XML file and preview statement metadata, entries, summary, and duplicate matches against existing transactions.",
     {
@@ -568,7 +569,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     }
   );
 
-  server.tool(
+  registerTool(server, 
     "import_camt053",
     "Parse a CAMT.053 bank statement XML file and create bank transactions in e-arveldaja. Skips duplicates by AcctSvcrRef bank reference. DRY RUN by default.",
     {

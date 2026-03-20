@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import pdf from "pdf-parse";
 import { closest } from "fastest-levenshtein";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { validateFilePath } from "../file-validation.js";
 import { roundMoney } from "../money.js";
@@ -1712,7 +1713,7 @@ function extractClassificationGroups(payload: unknown): ClassifiedTransactionGro
 }
 
 export function registerReceiptInboxTools(server: McpServer, api: ApiContext): void {
-  server.tool(
+  registerTool(server, 
     "scan_receipt_folder",
     "Scan a folder for supported receipt files (PDF, JPG, PNG) without recursing into subfolders. Returns valid file metadata and skipped entries.",
     {
@@ -1731,7 +1732,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     },
   );
 
-  server.tool(
+  registerTool(server, 
     "process_receipt_batch",
     "Process receipt PDFs and images from a folder. DRY RUN by default. Purchase-invoice PDFs can be created, confirmed, and matched to bank transactions when execute=true.",
     {
@@ -1943,7 +1944,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     },
   );
 
-  server.tool(
+  registerTool(server, 
     "classify_unmatched_transactions",
     "Classify unconfirmed bank transactions that do not match any sale or purchase invoice. Read-only analysis with suggested booking defaults.",
     {
@@ -2021,7 +2022,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     },
   );
 
-  server.tool(
+  registerTool(server, 
     "apply_transaction_classifications",
     "Apply the output of classify_unmatched_transactions. DRY RUN by default. Only expense-like categories are auto-booked as purchase invoices; review-only categories are reported back.",
     {

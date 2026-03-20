@@ -1,4 +1,4 @@
-export function parseCSVLine(line: string): string[] {
+export function parseCSVLine(line: string, delimiter = ","): string[] {
   const fields: string[] = [];
   let current = "";
   let inQuotes = false;
@@ -18,7 +18,7 @@ export function parseCSVLine(line: string): string[] {
       }
     } else if (ch === '"') {
       inQuotes = true;
-    } else if (ch === ",") {
+    } else if (ch === delimiter) {
       fields.push(current);
       current = "";
     } else {

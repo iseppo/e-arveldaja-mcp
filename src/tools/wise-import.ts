@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "fs/promises";
+import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { batch } from "../annotations.js";
@@ -83,7 +84,7 @@ function wiseDate(dateStr: string): string {
 
 export function registerWiseImportTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("import_wise_transactions",
+  registerTool(server, "import_wise_transactions",
     "Parse a Wise transaction history CSV and create bank transactions in e-arveldaja. " +
     "Skips REFUNDED, NEUTRAL, and zero-amount entries. " +
     "All transactions use type C (e-arveldaja convention). " +

@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import { readFile } from "fs/promises";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
@@ -8,6 +9,7 @@ import { readOnly, batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { parseCSVLine } from "../csv.js";
 import { validateAccounts } from "../account-validation.js";
+import { toolError } from "../tool-error.js";
 
 const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -378,7 +380,7 @@ function matchSellsToCapitalGains(
 
 export function registerLightyearTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("parse_lightyear_statement",
+  registerTool(server, "parse_lightyear_statement",
     "Parse a Lightyear account statement CSV. Extracts investment trades (Buy/Sell), " +
     "distributions, deposits, withdrawals. Filters out BRICEKSP money market fund trades. " +
     "Pairs foreign currency trades with their FX conversion entries.",
@@ -466,7 +468,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     }
   );
 
-  server.tool("parse_lightyear_capital_gains",
+  registerTool(server, "parse_lightyear_capital_gains",
     "Parse a Lightyear Capital Gains Statement CSV (FIFO method). " +
     "Shows cost basis, proceeds, and realized capital gains per sale.",
     {
@@ -510,7 +512,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     }
   );
 
-  server.tool("book_lightyear_trades",
+  registerTool(server, "book_lightyear_trades",
     "Create journal entries for Lightyear stock Buy/Sell trades. " +
     "Checks for duplicates using Lightyear reference IDs (stored as LY:{ref} in document_number). " +
     "For sells: requires capital_gains_file to determine cost basis and recognized gain/loss. " +
@@ -546,16 +548,11 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       ]);
 
       if (errors.length > 0) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              error: "Account validation failed",
-              details: errors,
-              hint: "Use list_accounts to find correct account numbers.",
-            }, null, 2),
-          }],
-        };
+        return toolError({
+          error: "Account validation failed",
+          details: errors,
+          hint: "Use list_accounts to find correct account numbers.",
+        });
       }
 
       const csv = await readCsvFile(file_path);
@@ -796,7 +793,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     }
   );
 
-  server.tool("book_lightyear_distributions",
+  registerTool(server, "book_lightyear_distributions",
     "Create journal entries for Lightyear dividend and interest distributions, including withheld tax. DRY RUN by default.",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
@@ -822,12 +819,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       ]);
 
       if (errors.length > 0) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ error: "Account validation failed", details: errors }, null, 2),
-          }],
-        };
+        return toolError({
+          error: "Account validation failed",
+          details: errors,
+        });
       }
 
       const csv = await readCsvFile(file_path);
@@ -835,15 +830,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const distributions = extractDistributions(rows);
 
       if (!tax_account && distributions.some(dist => dist.tax_amount > 0)) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              error: "tax_account is required when distributions include withheld tax",
-              hint: "Provide tax_account so tax_amount can be booked separately for Lightyear distributions.",
-            }, null, 2),
-          }],
-        };
+        return toolError({
+          error: "tax_account is required when distributions include withheld tax",
+          hint: "Provide tax_account so tax_amount can be booked separately for Lightyear distributions.",
+        });
       }
 
       // Check duplicates
@@ -941,7 +931,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     }
   );
 
-  server.tool("lightyear_portfolio_summary",
+  registerTool(server, "lightyear_portfolio_summary",
     "Compute current holdings and cost basis from a Lightyear account statement. Useful for verifying investment account balance.",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),

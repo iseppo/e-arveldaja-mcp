@@ -13,6 +13,11 @@ const NON_VAT_REGISTERED_FALLBACK = {
 
 const warnedFallbackKeys = new Set<string>();
 
+/** Clear the fallback-warning dedup set. Call on connection switch. */
+export function clearVatWarnings(): void {
+  warnedFallbackKeys.clear();
+}
+
 type PurchaseArticleWithVat = PurchaseArticle & {
   vat_accounts_id?: number | null;
   cl_vat_articles_id?: number | null;

@@ -5,7 +5,7 @@ describe("annotations", () => {
   it("readOnly is non-destructive and read-only", () => {
     expect(readOnly.readOnlyHint).toBe(true);
     expect(readOnly.destructiveHint).toBe(false);
-    expect(readOnly.openWorldHint).toBe(true);
+    expect(readOnly.openWorldHint).toBe(false);
   });
 
   it("create is not read-only, not destructive, not idempotent", () => {
@@ -35,9 +35,10 @@ describe("annotations", () => {
     expect(batch.idempotentHint).toBe(false);
   });
 
-  it("all annotations have openWorldHint true", () => {
-    for (const ann of [readOnly, create, mutate, destructive, send, batch]) {
-      expect(ann.openWorldHint).toBe(true);
+  it("closed-world presets stay closed while send remains open-world", () => {
+    for (const ann of [readOnly, create, mutate, destructive, batch]) {
+      expect(ann.openWorldHint).toBe(false);
     }
+    expect(send.openWorldHint).toBe(true);
   });
 });

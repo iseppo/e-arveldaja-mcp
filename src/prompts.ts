@@ -1,9 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerPrompt } from "./mcp-compat.js";
 
 export function registerPrompts(server: McpServer): void {
 
-  server.prompt(
+  registerPrompt(server, 
     "book-invoice",
     "Book a purchase invoice from a PDF file. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, and creates + confirms the invoice.",
     { file_path: z.string().describe("Absolute path to the PDF invoice file") },
@@ -82,7 +83,7 @@ Follow these steps in order:
     })
   );
 
-  server.prompt(
+  registerPrompt(server, 
     "reconcile-bank",
     "Match bank transactions to invoices and optionally auto-confirm exact matches.",
     { mode: z.string().optional().describe('Reconciliation mode: "auto" (default), "review", or a specific transaction ID') },
@@ -132,7 +133,7 @@ Follow these steps:
     }
   );
 
-  server.prompt(
+  registerPrompt(server, 
     "month-end-close",
     "Run the month-end close checklist: check for blockers, find missing documents, detect duplicates, and generate financial statements.",
     { month: z.string().describe('Month in YYYY-MM format, e.g. "2026-03"') },
@@ -192,7 +193,7 @@ Follow these steps in order:
     }
   );
 
-  server.prompt(
+  registerPrompt(server, 
     "new-supplier",
     "Create a new supplier by looking up registry data and creating a client record.",
     { identifier: z.string().describe("Supplier name or 8-digit Estonian registry code") },
@@ -246,7 +247,7 @@ Follow these steps:
     })
   );
 
-  server.prompt(
+  registerPrompt(server, 
     "company-overview",
     "Get a comprehensive dashboard overview of the company's current financial state.",
     async () => {
@@ -310,7 +311,7 @@ Follow these steps:
     }
   );
 
-  server.prompt(
+  registerPrompt(server, 
     "lightyear-booking",
     "Book Lightyear investment trades and distributions into e-arveldaja journals. " +
     "Parses CSV exports, pairs FX conversions, matches capital gains, and creates journal entries.",
@@ -401,7 +402,7 @@ ${income_account ? `6. Call \`book_lightyear_distributions\` with:
     })
   );
 
-  server.prompt(
+  registerPrompt(server, 
     "quarterly-vat",
     "Prepare data for the quarterly VAT return (KMD — käibedeklaratsioon).",
     { quarter: z.string().describe('Quarter in format YYYY-QN, e.g. "2026-Q1"') },
@@ -490,7 +491,7 @@ Follow these steps:
 
    **Important notes**:
    - KMD must be filed by the 20th of the month following the quarter end
-   - ${quarter} deadline: ${year}-${String(Number(endMonth) + 1).padStart(2, "0")}-20
+   - ${quarter} deadline: ${Number(endMonth) === 12 ? `${Number(year) + 1}-01` : `${year}-${String(Number(endMonth) + 1).padStart(2, "0")}`}-20
    - Verify these figures against the official e-MTA portal before filing
 `,
           },

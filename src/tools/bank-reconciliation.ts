@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
@@ -72,7 +73,7 @@ function matchScore(
 
 export function registerBankReconciliationTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("reconcile_transactions",
+  registerTool(server, "reconcile_transactions",
     "Match unconfirmed bank transactions to open sale/purchase invoices. " +
     "Returns suggested matches with confidence scores and ready-to-use distribution data.",
     {
@@ -181,7 +182,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
     }
   );
 
-  server.tool("auto_confirm_exact_matches",
+  registerTool(server, "auto_confirm_exact_matches",
     "Batch-confirm bank transactions with a single high-confidence match (>=90). DRY RUN by default — set execute=true to confirm.",
     {
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),

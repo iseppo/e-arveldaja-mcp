@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
@@ -95,7 +96,7 @@ async function computeAccountBalance(
 
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("compute_account_balance",
+  registerTool(server, "compute_account_balance",
     "Compute an account balance from journal postings, with optional client and date filters. Applies the account's debit/credit direction automatically.",
     {
       account_id: z.number().describe("Account number (e.g. 2110 for short-term loans)"),
@@ -126,7 +127,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     }
   );
 
-  server.tool("compute_client_debt",
+  registerTool(server, "compute_client_debt",
     "Compute how much the company owes the client and vice versa across selected accounts (default: 2110, 2310, 1210). Uses journal D/C postings.",
     {
       client_id: z.number().describe("Client ID"),

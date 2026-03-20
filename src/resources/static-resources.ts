@@ -1,9 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ApiContext } from "../tools/crud-tools.js";
+import { registerResource } from "../mcp-compat.js";
 
 export function registerResources(server: McpServer, api: ApiContext): void {
 
-  server.resource(
+  registerResource(server, 
     "accounts",
     "earveldaja://accounts",
     { description: "Chart of accounts (kontoplaan) - all available accounts with their types and balance directions", mimeType: "application/json" },
@@ -19,7 +20,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
     }
   );
 
-  server.resource(
+  registerResource(server, 
     "sale_articles",
     "earveldaja://sale_articles",
     { description: "Sales articles (müügiartiklid) - account mappings for sales", mimeType: "application/json" },
@@ -35,7 +36,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
     }
   );
 
-  server.resource(
+  registerResource(server, 
     "purchase_articles",
     "earveldaja://purchase_articles",
     { description: "Purchase articles (ostuartiklid) - account mappings for purchases", mimeType: "application/json" },
@@ -51,7 +52,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
     }
   );
 
-  server.resource(
+  registerResource(server, 
     "templates",
     "earveldaja://templates",
     { description: "Sales invoice templates", mimeType: "application/json" },
@@ -67,7 +68,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
     }
   );
 
-  server.resource(
+  registerResource(server, 
     "vat_info",
     "earveldaja://vat_info",
     { description: "Company VAT information (KMKR number)", mimeType: "application/json" },
@@ -83,7 +84,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
     }
   );
 
-  server.resource(
+  registerResource(server, 
     "invoice_info",
     "earveldaja://invoice_info",
     { description: "Company invoice settings (address, email, templates)", mimeType: "application/json" },

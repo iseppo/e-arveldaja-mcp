@@ -43,7 +43,7 @@ export class Cache {
       return;
     }
     for (const key of this.store.keys()) {
-      if (key.includes(pattern)) {
+      if (key.startsWith(pattern)) {
         this.store.delete(key);
       }
     }

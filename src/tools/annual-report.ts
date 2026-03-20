@@ -1,11 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Account, Client, Journal, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { computeAllBalances } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { validateAccounts } from "../account-validation.js";
+import { toolError } from "../tool-error.js";
 
 type AccountBalance = Awaited<ReturnType<typeof computeAllBalances>>[number];
 type PostingType = "D" | "C";
@@ -1085,12 +1087,15 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
 }
 
 export function registerAnnualReportTools(server: McpServer, api: ApiContext): void {
-  server.tool("prepare_year_end_close",
+  registerTool(server, "prepare_year_end_close",
     "Analyze the fiscal year and prepare a dry-run year-end close package: unresolved items, accrual review, balance check, and draft P&L closing entries.",
     yearShape,
     { ...readOnly, title: "Prepare Year-End Close" },
     async ({ year }) => {
       const analysis = await analyzeYearEndClose(api, year);
+      if ("error" in analysis) {
+        return toolError(analysis);
+      }
       return {
         content: [{
           type: "text",
@@ -1100,7 +1105,7 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
     },
   );
 
-  server.tool("generate_annual_report_data",
+  registerTool(server, "generate_annual_report_data",
     "Generate structured annual report data for the Estonian RTJ micro/small-entity format: balance sheet, income statement (Schema 1), cash-flow data, ratios, and note inputs.",
     yearShape,
     { ...readOnly, title: "Generate Annual Report Data" },
@@ -1115,7 +1120,7 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
     },
   );
 
-  server.tool("execute_year_end_close",
+  registerTool(server, "execute_year_end_close",
     "Create the executable closing journal entries proposed by prepare_year_end_close. Requires confirm=true. Creates draft journals only; review and register them separately.",
     {
       ...yearShape,
@@ -1124,38 +1129,23 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
     { ...batch, title: "Execute Year-End Close" },
     async ({ year, confirm }) => {
       if (confirm !== true) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              error: "Explicit confirmation required",
-              hint: "Re-run execute_year_end_close with confirm=true to create the closing journal entries.",
-            }, null, 2),
-          }],
-        };
+        return toolError({
+          error: "Explicit confirmation required",
+          hint: "Re-run execute_year_end_close with confirm=true to create the closing journal entries.",
+        });
       }
 
       const analysis = await analyzeYearEndClose(api, year);
       if ("error" in analysis) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(analysis, null, 2),
-          }],
-        };
+        return toolError(analysis);
       }
 
       if (analysis.existing_year_end_close_journals.length > 0) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              error: "Year-end close already exists",
-              existing_year_end_close_journals: analysis.existing_year_end_close_journals,
-              hint: "Delete or invalidate the existing close manually if you need to recreate it.",
-            }, null, 2),
-          }],
-        };
+        return toolError({
+          error: "Year-end close already exists",
+          existing_year_end_close_journals: analysis.existing_year_end_close_journals,
+          hint: "Delete or invalidate the existing close manually if you need to recreate it.",
+        });
       }
 
       const executableProposals = analysis.proposed_journal_entries

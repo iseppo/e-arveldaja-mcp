@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney } from "../money.js";
@@ -101,7 +102,7 @@ const monthRegex = /^\d{4}-\d{2}$/;
 
 export function registerFinancialStatementTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("compute_trial_balance",
+  registerTool(server, "compute_trial_balance",
     "Compute trial balance (käibeandmik/proovibilanss) from journal postings. " +
     "Shows debit/credit totals and balance for each account.",
     {
@@ -133,7 +134,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     }
   );
 
-  server.tool("compute_balance_sheet",
+  registerTool(server, "compute_balance_sheet",
     "Compute balance sheet (bilanss) from journal postings. " +
     "Groups accounts into Varad (Assets) and Kohustused+Omakapital (Liabilities+Equity).",
     {
@@ -202,7 +203,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     }
   );
 
-  server.tool("compute_profit_and_loss",
+  registerTool(server, "compute_profit_and_loss",
     "Compute profit and loss statement (kasumiaruanne) for a period. " +
     "Shows revenue minus expenses.",
     {
@@ -239,7 +240,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     }
   );
 
-  server.tool("month_end_close_checklist",
+  registerTool(server, "month_end_close_checklist",
     "Generate month-end close checklist: unconfirmed journals/invoices, " +
     "unreconciled bank transactions, overdue receivables/payables.",
     {

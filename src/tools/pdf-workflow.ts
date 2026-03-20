@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "fs/promises";
+import { registerTool } from "../mcp-compat.js";
 import pdf from "pdf-parse";
 import { closest } from "fastest-levenshtein";
 import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse } from "./crud-tools.js";
@@ -49,8 +50,8 @@ function extractPdfHints(text: string): PdfHints {
   const vatMatch = text.match(/(?:KMKR|VAT|KM\s*nr)[:\s]*(EE\d+)/i);
   if (vatMatch) result.supplier_vat_no = vatMatch[1];
 
-  // IBAN (country code + 13-30 digits)
-  const ibanMatch = text.match(/\b([A-Z]{2}\d{13,30})(?!\d)/);
+  // IBAN (country code + 13-30 alphanumeric characters)
+  const ibanMatch = text.match(/\b([A-Z]{2}[0-9A-Z]{13,30})(?![0-9A-Z])/);
   if (ibanMatch) result.supplier_iban = ibanMatch[1];
 
   // Reference number
@@ -62,7 +63,7 @@ function extractPdfHints(text: string): PdfHints {
 
 export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("extract_pdf_invoice",
+  registerTool(server, "extract_pdf_invoice",
     "Extract text and key identifiers from a supplier invoice PDF. Returns raw text + detected IBAN, registry code, VAT number, reference number. Read raw_text to extract all invoice fields, then call validate_invoice_data.",
     {
       file_path: z.string().describe("Absolute path to the PDF file"),
@@ -89,7 +90,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     }
   );
 
-  server.tool("validate_invoice_data",
+  registerTool(server, "validate_invoice_data",
     "Validate extracted invoice data before creating a purchase invoice. " +
     "Checks that net + VAT = gross, item totals match invoice total, " +
     "dates are valid, and required fields are present. " +
@@ -218,7 +219,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       };
     }
   );
-  server.tool("resolve_supplier",
+  registerTool(server, "resolve_supplier",
     "Match a supplier to an existing client by registry code, VAT number, or name (fuzzy). Optionally creates a new client. Looks up Estonian business registry data.",
     {
       name: z.string().optional().describe("Supplier name from invoice"),
@@ -355,7 +356,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     }
   );
 
-  server.tool("suggest_booking",
+  registerTool(server, "suggest_booking",
     "Suggest purchase articles and accounts for a new invoice based on similar confirmed invoices from the same supplier.",
     {
       clients_id: z.number().describe("Supplier client ID"),
@@ -368,7 +369,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const allInvoices = await api.purchaseInvoices.listAll();
 
       // Filter by supplier
-      let supplierInvoices = allInvoices
+      const supplierInvoices = allInvoices
         .filter((inv: PurchaseInvoice) => inv.clients_id === clients_id && inv.status === "CONFIRMED")
         .sort((a: PurchaseInvoice, b: PurchaseInvoice) =>
           (b.create_date ?? "").localeCompare(a.create_date ?? "")
@@ -427,7 +428,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     }
   );
 
-  server.tool("create_purchase_invoice_from_pdf",
+  registerTool(server, "create_purchase_invoice_from_pdf",
     "Create a draft purchase invoice from extracted and validated PDF data. Pass EXACT vat_price and gross_price from the original invoice for payment matching.",
     {
       supplier_client_id: z.number().describe("Supplier client ID (from resolve_supplier)"),
@@ -487,7 +488,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     }
   );
 
-  server.tool("upload_invoice_document",
+  registerTool(server, "upload_invoice_document",
     "Upload a PDF document to an existing purchase invoice",
     {
       invoice_id: z.number().describe("Purchase invoice ID"),

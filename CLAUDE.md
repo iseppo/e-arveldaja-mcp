@@ -157,7 +157,14 @@ npx tsc --noEmit      # Type-check without emitting
 npx tsc               # Full build to dist/
 ```
 
-No test framework is configured. Test via MCP client connection:
+Unit tests use **vitest**:
+```bash
+npm run test              # vitest run (all unit tests)
+npm run test:watch        # vitest in watch mode
+npm run test:integration  # integration tests (requires API credentials)
+```
+
+Manual testing via MCP client connection:
 ```typescript
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";

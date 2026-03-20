@@ -1,10 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
 import { computeAllBalances } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { create } from "../annotations.js";
 import { validateAccounts } from "../account-validation.js";
+import { toolError } from "../tool-error.js";
 
 async function computeRetainedEarningsBalance(api: ApiContext, accountId: number, asOfDate?: string): Promise<number> {
   const allJournals = await api.journals.listAllWithPostings();
@@ -33,7 +35,7 @@ async function computeRetainedEarningsBalance(api: ApiContext, accountId: number
 
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("prepare_dividend_package",
+  registerTool(server, "prepare_dividend_package",
     "Calculate dividend tax (22/78 CIT) and create draft journal entries for dividend payable and tax liability. Validates retained earnings balance and net assets.",
     {
       net_dividend: z.number().describe("Net dividend amount to shareholder (EUR)"),
@@ -61,16 +63,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         { id: shareCapitalAccount, label: "Share capital account" },
       ]);
       if (accountErrors.length > 0) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              error: "Account validation failed",
-              details: accountErrors,
-              hint: "Use list_accounts to find correct account numbers.",
-            }, null, 2),
-          }],
-        };
+        return toolError({
+          error: "Account validation failed",
+          details: accountErrors,
+          hint: "Use list_accounts to find correct account numbers.",
+        });
       }
 
       // Estonian CIT rate on dividends: 22/78 of net dividend
@@ -83,19 +80,14 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const warnings: string[] = [];
       if (retainedBalance < grossDividend) {
         if (!force) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({
-                error: "Insufficient retained earnings",
-                retained_earnings_balance: retainedBalance,
-                gross_dividend_required: roundMoney(grossDividend),
-                shortfall: roundMoney(grossDividend - retainedBalance),
-                calculation: { net_dividend, cit_rate: "22/78", cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
-                hint: "Distribution may be unlawful per ÄS § 157. Set force=true to create the journal anyway.",
-              }, null, 2),
-            }],
-          };
+          return toolError({
+            error: "Insufficient retained earnings",
+            retained_earnings_balance: retainedBalance,
+            gross_dividend_required: roundMoney(grossDividend),
+            shortfall: roundMoney(grossDividend - retainedBalance),
+            calculation: { net_dividend, cit_rate: "22/78", cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
+            hint: "Distribution may be unlawful per ÄS § 157. Set force=true to create the journal anyway.",
+          });
         }
         warnings.push(
           `Retained earnings balance (${retainedBalance} EUR) is less than gross dividend (${roundMoney(grossDividend)} EUR). ` +
@@ -179,7 +171,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     }
   );
 
-  server.tool("create_owner_expense_reimbursement",
+  registerTool(server, "create_owner_expense_reimbursement",
     "Create a journal for a business expense paid personally by the owner. Splits input VAT for VAT-registered companies.",
     {
       owner_client_id: z.number().describe("Owner/shareholder client ID"),
@@ -211,16 +203,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         { id: payAcc, label: "Payable account" },
       ]);
       if (accountErrors.length > 0) {
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              error: "Account validation failed",
-              details: accountErrors,
-              hint: "Use list_accounts to find correct account numbers.",
-            }, null, 2),
-          }],
-        };
+        return toolError({
+          error: "Account validation failed",
+          details: accountErrors,
+          hint: "Use list_accounts to find correct account numbers.",
+        });
       }
 
       const total = roundMoney(net_amount + vat);

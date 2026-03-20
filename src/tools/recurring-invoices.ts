@@ -1,12 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice } from "../types/api.js";
 import { batch } from "../annotations.js";
 
 export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("create_recurring_sale_invoices",
+  registerTool(server, "create_recurring_sale_invoices",
     "Clone sale invoices from a previous month for recurring monthly billing. " +
     "Copies items, client, template from source invoices. Creates as DRAFT. " +
     "Invoice numbers are auto-assigned by the configured invoice series.",
@@ -16,9 +17,11 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
       target_journal_date: z.string().describe("New turnover date (YYYY-MM-DD)"),
       invoice_ids: z.string().optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
       auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
+      dry_run: z.boolean().optional().describe("Preview without creating invoices (default true)"),
     },
     { ...batch, title: "Create Recurring Sale Invoices" },
-    async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm }) => {
+    async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm, dry_run }) => {
+      const isDryRun = dry_run !== false;
       // Get source invoices
       const allSales = await api.saleInvoices.listAll();
       const sourceFrom = `${source_month}-01`;
@@ -45,6 +48,18 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
         // Fetch full invoice to get items
         const full = await api.saleInvoices.get(source.id!);
         if (!full.items || full.items.length === 0) continue;
+
+        if (isDryRun) {
+          results.push({
+            source_id: source.id,
+            source_number: source.number,
+            client: full.client_name,
+            items_count: full.items.length,
+            gross_price: full.gross_price,
+            status: "would_create",
+          });
+          continue;
+        }
 
         try {
           const result = await api.saleInvoices.create({
@@ -118,12 +133,15 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
         content: [{
           type: "text",
           text: JSON.stringify({
+            mode: isDryRun ? "DRY_RUN" : "EXECUTED",
             source_month,
             target_date,
             source_count: sourceInvoices.length,
-            created: results.filter(r => r.status === "ok").length,
-            errors: results.filter(r => r.status === "error").length,
+            would_create: isDryRun ? results.length : undefined,
+            created: isDryRun ? undefined : results.filter(r => r.status === "ok").length,
+            errors: isDryRun ? undefined : results.filter(r => r.status === "error").length,
             results,
+            ...(isDryRun && { note: "Set dry_run=false to create the invoices." }),
           }, null, 2),
         }],
       };

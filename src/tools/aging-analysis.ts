@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney } from "../money.js";
@@ -35,7 +36,7 @@ function bucketLabel(days: number): string {
 
 export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
-  server.tool("compute_receivables_aging",
+  registerTool(server, "compute_receivables_aging",
     "Compute receivables aging report (nõuete vanusanalüüs). " +
     "Groups unpaid sale invoices into aging buckets by client.",
     {
@@ -117,7 +118,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
     }
   );
 
-  server.tool("compute_payables_aging",
+  registerTool(server, "compute_payables_aging",
     "Compute payables aging report (kohustuste vanusanalüüs). " +
     "Groups unpaid purchase invoices into aging buckets by supplier.",
     {
