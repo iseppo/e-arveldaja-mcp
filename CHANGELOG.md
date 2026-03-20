@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0] - 2026-03-20
+
+### Fixed
+- **MCP reliability regressions**:
+  - `import_wise_transactions` now skips duplicate main and fee rows both by `WISE:{id}` markers and by a legacy date/amount/counterparty/reference signature, preventing re-imports when older rows lack the newer description prefix
+  - `create_recurring_sale_invoices` creates invoices again by default; preview mode is now explicit via `dry_run=true`, and the tool description matches the actual behavior
+  - `toolError()` now handles `undefined`, circular objects, and other non-JSON-serializable throws without failing inside the error wrapper
+- **Release metadata drift**:
+  - package metadata and lockfile root version are now aligned again
+
+### Changed
+- **MCP tool annotations**:
+  - file/folder-input tools now advertise `openWorldHint=true`, including PDF import/upload, Lightyear CSV tools, Wise import, receipt-folder tools, and CAMT.053 parse/import
+- **122 tests** total (up from 115 in v0.5.0) — added focused regression coverage for recurring invoice execution defaults, Wise duplicate detection, file-input metadata flags, and robust tool error serialization
+
 ## [0.5.0] - 2026-03-19
 
 ### Added
