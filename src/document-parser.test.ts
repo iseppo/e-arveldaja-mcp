@@ -39,6 +39,9 @@ describe("document parser", () => {
       preciseBoundingBox: false,
       preserveVerySmallText: true,
     }));
+    const defaultConfig = liteParseConstructor.mock.calls[0]?.[0];
+    expect(defaultConfig).not.toHaveProperty("numWorkers");
+    expect(defaultConfig).not.toHaveProperty("maxPages");
     expect(parseMock).toHaveBeenCalledWith("/tmp/invoice.pdf", true);
     expect(result).toEqual(expect.objectContaining({
       text: "Invoice text",

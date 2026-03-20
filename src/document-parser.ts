@@ -20,18 +20,24 @@ function readNumberEnv(name: string): number | undefined {
 }
 
 export function buildDocumentParserConfig(): Partial<LiteParseConfig> {
-  return {
+  const config: Partial<LiteParseConfig> = {
     // Most invoices here are Estonian/English. LiteParse's built-in Tesseract
     // supports multi-language strings like "eng+est".
     ocrEnabled: readBooleanEnv("EARVELDAJA_LITEPARSE_OCR_ENABLED", true),
     ocrLanguage: process.env.EARVELDAJA_LITEPARSE_OCR_LANGUAGE ?? "eng+est",
     ocrServerUrl: process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL || undefined,
-    numWorkers: readNumberEnv("EARVELDAJA_LITEPARSE_NUM_WORKERS"),
-    maxPages: readNumberEnv("EARVELDAJA_LITEPARSE_MAX_PAGES"),
     outputFormat: "text",
     preciseBoundingBox: false,
     preserveVerySmallText: true,
   };
+
+  const numWorkers = readNumberEnv("EARVELDAJA_LITEPARSE_NUM_WORKERS");
+  if (numWorkers !== undefined) config.numWorkers = numWorkers;
+
+  const maxPages = readNumberEnv("EARVELDAJA_LITEPARSE_MAX_PAGES");
+  if (maxPages !== undefined) config.maxPages = maxPages;
+
+  return config;
 }
 
 let parser: LiteParse | undefined;
