@@ -2,8 +2,27 @@
 
 ## [0.6.0] - 2026-03-20
 
+### Added
+- **Receipt inbox and expense auto-booking** — 4 new tools:
+  - `scan_receipt_folder`: scan a folder for receipt PDFs/images without recursing
+  - `process_receipt_batch`: extract, classify, book, and bank-match receipt files in one pass (`execute=false` by default)
+  - `classify_unmatched_transactions`: classify unreconciled bank transactions into expense-like and review-only categories
+  - `apply_transaction_classifications`: batch-apply those classifications as purchase invoices and transaction links
+- **MCP compatibility layer**:
+  - new `src/mcp-compat.ts` bridges legacy `tool/prompt/resource` registrations to SDK `registerTool` / `registerPrompt` / `registerResource`
+  - resource and tool registrations now preserve first-class MCP titles through the compatibility wrapper
+
 ### Fixed
-- **MCP reliability regressions**:
+- **Receipt inbox booking and totals**:
+  - auto-booked purchase invoices now preserve explicit gross/VAT totals correctly during confirm
+  - domestic expense auto-booking no longer overstates net/gross amounts
+  - reverse-charge handling and foreign supplier detection were corrected for imported receipts and transaction classifications
+  - small incoming bank movements no longer fall into the `bank_fees` auto-booking bucket
+- **Runtime config lookup**:
+  - `.env` and `apikey*.txt` are now resolved from the working directory as well, fixing `npx` / installed-package MCP setups that previously looked in the wrong place
+- **MCP reliability and protocol behavior**:
+  - tool and resource handlers are pinned to a connection snapshot, so `switch_connection` cannot race resource reads onto the wrong company
+  - tool-level validation and business errors now return proper MCP `isError: true` results
   - `import_wise_transactions` now skips duplicate main and fee rows both by `WISE:{id}` markers and by a legacy date/amount/counterparty/reference signature, preventing re-imports when older rows lack the newer description prefix
   - `create_recurring_sale_invoices` creates invoices again by default; preview mode is now explicit via `dry_run=true`, and the tool description matches the actual behavior
   - `toolError()` now handles `undefined`, circular objects, and other non-JSON-serializable throws without failing inside the error wrapper
@@ -11,9 +30,14 @@
   - package metadata and lockfile root version are now aligned again
 
 ### Changed
-- **MCP tool annotations**:
+- **MCP metadata and SDK usage**:
+  - prompts, resources, and tools now register through the modern SDK registration path via the compatibility layer
   - file/folder-input tools now advertise `openWorldHint=true`, including PDF import/upload, Lightyear CSV tools, Wise import, receipt-folder tools, and CAMT.053 parse/import
-- **122 tests** total (up from 115 in v0.5.0) — added focused regression coverage for recurring invoice execution defaults, Wise duplicate detection, file-input metadata flags, and robust tool error serialization
+  - prompt/resource listings now carry first-class titles consistently
+- **Documentation and assistant guidance**:
+  - README and Claude guidance were updated for the newer MCP workflow and dry-run semantics
+- **96 tools** total (up from 90 in v0.5.0).
+- **122 tests** total (up from 88 in v0.5.0) — added focused regression coverage for receipt inbox flows, config lookup, purchase invoice totals, recurring invoice execution defaults, Wise duplicate detection, file-input metadata flags, MCP compat behavior, and robust tool error serialization
 
 ## [0.5.0] - 2026-03-19
 
