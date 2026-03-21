@@ -187,6 +187,12 @@ The assistant will compute the 22/78 corporate income tax, check retained earnin
 
 Document parsing (PDF, JPG, PNG) uses built-in local OCR — no external OCR service is involved. However, the extracted text is returned to your AI assistant via the MCP protocol, so it will be processed by whichever LLM you are using (Claude, Codex, Gemini, etc.). The server's own outbound connections are limited to the e-arveldaja API (`rmp-api.rik.ee`) and optionally the Estonian Business Registry (`ariregister.rik.ee`) for supplier lookups.
 
+## Feedback and Bug Reports
+
+Feature requests, bug reports, and invoices that don't parse correctly are welcome on the [GitHub Issues page](https://github.com/iseppo/e-arveldaja-mcp/issues).
+
+If you'd rather not upload your invoice publicly, email it directly to indrek.seppo@gmail.com.
+
 ## License
 
 [The Unlicense](LICENSE) — public domain. Do whatever you want with it.
