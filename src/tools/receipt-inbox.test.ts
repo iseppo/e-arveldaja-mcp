@@ -15,10 +15,12 @@ import {
   getClientCountryFromIban,
   hasAutoBookableReceiptFields,
   hasRecurringSimilarAmounts,
+  inferSupplierCountry,
   looksLikePersonCounterparty,
   normalizeDate,
   normalizeCounterpartyName,
   scoreTransactionToInvoice,
+  suggestBookingInternal,
 } from "./receipt-inbox.js";
 
 function makeTx(overrides: Partial<{
@@ -180,6 +182,21 @@ describe("extractAmounts", () => {
 
     expect(result.total_gross).toBe(47);
   });
+
+  it("detects VAT from split OCR lines that continue onto the next line", () => {
+    const result = extractAmounts([
+      "Vahesumma   €19.98",
+      "Transport   €2.89 Omniva",
+      "Kokku  €22.87 (sisaldab €4.12",
+      "käibemaksu)",
+    ].join("\n"));
+
+    expect(result).toEqual({
+      total_net: 18.75,
+      total_vat: 4.12,
+      total_gross: 22.87,
+    });
+  });
 });
 
 describe("detectReceiptCurrency", () => {
@@ -310,6 +327,21 @@ describe("extractSupplierName", () => {
       extractSupplierName("Ostja Müüja\nNimi: Csik Timea Nimi: Runikon Retail OU", "ikea.pdf"),
     ).toBe("Runikon Retail OU");
   });
+
+  it("extracts the rightmost seller column after recipient rows", () => {
+    expect(
+      extractSupplierName("Recipient:\nIndrek                 bilaal tmi", "bolt.pdf"),
+    ).toBe("bilaal tmi");
+  });
+
+  it("does not switch to the buyer column on mixed supplier/Bill to rows", () => {
+    expect(
+      extractSupplierName([
+        "Midjourney Inc                          Bill to",
+        "611 Gateway Blvd                        Indrek Seppo",
+      ].join("\n"), "midjourney.pdf"),
+    ).toBe("Midjourney Inc");
+  });
 });
 
 describe("classifyReceiptDocument", () => {
@@ -347,6 +379,26 @@ describe("hasAutoBookableReceiptFields", () => {
       invoice_date: "2023-06-30",
       total_gross: 624.86,
     })).toBe(true);
+  });
+});
+
+describe("inferSupplierCountry", () => {
+  it("prefers supplier-side country text when no IBAN is present", () => {
+    expect(inferSupplierCountry({
+      supplier_vat_no: "EU372045196",
+      raw_text: [
+        "Midjourney Inc                          Bill to",
+        "611 Gateway Blvd                        Seppo OÜ",
+        "United States                           Estonia",
+      ].join("\n"),
+    })).toBe("USA");
+  });
+
+  it("uses VAT prefixes for foreign suppliers when available", () => {
+    expect(inferSupplierCountry({
+      supplier_vat_no: "FI32738114",
+      raw_text: "",
+    })).toBe("FIN");
   });
 });
 
@@ -442,6 +494,57 @@ describe("scoreTransactionToInvoice", () => {
 
     expect(confidence).toBe(70);
     expect(reasons).toEqual(["exact_base_amount", "date_within_3_days"]);
+  });
+});
+
+describe("suggestBookingInternal", () => {
+  it("preserves reverse-charge metadata from supplier history", async () => {
+    const api = {
+      purchaseInvoices: {
+        get: async () => ({
+          id: 1,
+          number: "PI-1",
+          items: [{
+            custom_title: "AI subscription",
+            cl_purchase_articles_id: 45,
+            purchase_accounts_id: 5230,
+            purchase_accounts_dimensions_id: null,
+            vat_rate_dropdown: "24",
+            vat_accounts_id: 1510,
+            cl_vat_articles_id: 1,
+            reversed_vat_id: 1,
+          }],
+        }),
+      },
+    } as any;
+
+    const context = {
+      purchaseInvoices: [{
+        id: 1,
+        clients_id: 7,
+        status: "CONFIRMED",
+        create_date: "2026-02-15",
+      }],
+      purchaseArticlesWithVat: [{
+        id: 45,
+        name_est: "Software",
+        name_eng: "Software",
+        accounts_id: 5230,
+        is_disabled: false,
+        priority: 1,
+      }],
+      accounts: [{
+        id: 5230,
+        name_est: "Software expense",
+        name_eng: "Software expense",
+        account_type_est: "",
+        account_type_eng: "",
+      }],
+    } as any;
+
+    const result = await suggestBookingInternal(api, context, 7, "subscription");
+
+    expect(result?.item.reversed_vat_id).toBe(1);
   });
 });
 

@@ -53,6 +53,8 @@ const RECEIPT_COMPONENT_LABEL_RE = /(shipping|transport|delivery|postage|service
 const SUPPLIER_LABEL_RE =
   /^(?:saatja nimi|müüja|seller|supplier|teenusepakkuja|arve esitaja|makse saaja|vedaja\/teenuse pakkuja)\b[:\s-]*/i;
 const BUYER_SECTION_RE = /\b(bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i;
+const BUYER_OR_RECIPIENT_SECTION_RE = /\b(recipient|buyer|ostja|bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i;
+const PURE_BUYER_LABEL_RE = /^(?:recipient|buyer|ostja|bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)[:\s]*$/i;
 const SUPPLIER_METADATA_RE =
   /\b(?:telefon|phone|e-?post|email|kodulehekülg|website|web|iban|swift|reg\.?\s*(?:nr|code)|registrikood|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id|payment method|makseviis|kuupäev|date|due date|maksetähtaeg)\b[:]?/i;
 const SUPPLIER_INVALID_LINE_RE =
@@ -68,9 +70,28 @@ const RECEIPT_CURRENCY_PATTERNS = [
   { code: "PLN", pattern: /\bPLN\b/i },
 ] as const;
 const PERSON_COUNTERPARTY_COMPANY_WORD_RE =
-  /\b(limited|ltd|llc|inc|gmbh|ag|ab|oy|srl|bv|nv|sa|plc|ireland|operations|services|solutions|group|holding|capital|systems|technologies|media|digital|cloud|platform|company|corp|corporation)\b/i;
+  /\b(limited|ltd|llc|inc|gmbh|ag|ab|oy|srl|bv|nv|sa|plc|tmi|ireland|operations|services|solutions|group|holding|capital|systems|technologies|media|digital|cloud|platform|company|corp|corporation)\b/i;
 const TEXTUAL_MONTH_VALUE_RE =
   /\b(?:jaan(?:uar)?|jan(?:uary)?|veebr(?:uar)?|feb(?:ruary)?|märts|mar(?:ch)?|aprill|apr(?:il)?|mai|may|juuni|june?|juuli|july?|aug(?:ust)?|september|sept?|oktoober|okt|oct(?:ober)?|nov(?:ember)?|detsember|dets|dec(?:ember)?)\b/iu;
+const SUPPLIER_COUNTRY_NAME_TO_CLIENT_COUNTRY: Array<[string, string]> = [
+  ["united states", "USA"],
+  ["estonia", "EST"],
+  ["eesti", "EST"],
+  ["finland", "FIN"],
+  ["suomi", "FIN"],
+  ["ireland", "IRL"],
+  ["united kingdom", "GBR"],
+  ["great britain", "GBR"],
+  ["latvia", "LVA"],
+  ["lithuania", "LTU"],
+  ["sweden", "SWE"],
+  ["norway", "NOR"],
+  ["denmark", "DNK"],
+  ["germany", "DEU"],
+  ["france", "FRA"],
+  ["netherlands", "NLD"],
+  ["poland", "POL"],
+];
 const MONTH_NAME_TO_NUMBER: Record<string, number> = {
   jaan: 1,
   jaanuar: 1,
@@ -504,6 +525,58 @@ export function getClientCountryFromIban(iban?: string | null): string | undefin
   return IBAN_COUNTRY_TO_CLIENT_COUNTRY[countryCode] ?? countryCode;
 }
 
+function getClientCountryFromVatNumber(vatNo?: string | null): string | undefined {
+  const normalized = vatNo?.replace(/\s+/g, "").toUpperCase();
+  const countryCode = normalized?.slice(0, 2);
+  if (!countryCode || !/^[A-Z]{2}$/.test(countryCode) || countryCode === "EU") return undefined;
+  return IBAN_COUNTRY_TO_CLIENT_COUNTRY[countryCode] ?? countryCode;
+}
+
+function getClientCountryFromText(text?: string): string | undefined {
+  if (!text) return undefined;
+  const rows = text
+    .split(/\r?\n/)
+    .map(raw => ({ raw, line: clampTextLine(raw) }))
+    .filter(row => row.line);
+  const buyerIndex = rows.findIndex(row => BUYER_OR_RECIPIENT_SECTION_RE.test(row.line));
+  const supplierParts: string[] = [];
+
+  const prefixRows = buyerIndex >= 0 ? rows.slice(0, buyerIndex) : rows.slice(0, 20);
+  supplierParts.push(...prefixRows.map(row => row.line));
+
+  if (buyerIndex >= 0) {
+    for (const row of rows.slice(buyerIndex, buyerIndex + 10)) {
+      const columns = row.raw
+        .split(/\s{2,}/)
+        .map(clampTextLine)
+        .filter(Boolean);
+      if (columns.length >= 2) {
+        const leftColumn = columns[0]!;
+        if (!PURE_BUYER_LABEL_RE.test(leftColumn)) {
+          supplierParts.push(leftColumn);
+        }
+      }
+    }
+  }
+
+  const supplierSide = supplierParts.join("\n").toLowerCase();
+
+  for (const [countryName, countryCode] of SUPPLIER_COUNTRY_NAME_TO_CLIENT_COUNTRY) {
+    if (supplierSide.includes(countryName)) {
+      return countryCode;
+    }
+  }
+
+  return undefined;
+}
+
+export function inferSupplierCountry(fields: Pick<ExtractedReceiptFields, "supplier_iban" | "supplier_vat_no" | "raw_text">): string {
+  return getClientCountryFromIban(fields.supplier_iban) ??
+    getClientCountryFromVatNumber(fields.supplier_vat_no) ??
+    getClientCountryFromText(fields.raw_text) ??
+    "EST";
+}
+
 function isDomesticClientCountry(country?: string | null): boolean {
   if (!country) return true;
   const normalized = country.trim().toUpperCase();
@@ -529,6 +602,12 @@ function isVatAmountLine(line: string): boolean {
   const trimmed = line.trim();
   return /^(?:käibemaks\b|vat\b|tax\b|km\b)/i.test(trimmed) ||
     /\b(?:sisaldab|including|incl\.?)\b.*(?:käibemaks|vat|tax|km\b)/i.test(trimmed);
+}
+
+function buildAmountInspectionLine(lines: string[], index: number): string {
+  const current = lines[index] ?? "";
+  const next = lines[index + 1] ?? "";
+  return next ? `${current} ${next}` : current;
 }
 
 export function detectReceiptCurrency(text: string): string {
@@ -682,13 +761,34 @@ function cleanSupplierCandidate(raw: string): string | undefined {
 }
 
 export function extractSupplierName(text: string, fallbackFileName: string): string | undefined {
-  const lines = text
+  const rows = text
     .split(/\r?\n/)
-    .map(clampTextLine)
-    .filter(Boolean);
+    .map(raw => ({ raw, line: clampTextLine(raw) }))
+    .filter(row => row.line);
+  const lines = rows.map(row => row.line);
 
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!;
+  const extractRightmostColumnCandidate = (rawLine: string): string | undefined => {
+    const segments = rawLine
+      .split(/\s{2,}/)
+      .map(clampTextLine)
+      .filter(Boolean);
+    if (segments.length < 2) return undefined;
+    for (let index = segments.length - 1; index >= 1; index--) {
+      const candidate = cleanSupplierCandidate(segments[index] ?? "");
+      if (candidate) return candidate;
+    }
+    return undefined;
+  };
+
+  for (let index = 0; index < rows.length; index++) {
+    const line = rows[index]!.line;
+    const previousLine = rows[index - 1]?.line ?? "";
+
+    if (PURE_BUYER_LABEL_RE.test(previousLine)) {
+      const rightmostColumnCandidate = extractRightmostColumnCandidate(rows[index]!.raw);
+      if (rightmostColumnCandidate) return rightmostColumnCandidate;
+    }
+
     const dualNameMatch = line.match(/^Nimi:\s*(.+?)\s+Nimi:\s*(.+)$/i);
     const sellerFromDualName = cleanSupplierCandidate(dualNameMatch?.[2] ?? "");
     if (sellerFromDualName) return sellerFromDualName;
@@ -708,8 +808,8 @@ export function extractSupplierName(text: string, fallbackFileName: string): str
     if (beforeBuyer) return beforeBuyer;
   }
 
-  const companyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB)\b/i;
-  const buyerSectionIndex = lines.findIndex(line => BUYER_SECTION_RE.test(line));
+  const companyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)\b/i;
+  const buyerSectionIndex = lines.findIndex(line => BUYER_OR_RECIPIENT_SECTION_RE.test(line));
   const searchLines = lines.slice(0, buyerSectionIndex >= 0 ? Math.max(buyerSectionIndex + 1, 1) : Math.min(lines.length, 12));
   for (const line of searchLines) {
     const candidate = cleanSupplierCandidate(line);
@@ -810,22 +910,25 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
   const componentAmounts: number[] = [];
   let bestExplicitGrossCandidate: { amount: number; score: number } | undefined;
-  const hasExplicitVatLine = lines.some(line =>
-    isVatAmountLine(line) &&
-    !RECEIPT_REFERENCE_LINE_RE.test(line) &&
-    !RECEIPT_NET_LABEL_RE.test(line),
+  const hasExplicitVatLine = lines.some((line, index) =>
+    isVatAmountLine(buildAmountInspectionLine(lines, index)) &&
+    !RECEIPT_REFERENCE_LINE_RE.test(buildAmountInspectionLine(lines, index)) &&
+    !RECEIPT_NET_LABEL_RE.test(buildAmountInspectionLine(lines, index)),
   );
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
     const amounts = extractAmountsFromLine(line);
     if (amounts.length === 0) continue;
 
+    const inspectionLine = buildAmountInspectionLine(lines, index);
+    const inspectionLower = inspectionLine.toLowerCase();
     const lineLower = line.toLowerCase();
     const blockedAsReference = RECEIPT_REFERENCE_LINE_RE.test(lineLower);
     const hasCurrencyKeyword = RECEIPT_CURRENCY_PATTERNS.some(currency => currency.pattern.test(line));
     const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower);
     const hasNetLikeLabel = RECEIPT_NET_LABEL_RE.test(lineLower);
-    const hasVatAmountLabel = isVatAmountLine(line);
+    const hasVatAmountLabel = isVatAmountLine(inspectionLine);
     const deDatedAmounts = amounts.filter(amount => !isLikelyYearAmount(amount, line));
     const filteredAmounts = (deDatedAmounts.length > 0 ? deDatedAmounts : amounts).filter(amount =>
       !(Number.isInteger(amount) && amount >= 1000 && !hasCurrencyKeyword && !hasTotalLikeLabel),
@@ -833,10 +936,10 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     if (filteredAmounts.length === 0) {
       continue;
     }
-    const pickedGross = filteredAmounts.length > 1 && (RECEIPT_VAT_LABEL_RE.test(lineLower) || /\b(?:sisaldab|including|incl\.?)\b/i.test(line))
+    const pickedGross = filteredAmounts.length > 1 && (RECEIPT_VAT_LABEL_RE.test(inspectionLower) || /\b(?:sisaldab|including|incl\.?)\b/i.test(inspectionLine))
       ? Math.max(...filteredAmounts)
       : filteredAmounts[filteredAmounts.length - 1];
-    const vatCandidates = filteredAmounts.filter(amount => ![...line.matchAll(/(\d{1,2}(?:[.,]\d+)?)\s*%/g)]
+    const vatCandidates = filteredAmounts.filter(amount => ![...inspectionLine.matchAll(/(\d{1,2}(?:[.,]\d+)?)\s*%/g)]
       .map(match => parseAmount(match[1] ?? ""))
       .some(rate => rate !== undefined && Math.abs(rate - amount) < 0.001));
     const pickedVat = vatCandidates[vatCandidates.length - 1] ?? filteredAmounts[filteredAmounts.length - 1];
@@ -853,7 +956,7 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
       !blockedAsReference &&
       hasTotalLikeLabel
     ) {
-      const score = scoreExplicitGrossCandidate(line, hasCurrencyKeyword, hasTotalLikeLabel);
+      const score = scoreExplicitGrossCandidate(inspectionLine, hasCurrencyKeyword, hasTotalLikeLabel);
       if (!bestExplicitGrossCandidate || score > bestExplicitGrossCandidate.score || (score === bestExplicitGrossCandidate.score && pickedGross > bestExplicitGrossCandidate.amount)) {
         bestExplicitGrossCandidate = { amount: pickedGross, score };
       }
@@ -958,7 +1061,7 @@ export function normalizeCounterpartyName(name?: string | null): string {
     ?.toLowerCase()
     .normalize("NFKD")
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\b(ou|oü|as|mtu|mtü|fie|uab|sia|llc|ltd|inc|gmbh|oy|ab|pank)\b/gu, " ")
+    .replace(/\b(ou|oü|as|mtu|mtü|fie|uab|sia|llc|ltd|inc|gmbh|oy|ab|tmi|pank)\b/gu, " ")
     .replace(/\s+/g, " ")
     .trim() ?? "";
 }
@@ -1325,7 +1428,7 @@ async function resolveSupplierInternal(
     }
   }
 
-  const supplierCountry = getClientCountryFromIban(fields.supplier_iban) ?? "EST";
+  const supplierCountry = inferSupplierCountry(fields);
   const registryData = await fetchRegistryData(fields.supplier_reg_code, supplierCountry, fields.supplier_name);
   const clientName = registryData?.name ?? fields.supplier_name;
   if (!clientName) {
@@ -1453,7 +1556,7 @@ function buildKeywordSuggestion(
   };
 }
 
-async function suggestBookingInternal(
+export async function suggestBookingInternal(
   api: ApiContext,
   context: ReceiptProcessingContext,
   clientId: number,
@@ -1494,6 +1597,7 @@ async function suggestBookingInternal(
         vat_rate_dropdown: matchedItem.vat_rate_dropdown,
         vat_accounts_id: matchedItem.vat_accounts_id,
         cl_vat_articles_id: matchedItem.cl_vat_articles_id,
+        reversed_vat_id: matchedItem.reversed_vat_id,
         custom_title: matchedItem.custom_title || description,
         amount: 1,
       },
