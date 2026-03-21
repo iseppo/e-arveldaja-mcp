@@ -79,7 +79,7 @@ describe("registerPrompts", () => {
     expect(monthEndText).toContain('date_from: "2026-03-01"');
     expect(monthEndText).toContain('date_to: "2026-03-31"');
     expect(monthEndText).toContain("compute_balance_sheet` with:");
-    expect(overviewText).toContain("compute_balance_sheet` with:");
+    expect(overviewText).toContain("compute_balance_sheet` with date_to:");
     expect(overviewText).toContain("date_from:");
     expect(overviewText).toContain("as_of_date:");
     expect(overviewText).not.toContain("start_date:");
@@ -105,8 +105,8 @@ describe("registerPrompts", () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "lightyear-booking", {
       statement_path: "/tmp/statement.csv",
-      investment_account: "1520",
-      broker_account: "1120",
+      investment_account: 1520,
+      broker_account: 1120,
     });
 
     expect(text).toContain("ask the user for it before booking sells");

@@ -335,20 +335,13 @@ Follow these steps:
 1. Call \`get_vat_info\`, \`get_invoice_info\`, and \`list_connections\`.
    These can be fetched in parallel.
 
-2. Call \`compute_balance_sheet\` with:
-   - date_to: "${today}"
+2. Call all four of these in parallel (they have no dependencies on each other):
+   - \`compute_balance_sheet\` with date_to: "${today}"
+   - \`compute_profit_and_loss\` with date_from: "${yearStart}", date_to: "${today}"
+   - \`compute_receivables_aging\` with as_of_date: "${today}"
+   - \`compute_payables_aging\` with as_of_date: "${today}"
 
-3. Call \`compute_profit_and_loss\` for the current year:
-   - date_from: "${yearStart}"
-   - date_to: "${today}"
-
-4. Call \`compute_receivables_aging\` with:
-   - as_of_date: "${today}"
-   Call \`compute_payables_aging\` with:
-   - as_of_date: "${today}"
-   These can be fetched in parallel.
-
-5. Present a dashboard summary with these sections:
+3. Present a dashboard summary with these sections:
 
    **Company**
    - Name, VAT number, active connection
