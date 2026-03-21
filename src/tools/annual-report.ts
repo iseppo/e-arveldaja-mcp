@@ -349,9 +349,9 @@ function buildClosingProposal(
 
   if (profitAndLossAccounts.length === 0) return null;
 
-  const totalDebits = sumStatementBalances(yearProfitAndLossBalances, (balance) => balance.account_type_est === "Tulud");
+  const totalRevenue = sumStatementBalances(yearProfitAndLossBalances, (balance) => balance.account_type_est === "Tulud");
   const totalExpenses = sumStatementBalances(yearProfitAndLossBalances, (balance) => balance.account_type_est === "Kulud");
-  const netProfit = roundMoney(totalDebits - totalExpenses);
+  const netProfit = roundMoney(totalRevenue - totalExpenses);
   const currentYearProfitAccount = accountsById.get(3310);
 
   if (Math.abs(netProfit) >= 0.005) {
@@ -447,8 +447,8 @@ async function analyzeYearEndClose(api: ApiContext, year: number): Promise<YearE
     api.purchaseInvoices.listAll(),
   ]);
   const [yearEndBalances, yearProfitAndLossBalances] = await Promise.all([
-    computeAllBalances(api, undefined, to),
-    computeAllBalances(api, from, to),
+    computeAllBalances(api, undefined, to, { preloadedAccounts: accounts, preloadedJournals: allJournals }),
+    computeAllBalances(api, from, to, { preloadedAccounts: accounts, preloadedJournals: allJournals }),
   ]);
 
   const accountErrors = validateAccounts(accounts, [{ id: 3310, label: "Current year profit account" }]);

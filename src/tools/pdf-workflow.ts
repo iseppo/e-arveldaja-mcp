@@ -2,7 +2,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
-import { closest } from "fastest-levenshtein";
 import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { validateFilePath } from "../file-validation.js";
@@ -12,8 +11,8 @@ import { readOnly, create, mutate } from "../annotations.js";
 import { parseDocument } from "../document-parser.js";
 import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
-import { extractReceiptFieldsFromText } from "./receipt-extraction.js";
-import { fetchRegistryData } from "./supplier-resolution.js";
+import { type ExtractedReceiptFields, extractReceiptFieldsFromText } from "./receipt-extraction.js";
+import { fetchRegistryData, resolveSupplierInternal } from "./supplier-resolution.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];
@@ -232,87 +231,38 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     },
     { ...create, title: "Find or Create Supplier" },
     async ({ name, reg_code, vat_no, iban, auto_create, country, is_physical_entity }) => {
-      // 1. Search by registry code
-      if (reg_code) {
-        const byCode = await api.clients.findByCode(reg_code);
-        if (byCode) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({ found: true, match_type: "registry_code", client: byCode }, null, 2),
-            }],
-          };
-        }
+      const allClients = await api.clients.listAll();
+      const resolution = await resolveSupplierInternal(
+        api,
+        allClients,
+        {
+          supplier_name: name,
+          supplier_reg_code: reg_code,
+          supplier_vat_no: vat_no,
+          supplier_iban: iban,
+        } as ExtractedReceiptFields,
+        auto_create === true,
+        { _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity } },
+      );
+
+      if (resolution.found) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ found: true, match_type: resolution.match_type, client: resolution.client }, null, 2),
+          }],
+        };
       }
 
-      // 2. Search by VAT number
-      if (vat_no) {
-        const byVatNo = await api.clients.findByVatNo(vat_no);
-        if (byVatNo) {
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({ found: true, match_type: "vat_no", client: byVatNo }, null, 2),
-            }],
-          };
-        }
-      }
-
-      // 3. Search by name (fuzzy)
-      if (name) {
-        const allClients = await api.clients.listAll();
-        const clientNames = allClients.filter(c => !c.is_deleted).map(c => c.name);
-
-        if (clientNames.length > 0) {
-          const bestMatch = closest(name, clientNames);
-          const matchedClient = allClients.find(c => !c.is_deleted && c.name === bestMatch);
-
-          // Check similarity - simple contains check
-          if (matchedClient && (
-            bestMatch.toLowerCase().includes(name.toLowerCase()) ||
-            name.toLowerCase().includes(bestMatch.toLowerCase())
-          )) {
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({ found: true, match_type: "name_fuzzy", client: matchedClient }, null, 2),
-              }],
-            };
-          }
-        }
-      }
-
-      // 4. Try business registry lookup for Estonian registry codes
-      const registryData = await fetchRegistryData(reg_code, country ?? "EST", name);
-
-      // 5. Create new client if requested
-      if (auto_create) {
-        const clientName = registryData?.name ?? name ?? "Unknown";
-        const isPhysical = is_physical_entity ?? false;
-        const result = await api.clients.create({
-          name: clientName,
-          code: reg_code ?? undefined,
-          is_client: false,
-          is_supplier: true,
-          cl_code_country: country ?? "EST",
-          is_juridical_entity: !isPhysical,
-          is_physical_entity: isPhysical,
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          invoice_vat_no: vat_no ?? undefined,
-          bank_account_no: iban ?? undefined,
-          address_text: registryData?.address ?? undefined,
-        });
-
+      if (resolution.created) {
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
               found: false,
               created: true,
-              api_response: result,
-              registry_data: registryData,
+              api_response: resolution.client ? { created_object_id: resolution.client.id } : {},
+              registry_data: resolution.registry_data,
             }, null, 2),
           }],
         };
@@ -324,7 +274,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           text: JSON.stringify({
             found: false,
             created: false,
-            registry_data: registryData,
+            registry_data: resolution.registry_data,
             suggestion: "Client not found. Set auto_create=true to create, or provide more details.",
           }, null, 2),
         }],

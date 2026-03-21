@@ -214,7 +214,7 @@ export interface InvoiceSummaryForMatching {
   status?: string;
 }
 
-type ClassificationApplyMode = "purchase_invoice" | "review_only";
+export type ClassificationApplyMode = "purchase_invoice" | "review_only";
 
 interface ReceiptAmountCandidate {
   amount: number;
@@ -1238,7 +1238,7 @@ function pickFirstDefined<T>(...values: Array<T | undefined>): T | undefined {
   return undefined;
 }
 
-function findAccountByKeywords(accounts: Account[], keywords: string[]): Account | undefined {
+export function findAccountByKeywords(accounts: Account[], keywords: string[]): Account | undefined {
   const loweredKeywords = keywords.map(keyword => keyword.toLowerCase());
   return accounts.find(account => {
     const text = `${account.name_est} ${account.name_eng} ${account.account_type_est} ${account.account_type_eng}`.toLowerCase();
@@ -1246,7 +1246,7 @@ function findAccountByKeywords(accounts: Account[], keywords: string[]): Account
   });
 }
 
-function findPurchaseArticleByKeywords(
+export function findPurchaseArticleByKeywords(
   purchaseArticles: Array<{ id: number; name_est: string; name_eng: string; accounts_id?: number; is_disabled?: boolean; priority?: number }>,
   keywords: string[],
 ): (typeof purchaseArticles)[number] | undefined {

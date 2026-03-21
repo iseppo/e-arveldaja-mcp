@@ -24,6 +24,10 @@ export interface SupplierResolution {
 
 export interface SupplierResolutionOptions {
   classification_category?: TransactionClassificationCategory;
+  _resolveSupplierOverrides?: {
+    country?: string;
+    is_physical_entity?: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +68,12 @@ export async function fetchRegistryData(regCode?: string, country = "EST", fallb
 // Supplier resolution
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve a supplier from extracted receipt fields. Searches by registry code,
+ * VAT number, then fuzzy name match. Optionally creates a new client.
+ * NOTE: When execute=true and a client is created, the `clients` array is
+ * mutated (new client pushed) so subsequent calls in the same batch see it.
+ */
 export async function resolveSupplierInternal(
   api: ApiContext,
   clients: Client[],
@@ -107,18 +117,19 @@ export async function resolveSupplierInternal(
     }
   }
 
-  const supplierCountry = inferSupplierCountry(fields);
+  const overrides = options?._resolveSupplierOverrides;
+  const supplierCountry = overrides?.country ?? inferSupplierCountry(fields);
   const registryData = await fetchRegistryData(fields.supplier_reg_code, supplierCountry, fields.supplier_name);
   const clientName = registryData?.name ?? fields.supplier_name;
   if (!clientName) {
     return { found: false, created: false, registry_data: registryData };
   }
 
-  const isPhysicalEntity =
-    options?.classification_category !== "salary_payroll" &&
+  const isPhysicalEntity = overrides?.is_physical_entity ??
+    (options?.classification_category !== "salary_payroll" &&
     !fields.supplier_reg_code &&
     !fields.supplier_vat_no &&
-    looksLikePersonCounterparty(normalizeCounterpartyName(clientName), clientName);
+    looksLikePersonCounterparty(normalizeCounterpartyName(clientName), clientName));
 
   const previewClient: Partial<Client> = {
     name: clientName,

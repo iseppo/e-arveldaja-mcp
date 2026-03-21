@@ -17,6 +17,7 @@ import {
 } from "../invoice-extraction-fallback.js";
 import {
   type BookingSuggestion,
+  type ClassificationApplyMode,
   type ExtractedReceiptFields,
   type InvoiceSummaryForMatching,
   type ReceiptClassification,
@@ -30,6 +31,8 @@ import {
   deriveAutoBookedNetAmount,
   deriveAutoBookedVatPrice,
   extractReceiptFieldsFromText,
+  findAccountByKeywords,
+  findPurchaseArticleByKeywords,
   getAutoBookedVatConfig,
   hasAutoBookableReceiptFields,
   inferSupplierCountry,
@@ -91,7 +94,6 @@ type ReceiptBatchStatus =
   | "needs_review"
   | "failed"
   | "dry_run_preview";
-type ClassificationApplyMode = "purchase_invoice" | "review_only";
 
 interface ReceiptFileInfo {
   name: string;
@@ -309,27 +311,6 @@ function groupTransactionsByCounterparty(transactions: Transaction[]): Transacti
   return [...groups.values()].sort((a, b) => a.display_counterparty.localeCompare(b.display_counterparty));
 }
 
-function findAccountByKeywords(accounts: Account[], keywords: string[]): Account | undefined {
-  const loweredKeywords = keywords.map(keyword => keyword.toLowerCase());
-  return accounts.find(account => {
-    const text = `${account.name_est} ${account.name_eng} ${account.account_type_est} ${account.account_type_eng}`.toLowerCase();
-    return loweredKeywords.some(keyword => text.includes(keyword));
-  });
-}
-
-function findPurchaseArticleByKeywords(
-  purchaseArticles: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
-  keywords: string[],
-): Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>[number] | undefined {
-  const loweredKeywords = keywords.map(keyword => keyword.toLowerCase());
-  return [...purchaseArticles]
-    .filter(article => !article.is_disabled)
-    .sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999))
-    .find(article => {
-      const text = `${article.name_est} ${article.name_eng}`.toLowerCase();
-      return loweredKeywords.some(keyword => text.includes(keyword));
-    });
-}
 
 function buildClassificationSuggestion(
   purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
@@ -762,14 +743,32 @@ async function resolveSupplierFromTransaction(
   });
 }
 
+function validateClassificationGroup(item: unknown, index: number): void {
+  if (!item || typeof item !== "object") {
+    throw new Error(`classifications_json[${index}] must be an object`);
+  }
+  const obj = item as Record<string, unknown>;
+  if (typeof obj.category !== "string") {
+    throw new Error(`classifications_json[${index}] missing required field "category"`);
+  }
+  if (!Array.isArray(obj.transactions)) {
+    throw new Error(`classifications_json[${index}] missing required field "transactions" (array)`);
+  }
+}
+
 function extractClassificationGroups(payload: unknown): ClassifiedTransactionGroupResult[] {
+  let groups: unknown[];
   if (Array.isArray(payload)) {
-    return payload as ClassifiedTransactionGroupResult[];
+    groups = payload;
+  } else if (payload && typeof payload === "object" && "groups" in payload && Array.isArray((payload as { groups?: unknown[] }).groups)) {
+    groups = (payload as { groups: unknown[] }).groups;
+  } else {
+    throw new Error("classifications_json must be a JSON array of groups or an object with a groups array");
   }
-  if (payload && typeof payload === "object" && "groups" in payload && Array.isArray((payload as { groups?: unknown[] }).groups)) {
-    return (payload as { groups: ClassifiedTransactionGroupResult[] }).groups;
+  for (let i = 0; i < groups.length; i++) {
+    validateClassificationGroup(groups[i], i);
   }
-  throw new Error("classifications_json must be a JSON array of groups or an object with a groups array");
+  return groups as ClassifiedTransactionGroupResult[];
 }
 
 // ---------------------------------------------------------------------------
