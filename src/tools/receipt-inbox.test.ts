@@ -13,10 +13,12 @@ import {
   getAutoBookedVatConfig,
   getAutoBookedVatRateDropdown,
   getClientCountryFromIban,
+  hasAutoBookableReceiptFields,
   hasRecurringSimilarAmounts,
   looksLikePersonCounterparty,
   normalizeDate,
   normalizeCounterpartyName,
+  scoreTransactionToInvoice,
 } from "./receipt-inbox.js";
 
 function makeTx(overrides: Partial<{
@@ -154,6 +156,30 @@ describe("extractAmounts", () => {
 
     expect(result.total_gross).toBe(47);
   });
+
+  it("prefers VAT-inclusive grand totals over earlier net-only total rows", () => {
+    const result = extractAmounts([
+      "Invoice no. 8579478-FI1123-335",
+      "Vattuniemenranta 4 B 13 00210 Helsinki",
+      "Title Sum (EUR) VAT 10% Total sum (EUR)",
+      "Trip Fee 13.73 1.37 15.10",
+      "Total (EUR): 13.73",
+      "VAT 10%: 1.37",
+      "Total including VAT (EUR): 15.10",
+    ].join("\n"));
+
+    expect(result).toEqual({
+      total_net: 13.73,
+      total_vat: 1.37,
+      total_gross: 15.1,
+    });
+  });
+
+  it("does not treat years on paid-amount lines as the gross total", () => {
+    const result = extractAmounts("Kuupäeval 25. nov 2024 makstud summa € 47");
+
+    expect(result.total_gross).toBe(47);
+  });
 });
 
 describe("detectReceiptCurrency", () => {
@@ -223,6 +249,14 @@ describe("extractInvoiceNumber", () => {
   it("does not treat section labels as invoice numbers", () => {
     expect(extractInvoiceNumber("Arve Saatja nimi\nArve/Tehingu nr UPMPCA26F6IB", "delfi.pdf")).toBe("UPMPCA26F6IB");
     expect(extractInvoiceNumber("Arve aadress:\nTellimuse number: E-H9J241K2", "ikea.pdf")).toBe("E-H9J241K2");
+  });
+
+  it("does not confuse registry-code labels with invoice numbers", () => {
+    expect(extractInvoiceNumber([
+      "Arve Saatja nimi Deli Meedia AS",
+      "Reg nr 10586863, KMKR EE100576146",
+      "Arve/Tehingu nr UPMPCA26F6IB",
+    ].join("\n"), "delfi.pdf")).toBe("UPMPCA26F6IB");
   });
 });
 
@@ -298,6 +332,24 @@ describe("classifyReceiptDocument", () => {
   });
 });
 
+describe("hasAutoBookableReceiptFields", () => {
+  it("requires a confident supplier invoice number for auto-booking", () => {
+    expect(hasAutoBookableReceiptFields({
+      supplier_name: "Runikon Retail OU",
+      invoice_number: "AUTO-20260320-E-9411L9KU",
+      invoice_date: "2021-03-12",
+      total_gross: 181.69,
+    })).toBe(false);
+
+    expect(hasAutoBookableReceiptFields({
+      supplier_name: "Runikon Retail OU",
+      invoice_number: "POS-23-081972",
+      invoice_date: "2023-06-30",
+      total_gross: 624.86,
+    })).toBe(true);
+  });
+});
+
 describe("getClientCountryFromIban", () => {
   it("maps foreign IBAN prefixes to e-arveldaja country codes", () => {
     expect(getClientCountryFromIban("IE29AIBK93115212345678")).toBe("IRL");
@@ -350,6 +402,46 @@ describe("deriveAutoBookedNetAmount", () => {
 
     expect(deriveAutoBookedNetAmount(100, vatConfig)).toBe(100);
     expect(deriveAutoBookedVatPrice(100, vatConfig)).toBe(0);
+  });
+});
+
+describe("scoreTransactionToInvoice", () => {
+  it("does not compare nominal amounts across different currencies without a base amount", () => {
+    const { confidence, reasons } = scoreTransactionToInvoice({
+      id: 1,
+      accounts_dimensions_id: 1,
+      type: "C",
+      amount: 10,
+      cl_currencies_id: "EUR",
+      date: "2024-10-01",
+    }, {
+      gross_price: 10,
+      cl_currencies_id: "USD",
+      create_date: "2024-10-01",
+    });
+
+    expect(confidence).toBe(20);
+    expect(reasons).toEqual(["date_within_3_days"]);
+  });
+
+  it("uses base amounts for foreign-currency invoice matching when available", () => {
+    const { confidence, reasons } = scoreTransactionToInvoice({
+      id: 1,
+      accounts_dimensions_id: 1,
+      type: "C",
+      amount: 9.23,
+      base_amount: 10.81,
+      cl_currencies_id: "EUR",
+      date: "2024-10-01",
+    }, {
+      gross_price: 10,
+      base_gross_price: 10.81,
+      cl_currencies_id: "USD",
+      create_date: "2024-10-01",
+    });
+
+    expect(confidence).toBe(70);
+    expect(reasons).toEqual(["exact_base_amount", "date_within_3_days"]);
   });
 });
 

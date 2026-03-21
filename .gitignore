@@ -8,3 +8,5 @@ dist/
 *.log
 *.js.map
 *.d.ts.map
+eng.traineddata
+est.traineddata

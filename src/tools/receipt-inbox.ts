@@ -16,7 +16,11 @@ import { type ApiContext, isCompanyVatRegistered, safeJsonParse } from "./crud-t
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, normalizeVatRate } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
-import { type InvoiceExtractionFallback, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+import {
+  type InvoiceExtractionFallback,
+  hasConfidentInvoiceNumber,
+  summarizeInvoiceExtraction,
+} from "../invoice-extraction-fallback.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -65,6 +69,8 @@ const RECEIPT_CURRENCY_PATTERNS = [
 ] as const;
 const PERSON_COUNTERPARTY_COMPANY_WORD_RE =
   /\b(limited|ltd|llc|inc|gmbh|ag|ab|oy|srl|bv|nv|sa|plc|ireland|operations|services|solutions|group|holding|capital|systems|technologies|media|digital|cloud|platform|company|corp|corporation)\b/i;
+const TEXTUAL_MONTH_VALUE_RE =
+  /\b(?:jaan(?:uar)?|jan(?:uary)?|veebr(?:uar)?|feb(?:ruary)?|märts|mar(?:ch)?|aprill|apr(?:il)?|mai|may|juuni|june?|juuli|july?|aug(?:ust)?|september|sept?|oktoober|okt|oct(?:ober)?|nov(?:ember)?|detsember|dets|dec(?:ember)?)\b/iu;
 const MONTH_NAME_TO_NUMBER: Record<string, number> = {
   jaan: 1,
   jaanuar: 1,
@@ -256,6 +262,7 @@ interface InvoiceSummaryForMatching {
   clients_id?: number;
   client_name?: string;
   number?: string;
+  cl_currencies_id?: string;
   gross_price?: number;
   base_gross_price?: number;
   create_date?: string;
@@ -330,6 +337,7 @@ interface ReceiptAmountCandidate {
   blocked_as_reference: boolean;
   has_currency_keyword: boolean;
   has_total_like_label: boolean;
+  likely_year_amount: boolean;
 }
 
 interface SupplierResolutionOptions {
@@ -467,6 +475,16 @@ function extractAmountsFromLine(line: string): number[] {
   return [...new Set(amounts)];
 }
 
+function isLikelyYearAmount(amount: number, line: string): boolean {
+  if (!Number.isInteger(amount) || amount < 1900 || amount > 2100) {
+    return false;
+  }
+
+  return /\b(?:date|kuupäev|issue\s*date|date\s*of\s*issue|date\s*paid|paid|makstud|sisseregistreerimine|väljaregistreerimine|check-?in|check-?out)\b/i.test(line) ||
+    /\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b/.test(line) ||
+    TEXTUAL_MONTH_VALUE_RE.test(line);
+}
+
 function roundToDecimals(value: number, decimals: number): number {
   if (!Number.isFinite(value)) return 0;
   return Number(value.toFixed(decimals));
@@ -493,12 +511,23 @@ function isDomesticClientCountry(country?: string | null): boolean {
 }
 
 function scoreReceiptAmountFallbackCandidate(candidate: ReceiptAmountCandidate): number {
-  return (candidate.has_total_like_label ? 4 : 0) + (candidate.has_currency_keyword ? 2 : 0);
+  return (candidate.has_total_like_label ? 4 : 0) +
+    (candidate.has_currency_keyword ? 2 : 0) -
+    (candidate.likely_year_amount ? 10 : 0);
+}
+
+function scoreExplicitGrossCandidate(line: string, hasCurrencyKeyword: boolean, hasTotalLikeLabel: boolean): number {
+  const lineLower = line.toLowerCase();
+  return (hasTotalLikeLabel ? 4 : 0) +
+    (hasCurrencyKeyword ? 2 : 0) +
+    (/\b(?:including|incl\.?|sisaldab)\b/i.test(line) ? 4 : 0) +
+    (/\b(?:grand total|amount due|payable|km-ga|charged|makstud summa|paid amount)\b/i.test(lineLower) ? 4 : 0) +
+    (RECEIPT_VAT_LABEL_RE.test(lineLower) ? 2 : 0);
 }
 
 function isVatAmountLine(line: string): boolean {
   const trimmed = line.trim();
-  return /^(?:käibemaks|vat|tax|km\b)/i.test(trimmed) ||
+  return /^(?:käibemaks\b|vat\b|tax\b|km\b)/i.test(trimmed) ||
     /\b(?:sisaldab|including|incl\.?)\b.*(?:käibemaks|vat|tax|km\b)/i.test(trimmed);
 }
 
@@ -708,14 +737,26 @@ export function extractSupplierName(text: string, fallbackFileName: string): str
 }
 
 export function extractInvoiceNumber(text: string, fileName: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map(clampTextLine)
+    .filter(Boolean);
   const invoiceNumberPatterns = [
-    /(?:arve(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?))[:#\s.-]*([A-Z0-9/_-]{3,})/i,
+    /(?:arve(?:\/tehingu)?(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?)|tellimuse\s*number|order\s*number|booking\s*(?:number|no\.?)|pileti\s*nr)[:#\s.-]*([A-Z0-9/_-]{3,})/i,
     /\b(?:invoice|arve(?:-saateleht)?|receipt)\s+(?!date\b|number\b|nr\b|no\.?\b)([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b/i,
-    /(?:number|nr)[:#\s-]*([A-Z0-9/_-]{3,})/i,
   ];
 
   for (const pattern of invoiceNumberPatterns) {
     const match = text.match(pattern);
+    const candidate = match?.[1]?.trim();
+    if (candidate) return candidate;
+  }
+
+  for (const line of lines) {
+    if (/\b(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id)\b/i.test(line)) {
+      continue;
+    }
+    const match = line.match(/(?:number|nr|no\.?)[:#\s-]*([A-Z0-9/_-]{3,})/i);
     const candidate = match?.[1]?.trim();
     if (candidate) return candidate;
   }
@@ -768,6 +809,7 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
   let totalNet: number | undefined;
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
   const componentAmounts: number[] = [];
+  let bestExplicitGrossCandidate: { amount: number; score: number } | undefined;
   const hasExplicitVatLine = lines.some(line =>
     isVatAmountLine(line) &&
     !RECEIPT_REFERENCE_LINE_RE.test(line) &&
@@ -784,7 +826,8 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower);
     const hasNetLikeLabel = RECEIPT_NET_LABEL_RE.test(lineLower);
     const hasVatAmountLabel = isVatAmountLine(line);
-    const filteredAmounts = amounts.filter(amount =>
+    const deDatedAmounts = amounts.filter(amount => !isLikelyYearAmount(amount, line));
+    const filteredAmounts = (deDatedAmounts.length > 0 ? deDatedAmounts : amounts).filter(amount =>
       !(Number.isInteger(amount) && amount >= 1000 && !hasCurrencyKeyword && !hasTotalLikeLabel),
     );
     if (filteredAmounts.length === 0) {
@@ -803,14 +846,17 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
       blocked_as_reference: blockedAsReference,
       has_currency_keyword: hasCurrencyKeyword,
       has_total_like_label: hasTotalLikeLabel,
+      likely_year_amount: isLikelyYearAmount(amount, line),
     })));
 
     if (
-      totalGross === undefined &&
       !blockedAsReference &&
       hasTotalLikeLabel
     ) {
-      totalGross = pickedGross;
+      const score = scoreExplicitGrossCandidate(line, hasCurrencyKeyword, hasTotalLikeLabel);
+      if (!bestExplicitGrossCandidate || score > bestExplicitGrossCandidate.score || (score === bestExplicitGrossCandidate.score && pickedGross > bestExplicitGrossCandidate.amount)) {
+        bestExplicitGrossCandidate = { amount: pickedGross, score };
+      }
     }
 
     if (
@@ -837,6 +883,10 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     ) {
       componentAmounts.push(pickedGross);
     }
+  }
+
+  if (bestExplicitGrossCandidate) {
+    totalGross = bestExplicitGrossCandidate.amount;
   }
 
   if (totalGross === undefined) {
@@ -1457,19 +1507,24 @@ async function suggestBookingInternal(
   );
 }
 
-function scoreTransactionToInvoice(tx: Transaction, invoice: InvoiceSummaryForMatching): { confidence: number; reasons: string[] } {
+export function scoreTransactionToInvoice(tx: Transaction, invoice: InvoiceSummaryForMatching): { confidence: number; reasons: string[] } {
   let confidence = 0;
   const reasons: string[] = [];
   const invoiceAmount = invoice.gross_price ?? 0;
   const txAmount = tx.amount;
+  const txBaseAmount = tx.base_amount;
+  const invoiceBaseAmount = invoice.base_gross_price;
+  const invoiceCurrency = invoice.cl_currencies_id?.trim().toUpperCase();
+  const txCurrency = tx.cl_currencies_id?.trim().toUpperCase();
+  const canCompareNominalAmounts = !invoiceCurrency || !txCurrency || invoiceCurrency === txCurrency;
 
-  if (Math.abs(txAmount - invoiceAmount) < 0.01) {
+  if (canCompareNominalAmounts && Math.abs(txAmount - invoiceAmount) < 0.01) {
     confidence += 50;
     reasons.push("exact_amount");
-  } else if (Math.abs((tx.base_amount ?? txAmount) - (invoice.base_gross_price ?? invoiceAmount)) < 0.01) {
+  } else if (txBaseAmount !== undefined && invoiceBaseAmount !== undefined && Math.abs(txBaseAmount - invoiceBaseAmount) < 0.01) {
     confidence += 50;
     reasons.push("exact_base_amount");
-  } else if (Math.abs(txAmount - invoiceAmount) <= 1) {
+  } else if (canCompareNominalAmounts && Math.abs(txAmount - invoiceAmount) <= 1) {
     confidence += 20;
     reasons.push("close_amount");
   }
@@ -1721,6 +1776,17 @@ export function extractReceiptFieldsFromText(text: string, fileName: string): Ex
   };
 }
 
+export function hasAutoBookableReceiptFields(
+  extracted: Pick<ExtractedReceiptFields, "supplier_name" | "invoice_number" | "invoice_date" | "total_gross">,
+): boolean {
+  return Boolean(
+    extracted.supplier_name &&
+    extracted.invoice_date &&
+    extracted.total_gross !== undefined &&
+    hasConfidentInvoiceNumber(extracted.invoice_number),
+  );
+}
+
 async function extractReceiptFields(file: ReceiptFileInfo): Promise<ExtractedReceiptFields> {
   const parsedDocument = await parseDocument(file.path);
   return extractReceiptFieldsFromText(parsedDocument.text, file.name);
@@ -1750,6 +1816,10 @@ async function createAndMaybeMatchPurchaseInvoice(
     notes.push("Supplier resolution did not return a concrete client ID.");
     return { notes, status: "needs_review" };
   }
+  if (!hasConfidentInvoiceNumber(extracted.invoice_number)) {
+    notes.push("Missing a confident supplier invoice number required for auto-booking.");
+    return { notes, status: "needs_review" };
+  }
 
   const itemNetAmount = extracted.total_net
     ?? (extracted.total_gross !== undefined && extracted.total_vat !== undefined
@@ -1772,14 +1842,16 @@ async function createAndMaybeMatchPurchaseInvoice(
   const invoiceDraft: InvoiceSummaryForMatching = {
     clients_id: supplierId,
     client_name: supplierName,
+    cl_currencies_id: invoiceCurrency,
     number: extracted.invoice_number,
     create_date: extracted.invoice_date,
     gross_price: extracted.total_gross,
     bank_ref_number: extracted.ref_number,
   };
 
-  const candidate = findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds);
-  const canAutoLink = candidate !== undefined && candidate.confidence >= EXACT_MATCH_THRESHOLD;
+  const candidate = execute
+    ? undefined
+    : findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds);
 
   if (invoiceCurrency !== "EUR") {
     notes.push(`Detected non-EUR receipt currency ${invoiceCurrency}; invoice will use the source currency amount.`);
@@ -1788,6 +1860,8 @@ async function createAndMaybeMatchPurchaseInvoice(
   if (!execute) {
     if (candidate) {
       notes.push(`Dry run: matched candidate transaction ${candidate.transaction_id} at confidence ${candidate.confidence}.`);
+    } else if (invoiceCurrency !== "EUR") {
+      notes.push("Dry run: non-EUR bank matching is conservative until the created invoice exposes base_gross_price.");
     }
     return {
       notes,
@@ -1841,18 +1915,31 @@ async function createAndMaybeMatchPurchaseInvoice(
     notes.push("Confirmed created purchase invoice for booking and bank matching.");
   }
 
+  const matchedInvoice: InvoiceSummaryForMatching = {
+    id: createdInvoice.id,
+    clients_id: createdInvoice.clients_id,
+    client_name: createdInvoice.client_name,
+    cl_currencies_id: createdInvoice.cl_currencies_id,
+    number: createdInvoice.number,
+    create_date: createdInvoice.create_date,
+    gross_price: createdInvoice.gross_price,
+    base_gross_price: createdInvoice.base_gross_price,
+    bank_ref_number: createdInvoice.bank_ref_number,
+  };
+  const matchedCandidate = findBestTransactionMatch(bankTransactions, matchedInvoice, consumedTransactionIds);
+  const canAutoLink = matchedCandidate !== undefined && matchedCandidate.confidence >= EXACT_MATCH_THRESHOLD;
   let linked = false;
-  if (createdInvoice.id && candidate && canAutoLink) {
-    await api.transactions.confirm(candidate.transaction_id, [{
+  if (createdInvoice.id && matchedCandidate && canAutoLink) {
+    await api.transactions.confirm(matchedCandidate.transaction_id, [{
       related_table: "purchase_invoices",
       related_id: createdInvoice.id,
-      amount: candidate.amount,
+      amount: matchedCandidate.amount,
     }]);
-    consumedTransactionIds.add(candidate.transaction_id);
+    consumedTransactionIds.add(matchedCandidate.transaction_id);
     linked = true;
-    notes.push(`Linked transaction ${candidate.transaction_id} to purchase invoice ${createdInvoice.id}.`);
-  } else if (candidate) {
-    notes.push(`Found transaction candidate ${candidate.transaction_id}, but confidence ${candidate.confidence} was below auto-link threshold ${EXACT_MATCH_THRESHOLD}.`);
+    notes.push(`Linked transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}.`);
+  } else if (matchedCandidate) {
+    notes.push(`Found transaction candidate ${matchedCandidate.transaction_id}, but confidence ${matchedCandidate.confidence} was below auto-link threshold ${EXACT_MATCH_THRESHOLD}.`);
   }
 
   context.purchaseInvoices.push(createdInvoice);
@@ -1867,10 +1954,10 @@ async function createAndMaybeMatchPurchaseInvoice(
       confirmed: true,
       uploaded_document: uploadedDocument,
     },
-    bank_match: candidate ? {
-      candidate,
+    bank_match: matchedCandidate ? {
+      candidate: matchedCandidate,
       linked,
-      confirmed_transaction_id: linked ? candidate.transaction_id : undefined,
+      confirmed_transaction_id: linked ? matchedCandidate.transaction_id : undefined,
     } : undefined,
   };
 }
@@ -2038,8 +2125,8 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             continue;
           }
 
-          if (!extracted.supplier_name || !extracted.invoice_date || extracted.total_gross === undefined) {
-            notes.push("Missing supplier name, invoice date, or gross total required for auto-booking.");
+          if (!hasAutoBookableReceiptFields(extracted)) {
+            notes.push("Missing supplier name, confident invoice number, invoice date, or gross total required for auto-booking.");
             maybeAddLlmFallbackNote(notes, llmFallback);
             results.push({
               file,
@@ -2074,7 +2161,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           }
 
           const bookingSuggestion = resolvedClientId
-            ? await suggestBookingInternal(api, context, resolvedClientId, extracted.description ?? extracted.supplier_name)
+            ? await suggestBookingInternal(api, context, resolvedClientId, extracted.description ?? extracted.supplier_name ?? "Receipt expense")
             : buildKeywordSuggestion(
               context.purchaseArticlesWithVat,
               context.accounts,
