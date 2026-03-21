@@ -2,11 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
-import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import type { Account, Journal, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
 
-interface AccountBalance {
+export interface AccountBalance {
   account_id: number;
   name_est: string;
   name_eng: string;
@@ -20,10 +20,16 @@ interface AccountBalance {
 export async function computeAllBalances(
   api: ApiContext,
   dateFrom?: string,
-  dateTo?: string
+  dateTo?: string,
+  options?: {
+    preloadedAccounts?: Account[];
+    preloadedJournals?: Journal[];
+    journalFilter?: (journal: Journal) => boolean;
+  },
 ): Promise<AccountBalance[]> {
-  const accounts = await api.readonly.getAccounts();
-  const allJournals = await api.journals.listAllWithPostings();
+  const accounts = options?.preloadedAccounts ?? await api.readonly.getAccounts();
+  const allJournals = options?.preloadedJournals ?? await api.journals.listAllWithPostings();
+  const journalFilter = options?.journalFilter;
 
   const balances = new Map<number, { debit: number; credit: number }>();
 
@@ -32,6 +38,7 @@ export async function computeAllBalances(
     if (!journal.registered) continue;
     if (dateFrom && journal.effective_date < dateFrom) continue;
     if (dateTo && journal.effective_date > dateTo) continue;
+    if (journalFilter && !journalFilter(journal)) continue;
 
     if (!journal.postings) continue;
 

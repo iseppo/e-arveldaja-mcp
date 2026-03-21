@@ -3,13 +3,12 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Account, Client, Journal, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
-import { computeAllBalances } from "./financial-statements.js";
+import { computeAllBalances, type AccountBalance } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 
-type AccountBalance = Awaited<ReturnType<typeof computeAllBalances>>[number];
 type PostingType = "D" | "C";
 type CashFlowClass = "operating" | "investing" | "financing" | "unclassified";
 
@@ -322,63 +321,6 @@ function findExistingYearEndCloseJournals(allJournals: Journal[], year: number):
     const title = journal.title?.toLowerCase() ?? "";
     return titleNeedles.some((needle) => title.includes(needle));
   });
-}
-
-function computeBalancesFromLoadedJournals(
-  accounts: Account[],
-  allJournals: Journal[],
-  dateFrom?: string,
-  dateTo?: string,
-  includeJournal: (journal: Journal) => boolean = () => true,
-): AccountBalance[] {
-  const balances = new Map<number, { debit: number; credit: number }>();
-
-  for (const journal of allJournals) {
-    if (journal.is_deleted || !journal.registered) continue;
-    if (dateFrom && journal.effective_date < dateFrom) continue;
-    if (dateTo && journal.effective_date > dateTo) continue;
-    if (!includeJournal(journal)) continue;
-    if (!journal.postings) continue;
-
-    for (const posting of journal.postings) {
-      if (posting.is_deleted) continue;
-      if (posting.type !== "D" && posting.type !== "C") continue;
-
-      const amount = posting.base_amount ?? posting.amount;
-      const entry = balances.get(posting.accounts_id) ?? { debit: 0, credit: 0 };
-
-      if (posting.type === "D") entry.debit += amount;
-      else entry.credit += amount;
-
-      balances.set(posting.accounts_id, entry);
-    }
-  }
-
-  const result: AccountBalance[] = [];
-  for (const account of accounts) {
-    const entry = balances.get(account.id);
-    if (!entry) continue;
-
-    const balance = account.balance_type === "D"
-      ? entry.debit - entry.credit
-      : entry.credit - entry.debit;
-
-    if (Math.abs(balance) < 0.005 && entry.debit === 0 && entry.credit === 0) continue;
-
-    result.push({
-      account_id: account.id,
-      name_est: account.name_est,
-      name_eng: account.name_eng,
-      balance_type: account.balance_type,
-      account_type_est: account.account_type_est,
-      debit_total: roundMoney(entry.debit),
-      credit_total: roundMoney(entry.credit),
-      balance: roundMoney(balance),
-    });
-  }
-
-  result.sort((a, b) => a.account_id - b.account_id);
-  return result;
 }
 
 function buildBalanceLine(balance: AccountBalance): StatementLine {
@@ -705,15 +647,15 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     api.journals.listAllWithPostings(),
   ]);
 
-  const yearEndBalances = computeBalancesFromLoadedJournals(accounts, allJournals, undefined, to);
-  const priorYearEndBalances = computeBalancesFromLoadedJournals(accounts, allJournals, undefined, priorTo);
-  const yearProfitAndLossBalances = computeBalancesFromLoadedJournals(
-    accounts,
-    allJournals,
-    from,
-    to,
-    (journal) => !isYearEndClosingJournal(journal),
-  );
+  const preloaded = { preloadedAccounts: accounts, preloadedJournals: allJournals };
+  const [yearEndBalances, priorYearEndBalances, yearProfitAndLossBalances] = await Promise.all([
+    computeAllBalances(api, undefined, to, preloaded),
+    computeAllBalances(api, undefined, priorTo, preloaded),
+    computeAllBalances(api, from, to, {
+      ...preloaded,
+      journalFilter: (journal) => !isYearEndClosingJournal(journal),
+    }),
+  ]);
 
   const accountsById = new Map(accounts.map((account) => [account.id, account]));
   const warnings: string[] = [];

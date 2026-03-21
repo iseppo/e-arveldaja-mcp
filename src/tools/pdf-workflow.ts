@@ -12,7 +12,8 @@ import { readOnly, create, mutate } from "../annotations.js";
 import { parseDocument } from "../document-parser.js";
 import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
-import { extractReceiptFieldsFromText } from "./receipt-inbox.js";
+import { extractReceiptFieldsFromText } from "./receipt-extraction.js";
+import { fetchRegistryData } from "./supplier-resolution.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];
@@ -282,31 +283,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       }
 
       // 4. Try business registry lookup for Estonian registry codes
-      let registryData: Record<string, string> | null = null;
-      if (reg_code && (country ?? "EST") === "EST" && /^\d{8}$/.test(reg_code)) {
-        try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 10000);
-          const response = await fetch(
-            `https://ariregister.rik.ee/est/api/autocomplete?q=${encodeURIComponent(reg_code)}`,
-            { signal: controller.signal }
-          );
-          clearTimeout(timeout);
-          if (response.ok) {
-            const data = await response.json() as Array<Record<string, unknown>>;
-            if (data.length > 0) {
-              const entry = data[0];
-              registryData = {
-                name: String(entry.company_name ?? entry.nimi ?? name ?? ""),
-                reg_code: reg_code,
-                address: String(entry.address ?? entry.aadress ?? ""),
-              };
-            }
-          }
-        } catch {
-          // Registry lookup failed, continue
-        }
-      }
+      const registryData = await fetchRegistryData(reg_code, country ?? "EST", name);
 
       // 5. Create new client if requested
       if (auto_create) {

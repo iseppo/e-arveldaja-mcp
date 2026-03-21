@@ -75,7 +75,7 @@ export function getConfigSearchDirs(
   return toUniqueDirs(dirs);
 }
 
-function loadDotenvFiles(): void {
+export function loadDotenvFiles(): void {
   const loaded = new Set<string>();
 
   const loadFromDirs = (dirs: string[]): void => {
@@ -101,8 +101,6 @@ function loadDotenvFiles(): void {
     loadFromDirs(getConfigSearchDirs(true));
   }
 }
-
-loadDotenvFiles();
 
 function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string; password: string } | null {
   if (!existsSync(filePath)) return null;

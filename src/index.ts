@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { registerTool } from "./mcp-compat.js";
-import { loadAllConfigs, type NamedConfig } from "./config.js";
+import { loadDotenvFiles, loadAllConfigs, type NamedConfig } from "./config.js";
 import { toolExtraStorage } from "./progress.js";
 import { HttpClient } from "./http-client.js";
 import { ClientsApi } from "./api/clients.api.js";
@@ -118,6 +118,7 @@ function createScopedApiContext(
 }
 
 async function main() {
+  loadDotenvFiles();
   const allConfigs = loadAllConfigs();
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
   const invocationStorage = new AsyncLocalStorage<ConnectionSnapshot>();
