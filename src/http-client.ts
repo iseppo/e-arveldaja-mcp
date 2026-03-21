@@ -128,12 +128,11 @@ export class HttpClient {
           }
 
           if (response.status === 401) {
-            const publicIp = await HttpClient.getPublicIp();
             errorMessage += `\n\nTroubleshooting 401 Unauthorized:\n` +
               `  1. Is the API key downloaded and configured? Check apikey*.txt or environment variables.\n` +
-              `  2. Is this machine's IP address allowed in e-arveldaja API settings?\n` +
-              `     Your public IP: ${publicIp}\n` +
-              `  3. Add the IP above to: e-arveldaja → Seaded → API võtmed → Lubatud IP-aadressid\n` +
+              `  2. Is this machine's public IP address allowed in e-arveldaja API settings?\n` +
+              `     Find the current public IP locally (for example, open https://api.ipify.org in your browser) ` +
+              `and add it to: e-arveldaja → Seaded → API võtmed → Lubatud IP-aadressid\n` +
               `     Multiple IP addresses can be added, separated by ;`;
           }
 
@@ -163,21 +162,6 @@ export class HttpClient {
 
     throw new Error(`API request failed: ${method} ${path} → retries exhausted`);
   }
-
-  private static async getPublicIp(): Promise<string> {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5_000);
-      try {
-        const r = await fetch("https://api.ipify.org", { signal: controller.signal });
-        if (r.ok) return (await r.text()).trim();
-      } finally {
-        clearTimeout(timeoutId);
-      }
-    } catch { /* ignore */ }
-    return "(could not determine)";
-  }
-
   async get<T = unknown>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
     return this.request<T>(path, { params });
   }

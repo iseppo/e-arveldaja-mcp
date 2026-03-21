@@ -114,24 +114,22 @@ describe("HttpClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("preserves 401 troubleshooting with public IP disclosure", async () => {
+  it("keeps 401 troubleshooting local without extra outbound lookups", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ messages: ["Unauthorized"] }), {
         status: 401,
         headers: { "content-type": "application/json" },
-      }))
-      .mockResolvedValueOnce(new Response("203.0.113.42", { status: 200 }));
+      }));
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new HttpClient(config);
     const promise = client.get("/clients");
-    const expectation = expect(promise).rejects.toThrow(/Your public IP: 203\.0\.113\.42/);
+    const expectation = expect(promise).rejects.toThrow(/https:\/\/api\.ipify\.org/);
 
     await vi.runAllTimersAsync();
 
     await expectation;
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://api.ipify.org");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

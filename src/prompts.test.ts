@@ -1,10 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import { registerPrompts } from "./prompts.js";
+import { getProjectRoot } from "./paths.js";
 
 function setupPromptServer() {
   const server = { registerPrompt: vi.fn() } as any;
   registerPrompts(server);
   return server;
+}
+
+function readPromptSurface(relativePath: string): string {
+  return readFileSync(resolve(getProjectRoot(), relativePath), "utf8");
 }
 
 function getPromptText(
@@ -116,5 +123,40 @@ describe("registerPrompts", () => {
     expect(text).toContain("current accounting carrying value / cost basis");
     expect(text).toContain("Current portfolio carrying value / remaining cost basis");
     expect(text).not.toContain("Current portfolio value (from step 3)");
+  });
+
+  it("keeps shipped book-invoice markdown prompts aligned with MCP prompt safety rails", () => {
+    for (const relativePath of ["workflows/book-invoice.md", ".claude/commands/book-invoice.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("hints.raw_text");
+      expect(text).toContain("llm_fallback");
+      expect(text).toContain("source of truth");
+      expect(text).toContain("candidate_invoice_number_matches");
+      expect(text).toContain("auto_create: false");
+      expect(text).toContain("auto_create: true");
+      expect(text).not.toMatch(/Read tool|visually/i);
+      expect(text).not.toContain("Call `detect_duplicate_purchase_invoice` (no parameters needed)");
+    }
+  });
+
+  it("keeps shipped reconcile-bank markdown prompts aligned with distribution_ready handling", () => {
+    for (const relativePath of ["workflows/reconcile-bank.md", ".claude/commands/reconcile-bank.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("distribution_ready=false");
+      expect(text).toContain("match.distribution");
+      expect(text).toContain("prepare the distribution manually");
+      expect(text).not.toContain("Call `get_transaction`");
+    }
+  });
+
+  it("keeps shipped new-supplier markdown prompts duplicate-safe and registry-accurate", () => {
+    for (const relativePath of ["workflows/new-supplier.md", ".claude/commands/new-supplier.md"]) {
+      const text = readPromptSurface(relativePath);
+      const lower = text.toLowerCase();
+      expect(lower).toContain("do not create a duplicate");
+      expect(lower).toContain("name-only lookup does not");
+      expect(lower).toContain("does not fetch a vat number");
+      expect(text).not.toContain("create a new one anyway");
+    }
   });
 });

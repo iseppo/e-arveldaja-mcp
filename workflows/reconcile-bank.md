@@ -31,6 +31,8 @@ Show a summary grouped by confidence level:
 
 **LOW (<50):** Unlikely matches, shown for reference only.
 
+If `distribution_ready=false` or a partially paid warning is present, say clearly that no ready-to-use distribution is provided and the remaining open balance must be checked manually first.
+
 ## Step 3: Handle based on mode
 
 ### Auto mode
@@ -53,13 +55,18 @@ Show all matches. For each, ask user to confirm or skip.
 
 For approved matches, call `confirm_transaction`:
 - `id`: transaction ID
-- `distributions`: JSON string, e.g. `[{"related_table": "sale_invoices", "related_id": 123, "amount": 100.00}]`
+- `distributions`: `JSON.stringify([match.distribution])`
 
-Use `"sale_invoices"` for incoming payments (type D) and `"purchase_invoices"` for outgoing payments (type C).
+Only do this when `distribution_ready=true`.
+- If `distribution_ready=false` or the invoice is partially paid, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
+- Only confirm one explicitly approved match at a time; do not auto-confirm ambiguous transactions.
 
 ### Single transaction mode
 
-Call `get_transaction` with the ID. Show full details and its matches from step 1. Offer to confirm if a match exists.
+Call `reconcile_transactions` with `min_confidence: 0`, then filter the returned matches to the requested transaction ID.
+- If no match exists for that transaction, report that and stop.
+- If the user approves a match and `distribution_ready=true`, call `confirm_transaction` with `distributions: JSON.stringify([match.distribution])`.
+- If `distribution_ready=false`, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
 
 ## Step 4: Unmatched transactions
 

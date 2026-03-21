@@ -25,6 +25,8 @@ By using this software you acknowledge that:
 
 If you don't have a static IP address, you will need to update the allowed IP in e-arveldaja settings whenever your IP changes.
 
+If requests later start failing with `401 Unauthorized`, the most common cause is that your public IP changed and no longer matches the allowed IP list. Check the current public IP yourself in a browser (for example, `https://api.ipify.org`) and update the whitelist in e-arveldaja if needed.
+
 **Never commit the `apikey.txt` file to git.**
 
 For the demo server, set the environment variable `EARVELDAJA_SERVER=demo`.
@@ -149,11 +151,13 @@ The assistant will parse the ISO 20022 XML, create bank transactions with correc
 
 ### Import Wise bank transactions
 
-Download your Wise transaction history CSV (Account → Statements → CSV), then:
+Download the regular Wise transactions CSV from the Transactions view, then:
 
 > "Import my Wise transactions from transaction-history.csv into e-arveldaja"
 
-The assistant will parse the CSV, create bank transactions with correct amounts, and separate Wise fees into their own entries for proper expense accounting. Supports EUR and foreign currency card payments (USD etc.).
+The assistant will parse the CSV, create incoming and outgoing bank transactions from Wise's `Direction` field, and separate Wise fees into their own entries for proper expense accounting. Supports EUR and foreign currency card payments (USD etc.).
+
+For now, this expects the normal transactions CSV export from Wise Transactions, not the special statement/report exports under Statements or Reports. Wise support is still lightly tested; if you hit an import issue, please open an issue or report it.
 
 ### Generate financial reports
 

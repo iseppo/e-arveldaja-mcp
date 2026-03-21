@@ -196,4 +196,32 @@ describe("wise import tool", () => {
       { wise_id: "FEE:abc-4", reason: "Skipped because main transaction was not created" },
     ]));
   });
+
+  it("maps IN rows to incoming transactions and uses the source side as counterparty", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "abc-5", "COMPLETED", "IN", "2026-01-14 09:00:00", "2026-01-14 09:00:00",
+      "0", "EUR", "0", "EUR",
+      "Customer OU", "125", "EUR",
+      "Seppo AI OÜ", "125", "EUR",
+      "1", "PAY-5", "", "", "General", "",
+    ]));
+
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9005 });
+    const { api, handler } = setupWiseTool([], create);
+
+    await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_relation_id: 9,
+      execute: true,
+    });
+
+    expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
+      type: "D",
+      amount: 125,
+      bank_account_name: "Customer OU",
+      description: "WISE:abc-5 Customer OU",
+      ref_number: "PAY-5",
+    }));
+  });
 });

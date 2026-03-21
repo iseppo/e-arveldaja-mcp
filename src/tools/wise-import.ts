@@ -16,6 +16,7 @@ interface WiseRow {
   finishedOn: string;
   sourceFeeAmount: number;
   sourceFeeCurrency: string;
+  sourceName: string;
   sourceAmount: number;
   sourceCurrency: string;
   targetName: string;
@@ -62,6 +63,7 @@ function parseWiseCSV(csv: string): WiseRow[] {
       finishedOn: fields[idx("Finished on")] ?? "",
       sourceFeeAmount: parseFloat(fields[idx("Source fee amount")] || "0") || 0,
       sourceFeeCurrency: fields[idx("Source fee currency")] ?? "EUR",
+      sourceName: fields[idx("Source name")] ?? "",
       sourceAmount: parseFloat(fields[idx("Source amount (after fees)")] || "0") || 0,
       sourceCurrency: fields[idx("Source currency")] ?? "EUR",
       targetName: fields[idx("Target name")] ?? "",
@@ -80,6 +82,32 @@ function parseWiseCSV(csv: string): WiseRow[] {
 function wiseDate(dateStr: string): string {
   // "2026-01-19 17:59:56" → "2026-01-19"
   return dateStr.split(" ")[0] ?? dateStr;
+}
+
+function normalizeWiseDirection(direction: string): "IN" | "OUT" | "NEUTRAL" | undefined {
+  const normalized = direction.trim().toUpperCase();
+  if (normalized === "IN" || normalized === "OUT" || normalized === "NEUTRAL") {
+    return normalized;
+  }
+  return undefined;
+}
+
+function transactionTypeForWiseDirection(direction: string): "C" | "D" | undefined {
+  const normalized = normalizeWiseDirection(direction);
+  if (normalized === "IN") return "D";
+  if (normalized === "OUT") return "C";
+  return undefined;
+}
+
+function counterpartyNameForWiseRow(row: WiseRow): string | undefined {
+  const txType = transactionTypeForWiseDirection(row.direction);
+  if (txType === "D") {
+    return row.sourceName || row.targetName || undefined;
+  }
+  if (txType === "C") {
+    return row.targetName || row.sourceName || undefined;
+  }
+  return row.targetName || row.sourceName || undefined;
 }
 
 function normalizeWiseText(value?: string | null): string {
@@ -113,13 +141,14 @@ function buildWiseTransactionSignature(
 export function registerWiseImportTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "import_wise_transactions",
-    "Parse a Wise transaction history CSV and create bank transactions in e-arveldaja. " +
+    "Parse the regular Wise transactions CSV export and create bank transactions in e-arveldaja. " +
+    "Does not support the special statement/report CSV exports. " +
     "Skips REFUNDED, NEUTRAL, and zero-amount entries. " +
-    "All transactions use type C (e-arveldaja convention). " +
+    "Uses type D for incoming rows and type C for outgoing rows. " +
     "Wise fees are created as separate transactions (for correct VAT/expense treatment). " +
     "DRY RUN by default — set execute=true to actually create transactions.",
     {
-      file_path: z.string().describe("Absolute path to Wise transaction-history.csv"),
+      file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions"),
       accounts_dimensions_id: z.number().describe("Bank account dimension ID for the Wise account in e-arveldaja"),
       fee_account_relation_id: z.number().describe("Relation ID for fee account distribution (e.g. accounts_dimensions_id for 8610 Muud finantskulud). Use list_account_dimensions to find the correct ID."),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
@@ -147,7 +176,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       // Filter rows
       const eligible = rows.filter(r => {
         if (r.status !== "COMPLETED") return false;
-        if (r.direction === "NEUTRAL") return false;
+        if (normalizeWiseDirection(r.direction) === "NEUTRAL") return false;
         if (r.sourceAmount === 0 && r.targetAmount === 0) return false;
         const date = wiseDate(r.finishedOn || r.createdOn);
         if (date_from && date < date_from) return false;
@@ -189,27 +218,37 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         const row = eligible[i]!;
         await reportProgress(i, totalEligible);
         const date = wiseDate(row.finishedOn || row.createdOn);
-        const type = "C"; // e-arveldaja uses type C for all bank transactions
+        const type = transactionTypeForWiseDirection(row.direction);
+        if (!type) {
+          skipped.push({ wise_id: row.id, reason: `Unsupported Wise direction "${row.direction}"` });
+          continue;
+        }
         const amount = row.sourceAmount;
         const fee = row.sourceFeeAmount;
         const wiseIdTag = `WISE:${row.id}`;
+        const counterpartyName = counterpartyNameForWiseRow(row);
 
         // Build description
         let desc = wiseIdTag;
-        if (row.targetName) desc += ` ${row.targetName}`;
+        if (counterpartyName) desc += ` ${counterpartyName}`;
         if (row.category && row.category !== "General") desc += ` (${row.category})`;
         if (row.targetCurrency !== "EUR" && row.targetCurrency !== row.sourceCurrency) {
           desc += ` [${row.targetAmount} ${row.targetCurrency} @ ${row.exchangeRate}]`;
         }
         const legacyDesc = stripWisePrefix(desc);
-        const mainSignature = buildWiseTransactionSignature(
-          date,
-          amount,
-          row.targetName || undefined,
-          row.reference || undefined,
-          legacyDesc,
+        const mainSignatureCandidates = new Set(
+          [counterpartyName, row.targetName || undefined, row.sourceName || undefined]
+            .filter((name): name is string => Boolean(name))
+            .map((name) => buildWiseTransactionSignature(
+              date,
+              amount,
+              name,
+              row.reference || undefined,
+              legacyDesc,
+            ))
         );
-        const mainAlreadyImported = seenWiseIds.has(wiseIdTag) || existingSignatures.has(mainSignature);
+        const mainAlreadyImported = seenWiseIds.has(wiseIdTag) ||
+          [...mainSignatureCandidates].some(signature => existingSignatures.has(signature));
         let mainAvailableForFee = false;
 
         if (mainAlreadyImported) {
@@ -231,7 +270,9 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               status: "would_create",
             });
             seenWiseIds.add(wiseIdTag);
-            existingSignatures.add(mainSignature);
+            for (const signature of mainSignatureCandidates) {
+              existingSignatures.add(signature);
+            }
             mainAvailableForFee = true;
           } else {
             try {
@@ -242,7 +283,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 cl_currencies_id: "EUR",
                 date,
                 description: desc,
-                bank_account_name: row.targetName || undefined,
+                bank_account_name: counterpartyName,
                 ref_number: row.reference || undefined,
               });
               created.push({
@@ -255,7 +296,9 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 api_id: result.created_object_id,
               });
               seenWiseIds.add(wiseIdTag);
-              existingSignatures.add(mainSignature);
+              for (const signature of mainSignatureCandidates) {
+                existingSignatures.add(signature);
+              }
               mainAvailableForFee = true;
             } catch (err: unknown) {
               skipped.push({ wise_id: row.id, reason: err instanceof Error ? err.message : String(err) });

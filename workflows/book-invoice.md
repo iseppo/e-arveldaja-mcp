@@ -1,132 +1,123 @@
 # Book Purchase Invoice from PDF
 
-Read a PDF invoice, extract data, find or create the supplier, create the purchase invoice, upload the PDF, and confirm.
+Book a purchase invoice from a source document. Extract the data, validate it, resolve the supplier safely, check duplicate risk, create the invoice, upload the document, and confirm it.
 
-**Input:** Absolute file path to the PDF invoice.
+**Input:** Absolute path to the invoice document (`.pdf`, `.jpg`, `.jpeg`, `.png`).
 
-## Step 1: Extract text from the PDF
+## Step 1: Extract the document text
 
 Call `extract_pdf_invoice`:
-- `file_path`: absolute path to the PDF
+- `file_path`: absolute path to the invoice document
 
-The tool returns `hints` with regex-detected IBAN, registry code, VAT number, and reference number.
+Use `hints.raw_text` as the source of truth for the whole document.
+- If `llm_fallback.recommended=true` or any identifier hint is missing, continue from `hints.raw_text` manually.
+- Do not stop just because the regex identifier hints are incomplete.
 
-Also read the PDF visually and extract:
-- Supplier name and registry code (registrikood, 8 digits)
-- Supplier VAT number (KMKR, starts with EE)
+Extract all of the following from `hints.raw_text`:
+- Supplier name and address
+- Supplier registry code (if present)
+- Supplier VAT number (if present)
 - Invoice number
-- Invoice date (YYYY-MM-DD)
-- Due date or payment term in days
-- Reference number (viitenumber) if present
+- Invoice date and due date in `YYYY-MM-DD`
+- Net amount, VAT amount, gross total
+- Line items: description, quantity, unit price, VAT rate, net amount per line
 - Supplier IBAN
-- Line items: description, quantity, unit price, net total, VAT rate
-- Invoice totals: net (without VAT), VAT amount, gross (with VAT)
+- Payment reference number
 
-Cross-check visually extracted values against the tool's hints.
-
-## Step 2: Validate the numbers
+## Step 2: Validate the totals
 
 Call `validate_invoice_data`:
-- `total_net`: invoice net total
-- `total_vat`: invoice VAT total
-- `total_gross`: invoice gross total
-- `items`: JSON array of items, each with `total_net_price` and `vat_rate_dropdown` (e.g. `"24"`, `"22"`, `"9"`, `"0"`, or `"-"`)
-- `invoice_date`: YYYY-MM-DD
-- `due_date`: YYYY-MM-DD (if available)
+- `total_net`: extracted net total
+- `total_vat`: extracted VAT total
+- `total_gross`: extracted gross total
+- `items`: JSON array of extracted line items
+- `invoice_date`: extracted invoice date
+- `due_date`: extracted due date (if available)
 
-Do NOT proceed until the result shows `valid: true`. If errors are returned, re-check the extracted values.
+If validation returns `valid=false` or any errors, stop and ask the user to review the extraction before creating anything.
 
-## Step 3: Check for duplicates
-
-Call `detect_duplicate_purchase_invoice` (no parameters needed).
-
-If a duplicate is found with the same supplier and invoice number, STOP and inform the user.
-
-## Step 4: Resolve the supplier
+## Step 3: Resolve the supplier without creating duplicates
 
 Call `resolve_supplier`:
 - `name`: supplier name
 - `reg_code`: registry code (if found)
 - `vat_no`: VAT number (if found)
 - `iban`: IBAN (if found)
-- `auto_create`: `true` (creates the client if not found)
+- `auto_create: false`
 
-Note the returned client ID.
+This either returns an existing supplier match or registry data for a possible new supplier.
 
-If the supplier was found (not created) and the invoice has an IBAN or VAT number missing from the existing client record, call `update_client` to add it:
-- `id`: client ID
-- `data`: JSON with fields to update, e.g. `{"bank_account_no": "EE...", "invoice_vat_no": "EE..."}`
+## Step 4: Check duplicate risk before creating anything
 
-## Step 5: Look up booking suggestions
+Call `detect_duplicate_purchase_invoice` with:
+- `date_from`: invoice date
+- `date_to`: invoice date
+- `invoice_number`: extracted invoice number
+- `gross_price`: extracted gross total
+- `clients_id`: resolved client ID if step 3 returned `found=true`
+
+Inspect `candidate_invoice_number_matches` and `candidate_same_amount_date_matches` first.
+- Also review `exact_duplicates` and `suspicious_same_amount_date` as warning context.
+- If a candidate looks like the same invoice, stop and report it before creating anything.
+
+## Step 5: Ensure the supplier client exists
+
+- If step 3 returned `found=true`, use `client.id` as `supplier_client_id`.
+- Otherwise call `resolve_supplier` again with the same identifiers and `auto_create: true`.
+- Use `api_response.created_object_id` as `supplier_client_id`. If no client ID is returned, stop and report the failure.
+
+## Step 6: Reuse the best booking setup
 
 Call `suggest_booking`:
 - `clients_id`: supplier client ID
-- `description`: first line item description (helps find similar past invoices)
+- `description`: first line item description
 
-Use the returned past invoice data to determine:
-- Which `cl_purchase_articles_id` to use
-- Which `purchase_accounts_id` (expense account) to use
+Review `past_invoices` and reuse the most relevant:
+- `cl_purchase_articles_id`
+- `purchase_accounts_id`
+- VAT fields such as `vat_rate_dropdown`, `vat_accounts_id`, `cl_vat_articles_id`, `reversed_vat_id`
 
-If no past invoices exist, call `list_purchase_articles` and choose the most appropriate article. Common expense articles:
+If there is no suitable history, call `list_purchase_articles` or ask the user instead of inventing IDs.
 
-| ID | Name | Account | Typical use |
-|----|------|---------|-------------|
-| 35 | Üür ja rent / Leases | 5020 | Office rent, coworking |
-| 37 | Bürookulud / Office expenses | 5040 | General office |
-| 45 | Internet | 5230 | Internet, subscriptions |
-| 49 | Konsultatsioon / Consultation | 5340 | Consulting fees |
-| 62 | Muud tegevuskulud / Other operating | 5990 | Catch-all |
+## Step 7: Determine VAT treatment
 
-## Step 5b: Determine reverse charge VAT (pöördkäibemaks)
+- For normal domestic invoices, keep the VAT treatment shown on the document.
+- Reverse charge applies when the supplier is foreign and the invoice is for services rather than goods.
+- If reverse charge applies, set `reversed_vat_id: 1` on the affected lines.
 
-ALWAYS check if reverse charge applies. Set `reversed_vat_id: 1` on items when:
-- Supplier is **outside Estonia** (EU or non-EU) AND provides services
-- Invoice mentions "reverse charge", "Article 196", "pöördkäibemaks", or has 0% VAT with a foreign supplier
-- Supplier country is NOT Estonia (check `cl_code_country`, VAT number prefix, or address)
-
-When reverse charge applies:
-- `vat_rate_dropdown`: `"0"`
-- `reversed_vat_id`: `1`
-
-When supplier is Estonian with regular VAT:
-- `vat_rate_dropdown`: the VAT rate (e.g. `"24"`)
-- `reversed_vat_id`: do not set
-
-## Step 6: Create the purchase invoice
+## Step 8: Create the purchase invoice
 
 Call `create_purchase_invoice_from_pdf`:
-- `supplier_client_id`: from step 4
-- `invoice_number`: from the PDF
-- `invoice_date`: YYYY-MM-DD
-- `journal_date`: same as invoice_date
-- `term_days`: calculated from due date, or `0` if already paid
-- `items`: JSON array where each item has:
-  - `custom_title`: description from PDF
-  - `cl_purchase_articles_id`: from step 5
-  - `purchase_accounts_id`: from step 5
-  - `total_net_price`: net amount
-  - `vat_rate_dropdown`: VAT rate as string (e.g. `"24"`, or `"0"` for reverse charge)
-  - `reversed_vat_id`: `1` if reverse charge applies (see step 5b)
-  - `amount`: quantity
-- `vat_price`: **EXACT** total VAT from the original invoice
-- `gross_price`: **EXACT** total gross from the original invoice
-- `ref_number`: reference number (if found)
-- `bank_account_no`: supplier IBAN (spaces removed)
-- `notes`: PDF filename
+- `supplier_client_id`
+- `invoice_number`
+- `invoice_date`
+- `journal_date`
+- `term_days`
+- `items`: JSON array with `cl_purchase_articles_id`, `purchase_accounts_id`, quantities, totals, VAT fields, `vat_accounts_id`, `cl_vat_articles_id`, and `reversed_vat_id` when applicable
+- `vat_price`: exact value from the invoice
+- `gross_price`: exact value from the invoice
+- `ref_number`
+- `bank_account_no`
+- `notes`: source filename and any assumptions
 
-## Step 7: Upload the PDF
+Use the exact `vat_price` and `gross_price` from the invoice. Do not recalculate them.
+
+## Step 9: Upload and confirm
 
 Call `upload_invoice_document`:
-- `invoice_id`: the ID returned from step 6
-- `file_path`: the original PDF path
-
-## Step 8: Confirm the invoice
+- `invoice_id`: the invoice ID returned from step 8
+- `file_path`: the original file path
 
 Call `confirm_purchase_invoice`:
-- `id`: the invoice ID
+- `id`: the invoice ID from step 8
 
-This is irreversible. The tool automatically fixes `vat_price`/`gross_price` if inconsistent.
+## Step 10: Report the result
 
-## Step 9: Summary
-
-Report: invoice number, supplier name, net/VAT/gross amounts, expense account used, invoice ID, whether supplier was newly created or found, confirmation status.
+Report:
+- Supplier name and supplier client ID
+- Invoice number, date, due date
+- Net / VAT / gross amounts
+- Booking basis used
+- Whether reverse charge was applied
+- Any validation warnings or assumptions
+- Invoice ID and confirmation status
