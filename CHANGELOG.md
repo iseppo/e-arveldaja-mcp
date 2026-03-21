@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.1] - 2026-03-21
+
+### Changed
+- **README improvements**:
+  - Added batch receipt processing usage example
+  - Added CAMT.053 bank statement import usage example (LHV, Swedbank, SEB, Coop, Luminor)
+  - Added Estonian tax tools usage examples (dividends, owner expense reimbursement)
+  - Added "Good to know" section: dry-run defaults, 200-page pagination limit, caching behavior, EUR default, multi-company switching
+  - Added privacy note clarifying that local OCR is used but extracted text flows through the connected LLM
+
 ## [0.8.0] - 2026-03-21
 
 ### Added
