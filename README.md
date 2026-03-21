@@ -177,7 +177,7 @@ The assistant will compute the 22/78 corporate income tax, check retained earnin
 
 ## Privacy
 
-All document processing (PDF, JPG, PNG) happens locally using built-in OCR. No invoice data is sent to external services. The only outbound connections are to the e-arveldaja API (`rmp-api.rik.ee`) and optionally the Estonian Business Registry (`ariregister.rik.ee`) for supplier lookups.
+Document parsing (PDF, JPG, PNG) uses built-in local OCR — no external OCR service is involved. However, the extracted text is returned to your AI assistant via the MCP protocol, so it will be processed by whichever LLM you are using (Claude, Codex, Gemini, etc.). The server's own outbound connections are limited to the e-arveldaja API (`rmp-api.rik.ee`) and optionally the Estonian Business Registry (`ariregister.rik.ee`) for supplier lookups.
 
 ## License
 
