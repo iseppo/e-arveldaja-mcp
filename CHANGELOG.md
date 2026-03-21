@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.8.0] - 2026-03-21
+
+### Added
+- **Local document parsing with LiteParse** — PDF, JPG, and PNG invoice documents are now parsed locally using `@llamaindex/liteparse` with built-in Tesseract OCR (Estonian + English). No external service required.
+  - Configurable via environment variables: `EARVELDAJA_LITEPARSE_OCR_ENABLED`, `EARVELDAJA_LITEPARSE_OCR_LANGUAGE`, `EARVELDAJA_LITEPARSE_OCR_SERVER_URL`, `EARVELDAJA_LITEPARSE_NUM_WORKERS`, `EARVELDAJA_LITEPARSE_MAX_PAGES`
+- **Invoice extraction fallback** — when deterministic regex extraction is incomplete, `extract_pdf_invoice` returns structured `llm_fallback` hints alongside `raw_text` so the LLM can fill gaps from the full document text
+- **Document identifier extraction** — dedicated `src/document-identifiers.ts` module for extracting Estonian registry codes, VAT numbers, IBANs (with ISO 7064 mod-97 validation), and reference numbers from OCR text
+- **144 new unit tests** (181 → 325 total across 32 test files):
+  - `financial-statements.test.ts` (34): balance computation, contra-accounts, trial balance, balance sheet, P&L, month-end close, leap year
+  - `account-balance.test.ts` (14): D/C direction, date filters, client filter, multi-currency
+  - `aging-analysis.test.ts` (16): bucket boundaries, due-date edge cases, `base_gross_price` fallback
+  - `estonian-tax.test.ts` (21): 22/78 CIT arithmetic, retained earnings, net-assets §157, VAT branching
+  - `document-identifiers.test.ts` (26): registry codes, VAT numbers, IBAN mod-97 validation, reference numbers
+  - `csv.test.ts` (7): quoted fields, escaped double-quotes, custom delimiters
+  - `base-resource.test.ts` (20): pagination cap, cache invalidation, namespace isolation
+  - `account-validation.test.ts` (6): missing/inactive accounts, deduplication
+
+### Fixed
+- **Security hardening**:
+  - Updated `fast-xml-parser` to fix entity expansion bypass (GHSA-jp2q-39xq-3w4g) — 0 npm audit vulnerabilities
+  - `EARVELDAJA_ALLOWED_PATHS` now warns when set to filesystem root `/`
+  - OCR server URL (`EARVELDAJA_LITEPARSE_OCR_SERVER_URL`) validated for http/https protocol to prevent SSRF
+  - `toolError()` inspect depth reduced to 2 and output truncated to 500 chars to limit information disclosure
+  - Stack trace logging demoted from stderr to MCP debug level
+  - `getAllowedRoots()` deduplicated — single source of truth in `file-validation.ts` (removed duplicate from `receipt-inbox.ts`)
+  - `resolveFilePath()` exported from `file-validation.ts` (removed duplicate `resolveInputPath` from `receipt-inbox.ts`)
+- **Error handling**: all `catch (err: any)` blocks converted to `catch (err: unknown)` with safe `err instanceof Error ? err.message : String(err)` pattern in `wise-import.ts` and `recurring-invoices.ts`
+- **Cache consistency**: `sendEinvoice()` now calls `invalidateCache()` before the API call, matching every other mutating method
+- **Type safety**: removed unnecessary `(inv as any).payment_status` cast in `bank-reconciliation.ts`; removed dead `if (vat !== undefined || gross !== undefined)` guard in `purchase-invoices.api.ts`
+- **Prompt accuracy**:
+  - `book-invoice` step cross-references fixed (steps 5 and 11, not 4 and 10)
+  - `lightyear-booking` account parameters changed from `z.string()` to `z.number()` to match actual tool schemas
+  - `month-end-close` duplicate detection step clarified (scans all suppliers, explains `exact_duplicates` vs `suspicious_same_amount_date`)
+  - `reconcile-bank` mode description clarified as numeric transaction ID
+- **Receipt inbox reliability**:
+  - VAT extraction and supplier name detection improved for OCR edge cases (split lines, Estonian text, mixed formats)
+  - Auto-booking accuracy improved for domestic expenses and foreign supplier reverse-charge detection
+  - Currency detection and amount extraction hardened against malformed OCR output
+
+### Changed
+- **New dependency**: `@llamaindex/liteparse` ^1.0.0 for local document parsing
+- **88 tools**, 6 prompts, 12 resources (unchanged from 0.7.x; corrected from previously overcounted README)
+- **325 tests** total (up from 133 in 0.7.1)
+
 ## [0.7.1] - 2026-03-20
 
 ### Fixed
