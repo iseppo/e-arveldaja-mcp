@@ -175,6 +175,14 @@ The assistant will compute the 22/78 corporate income tax, check retained earnin
 
 > "Reimburse my business expense of 45.50 EUR from Bolt"
 
+## Good to know
+
+- **Dry run by default.** Batch operations (bank import, Wise import, Lightyear booking, receipt processing, auto-confirm) preview results first. You must explicitly confirm or pass `execute=true` to create records.
+- **Large datasets need date filters.** The server loads up to 200 pages of data per query. Companies with thousands of invoices or transactions should narrow reporting and reconciliation tools with date ranges — otherwise the tool will ask you to.
+- **Caching.** API responses are cached for 2–5 minutes and automatically invalidated when you create, update, or delete records through the server. Changes made directly in the e-arveldaja web UI may take a few minutes to appear.
+- **EUR by default.** All amounts are EUR unless a different currency is specified.
+- **Multi-company.** Place multiple `apikey*.txt` files and use `list_connections` / `switch_connection`. Switching clears all cached data to prevent cross-company leaks.
+
 ## Privacy
 
 Document parsing (PDF, JPG, PNG) uses built-in local OCR — no external OCR service is involved. However, the extracted text is returned to your AI assistant via the MCP protocol, so it will be processed by whichever LLM you are using (Claude, Codex, Gemini, etc.). The server's own outbound connections are limited to the e-arveldaja API (`rmp-api.rik.ee`) and optionally the Estonian Business Registry (`ariregister.rik.ee`) for supplier lookups.
