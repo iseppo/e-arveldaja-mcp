@@ -2,14 +2,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
+import type { Journal } from "../types/api.js";
 import { computeAllBalances } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { create } from "../annotations.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 
-async function computeRetainedEarningsBalance(api: ApiContext, accountId: number, asOfDate?: string): Promise<number> {
-  const allJournals = await api.journals.listAllWithPostings();
+async function computeRetainedEarningsBalance(api: ApiContext, accountId: number, asOfDate?: string, preloadedJournals?: Journal[]): Promise<number> {
+  const allJournals = preloadedJournals ?? await api.journals.listAllWithPostings();
   let debit = 0;
   let credit = 0;
 
@@ -75,8 +76,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const cit = roundMoney(net_dividend * taxRate);
       const grossDividend = net_dividend + cit;
 
+      // Preload journals once for both retained earnings and balance sheet checks
+      const allJournals = await api.journals.listAllWithPostings();
+
       // Check retained earnings balance
-      const retainedBalance = await computeRetainedEarningsBalance(api, retainedAccount, effective_date);
+      const retainedBalance = await computeRetainedEarningsBalance(api, retainedAccount, effective_date, allJournals);
       const warnings: string[] = [];
       if (retainedBalance < grossDividend) {
         if (!force) {
@@ -95,7 +99,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         );
       }
 
-      const balances = await computeAllBalances(api, undefined, effective_date);
+      const balances = await computeAllBalances(api, undefined, effective_date, {
+        preloadedAccounts: accounts,
+        preloadedJournals: allJournals,
+      });
       const totalAssets = balances
         .filter(balance => balance.account_type_est === "Varad")
         .reduce((sum, balance) => sum + (balance.balance_type === "D" ? balance.balance : -balance.balance), 0);

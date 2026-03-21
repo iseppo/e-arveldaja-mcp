@@ -9,6 +9,8 @@ import {
   normalizeCounterpartyName,
 } from "./receipt-extraction.js";
 
+export type SupplierIdentityFields = Pick<ExtractedReceiptFields, "supplier_name" | "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "raw_text">;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -77,7 +79,7 @@ export async function fetchRegistryData(regCode?: string, country = "EST", fallb
 export async function resolveSupplierInternal(
   api: ApiContext,
   clients: Client[],
-  fields: ExtractedReceiptFields,
+  fields: SupplierIdentityFields,
   execute: boolean,
   options?: SupplierResolutionOptions,
 ): Promise<SupplierResolution> {

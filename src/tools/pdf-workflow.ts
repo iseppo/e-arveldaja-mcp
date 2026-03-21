@@ -11,7 +11,7 @@ import { readOnly, create, mutate } from "../annotations.js";
 import { parseDocument } from "../document-parser.js";
 import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
-import { type ExtractedReceiptFields, extractReceiptFieldsFromText } from "./receipt-extraction.js";
+import { extractReceiptFieldsFromText } from "./receipt-extraction.js";
 import { fetchRegistryData, resolveSupplierInternal } from "./supplier-resolution.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
@@ -240,7 +240,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           supplier_reg_code: reg_code,
           supplier_vat_no: vat_no,
           supplier_iban: iban,
-        } as ExtractedReceiptFields,
+        },
         auto_create === true,
         { _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity } },
       );

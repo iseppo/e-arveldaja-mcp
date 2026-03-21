@@ -1289,8 +1289,8 @@ export function buildKeywordSuggestion(
     accountKeywords = ["kontor", "office", "admin"];
   }
 
-  const article = findPurchaseArticleByKeywords(purchaseArticles, articleKeywords)
-    ?? findPurchaseArticleByKeywords(purchaseArticles, ["muu", "other", "general"]);
+  const fallbackArticle = findPurchaseArticleByKeywords(purchaseArticles, ["muu", "other", "general"]);
+  const article = findPurchaseArticleByKeywords(purchaseArticles, articleKeywords) ?? fallbackArticle;
   const account = article?.accounts_id
     ? accounts.find(candidate => candidate.id === article.accounts_id)
     : findAccountByKeywords(accounts, accountKeywords)
@@ -1299,7 +1299,7 @@ export function buildKeywordSuggestion(
   if (!article) return undefined;
 
   return {
-    source: article === findPurchaseArticleByKeywords(purchaseArticles, ["muu", "other", "general"]) ? "fallback" : "keyword_match",
+    source: article === fallbackArticle ? "fallback" : "keyword_match",
     suggested_account: account,
     suggested_purchase_article: { id: article.id, name: article.name_est || article.name_eng },
     item: {
