@@ -125,6 +125,12 @@ Once the MCP server is connected, just talk to your AI assistant in natural lang
 
 The assistant will extract invoice data from the PDF, create a purchase invoice with the correct accounts and VAT rates, and match it to existing bank transactions.
 
+### Batch-process a folder of invoices and receipts
+
+> "Process all the invoices in the arved/ folder and book them into e-arveldaja"
+
+The assistant will scan the folder, OCR-parse each PDF/JPG/PNG, extract invoice data, resolve suppliers, detect duplicates, create purchase invoices with correct VAT treatment, upload source documents, confirm, and match to bank transactions — all in one pass. Dry run by default so you can review before committing.
+
 ### Book Lightyear investment trades
 
 Download your Lightyear account statement CSV and capital gains report, then:
