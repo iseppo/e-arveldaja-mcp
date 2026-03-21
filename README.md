@@ -139,6 +139,14 @@ Download your Lightyear account statement CSV and capital gains report, then:
 
 The assistant will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts.
 
+### Import bank statements (CAMT.053)
+
+Download your bank statement as a CAMT.053 XML file (supported by LHV, Swedbank, SEB, Coop, Luminor), then:
+
+> "Import bank transactions from my LHV statement XML into e-arveldaja"
+
+The assistant will parse the ISO 20022 XML, create bank transactions with correct amounts and counterparties, detect duplicates by bank reference, and handle batched entries and mixed currencies. Dry run by default.
+
 ### Import Wise bank transactions
 
 Download your Wise transaction history CSV (Account → Statements → CSV), then:
@@ -158,6 +166,18 @@ The assistant will parse the CSV, create bank transactions with correct amounts,
 ### Month-end close
 
 > "Run the month-end close checklist for February 2026"
+
+### Estonian tax: dividends and owner expenses
+
+> "Prepare a dividend package for 5000 EUR"
+
+The assistant will compute the 22/78 corporate income tax, check retained earnings sufficiency and net assets against share capital (ÄS §157), and create the journal entry with correct postings.
+
+> "Reimburse my business expense of 45.50 EUR from Bolt"
+
+## Privacy
+
+All document processing (PDF, JPG, PNG) happens locally using built-in OCR. No invoice data is sent to external services. The only outbound connections are to the e-arveldaja API (`rmp-api.rik.ee`) and optionally the Estonian Business Registry (`ariregister.rik.ee`) for supplier lookups.
 
 ## License
 
