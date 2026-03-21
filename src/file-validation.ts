@@ -10,9 +10,15 @@ import { getProjectRoot } from "./paths.js";
  * Roots are resolved through symlinks so that the check works even if
  * e.g. /tmp is a symlink to /private/tmp (macOS).
  */
-function getAllowedRoots(): string[] {
+export function getAllowedRoots(): string[] {
   const raw = process.env.EARVELDAJA_ALLOWED_PATHS
-    ? process.env.EARVELDAJA_ALLOWED_PATHS.split(":").map(p => resolve(p))
+    ? process.env.EARVELDAJA_ALLOWED_PATHS.split(":").map(p => {
+        const resolved = resolve(p);
+        if (resolved === "/") {
+          process.stderr.write("WARNING: EARVELDAJA_ALLOWED_PATHS includes filesystem root '/'. This is insecure.\n");
+        }
+        return resolved;
+      })
     : [homedir(), "/tmp"];
 
   return raw.map(root => {
@@ -26,7 +32,7 @@ function getAllowedRoots(): string[] {
  * 2. Project root
  * 3. Current working directory (fallback)
  */
-function resolveFilePath(filePath: string): string {
+export function resolveFilePath(filePath: string): string {
   if (isAbsolute(filePath)) return resolve(filePath);
 
   const projectRoot = getProjectRoot();

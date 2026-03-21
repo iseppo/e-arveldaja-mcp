@@ -261,7 +261,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               client_name: inv.client_name ?? "",
               clients_id: inv.clients_id,
               gross_price: inv.gross_price ?? 0,
-              payment_status: (inv as any).payment_status ?? "NOT_PAID",
+              payment_status: inv.payment_status ?? "NOT_PAID",
               partially_paid_warning: false,
               confidence,
               match_reasons: reasons,

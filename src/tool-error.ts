@@ -11,7 +11,7 @@ function serializeUnknownError(error: unknown): string {
     if (typeof json === "string") return json;
   } catch {}
 
-  return inspect(error, { depth: 5, breakLength: 80, compact: false });
+  return inspect(error, { depth: 2, breakLength: 80, compact: false }).substring(0, 500);
 }
 
 export function toolError(error: unknown): CallToolResult {

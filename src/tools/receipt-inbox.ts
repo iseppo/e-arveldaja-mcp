@@ -1,16 +1,13 @@
-import { existsSync, realpathSync } from "fs";
 import { readFile, readdir, realpath, stat } from "fs/promises";
-import { homedir } from "os";
 import { basename, extname, join, resolve } from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { closest } from "fastest-levenshtein";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
-import { validateFilePath } from "../file-validation.js";
+import { validateFilePath, getAllowedRoots, resolveFilePath } from "../file-validation.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
-import { getProjectRoot } from "../paths.js";
 import { readOnly, batch } from "../annotations.js";
 import { type ApiContext, isCompanyVatRegistered, safeJsonParse } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, normalizeVatRate } from "./purchase-vat-defaults.js";
@@ -365,44 +362,8 @@ interface SupplierResolutionOptions {
   classification_category?: TransactionClassificationCategory;
 }
 
-function getAllowedRoots(): string[] {
-  const raw = process.env.EARVELDAJA_ALLOWED_PATHS
-    ? process.env.EARVELDAJA_ALLOWED_PATHS.split(":").map(path => resolve(path))
-    : [homedir(), "/tmp"];
-
-  return raw.map(root => {
-    try {
-      return realpathSync(root);
-    } catch {
-      return root;
-    }
-  });
-}
-
-function resolveInputPath(inputPath: string): string {
-  if (inputPath.startsWith("/")) {
-    return resolve(inputPath);
-  }
-
-  const projectRoot = getProjectRoot();
-  const bases = [
-    resolve(projectRoot, ".."),
-    projectRoot,
-    process.cwd(),
-  ];
-
-  for (const base of bases) {
-    const candidate = resolve(base, inputPath);
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  return resolve(bases[0]!, inputPath);
-}
-
 async function validateFolderPath(folderPath: string): Promise<string> {
-  const resolved = resolveInputPath(folderPath);
+  const resolved = resolveFilePath(folderPath);
   const real = await realpath(resolved);
   const roots = getAllowedRoots();
 

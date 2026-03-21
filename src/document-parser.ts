@@ -1,5 +1,21 @@
 import { LiteParse, type LiteParseConfig, type ParseResult } from "@llamaindex/liteparse";
 
+function validateOcrUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      throw new Error(`EARVELDAJA_LITEPARSE_OCR_SERVER_URL must use http or https protocol, got: ${parsed.protocol}`);
+    }
+    return url;
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error(`EARVELDAJA_LITEPARSE_OCR_SERVER_URL is not a valid URL: ${url}`);
+    }
+    throw err;
+  }
+}
+
 interface ParsedDocument {
   text: string;
   pageCount: number;
@@ -25,7 +41,7 @@ export function buildDocumentParserConfig(): Partial<LiteParseConfig> {
     // supports multi-language strings like "eng+est".
     ocrEnabled: readBooleanEnv("EARVELDAJA_LITEPARSE_OCR_ENABLED", true),
     ocrLanguage: process.env.EARVELDAJA_LITEPARSE_OCR_LANGUAGE ?? "eng+est",
-    ocrServerUrl: process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL || undefined,
+    ocrServerUrl: validateOcrUrl(process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL),
     outputFormat: "text",
     preciseBoundingBox: false,
     preserveVerySmallText: true,

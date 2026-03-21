@@ -38,6 +38,7 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   }
 
   async sendEinvoice(id: number, request: SaleInvoiceDeliveryRequest): Promise<ApiResponse> {
+    this.invalidateCache();
     return this.client.patch<ApiResponse>(`/sale_invoices/${id}/deliver`, request);
   }
 }

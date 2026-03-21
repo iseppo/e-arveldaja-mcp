@@ -35,7 +35,7 @@ import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
 import { registerPrompts } from "./prompts.js";
 import { toolError } from "./tool-error.js";
-import { setLogger } from "./logger.js";
+import { setLogger, log } from "./logger.js";
 import { readOnly, mutate } from "./annotations.js";
 
 const require = createRequire(import.meta.url);
@@ -251,7 +251,10 @@ Reporting:
           return result;
         });
       } catch (error) {
-        process.stderr.write(`Tool handler error: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+        log("error", `Tool handler error: ${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof Error && error.stack) {
+          log("debug", error.stack);
+        }
         return toolError(error);
       }
     }) as unknown as T;

@@ -48,7 +48,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("source of truth");
     expect(text).toContain("clients_id: supplier_client_id");
     expect(text).toContain("supplier_client_id");
-    expect(text).toContain("invoice_id: the invoice ID returned in step 10");
+    expect(text).toContain("invoice_id: the invoice ID returned in step 11");
     expect(text).toContain("term_days");
     expect(text).toContain("api_response.created_object_id");
     expect(text).toContain("invoice_number: extracted invoice number");

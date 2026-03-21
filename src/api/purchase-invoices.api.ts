@@ -97,10 +97,8 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       ? grossPrice
       : roundMoney(itemNet + itemVat);
 
-    if (vat !== undefined || gross !== undefined) {
-      await this.update(id, { vat_price: vat, gross_price: gross, items: invoice.items } as Partial<PurchaseInvoice>);
-      this.invalidateCache();
-    }
+    await this.update(id, { vat_price: vat, gross_price: gross, items: invoice.items } as Partial<PurchaseInvoice>);
+    this.invalidateCache();
 
     return this.get(id);
   }

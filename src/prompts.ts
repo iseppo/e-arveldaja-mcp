@@ -58,13 +58,13 @@ Follow these steps in order:
      - date_to: invoice_date
      - invoice_number: extracted invoice number
      - gross_price: extracted gross total
-     - clients_id: resolved client.id if step 4 returned \`found=true\`
+     - clients_id: resolved client.id if step 5 returned \`found=true\`
    - Inspect \`candidate_invoice_number_matches\` and \`candidate_same_amount_date_matches\` first.
    - Also inspect \`exact_duplicates\` and \`suspicious_same_amount_date\` as warning context for messy supplier histories.
    - If a candidate match looks like the same invoice, stop and report it before creating anything.
 
 7. Ensure the supplier client exists:
-   - If step 4 returned \`found=true\`, use \`client.id\` as \`supplier_client_id\`.
+   - If step 5 returned \`found=true\`, use \`client.id\` as \`supplier_client_id\`.
    - Otherwise call \`resolve_supplier\` again with the same identifiers and \`auto_create: true\`.
    - Use \`api_response.created_object_id\` as \`supplier_client_id\`. If no client ID is returned, stop and report the failure.
 
@@ -101,11 +101,11 @@ Follow these steps in order:
    IMPORTANT: Use the EXACT \`vat_price\` and \`gross_price\` from the invoice. Do not recalculate them.
 
 12. Call \`upload_invoice_document\` with:
-   - invoice_id: the invoice ID returned in step 10
+   - invoice_id: the invoice ID returned in step 11
    - file_path: "${file_path}"
 
 13. Call \`confirm_purchase_invoice\` with:
-   - id: the invoice ID from step 10
+   - id: the invoice ID from step 11
 
 14. Report a summary:
     - Supplier name and supplier_client_id
@@ -124,7 +124,7 @@ Follow these steps in order:
   registerPrompt(server, 
     "reconcile-bank",
     "Match bank transactions to invoices and optionally auto-confirm exact matches.",
-    { mode: z.string().optional().describe('Reconciliation mode: "auto" (default), "review", or a specific transaction ID') },
+    { mode: z.string().optional().describe('Reconciliation mode: "auto" (default), "review", or a numeric transaction ID') },
     async ({ mode }) => {
       const effectiveMode = mode ?? "auto";
       return {
@@ -214,7 +214,8 @@ Follow these steps in order:
 4. Call \`detect_duplicate_purchase_invoice\` with:
    - date_from: "${startDate}"
    - date_to: "${endDate}"
-   Present both \`exact_duplicates\` and \`suspicious_same_amount_date\` findings.
+   This scans ALL suppliers for the month. Present both \`exact_duplicates\` (same supplier + invoice number)
+   and \`suspicious_same_amount_date\` (same supplier + amount + date) findings.
 
 5. Call \`compute_trial_balance\` for the period:
    - date_from: "${startDate}"
@@ -389,15 +390,15 @@ Follow these steps:
     {
       statement_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
       capital_gains_path: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sells)"),
-      investment_account: z.string().describe("Investment asset account number (e.g. 1520)"),
-      broker_account: z.string().describe("Broker cash account number (e.g. 1120)"),
-      income_account: z.string().optional().describe("Distribution income account (e.g. 8320 or 8400)"),
-      gain_loss_account: z.string().optional().describe("Realized gain/loss account for sell trades"),
-      loss_account: z.string().optional().describe("Optional separate realized loss account"),
-      fee_account: z.string().optional().describe("Optional fee expense account"),
-      tax_account: z.string().optional().describe("Withheld tax account for distributions"),
-      investment_dimension_id: z.string().optional().describe("Optional dimension ID for the investment account"),
-      broker_dimension_id: z.string().optional().describe("Optional dimension ID for the broker account"),
+      investment_account: z.number().describe("Investment asset account number (e.g. 1550)"),
+      broker_account: z.number().describe("Broker cash account number (e.g. 1120)"),
+      income_account: z.number().optional().describe("Distribution income account (e.g. 8320 or 8400)"),
+      gain_loss_account: z.number().optional().describe("Realized gain/loss account for sell trades"),
+      loss_account: z.number().optional().describe("Optional separate realized loss account"),
+      fee_account: z.number().optional().describe("Optional fee expense account"),
+      tax_account: z.number().optional().describe("Withheld tax account for distributions"),
+      investment_dimension_id: z.number().optional().describe("Optional dimension ID for the investment account"),
+      broker_dimension_id: z.number().optional().describe("Optional dimension ID for the broker account"),
     },
     async ({ statement_path, capital_gains_path, investment_account, broker_account, income_account, gain_loss_account, loss_account, fee_account, tax_account, investment_dimension_id, broker_dimension_id }) => ({
       messages: [{

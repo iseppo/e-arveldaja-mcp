@@ -167,7 +167,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
               await api.saleInvoices.confirm(result.created_object_id);
               confirmed = true;
               status = "confirmed";
-            } catch (err: any) {
+            } catch (err: unknown) {
               confirmError = err instanceof Error ? err.message : String(err);
               status = "confirm_error";
             }
@@ -182,13 +182,13 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             ...(confirmError ? { confirm_error: confirmError } : {}),
             status,
           });
-        } catch (err: any) {
+        } catch (err: unknown) {
           results.push({
             source_id: source.id,
             source_number: source.number,
             client: source.client_name,
             status: "error",
-            error: err.message,
+            error: err instanceof Error ? err.message : String(err),
           });
         }
       }

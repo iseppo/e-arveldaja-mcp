@@ -257,8 +257,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               seenWiseIds.add(wiseIdTag);
               existingSignatures.add(mainSignature);
               mainAvailableForFee = true;
-            } catch (err: any) {
-              skipped.push({ wise_id: row.id, reason: err.message });
+            } catch (err: unknown) {
+              skipped.push({ wise_id: row.id, reason: err instanceof Error ? err.message : String(err) });
             }
           }
         }
@@ -350,8 +350,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 seenWiseIds.add(feeWiseIdTag);
                 existingSignatures.add(feeSignature);
               }
-            } catch (err: any) {
-              skipped.push({ wise_id: `FEE:${row.id}`, reason: err.message });
+            } catch (err: unknown) {
+              skipped.push({ wise_id: `FEE:${row.id}`, reason: err instanceof Error ? err.message : String(err) });
             }
           }
         }
