@@ -96,6 +96,48 @@ describe("receipt inbox tool status handling", () => {
     expect(payload.groups[0]!.transactions[0]!.id).toBe(2);
   });
 
+  it("classify_unmatched_transactions keeps type C sale-invoice payments out of the unmatched expense flow", async () => {
+    const { handler } = setupReceiptTool("classify_unmatched_transactions", {
+      transactions: [
+        {
+          id: 3,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 100,
+          date: "2026-03-21",
+          accounts_dimensions_id: 100,
+          bank_account_name: "Acme OU",
+          ref_number: "RF-100",
+          description: "Customer payment",
+          cl_currencies_id: "EUR",
+        },
+      ],
+      saleInvoices: [
+        {
+          id: 33,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+          number: "ARV-33",
+          clients_id: 20,
+          client_name: "Acme OU",
+          gross_price: 100,
+          bank_ref_number: "RF-100",
+          cl_currencies_id: "EUR",
+        },
+      ],
+      purchaseArticles: [],
+      accounts: [],
+    });
+
+    const result = await handler({ accounts_dimensions_id: 100 });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.total_unconfirmed).toBe(1);
+    expect(payload.total_unmatched).toBe(0);
+    expect(payload.groups).toEqual([]);
+  });
+
   it("apply_transaction_classifications skips stale VOID transactions before creating invoices", async () => {
     const { handler, api } = setupReceiptTool("apply_transaction_classifications", {
       clients: [

@@ -535,7 +535,7 @@ async function createAndMaybeMatchPurchaseInvoice(
   bankTransactions: Transaction[],
   execute: boolean,
   consumedTransactionIds: Set<number>,
-): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status">> {
+): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error">> {
   const notes: string[] = [];
   const supplier = supplierResolution.client;
   const supplierId = supplier?.id;
@@ -610,39 +610,97 @@ async function createAndMaybeMatchPurchaseInvoice(
     return { notes, status: "needs_review" };
   }
 
-  const createdInvoice = await api.purchaseInvoices.createAndSetTotals(
-    {
-      clients_id: supplierId,
-      client_name: supplier.name,
-      number: extracted.invoice_number!,
-      create_date: extracted.invoice_date!,
-      journal_date: extracted.invoice_date!,
-      term_days: computeTermDays(extracted.invoice_date, extracted.due_date),
-      cl_currencies_id: invoiceCurrency,
-      liability_accounts_id: DEFAULT_LIABILITY_ACCOUNT,
-      bank_ref_number: extracted.ref_number,
-      bank_account_no: extracted.supplier_iban,
-      notes: invoiceNotes,
-      items: [item],
-    },
-    extracted.total_vat,
-    extracted.total_gross,
-    context.isVatRegistered,
-  );
+  let createdInvoice: PurchaseInvoice;
+  try {
+    createdInvoice = await api.purchaseInvoices.createAndSetTotals(
+      {
+        clients_id: supplierId,
+        client_name: supplier.name,
+        number: extracted.invoice_number!,
+        create_date: extracted.invoice_date!,
+        journal_date: extracted.invoice_date!,
+        term_days: computeTermDays(extracted.invoice_date, extracted.due_date),
+        cl_currencies_id: invoiceCurrency,
+        liability_accounts_id: DEFAULT_LIABILITY_ACCOUNT,
+        bank_ref_number: extracted.ref_number,
+        bank_account_no: extracted.supplier_iban,
+        notes: invoiceNotes,
+        items: [item],
+      },
+      extracted.total_vat,
+      extracted.total_gross,
+      context.isVatRegistered,
+    );
+  } catch (error) {
+    return {
+      notes,
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 
   let uploadedDocument = false;
+  const rollbackCreatedInvoice = async (reason: string, error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (!createdInvoice.id) {
+      return {
+        notes,
+        status: "failed" as const,
+        error: message,
+      };
+    }
+
+    try {
+      await api.purchaseInvoices.invalidate(createdInvoice.id);
+      notes.push(`Invalidated created purchase invoice ${createdInvoice.id} because ${reason}: ${message}.`);
+      return {
+        notes,
+        status: "failed" as const,
+        error: message,
+      };
+    } catch (invalidateError) {
+      const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
+      notes.push(
+        `Created purchase invoice ${createdInvoice.id} could not be invalidated after ${reason}: ${message}. ` +
+        `Automatic invalidation also failed: ${invalidateMessage}.`
+      );
+      context.purchaseInvoices.push(createdInvoice);
+      return {
+        notes,
+        status: "failed" as const,
+        error: `${message}; automatic invalidation failed: ${invalidateMessage}`,
+        created_invoice: {
+          id: createdInvoice.id,
+          number: createdInvoice.number,
+          status: createdInvoice.status,
+          confirmed: false,
+          uploaded_document: uploadedDocument,
+        },
+      };
+    }
+  };
+
   if (createdInvoice.id) {
-    const contents = (await readValidatedReceiptFile(file)).toString("base64");
-    await api.purchaseInvoices.uploadDocument(createdInvoice.id, file.name, contents);
-    uploadedDocument = true;
-    notes.push("Uploaded source document to created purchase invoice.");
+    try {
+      const contents = (await readValidatedReceiptFile(file)).toString("base64");
+      await api.purchaseInvoices.uploadDocument(createdInvoice.id, file.name, contents);
+      uploadedDocument = true;
+      notes.push("Uploaded source document to created purchase invoice.");
+    } catch (error) {
+      return rollbackCreatedInvoice("source document upload failed", error);
+    }
   }
 
   if (createdInvoice.id) {
-    await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered, {
-      preserveExistingTotals: true,
-    });
-    notes.push("Confirmed created purchase invoice for booking and bank matching.");
+    try {
+      await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered, {
+        preserveExistingTotals: true,
+      });
+      notes.push("Confirmed created purchase invoice for booking and bank matching.");
+    } catch (error) {
+      return rollbackCreatedInvoice("invoice confirmation failed", error);
+    }
   }
 
   const matchedInvoice: InvoiceSummaryForMatching = {
@@ -660,18 +718,23 @@ async function createAndMaybeMatchPurchaseInvoice(
   const canAutoLink = matchedCandidate !== undefined && matchedCandidate.confidence >= EXACT_MATCH_THRESHOLD;
   let linked = false;
   if (createdInvoice.id && matchedCandidate && canAutoLink) {
-    const freshMatch = await api.transactions.get(matchedCandidate.transaction_id);
-    if (isProjectTransaction(freshMatch)) {
-      await api.transactions.confirm(matchedCandidate.transaction_id, [{
-        related_table: "purchase_invoices",
-        related_id: createdInvoice.id,
-        amount: matchedCandidate.amount,
-      }]);
-      consumedTransactionIds.add(matchedCandidate.transaction_id);
-      linked = true;
-      notes.push(`Linked transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}.`);
-    } else {
-      notes.push(`Matched transaction ${matchedCandidate.transaction_id} is no longer bookable (status ${freshMatch.status ?? "UNKNOWN"}); invoice was created without bank link.`);
+    try {
+      const freshMatch = await api.transactions.get(matchedCandidate.transaction_id);
+      if (isProjectTransaction(freshMatch)) {
+        await api.transactions.confirm(matchedCandidate.transaction_id, [{
+          related_table: "purchase_invoices",
+          related_id: createdInvoice.id,
+          amount: matchedCandidate.amount,
+        }]);
+        consumedTransactionIds.add(matchedCandidate.transaction_id);
+        linked = true;
+        notes.push(`Linked transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}.`);
+      } else {
+        notes.push(`Matched transaction ${matchedCandidate.transaction_id} is no longer bookable (status ${freshMatch.status ?? "UNKNOWN"}); invoice was created without bank link.`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notes.push(`Could not link matched transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}: ${message}. Invoice was kept without bank link.`);
     }
   } else if (matchedCandidate) {
     notes.push(`Found transaction candidate ${matchedCandidate.transaction_id}, but confidence ${matchedCandidate.confidence} was below auto-link threshold ${EXACT_MATCH_THRESHOLD}.`);
@@ -699,8 +762,7 @@ async function createAndMaybeMatchPurchaseInvoice(
 
 function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): boolean {
   if (tx.type !== "D" && tx.type !== "C") return false;
-  const invoices = tx.type === "D" ? openSales : openPurchases;
-  for (const invoice of invoices) {
+  for (const invoice of [...openSales, ...openPurchases]) {
     const { confidence } = scoreTransactionToInvoice(tx, invoice);
     if (confidence >= POSSIBLE_MATCH_THRESHOLD) {
       return true;
@@ -986,6 +1048,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             created_invoice: created.created_invoice,
             bank_match: created.bank_match,
             notes: created.notes,
+            error: created.error,
           });
         } catch (error) {
           results.push({

@@ -79,28 +79,45 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     const id = response.created_object_id;
     if (!id) throw new Error("Purchase invoice created but no ID returned");
 
-    // Read back to get item-level VAT computed by API
-    const invoice = await this.get(id);
-    const items = invoice.items;
+    try {
+      // Read back to get item-level VAT computed by API
+      const invoice = await this.get(id);
+      const items = invoice.items;
 
-    const itemVat = items ? roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0)) : 0;
-    const itemNet = items ? roundMoney(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0)) : 0;
+      const itemVat = items ? roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0)) : 0;
+      const itemNet = items ? roundMoney(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0)) : 0;
 
-    // Invoice-level VAT: explicit value wins for VAT-registered companies.
-    // Non-VAT companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
-    const vat = isVatRegistered
-      ? (vatPrice !== undefined ? vatPrice : itemVat)
-      : 0;
+      // Invoice-level VAT: explicit value wins for VAT-registered companies.
+      // Non-VAT companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
+      const vat = isVatRegistered
+        ? (vatPrice !== undefined ? vatPrice : itemVat)
+        : 0;
 
-    // Invoice-level gross: explicit value wins, otherwise net + actual item VAT
-    const gross = grossPrice !== undefined
-      ? grossPrice
-      : roundMoney(itemNet + itemVat);
+      // Invoice-level gross: explicit value wins, otherwise net + actual item VAT
+      const gross = grossPrice !== undefined
+        ? grossPrice
+        : roundMoney(itemNet + itemVat);
 
-    await this.update(id, { vat_price: vat, gross_price: gross, items: invoice.items } as Partial<PurchaseInvoice>);
-    this.invalidateCache();
+      await this.update(id, { vat_price: vat, gross_price: gross, items: invoice.items } as Partial<PurchaseInvoice>);
+      this.invalidateCache();
 
-    return this.get(id);
+      return this.get(id);
+    } catch (error) {
+      const followUpMessage = error instanceof Error ? error.message : String(error);
+      try {
+        await this.invalidate(id);
+      } catch (invalidateError) {
+        const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
+        throw new Error(
+          `Purchase invoice ${id} was created but follow-up failed: ${followUpMessage}. ` +
+          `Automatic invalidation also failed: ${invalidateMessage}`
+        );
+      }
+
+      throw new Error(
+        `Purchase invoice ${id} was created but follow-up failed and the draft was invalidated: ${followUpMessage}`
+      );
+    }
   }
 
   /**

@@ -499,6 +499,34 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.matched_pairs).toBe(0);
   });
 
+  it("skips ambiguous pair matches instead of picking the first incoming candidate", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_name: "Transfer" },
+        { id: 26, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Transfer" },
+        { id: 27, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 300, bank_account_name: "Transfer" },
+      ],
+      bankAccounts: [
+        ...bankAccounts,
+        { id: 3, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+      ],
+    });
+
+    const result = await handler({ execute: true });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.skipped_ambiguous).toBe(1);
+    expect(payload.ambiguous_pairs).toEqual([
+      expect.objectContaining({
+        outgoing_transaction_id: 25,
+        candidate_incoming_transaction_ids: [26, 27],
+        confidence: 60,
+      }),
+    ]);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
   it("confirms both sides with correct distribution when execute=true", async () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [

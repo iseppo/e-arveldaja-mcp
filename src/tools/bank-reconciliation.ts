@@ -430,6 +430,17 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         status: string;
       }
 
+      interface AmbiguousPairResult {
+        outgoing_transaction_id: number;
+        amount: number;
+        date_out: string;
+        from_dimension_id: number;
+        candidate_incoming_transaction_ids: number[];
+        candidate_incoming_dimension_ids: number[];
+        confidence: number;
+        reason: string;
+      }
+
       interface OneSidedResult {
         transaction_id: number;
         type: string;
@@ -447,6 +458,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       }
 
       const matchedPairs: PairResult[] = [];
+      const ambiguousPairs: AmbiguousPairResult[] = [];
       const matchedOneSided: OneSidedResult[] = [];
       const skippedAlreadyHandled: Array<{
         transaction_id: number; amount: number; date: string;
@@ -517,6 +529,13 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         if (!txOut.id || consumedTxIds.has(txOut.id)) continue;
         await reportProgress(i, outgoing.length);
 
+        const candidates: Array<{
+          txIn: Transaction;
+          confidence: number;
+          reasons: string[];
+          existingJournalId?: number;
+        }> = [];
+
         for (const txIn of incoming) {
           if (!txIn.id || consumedTxIds.has(txIn.id)) continue;
           if (txOut.accounts_dimensions_id === txIn.accounts_dimensions_id) continue;
@@ -569,64 +588,94 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
           if (confidence < 50) continue;
 
-          // Check if already journalized
-          const existingJournal = findExistingJournal(txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, txOut.amount, txOut.date, maxGap);
-          if (existingJournal) {
-            consumedTxIds.add(txOut.id);
-            consumedTxIds.add(txIn.id);
-            skippedAlreadyHandled.push(
-              { transaction_id: txOut.id, amount: txOut.amount, date: txOut.date, source_account: dimensionToTitle.get(txOut.accounts_dimensions_id) ?? "", existing_journal_id: existingJournal, reason: "Already journalized" },
-              { transaction_id: txIn.id, amount: txIn.amount, date: txIn.date, source_account: dimensionToTitle.get(txIn.accounts_dimensions_id) ?? "", existing_journal_id: existingJournal, reason: "Already journalized" },
-            );
-            break;
-          }
+          candidates.push({
+            txIn,
+            confidence: Math.min(confidence, 100),
+            reasons,
+            existingJournalId: findExistingJournal(txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, txOut.amount, txOut.date, maxGap),
+          });
+        }
 
-          const fromTitle = dimensionToTitle.get(txOut.accounts_dimensions_id) ?? `dim:${txOut.accounts_dimensions_id}`;
-          const toTitle = dimensionToTitle.get(txIn.accounts_dimensions_id) ?? `dim:${txIn.accounts_dimensions_id}`;
+        if (candidates.length === 0) continue;
 
+        candidates.sort((a, b) => {
+          if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+          return (a.txIn.id ?? 0) - (b.txIn.id ?? 0);
+        });
+
+        const topConfidence = candidates[0]!.confidence;
+        const topCandidates = candidates.filter(candidate => candidate.confidence === topConfidence);
+        if (topCandidates.length > 1) {
+          ambiguousPairs.push({
+            outgoing_transaction_id: txOut.id,
+            amount: txOut.amount,
+            date_out: txOut.date,
+            from_dimension_id: txOut.accounts_dimensions_id,
+            candidate_incoming_transaction_ids: topCandidates.map(candidate => candidate.txIn.id!),
+            candidate_incoming_dimension_ids: topCandidates.map(candidate => candidate.txIn.accounts_dimensions_id),
+            confidence: topConfidence,
+            reason: `Multiple incoming transactions matched outgoing transaction ${txOut.id} with the same confidence ${topConfidence}.`,
+          });
+          continue;
+        }
+
+        const bestCandidate = topCandidates[0]!;
+        const txIn = bestCandidate.txIn;
+
+        if (bestCandidate.existingJournalId) {
           consumedTxIds.add(txOut.id);
-          consumedTxIds.add(txIn.id);
+          consumedTxIds.add(txIn.id!);
+          skippedAlreadyHandled.push(
+            { transaction_id: txOut.id, amount: txOut.amount, date: txOut.date, source_account: dimensionToTitle.get(txOut.accounts_dimensions_id) ?? "", existing_journal_id: bestCandidate.existingJournalId, reason: "Already journalized" },
+            { transaction_id: txIn.id!, amount: txIn.amount, date: txIn.date, source_account: dimensionToTitle.get(txIn.accounts_dimensions_id) ?? "", existing_journal_id: bestCandidate.existingJournalId, reason: "Already journalized" },
+          );
+          continue;
+        }
 
-          if (dryRun) {
+        const fromTitle = dimensionToTitle.get(txOut.accounts_dimensions_id) ?? `dim:${txOut.accounts_dimensions_id}`;
+        const toTitle = dimensionToTitle.get(txIn.accounts_dimensions_id) ?? `dim:${txIn.accounts_dimensions_id}`;
+
+        consumedTxIds.add(txOut.id);
+        consumedTxIds.add(txIn.id!);
+
+        if (dryRun) {
+          matchedPairs.push({
+            outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id!,
+            amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
+            from_account: fromTitle, to_account: toTitle,
+            from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
+            description_out: txOut.description, description_in: txIn.description,
+            confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons, status: "would_confirm",
+          });
+        } else {
+          try {
+            await ensureClientsId(txOut.id, txOut.bank_account_name);
+            await api.transactions.confirm(txOut.id, [buildAccountDistribution(txIn.accounts_dimensions_id, txOut.amount)]);
+            try {
+              await ensureClientsId(txIn.id!, txIn.bank_account_name);
+              await api.transactions.confirm(txIn.id!, [buildAccountDistribution(txOut.accounts_dimensions_id, txIn.amount)]);
+            } catch (err2: unknown) {
+              // Outgoing confirmed but incoming failed — partial confirmation
+              errors.push({
+                transaction_ids: [txOut.id, txIn.id!],
+                reason: `PARTIAL: outgoing ${txOut.id} confirmed, but incoming ${txIn.id} failed: ${err2 instanceof Error ? err2.message : String(err2)}. Invalidate ${txOut.id} to roll back.`,
+              });
+              continue;
+            }
             matchedPairs.push({
-              outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id,
+              outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id!,
               amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
               from_account: fromTitle, to_account: toTitle,
               from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
               description_out: txOut.description, description_in: txIn.description,
-              confidence: Math.min(confidence, 100), match_reasons: reasons, status: "would_confirm",
+              confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons, status: "confirmed",
             });
-          } else {
-            try {
-              await ensureClientsId(txOut.id, txOut.bank_account_name);
-              await api.transactions.confirm(txOut.id, [buildAccountDistribution(txIn.accounts_dimensions_id, txOut.amount)]);
-              try {
-                await ensureClientsId(txIn.id, txIn.bank_account_name);
-                await api.transactions.confirm(txIn.id, [buildAccountDistribution(txOut.accounts_dimensions_id, txIn.amount)]);
-              } catch (err2: unknown) {
-                // Outgoing confirmed but incoming failed — partial confirmation
-                errors.push({
-                  transaction_ids: [txOut.id, txIn.id],
-                  reason: `PARTIAL: outgoing ${txOut.id} confirmed, but incoming ${txIn.id} failed: ${err2 instanceof Error ? err2.message : String(err2)}. Invalidate ${txOut.id} to roll back.`,
-                });
-                break;
-              }
-              matchedPairs.push({
-                outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id,
-                amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
-                from_account: fromTitle, to_account: toTitle,
-                from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
-                description_out: txOut.description, description_in: txIn.description,
-                confidence: Math.min(confidence, 100), match_reasons: reasons, status: "confirmed",
-              });
-            } catch (err: unknown) {
-              errors.push({
-                transaction_ids: [txOut.id, txIn.id],
-                reason: err instanceof Error ? err.message : String(err),
-              });
-            }
+          } catch (err: unknown) {
+            errors.push({
+              transaction_ids: [txOut.id, txIn.id!],
+              reason: err instanceof Error ? err.message : String(err),
+            });
           }
-          break;
         }
       }
 
@@ -728,6 +777,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             total_unconfirmed: unconfirmed.length,
             matched_pairs: matchedPairs.length,
             matched_one_sided: matchedOneSided.length,
+            skipped_ambiguous: ambiguousPairs.length,
             skipped_already_handled: skippedAlreadyHandled.length,
             own_bank_accounts: [...dimensionToIban.entries()].map(([dimId, iban]) => ({
               accounts_dimensions_id: dimId,
@@ -735,6 +785,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               title: dimensionToTitle.get(dimId),
             })),
             pairs: matchedPairs,
+            ambiguous_pairs: ambiguousPairs,
             one_sided: matchedOneSided,
             already_handled: skippedAlreadyHandled,
             errors,

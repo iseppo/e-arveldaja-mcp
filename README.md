@@ -136,6 +136,7 @@ The assistant will extract invoice data from the PDF, create a purchase invoice 
 > "Process all the invoices in the arved/ folder and book them into e-arveldaja"
 
 The assistant will scan the folder, OCR-parse each PDF/JPG/PNG, extract invoice data, resolve suppliers, detect duplicates, create purchase invoices with correct VAT treatment, upload source documents, confirm, and match to bank transactions — all in one pass. Dry run by default so you can review before committing.
+If invoice creation succeeds but a later step like document upload or confirmation fails, the tool now auto-invalidates the created purchase invoice and reports that file as failed instead of leaving a stray draft behind.
 
 ### Book Lightyear investment trades
 
@@ -170,6 +171,8 @@ For now, this expects the normal transactions CSV export from Wise Transactions,
 ### Reconcile bank transactions
 
 > "Match unconfirmed bank transactions to invoices"
+
+Inter-account transfer reconciliation is conservative: if multiple candidate matches have the same top confidence, it reports the transfer as ambiguous and skips confirmation instead of guessing.
 
 ### Month-end close
 
