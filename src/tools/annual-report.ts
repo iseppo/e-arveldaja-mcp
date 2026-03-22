@@ -6,6 +6,7 @@ import type { Account, Client, Journal, PurchaseInvoice, SaleInvoice, Transactio
 import { computeAllBalances, type AccountBalance } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
+import { isProjectTransaction } from "../transaction-status.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 
@@ -244,8 +245,7 @@ function buildUnresolvedItems(
   );
 
   const unconfirmedTransactions = allTransactions.filter((transaction) =>
-    !transaction.is_deleted &&
-    transaction.status !== "CONFIRMED" &&
+    isProjectTransaction(transaction) &&
     transaction.date >= dateFrom &&
     transaction.date <= dateTo,
   );

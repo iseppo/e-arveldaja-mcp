@@ -5,6 +5,7 @@ import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice, BankAccount } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
+import { isProjectTransaction } from "../transaction-status.js";
 import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
@@ -120,7 +121,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
       // Get all unconfirmed transactions
       const allTx = await api.transactions.listAll();
-      const unconfirmed = allTx.filter(tx => tx.status !== "CONFIRMED" && !tx.is_deleted);
+      const unconfirmed = allTx.filter(isProjectTransaction);
 
       // Get unpaid invoices (including partially paid)
       const allSales = await api.saleInvoices.listAll();
@@ -234,7 +235,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
       // Get all unconfirmed transactions across pages
       const allTx = await api.transactions.listAll();
-      const unconfirmed = allTx.filter(tx => tx.status !== "CONFIRMED" && !tx.is_deleted);
+      const unconfirmed = allTx.filter(isProjectTransaction);
 
       const allSales = await api.saleInvoices.listAll();
       const openSales = allSales.filter((inv: SaleInvoice) =>
@@ -384,7 +385,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         api.readonly.getInvoiceInfo(),
       ]);
 
-      const unconfirmed = allTx.filter(tx => tx.status !== "CONFIRMED" && !tx.is_deleted);
+      const unconfirmed = allTx.filter(isProjectTransaction);
       const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
 
       // Build lookup: IBAN → accounts_dimensions_id for own bank accounts

@@ -92,6 +92,36 @@ function setupInterAccountTool(options: {
 }
 
 describe("reconcile_transactions", () => {
+  it("ignores VOID transactions", async () => {
+    const handler = setupReconciliationTool({
+      transactions: [{
+        id: 99,
+        status: "VOID",
+        is_deleted: false,
+        type: "D",
+        amount: 100,
+        date: "2026-03-20",
+        description: "Voided payment",
+        bank_account_name: "Acme OU",
+      }],
+      sales: [{
+        id: 199,
+        status: "CONFIRMED",
+        payment_status: "NOT_PAID",
+        number: "ARV-199",
+        clients_id: 20,
+        client_name: "Acme OU",
+        gross_price: 100,
+      }],
+    });
+
+    const result = await handler({ min_confidence: 0 });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.total_unconfirmed).toBe(0);
+    expect(payload.matches).toHaveLength(0);
+  });
+
   it("does not provide a ready-to-use distribution for partially paid invoices", async () => {
     const handler = setupReconciliationTool({
       transactions: [{
@@ -236,6 +266,24 @@ function setupAutoConfirmTool(options: {
 }
 
 describe("auto_confirm_exact_matches", () => {
+  it("ignores VOID transactions", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [
+        { id: 98, status: "VOID", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", bank_account_name: "Acme OU", ref_number: "RFVOID" },
+      ],
+      sales: [
+        { id: 108, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-108", clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RFVOID" },
+      ],
+    });
+
+    const result = await handler({ execute: true });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.total_unconfirmed).toBe(0);
+    expect(payload.auto_confirmed).toBe(0);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
   it("dry run produces would_confirm without calling API", async () => {
     const { handler, api } = setupAutoConfirmTool({
       transactions: [
@@ -507,6 +555,24 @@ describe("reconcile_inter_account_transfers", () => {
     const payload = JSON.parse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
+  });
+
+  it("ignores VOID transactions when matching transfers", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 18, status: "VOID", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
+        { id: 19, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Random Counterparty", bank_account_no: null },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.total_unconfirmed).toBe(1);
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.matched_one_sided).toBe(0);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
   describe("one-sided transfers (Phase 2)", () => {

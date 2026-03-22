@@ -8,6 +8,7 @@ import { validateFilePath, getAllowedRoots, resolveFilePath } from "../file-vali
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { readOnly, batch } from "../annotations.js";
+import { isProjectTransaction } from "../transaction-status.js";
 import { type ApiContext, isCompanyVatRegistered, safeJsonParse } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
@@ -659,14 +660,19 @@ async function createAndMaybeMatchPurchaseInvoice(
   const canAutoLink = matchedCandidate !== undefined && matchedCandidate.confidence >= EXACT_MATCH_THRESHOLD;
   let linked = false;
   if (createdInvoice.id && matchedCandidate && canAutoLink) {
-    await api.transactions.confirm(matchedCandidate.transaction_id, [{
-      related_table: "purchase_invoices",
-      related_id: createdInvoice.id,
-      amount: matchedCandidate.amount,
-    }]);
-    consumedTransactionIds.add(matchedCandidate.transaction_id);
-    linked = true;
-    notes.push(`Linked transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}.`);
+    const freshMatch = await api.transactions.get(matchedCandidate.transaction_id);
+    if (isProjectTransaction(freshMatch)) {
+      await api.transactions.confirm(matchedCandidate.transaction_id, [{
+        related_table: "purchase_invoices",
+        related_id: createdInvoice.id,
+        amount: matchedCandidate.amount,
+      }]);
+      consumedTransactionIds.add(matchedCandidate.transaction_id);
+      linked = true;
+      notes.push(`Linked transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}.`);
+    } else {
+      notes.push(`Matched transaction ${matchedCandidate.transaction_id} is no longer bookable (status ${freshMatch.status ?? "UNKNOWN"}); invoice was created without bank link.`);
+    }
   } else if (matchedCandidate) {
     notes.push(`Found transaction candidate ${matchedCandidate.transaction_id}, but confidence ${matchedCandidate.confidence} was below auto-link threshold ${EXACT_MATCH_THRESHOLD}.`);
   }
@@ -835,8 +841,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       const allTransactions = await api.transactions.listAll();
       const bankTransactions = allTransactions.filter(transaction =>
         transaction.accounts_dimensions_id === accounts_dimensions_id &&
-        transaction.status !== "CONFIRMED" &&
-        !transaction.is_deleted &&
+        isProjectTransaction(transaction) &&
         transaction.type === "C" &&
         (!date_from || transaction.date >= date_from) &&
         (!date_to || transaction.date <= date_to),
@@ -1049,8 +1054,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
       const unconfirmed = transactions.filter(transaction =>
         transaction.accounts_dimensions_id === accounts_dimensions_id &&
-        transaction.status !== "CONFIRMED" &&
-        !transaction.is_deleted &&
+        isProjectTransaction(transaction) &&
         (!date_from || transaction.date >= date_from) &&
         (!date_to || transaction.date <= date_to),
       );
@@ -1148,6 +1152,10 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               }
               if (transaction.status === "CONFIRMED") {
                 notes.push(`Transaction ${transactionStub.id} was confirmed since classification; skipped.`);
+                continue;
+              }
+              if (transaction.status !== "PROJECT") {
+                notes.push(`Transaction ${transactionStub.id} is no longer bookable (status ${transaction.status ?? "UNKNOWN"}); skipped.`);
                 continue;
               }
               freshTransactions.push(transaction);

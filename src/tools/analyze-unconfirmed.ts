@@ -5,6 +5,7 @@ import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
 import { reportProgress } from "../progress.js";
+import { isProjectTransaction } from "../transaction-status.js";
 import { matchScore, normalizeCompanyName } from "./bank-reconciliation.js";
 
 /** Known fee/charge patterns for expense detection */
@@ -62,7 +63,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       ]);
 
       // Filter unconfirmed transactions
-      let unconfirmed = allTx.filter(tx => tx.status === "PROJECT" && !tx.is_deleted);
+      let unconfirmed = allTx.filter(isProjectTransaction);
       if (accounts_dimensions_id !== undefined) {
         unconfirmed = unconfirmed.filter(tx => tx.accounts_dimensions_id === accounts_dimensions_id);
       }

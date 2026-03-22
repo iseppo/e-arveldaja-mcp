@@ -5,6 +5,7 @@ import type { ApiContext } from "./crud-tools.js";
 import type { Account, Journal, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
+import { isProjectTransaction } from "../transaction-status.js";
 
 export interface AccountBalance {
   account_id: number;
@@ -272,7 +273,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       );
 
       const unconfirmedTx = allTx.filter(tx =>
-        !tx.is_deleted && tx.status !== "CONFIRMED" &&
+        isProjectTransaction(tx) &&
         tx.date >= dateFrom && tx.date <= dateTo
       );
 

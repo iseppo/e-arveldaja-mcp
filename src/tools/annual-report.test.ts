@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Account, Journal, Posting } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
-import { buildAnnualReportData } from "./annual-report.js";
+import { buildAnnualReportData, registerAnnualReportTools } from "./annual-report.js";
 
 function makeAccount(overrides: Partial<Account> & Pick<Account,
   "id" |
@@ -49,7 +49,7 @@ function makeJournal(
   };
 }
 
-function createApi(journals: Journal[]): ApiContext {
+function createApi(journals: Journal[], options: { transactions?: unknown[] } = {}): ApiContext {
   const accounts: Account[] = [
     makeAccount({
       id: 1000,
@@ -132,10 +132,29 @@ function createApi(journals: Journal[]): ApiContext {
     purchaseInvoices: {
       listAll: async () => [],
     },
+    transactions: {
+      listAll: async () => options.transactions ?? [],
+    },
     journals: {
       listAllWithPostings: async () => journals,
     },
   } as unknown as ApiContext;
+}
+
+function setupTool(
+  toolName: string,
+  options: {
+    journals?: Journal[];
+    transactions?: unknown[];
+  } = {},
+): (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> {
+  const server = { registerTool: vi.fn() } as any;
+  const api = createApi(options.journals ?? [], { transactions: options.transactions });
+  registerAnnualReportTools(server, api);
+
+  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === toolName);
+  if (!registration) throw new Error(`Tool '${toolName}' was not registered`);
+  return registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
 }
 
 function extractEquity(report: Record<string, unknown>) {
@@ -211,5 +230,29 @@ describe("buildAnnualReportData", () => {
       },
     ]);
     expect(equity.total_equity).toBe(220);
+  });
+
+  it("prepare_year_end_close ignores VOID transactions in unresolved items", async () => {
+    const handler = setupTool("prepare_year_end_close", {
+      journals: baseJournals,
+      transactions: [{
+        id: 1,
+        status: "VOID",
+        is_deleted: false,
+        type: "C",
+        amount: 60,
+        base_amount: 60,
+        cl_currencies_id: "EUR",
+        date: "2025-06-20",
+        accounts_dimensions_id: 100,
+        description: "Voided transfer",
+      }],
+    });
+
+    const result = await handler({ year: 2025 });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.unresolved_items.unconfirmed_transactions.count).toBe(0);
+    expect(payload.unresolved_items.total_issues).toBe(0);
   });
 });

@@ -671,6 +671,30 @@ describe("month_end_close_checklist", () => {
     expect(payload.unconfirmed_sale_invoices.count).toBe(1);
   });
 
+  it("does not include VOID transactions in unconfirmed transaction counts", async () => {
+    const handler = setupTool("month_end_close_checklist", {
+      transactions: [
+        {
+          id: 50,
+          status: "VOID",
+          is_deleted: false,
+          type: "C",
+          amount: 75,
+          date: "2024-03-15",
+          accounts_dimensions_id: 100,
+          cl_currencies_id: "EUR",
+          description: "Voided bank transaction",
+        },
+      ],
+    });
+
+    const result = await handler({ month: "2024-03" });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.unconfirmed_transactions.count).toBe(0);
+    expect(payload.summary.ready_to_close).toBe(true);
+  });
+
   it("does not flag receivable as overdue when due date is exactly at month-end", async () => {
     // Invoice created 2024-03-01 with term_days=30 => due 2024-03-31 = month-end
     // Overdue condition: due < dateTo (strict less-than), so exactly month-end is NOT overdue

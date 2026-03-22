@@ -1,0 +1,187 @@
+import { describe, expect, it, vi } from "vitest";
+import { registerReceiptInboxTools } from "./receipt-inbox.js";
+
+function setupReceiptTool(
+  toolName: string,
+  options: {
+    clients?: unknown[];
+    transactions?: unknown[];
+    transactionDetails?: Record<number, unknown>;
+    purchaseArticles?: unknown[];
+    accounts?: unknown[];
+    saleInvoices?: unknown[];
+    purchaseInvoices?: unknown[];
+  } = {},
+) {
+  const server = { registerTool: vi.fn() } as any;
+  const api = {
+    clients: {
+      listAll: vi.fn().mockResolvedValue(options.clients ?? []),
+    },
+    saleInvoices: {
+      listAll: vi.fn().mockResolvedValue(options.saleInvoices ?? []),
+    },
+    purchaseInvoices: {
+      listAll: vi.fn().mockResolvedValue(options.purchaseInvoices ?? []),
+      createAndSetTotals: vi.fn().mockResolvedValue({ id: 9001 }),
+      confirmWithTotals: vi.fn().mockResolvedValue({}),
+    },
+    transactions: {
+      listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
+      get: vi.fn().mockImplementation(async (id: number) => {
+        const detail = options.transactionDetails?.[id];
+        if (detail) return detail;
+        return (options.transactions ?? []).find((transaction: any) => transaction.id === id);
+      }),
+      confirm: vi.fn().mockResolvedValue({}),
+    },
+    readonly: {
+      getPurchaseArticles: vi.fn().mockResolvedValue(options.purchaseArticles ?? []),
+      getAccounts: vi.fn().mockResolvedValue(options.accounts ?? []),
+      getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+    },
+  } as any;
+
+  registerReceiptInboxTools(server, api);
+
+  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === toolName);
+  if (!registration) throw new Error(`Tool '${toolName}' was not registered`);
+
+  return {
+    handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+    api,
+  };
+}
+
+describe("receipt inbox tool status handling", () => {
+  it("classify_unmatched_transactions excludes VOID transactions", async () => {
+    const { handler } = setupReceiptTool("classify_unmatched_transactions", {
+      transactions: [
+        {
+          id: 1,
+          status: "VOID",
+          is_deleted: false,
+          type: "C",
+          amount: 15,
+          date: "2026-03-20",
+          accounts_dimensions_id: 100,
+          bank_account_name: "OpenAI",
+          description: "Subscription",
+        },
+        {
+          id: 2,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 16,
+          date: "2026-03-21",
+          accounts_dimensions_id: 100,
+          bank_account_name: "OpenAI",
+          description: "Subscription",
+        },
+      ],
+      purchaseArticles: [],
+      accounts: [],
+    });
+
+    const result = await handler({ accounts_dimensions_id: 100 });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.total_unconfirmed).toBe(1);
+    expect(payload.total_unmatched).toBe(1);
+    expect(payload.groups).toHaveLength(1);
+    expect(payload.groups[0]!.transactions).toHaveLength(1);
+    expect(payload.groups[0]!.transactions[0]!.id).toBe(2);
+  });
+
+  it("apply_transaction_classifications skips stale VOID transactions before creating invoices", async () => {
+    const { handler, api } = setupReceiptTool("apply_transaction_classifications", {
+      clients: [
+        {
+          id: 7,
+          name: "OpenAI Ireland Limited",
+          is_supplier: true,
+          is_client: false,
+          cl_code_country: "IE",
+          is_member: false,
+          send_invoice_to_email: false,
+          send_invoice_to_accounting_email: false,
+          is_deleted: false,
+        },
+      ],
+      transactionDetails: {
+        42: {
+          id: 42,
+          status: "VOID",
+          is_deleted: false,
+          type: "C",
+          amount: 25,
+          date: "2026-03-22",
+          accounts_dimensions_id: 100,
+          bank_account_name: "OpenAI",
+          description: "ChatGPT subscription",
+          cl_currencies_id: "EUR",
+          clients_id: 7,
+        },
+      },
+      purchaseArticles: [{
+        id: 501,
+        name_est: "Software",
+        name_eng: "Software",
+        accounts_id: 5230,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        is_disabled: false,
+        priority: 1,
+      }],
+      accounts: [{
+        id: 5230,
+        name_est: "Software expense",
+        name_eng: "Software expense",
+        account_type_est: "Kulud",
+        account_type_eng: "Expenses",
+      }],
+    });
+
+    const classificationsJson = JSON.stringify([{
+      category: "saas_subscriptions",
+      apply_mode: "purchase_invoice",
+      normalized_counterparty: "openai",
+      display_counterparty: "OpenAI",
+      recurring: true,
+      similar_amounts: true,
+      total_amount: 25,
+      suggested_booking: {
+        purchase_article_id: 501,
+        purchase_article_name: "Software",
+        purchase_account_id: 5230,
+        purchase_account_name: "Software expense",
+        liability_account_id: 2310,
+        reason: "Recurring SaaS",
+      },
+      reasons: ["keyword"],
+      transactions: [{
+        id: 42,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        description: "ChatGPT subscription",
+        bank_account_name: "OpenAI",
+        accounts_dimensions_id: 100,
+        clients_id: 7,
+      }],
+    }]);
+
+    const result = await handler({ classifications_json: classificationsJson, execute: true });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.results).toHaveLength(1);
+    expect(payload.results[0]!.status).toBe("skipped");
+    expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
+      expect.stringContaining("status VOID"),
+      "No unconfirmed transactions remain in this classification group.",
+    ]));
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+});
