@@ -7,6 +7,18 @@ import { readOnly, batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
 
+const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
+
+function validateInterAccountDateGap(maxDateGap: number | undefined): number {
+  const value = maxDateGap ?? 1;
+
+  if (!Number.isInteger(value) || value < 0 || value > MAX_INTER_ACCOUNT_DATE_GAP_DAYS) {
+    throw new Error(`max_date_gap must be an integer between 0 and ${MAX_INTER_ACCOUNT_DATE_GAP_DAYS}.`);
+  }
+
+  return value;
+}
+
 /** Normalize text for fuzzy company name matching: lowercase, strip diacritics, collapse whitespace */
 function normalizeCompanyName(name: string): string {
   return name.trim().toLowerCase()
@@ -353,7 +365,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
     "Already-handled transfers are reported in the output for review/deletion.",
     {
       execute: z.boolean().optional().describe("Actually confirm matched pairs (default false = dry run)"),
-      max_date_gap: z.number().optional().describe("Maximum days between C and D transaction dates (default 1)"),
+      max_date_gap: z.number().int().min(0).max(MAX_INTER_ACCOUNT_DATE_GAP_DAYS).optional()
+        .describe(`Maximum days between C and D transaction dates (default 1, max ${MAX_INTER_ACCOUNT_DATE_GAP_DAYS})`),
       target_accounts_dimensions_id: z.number().optional().describe(
         "For one-sided transfers (no matching D/C pair), specify the target bank account dimension ID. " +
         "Required when there are 3+ bank accounts and counterparty IBAN is missing."
@@ -362,7 +375,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
     { ...batch, title: "Reconcile Inter-Account Transfers" },
     async ({ execute, max_date_gap, target_accounts_dimensions_id }) => {
       const dryRun = execute !== true;
-      const maxGap = max_date_gap ?? 1;
+      const maxGap = validateInterAccountDateGap(max_date_gap);
 
       const [allTx, bankAccounts, accountDimensions, invoiceInfo] = await Promise.all([
         api.transactions.listAll(),

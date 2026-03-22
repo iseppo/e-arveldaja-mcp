@@ -392,6 +392,20 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.pairs[0]!.match_reasons).toContain("exact_amount");
   });
 
+  it("rejects oversized max_date_gap values", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        { id: 5, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-15", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
+        { id: 6, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+      ],
+      bankAccounts,
+    });
+
+    await expect(handler({ max_date_gap: 1000000 })).rejects.toThrow(
+      "max_date_gap must be an integer between 0 and 31."
+    );
+  });
+
   it("does not match when date gap exceeds max_date_gap", async () => {
     const { handler } = setupInterAccountTool({
       transactions: [
