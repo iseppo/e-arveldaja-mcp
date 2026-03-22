@@ -110,19 +110,16 @@ Call `create_purchase_invoice_from_pdf`:
 - `ref_number`
 - `bank_account_no`
 - `notes`: source filename and any assumptions
+- `file_path`: the original file path (auto-uploads the source document)
 
 Use the exact `vat_price` and `gross_price` from the invoice. Do not recalculate them.
 
-## Step 10: Upload and confirm
-
-Call `upload_invoice_document`:
-- `invoice_id`: the invoice ID returned from step 9
-- `file_path`: the original file path
+## Step 10: Confirm and report
 
 Call `confirm_purchase_invoice`:
 - `id`: the invoice ID from step 9
 
-## Step 11: Report the result
+Report the result:
 
 Report:
 - Supplier name and supplier client ID

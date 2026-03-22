@@ -68,9 +68,9 @@ describe("registerPrompts", () => {
     expect(text).toContain("If the user has not explicitly approved the preview, stop here and wait.");
     expect(text).toContain("vat_accounts_id");
     expect(text).toContain("cl_vat_articles_id");
-    expect(text).toContain("invoice_id: the invoice ID returned in step 12");
+    expect(text).toContain("auto-uploads the source document");
+    expect(text).not.toContain("upload_invoice_document");
     expect(text).not.toContain("client_id: the supplier's client_id");
-    expect(text).not.toContain("invoice_id: the invoice ID returned in step 11");
   });
 
   it("uses the real reconciliation execution flags and confirm_transaction payload", async () => {

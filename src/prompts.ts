@@ -107,16 +107,13 @@ Follow these steps in order:
    - ref_number
    - bank_account_no
    - notes: include the source PDF filename or any important assumptions
+   - file_path: "${file_path}" (auto-uploads the source document)
    IMPORTANT: Use the EXACT \`vat_price\` and \`gross_price\` from the invoice. Do not recalculate them.
 
-13. Call \`upload_invoice_document\` with:
-   - invoice_id: the invoice ID returned in step 12
-   - file_path: "${file_path}"
-
-14. Call \`confirm_purchase_invoice\` with:
+13. Call \`confirm_purchase_invoice\` with:
    - id: the invoice ID from step 12
 
-15. Report a summary:
+14. Report a summary:
     - Supplier name and supplier_client_id
     - Invoice number, date, due date
     - Net / VAT / Gross amounts
