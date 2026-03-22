@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.9.0] - 2026-03-22
+
+### Added
+- **Inter-account transfer reconciliation** — new `reconcile_inter_account_transfers` tool matches and confirms own-account-to-own-account bank transfers (e.g. LHV↔Wise). DUPLICATE-SAFE: checks existing journal entries before confirming, preventing double-booking when the other side was already confirmed via CAMT import. Supports Phase 1 (paired C↔D matching) and Phase 2 (one-sided transfers by IBAN/company name). Dry run by default.
+- **4 new MCP prompts** (10 total, up from 6):
+  - `receipt-batch`: guided receipt folder scan with preview and explicit approval before booking
+  - `import-wise`: Wise CSV transaction import workflow with fee account selection and dry-run preview
+  - `import-camt`: CAMT.053 bank statement import workflow with duplicate detection guidance
+  - `classify-unmatched`: unmatched bank transaction classification and batch-apply workflow
+- **4 new Claude Code commands** (`.claude/commands/`): `receipt-batch`, `import-wise`, `import-camt`, `classify-unmatched` — matching the new MCP prompts
+- **4 new workflow guides** (`workflows/`): editor-agnostic runbooks for the new prompts
+- **Wise Jar filtering** — Wise import now recognizes and filters Jar (savings pot) transfers so they don't create spurious bank transactions
+- **Wise multi-currency handling** — target fee amount/currency and source name fields now parsed from CSV; currency detection improved for non-EUR transactions
+- **.env.example** added with all configurable environment variables documented
+
+### Fixed
+- **Booking approval safeguard**: `book-invoice` prompt and command now require explicit user approval of a booking preview before creating the purchase invoice — prevents silent mis-bookings
+- **Connection switching safety**: race guard error message now warns about inspecting side effects; `requestGuard()` added to block API requests after mid-tool connection changes
+- **Diacritics in reconciliation matching**: `normalizeCompanyName()` strips diacritics (ü→u, ö→o, etc.) for consistent fuzzy name matching across bank reconciliation and inter-account transfers
+- **Invoice number prefix nullability**: `number_prefix` concatenation no longer produces `"undefined123"` when prefix is null
+- **Wise import edge cases**: direction normalization handles case variations; fee rows use correct target fee currency; preview metadata includes currency info
+- **OCR hardening**: default integration checks enabled; document parser handles edge cases more robustly
+- **`.env` loading**: explicit `loadDotenvFiles()` call at startup ensures environment variables are available before config loading
+- **Allowed roots startup warning**: `getAllowedRootsStartupWarning()` now runs at server start and logs a warning if `EARVELDAJA_ALLOWED_PATHS` is set to filesystem root
+
+### Changed
+- **Receipt inbox refactored** into three focused modules:
+  - `receipt-extraction.ts` (1318 lines): regex-based field extraction, VAT detection, supplier inference, classification logic
+  - `supplier-resolution.ts` (176 lines): Levenshtein-based supplier matching, country inference, counterparty normalization
+  - `receipt-inbox.ts`: orchestration layer importing from the above
+- **Prompt accuracy improvements**:
+  - `book-invoice` step numbering updated for the new approval checkpoint (steps 11→14)
+  - `reconcile-bank` prompt includes Phase 4 for inter-account transfers with duplicate safety workflow
+  - `company-overview` prompt steps parallelized for faster execution
+  - `new-supplier` command updated with safer resolution workflow
+  - Server instructions updated with inter-account transfer guidance and approval checkpoint in document flow
+- **CSV parsing**: Wise import switched from line-by-line `parseCSVLine` to full `parseCSV` for correct multi-line field handling
+- **Code deduplication**: keyword lookup deduplicated, journal data preloaded, types narrowed across multiple modules
+- **Test coverage improvements**: bank reconciliation tests (46), Wise import tests (27), prompt content validation tests, config tests, integration connection tests hardened
+- **89 tools**, 10 prompts, 12 resources
+- **376 tests** total (up from 325 in 0.8.0)
+
 ## [0.8.1] - 2026-03-21
 
 ### Changed
