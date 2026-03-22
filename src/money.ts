@@ -6,6 +6,14 @@
 export const roundMoney = (v: number): number => {
   if (v === 0 || !Number.isFinite(v)) return 0;
   const abs = Math.abs(v);
+
+  // Once the scaled value reaches 1e21, Number stringification switches to
+  // exponential notation and the string-exponent trick becomes invalid
+  // (e.g. Number(Math.round(...)) + "e-2" => "1e+21e-2"). At that magnitude
+  // the IEEE 754 spacing is already much larger than 0.01, so the original
+  // value is the closest representable cent-rounded result.
+  if (abs >= 1e19) return v || 0;
+
   const rounded = Number(Math.round(parseFloat(abs + "e2")) + "e-2");
   return (v < 0 ? -rounded : rounded) || 0;
 };
