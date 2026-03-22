@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -70,6 +70,7 @@ describe("loadAllConfigs", () => {
       "Password: secret-password",
       "",
     ].join("\n"));
+    chmodSync(apiKeyFile, 0o600);
 
     process.chdir(tempDir);
 
@@ -158,7 +159,7 @@ describe("loadAllConfigs", () => {
     }
   });
 
-  it("warns when the API key file is group-readable", async () => {
+  it("rejects API key files that are group-readable", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-config-perms-"));
     const apiKeyFile = join(tempDir, "apikey.txt");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -180,9 +181,9 @@ describe("loadAllConfigs", () => {
 
     try {
       const { loadAllConfigs } = await importFreshConfig(tempDir);
-      loadAllConfigs();
+      expect(() => loadAllConfigs()).toThrowError("No API credentials found");
 
-      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("group/world-readable"));
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("accessible by group/others"));
       expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("chmod 600"));
     } finally {
       stderrSpy.mockRestore();
@@ -216,6 +217,41 @@ describe("loadAllConfigs", () => {
       loadAllConfigs();
 
       expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects symlinked API key files from EARVELDAJA_API_KEY_FILE", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-config-symlink-"));
+    const actualFile = join(tempDir, "actual-apikey.txt");
+    const symlinkFile = join(tempDir, "apikey.txt");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    process.env.EARVELDAJA_SERVER = "live";
+    process.env.EARVELDAJA_API_KEY_ID = "";
+    process.env.EARVELDAJA_API_PUBLIC_VALUE = "";
+    process.env.EARVELDAJA_API_PASSWORD = "";
+    process.env.EARVELDAJA_API_KEY_FILE = symlinkFile;
+    process.env.EARVELDAJA_SCAN_PARENT = "";
+
+    writeFileSync(actualFile, [
+      "ApiKey ID: key-id",
+      "ApiKey public value: public-value",
+      "Password: secret-password",
+      "",
+    ].join("\n"));
+    chmodSync(actualFile, 0o600);
+    symlinkSync(actualFile, symlinkFile);
+    process.chdir(tempDir);
+
+    try {
+      const { loadAllConfigs } = await importFreshConfig(tempDir);
+      expect(() => loadAllConfigs()).toThrowError("No API credentials found");
+
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("Ignoring symlinked credential file"));
     } finally {
       stderrSpy.mockRestore();
       process.chdir(ORIGINAL_CWD);

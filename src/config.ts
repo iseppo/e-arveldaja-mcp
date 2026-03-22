@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { resolve } from "path";
-import { readFileSync, existsSync, statSync, readdirSync, realpathSync } from "fs";
+import { readFileSync, existsSync, statSync, readdirSync, realpathSync, lstatSync } from "fs";
 import { getProjectRoot } from "./paths.js";
 
 export interface Config {
@@ -31,16 +31,39 @@ function getBaseUrl(): string {
   return SERVERS[server as keyof typeof SERVERS];
 }
 
-function warnIfWorldReadable(filePath: string): void {
+function validateCredentialFile(filePath: string): boolean {
   try {
-    const mode = statSync(filePath).mode;
-    if (mode & 0o044) {
-      process.stderr.write(
-        `WARNING: ${filePath} is group/world-readable (mode ${(mode & 0o777).toString(8)}). ` +
-        `Run: chmod 600 ${filePath}\n`
-      );
+    const fileInfo = lstatSync(filePath);
+    if (fileInfo.isSymbolicLink()) {
+      process.stderr.write(`WARNING: Ignoring symlinked credential file: ${filePath}\n`);
+      return false;
     }
-  } catch { /* stat failed, continue anyway */ }
+
+    const stats = statSync(filePath);
+    if (!stats.isFile()) {
+      process.stderr.write(`WARNING: Ignoring non-file credential path: ${filePath}\n`);
+      return false;
+    }
+
+    if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
+      process.stderr.write(
+        `WARNING: Ignoring credential file not owned by the current user: ${filePath}\n`
+      );
+      return false;
+    }
+
+    if (stats.mode & 0o077) {
+      process.stderr.write(
+        `WARNING: Ignoring ${filePath} because it is accessible by group/others ` +
+        `(mode ${(stats.mode & 0o777).toString(8)}). Run: chmod 600 ${filePath}\n`
+      );
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function toUniqueDirs(dirs: string[]): string[] {
@@ -90,7 +113,6 @@ export function loadDotenvFiles(): void {
       if (loaded.has(dedupeKey)) continue;
       loaded.add(dedupeKey);
 
-      warnIfWorldReadable(envPath);
       dotenv.config({ path: envPath });
     }
   };
@@ -105,7 +127,7 @@ export function loadDotenvFiles(): void {
 function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string; password: string } | null {
   if (!existsSync(filePath)) return null;
 
-  warnIfWorldReadable(filePath);
+  if (!validateCredentialFile(filePath)) return null;
 
   const content = readFileSync(filePath, "utf-8");
   const keyIdMatch = content.match(/^ApiKey ID:\s*(.+)$/m);
