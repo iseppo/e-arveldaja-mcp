@@ -17,6 +17,8 @@ interface WiseRow {
   finishedOn: string;
   sourceFeeAmount: number;
   sourceFeeCurrency: string;
+  targetFeeAmount: number;
+  targetFeeCurrency: string;
   sourceName: string;
   sourceAmount: number;
   sourceCurrency: string;
@@ -64,6 +66,8 @@ function parseWiseCSV(csv: string): WiseRow[] {
       finishedOn: fields[idx("Finished on")] ?? "",
       sourceFeeAmount: parseFloat(fields[idx("Source fee amount")] || "0") || 0,
       sourceFeeCurrency: fields[idx("Source fee currency")] ?? "EUR",
+      targetFeeAmount: parseFloat(fields[idx("Target fee amount")] || "0") || 0,
+      targetFeeCurrency: fields[idx("Target fee currency")] ?? "EUR",
       sourceName: fields[idx("Source name")] ?? "",
       sourceAmount: parseFloat(fields[idx("Source amount (after fees)")] || "0") || 0,
       sourceCurrency: fields[idx("Source currency")] ?? "EUR",
@@ -115,6 +119,44 @@ function normalizeWiseText(value?: string | null): string {
   return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+function normalizeWiseCurrency(value?: string | null, fallback = "EUR"): string {
+  const normalized = value?.trim().toUpperCase();
+  return normalized || fallback;
+}
+
+function ownAccountSideForWiseRow(row: WiseRow): "source" | "target" | undefined {
+  const txType = transactionTypeForWiseDirection(row.direction);
+  if (txType === "C") return "source";
+  if (txType === "D") return "target";
+  return undefined;
+}
+
+function bookedAmountForWiseRow(row: WiseRow): number {
+  return ownAccountSideForWiseRow(row) === "target" ? row.targetAmount : row.sourceAmount;
+}
+
+function bookedCurrencyForWiseRow(row: WiseRow): string {
+  return ownAccountSideForWiseRow(row) === "target"
+    ? normalizeWiseCurrency(row.targetCurrency)
+    : normalizeWiseCurrency(row.sourceCurrency);
+}
+
+function bookedFeeAmountForWiseRow(row: WiseRow): number {
+  return ownAccountSideForWiseRow(row) === "target" ? row.targetFeeAmount : row.sourceFeeAmount;
+}
+
+function bookedFeeCurrencyForWiseRow(row: WiseRow, fallbackCurrency: string): string {
+  return ownAccountSideForWiseRow(row) === "target"
+    ? normalizeWiseCurrency(row.targetFeeCurrency, fallbackCurrency)
+    : normalizeWiseCurrency(row.sourceFeeCurrency, fallbackCurrency);
+}
+
+function oppositeSideForWiseRow(row: WiseRow): { amount: number; currency: string } {
+  return ownAccountSideForWiseRow(row) === "target"
+    ? { amount: row.sourceAmount, currency: normalizeWiseCurrency(row.sourceCurrency) }
+    : { amount: row.targetAmount, currency: normalizeWiseCurrency(row.targetCurrency) };
+}
+
 /** Detect Wise Jar (savings pot) transfers — internal movements, not real payments */
 function isJarTransfer(row: WiseRow): boolean {
   const catLower = row.category.toLowerCase();
@@ -146,6 +188,7 @@ function formatWiseAmount(amount: number): string {
 function buildWiseTransactionSignature(
   date: string,
   amount: number,
+  currency: string,
   bankAccountName?: string | null,
   refNumber?: string | null,
   description?: string | null,
@@ -153,6 +196,7 @@ function buildWiseTransactionSignature(
   return [
     date,
     formatWiseAmount(amount),
+    normalizeWiseCurrency(currency),
     normalizeWiseText(bankAccountName),
     normalizeWiseText(refNumber),
     normalizeWiseText(description),
@@ -271,6 +315,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         existingTx.map(tx => buildWiseTransactionSignature(
           tx.date,
           tx.amount,
+          tx.cl_currencies_id ?? "EUR",
           tx.bank_account_name,
           tx.ref_number,
           stripWisePrefix(tx.description),
@@ -304,17 +349,19 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
           skipped.push({ wise_id: row.id, reason: `Unsupported Wise direction "${row.direction}"` });
           continue;
         }
-        const amount = row.sourceAmount;
-        const fee = row.sourceFeeAmount;
+        const amount = bookedAmountForWiseRow(row);
+        const fee = bookedFeeAmountForWiseRow(row);
+        const transactionCurrency = bookedCurrencyForWiseRow(row);
         const wiseIdTag = `WISE:${row.id}`;
         const counterpartyName = counterpartyNameForWiseRow(row);
+        const oppositeSide = oppositeSideForWiseRow(row);
 
         // Build description
         let desc = wiseIdTag;
         if (counterpartyName) desc += ` ${counterpartyName}`;
         if (row.category && row.category !== "General") desc += ` (${row.category})`;
-        if (row.targetCurrency !== "EUR" && row.targetCurrency !== row.sourceCurrency) {
-          desc += ` [${row.targetAmount} ${row.targetCurrency} @ ${row.exchangeRate}]`;
+        if (oppositeSide.currency !== transactionCurrency) {
+          desc += ` [${oppositeSide.amount} ${oppositeSide.currency} @ ${row.exchangeRate}]`;
         }
         const legacyDesc = stripWisePrefix(desc);
         const mainSignatureCandidates = new Set(
@@ -323,6 +370,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             .map((name) => buildWiseTransactionSignature(
               date,
               amount,
+              transactionCurrency,
               name,
               row.reference || undefined,
               legacyDesc,
@@ -361,7 +409,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 accounts_dimensions_id,
                 type,
                 amount,
-                cl_currencies_id: "EUR",
+                cl_currencies_id: transactionCurrency,
                 date,
                 description: desc,
                 bank_account_name: counterpartyName,
@@ -398,9 +446,11 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
 
           const feeWiseIdTag = `WISE:FEE:${row.id}`;
           const feeDesc = `WISE:FEE:${row.id} Wise teenustasu`;
+          const feeCurrency = bookedFeeCurrencyForWiseRow(row, transactionCurrency);
           const feeSignature = buildWiseTransactionSignature(
             date,
             fee,
+            feeCurrency,
             "Wise",
             undefined,
             stripWisePrefix(feeDesc),
@@ -434,7 +484,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 accounts_dimensions_id,
                 type: feeType,
                 amount: fee,
-                cl_currencies_id: "EUR",
+                cl_currencies_id: feeCurrency,
                 date,
                 description: feeDesc,
                 bank_account_name: "Wise",

@@ -328,4 +328,111 @@ describe("wise import tool", () => {
       ref_number: "PAY-5",
     }));
   });
+
+  it("preserves non-EUR source currencies for Wise transactions and fees", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "fx-1", "COMPLETED", "OUT", "2026-01-15 09:00:00", "2026-01-15 09:00:00",
+      "1.5", "USD", "0", "USD",
+      "Seppo AI OÜ", "100", "USD",
+      "Acme Ltd", "100", "USD",
+      "1", "INV-FX", "", "", "General", "",
+    ]));
+
+    const create = vi.fn()
+      .mockResolvedValueOnce({ created_object_id: 9010 })
+      .mockResolvedValueOnce({ created_object_id: 9011 });
+    const { api, handler } = setupWiseTool([], create);
+
+    await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+      execute: true,
+    });
+
+    expect(api.transactions.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      amount: 100,
+      cl_currencies_id: "USD",
+      description: "WISE:fx-1 Acme Ltd",
+    }));
+    expect(api.transactions.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      amount: 1.5,
+      cl_currencies_id: "USD",
+      description: "WISE:FEE:fx-1 Wise teenustasu",
+    }));
+  });
+
+  it("uses the target-side amount, currency, and fee for incoming FX rows", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "fx-in-1", "COMPLETED", "IN", "2026-01-16 09:00:00", "2026-01-16 09:00:00",
+      "0", "USD", "2", "EUR",
+      "Customer Inc", "100", "USD",
+      "Seppo AI OÜ", "92", "EUR",
+      "0.92", "PAY-FX-IN", "", "", "General", "",
+    ]));
+
+    const create = vi.fn()
+      .mockResolvedValueOnce({ created_object_id: 9020 })
+      .mockResolvedValueOnce({ created_object_id: 9021 });
+    const { api, handler } = setupWiseTool([], create);
+
+    await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+      execute: true,
+    });
+
+    expect(api.transactions.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      type: "D",
+      amount: 92,
+      cl_currencies_id: "EUR",
+      bank_account_name: "Customer Inc",
+      description: "WISE:fx-in-1 Customer Inc [100 USD @ 0.92]",
+      ref_number: "PAY-FX-IN",
+    }));
+    expect(api.transactions.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      type: "C",
+      amount: 2,
+      cl_currencies_id: "EUR",
+      description: "WISE:FEE:fx-in-1 Wise teenustasu",
+    }));
+  });
+
+  it("does not treat same-amount rows in different currencies as duplicates", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "fx-dup-1", "COMPLETED", "OUT", "2026-01-17 09:00:00", "2026-01-17 09:00:00",
+      "0", "USD", "0", "USD",
+      "Seppo AI OÜ", "100", "USD",
+      "Acme Ltd", "100", "USD",
+      "1", "INV-DUP", "", "", "General", "",
+    ]));
+
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9030 });
+    const { api, handler } = setupWiseTool([{
+      date: "2026-01-17",
+      amount: 100,
+      cl_currencies_id: "EUR",
+      bank_account_name: "Acme Ltd",
+      ref_number: "INV-DUP",
+      description: "Acme Ltd",
+    }], create);
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+      execute: true,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
+      amount: 100,
+      cl_currencies_id: "USD",
+      description: "WISE:fx-dup-1 Acme Ltd",
+    }));
+    expect(payload.skipped_details).toEqual([]);
+  });
 });

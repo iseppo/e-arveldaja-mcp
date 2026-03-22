@@ -108,7 +108,7 @@ The server includes 6 built-in workflow prompts that any MCP client can discover
 
 | Prompt | Description |
 |---|---|
-| `book-invoice` | Book a purchase invoice from PDF: extract, validate, resolve supplier, create, upload, confirm |
+| `book-invoice` | Book a purchase invoice from PDF: extract, validate, resolve supplier, preview, create, upload, confirm |
 | `reconcile-bank` | Match bank transactions to invoices, auto-confirm or review manually |
 | `month-end-close` | Blockers, missing docs, duplicates, trial balance, P&L, balance sheet |
 | `new-supplier` | Create supplier with Estonian business registry lookup |

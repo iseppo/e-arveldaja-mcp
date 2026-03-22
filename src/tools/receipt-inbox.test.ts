@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildDryRunCreatedInvoicePreview,
   classifyReceiptDocument,
   categorizeTransactionGroup,
   detectReceiptCurrency,
@@ -44,6 +45,17 @@ describe("normalizeCounterpartyName", () => {
   it("removes common company suffixes and punctuation", () => {
     expect(normalizeCounterpartyName("AS LHV Pank")).toBe("lhv");
     expect(normalizeCounterpartyName("OÜ OpenAI, Inc.")).toBe("openai");
+  });
+});
+
+describe("buildDryRunCreatedInvoicePreview", () => {
+  it("marks process_receipt_batch previews as not yet uploaded or confirmed", () => {
+    expect(buildDryRunCreatedInvoicePreview("INV-42")).toEqual({
+      number: "INV-42",
+      status: "would_create",
+      confirmed: false,
+      uploaded_document: false,
+    });
   });
 });
 

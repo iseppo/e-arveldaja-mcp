@@ -200,6 +200,15 @@ interface ClassifiedTransactionGroupResult {
   }>;
 }
 
+export function buildDryRunCreatedInvoicePreview(invoiceNumber: string) {
+  return {
+    number: invoiceNumber,
+    status: "would_create",
+    confirmed: false,
+    uploaded_document: false,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -576,14 +585,11 @@ async function createAndMaybeMatchPurchaseInvoice(
     } else if (invoiceCurrency !== "EUR") {
       notes.push("Dry run: non-EUR bank matching is conservative until the created invoice exposes base_gross_price.");
     }
+    notes.push("Dry run: purchase invoice document was not uploaded and the invoice was not confirmed.");
     return {
       notes,
       status: "dry_run_preview",
-      created_invoice: {
-        number: extracted.invoice_number!,
-        confirmed: true,
-        uploaded_document: true,
-      },
+      created_invoice: buildDryRunCreatedInvoicePreview(extracted.invoice_number!),
       bank_match: candidate ? { candidate, linked: false } : undefined,
     };
   }
