@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.9.2] - 2026-03-22
+
+### Added
+- **Auto-upload source document** — `create_purchase_invoice_from_pdf` now automatically uploads the source PDF/image to the created purchase invoice, eliminating the separate `upload_purchase_invoice_document` step
+- **VOID transaction handling** — CAMT import, Wise import, receipt inbox, and analyze-unconfirmed tools now exclude VOID (invalidated) transactions from matching, duplicate detection, and reconciliation
+- **Transaction confirm rollback** — if transaction confirmation fails after auto-setting `clients_id`, the change is now rolled back (best-effort with stderr logging on rollback failure)
+- **`.env` file permission checks** — startup now warns about symlinked or group/other-readable `.env` files, matching the security posture of `apikey*.txt` validation
+
+### Fixed
+- **CRITICAL: Cache invalidation race condition** — all mutating API methods (create, update, delete, confirm, invalidate, upload/delete document) across 8 API files now invalidate cache *after* the API call succeeds, not before. Eliminates a window where concurrent reads could cache stale data for up to 300 seconds.
+- **Purchase invoice tolerance** — `confirmWithTotals` now uses exact `roundMoney()` comparison instead of a 0.02 EUR tolerance that could silently accept accounting discrepancies. Also fixed falsy `!currentGross` check that treated zero-value invoices (credit notes) as needing repair.
+- **Stack trace leakage** — error stack traces are now written to stderr only, no longer sent through the MCP logging protocol where they could expose internal paths to the AI model
+- **Error message sanitization** — removed `inspect()` fallback in `toolError()` that could leak internal object structure; non-serializable errors now return `"Internal error"`
+- **`roundMoney(NaN)` silent corruption** — now throws instead of silently returning `0`, surfacing upstream bugs immediately in a financial context
+- **`roundToDecimals` IEEE 754 edge case** — receipt extraction now uses the same string-exponent rounding as `roundMoney()`, avoiding `.toFixed()` boundary errors
+- **Unparseable VAT rates silently skipped** — `normalizeItemsForNonVat` now logs a warning when `vat_rate_dropdown` produces `NaN`
+- **Journal batch fetch null id** — `listAllWithPostings` now guards against journals with `id == null` before attempting individual fetch
+- **`sumCategory` floating-point drift** — return value now wrapped in `roundMoney()` for defense-in-depth
+- **`parseInt` without radix** — all 3 call sites now pass explicit radix 10
+- **Cache iterator fragility** — `invalidate()` now collects keys first, then deletes in a second pass (safe against future refactors)
+- **CSV size limit** — `parseCSV` now enforces a 1 MB size limit, consistent with `safeJsonParse`
+- **Project root silent fallback** — `getProjectRoot()` now logs a warning when falling back to `process.cwd()`
+- **`invalidateReadonlyCache` accidental full clear** — `pattern` parameter is now required, preventing callers from accidentally clearing all reference data caches
+- **Receipt inbox VOID rollback** — receipt batch processing now correctly handles VOID transactions during rollback and skips them during bank matching
+
+### Changed
+- **Prompts and commands updated** for the auto-upload workflow in `create_purchase_invoice_from_pdf`
+- **410 tests** total (up from 396 in 0.9.1)
+
 ## [0.9.1] - 2026-03-22
 
 ### Added
