@@ -179,6 +179,36 @@ The assistant will compute the 22/78 corporate income tax, check retained earnin
 
 > "Reimburse my business expense of 45.50 EUR from Bolt"
 
+
+## Updating
+
+How you update depends on how you set up the server:
+
+### Using `npx`
+
+If your MCP config runs `npx -y e-arveldaja-mcp`, you usually just need to restart your AI assistant or reload the MCP server. On the next start, `npx` will fetch the latest published version.
+
+If your client keeps using an older cached version, force-refresh it once:
+
+```bash
+npx -y e-arveldaja-mcp@latest
+```
+
+Then restart the MCP server in your client.
+
+### Running from a local git checkout
+
+Pull the latest changes, reinstall dependencies if needed, rebuild, then restart your AI assistant:
+
+```bash
+git pull
+npm install
+npm run build
+```
+
+If your MCP config points to `dist/index.js`, the rebuild step is required after updating the source.
+
+
 ## Good to know
 
 - **Dry run by default.** Batch operations (bank import, Wise import, Lightyear booking, receipt processing, auto-confirm) preview results first. You must explicitly confirm or pass `execute=true` to create records.
