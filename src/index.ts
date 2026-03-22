@@ -151,6 +151,8 @@ async function main() {
 
 Bank reconciliation:
 - Run reconcile_transactions first, then auto_confirm_exact_matches with execute=false before executing.
+- For inter-account transfers (Wise↔LHV etc.): use reconcile_inter_account_transfers. It checks existing journals to prevent double-booking when the other side was already confirmed (e.g. from CAMT import). Always dry-run first.
+- Do NOT confirm Wise-side transfer transactions if the same transfer was already confirmed from the LHV CAMT side — this creates duplicate journal entries.
 
 Reporting:
 - Confirm all journals/invoices/transactions first for accurate financial reports.

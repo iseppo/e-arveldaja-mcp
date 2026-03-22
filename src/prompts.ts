@@ -163,11 +163,18 @@ Follow these steps:
      - distributions: JSON.stringify([match.distribution])
    - If \`distribution_ready=false\`, inspect the invoice first and prepare the distribution manually instead of reusing \`match.distribution\``}
 
-4. List any unmatched transactions (no match found or confidence below threshold):
-   - Show transaction date, amount, and description
-   - Suggest possible actions (create invoice, mark as expense, etc.)
+4. For inter-account transfers (counterparty matches own company name or IBAN matches another own bank account):
+   - Call \`reconcile_inter_account_transfers\` with execute=false first.
+   - It automatically detects transfers already journalized from the other account side and skips them.
+   - Show the dry-run: already_handled (safe to delete), one_sided (would confirm), pairs (would confirm both sides).
+   - After approval, run with execute=true. If there are 3+ bank accounts and IBAN is missing, provide target_accounts_dimensions_id.
+   - WARNING: Do NOT manually confirm Wise-side transfers that were already confirmed via LHV CAMT — this creates duplicate journal entries.
 
-5. Report a final summary:
+5. List any remaining unmatched transactions (no match found or confidence below threshold):
+   - Show transaction date, amount, and description
+   - Suggest possible actions (create invoice, mark as expense, delete if duplicate, etc.)
+
+6. Report a final summary:
    - Total transactions processed
    - Number auto-confirmed / manually confirmed
    - Number unmatched

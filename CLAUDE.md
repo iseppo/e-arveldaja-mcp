@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-88 tools, 6 workflow prompts, 12 resources across 11 modules. Supports multiple companies/accounts.
+89 tools, 6 workflow prompts, 12 resources across 11 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -95,7 +95,7 @@ src/
     purchase-vat-defaults.ts # Purchase VAT article/account resolution from reference data
     account-balance.ts   # D/C balance computation, client debt
     pdf-workflow.ts      # PDF text extraction, invoice validation, supplier resolution, booking suggestions
-    bank-reconciliation.ts # Transaction matching and auto-confirmation
+    bank-reconciliation.ts # Transaction matching, auto-confirmation, inter-account transfer reconciliation
     financial-statements.ts # Trial balance, balance sheet, P&L, month-end close
     aging-analysis.ts    # Receivables/payables aging buckets
     recurring-invoices.ts # Clone sale invoices for recurring billing
