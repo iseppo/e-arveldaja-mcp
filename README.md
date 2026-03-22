@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 88 tools, 6 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 88 tools, 10 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 ## Disclaimer
 
@@ -104,18 +104,22 @@ npm install && npm run build
 
 ## Workflows (MCP Prompts)
 
-The server includes 6 built-in workflow prompts that any MCP client can discover and use. These guide the AI through multi-step accounting tasks:
+The server includes 10 built-in workflow prompts that any MCP client can discover and use. These guide the AI through multi-step accounting tasks:
 
 | Prompt | Description |
 |---|---|
 | `book-invoice` | Book a purchase invoice from PDF: extract, validate, resolve supplier, preview, create, upload, confirm |
+| `receipt-batch` | Scan a receipt folder, preview auto-bookable items, then batch-create after approval |
+| `import-camt` | Parse CAMT.053 XML, preview imported bank transactions, then create after approval |
+| `import-wise` | Preview Wise CSV import results, fees, duplicates, and Jar skips before execution |
+| `classify-unmatched` | Group unmatched bank transactions, preview suggested booking actions, then apply after approval |
 | `reconcile-bank` | Match bank transactions to invoices, auto-confirm or review manually |
 | `month-end-close` | Blockers, missing docs, duplicates, trial balance, P&L, balance sheet |
 | `new-supplier` | Create supplier with Estonian business registry lookup |
 | `company-overview` | Financial dashboard: balance sheet, P&L, receivables, payables |
 | `lightyear-booking` | Book Lightyear investment trades and distributions from CSV |
 
-**Claude Code** also has these as slash commands: `/book-invoice`, `/reconcile-bank`, `/month-end`, `/new-supplier`.
+**Claude Code** also has these as slash commands: `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`.
 
 ## Usage Examples
 

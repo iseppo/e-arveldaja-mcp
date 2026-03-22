@@ -1,0 +1,48 @@
+# Receipt Batch
+
+Process a folder of receipts with an approval checkpoint before any invoices are created.
+
+## Arguments
+
+`$ARGUMENTS` should provide:
+- folder path
+- bank `accounts_dimensions_id`
+- optional `date_from` / `date_to`
+
+## Workflow
+
+### Step 1: Scan the folder
+
+Call `scan_receipt_folder` with the provided folder path.
+
+Show valid files and skipped entries. If no valid files exist, stop.
+
+### Step 2: Preview the batch
+
+Call `process_receipt_batch`:
+- `folder_path`: the provided folder
+- `accounts_dimensions_id`: the provided dimension ID
+- `execute`: `false`
+- include `date_from` / `date_to` when provided
+
+Review `summary.created`, `summary.matched`, `summary.skipped_duplicate`, `summary.needs_review`, `summary.failed`, `summary.dry_run_preview`, `skipped`, and `results`.
+
+Group by status:
+- `dry_run_preview`: show supplier, invoice number, amounts, booking suggestion, and bank match. The purchase invoice has NOT been created yet. The document has NOT been uploaded yet. The invoice has NOT been confirmed yet.
+- `skipped_duplicate`: show duplicate details
+- `needs_review`: show `llm_fallback` and notes
+- `failed`: show the exact error
+
+### Step 3: Approval gate
+
+State that `execute: false` is only a preview.
+
+Ask for approval before calling `process_receipt_batch` with `execute: true`.
+
+If the user does not explicitly approve, stop.
+
+### Step 4: Execute
+
+Call `process_receipt_batch` again with `execute: true`.
+
+Report created, matched, skipped duplicates, items needing review, failures, and manual follow-up.

@@ -38,6 +38,10 @@ describe("registerPrompts", () => {
     const names = server.registerPrompt.mock.calls.map(([name]) => name);
     expect(names).toEqual([
       "book-invoice",
+      "receipt-batch",
+      "import-camt",
+      "import-wise",
+      "classify-unmatched",
       "reconcile-bank",
       "month-end-close",
       "new-supplier",
@@ -79,6 +83,73 @@ describe("registerPrompts", () => {
     expect(reviewText).toContain("distributions: JSON.stringify([match.distribution])");
     expect(reviewText).toContain("distribution_ready=false");
     expect(reviewText).toContain("prepare the distribution manually");
+  });
+
+  it("keeps receipt-batch explicit about preview-only receipt processing before execute=true", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "receipt-batch", {
+      folder_path: "/tmp/receipts",
+      accounts_dimensions_id: 123,
+    });
+
+    expect(text).toContain("scan_receipt_folder");
+    expect(text).toContain("process_receipt_batch");
+    expect(text).toContain("execute: false");
+    expect(text).toContain("execute: true");
+    expect(text).toContain("dry_run_preview");
+    expect(text).toContain("The purchase invoice has NOT been created yet.");
+    expect(text).toContain("The document has NOT been uploaded yet.");
+    expect(text).toContain("The invoice has NOT been confirmed yet.");
+  });
+
+  it("keeps import-camt aligned with parse and dry-run import details", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "import-camt", {
+      file_path: "/tmp/statement.xml",
+      accounts_dimensions_id: 77,
+    });
+
+    expect(text).toContain("parse_camt053");
+    expect(text).toContain("import_camt053");
+    expect(text).toContain("statement_metadata");
+    expect(text).toContain("execute: false");
+    expect(text).toContain("execute: true");
+    expect(text).toContain("skipped_duplicate_details");
+    expect(text).toContain("created_count");
+    expect(text).toContain("errors_count");
+  });
+
+  it("keeps import-wise aligned with fee account handling and dry-run fields", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "import-wise", {
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 88,
+    });
+
+    expect(text).toContain("import_wise_transactions");
+    expect(text).toContain("fee_account_dimensions_id");
+    expect(text).toContain("list_account_dimensions");
+    expect(text).toContain("execute: false");
+    expect(text).toContain("execute: true");
+    expect(text).toContain("skipped_jar_transfers");
+    expect(text).toContain("skipped_details");
+    expect(text).toContain("Do not disable Jar skipping");
+  });
+
+  it("keeps classify-unmatched aligned with filtered apply_transaction_classifications dry runs", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "classify-unmatched", {
+      accounts_dimensions_id: 55,
+    });
+
+    expect(text).toContain("classify_unmatched_transactions");
+    expect(text).toContain("apply_transaction_classifications");
+    expect(text).toContain("classifications_json: JSON.stringify(the full response from step 1)");
+    expect(text).toContain("execute: false");
+    expect(text).toContain("execute: true");
+    expect(text).toContain("dry_run_preview");
+    expect(text).toContain('apply_mode="purchase_invoice"');
+    expect(text).toContain("filtered JSON object");
   });
 
   it("uses the real reporting tool parameter names in month-end and overview prompts", async () => {
@@ -151,6 +222,40 @@ describe("registerPrompts", () => {
       expect(text).toContain("match.distribution");
       expect(text).toContain("prepare the distribution manually");
       expect(text).not.toContain("Call `get_transaction`");
+    }
+  });
+
+  it("keeps shipped receipt-batch markdown prompts aligned with preview-only batch processing", () => {
+    for (const relativePath of ["workflows/receipt-batch.md", ".claude/commands/receipt-batch.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("scan_receipt_folder");
+      expect(text).toContain("process_receipt_batch");
+      expect(text).toContain("dry_run_preview");
+      expect(text).toContain("The purchase invoice has NOT been created yet.");
+    }
+  });
+
+  it("keeps shipped import markdown prompts aligned with approval-first execution", () => {
+    for (const relativePath of [
+      "workflows/import-camt.md",
+      ".claude/commands/import-camt.md",
+      "workflows/import-wise.md",
+      ".claude/commands/import-wise.md",
+    ]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("execute: false");
+      expect(text).toContain("execute: true");
+      expect(text.toLowerCase()).toContain("approval");
+    }
+  });
+
+  it("keeps shipped classify-unmatched markdown prompts aligned with filtered dry runs", () => {
+    for (const relativePath of ["workflows/classify-unmatched.md", ".claude/commands/classify-unmatched.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("classify_unmatched_transactions");
+      expect(text).toContain("apply_transaction_classifications");
+      expect(text).toContain("classifications_json");
+      expect(text).toContain("filtered JSON object");
     }
   });
 

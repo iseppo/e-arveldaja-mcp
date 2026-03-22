@@ -131,6 +131,335 @@ Follow these steps in order:
   );
 
   registerPrompt(server, 
+    "receipt-batch",
+    "Scan a receipt folder, preview auto-bookable results, and only create purchase invoices after explicit approval.",
+    {
+      folder_path: z.string().describe("Absolute path to the receipt folder"),
+      accounts_dimensions_id: z.number().describe("Bank account dimension ID used for bank transaction matching"),
+      date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
+      date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
+    },
+    async ({ folder_path, accounts_dimensions_id, date_from, date_to }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Process a receipt batch from: ${folder_path}
+
+Bank account dimension ID: ${accounts_dimensions_id}
+${date_from ? `Date from: ${date_from}` : ""}
+${date_to ? `Date to: ${date_to}` : ""}
+
+Follow these steps in order:
+
+1. Call \`scan_receipt_folder\` with:
+   - folder_path: "${folder_path}"
+   ${date_from || date_to ? "- If the user asked for date filtering, mention that the scan itself does not apply date filters; the processing step does." : ""}
+
+2. Present the scan results before doing anything else:
+   - folder_path
+   - total valid files found
+   - skipped entries and their reasons
+   - if there are zero valid files, stop here
+
+3. Call \`process_receipt_batch\` with:
+   - folder_path: "${folder_path}"
+   - accounts_dimensions_id: ${accounts_dimensions_id}
+   - execute: false
+   ${date_from ? `- date_from: "${date_from}"` : ""}
+   ${date_to ? `- date_to: "${date_to}"` : ""}
+
+4. Review the dry run output carefully:
+   - summary.created
+   - summary.matched
+   - summary.skipped_duplicate
+   - summary.needs_review
+   - summary.failed
+   - summary.dry_run_preview
+   - skipped
+   - results
+
+5. Present the preview grouped by status:
+   - \`dry_run_preview\`: show file name, extracted supplier, invoice number, amounts, booking suggestion, supplier resolution, and any matching bank transaction. The purchase invoice has NOT been created yet. The document has NOT been uploaded yet. The invoice has NOT been confirmed yet.
+   - \`skipped_duplicate\`: show the duplicate match and why it was skipped.
+   - \`needs_review\`: show the file, classification, missing fields, llm_fallback, and notes.
+   - \`failed\`: show the file and exact error.
+
+6. Make the approval checkpoint explicit:
+   - Say that \`execute: false\` was only a preview.
+   - Do not imply that any invoice already exists.
+   - Ask whether to proceed with \`execute: true\`.
+
+7. If the user does not explicitly approve execution, stop here.
+
+8. After approval, call \`process_receipt_batch\` again with:
+   - folder_path: "${folder_path}"
+   - accounts_dimensions_id: ${accounts_dimensions_id}
+   - execute: true
+   ${date_from ? `- date_from: "${date_from}"` : ""}
+   ${date_to ? `- date_to: "${date_to}"` : ""}
+
+9. Report the execution summary:
+   - created
+   - matched
+   - skipped_duplicate
+   - needs_review
+   - failed
+   - which files still need manual follow-up
+`,
+        },
+      }],
+    })
+  );
+
+  registerPrompt(server, 
+    "import-camt",
+    "Parse a CAMT.053 statement, preview imported bank transactions, and only create them after approval.",
+    {
+      file_path: z.string().describe("Absolute path to the CAMT.053 XML file"),
+      accounts_dimensions_id: z.number().describe("Bank account dimension ID in e-arveldaja"),
+      date_from: z.string().optional().describe("Optional statement-entry lower bound (YYYY-MM-DD)"),
+      date_to: z.string().optional().describe("Optional statement-entry upper bound (YYYY-MM-DD)"),
+    },
+    async ({ file_path, accounts_dimensions_id, date_from, date_to }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Import CAMT.053 bank transactions from: ${file_path}
+
+Bank account dimension ID: ${accounts_dimensions_id}
+${date_from ? `Date from: ${date_from}` : ""}
+${date_to ? `Date to: ${date_to}` : ""}
+
+Follow these steps in order:
+
+1. Call \`parse_camt053\` with:
+   - file_path: "${file_path}"
+
+2. Present the parsed statement preview:
+   - statement_metadata
+   - summary.entry_count
+   - summary.credit_count and summary.credit_total
+   - summary.debit_count and summary.debit_total
+   - summary.duplicate_count
+   - any duplicate hints already found in the parsed entries
+
+3. Call \`import_camt053\` with:
+   - file_path: "${file_path}"
+   - accounts_dimensions_id: ${accounts_dimensions_id}
+   - execute: false
+   ${date_from ? `- date_from: "${date_from}"` : ""}
+   ${date_to ? `- date_to: "${date_to}"` : ""}
+
+4. Review the import dry run:
+   - mode
+   - total_statement_entries
+   - eligible_entries
+   - filtered_out
+   - created_count
+   - skipped_duplicates
+   - errors_count
+   - results
+   - skipped_duplicate_details
+   - errors
+
+5. Present a clear import preview:
+   - transactions that would_create, with date, amount, currency, direction, counterparty, and reference
+   - skipped duplicates, including why each was skipped
+   - any import errors that would block execution
+
+6. Ask for approval before creating anything.
+   If the user does not explicitly approve, stop here.
+
+7. After approval, call \`import_camt053\` again with:
+   - file_path: "${file_path}"
+   - accounts_dimensions_id: ${accounts_dimensions_id}
+   - execute: true
+   ${date_from ? `- date_from: "${date_from}"` : ""}
+   ${date_to ? `- date_to: "${date_to}"` : ""}
+
+8. Report the execution result:
+   - created_count
+   - skipped_duplicates
+   - errors_count
+   - any transactions that still need attention
+
+9. If import completed successfully, offer the next logical step:
+   - reconcile the imported bank account with \`reconcile-bank\`
+`,
+        },
+      }],
+    })
+  );
+
+  registerPrompt(server, 
+    "import-wise",
+    "Preview Wise transaction import results, including fees and skipped duplicates, before creating any bank transactions.",
+    {
+      file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export"),
+      accounts_dimensions_id: z.number().describe("Bank account dimension ID for the Wise account"),
+      fee_account_dimensions_id: z.number().optional().describe("Optional Wise fee expense account dimension ID"),
+      date_from: z.string().optional().describe("Optional transaction-date lower bound (YYYY-MM-DD)"),
+      date_to: z.string().optional().describe("Optional transaction-date upper bound (YYYY-MM-DD)"),
+      skip_jar_transfers: z.boolean().optional().describe("Skip Jar transfers (default true)"),
+    },
+    async ({
+      file_path,
+      accounts_dimensions_id,
+      fee_account_dimensions_id,
+      date_from,
+      date_to,
+      skip_jar_transfers,
+    }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Import Wise transactions from: ${file_path}
+
+Wise account dimension ID: ${accounts_dimensions_id}
+${fee_account_dimensions_id !== undefined ? `Fee account dimension ID: ${fee_account_dimensions_id}` : "Fee account dimension ID: not provided"}
+${date_from ? `Date from: ${date_from}` : ""}
+${date_to ? `Date to: ${date_to}` : ""}
+Skip Jar transfers: ${skip_jar_transfers === false ? "false" : "true"}
+
+Follow these steps in order:
+
+1. Call \`import_wise_transactions\` with:
+   - file_path: "${file_path}"
+   - accounts_dimensions_id: ${accounts_dimensions_id}
+   ${fee_account_dimensions_id !== undefined ? `- fee_account_dimensions_id: ${fee_account_dimensions_id}` : ""}
+   - execute: false
+   ${date_from ? `- date_from: "${date_from}"` : ""}
+   ${date_to ? `- date_to: "${date_to}"` : ""}
+   ${skip_jar_transfers === false ? "- skip_jar_transfers: false" : ""}
+
+2. If the dry run fails because Wise fee rows require \`fee_account_dimensions_id\`:
+   - call \`list_account_dimensions\`
+   - show the available dimensions to the user
+   - ask the user which expense dimension should be used for Wise fees
+   - then retry step 1 with \`fee_account_dimensions_id\`
+
+3. Review the dry run output:
+   - mode
+   - total_csv_rows
+   - eligible
+   - filtered_out
+   - skipped_jar_transfers
+   - created
+   - skipped
+   - results
+   - skipped_details
+
+4. Present a clear preview:
+   - each main transaction or fee transaction that would be created
+   - skipped duplicates and skipped fee rows, with their exact reasons
+   - whether Jar transfers were skipped
+   - whether fees will be auto-confirmed to the configured expense dimension
+
+5. Do not disable Jar skipping unless the user explicitly wants those internal Wise movements imported.
+
+6. Ask for approval before creating anything.
+   If the user does not explicitly approve, stop here.
+
+7. After approval, call \`import_wise_transactions\` again with:
+   - file_path: "${file_path}"
+   - accounts_dimensions_id: ${accounts_dimensions_id}
+   ${fee_account_dimensions_id !== undefined ? `- fee_account_dimensions_id: ${fee_account_dimensions_id}` : ""}
+   - execute: true
+   ${date_from ? `- date_from: "${date_from}"` : ""}
+   ${date_to ? `- date_to: "${date_to}"` : ""}
+   ${skip_jar_transfers === false ? "- skip_jar_transfers: false" : ""}
+
+8. Report the execution result:
+   - created
+   - skipped
+   - which rows became fee transactions
+   - any rows that still need manual follow-up
+`,
+        },
+      }],
+    })
+  );
+
+  registerPrompt(server, 
+    "classify-unmatched",
+    "Classify unmatched bank transactions, preview the suggested purchase-invoice bookings, and only apply them after approval.",
+    {
+      accounts_dimensions_id: z.number().describe("Bank account dimension ID"),
+      date_from: z.string().optional().describe("Optional lower transaction date bound (YYYY-MM-DD)"),
+      date_to: z.string().optional().describe("Optional upper transaction date bound (YYYY-MM-DD)"),
+    },
+    async ({ accounts_dimensions_id, date_from, date_to }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Classify unmatched bank transactions for account dimension ${accounts_dimensions_id}.
+
+${date_from ? `Date from: ${date_from}` : ""}
+${date_to ? `Date to: ${date_to}` : ""}
+
+Follow these steps in order:
+
+1. Call \`classify_unmatched_transactions\` with:
+   - accounts_dimensions_id: ${accounts_dimensions_id}
+   ${date_from ? `- date_from: "${date_from}"` : ""}
+   ${date_to ? `- date_to: "${date_to}"` : ""}
+
+2. Present the classification summary:
+   - total_unconfirmed
+   - total_unmatched
+   - category_counts
+   - groups
+
+3. Review each group carefully and show:
+   - category
+   - display_counterparty
+   - apply_mode
+   - reasons
+   - suggested_booking
+   - transaction IDs, dates, amounts, and descriptions
+
+4. Explain the execution boundary clearly:
+   - \`apply_mode="purchase_invoice"\` groups are the ones that can be auto-booked through \`apply_transaction_classifications\`
+   - review-only categories will be reported back as skipped, not booked
+
+5. Call \`apply_transaction_classifications\` with:
+   - classifications_json: JSON.stringify(the full response from step 1)
+   - execute: false
+
+6. Present the dry run result grouped by status:
+   - \`dry_run_preview\`: would create purchase invoices and link transactions, but nothing has been created yet
+   - \`skipped\`: review-only categories or groups that no longer qualify
+   - \`failed\`: exact errors that blocked preview
+
+7. If the user wants to apply only some groups:
+   - build a filtered JSON object that keeps the original top-level metadata and only the approved \`groups\` array entries
+   - pass that filtered JSON object to \`apply_transaction_classifications\` instead of the full response
+
+8. Ask for approval before executing.
+   If the user does not explicitly approve, stop here.
+
+9. After approval, call \`apply_transaction_classifications\` again with:
+   - classifications_json: the approved full or filtered JSON object
+   - execute: true
+
+10. Report the execution result:
+   - applied
+   - skipped
+   - failed
+   - created_invoice_ids
+   - linked_transaction_ids
+   - which groups still need manual review
+`,
+        },
+      }],
+    })
+  );
+
+  registerPrompt(server, 
     "reconcile-bank",
     "Match bank transactions to invoices and optionally auto-confirm exact matches.",
     { mode: z.string().optional().describe('Reconciliation mode: "auto" (default), "review", or a numeric transaction ID') },
