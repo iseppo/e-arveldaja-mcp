@@ -6,7 +6,7 @@ export function registerPrompts(server: McpServer): void {
 
   registerPrompt(server, 
     "book-invoice",
-    "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, and creates + confirms the invoice.",
+    "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, previews the booking, and creates + confirms the invoice after approval.",
     { file_path: z.string().describe("Absolute path to the invoice document file (PDF/JPG/PNG)") },
     async ({ file_path }) => ({
       messages: [{
@@ -85,7 +85,16 @@ Follow these steps in order:
    - term_days: the calendar-day difference between invoice_date and due_date.
    - If due_date is missing, use \`term_days: 0\` and mention that assumption in the final summary.
 
-11. Call \`create_purchase_invoice_from_pdf\` with:
+11. Present a booking preview and ask for approval before creating anything:
+   - Supplier name and supplier_client_id
+   - Invoice number, invoice_date, due_date, journal_date, and term_days
+   - Net / VAT / Gross amounts
+   - The exact item-level booking you intend to send, including \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, VAT fields, and any \`reversed_vat_id\`
+   - Booking basis used (which past invoice/article/account/VAT config was reused, or that it was chosen manually)
+   - Any validation warnings or assumptions
+   If the user has not explicitly approved the preview, stop here and wait.
+
+12. After approval, call \`create_purchase_invoice_from_pdf\` with:
    - supplier_client_id
    - invoice_number
    - invoice_date
@@ -100,14 +109,14 @@ Follow these steps in order:
    - notes: include the source PDF filename or any important assumptions
    IMPORTANT: Use the EXACT \`vat_price\` and \`gross_price\` from the invoice. Do not recalculate them.
 
-12. Call \`upload_invoice_document\` with:
-   - invoice_id: the invoice ID returned in step 11
+13. Call \`upload_invoice_document\` with:
+   - invoice_id: the invoice ID returned in step 12
    - file_path: "${file_path}"
 
-13. Call \`confirm_purchase_invoice\` with:
-   - id: the invoice ID from step 11
+14. Call \`confirm_purchase_invoice\` with:
+   - id: the invoice ID from step 12
 
-14. Report a summary:
+15. Report a summary:
     - Supplier name and supplier_client_id
     - Invoice number, date, due date
     - Net / VAT / Gross amounts

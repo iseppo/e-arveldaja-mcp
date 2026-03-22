@@ -55,15 +55,18 @@ describe("registerPrompts", () => {
     expect(text).toContain("source of truth");
     expect(text).toContain("clients_id: supplier_client_id");
     expect(text).toContain("supplier_client_id");
-    expect(text).toContain("invoice_id: the invoice ID returned in step 11");
     expect(text).toContain("term_days");
     expect(text).toContain("api_response.created_object_id");
     expect(text).toContain("invoice_number: extracted invoice number");
     expect(text).toContain("gross_price: extracted gross total");
     expect(text).toContain("candidate_invoice_number_matches");
+    expect(text).toContain("ask for approval before creating anything");
+    expect(text).toContain("If the user has not explicitly approved the preview, stop here and wait.");
     expect(text).toContain("vat_accounts_id");
     expect(text).toContain("cl_vat_articles_id");
+    expect(text).toContain("invoice_id: the invoice ID returned in step 12");
     expect(text).not.toContain("client_id: the supplier's client_id");
+    expect(text).not.toContain("invoice_id: the invoice ID returned in step 11");
   });
 
   it("uses the real reconciliation execution flags and confirm_transaction payload", async () => {
@@ -134,6 +137,8 @@ describe("registerPrompts", () => {
       expect(text).toContain("candidate_invoice_number_matches");
       expect(text).toContain("auto_create: false");
       expect(text).toContain("auto_create: true");
+      expect(text).toContain("ask for approval");
+      expect(text).toContain("If the user has not explicitly approved the preview, stop here and wait.");
       expect(text).not.toMatch(/Read tool|visually/i);
       expect(text).not.toContain("Call `detect_duplicate_purchase_invoice` (no parameters needed)");
     }

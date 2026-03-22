@@ -37,6 +37,7 @@ import { registerPrompts } from "./prompts.js";
 import { toolError } from "./tool-error.js";
 import { setLogger, log } from "./logger.js";
 import { readOnly, mutate } from "./annotations.js";
+import { getAllowedRootsStartupWarning } from "./file-validation.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
@@ -122,6 +123,10 @@ function createScopedApiContext(
 
 async function main() {
   loadDotenvFiles();
+  const allowedRootsWarning = getAllowedRootsStartupWarning();
+  if (allowedRootsWarning) {
+    log("warning", allowedRootsWarning);
+  }
   const allConfigs = loadAllConfigs();
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
   const invocationStorage = new AsyncLocalStorage<ConnectionSnapshot>();

@@ -1,6 +1,6 @@
 # Book Purchase Invoice from PDF
 
-Book a purchase invoice from a source document. Extract the data, validate it, resolve the supplier safely, check duplicate risk, create the invoice, upload the document, and confirm it.
+Book a purchase invoice from a source document. Extract the data, validate it, resolve the supplier safely, check duplicate risk, preview the booking, then create the invoice, upload the document, and confirm it after approval.
 
 ## Arguments
 
@@ -92,7 +92,18 @@ When supplier is Estonian with regular VAT:
 - `vat_rate_dropdown`: the VAT rate (e.g. "24")
 - `reversed_vat_id`: do not set
 
-### Step 8: Create the purchase invoice
+### Step 8: Preview the booking and ask for approval
+
+Before creating anything, present:
+- Supplier name and supplier client ID
+- Invoice number, invoice date, due date, journal date, and term days
+- Net / VAT / gross amounts
+- The exact item-level booking you intend to send, including article IDs, account IDs, VAT fields, and any `reversed_vat_id`
+- The booking basis used and any assumptions
+
+If the user has not explicitly approved the preview, stop here and wait.
+
+### Step 9: Create the purchase invoice
 
 Call `create_purchase_invoice_from_pdf`:
 - supplier_client_id
@@ -118,18 +129,18 @@ Call `create_purchase_invoice_from_pdf`:
 
 Use the exact `vat_price` and `gross_price` from the invoice. Do not recalculate them.
 
-### Step 9: Upload the document
+### Step 10: Upload the document
 
 Call `upload_invoice_document`:
-- invoice_id: the ID from step 8
+- invoice_id: the ID from step 9
 - file_path: the original PDF path
 
-### Step 10: Confirm the invoice
+### Step 11: Confirm the invoice
 
 Call `confirm_purchase_invoice`:
 - id: the invoice ID
 
-### Step 11: Summary
+### Step 12: Summary
 
 Report:
 - Supplier name and supplier client ID

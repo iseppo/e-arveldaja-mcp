@@ -216,10 +216,11 @@ If your MCP config points to `dist/index.js`, the rebuild step is required after
 - **Caching.** API responses are cached for 2–5 minutes and automatically invalidated when you create, update, or delete records through the server. Changes made directly in the e-arveldaja web UI may take a few minutes to appear.
 - **EUR by default.** All amounts are EUR unless a different currency is specified.
 - **Multi-company.** Place multiple `apikey*.txt` files and use `list_connections` / `switch_connection`. Switching clears all cached data to prevent cross-company leaks.
+- **File access scope.** By default, file-reading tools can access supported files anywhere under your home directory and `/tmp`. Set `EARVELDAJA_ALLOWED_PATHS` (colon-separated) to restrict reads to specific document folders.
 
 ## Privacy
 
-Document parsing (PDF, JPG, PNG) uses built-in local OCR — no external OCR service is involved. However, the extracted text is returned to your AI assistant via the MCP protocol, so it will be processed by whichever LLM you are using (Claude, Codex, Gemini, etc.). The server's own outbound connections are limited to the e-arveldaja API (`rmp-api.rik.ee`) and optionally the Estonian Business Registry (`ariregister.rik.ee`) for supplier lookups.
+Document parsing (PDF, JPG, PNG) uses LiteParse OCR locally by default. If you set `EARVELDAJA_LITEPARSE_OCR_SERVER_URL`, the server will send documents to that configured OCR endpoint instead of staying fully local for OCR. By default, the server may also read supported document files anywhere under your home directory and `/tmp`; set `EARVELDAJA_ALLOWED_PATHS` if you want a narrower local file boundary. In all cases, the extracted text is returned to your AI assistant via the MCP protocol, so it will be processed by whichever LLM you are using (Claude, Codex, Gemini, etc.). The server's own outbound connections are therefore limited to the e-arveldaja API (`rmp-api.rik.ee`), optionally the Estonian Business Registry (`ariregister.rik.ee`) for supplier lookups, and optionally your configured OCR server.
 
 ## Feedback and Bug Reports
 

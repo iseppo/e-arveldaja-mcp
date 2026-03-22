@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { validateFilePath } from "./file-validation.js";
+import { getAllowedRootsStartupWarning, validateFilePath } from "./file-validation.js";
 import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -78,6 +78,31 @@ describe("validateFilePath", () => {
       if (previous === undefined) delete process.env.EARVELDAJA_ALLOWED_PATHS;
       else process.env.EARVELDAJA_ALLOWED_PATHS = previous;
       try { rmdirSync(restrictedDir); } catch {}
+    }
+  });
+
+  it("warns when the default broad file-access scope is in use", () => {
+    const previous = process.env.EARVELDAJA_ALLOWED_PATHS;
+    delete process.env.EARVELDAJA_ALLOWED_PATHS;
+    try {
+      const warning = getAllowedRootsStartupWarning();
+      expect(warning).toContain("EARVELDAJA_ALLOWED_PATHS is not set");
+      expect(warning).toContain("/tmp");
+      expect(warning).toContain("restrict file access");
+    } finally {
+      if (previous === undefined) delete process.env.EARVELDAJA_ALLOWED_PATHS;
+      else process.env.EARVELDAJA_ALLOWED_PATHS = previous;
+    }
+  });
+
+  it("does not warn when EARVELDAJA_ALLOWED_PATHS is configured", () => {
+    const previous = process.env.EARVELDAJA_ALLOWED_PATHS;
+    process.env.EARVELDAJA_ALLOWED_PATHS = testDir;
+    try {
+      expect(getAllowedRootsStartupWarning()).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.EARVELDAJA_ALLOWED_PATHS;
+      else process.env.EARVELDAJA_ALLOWED_PATHS = previous;
     }
   });
 });

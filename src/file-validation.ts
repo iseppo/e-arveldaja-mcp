@@ -4,6 +4,12 @@ import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { getProjectRoot } from "./paths.js";
 
+function resolveAllowedRoots(roots: string[]): string[] {
+  return roots.map(root => {
+    try { return realpathSync(root); } catch { return root; }
+  });
+}
+
 /**
  * Allowed root directories for file reads. Configurable via EARVELDAJA_ALLOWED_PATHS
  * (colon-separated list). Defaults to $HOME and /tmp.
@@ -21,9 +27,16 @@ export function getAllowedRoots(): string[] {
       })
     : [homedir(), "/tmp"];
 
-  return raw.map(root => {
-    try { return realpathSync(root); } catch { return root; }
-  });
+  return resolveAllowedRoots(raw);
+}
+
+export function getAllowedRootsStartupWarning(): string | undefined {
+  if (process.env.EARVELDAJA_ALLOWED_PATHS) return undefined;
+
+  const roots = resolveAllowedRoots([homedir(), "/tmp"]);
+  return "WARNING: EARVELDAJA_ALLOWED_PATHS is not set. " +
+    `File-reading tools can access supported files anywhere under ${roots.join(", ")}. ` +
+    "Set EARVELDAJA_ALLOWED_PATHS to restrict file access to specific document folders.";
 }
 
 /**
