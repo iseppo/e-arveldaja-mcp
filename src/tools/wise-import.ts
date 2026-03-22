@@ -2,11 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
+import type { AccountDimension } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
-import { parseCSVLine } from "../csv.js";
+import { parseCSV } from "../csv.js";
 
 interface WiseRow {
   id: string;
@@ -37,10 +38,10 @@ const EXPECTED_HEADERS = [
 ];
 
 function parseWiseCSV(csv: string): WiseRow[] {
-  const lines = csv.trim().split("\n").filter(l => l.trim());
-  if (lines.length < 2) throw new Error("CSV has no data rows");
+  const records = parseCSV(csv).filter(record => record.some(field => field.trim() !== ""));
+  if (records.length < 2) throw new Error("CSV has no data rows");
 
-  const headers = parseCSVLine(lines[0]!);
+  const headers = records[0]!.map(header => header.replace(/^\uFEFF/, "").trim());
   // Validate key headers exist
   for (const expected of ["ID", "Status", "Direction", "Source amount (after fees)"]) {
     if (!headers.includes(expected)) {
@@ -51,8 +52,8 @@ function parseWiseCSV(csv: string): WiseRow[] {
   const idx = (name: string) => headers.indexOf(name);
 
   const rows: WiseRow[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const fields = parseCSVLine(lines[i]!);
+  for (let i = 1; i < records.length; i++) {
+    const fields = records[i]!;
     if (fields.length < headers.length - 2) continue; // allow slightly short rows
 
     rows.push({
@@ -158,6 +159,46 @@ function buildWiseTransactionSignature(
   ].join("|");
 }
 
+function resolveWiseFeeAccountDimensionId(
+  feeAccountDimensionId: number | undefined,
+  deprecatedFeeAccountRelationId: number | undefined,
+): number {
+  if (
+    feeAccountDimensionId !== undefined &&
+    deprecatedFeeAccountRelationId !== undefined &&
+    feeAccountDimensionId !== deprecatedFeeAccountRelationId
+  ) {
+    throw new Error("fee_account_dimensions_id and fee_account_relation_id must match when both are provided");
+  }
+
+  const resolved = feeAccountDimensionId ?? deprecatedFeeAccountRelationId;
+  if (resolved === undefined) {
+    throw new Error("Wise fee rows require fee_account_dimensions_id. Use list_account_dimensions to find it.");
+  }
+
+  return resolved;
+}
+
+function buildAccountDistributionFromDimension(
+  accountDimensions: AccountDimension[],
+  accountsDimensionsId: number,
+  amount: number,
+) {
+  const dimension = accountDimensions.find(item => item.id === accountsDimensionsId && !item.is_deleted);
+  if (!dimension?.id) {
+    throw new Error(
+      `Account dimension ${accountsDimensionsId} not found. Use list_account_dimensions to find a valid fee account dimension ID.`
+    );
+  }
+
+  return {
+    related_table: "accounts" as const,
+    related_id: dimension.accounts_id,
+    related_sub_id: dimension.id,
+    amount,
+  };
+}
+
 export function registerWiseImportTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "import_wise_transactions",
@@ -170,20 +211,36 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
     {
       file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions"),
       accounts_dimensions_id: z.number().describe("Bank account dimension ID for the Wise account in e-arveldaja"),
-      fee_account_relation_id: z.number().describe("Relation ID for fee account distribution (e.g. accounts_dimensions_id for 8610 Muud finantskulud). Use list_account_dimensions to find the correct ID."),
+      fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account. Use list_account_dimensions to find it."),
+      fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: z.string().optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
       skip_jar_transfers: z.boolean().optional().describe("Skip Jar (savings pot) transfers — internal movements within Wise (default true)"),
     },
     { ...batch, openWorldHint: true, title: "Import Wise Transactions" },
-    async ({ file_path, accounts_dimensions_id, fee_account_relation_id, execute, date_from, date_to, skip_jar_transfers }) => {
+    async ({
+      file_path,
+      accounts_dimensions_id,
+      fee_account_dimensions_id,
+      fee_account_relation_id,
+      execute,
+      date_from,
+      date_to,
+      skip_jar_transfers,
+    }) => {
       const skipJars = skip_jar_transfers !== false;
       const resolved = await validateFilePath(file_path, [".csv"], 10 * 1024 * 1024);
       const csv = await readFile(resolved, "utf-8");
       const rows = parseWiseCSV(csv);
       const dryRun = execute !== true;
-      const feeRelationId = fee_account_relation_id;
+      const hasFeeRows = rows.some(row => row.sourceFeeAmount > 0);
+      const feeAccountDimensionsId = hasFeeRows
+        ? resolveWiseFeeAccountDimensionId(fee_account_dimensions_id, fee_account_relation_id)
+        : undefined;
+      const accountDimensions = hasFeeRows
+        ? await api.readonly.getAccountDimensions()
+        : [];
 
       // Find Wise client for fee transactions
       let wiseClientId: number | undefined;
@@ -389,7 +446,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               if (feeId && wiseClientId) {
                 try {
                   await api.transactions.confirm(feeId, [
-                    { related_table: "accounts", related_id: feeRelationId, amount: fee },
+                    buildAccountDistributionFromDimension(accountDimensions, feeAccountDimensionsId!, fee),
                   ]);
                   created.push({
                     wise_id: `FEE:${row.id}`,

@@ -38,6 +38,7 @@ function setupInterAccountTool(options: {
   bankAccounts?: unknown[];
   companyName?: string;
   journals?: unknown[];
+  accountDimensions?: unknown[];
 } = {}) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
@@ -65,7 +66,7 @@ function setupInterAccountTool(options: {
     readonly: {
       getBankAccounts: vi.fn().mockResolvedValue(options.bankAccounts ?? []),
       getAccountDimensions: vi.fn().mockResolvedValue(
-        (options.bankAccounts ?? []).map((ba: any) => ({
+        options.accountDimensions ?? (options.bankAccounts ?? []).map((ba: any) => ({
           id: ba.accounts_dimensions_id,
           accounts_id: 1020,
           is_deleted: false,
@@ -576,6 +577,40 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.skipped_already_handled).toBe(1);
       expect(payload.already_handled[0]!.transaction_id).toBe(30);
       expect(payload.already_handled[0]!.existing_journal_id).toBe(999);
+    });
+
+    it("detects already-journalized transfers even when bank dimensions use non-1020 parent accounts", async () => {
+      const twoAccounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+        { id: 2, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+      ];
+
+      const { handler } = setupInterAccountTool({
+        transactions: [
+          { id: 31, status: "PROJECT", is_deleted: false, type: "C", amount: 800, date: "2025-12-05", accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null },
+        ],
+        bankAccounts: twoAccounts,
+        accountDimensions: [
+          { id: 100, accounts_id: 1210, is_deleted: false },
+          { id: 300, accounts_id: 1220, is_deleted: false },
+        ],
+        companyName: "Test OÜ",
+        journals: [{
+          id: 1000, effective_date: "2025-12-05", is_deleted: false, registered: true,
+          postings: [
+            { accounts_id: 1210, accounts_dimensions_id: 100, type: "C", amount: 800, is_deleted: false },
+            { accounts_id: 1220, accounts_dimensions_id: 300, type: "D", amount: 800, is_deleted: false },
+          ],
+        }],
+      });
+
+      const result = await handler({});
+      const payload = JSON.parse(result.content[0]!.text);
+
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.skipped_already_handled).toBe(1);
+      expect(payload.already_handled[0]!.transaction_id).toBe(31);
+      expect(payload.already_handled[0]!.existing_journal_id).toBe(1000);
     });
   });
 });

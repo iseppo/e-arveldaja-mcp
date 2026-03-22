@@ -132,4 +132,37 @@ describe("HttpClient", () => {
     await expectation;
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("blocks a request before fetch when the request guard rejects", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config, "connection:0", () => {
+      throw new Error("Active connection changed during tool execution.");
+    });
+
+    await expect(client.get("/clients")).rejects.toThrow(/Active connection changed/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not retry an aborted GET once the request guard starts rejecting", async () => {
+    let switched = false;
+    const abortError = new Error("This operation was aborted");
+    abortError.name = "AbortError";
+
+    const fetchMock = vi.fn().mockImplementationOnce(async () => {
+      switched = true;
+      throw abortError;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config, "connection:0", () => {
+      if (switched) {
+        throw new Error("Active connection changed during tool execution.");
+      }
+    });
+
+    await expect(client.get("/clients")).rejects.toThrow(/Active connection changed/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

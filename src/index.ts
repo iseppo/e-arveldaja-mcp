@@ -72,7 +72,10 @@ function captureSnapshot(state: ConnectionState): ConnectionSnapshot {
 
 function assertSnapshotCurrent(state: ConnectionState, snapshot: ConnectionSnapshot): void {
   if (snapshot.generation !== state.generation) {
-    throw new Error("Active connection changed during tool execution. Retry the tool on the intended connection.");
+    throw new Error(
+      "Active connection changed during tool execution. Further API requests were blocked. " +
+      "Inspect any side effects before retrying the tool on the intended connection."
+    );
   }
 }
 
@@ -122,8 +125,14 @@ async function main() {
   const allConfigs = loadAllConfigs();
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
   const invocationStorage = new AsyncLocalStorage<ConnectionSnapshot>();
+  const requestGuard = () => {
+    const snapshot = invocationStorage.getStore();
+    if (snapshot) {
+      assertSnapshotCurrent(connectionState, snapshot);
+    }
+  };
   const connectionContexts = allConfigs.map((namedConfig, index) =>
-    buildApiContext(new HttpClient(namedConfig.config, `connection:${index}`))
+    buildApiContext(new HttpClient(namedConfig.config, `connection:${index}`, requestGuard))
   );
   const api = createScopedApiContext(connectionState, connectionContexts, invocationStorage);
 
@@ -156,7 +165,7 @@ Bank reconciliation:
 
 Reporting:
 - Confirm all journals/invoices/transactions first for accurate financial reports.
-- list_connections / switch_connection for multi-company; switching clears caches.
+- list_connections / switch_connection for multi-company; switching clears caches and blocks further API requests from interrupted in-flight tools.
 - Many batch tools support dry_run/execute preview flows — read each tool description before executing.
 - Amounts are EUR unless cl_currencies_id specifies otherwise.`,
   });
@@ -193,7 +202,8 @@ Reporting:
   registerTool(server, "switch_connection",
     "Switch to a different e-arveldaja connection (company). " +
     "Clears cached data atomically. Use list_connections to see available indices. " +
-    "In-flight tool calls will fail fast and should be retried on the intended connection.",
+    "New tool calls use the new connection immediately. Interrupted in-flight tools are blocked from making further API requests, " +
+    "but a request already in flight may still finish, so inspect mutating tools before retrying.",
     {
       index: z.number().describe("Connection index from list_connections"),
     },
@@ -233,7 +243,7 @@ Reporting:
             message: `Switched to "${target.name}"`,
             server: target.config.baseUrl.includes("demo") ? "demo" : "live",
             generation: snapshot.generation,
-            note: "Caches cleared atomically. New tool calls use the new connection; in-flight calls must be retried.",
+            note: "Caches cleared atomically. New tool calls use the new connection; interrupted in-flight tools cannot make further API requests, but a request already in flight may still have completed.",
           }, null, 2),
         }],
       };
@@ -249,9 +259,7 @@ Reporting:
           const runInExtra = extra
             ? () => toolExtraStorage.run(extra, () => handler(...args))
             : () => handler(...args);
-          const result = await runInExtra();
-          assertSnapshotCurrent(connectionState, snapshot);
-          return result;
+          return runInExtra();
         });
       } catch (error) {
         log("error", `Tool handler error: ${error instanceof Error ? error.message : String(error)}`);
@@ -266,11 +274,7 @@ Reporting:
   function wrapResourceHandler<T extends (...args: any[]) => any>(handler: T): T {
     return (async (...args: unknown[]) => {
       const snapshot = captureSnapshot(connectionState);
-      return invocationStorage.run(snapshot, async () => {
-        const result = await handler(...args);
-        assertSnapshotCurrent(connectionState, snapshot);
-        return result;
-      });
+      return invocationStorage.run(snapshot, async () => handler(...args));
     }) as unknown as T;
   }
 

@@ -20,7 +20,12 @@ export class HttpClient {
   constructor(
     private config: Config,
     public readonly cacheNamespace = "connection:0",
+    private readonly requestGuard?: () => void,
   ) {}
+
+  private assertRequestAllowed(): void {
+    this.requestGuard?.();
+  }
 
   private async waitForRateLimitTurn(): Promise<void> {
     const waitTurn = this.lastRequest
@@ -76,6 +81,8 @@ export class HttpClient {
     const signingPath = url.pathname;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      this.assertRequestAllowed();
+
       // Fresh auth headers for each attempt (timestamp must be current)
       const authHeaders = createAuthHeaders(this.config, signingPath);
 
@@ -89,6 +96,7 @@ export class HttpClient {
       }
 
       await this.waitForRateLimitTurn();
+      this.assertRequestAllowed();
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60_000);
@@ -104,6 +112,7 @@ export class HttpClient {
           });
         } catch (error) {
           if (method === "GET" && HttpClient.isRetryableError(error) && attempt < MAX_RETRIES) {
+            this.assertRequestAllowed();
             await HttpClient.sleep(INITIAL_RETRY_DELAY_MS * (2 ** attempt));
             continue;
           }
@@ -112,6 +121,7 @@ export class HttpClient {
 
         if (!response.ok) {
           if (HttpClient.shouldRetryStatus(method, response.status) && attempt < MAX_RETRIES) {
+            this.assertRequestAllowed();
             await HttpClient.sleep(INITIAL_RETRY_DELAY_MS * (2 ** attempt));
             continue;
           }

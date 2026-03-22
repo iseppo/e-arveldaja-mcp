@@ -30,12 +30,24 @@ function buildCsvRow(values: string[]): string {
   return `${CSV_HEADER}\n${values.join(",")}\n`;
 }
 
-function setupWiseTool(existingTransactions: unknown[], createImpl?: ReturnType<typeof vi.fn>) {
+function setupWiseTool(
+  existingTransactions: unknown[],
+  createImpl?: ReturnType<typeof vi.fn>,
+  options: { accountDimensions?: unknown[] } = {},
+) {
   const server = { registerTool: vi.fn() } as any;
   const create = createImpl ?? vi.fn().mockResolvedValue({ created_object_id: 9001 });
   const api = {
     clients: {
       listAll: vi.fn().mockResolvedValue([{ id: 77, name: "Wise" }]),
+    },
+    readonly: {
+      getAccountDimensions: vi.fn().mockResolvedValue(options.accountDimensions ?? [{
+        id: 9,
+        accounts_id: 8610,
+        title_est: "Muud finantskulud",
+        is_deleted: false,
+      }]),
     },
     transactions: {
       listAll: vi.fn().mockResolvedValue(existingTransactions),
@@ -81,7 +93,7 @@ describe("wise import tool", () => {
     const result = await handler({
       file_path: "/tmp/wise.csv",
       accounts_dimensions_id: 5,
-      fee_account_relation_id: 9,
+      fee_account_dimensions_id: 9,
       execute: true,
     });
 
@@ -113,7 +125,7 @@ describe("wise import tool", () => {
     const result = await handler({
       file_path: "/tmp/wise.csv",
       accounts_dimensions_id: 5,
-      fee_account_relation_id: 9,
+      fee_account_dimensions_id: 9,
       execute: true,
     });
 
@@ -146,13 +158,16 @@ describe("wise import tool", () => {
     const result = await handler({
       file_path: "/tmp/wise.csv",
       accounts_dimensions_id: 5,
-      fee_account_relation_id: 9,
+      fee_account_dimensions_id: 9,
       execute: true,
     });
 
     const payload = JSON.parse(result.content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(api.transactions.confirm).toHaveBeenCalledWith(9003, [
+      { related_table: "accounts", related_id: 8610, related_sub_id: 9, amount: 1.5 },
+    ]);
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
       description: "WISE:FEE:abc-3 Wise teenustasu",
     }));
@@ -183,7 +198,7 @@ describe("wise import tool", () => {
     const result = await handler({
       file_path: "/tmp/wise.csv",
       accounts_dimensions_id: 5,
-      fee_account_relation_id: 9,
+      fee_account_dimensions_id: 9,
       execute: true,
     });
 
@@ -225,7 +240,7 @@ describe("wise import tool", () => {
     const result = await handler({
       file_path: "/tmp/wise.csv",
       accounts_dimensions_id: 5,
-      fee_account_relation_id: 9,
+      fee_account_dimensions_id: 9,
     });
 
     const payload = JSON.parse(result.content[0]!.text);
@@ -251,7 +266,7 @@ describe("wise import tool", () => {
     const result = await handler({
       file_path: "/tmp/wise.csv",
       accounts_dimensions_id: 5,
-      fee_account_relation_id: 9,
+      fee_account_dimensions_id: 9,
       skip_jar_transfers: false,
     });
 
@@ -259,6 +274,31 @@ describe("wise import tool", () => {
 
     expect(payload.skipped_jar_transfers).toBeUndefined();
     expect(payload.eligible).toBe(1);
+  });
+
+  it("skips note-based Jar transfers in CRLF exports", async () => {
+    mockedReadFile.mockResolvedValue([
+      CSV_HEADER,
+      ["jar-crlf-1", "COMPLETED", "OUT", "2026-01-23 09:00:00", "2026-01-23 09:00:00",
+       "0", "EUR", "0", "EUR",
+       "Seppo AI OÜ", "100", "EUR",
+       "Savings Pot", "100", "EUR",
+       "1", "", "", "", "General", "Jar top-up"].join(","),
+    ].join("\r\n") + "\r\n");
+
+    const { handler } = setupWiseTool([]);
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.skipped_jar_transfers).toBe(1);
+    expect(payload.eligible).toBe(0);
+    expect(payload.results).toEqual([]);
   });
 
   it("maps IN rows to incoming transactions and uses the source side as counterparty", async () => {
@@ -276,7 +316,7 @@ describe("wise import tool", () => {
     await handler({
       file_path: "/tmp/wise.csv",
       accounts_dimensions_id: 5,
-      fee_account_relation_id: 9,
+      fee_account_dimensions_id: 9,
       execute: true,
     });
 

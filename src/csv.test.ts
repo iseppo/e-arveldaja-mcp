@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCSVLine } from "./csv.js";
+import { parseCSV, parseCSVLine } from "./csv.js";
 
 describe("parseCSVLine", () => {
   it("parses simple comma-separated values", () => {
@@ -35,5 +35,22 @@ describe("parseCSVLine", () => {
 
   it("returns a single empty string for empty input", () => {
     expect(parseCSVLine("")).toEqual([""]);
+  });
+});
+
+describe("parseCSV", () => {
+  it("parses CRLF-delimited rows without leaving carriage returns in fields", () => {
+    expect(parseCSV("ID,Note\r\n1,Jar top-up\r\n2,Other\r\n")).toEqual([
+      ["ID", "Note"],
+      ["1", "Jar top-up"],
+      ["2", "Other"],
+    ]);
+  });
+
+  it("preserves embedded newlines inside quoted fields while splitting records", () => {
+    expect(parseCSV('ID,Note\r\n1,"line 1\r\nline 2"\r\n')).toEqual([
+      ["ID", "Note"],
+      ["1", "line 1\r\nline 2"],
+    ]);
   });
 });

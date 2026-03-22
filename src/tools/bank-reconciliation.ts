@@ -378,6 +378,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           dimensionToAccountsId.set(dim.id, dim.accounts_id);
         }
       }
+      const ownDimensionIds = new Set(dimensionToIban.keys());
 
       // Split by type
       const outgoing = unconfirmed.filter(tx => tx.type === "C");
@@ -432,7 +433,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       for (const j of allJournals) {
         if (j.is_deleted || !j.registered || !j.postings) continue;
         const bankPostings = j.postings.filter(p =>
-          !p.is_deleted && p.accounts_id === 1020 && p.accounts_dimensions_id
+          !p.is_deleted && p.accounts_dimensions_id && ownDimensionIds.has(p.accounts_dimensions_id)
         );
         if (bankPostings.length !== 2) continue;
         const [a, b] = bankPostings;
