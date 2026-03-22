@@ -5,12 +5,28 @@ import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotoc
 const RUN_LIVE_INTEGRATION = process.env.EARVELDAJA_INTEGRATION_TEST === "true";
 const DIST_ENTRYPOINT = "dist/index.js";
 
+function getEarveldajaEnvironment(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env)
+      .filter((entry): entry is [string, string] => entry[1] !== undefined)
+      .filter(([key]) => key.startsWith("EARVELDAJA_"))
+  );
+}
+
+function buildTransportEnv(overrides: Record<string, string> = {}): Record<string, string> {
+  return {
+    ...getDefaultEnvironment(),
+    ...getEarveldajaEnvironment(),
+    ...overrides,
+  };
+}
+
 function createTransport(env?: Record<string, string>): StdioClientTransport {
   return new StdioClientTransport({
     command: "node",
     args: [DIST_ENTRYPOINT],
     cwd: process.cwd(),
-    env,
+    env: env ?? buildTransportEnv(),
   });
 }
 
@@ -19,13 +35,12 @@ describe("MCP Server Integration", () => {
   let transport: StdioClientTransport;
 
   beforeAll(async () => {
-    transport = createTransport({
-      ...getDefaultEnvironment(),
+    transport = createTransport(buildTransportEnv({
       EARVELDAJA_API_KEY_ID: "integration-test-key-id",
       EARVELDAJA_API_PUBLIC_VALUE: "integration-test-public-value",
       EARVELDAJA_API_PASSWORD: "integration-test-password",
       EARVELDAJA_SERVER: "demo",
-    });
+    }));
     client = new Client({ name: "integration-test", version: "1.0.0" });
     await client.connect(transport);
   });

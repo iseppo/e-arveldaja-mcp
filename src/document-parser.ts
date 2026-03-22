@@ -1,7 +1,7 @@
 import { LiteParse, type LiteParseConfig, type ParseResult } from "@llamaindex/liteparse";
 
 function isLoopbackHost(hostname: string): boolean {
-  const normalized = hostname.trim().toLowerCase();
+  const normalized = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
   return normalized === "localhost" ||
     normalized.endsWith(".localhost") ||
     normalized === "::1" ||

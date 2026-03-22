@@ -278,23 +278,6 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       const csv = await readFile(resolved, "utf-8");
       const rows = parseWiseCSV(csv);
       const dryRun = execute !== true;
-      const hasFeeRows = rows.some(row => bookedFeeAmountForWiseRow(row) > 0);
-      const feeAccountDimensionsId = hasFeeRows
-        ? resolveWiseFeeAccountDimensionId(fee_account_dimensions_id, fee_account_relation_id)
-        : undefined;
-      const accountDimensions = hasFeeRows
-        ? await api.readonly.getAccountDimensions()
-        : [];
-
-      // Find Wise client for fee transactions
-      let wiseClientId: number | undefined;
-      if (!dryRun) {
-        const allClients = await api.clients.listAll();
-        const wiseClient = allClients.find(c =>
-          c.name?.toUpperCase() === "WISE" || c.name?.toUpperCase() === "TRANSFERWISE"
-        );
-        wiseClientId = wiseClient?.id;
-      }
 
       // Filter rows
       let skippedJarCount = 0;
@@ -308,6 +291,23 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         if (date_to && date > date_to) return false;
         return true;
       });
+      const hasFeeRows = eligible.some(row => bookedFeeAmountForWiseRow(row) > 0);
+      const feeAccountDimensionsId = hasFeeRows
+        ? resolveWiseFeeAccountDimensionId(fee_account_dimensions_id, fee_account_relation_id)
+        : undefined;
+      const accountDimensions = hasFeeRows
+        ? await api.readonly.getAccountDimensions()
+        : [];
+
+      // Find Wise client for fee transactions
+      let wiseClientId: number | undefined;
+      if (!dryRun && hasFeeRows) {
+        const allClients = await api.clients.listAll();
+        const wiseClient = allClients.find(c =>
+          c.name?.toUpperCase() === "WISE" || c.name?.toUpperCase() === "TRANSFERWISE"
+        );
+        wiseClientId = wiseClient?.id;
+      }
 
       // Get existing transactions for duplicate detection
       const existingTx = await api.transactions.listAll();

@@ -416,6 +416,41 @@ describe("wise import tool", () => {
     })).rejects.toThrow("Wise fee rows require fee_account_dimensions_id");
   });
 
+  it("does not require fee_account_dimensions_id when only filtered-out rows have fees", async () => {
+    mockedReadFile.mockResolvedValue([
+      CSV_HEADER,
+      ["fee-old-1", "COMPLETED", "OUT", "2026-01-10 09:00:00", "2026-01-10 09:00:00",
+       "1.5", "EUR", "0", "EUR",
+       "Seppo AI OÜ", "40", "EUR",
+       "Acme Ltd", "40", "EUR",
+       "1", "INV-OLD", "", "", "General", ""].join(","),
+      ["normal-new-1", "COMPLETED", "OUT", "2026-01-22 09:00:00", "2026-01-22 09:00:00",
+       "0", "EUR", "0", "EUR",
+       "Seppo AI OÜ", "25", "EUR",
+       "Acme Ltd", "25", "EUR",
+       "1", "INV-NEW", "", "", "General", ""].join(","),
+    ].join("\n"));
+
+    const { handler } = setupWiseTool([]);
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      date_from: "2026-01-20",
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.eligible).toBe(1);
+    expect(payload.created).toBe(1);
+    expect(payload.results).toEqual([
+      expect.objectContaining({
+        wise_id: "normal-new-1",
+        status: "would_create",
+      }),
+    ]);
+  });
+
   it("does not treat same-amount rows in different currencies as duplicates", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "fx-dup-1", "COMPLETED", "OUT", "2026-01-17 09:00:00", "2026-01-17 09:00:00",

@@ -91,4 +91,14 @@ describe("document parser", () => {
       ocrServerUrl: "https://ocr.example.com/parse",
     }));
   });
+
+  it("accepts IPv6 loopback http OCR endpoints", async () => {
+    process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL = "http://[::1]:9999/ocr";
+
+    const { buildDocumentParserConfig } = await import("./document-parser.js");
+
+    expect(buildDocumentParserConfig()).toEqual(expect.objectContaining({
+      ocrServerUrl: "http://[::1]:9999/ocr",
+    }));
+  });
 });
