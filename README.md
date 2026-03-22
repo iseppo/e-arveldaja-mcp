@@ -37,7 +37,7 @@ For the demo server, set the environment variable `EARVELDAJA_SERVER=demo`.
 
 Most AI assistants can set this up for you — just ask:
 
-> "Add e-arveldaja-mcp as an MCP server using npx. The package is on npm — do not clone from git."
+> "Add e-arveldaja-mcp as an MCP server using npx. The package is on npm."
 
 If you prefer to do it manually:
 
