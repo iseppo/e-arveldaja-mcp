@@ -9,6 +9,7 @@ import { validateFilePath } from "../file-validation.js";
 import { readOnly, batch } from "../annotations.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
+import { isNonVoidTransaction } from "../transaction-status.js";
 
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -463,7 +464,7 @@ async function loadParsedCamt053(filePath: string): Promise<CamtParseResult> {
 }
 
 async function enrichWithDuplicates(parsed: CamtParseResult, api: ApiContext): Promise<CamtParseResult> {
-  const existingTransactions = await api.transactions.listAll();
+  const existingTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
   const duplicateLookup = buildDuplicateLookup(existingTransactions);
   const entries = parsed.entries.map(entry => {
     const duplicateIds = findDuplicateTransactionIds(entry.bank_reference, duplicateLookup);

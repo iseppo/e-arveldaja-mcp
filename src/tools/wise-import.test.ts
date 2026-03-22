@@ -86,6 +86,41 @@ describe("wise import tool", () => {
     mockedReadFile.mockReset();
   });
 
+  it("does not treat VOID transactions as duplicates", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "void-1", "COMPLETED", "OUT", "2026-01-09 09:00:00", "2026-01-09 09:00:00",
+      "0", "EUR", "0", "EUR",
+      "Seppo OU", "12.5", "EUR",
+      "Acme Ltd", "12.5", "EUR",
+      "1", "INV-VOID", "", "", "General", "",
+    ]));
+
+    const { api, handler } = setupWiseTool([{
+      status: "VOID",
+      is_deleted: false,
+      date: "2026-01-09",
+      amount: 12.5,
+      bank_account_name: "Acme Ltd",
+      ref_number: "INV-VOID",
+      description: "Acme Ltd",
+    }]);
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+      execute: true,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(payload.skipped_details).toEqual([]);
+    expect(payload.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ wise_id: "void-1", status: "created" }),
+    ]));
+  });
+
   it("skips legacy duplicates even when existing rows do not contain a WISE id prefix", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "abc-1", "COMPLETED", "OUT", "2026-01-10 09:00:00", "2026-01-10 09:00:00",

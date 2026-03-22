@@ -7,6 +7,7 @@ function setupReceiptTool(
     clients?: unknown[];
     transactions?: unknown[];
     transactionDetails?: Record<number, unknown>;
+    getImpl?: ReturnType<typeof vi.fn>;
     purchaseArticles?: unknown[];
     accounts?: unknown[];
     saleInvoices?: unknown[];
@@ -25,10 +26,11 @@ function setupReceiptTool(
       listAll: vi.fn().mockResolvedValue(options.purchaseInvoices ?? []),
       createAndSetTotals: vi.fn().mockResolvedValue({ id: 9001 }),
       confirmWithTotals: vi.fn().mockResolvedValue({}),
+      invalidate: vi.fn().mockResolvedValue({}),
     },
     transactions: {
       listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
-      get: vi.fn().mockImplementation(async (id: number) => {
+      get: options.getImpl ?? vi.fn().mockImplementation(async (id: number) => {
         const detail = options.transactionDetails?.[id];
         if (detail) return detail;
         return (options.transactions ?? []).find((transaction: any) => transaction.id === id);
@@ -182,6 +184,114 @@ describe("receipt inbox tool status handling", () => {
       "No unconfirmed transactions remain in this classification group.",
     ]));
     expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("apply_transaction_classifications invalidates the draft invoice if the transaction turns VOID after creation", async () => {
+    const getImpl = vi.fn()
+      .mockResolvedValueOnce({
+        id: 43,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        accounts_dimensions_id: 100,
+        bank_account_name: "OpenAI",
+        description: "ChatGPT subscription",
+        cl_currencies_id: "EUR",
+        clients_id: 7,
+      })
+      .mockResolvedValueOnce({
+        id: 43,
+        status: "VOID",
+        is_deleted: false,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        accounts_dimensions_id: 100,
+        bank_account_name: "OpenAI",
+        description: "ChatGPT subscription",
+        cl_currencies_id: "EUR",
+        clients_id: 7,
+      });
+
+    const { handler, api } = setupReceiptTool("apply_transaction_classifications", {
+      clients: [
+        {
+          id: 7,
+          name: "OpenAI Ireland Limited",
+          is_supplier: true,
+          is_client: false,
+          cl_code_country: "IE",
+          is_member: false,
+          send_invoice_to_email: false,
+          send_invoice_to_accounting_email: false,
+          is_deleted: false,
+        },
+      ],
+      getImpl,
+      purchaseArticles: [{
+        id: 501,
+        name_est: "Software",
+        name_eng: "Software",
+        accounts_id: 5230,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        is_disabled: false,
+        priority: 1,
+      }],
+      accounts: [{
+        id: 5230,
+        name_est: "Software expense",
+        name_eng: "Software expense",
+        account_type_est: "Kulud",
+        account_type_eng: "Expenses",
+      }],
+    });
+
+    const classificationsJson = JSON.stringify([{
+      category: "saas_subscriptions",
+      apply_mode: "purchase_invoice",
+      normalized_counterparty: "openai",
+      display_counterparty: "OpenAI",
+      recurring: true,
+      similar_amounts: true,
+      total_amount: 25,
+      suggested_booking: {
+        purchase_article_id: 501,
+        purchase_article_name: "Software",
+        purchase_account_id: 5230,
+        purchase_account_name: "Software expense",
+        liability_account_id: 2310,
+        reason: "Recurring SaaS",
+      },
+      reasons: ["keyword"],
+      transactions: [{
+        id: 43,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        description: "ChatGPT subscription",
+        bank_account_name: "OpenAI",
+        accounts_dimensions_id: 100,
+        clients_id: 7,
+      }],
+    }]);
+
+    const result = await handler({ classifications_json: classificationsJson, execute: true });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.results).toHaveLength(1);
+    expect(payload.results[0]!.status).toBe("applied");
+    expect(payload.results[0]!.created_invoice_ids).toEqual([]);
+    expect(payload.results[0]!.linked_transaction_ids).toEqual([]);
+    expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
+      expect.stringContaining("Invalidated auto-created purchase invoice 9001 because transaction 43 is no longer bookable (status VOID)."),
+    ]));
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9001);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 });

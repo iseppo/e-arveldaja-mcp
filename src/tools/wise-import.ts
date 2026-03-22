@@ -7,6 +7,7 @@ import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
+import { isNonVoidTransaction } from "../transaction-status.js";
 import { parseCSV } from "../csv.js";
 import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
 
@@ -323,7 +324,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       }
 
       // Get existing transactions for duplicate detection
-      const existingTx = await api.transactions.listAll();
+      const existingTx = (await api.transactions.listAll()).filter(isNonVoidTransaction);
       const existingSignatures = new Set(
         existingTx.map(tx => buildWiseTransactionSignature(
           tx.date,

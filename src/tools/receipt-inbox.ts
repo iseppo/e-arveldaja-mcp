@@ -1263,14 +1263,37 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             );
 
             if (invoice.id) {
-              await api.purchaseInvoices.confirmWithTotals(invoice.id, isVatRegistered, {
-                preserveExistingTotals: true,
-              });
-              await api.transactions.confirm(transaction.id!, [{
-                related_table: "purchase_invoices",
-                related_id: invoice.id,
-                amount: transaction.amount,
-              }]);
+              const invalidateAutoCreatedInvoice = async (reason: string) => {
+                try {
+                  await api.purchaseInvoices.invalidate(invoice.id!);
+                  notes.push(`Invalidated auto-created purchase invoice ${invoice.id} because ${reason}.`);
+                } catch (invalidateError) {
+                  const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
+                  notes.push(`Auto-created purchase invoice ${invoice.id} could not be kept because ${reason}, and invalidation also failed: ${invalidateMessage}.`);
+                }
+              };
+
+              const freshTransaction = await api.transactions.get(transaction.id!);
+              if (!isProjectTransaction(freshTransaction)) {
+                await invalidateAutoCreatedInvoice(`transaction ${transaction.id} is no longer bookable (status ${freshTransaction.status ?? "UNKNOWN"})`);
+                continue;
+              }
+
+              try {
+                await api.purchaseInvoices.confirmWithTotals(invoice.id, isVatRegistered, {
+                  preserveExistingTotals: true,
+                });
+                await api.transactions.confirm(transaction.id!, [{
+                  related_table: "purchase_invoices",
+                  related_id: invoice.id,
+                  amount: transaction.amount,
+                }]);
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                await invalidateAutoCreatedInvoice(`automation failed after creation: ${message}`);
+                continue;
+              }
+
               createdInvoiceIds.push(invoice.id);
               linkedTransactionIds.push(transaction.id!);
             }
