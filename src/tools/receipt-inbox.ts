@@ -209,6 +209,15 @@ export function buildDryRunCreatedInvoicePreview(invoiceNumber: string) {
   };
 }
 
+export async function revalidateReceiptFilePath(file: ReceiptFileInfo): Promise<string> {
+  return validateFilePath(file.path, [file.extension], MAX_RECEIPT_SIZE);
+}
+
+export async function readValidatedReceiptFile(file: ReceiptFileInfo): Promise<Buffer> {
+  const validatedPath = await revalidateReceiptFilePath(file);
+  return readFile(validatedPath);
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -440,7 +449,8 @@ async function scanReceiptFolderInternal(folderPath: string, fileTypes?: FileTyp
 }
 
 async function extractReceiptFields(file: ReceiptFileInfo): Promise<ExtractedReceiptFields> {
-  const parsedDocument = await parseDocument(file.path);
+  const validatedPath = await revalidateReceiptFilePath(file);
+  const parsedDocument = await parseDocument(validatedPath);
   return extractReceiptFieldsFromText(parsedDocument.text, file.name);
 }
 
@@ -621,7 +631,7 @@ async function createAndMaybeMatchPurchaseInvoice(
 
   let uploadedDocument = false;
   if (createdInvoice.id) {
-    const contents = (await readFile(file.path)).toString("base64");
+    const contents = (await readValidatedReceiptFile(file)).toString("base64");
     await api.purchaseInvoices.uploadDocument(createdInvoice.id, file.name, contents);
     uploadedDocument = true;
     notes.push("Uploaded source document to created purchase invoice.");

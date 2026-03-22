@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { readFile } from "fs/promises";
+import { validateFilePath } from "../file-validation.js";
 import {
   buildDryRunCreatedInvoicePreview,
   classifyReceiptDocument,
@@ -22,7 +24,22 @@ import {
   normalizeCounterpartyName,
   scoreTransactionToInvoice,
   suggestBookingInternal,
+  readValidatedReceiptFile,
+  revalidateReceiptFilePath,
 } from "./receipt-inbox.js";
+
+vi.mock("../file-validation.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../file-validation.js")>()),
+  validateFilePath: vi.fn(),
+}));
+
+vi.mock("fs/promises", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("fs/promises")>()),
+  readFile: vi.fn(),
+}));
+
+const mockedValidateFilePath = vi.mocked(validateFilePath);
+const mockedReadFile = vi.mocked(readFile);
 
 function makeTx(overrides: Partial<{
   type: string;
@@ -56,6 +73,41 @@ describe("buildDryRunCreatedInvoicePreview", () => {
       confirmed: false,
       uploaded_document: false,
     });
+  });
+});
+
+describe("receipt file revalidation", () => {
+  it("revalidates the scanned path before re-reading the file", async () => {
+    mockedValidateFilePath.mockResolvedValueOnce("/tmp/revalidated.pdf");
+
+    await expect(revalidateReceiptFilePath({
+      name: "receipt.pdf",
+      path: "/tmp/original.pdf",
+      extension: ".pdf",
+      file_type: "pdf",
+      size_bytes: 123,
+      modified_at: "2026-03-01T00:00:00.000Z",
+    })).resolves.toBe("/tmp/revalidated.pdf");
+
+    expect(mockedValidateFilePath).toHaveBeenCalledWith("/tmp/original.pdf", [".pdf"], 50 * 1024 * 1024);
+  });
+
+  it("reads the revalidated path instead of the originally scanned path", async () => {
+    mockedValidateFilePath.mockResolvedValueOnce("/tmp/revalidated.pdf");
+    mockedReadFile.mockResolvedValueOnce(Buffer.from("pdf"));
+
+    await expect(readValidatedReceiptFile({
+      name: "receipt.pdf",
+      path: "/tmp/original.pdf",
+      extension: ".pdf",
+      file_type: "pdf",
+      size_bytes: 123,
+      modified_at: "2026-03-01T00:00:00.000Z",
+    })).resolves.toEqual(Buffer.from("pdf"));
+
+    expect(mockedValidateFilePath).toHaveBeenCalledWith("/tmp/original.pdf", [".pdf"], 50 * 1024 * 1024);
+    expect(mockedReadFile).toHaveBeenCalledWith("/tmp/revalidated.pdf");
+    expect(mockedReadFile).not.toHaveBeenCalledWith("/tmp/original.pdf");
   });
 });
 
