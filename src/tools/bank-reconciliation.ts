@@ -2,9 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
-import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import type { Transaction, SaleInvoice, PurchaseInvoice, BankAccount } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
+
+/** Normalize text for fuzzy company name matching: lowercase, strip diacritics, collapse whitespace */
+function normalizeCompanyName(name: string): string {
+  return name.trim().toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")  // strip diacritics (ü→u, ö→o, etc.)
+    .replace(/\s+/g, " ");
+}
 
 interface MatchCandidate {
   type: "sale_invoice" | "purchase_invoice";
@@ -313,6 +320,409 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             skipped: skipped.length,
             results: confirmed,
             errors: skipped,
+          }, null, 2),
+        }],
+      };
+    }
+  );
+
+  registerTool(server, "reconcile_inter_account_transfers",
+    "Match and confirm inter-account transfers (own bank account to own bank account). " +
+    "Phase 1: finds C↔D transaction pairs across different bank accounts with matching amounts and dates. " +
+    "Phase 2: detects one-sided transfers where counterparty name matches the company name or " +
+    "counterparty IBAN matches another own bank account — confirms them with the target account. " +
+    "If there are 2+ other bank accounts and IBAN is missing, provide target_accounts_dimensions_id. " +
+    "DRY RUN by default — set execute=true to confirm.",
+    {
+      execute: z.boolean().optional().describe("Actually confirm matched pairs (default false = dry run)"),
+      max_date_gap: z.number().optional().describe("Maximum days between C and D transaction dates (default 1)"),
+      target_accounts_dimensions_id: z.number().optional().describe(
+        "For one-sided transfers (no matching D/C pair), specify the target bank account dimension ID. " +
+        "Required when there are 3+ bank accounts and counterparty IBAN is missing."
+      ),
+    },
+    { ...batch, title: "Reconcile Inter-Account Transfers" },
+    async ({ execute, max_date_gap, target_accounts_dimensions_id }) => {
+      const dryRun = execute !== true;
+      const maxGap = max_date_gap ?? 1;
+
+      const [allTx, bankAccounts, accountDimensions, invoiceInfo] = await Promise.all([
+        api.transactions.listAll(),
+        api.readonly.getBankAccounts(),
+        api.readonly.getAccountDimensions(),
+        api.readonly.getInvoiceInfo(),
+      ]);
+
+      const unconfirmed = allTx.filter(tx => tx.status !== "CONFIRMED" && !tx.is_deleted);
+      const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
+
+      // Build lookup: IBAN → accounts_dimensions_id for own bank accounts
+      const ownIbanToDimension = new Map<string, number>();
+      const dimensionToIban = new Map<number, string>();
+      const dimensionToTitle = new Map<number, string>();
+      const dimensionToAccountsId = new Map<number, number>();
+      for (const ba of bankAccounts) {
+        const iban = (ba.iban_code ?? ba.account_no ?? "").trim().toUpperCase();
+        if (iban && ba.accounts_dimensions_id) {
+          ownIbanToDimension.set(iban, ba.accounts_dimensions_id);
+          dimensionToIban.set(ba.accounts_dimensions_id, iban);
+          dimensionToTitle.set(ba.accounts_dimensions_id, ba.account_name_est);
+        }
+      }
+      // Map dimension IDs to their parent accounts_id
+      for (const dim of accountDimensions) {
+        if (dim.id && !dim.is_deleted) {
+          dimensionToAccountsId.set(dim.id, dim.accounts_id);
+        }
+      }
+
+      // Split by type
+      const outgoing = unconfirmed.filter(tx => tx.type === "C");
+      const incoming = unconfirmed.filter(tx => tx.type === "D");
+
+      interface PairResult {
+        outgoing_transaction_id: number;
+        incoming_transaction_id: number;
+        amount: number;
+        date_out: string;
+        date_in: string;
+        from_account: string;
+        to_account: string;
+        from_dimension_id: number;
+        to_dimension_id: number;
+        description_out?: string | null;
+        description_in?: string | null;
+        confidence: number;
+        match_reasons: string[];
+        status: string;
+      }
+
+      interface OneSidedResult {
+        transaction_id: number;
+        type: string;
+        amount: number;
+        date: string;
+        source_account: string;
+        source_dimension_id: number;
+        target_account: string;
+        target_dimension_id: number;
+        description?: string | null;
+        counterparty_name?: string | null;
+        confidence: number;
+        match_reasons: string[];
+        status: string;
+      }
+
+      const matchedPairs: PairResult[] = [];
+      const matchedOneSided: OneSidedResult[] = [];
+      const skippedAlreadyHandled: Array<{
+        transaction_id: number; amount: number; date: string;
+        source_account: string; existing_journal_id: number; reason: string;
+      }> = [];
+      const errors: Array<{ transaction_ids: number[]; reason: string }> = [];
+      const consumedTxIds = new Set<number>();
+
+      // Build index of existing confirmed inter-account journals for duplicate detection.
+      // Key: "sourceDim|targetDim|amount|date" → journal_id
+      const existingInterAccountKeys = new Map<string, number>();
+      const allJournals = await api.journals.listAllWithPostings();
+      for (const j of allJournals) {
+        if (j.is_deleted || !j.registered || !j.postings) continue;
+        const bankPostings = j.postings.filter(p =>
+          !p.is_deleted && p.accounts_id === 1020 && p.accounts_dimensions_id
+        );
+        if (bankPostings.length !== 2) continue;
+        const [a, b] = bankPostings;
+        if (!a || !b) continue;
+        if (a.type === b.type) continue; // must be one D and one C
+        const debit = a.type === "D" ? a : b;
+        const credit = a.type === "C" ? a : b;
+        const amount = Math.round(((debit.base_amount ?? debit.amount) as number) * 100) / 100;
+        // Key in both directions so we catch it regardless of which side we're checking from
+        const key1 = `${credit.accounts_dimensions_id}|${debit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
+        const key2 = `${debit.accounts_dimensions_id}|${credit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
+        existingInterAccountKeys.set(key1, j.id!);
+        existingInterAccountKeys.set(key2, j.id!);
+      }
+
+      /** Check if an inter-account transfer is already journalized */
+      function findExistingJournal(sourceDim: number, targetDim: number, amount: number, date: string, maxGapDays: number): number | undefined {
+        // Round to avoid floating point mismatches
+        const roundedAmount = Math.round(amount * 100) / 100;
+        const exactKey = `${sourceDim}|${targetDim}|${roundedAmount}|${date}`;
+        if (existingInterAccountKeys.has(exactKey)) return existingInterAccountKeys.get(exactKey);
+        // Check nearby dates
+        if (maxGapDays > 0) {
+          const d = new Date(date);
+          for (let offset = -maxGapDays; offset <= maxGapDays; offset++) {
+            if (offset === 0) continue;
+            const nearby = new Date(d.getTime() + offset * 86_400_000);
+            const nearbyStr = nearby.toISOString().split("T")[0]!;
+            const nearbyKey = `${sourceDim}|${targetDim}|${roundedAmount}|${nearbyStr}`;
+            if (existingInterAccountKeys.has(nearbyKey)) return existingInterAccountKeys.get(nearbyKey);
+          }
+        }
+        return undefined;
+      }
+
+      // Helper: ensure clients_id is set (API requires it for confirmation)
+      let resolvedClientsId: number | undefined;
+      async function ensureClientsId(txId: number, counterpartyName: string | null | undefined): Promise<void> {
+        const tx = await api.transactions.get(txId);
+        if (tx.clients_id) return;
+
+        if (!resolvedClientsId && companyName) {
+          const clients = await api.clients.findByName(invoiceInfo.invoice_company_name ?? "");
+          const exact = clients.find(c => normalizeCompanyName(c.name) === companyName);
+          resolvedClientsId = exact?.id;
+        }
+
+        if (resolvedClientsId) {
+          await api.transactions.update(txId, { clients_id: resolvedClientsId });
+        }
+      }
+
+      // Helper: build distribution with accounts_id + accounts_dimensions_id
+      function buildAccountDistribution(targetDimensionId: number, amount: number) {
+        const accountsId = dimensionToAccountsId.get(targetDimensionId);
+        if (!accountsId) {
+          throw new Error(`Cannot resolve accounts_id for dimension ${targetDimensionId}. Use list_account_dimensions to verify.`);
+        }
+        return {
+          related_table: "accounts" as const,
+          related_id: accountsId,
+          related_sub_id: targetDimensionId,
+          amount,
+        };
+      }
+
+      // --- Phase 1: C↔D pair matching ---
+      for (let i = 0; i < outgoing.length; i++) {
+        const txOut = outgoing[i]!;
+        if (!txOut.id || consumedTxIds.has(txOut.id)) continue;
+        await reportProgress(i, outgoing.length);
+
+        for (const txIn of incoming) {
+          if (!txIn.id || consumedTxIds.has(txIn.id)) continue;
+          if (txOut.accounts_dimensions_id === txIn.accounts_dimensions_id) continue;
+
+          let confidence = 0;
+          const reasons: string[] = [];
+
+          if (Math.abs(txOut.amount - txIn.amount) < 0.01) {
+            confidence += 40;
+            reasons.push("exact_amount");
+          } else {
+            continue;
+          }
+
+          const dOut = new Date(txOut.date);
+          const dIn = new Date(txIn.date);
+          const daysDiff = Math.abs((dOut.getTime() - dIn.getTime()) / 86_400_000);
+          if (daysDiff === 0) {
+            confidence += 20;
+            reasons.push("same_date");
+          } else if (daysDiff <= maxGap) {
+            confidence += 10;
+            reasons.push(`date_gap_${Math.round(daysDiff)}d`);
+          } else {
+            continue;
+          }
+
+          const outCounterpartyIban = (txOut.bank_account_no ?? "").trim().toUpperCase();
+          const inCounterpartyIban = (txIn.bank_account_no ?? "").trim().toUpperCase();
+          const inAccountIban = dimensionToIban.get(txIn.accounts_dimensions_id) ?? "";
+          const outAccountIban = dimensionToIban.get(txOut.accounts_dimensions_id) ?? "";
+
+          if (outCounterpartyIban && outCounterpartyIban === inAccountIban) {
+            confidence += 30;
+            reasons.push("outgoing_iban_matches_incoming_account");
+          }
+          if (inCounterpartyIban && inCounterpartyIban === outAccountIban) {
+            confidence += 30;
+            reasons.push("incoming_iban_matches_outgoing_account");
+          }
+
+          if (outCounterpartyIban && ownIbanToDimension.has(outCounterpartyIban) && confidence <= 60) {
+            confidence += 15;
+            reasons.push("outgoing_counterparty_is_own_account");
+          }
+          if (inCounterpartyIban && ownIbanToDimension.has(inCounterpartyIban) && confidence <= 60) {
+            confidence += 15;
+            reasons.push("incoming_counterparty_is_own_account");
+          }
+
+          if (confidence < 50) continue;
+
+          // Check if already journalized
+          const existingJournal = findExistingJournal(txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, txOut.amount, txOut.date, maxGap);
+          if (existingJournal) {
+            consumedTxIds.add(txOut.id);
+            consumedTxIds.add(txIn.id);
+            skippedAlreadyHandled.push(
+              { transaction_id: txOut.id, amount: txOut.amount, date: txOut.date, source_account: dimensionToTitle.get(txOut.accounts_dimensions_id) ?? "", existing_journal_id: existingJournal, reason: "Already journalized" },
+              { transaction_id: txIn.id, amount: txIn.amount, date: txIn.date, source_account: dimensionToTitle.get(txIn.accounts_dimensions_id) ?? "", existing_journal_id: existingJournal, reason: "Already journalized" },
+            );
+            break;
+          }
+
+          const fromTitle = dimensionToTitle.get(txOut.accounts_dimensions_id) ?? `dim:${txOut.accounts_dimensions_id}`;
+          const toTitle = dimensionToTitle.get(txIn.accounts_dimensions_id) ?? `dim:${txIn.accounts_dimensions_id}`;
+
+          consumedTxIds.add(txOut.id);
+          consumedTxIds.add(txIn.id);
+
+          if (dryRun) {
+            matchedPairs.push({
+              outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id,
+              amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
+              from_account: fromTitle, to_account: toTitle,
+              from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
+              description_out: txOut.description, description_in: txIn.description,
+              confidence: Math.min(confidence, 100), match_reasons: reasons, status: "would_confirm",
+            });
+          } else {
+            try {
+              await ensureClientsId(txOut.id, txOut.bank_account_name);
+              await api.transactions.confirm(txOut.id, [buildAccountDistribution(txIn.accounts_dimensions_id, txOut.amount)]);
+              try {
+                await ensureClientsId(txIn.id, txIn.bank_account_name);
+                await api.transactions.confirm(txIn.id, [buildAccountDistribution(txOut.accounts_dimensions_id, txIn.amount)]);
+              } catch (err2: unknown) {
+                // Outgoing confirmed but incoming failed — partial confirmation
+                errors.push({
+                  transaction_ids: [txOut.id, txIn.id],
+                  reason: `PARTIAL: outgoing ${txOut.id} confirmed, but incoming ${txIn.id} failed: ${err2 instanceof Error ? err2.message : String(err2)}. Invalidate ${txOut.id} to roll back.`,
+                });
+                break;
+              }
+              matchedPairs.push({
+                outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id,
+                amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
+                from_account: fromTitle, to_account: toTitle,
+                from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
+                description_out: txOut.description, description_in: txIn.description,
+                confidence: Math.min(confidence, 100), match_reasons: reasons, status: "confirmed",
+              });
+            } catch (err: unknown) {
+              errors.push({
+                transaction_ids: [txOut.id, txIn.id],
+                reason: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+          break;
+        }
+      }
+
+      // --- Phase 2: one-sided transfers (counterparty = company name or own IBAN) ---
+      const remaining = unconfirmed.filter(tx => tx.id && !consumedTxIds.has(tx.id));
+
+      for (const tx of remaining) {
+        if (!tx.id) continue;
+        const counterpartyName = normalizeCompanyName(tx.bank_account_name ?? "");
+        const counterpartyIban = (tx.bank_account_no ?? "").trim().toUpperCase();
+
+        let targetDimension: number | undefined;
+        let confidence = 0;
+        const reasons: string[] = [];
+
+        // Check if counterparty IBAN matches another own bank account
+        if (counterpartyIban && ownIbanToDimension.has(counterpartyIban)) {
+          const ibanDim = ownIbanToDimension.get(counterpartyIban)!;
+          if (ibanDim !== tx.accounts_dimensions_id) {
+            targetDimension = ibanDim;
+            confidence += 90;
+            reasons.push("counterparty_iban_is_own_account");
+          }
+        }
+
+        // Check if counterparty name matches company name (min 4 chars to avoid false positives)
+        if (!targetDimension && companyName.length >= 4 && counterpartyName.length >= 4) {
+          const nameMatch = counterpartyName.includes(companyName) || companyName.includes(counterpartyName);
+          if (nameMatch) {
+            confidence += 60;
+            reasons.push("counterparty_name_matches_company");
+
+            // Determine target: user-specified (must differ from source), or auto if only one other account exists
+            const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== tx.accounts_dimensions_id);
+            if (target_accounts_dimensions_id && target_accounts_dimensions_id !== tx.accounts_dimensions_id && dimensionToIban.has(target_accounts_dimensions_id)) {
+              targetDimension = target_accounts_dimensions_id;
+              reasons.push("target_from_parameter");
+            } else if (otherDimensions.length === 1) {
+              targetDimension = otherDimensions[0]!;
+              confidence += 20;
+              reasons.push("only_one_other_account");
+            }
+          }
+        }
+
+        if (confidence < 50 || !targetDimension) continue;
+
+        // Check if this transfer is already journalized from the other side
+        const existingJournalId = findExistingJournal(tx.accounts_dimensions_id, targetDimension, tx.amount, tx.date, maxGap);
+        if (existingJournalId) {
+          consumedTxIds.add(tx.id);
+          skippedAlreadyHandled.push({
+            transaction_id: tx.id, amount: tx.amount, date: tx.date,
+            source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
+            existing_journal_id: existingJournalId,
+            reason: "Already journalized from the other account side",
+          });
+          continue;
+        }
+
+        consumedTxIds.add(tx.id);
+        const sourceTitle = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;
+        const targetTitle = dimensionToTitle.get(targetDimension) ?? `dim:${targetDimension}`;
+
+        if (dryRun) {
+          matchedOneSided.push({
+            transaction_id: tx.id, type: tx.type, amount: tx.amount, date: tx.date,
+            source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
+            target_account: targetTitle, target_dimension_id: targetDimension,
+            description: tx.description, counterparty_name: tx.bank_account_name,
+            confidence: Math.min(confidence, 100), match_reasons: reasons, status: "would_confirm",
+          });
+        } else {
+          try {
+            await ensureClientsId(tx.id, tx.bank_account_name);
+            await api.transactions.confirm(tx.id, [buildAccountDistribution(targetDimension, tx.amount)]);
+            matchedOneSided.push({
+              transaction_id: tx.id, type: tx.type, amount: tx.amount, date: tx.date,
+              source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
+              target_account: targetTitle, target_dimension_id: targetDimension,
+              description: tx.description, counterparty_name: tx.bank_account_name,
+              confidence: Math.min(confidence, 100), match_reasons: reasons, status: "confirmed",
+            });
+          } catch (err: unknown) {
+            errors.push({
+              transaction_ids: [tx.id],
+              reason: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            mode: dryRun ? "DRY_RUN" : "EXECUTED",
+            company_name: invoiceInfo.invoice_company_name,
+            total_unconfirmed: unconfirmed.length,
+            matched_pairs: matchedPairs.length,
+            matched_one_sided: matchedOneSided.length,
+            skipped_already_handled: skippedAlreadyHandled.length,
+            own_bank_accounts: [...dimensionToIban.entries()].map(([dimId, iban]) => ({
+              accounts_dimensions_id: dimId,
+              iban,
+              title: dimensionToTitle.get(dimId),
+            })),
+            pairs: matchedPairs,
+            one_sided: matchedOneSided,
+            already_handled: skippedAlreadyHandled,
+            errors,
           }, null, 2),
         }],
       };

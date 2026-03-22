@@ -197,6 +197,70 @@ describe("wise import tool", () => {
     ]));
   });
 
+  it("skips Jar transfers by default", async () => {
+    mockedReadFile.mockResolvedValue([
+      CSV_HEADER,
+      // Jar transfer: category contains "Jar"
+      ["jar-1", "COMPLETED", "OUT", "2026-01-20 09:00:00", "2026-01-20 09:00:00",
+       "0", "EUR", "0", "EUR",
+       "Seppo AI OÜ", "100", "EUR",
+       "Seppo AI OÜ", "100", "EUR",
+       "1", "", "", "", "Jar transfer", "Holiday fund"].join(","),
+      // Self-transfer: same source and target name
+      ["jar-2", "COMPLETED", "IN", "2026-01-21 09:00:00", "2026-01-21 09:00:00",
+       "0", "EUR", "0", "EUR",
+       "Seppo AI OÜ", "50", "EUR",
+       "Seppo AI OÜ", "50", "EUR",
+       "1", "", "", "", "General", ""].join(","),
+      // Normal transaction: should NOT be skipped
+      ["normal-1", "COMPLETED", "OUT", "2026-01-22 09:00:00", "2026-01-22 09:00:00",
+       "0", "EUR", "0", "EUR",
+       "Seppo AI OÜ", "25", "EUR",
+       "Acme Ltd", "25", "EUR",
+       "1", "INV-99", "", "", "General", ""].join(","),
+    ].join("\n"));
+
+    const { handler } = setupWiseTool([]);
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_relation_id: 9,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.skipped_jar_transfers).toBe(2);
+    expect(payload.eligible).toBe(1);
+    expect(payload.results).toHaveLength(1);
+    expect(payload.results[0]!.wise_id).toBe("normal-1");
+  });
+
+  it("includes Jar transfers when skip_jar_transfers=false", async () => {
+    mockedReadFile.mockResolvedValue([
+      CSV_HEADER,
+      ["jar-3", "COMPLETED", "OUT", "2026-01-20 09:00:00", "2026-01-20 09:00:00",
+       "0", "EUR", "0", "EUR",
+       "Seppo AI OÜ", "100", "EUR",
+       "Seppo AI OÜ", "100", "EUR",
+       "1", "", "", "", "Jar transfer", ""].join(","),
+    ].join("\n"));
+
+    const { handler } = setupWiseTool([]);
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_relation_id: 9,
+      skip_jar_transfers: false,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.skipped_jar_transfers).toBeUndefined();
+    expect(payload.eligible).toBe(1);
+  });
+
   it("maps IN rows to incoming transactions and uses the source side as counterparty", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "abc-5", "COMPLETED", "IN", "2026-01-14 09:00:00", "2026-01-14 09:00:00",

@@ -114,6 +114,26 @@ function normalizeWiseText(value?: string | null): string {
   return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+/** Detect Wise Jar (savings pot) transfers — internal movements, not real payments */
+function isJarTransfer(row: WiseRow): boolean {
+  const catLower = row.category.toLowerCase();
+  const noteLower = row.note.toLowerCase();
+  const refLower = row.reference.toLowerCase();
+
+  // Explicit Jar indicators
+  if (catLower.includes("jar")) return true;
+  if (noteLower.includes("jar")) return true;
+  if (refLower.includes("jar")) return true;
+
+  // Self-transfer: source and target are the same person/company,
+  // same currency, zero fee (to avoid false-positives on owner payments)
+  const src = normalizeWiseText(row.sourceName);
+  const tgt = normalizeWiseText(row.targetName);
+  if (src && tgt && src === tgt && row.sourceCurrency === row.targetCurrency && row.sourceFeeAmount === 0) return true;
+
+  return false;
+}
+
 function stripWisePrefix(description?: string | null): string {
   return (description ?? "").replace(/^WISE:(?:FEE:)?\S+\s*/i, "").trim();
 }
@@ -154,9 +174,11 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: z.string().optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
+      skip_jar_transfers: z.boolean().optional().describe("Skip Jar (savings pot) transfers — internal movements within Wise (default true)"),
     },
     { ...batch, openWorldHint: true, title: "Import Wise Transactions" },
-    async ({ file_path, accounts_dimensions_id, fee_account_relation_id, execute, date_from, date_to }) => {
+    async ({ file_path, accounts_dimensions_id, fee_account_relation_id, execute, date_from, date_to, skip_jar_transfers }) => {
+      const skipJars = skip_jar_transfers !== false;
       const resolved = await validateFilePath(file_path, [".csv"], 10 * 1024 * 1024);
       const csv = await readFile(resolved, "utf-8");
       const rows = parseWiseCSV(csv);
@@ -174,10 +196,12 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       }
 
       // Filter rows
+      let skippedJarCount = 0;
       const eligible = rows.filter(r => {
         if (r.status !== "COMPLETED") return false;
         if (normalizeWiseDirection(r.direction) === "NEUTRAL") return false;
         if (r.sourceAmount === 0 && r.targetAmount === 0) return false;
+        if (skipJars && isJarTransfer(r)) { skippedJarCount++; return false; }
         const date = wiseDate(r.finishedOn || r.createdOn);
         if (date_from && date < date_from) return false;
         if (date_to && date > date_to) return false;
@@ -334,11 +358,13 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             continue;
           }
 
+          const feeType = "C" as const; // Fees are always outgoing regardless of main transaction direction
+
           if (dryRun) {
             created.push({
               wise_id: `FEE:${row.id}`,
               date,
-              type,
+              type: feeType,
               amount: fee,
               description: feeDesc,
               status: "would_create",
@@ -349,7 +375,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             try {
               const feeResult = await api.transactions.create({
                 accounts_dimensions_id,
-                type,
+                type: feeType,
                 amount: fee,
                 cl_currencies_id: "EUR",
                 date,
@@ -367,7 +393,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                   ]);
                   created.push({
                     wise_id: `FEE:${row.id}`,
-                    date, type, amount: fee, description: feeDesc,
+                    date, type: feeType, amount: fee, description: feeDesc,
                     status: "created_and_confirmed",
                     api_id: feeId,
                   });
@@ -376,7 +402,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 } catch (confErr: unknown) {
                   created.push({
                     wise_id: `FEE:${row.id}`,
-                    date, type, amount: fee, description: feeDesc,
+                    date, type: feeType, amount: fee, description: feeDesc,
                     status: "created (confirm failed: " + (confErr instanceof Error ? confErr.message : String(confErr)) + ")",
                     api_id: feeId,
                   });
@@ -386,7 +412,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               } else {
                 created.push({
                   wise_id: `FEE:${row.id}`,
-                  date, type, amount: fee, description: feeDesc,
+                  date, type: feeType, amount: fee, description: feeDesc,
                   status: "created (needs manual confirm)",
                   api_id: feeId,
                 });
@@ -408,6 +434,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             total_csv_rows: rows.length,
             eligible: eligible.length,
             filtered_out: rows.length - eligible.length,
+            ...(skippedJarCount > 0 ? { skipped_jar_transfers: skippedJarCount } : {}),
             created: created.length,
             skipped: skipped.length,
             results: created,
