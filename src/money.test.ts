@@ -38,6 +38,13 @@ describe("roundMoney", () => {
     expect(roundMoney(123456.789)).toBe(123456.79);
   });
 
+  it("does not zero extremely large values", () => {
+    expect(roundMoney(1e19)).toBe(1e19);
+    expect(roundMoney(-1e19)).toBe(-1e19);
+    expect(roundMoney(1e21)).toBe(1e21);
+    expect(roundMoney(-1e21)).toBe(-1e21);
+  });
+
   it("handles already-rounded values", () => {
     expect(roundMoney(1.23)).toBe(1.23);
     expect(roundMoney(100)).toBe(100);
