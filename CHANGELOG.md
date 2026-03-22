@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.9.1] - 2026-03-22
+
+### Added
+- **`analyze_unconfirmed_transactions` tool** — read-only tool that categorizes unconfirmed bank transactions into actionable suggestions: likely duplicate (with confidence scoring), confirm against invoice, confirm as inter-account transfer, confirm as expense, or manual review. Includes ready-to-use distribution objects for each suggestion.
+- **Wise import auto-reconciliation** — `import_wise_transactions` now auto-detects inter-account transfers (TRANSFER-*, BANK_DETAILS_PAYMENT_RETURN-*) after import and checks existing journal entries before confirming, preventing double-counting. New `inter_account_dimension_id` parameter (auto-detected when only one other bank account exists).
+- **Shared `buildInterAccountJournalIndex` utility** (`inter-account-utils.ts`) — extracted from bank-reconciliation and wise-import to eliminate duplicate journal-scanning logic
+
+### Fixed
+- **Reconciliation type bias** — `reconcile_transactions` and `auto_confirm_exact_matches` now match against both sale and purchase invoices regardless of transaction type. Previously, sale invoice matching was dead code because the API stores all bank transactions as type C.
+- **Wise `isJarTransfer` documentation** — clarified why the self-transfer heuristic works (bank registrations use different name variants) and when to use `skip_jar_transfers=false`
+
+### Changed
+- **CLAUDE.md documentation overhaul**:
+  - Documented that transaction `type` field is cosmetic; journal direction is determined by distribution at confirmation time
+  - Documented transaction status values (PROJECT/CONFIRMED/VOID) and invalidate→delete workflow
+  - Fixed misleading `gross_price` guidance: invoice-level `gross_price`/`vat_price` ARE required; only item-level is auto-computed
+  - Added inter-account transfer duplicate risk documentation and mitigation guidance
+  - Noted Wise balance ~0.03 EUR discrepancy (root cause pending)
+- Exported `matchScore` and `normalizeCompanyName` from bank-reconciliation for reuse
+- **90 tools**, 10 prompts, 12 resources
+- **396 tests** total (up from 376 in 0.9.0)
+
+### Security
+- Hardened API key file loading — restricted to package directories
+- Fixed TOCTOU vulnerability in receipt inbox file revalidation
+- Bounded reconcile transfer date gap to prevent DoS
+- Fixed parent dotenv scanning opt-in
+- Fixed `roundMoney` for extreme magnitudes
+
 ## [0.9.0] - 2026-03-22
 
 ### Added
