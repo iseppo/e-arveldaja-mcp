@@ -50,7 +50,11 @@ export class TransactionsApi extends BaseResource<Transaction> {
       if (clientsIdWasSet) {
         try {
           await this.update(id, { clients_id: null } as Partial<Transaction>);
-        } catch { /* best-effort rollback */ }
+        } catch (rollbackErr) {
+          process.stderr.write(
+            `WARNING: Failed to roll back clients_id on transaction ${id}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}\n`
+          );
+        }
       }
       throw error;
     }
