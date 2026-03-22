@@ -136,7 +136,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     { ...readOnly, title: "Compute Client Net Position" },
     async ({ client_id, account_ids }) => {
       const ids = account_ids
-        ? account_ids.split(",").map(s => parseInt(s.trim()))
+        ? account_ids.split(",").map(s => parseInt(s.trim(), 10))
         : [2110, 2310, 1210]; // short-term loans, accounts payable, accounts receivable
 
       // Load journals once, share across all account balance computations

@@ -1,4 +1,3 @@
-import { inspect } from "node:util";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 function serializeUnknownError(error: unknown): string {
@@ -8,10 +7,10 @@ function serializeUnknownError(error: unknown): string {
 
   try {
     const json = JSON.stringify(error, null, 2);
-    if (typeof json === "string") return json;
+    if (typeof json === "string") return json.substring(0, 500);
   } catch {}
 
-  return inspect(error, { depth: 2, breakLength: 80, compact: false }).substring(0, 500);
+  return "Internal error";
 }
 
 export function toolError(error: unknown): CallToolResult {

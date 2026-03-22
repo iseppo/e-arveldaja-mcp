@@ -43,7 +43,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
       const isDryRun = dry_run === true;
       const allSales = await api.saleInvoices.listAll();
       const sourceFrom = `${source_month}-01`;
-      const sourceLastDay = new Date(parseInt(source_month.split("-")[0]!), parseInt(source_month.split("-")[1]!), 0).getDate();
+      const sourceLastDay = new Date(parseInt(source_month.split("-")[0]!, 10), parseInt(source_month.split("-")[1]!, 10), 0).getDate();
       const sourceTo = `${source_month}-${String(sourceLastDay).padStart(2, "0")}`;
       const existingCloneMarkers = new Map<string, { id?: number; number?: string }>();
 
@@ -56,7 +56,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
 
       let sourceInvoices: SaleInvoice[];
       if (invoice_ids) {
-        const ids = invoice_ids.split(",").map(s => parseInt(s.trim()));
+        const ids = invoice_ids.split(",").map(s => parseInt(s.trim(), 10));
         sourceInvoices = [];
         for (const id of ids) {
           sourceInvoices.push(await api.saleInvoices.get(id));

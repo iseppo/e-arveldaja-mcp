@@ -8,8 +8,9 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   }
 
   async confirm(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/sale_invoices/${id}/register`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/sale_invoices/${id}/register`, {});
+    return result;
   }
 
   async getDeliveryOptions(id: number): Promise<SaleInvoiceDeliveryOptions> {
@@ -25,20 +26,23 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    this.invalidateCache();
-    return this.client.request<ApiResponse>(`/sale_invoices/${id}/document_user`, {
+    const result = await this.client.request<ApiResponse>(`/sale_invoices/${id}/document_user`, {
       method: "PUT",
       body: { name, contents },
     });
+    this.invalidateCache();
+    return result;
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
+    const result = await this.client.delete<ApiResponse>(`/sale_invoices/${id}/document_user`);
     this.invalidateCache();
-    return this.client.delete<ApiResponse>(`/sale_invoices/${id}/document_user`);
+    return result;
   }
 
   async sendEinvoice(id: number, request: SaleInvoiceDeliveryRequest): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/sale_invoices/${id}/deliver`, request);
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/sale_invoices/${id}/deliver`, request);
+    return result;
   }
 }

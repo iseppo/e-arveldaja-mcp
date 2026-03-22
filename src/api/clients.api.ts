@@ -8,19 +8,22 @@ export class ClientsApi extends BaseResource<Client> {
   }
 
   async deactivate(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/clients/${id}/deactivate`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/clients/${id}/deactivate`, {});
+    return result;
   }
 
   async restore(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/clients/${id}/reactivate`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/clients/${id}/reactivate`, {});
+    return result;
   }
 
   /** Not in OpenAPI spec — endpoint may not exist on all API versions */
   async merge(targetId: number, sourceId: number): Promise<ApiResponse> {
+    const result = await this.client.post<ApiResponse>(`/clients/${targetId}/merge/${sourceId}`, {});
     this.invalidateCache();
-    return this.client.post<ApiResponse>(`/clients/${targetId}/merge/${sourceId}`, {});
+    return result;
   }
 
   async findByName(name: string): Promise<Client[]> {

@@ -42,10 +42,9 @@ export class Cache {
       this.store.clear();
       return;
     }
-    for (const key of this.store.keys()) {
-      if (key.startsWith(pattern)) {
-        this.store.delete(key);
-      }
+    const toDelete = [...this.store.keys()].filter(k => k.startsWith(pattern));
+    for (const key of toDelete) {
+      this.store.delete(key);
     }
   }
 }

@@ -97,6 +97,23 @@ export function getConfigSearchDirs(
   return toUniqueDirs(dirs);
 }
 
+function warnIfInsecureEnvFile(envPath: string): void {
+  try {
+    const info = lstatSync(envPath);
+    if (info.isSymbolicLink()) {
+      process.stderr.write(`WARNING: .env file is a symlink, skipping: ${envPath}\n`);
+      return;
+    }
+    if (!info.isFile()) return;
+    if (info.mode & 0o077) {
+      process.stderr.write(
+        `WARNING: ${envPath} is readable by group/others ` +
+        `(mode ${(info.mode & 0o777).toString(8)}). Run: chmod 600 ${envPath}\n`
+      );
+    }
+  } catch { /* file may not exist yet */ }
+}
+
 export function loadDotenvFiles(): void {
   const loaded = new Set<string>();
   const scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true";
@@ -113,6 +130,7 @@ export function loadDotenvFiles(): void {
       if (loaded.has(dedupeKey)) continue;
       loaded.add(dedupeKey);
 
+      warnIfInsecureEnvFile(envPath);
       dotenv.config({ path: envPath });
     }
   };

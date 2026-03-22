@@ -8,19 +8,22 @@ export class ProductsApi extends BaseResource<Product> {
   }
 
   async deactivate(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/products/${id}/deactivate`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/products/${id}/deactivate`, {});
+    return result;
   }
 
   async restore(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/products/${id}/reactivate`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/products/${id}/reactivate`, {});
+    return result;
   }
 
   /** Not in OpenAPI spec — endpoint may not exist on all API versions */
   async merge(targetId: number, sourceId: number): Promise<ApiResponse> {
+    const result = await this.client.post<ApiResponse>(`/products/${targetId}/merge/${sourceId}`, {});
     this.invalidateCache();
-    return this.client.post<ApiResponse>(`/products/${targetId}/merge/${sourceId}`, {});
+    return result;
   }
 
   async findByName(name: string): Promise<Product[]> {

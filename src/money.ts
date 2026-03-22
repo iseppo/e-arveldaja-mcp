@@ -4,7 +4,9 @@
  * (e.g. 1.005 * 100 = 100.499... but parseFloat('1.005e2') = 100.5 exactly).
  */
 export const roundMoney = (v: number): number => {
-  if (v === 0 || !Number.isFinite(v)) return 0;
+  if (v === 0) return 0;
+  if (Number.isNaN(v)) throw new Error("roundMoney received NaN — indicates a bug in the caller");
+  if (!Number.isFinite(v)) return 0;
   const abs = Math.abs(v);
 
   // Once the scaled value reaches 1e21, Number stringification switches to

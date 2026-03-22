@@ -98,7 +98,7 @@ function sumCategory(accounts: AccountBalance[], normalType: "D" | "C"): number 
       total -= a.balance; // contra-account
     }
   }
-  return total;
+  return roundMoney(total);
 }
 
 function getMonthLastDay(month: string): number {

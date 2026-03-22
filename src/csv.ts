@@ -1,4 +1,9 @@
+const CSV_MAX_SIZE = 1_048_576; // 1 MB — consistent with safeJsonParse
+
 export function parseCSV(content: string, delimiter = ","): string[][] {
+  if (content.length > CSV_MAX_SIZE) {
+    throw new Error(`CSV input exceeds ${CSV_MAX_SIZE} bytes (got ${content.length})`);
+  }
   const rows: string[][] = [];
   let fields: string[] = [];
   let current = "";

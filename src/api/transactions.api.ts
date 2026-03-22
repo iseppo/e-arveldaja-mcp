@@ -12,12 +12,13 @@ export class TransactionsApi extends BaseResource<Transaction> {
    * If the transaction has no clients_id (common for card payments), automatically
    * sets it from the linked invoice before confirming. Without this, the API
    * rejects confirmation with "buyer or supplier is missing".
+   * If confirmation fails after setting clients_id, the change is rolled back.
    */
   async confirm(id: number, distributions?: TransactionDistribution[]): Promise<ApiResponse> {
-    this.invalidateCache();
     const body = distributions ?? [];
 
     // Auto-fix missing clients_id from linked invoice
+    let clientsIdWasSet = false;
     if (body.length > 0) {
       const tx = await this.get(id);
       if (!tx.clients_id) {
@@ -36,16 +37,29 @@ export class TransactionsApi extends BaseResource<Transaction> {
 
         if (clientsId !== undefined) {
           await this.update(id, { clients_id: clientsId });
+          clientsIdWasSet = true;
         }
       }
     }
 
-    return this.client.patch<ApiResponse>(`/transactions/${id}/register`, body);
+    try {
+      const result = await this.client.patch<ApiResponse>(`/transactions/${id}/register`, body);
+      this.invalidateCache();
+      return result;
+    } catch (error) {
+      if (clientsIdWasSet) {
+        try {
+          await this.update(id, { clients_id: null } as Partial<Transaction>);
+        } catch { /* best-effort rollback */ }
+      }
+      throw error;
+    }
   }
 
   async invalidate(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/transactions/${id}/invalidate`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/transactions/${id}/invalidate`, {});
+    return result;
   }
 
   async getDocument(id: number): Promise<ApiFile> {
@@ -53,15 +67,17 @@ export class TransactionsApi extends BaseResource<Transaction> {
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    this.invalidateCache();
-    return this.client.request<ApiResponse>(`/transactions/${id}/document_user`, {
+    const result = await this.client.request<ApiResponse>(`/transactions/${id}/document_user`, {
       method: "PUT",
       body: { name, contents },
     });
+    this.invalidateCache();
+    return result;
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
+    const result = await this.client.delete<ApiResponse>(`/transactions/${id}/document_user`);
     this.invalidateCache();
-    return this.client.delete<ApiResponse>(`/transactions/${id}/document_user`);
+    return result;
   }
 }

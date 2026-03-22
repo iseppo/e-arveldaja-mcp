@@ -18,7 +18,7 @@ describe("roundMoney", () => {
     expect(Object.is(roundMoney(-0), 0)).toBe(true); // -0 returns +0
     expect(roundMoney(-1.235)).toBe(-1.24);
     expect(roundMoney(-0.005)).toBe(-0.01);
-    expect(roundMoney(NaN)).toBe(0);
+    expect(() => roundMoney(NaN)).toThrow("roundMoney received NaN");
     expect(roundMoney(Infinity)).toBe(0);
     expect(roundMoney(-Infinity)).toBe(0);
   });

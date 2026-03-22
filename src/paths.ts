@@ -10,5 +10,6 @@ export function getProjectRoot(): string {
     if (parent === dir) break;
     dir = parent;
   }
+  process.stderr.write("WARNING: Could not find package.json; falling back to process.cwd()\n");
   return process.cwd();
 }

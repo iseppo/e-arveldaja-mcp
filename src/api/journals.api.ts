@@ -24,7 +24,7 @@ export class JournalsApi extends BaseResource<Journal> {
     for (let i = 0; i < all.length; i++) {
       const journal = all[i]!;
       if (!journal.postings || journal.postings.length === 0) {
-        fetchIndices.push(i);
+        if (journal.id != null) fetchIndices.push(i);
       }
     }
 
@@ -43,13 +43,15 @@ export class JournalsApi extends BaseResource<Journal> {
   }
 
   async confirm(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/journals/${id}/register`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/journals/${id}/register`, {});
+    return result;
   }
 
   async invalidate(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/journals/${id}/invalidate`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/journals/${id}/invalidate`, {});
+    return result;
   }
 
   async getDocument(id: number): Promise<ApiFile> {
@@ -57,15 +59,17 @@ export class JournalsApi extends BaseResource<Journal> {
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    this.invalidateCache();
-    return this.client.request<ApiResponse>(`/journals/${id}/document_user`, {
+    const result = await this.client.request<ApiResponse>(`/journals/${id}/document_user`, {
       method: "PUT",
       body: { name, contents },
     });
+    this.invalidateCache();
+    return result;
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
+    const result = await this.client.delete<ApiResponse>(`/journals/${id}/document_user`);
     this.invalidateCache();
-    return this.client.delete<ApiResponse>(`/journals/${id}/document_user`);
+    return result;
   }
 }

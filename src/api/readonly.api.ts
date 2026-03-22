@@ -12,8 +12,8 @@ function readonlyCacheKey(client: HttpClient, key: string): string {
   return `${client.cacheNamespace}:${key}`;
 }
 
-function invalidateReadonlyCache(client: HttpClient, pattern?: string): void {
-  readonlyCache.invalidate(pattern ? readonlyCacheKey(client, pattern) : undefined);
+function invalidateReadonlyCache(client: HttpClient, pattern: string): void {
+  readonlyCache.invalidate(readonlyCacheKey(client, pattern));
 }
 
 async function readonlyCachedGet<T>(client: HttpClient, path: string): Promise<T> {
@@ -103,8 +103,9 @@ export class ReferenceDataApi {
   }
 
   async updateInvoiceInfo(data: Partial<CompanyInvoiceInfo>): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>("/invoice_info", data);
     invalidateReadonlyCache(this.client, "/invoice_info");
-    return this.client.patch<ApiResponse>("/invoice_info", data);
+    return result;
   }
 
   // VAT info
@@ -127,18 +128,21 @@ export class ReferenceDataApi {
   }
 
   async createInvoiceSeries(data: Partial<InvoiceSeries>): Promise<ApiResponse> {
+    const result = await this.client.post<ApiResponse>("/invoice_series", data);
     invalidateReadonlyCache(this.client, "/invoice_series");
-    return this.client.post<ApiResponse>("/invoice_series", data);
+    return result;
   }
 
   async updateInvoiceSeries(id: number, data: Partial<InvoiceSeries>): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/invoice_series/${id}`, data);
     invalidateReadonlyCache(this.client, "/invoice_series");
-    return this.client.patch<ApiResponse>(`/invoice_series/${id}`, data);
+    return result;
   }
 
   async deleteInvoiceSeries(id: number): Promise<ApiResponse> {
+    const result = await this.client.delete<ApiResponse>(`/invoice_series/${id}`);
     invalidateReadonlyCache(this.client, "/invoice_series");
-    return this.client.delete<ApiResponse>(`/invoice_series/${id}`);
+    return result;
   }
 
   // Bank accounts
@@ -151,17 +155,20 @@ export class ReferenceDataApi {
   }
 
   async createBankAccount(data: Partial<BankAccount>): Promise<ApiResponse> {
+    const result = await this.client.post<ApiResponse>("/bank_accounts", data);
     invalidateReadonlyCache(this.client, "/bank_accounts");
-    return this.client.post<ApiResponse>("/bank_accounts", data);
+    return result;
   }
 
   async updateBankAccount(id: number, data: Partial<BankAccount>): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/bank_accounts/${id}`, data);
     invalidateReadonlyCache(this.client, "/bank_accounts");
-    return this.client.patch<ApiResponse>(`/bank_accounts/${id}`, data);
+    return result;
   }
 
   async deleteBankAccount(id: number): Promise<ApiResponse> {
+    const result = await this.client.delete<ApiResponse>(`/bank_accounts/${id}`);
     invalidateReadonlyCache(this.client, "/bank_accounts");
-    return this.client.delete<ApiResponse>(`/bank_accounts/${id}`);
+    return result;
   }
 }

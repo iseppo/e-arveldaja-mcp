@@ -291,8 +291,10 @@ function isLikelyYearAmount(amount: number, line: string): boolean {
 }
 
 function roundToDecimals(value: number, decimals: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return Number(value.toFixed(decimals));
+  if (value === 0 || !Number.isFinite(value)) return 0;
+  const abs = Math.abs(value);
+  const rounded = Number(Math.round(parseFloat(abs + "e" + decimals)) + "e-" + decimals);
+  return (value < 0 ? -rounded : rounded) || 0;
 }
 
 function hasAllCapsWord(value: string): boolean {

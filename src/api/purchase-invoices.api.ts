@@ -2,6 +2,7 @@ import type { HttpClient } from "../http-client.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse, ApiFile } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
 import { roundMoney } from "../money.js";
+import { log } from "../logger.js";
 
 interface ConfirmPurchaseInvoiceOptions {
   preserveExistingTotals?: boolean;
@@ -33,6 +34,10 @@ function normalizeItemsForNonVat(
       : rateStr !== undefined
         ? Number(rateStr.replace(",", "."))
         : undefined;
+
+    if (rate !== undefined && !Number.isFinite(rate)) {
+      log("warning", `Purchase invoice item "${item.custom_title ?? "(no title)"}": unparseable vat_rate_dropdown "${rateStr}"`);
+    }
 
     // Single-item invoice: use explicit gross_price if available
     const derivedGross =
@@ -99,7 +104,6 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         : roundMoney(itemNet + itemVat);
 
       await this.update(id, { vat_price: vat, gross_price: gross, items: invoice.items } as Partial<PurchaseInvoice>);
-      this.invalidateCache();
 
       return this.get(id);
     } catch (error) {
@@ -145,8 +149,8 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       const gross = roundMoney(net + itemVat);
       const currentGross = invoice.gross_price;
       const currentVat = invoice.vat_price;
-      const grossNeedsRepair = !currentGross || Math.abs(currentGross - gross) > 0.02;
-      const vatNeedsRepair = isVatRegistered && (currentVat === undefined || currentVat === null || Math.abs(currentVat - vat) > 0.02);
+      const grossNeedsRepair = currentGross === undefined || currentGross === null || roundMoney(currentGross) !== roundMoney(gross);
+      const vatNeedsRepair = isVatRegistered && (currentVat === undefined || currentVat === null || roundMoney(currentVat) !== roundMoney(vat));
       if (grossNeedsRepair || vatNeedsRepair) {
         await this.update(id, { vat_price: vat, gross_price: gross, items } as Partial<PurchaseInvoice>);
       }
@@ -155,13 +159,15 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   }
 
   async confirm(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/purchase_invoices/${id}/register`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/purchase_invoices/${id}/register`, {});
+    return result;
   }
 
   async invalidate(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/purchase_invoices/${id}/invalidate`, {});
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`/purchase_invoices/${id}/invalidate`, {});
+    return result;
   }
 
   async getDocument(id: number): Promise<ApiFile> {
@@ -169,15 +175,17 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    this.invalidateCache();
-    return this.client.request<ApiResponse>(`/purchase_invoices/${id}/document_user`, {
+    const result = await this.client.request<ApiResponse>(`/purchase_invoices/${id}/document_user`, {
       method: "PUT",
       body: { name, contents },
     });
+    this.invalidateCache();
+    return result;
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
+    const result = await this.client.delete<ApiResponse>(`/purchase_invoices/${id}/document_user`);
     this.invalidateCache();
-    return this.client.delete<ApiResponse>(`/purchase_invoices/${id}/document_user`);
+    return result;
   }
 }

@@ -34,6 +34,6 @@ describe("toolError", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content).toHaveLength(1);
-    expect((result.content[0] as { type: string; text: string }).text).toContain("boom");
+    expect((result.content[0] as { type: string; text: string }).text).toBe("Internal error");
   });
 });

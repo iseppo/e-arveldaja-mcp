@@ -73,18 +73,21 @@ export class BaseResource<T> {
   }
 
   async create(data: Partial<T>): Promise<ApiResponse> {
+    const result = await this.client.post<ApiResponse>(this.basePath, data);
     this.invalidateCache();
-    return this.client.post<ApiResponse>(this.basePath, data);
+    return result;
   }
 
   async update(id: number, data: Partial<T>): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`${this.basePath}/${id}`, data);
     this.invalidateCache();
-    return this.client.patch<ApiResponse>(`${this.basePath}/${id}`, data);
+    return result;
   }
 
   async delete(id: number): Promise<ApiResponse> {
+    const result = await this.client.delete<ApiResponse>(`${this.basePath}/${id}`);
     this.invalidateCache();
-    return this.client.delete<ApiResponse>(`${this.basePath}/${id}`);
+    return result;
   }
 
   // restore/reactivate is only supported by clients and products — implemented in those subclasses
