@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 89 tools, 10 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 90 tools, 10 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 ## Disclaimer
 
@@ -37,7 +37,7 @@ For the demo server, set the environment variable `EARVELDAJA_SERVER=demo`.
 
 Most AI assistants can set this up for you — just ask:
 
-> "Add the e-arveldaja-mcp npm package as an MCP server"
+> "Add e-arveldaja-mcp as an MCP server using npx. The package is on npm — do not clone from git."
 
 If you prefer to do it manually:
 
