@@ -8,6 +8,7 @@ import { validateFilePath } from "../file-validation.js";
 import { batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { parseCSV } from "../csv.js";
+import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
 
 interface WiseRow {
   id: string;
@@ -590,24 +591,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
           if (targetDim) {
             // Build index of existing inter-account journals to detect duplicates
             const ownDimensionIds = new Set([accounts_dimensions_id, targetDimensionId]);
-            const existingInterAccountKeys = new Map<string, number>();
             const allJournals = await api.journals.listAllWithPostings();
-            for (const j of allJournals) {
-              if (j.is_deleted || !j.registered || !j.postings) continue;
-              const bankPostings = j.postings.filter(p =>
-                !p.is_deleted && p.accounts_dimensions_id && ownDimensionIds.has(p.accounts_dimensions_id)
-              );
-              if (bankPostings.length !== 2) continue;
-              const [a, b] = bankPostings;
-              if (!a || !b || a.type === b.type) continue;
-              const debit = a.type === "D" ? a : b;
-              const credit = a.type === "C" ? a : b;
-              const amt = Math.round(((debit.base_amount ?? debit.amount) as number) * 100) / 100;
-              const key1 = `${credit.accounts_dimensions_id}|${debit.accounts_dimensions_id}|${amt}|${j.effective_date}`;
-              const key2 = `${debit.accounts_dimensions_id}|${credit.accounts_dimensions_id}|${amt}|${j.effective_date}`;
-              existingInterAccountKeys.set(key1, j.id!);
-              existingInterAccountKeys.set(key2, j.id!);
-            }
+            const existingInterAccountKeys = buildInterAccountJournalIndex(allJournals, ownDimensionIds);
 
             // Resolve company client for setting clients_id
             let companyClientId: number | undefined;

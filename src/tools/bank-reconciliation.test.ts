@@ -160,6 +160,42 @@ describe("reconcile_transactions", () => {
     });
     expect(payload.matches[0]!.manual_review_required).toBeUndefined();
   });
+
+  it("matches type C transactions against sale invoices (API always stores type C)", async () => {
+    const handler = setupReconciliationTool({
+      transactions: [{
+        id: 3,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 300,
+        date: "2026-03-21",
+        description: "Incoming payment",
+        bank_account_name: "Delta OU",
+      }],
+      sales: [{
+        id: 12,
+        status: "CONFIRMED",
+        payment_status: "NOT_PAID",
+        number: "ARV-12",
+        clients_id: 22,
+        client_name: "Delta OU",
+        gross_price: 300,
+      }],
+    });
+
+    const result = await handler({ min_confidence: 0 });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.matches).toHaveLength(1);
+    expect(payload.matches[0]!.best_match.type).toBe("sale_invoice");
+    expect(payload.matches[0]!.distribution_ready).toBe(true);
+    expect(payload.matches[0]!.distribution).toEqual({
+      related_table: "sale_invoices",
+      related_id: 12,
+      amount: 300,
+    });
+  });
 });
 
 function setupAutoConfirmTool(options: {
@@ -270,6 +306,27 @@ describe("auto_confirm_exact_matches", () => {
     const payload = JSON.parse(result.content[0]!.text);
 
     expect(payload.auto_confirmed).toBe(0);
+  });
+
+  it("auto-confirms type C transaction against sale invoice", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [
+        { id: 7, status: "PROJECT", is_deleted: false, type: "C", amount: 150, date: "2026-03-21", bank_account_name: "Delta OU", ref_number: "RF999" },
+      ],
+      sales: [
+        { id: 16, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-16", clients_id: 26, client_name: "Delta OU", gross_price: 150, bank_ref_number: "RF999" },
+      ],
+    });
+
+    const result = await handler({ execute: true });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.mode).toBe("EXECUTED");
+    expect(payload.auto_confirmed).toBe(1);
+    expect(payload.results[0]!.status).toBe("confirmed");
+    expect(api.transactions.confirm).toHaveBeenCalledWith(7, [
+      { related_table: "sale_invoices", related_id: 16, amount: 150 },
+    ]);
   });
 
   it("does not double-match the same invoice to two transactions", async () => {

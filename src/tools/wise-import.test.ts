@@ -33,13 +33,20 @@ function buildCsvRow(values: string[]): string {
 function setupWiseTool(
   existingTransactions: unknown[],
   createImpl?: ReturnType<typeof vi.fn>,
-  options: { accountDimensions?: unknown[] } = {},
+  options: {
+    accountDimensions?: unknown[];
+    journals?: unknown[];
+    bankAccounts?: unknown[];
+    invoiceInfo?: unknown;
+    findByNameResult?: unknown[];
+  } = {},
 ) {
   const server = { registerTool: vi.fn() } as any;
   const create = createImpl ?? vi.fn().mockResolvedValue({ created_object_id: 9001 });
   const api = {
     clients: {
       listAll: vi.fn().mockResolvedValue([{ id: 77, name: "Wise" }]),
+      findByName: vi.fn().mockResolvedValue(options.findByNameResult ?? []),
     },
     readonly: {
       getAccountDimensions: vi.fn().mockResolvedValue(options.accountDimensions ?? [{
@@ -48,10 +55,16 @@ function setupWiseTool(
         title_est: "Muud finantskulud",
         is_deleted: false,
       }]),
+      getBankAccounts: vi.fn().mockResolvedValue(options.bankAccounts ?? []),
+      getInvoiceInfo: vi.fn().mockResolvedValue(options.invoiceInfo ?? {}),
+    },
+    journals: {
+      listAllWithPostings: vi.fn().mockResolvedValue(options.journals ?? []),
     },
     transactions: {
       listAll: vi.fn().mockResolvedValue(existingTransactions),
       create,
+      update: vi.fn().mockResolvedValue({}),
       confirm: vi.fn().mockResolvedValue({}),
     },
   } as any;
@@ -486,5 +499,182 @@ describe("wise import tool", () => {
       description: "WISE:fx-dup-1 Acme Ltd",
     }));
     expect(payload.skipped_details).toEqual([]);
+  });
+
+  it("leaves transfer unconfirmed when already journalized from other side", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "TRANSFER-xfer-1", "COMPLETED", "IN", "2026-02-01 10:00:00", "2026-02-01 10:00:00",
+      "0", "EUR", "0", "EUR",
+      "LHV Bank", "500", "EUR",
+      "Seppo AI OÜ", "500", "EUR",
+      "1", "", "", "", "General", "",
+    ]));
+
+    // accounts_dimensions_id=5 (Wise), inter_account_dimension_id=20 (LHV)
+    // Existing journal has postings from LHV(dim=20) to Wise(dim=5) for 500 EUR on 2026-02-01
+    const existingJournal = {
+      id: 111,
+      is_deleted: false,
+      registered: true,
+      effective_date: "2026-02-01",
+      postings: [
+        { is_deleted: false, accounts_dimensions_id: 5,  type: "D", amount: 500, base_amount: 500 },
+        { is_deleted: false, accounts_dimensions_id: 20, type: "C", amount: 500, base_amount: 500 },
+      ],
+    };
+
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9100 });
+    const { api, handler } = setupWiseTool([], create, {
+      accountDimensions: [
+        { id: 5,  accounts_id: 1010, title_est: "Wise", is_deleted: false },
+        { id: 20, accounts_id: 1020, title_est: "LHV",  is_deleted: false },
+      ],
+      journals: [existingJournal],
+      bankAccounts: [
+        { accounts_dimensions_id: 5 },
+        { accounts_dimensions_id: 20 },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      inter_account_dimension_id: 20,
+      execute: true,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.inter_account_reconciliation).toBeDefined();
+    expect(payload.inter_account_reconciliation.already_journalized).toBe(1);
+    expect(payload.inter_account_reconciliation.confirmed).toBe(0);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("auto-confirms transfer against other bank account when not journalized", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "TRANSFER-xfer-2", "COMPLETED", "IN", "2026-02-05 10:00:00", "2026-02-05 10:00:00",
+      "0", "EUR", "0", "EUR",
+      "LHV Bank", "750", "EUR",
+      "Seppo AI OÜ", "750", "EUR",
+      "1", "", "", "", "General", "",
+    ]));
+
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9200 });
+    const { api, handler } = setupWiseTool([], create, {
+      accountDimensions: [
+        { id: 5,  accounts_id: 1010, title_est: "Wise", is_deleted: false },
+        { id: 20, accounts_id: 1020, title_est: "LHV",  is_deleted: false },
+      ],
+      journals: [],
+      bankAccounts: [
+        { accounts_dimensions_id: 5 },
+        { accounts_dimensions_id: 20 },
+      ],
+      invoiceInfo: { invoice_company_name: "Seppo AI OÜ" },
+      findByNameResult: [{ id: 55, name: "Seppo AI OÜ" }],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      inter_account_dimension_id: 20,
+      execute: true,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.inter_account_reconciliation).toBeDefined();
+    expect(payload.inter_account_reconciliation.confirmed).toBe(1);
+    expect(payload.inter_account_reconciliation.already_journalized).toBe(0);
+    expect(api.transactions.confirm).toHaveBeenCalledWith(9200, [{
+      related_table: "accounts",
+      related_id: 1020,
+      related_sub_id: 20,
+      amount: 750,
+    }]);
+  });
+
+  it("dry run reports would_create for transfer rows and does not call confirm", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "TRANSFER-xfer-3", "COMPLETED", "IN", "2026-02-10 10:00:00", "2026-02-10 10:00:00",
+      "0", "EUR", "0", "EUR",
+      "LHV Bank", "200", "EUR",
+      "Seppo AI OÜ", "200", "EUR",
+      "1", "", "", "", "General", "",
+    ]));
+
+    const { api, handler } = setupWiseTool([], undefined, {
+      accountDimensions: [
+        { id: 5,  accounts_id: 1010, title_est: "Wise", is_deleted: false },
+        { id: 20, accounts_id: 1020, title_est: "LHV",  is_deleted: false },
+      ],
+      bankAccounts: [
+        { accounts_dimensions_id: 5 },
+        { accounts_dimensions_id: 20 },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      inter_account_dimension_id: 20,
+      // execute not set → dry run
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.mode).toBe("DRY_RUN");
+    // In dry run, transfer rows are staged as would_create; no reconciliation is attempted
+    expect(payload.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        wise_id: "TRANSFER-xfer-3",
+        status: "would_create",
+      }),
+    ]));
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    expect(api.journals.listAllWithPostings).not.toHaveBeenCalled();
+  });
+
+  it("auto-detects target bank account when only one other exists", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "TRANSFER-xfer-4", "COMPLETED", "IN", "2026-02-15 10:00:00", "2026-02-15 10:00:00",
+      "0", "EUR", "0", "EUR",
+      "LHV Bank", "300", "EUR",
+      "Seppo AI OÜ", "300", "EUR",
+      "1", "", "", "", "General", "",
+    ]));
+
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9300 });
+    const { api, handler } = setupWiseTool([], create, {
+      accountDimensions: [
+        { id: 5,  accounts_id: 1010, title_est: "Wise", is_deleted: false },
+        { id: 30, accounts_id: 1030, title_est: "LHV",  is_deleted: false },
+      ],
+      journals: [],
+      // Only one other bank account (dim=30), so auto-detection should pick it
+      bankAccounts: [
+        { accounts_dimensions_id: 5 },
+        { accounts_dimensions_id: 30 },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      // inter_account_dimension_id intentionally omitted
+      execute: true,
+    });
+
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.inter_account_reconciliation).toBeDefined();
+    expect(payload.inter_account_reconciliation.confirmed).toBe(1);
+    expect(api.transactions.confirm).toHaveBeenCalledWith(9300, [{
+      related_table: "accounts",
+      related_id: 1030,
+      related_sub_id: 30,
+      amount: 300,
+    }]);
   });
 });

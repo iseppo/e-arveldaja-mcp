@@ -5,6 +5,7 @@ import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice, BankAccount } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
+import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
 
 /** Normalize text for fuzzy company name matching: lowercase, strip diacritics, collapse whitespace */
 function normalizeCompanyName(name: string): string {
@@ -442,26 +443,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
       // Build index of existing confirmed inter-account journals for duplicate detection.
       // Key: "sourceDim|targetDim|amount|date" → journal_id
-      const existingInterAccountKeys = new Map<string, number>();
       const allJournals = await api.journals.listAllWithPostings();
-      for (const j of allJournals) {
-        if (j.is_deleted || !j.registered || !j.postings) continue;
-        const bankPostings = j.postings.filter(p =>
-          !p.is_deleted && p.accounts_dimensions_id && ownDimensionIds.has(p.accounts_dimensions_id)
-        );
-        if (bankPostings.length !== 2) continue;
-        const [a, b] = bankPostings;
-        if (!a || !b) continue;
-        if (a.type === b.type) continue; // must be one D and one C
-        const debit = a.type === "D" ? a : b;
-        const credit = a.type === "C" ? a : b;
-        const amount = Math.round(((debit.base_amount ?? debit.amount) as number) * 100) / 100;
-        // Key in both directions so we catch it regardless of which side we're checking from
-        const key1 = `${credit.accounts_dimensions_id}|${debit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
-        const key2 = `${debit.accounts_dimensions_id}|${credit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
-        existingInterAccountKeys.set(key1, j.id!);
-        existingInterAccountKeys.set(key2, j.id!);
-      }
+      const existingInterAccountKeys = buildInterAccountJournalIndex(allJournals, ownDimensionIds);
 
       /** Check if an inter-account transfer is already journalized */
       function findExistingJournal(sourceDim: number, targetDim: number, amount: number, date: string, maxGapDays: number): number | undefined {
