@@ -77,6 +77,7 @@ export function getConfigSearchDirs(
 
 export function loadDotenvFiles(): void {
   const loaded = new Set<string>();
+  const scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true";
 
   const loadFromDirs = (dirs: string[]): void => {
     for (const dir of dirs) {
@@ -97,7 +98,7 @@ export function loadDotenvFiles(): void {
 
   loadFromDirs(getConfigSearchDirs(false));
 
-  if (process.env.EARVELDAJA_SCAN_PARENT === "true") {
+  if (scanParent) {
     loadFromDirs(getConfigSearchDirs(true));
   }
 }
