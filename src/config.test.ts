@@ -34,27 +34,27 @@ async function importFreshConfig(packageRoot?: string) {
   return import("./config.js");
 }
 
-  afterEach(() => {
-    process.chdir(ORIGINAL_CWD);
-    restoreConfigEnv();
-    vi.doUnmock("./paths.js");
-    vi.resetModules();
-  });
+afterEach(() => {
+  process.chdir(ORIGINAL_CWD);
+  restoreConfigEnv();
+  vi.doUnmock("./paths.js");
+  vi.resetModules();
+});
 
 describe("getConfigSearchDirs", () => {
-  it("prioritizes the current working directory before the package root", async () => {
+  it("only includes the package root by default", async () => {
     const { getConfigSearchDirs } = await importFreshConfig();
 
-    expect(getConfigSearchDirs(false, "/tmp/runtime-cwd", "/opt/e-arveldaja-mcp")).toEqual([
-      "/tmp/runtime-cwd",
+    expect(getConfigSearchDirs(false, "/opt/e-arveldaja-mcp")).toEqual([
       "/opt/e-arveldaja-mcp",
     ]);
   });
 });
 
 describe("loadAllConfigs", () => {
-  it("finds apikey files from the current working directory", async () => {
+  it("does not load apikey files from the current working directory", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-config-"));
+    const packageDir = mkdtempSync(join(tmpdir(), "earveldaja-package-"));
     const apiKeyFile = join(tempDir, "apikey.txt");
 
     process.env.EARVELDAJA_SERVER = "live";
@@ -74,23 +74,13 @@ describe("loadAllConfigs", () => {
     process.chdir(tempDir);
 
     try {
-      const { loadAllConfigs } = await importFreshConfig(tempDir);
-      const configs = loadAllConfigs();
+      const { loadAllConfigs } = await importFreshConfig(packageDir);
 
-      expect(configs).toHaveLength(1);
-      expect(configs[0]).toMatchObject({
-        name: "apikey",
-        filePath: apiKeyFile,
-        config: {
-          apiKeyId: "key-id",
-          apiPublicValue: "public-value",
-          apiPassword: "secret-password",
-          baseUrl: "https://rmp-api.rik.ee/v1",
-        },
-      });
+      expect(() => loadAllConfigs()).toThrow(/No API credentials found/);
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });
+      rmSync(packageDir, { recursive: true, force: true });
     }
   });
 
@@ -187,7 +177,6 @@ describe("loadAllConfigs", () => {
       "",
     ].join("\n"));
     chmodSync(apiKeyFile, 0o640);
-    process.chdir(tempDir);
 
     try {
       const { loadAllConfigs } = await importFreshConfig(tempDir);
@@ -221,7 +210,6 @@ describe("loadAllConfigs", () => {
       "",
     ].join("\n"));
     chmodSync(apiKeyFile, 0o600);
-    process.chdir(tempDir);
 
     try {
       const { loadAllConfigs } = await importFreshConfig(tempDir);

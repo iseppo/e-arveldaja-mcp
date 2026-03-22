@@ -65,12 +65,11 @@ function toUniqueDirs(dirs: string[]): string[] {
 
 export function getConfigSearchDirs(
   scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true",
-  cwd = process.cwd(),
   packageRoot = PACKAGE_ROOT,
 ): string[] {
-  const dirs = [cwd, packageRoot];
+  const dirs = [packageRoot];
   if (scanParent) {
-    dirs.push(resolve(cwd, ".."), resolve(packageRoot, ".."));
+    dirs.push(resolve(packageRoot, ".."));
   }
   return toUniqueDirs(dirs);
 }
@@ -125,7 +124,7 @@ function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string
 
 /**
  * Load all available API configurations from env vars and apikey*.txt files.
- * Scans the runtime working directory first, then the package root.
+ * Scans the package root by default.
  * Set EARVELDAJA_SCAN_PARENT=true to also scan parent directories.
  */
 export function loadAllConfigs(): NamedConfig[] {
@@ -157,8 +156,7 @@ export function loadAllConfigs(): NamedConfig[] {
     }
   }
 
-  // 3. Scan the runtime working directory first, then the package dir.
-  // Parent scan remains opt-in.
+  // 3. Scan the package dir by default. Parent scan remains opt-in.
   const searchDirs = getConfigSearchDirs();
 
   for (const dir of searchDirs) {
@@ -190,7 +188,7 @@ export function loadAllConfigs(): NamedConfig[] {
   if (configs.length === 0) {
     throw new Error(
       "No API credentials found. Set EARVELDAJA_API_KEY_ID/EARVELDAJA_API_PUBLIC_VALUE/EARVELDAJA_API_PASSWORD " +
-      "environment variables, or place apikey*.txt files in the working directory."
+      "environment variables, or place apikey*.txt files in the package directory."
     );
   }
 
