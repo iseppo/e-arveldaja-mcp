@@ -411,6 +411,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
 
       // Auto-upload source document if file_path provided
       let uploaded = false;
+      let uploadError: string | undefined;
       if (params.file_path && result.id) {
         try {
           const resolved = await validateInvoiceDocumentPath(params.file_path);
@@ -419,7 +420,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           const fileName = resolved.split("/").pop() ?? "document";
           await api.purchaseInvoices.uploadDocument(result.id, fileName, base64);
           uploaded = true;
-        } catch { /* upload failure is non-fatal */ }
+        } catch (err: unknown) {
+          uploadError = err instanceof Error ? err.message : String(err);
+        }
       }
 
       return {
@@ -428,6 +431,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           text: JSON.stringify({
             result,
             ...(uploaded ? { document_uploaded: true } : {}),
+            ...(uploadError ? { document_upload_error: uploadError } : {}),
             note: "Purchase invoice created as DRAFT. Review and use confirm_purchase_invoice to confirm.",
           }, null, 2),
         }],

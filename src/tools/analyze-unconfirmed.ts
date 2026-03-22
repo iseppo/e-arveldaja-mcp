@@ -62,7 +62,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       ]);
 
       // Filter unconfirmed transactions
-      let unconfirmed = allTx.filter(tx => tx.status !== "CONFIRMED" && !tx.is_deleted);
+      let unconfirmed = allTx.filter(tx => tx.status === "PROJECT" && !tx.is_deleted);
       if (accounts_dimensions_id !== undefined) {
         unconfirmed = unconfirmed.filter(tx => tx.accounts_dimensions_id === accounts_dimensions_id);
       }
