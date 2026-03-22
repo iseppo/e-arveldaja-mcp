@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import dotenv from "dotenv";
 import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -95,7 +94,7 @@ describe("loadAllConfigs", () => {
     }
   });
 
-  it("loads parent .env values when parent scanning is enabled from the runtime .env", async () => {
+  it("does not let the runtime .env enable parent scanning", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-parent-env-"));
     const parentDir = join(tempDir, "parent");
     const childDir = join(parentDir, "child");
@@ -116,9 +115,42 @@ describe("loadAllConfigs", () => {
     process.chdir(childDir);
 
     try {
-      const { loadAllConfigs } = await importFreshConfig(childDir);
-      dotenv.config({ path: join(childDir, ".env"), override: true });
-      dotenv.config({ path: join(parentDir, ".env"), override: true });
+      const { loadDotenvFiles } = await importFreshConfig(childDir);
+      loadDotenvFiles();
+
+      expect(process.env.EARVELDAJA_SCAN_PARENT).toBe("true");
+      expect(process.env.EARVELDAJA_API_KEY_ID).toBeUndefined();
+      expect(process.env.EARVELDAJA_API_PUBLIC_VALUE).toBeUndefined();
+      expect(process.env.EARVELDAJA_API_PASSWORD).toBeUndefined();
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads parent .env values when parent scanning is enabled in the process environment", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-parent-env-opt-in-"));
+    const parentDir = join(tempDir, "parent");
+    const childDir = join(parentDir, "child");
+
+    mkdirSync(childDir, { recursive: true });
+    writeFileSync(join(parentDir, ".env"), [
+      "EARVELDAJA_API_KEY_ID=parent-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=parent-public",
+      "EARVELDAJA_API_PASSWORD=parent-secret",
+      "",
+    ].join("\n"));
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_SCAN_PARENT = "true";
+
+    process.chdir(childDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(childDir);
+      loadDotenvFiles();
       const configs = loadAllConfigs();
 
       expect(configs).toEqual(expect.arrayContaining([expect.objectContaining({
