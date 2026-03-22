@@ -5,7 +5,6 @@ import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
 import { reportProgress } from "../progress.js";
-import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
 import { matchScore, normalizeCompanyName } from "./bank-reconciliation.js";
 
 /** Known fee/charge patterns for expense detection */
@@ -17,6 +16,8 @@ const EXPENSE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\b(valuuta.*vahetuse?|currency.*exchange|fx fee)\b/i, label: "fx_fee" },
 ];
 
+// Small-expense threshold in EUR. EUR-centric: foreign-currency transactions are compared
+// by their nominal amount, which may differ from the EUR equivalent.
 const MAX_EXPENSE_AMOUNT = 50;
 
 interface Suggestion {
@@ -26,8 +27,9 @@ interface Suggestion {
   currency: string;
   description: string | null | undefined;
   bank_account_name: string | null | undefined;
-  suggested_action: "delete_duplicate" | "confirm_invoice" | "confirm_inter_account" | "confirm_expense" | "manual_review";
+  suggested_action: "likely_duplicate" | "confirm_invoice" | "confirm_inter_account" | "confirm_expense" | "manual_review";
   reason: string;
+  confidence?: number;
   distribution?: { related_table: string; related_id?: number; related_sub_id?: number; amount: number };
   duplicate_journal_id?: number;
   match_confidence?: number;
@@ -95,13 +97,10 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       const ownDimensionIds = new Set(dimensionToIban.keys());
       const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
 
-      // Build journal index for duplicate detection
-      // This finds journals that touch a bank account dimension with matching amount+date
-      const interAccountIndex = buildInterAccountJournalIndex(allJournals, ownDimensionIds);
-
       // Build a broader index: journals with any posting touching a bank account dimension
-      // Key: "dimensionId|amount|date" -> journal_id
-      const bankJournalIndex = new Map<string, number>();
+      // Key: "dimensionId|amount|date" -> journal_ids[]
+      // Storing all matching journal IDs to detect ambiguous duplicates.
+      const bankJournalIndex = new Map<string, number[]>();
       for (const j of allJournals) {
         if (j.is_deleted || !j.registered || !j.postings) continue;
         for (const p of j.postings) {
@@ -109,7 +108,12 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           if (!ownDimensionIds.has(p.accounts_dimensions_id)) continue;
           const amount = Math.round(((p.base_amount ?? p.amount) as number) * 100) / 100;
           const key = `${p.accounts_dimensions_id}|${amount}|${j.effective_date}`;
-          bankJournalIndex.set(key, j.id!);
+          const existing = bankJournalIndex.get(key);
+          if (existing) {
+            existing.push(j.id!);
+          } else {
+            bankJournalIndex.set(key, [j.id!]);
+          }
         }
       }
 
@@ -126,8 +130,14 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
 
         // --- 1. Duplicate detection: journal already exists for this amount/date/bank account ---
         const dupKey = `${txDim}|${txAmount}|${tx.date}`;
-        const dupJournalId = bankJournalIndex.get(dupKey);
-        if (dupJournalId) {
+        const dupJournalIds = bankJournalIndex.get(dupKey);
+        if (dupJournalIds) {
+          const isAmbiguous = dupJournalIds.length > 1;
+          const confidence = isAmbiguous ? 60 : 80;
+          const dupJournalId = dupJournalIds[0]!;
+          const reasonSuffix = isAmbiguous
+            ? ` (${dupJournalIds.length} matching journals — ambiguous, verify manually)`
+            : "";
           suggestions.push({
             transaction_id: tx.id!,
             date: tx.date,
@@ -135,8 +145,9 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             currency: tx.cl_currencies_id,
             description: tx.description,
             bank_account_name: tx.bank_account_name,
-            suggested_action: "delete_duplicate",
-            reason: `Journal #${dupJournalId} already exists with amount ${txAmount} on ${tx.date} in ${bankTitle}`,
+            suggested_action: "likely_duplicate",
+            confidence,
+            reason: `Journal #${dupJournalId} already exists with amount ${txAmount} on ${tx.date} in ${bankTitle}${reasonSuffix}`,
             duplicate_journal_id: dupJournalId,
           });
           continue;
@@ -287,7 +298,8 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         // --- 4. Expense detection ---
         const desc = (tx.description ?? "").toLowerCase();
         const absAmount = Math.abs(tx.amount);
-        if (absAmount <= MAX_EXPENSE_AMOUNT && tx.type === "C") {
+        // All transactions from the API are type C (see CLAUDE.md); no need to filter by type.
+        if (absAmount <= MAX_EXPENSE_AMOUNT) {
           const matchedPattern = EXPENSE_PATTERNS.find(ep => ep.pattern.test(desc));
           if (matchedPattern) {
             suggestions.push({
@@ -298,7 +310,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               description: tx.description,
               bank_account_name: tx.bank_account_name,
               suggested_action: "confirm_expense",
-              reason: `Small ${matchedPattern.label} (${absAmount} EUR): "${tx.description}"`,
+              reason: `Small ${matchedPattern.label} (${absAmount} ${tx.cl_currencies_id || "EUR"}): "${tx.description}"`,
               match_confidence: 70,
             });
             continue;

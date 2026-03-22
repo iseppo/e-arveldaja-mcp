@@ -96,6 +96,9 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - The Wise import tool (`import_wise_transactions`) has built-in duplicate detection for inter-account transfers
 - When manually confirming transactions against another bank account, first check for existing journals at that date/amount
 
+### Known issues — Wise account
+- **Wise balance has ~0.03 EUR discrepancy** with the real account balance (8.71 vs 8.68 EUR as of 2026-03-22). Root cause not yet identified — likely a pre-existing duplicate or rounding issue from earlier imports. Does not affect LHV balance.
+
 ## Architecture
 
 ```
