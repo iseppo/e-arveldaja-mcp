@@ -161,6 +161,135 @@ describe("reconcile_transactions", () => {
   });
 });
 
+function setupAutoConfirmTool(options: {
+  transactions?: unknown[];
+  sales?: unknown[];
+  purchases?: unknown[];
+} = {}) {
+  const server = { registerTool: vi.fn() } as any;
+  const api = {
+    transactions: {
+      listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
+      confirm: vi.fn().mockResolvedValue({}),
+    },
+    saleInvoices: {
+      listAll: vi.fn().mockResolvedValue(options.sales ?? []),
+    },
+    purchaseInvoices: {
+      listAll: vi.fn().mockResolvedValue(options.purchases ?? []),
+    },
+    readonly: {
+      getBankAccounts: vi.fn().mockResolvedValue([]),
+      getAccountDimensions: vi.fn().mockResolvedValue([]),
+      getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
+    },
+    journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    clients: { findByName: vi.fn().mockResolvedValue([]) },
+  } as any;
+
+  registerBankReconciliationTools(server, api);
+
+  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "auto_confirm_exact_matches");
+  if (!registration) throw new Error("Tool was not registered");
+
+  return {
+    handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+    api,
+  };
+}
+
+describe("auto_confirm_exact_matches", () => {
+  it("dry run produces would_confirm without calling API", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [
+        { id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", bank_account_name: "Acme OU", ref_number: "RF123" },
+      ],
+      sales: [
+        { id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF123" },
+      ],
+    });
+
+    const result = await handler({});
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.mode).toBe("DRY_RUN");
+    expect(payload.auto_confirmed).toBe(1);
+    expect(payload.results[0]!.status).toBe("would_confirm");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("execute mode calls confirm with correct distribution", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [
+        { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", bank_account_name: "Beta OU", ref_number: "RF456" },
+      ],
+      sales: [
+        { id: 11, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-11", clients_id: 21, client_name: "Beta OU", gross_price: 200, bank_ref_number: "RF456" },
+      ],
+    });
+
+    const result = await handler({ execute: true });
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.mode).toBe("EXECUTED");
+    expect(payload.results[0]!.status).toBe("confirmed");
+    expect(api.transactions.confirm).toHaveBeenCalledWith(2, [
+      { related_table: "sale_invoices", related_id: 11, amount: 200 },
+    ]);
+  });
+
+  it("skips partially paid invoices", async () => {
+    const { handler } = setupAutoConfirmTool({
+      transactions: [
+        { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", bank_account_name: "Gamma OU" },
+      ],
+      sales: [
+        { id: 12, status: "CONFIRMED", payment_status: "PARTIALLY_PAID", number: "ARV-12", clients_id: 22, client_name: "Gamma OU", gross_price: 100 },
+      ],
+    });
+
+    const result = await handler({});
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.auto_confirmed).toBe(0);
+  });
+
+  it("does not auto-confirm when multiple candidates match", async () => {
+    const { handler } = setupAutoConfirmTool({
+      transactions: [
+        { id: 4, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", ref_number: "RF789" },
+      ],
+      sales: [
+        { id: 13, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-13", clients_id: 23, gross_price: 100, bank_ref_number: "RF789" },
+        { id: 14, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-14", clients_id: 24, gross_price: 100, bank_ref_number: "RF789" },
+      ],
+    });
+
+    const result = await handler({});
+    const payload = JSON.parse(result.content[0]!.text);
+
+    expect(payload.auto_confirmed).toBe(0);
+  });
+
+  it("does not double-match the same invoice to two transactions", async () => {
+    const { handler } = setupAutoConfirmTool({
+      transactions: [
+        { id: 5, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", ref_number: "RF111", clients_id: 25 },
+        { id: 6, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-21", ref_number: "RF111", clients_id: 25 },
+      ],
+      sales: [
+        { id: 15, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-15", clients_id: 25, gross_price: 100, bank_ref_number: "RF111" },
+      ],
+    });
+
+    const result = await handler({});
+    const payload = JSON.parse(result.content[0]!.text);
+
+    // Only the first transaction should match; the second should find the invoice consumed
+    expect(payload.auto_confirmed).toBe(1);
+  });
+});
+
 describe("reconcile_inter_account_transfers", () => {
   const bankAccounts = [
     { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },

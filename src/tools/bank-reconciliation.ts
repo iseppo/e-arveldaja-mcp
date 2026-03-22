@@ -76,8 +76,8 @@ function matchScore(
     confidence += 15;
     reasons.push("client_id");
   } else if (tx.bank_account_name && invoice.client_name) {
-    const nameLower = tx.bank_account_name.toLowerCase();
-    const clientLower = invoice.client_name.toLowerCase();
+    const nameLower = normalizeCompanyName(tx.bank_account_name);
+    const clientLower = normalizeCompanyName(invoice.client_name);
     if (nameLower.includes(clientLower) || clientLower.includes(nameLower)) {
       confidence += 10;
       reasons.push("client_name_partial");
@@ -133,7 +133,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               candidates.push({
                 type: "sale_invoice",
                 id: inv.id!,
-                number: inv.number ?? `${inv.number_prefix}${inv.number_suffix}`,
+                number: inv.number ?? `${inv.number_prefix ?? ""}${inv.number_suffix}`,
                 client_name: inv.client_name ?? "",
                 clients_id: inv.clients_id,
                 gross_price: inv.gross_price ?? 0,
