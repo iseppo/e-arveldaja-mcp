@@ -278,7 +278,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       const csv = await readFile(resolved, "utf-8");
       const rows = parseWiseCSV(csv);
       const dryRun = execute !== true;
-      const hasFeeRows = rows.some(row => row.sourceFeeAmount > 0);
+      const hasFeeRows = rows.some(row => bookedFeeAmountForWiseRow(row) > 0);
       const feeAccountDimensionsId = hasFeeRows
         ? resolveWiseFeeAccountDimensionId(fee_account_dimensions_id, fee_account_relation_id)
         : undefined;

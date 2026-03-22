@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import dotenv from "dotenv";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -131,6 +131,73 @@ describe("loadAllConfigs", () => {
         },
       })]));
     } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("warns when the API key file is group-readable", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-config-perms-"));
+    const apiKeyFile = join(tempDir, "apikey.txt");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    process.env.EARVELDAJA_SERVER = "live";
+    process.env.EARVELDAJA_API_KEY_ID = "";
+    process.env.EARVELDAJA_API_PUBLIC_VALUE = "";
+    process.env.EARVELDAJA_API_PASSWORD = "";
+    process.env.EARVELDAJA_API_KEY_FILE = "";
+    process.env.EARVELDAJA_SCAN_PARENT = "";
+
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: key-id",
+      "ApiKey public value: public-value",
+      "Password: secret-password",
+      "",
+    ].join("\n"));
+    chmodSync(apiKeyFile, 0o640);
+    process.chdir(tempDir);
+
+    try {
+      const { loadAllConfigs } = await importFreshConfig(tempDir);
+      loadAllConfigs();
+
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("group/world-readable"));
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("chmod 600"));
+    } finally {
+      stderrSpy.mockRestore();
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not warn when the API key file is owner-only", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-config-private-"));
+    const apiKeyFile = join(tempDir, "apikey.txt");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    process.env.EARVELDAJA_SERVER = "live";
+    process.env.EARVELDAJA_API_KEY_ID = "";
+    process.env.EARVELDAJA_API_PUBLIC_VALUE = "";
+    process.env.EARVELDAJA_API_PASSWORD = "";
+    process.env.EARVELDAJA_API_KEY_FILE = "";
+    process.env.EARVELDAJA_SCAN_PARENT = "";
+
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: key-id",
+      "ApiKey public value: public-value",
+      "Password: secret-password",
+      "",
+    ].join("\n"));
+    chmodSync(apiKeyFile, 0o600);
+    process.chdir(tempDir);
+
+    try {
+      const { loadAllConfigs } = await importFreshConfig(tempDir);
+      loadAllConfigs();
+
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });
     }

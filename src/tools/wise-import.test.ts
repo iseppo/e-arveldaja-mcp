@@ -399,6 +399,23 @@ describe("wise import tool", () => {
     }));
   });
 
+  it("requires fee_account_dimensions_id when an incoming row has only a target-side fee", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "fx-in-fee-1", "COMPLETED", "IN", "2026-01-18 09:00:00", "2026-01-18 09:00:00",
+      "0", "USD", "2", "EUR",
+      "Customer Inc", "100", "USD",
+      "Seppo AI OÜ", "92", "EUR",
+      "0.92", "PAY-FX-FEE", "", "", "General", "",
+    ]));
+
+    const { handler } = setupWiseTool([]);
+
+    await expect(handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+    })).rejects.toThrow("Wise fee rows require fee_account_dimensions_id");
+  });
+
   it("does not treat same-amount rows in different currencies as duplicates", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "fx-dup-1", "COMPLETED", "OUT", "2026-01-17 09:00:00", "2026-01-17 09:00:00",

@@ -71,4 +71,24 @@ describe("document parser", () => {
       maxPages: 50,
     }));
   });
+
+  it("rejects non-loopback http OCR endpoints", async () => {
+    process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL = "http://ocr.example.com/parse";
+
+    const { buildDocumentParserConfig } = await import("./document-parser.js");
+
+    expect(() => buildDocumentParserConfig()).toThrow(
+      "EARVELDAJA_LITEPARSE_OCR_SERVER_URL must use https for remote OCR servers."
+    );
+  });
+
+  it("accepts https OCR endpoints", async () => {
+    process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL = "https://ocr.example.com/parse";
+
+    const { buildDocumentParserConfig } = await import("./document-parser.js");
+
+    expect(buildDocumentParserConfig()).toEqual(expect.objectContaining({
+      ocrServerUrl: "https://ocr.example.com/parse",
+    }));
+  });
 });

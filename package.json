@@ -37,7 +37,7 @@
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "npm run build && vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@llamaindex/liteparse": "^1.0.0",

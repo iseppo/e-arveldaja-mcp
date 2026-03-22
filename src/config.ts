@@ -34,9 +34,9 @@ function getBaseUrl(): string {
 function warnIfWorldReadable(filePath: string): void {
   try {
     const mode = statSync(filePath).mode;
-    if (mode & 0o004) {
+    if (mode & 0o044) {
       process.stderr.write(
-        `WARNING: ${filePath} is world-readable (mode ${(mode & 0o777).toString(8)}). ` +
+        `WARNING: ${filePath} is group/world-readable (mode ${(mode & 0o777).toString(8)}). ` +
         `Run: chmod 600 ${filePath}\n`
       );
     }

@@ -1,11 +1,27 @@
 import { LiteParse, type LiteParseConfig, type ParseResult } from "@llamaindex/liteparse";
 
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  return normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized === "::1" ||
+    /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
+
 function validateOcrUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
   try {
     const parsed = new URL(url);
     if (!["http:", "https:"].includes(parsed.protocol)) {
-      throw new Error(`EARVELDAJA_LITEPARSE_OCR_SERVER_URL must use http or https protocol, got: ${parsed.protocol}`);
+      throw new Error(
+        `EARVELDAJA_LITEPARSE_OCR_SERVER_URL must use https, or http only for a local loopback OCR server, got: ${parsed.protocol}`
+      );
+    }
+    if (parsed.protocol === "http:" && !isLoopbackHost(parsed.hostname)) {
+      throw new Error(
+        "EARVELDAJA_LITEPARSE_OCR_SERVER_URL must use https for remote OCR servers. " +
+        "Plain http is only allowed for localhost / loopback OCR services."
+      );
     }
     return url;
   } catch (err) {

@@ -212,6 +212,20 @@ npm run build
 
 If your MCP config points to `dist/index.js`, the rebuild step is required after updating the source.
 
+## Development
+
+Run the integration suite with:
+
+```bash
+npm run test:integration
+```
+
+This now runs self-contained MCP surface checks by default against a locally spawned server process with fake test credentials. The live API integration checks remain opt-in and require real credentials plus:
+
+```bash
+EARVELDAJA_INTEGRATION_TEST=true npm run test:integration
+```
+
 
 ## Good to know
 
@@ -224,7 +238,7 @@ If your MCP config points to `dist/index.js`, the rebuild step is required after
 
 ## Privacy
 
-Document parsing (PDF, JPG, PNG) uses LiteParse OCR locally by default. If you set `EARVELDAJA_LITEPARSE_OCR_SERVER_URL`, the server will send documents to that configured OCR endpoint instead of staying fully local for OCR. By default, the server may also read supported document files anywhere under your home directory and `/tmp`; set `EARVELDAJA_ALLOWED_PATHS` if you want a narrower local file boundary. In all cases, the extracted text is returned to your AI assistant via the MCP protocol, so it will be processed by whichever LLM you are using (Claude, Codex, Gemini, etc.). The server's own outbound connections are therefore limited to the e-arveldaja API (`rmp-api.rik.ee`), optionally the Estonian Business Registry (`ariregister.rik.ee`) for supplier lookups, and optionally your configured OCR server.
+Document parsing (PDF, JPG, PNG) uses LiteParse OCR locally by default. If you set `EARVELDAJA_LITEPARSE_OCR_SERVER_URL`, the server will send documents to that configured OCR endpoint instead of staying fully local for OCR. Remote OCR endpoints must use `https`; plain `http` is only accepted for localhost / loopback OCR services. By default, the server may also read supported document files anywhere under your home directory and `/tmp`; set `EARVELDAJA_ALLOWED_PATHS` if you want a narrower local file boundary. In all cases, the extracted text is returned to your AI assistant via the MCP protocol, so it will be processed by whichever LLM you are using (Claude, Codex, Gemini, etc.). The server's own outbound connections are therefore limited to the e-arveldaja API (`rmp-api.rik.ee`), optionally the Estonian Business Registry (`ariregister.rik.ee`) for supplier lookups, and optionally your configured OCR server.
 
 ## Feedback and Bug Reports
 
