@@ -157,7 +157,11 @@ function oppositeSideForWiseRow(row: WiseRow): { amount: number; currency: strin
     : { amount: row.targetAmount, currency: normalizeWiseCurrency(row.targetCurrency) };
 }
 
-/** Detect Wise Jar (savings pot) transfers — internal movements, not real payments */
+/** Detect Wise Jar (savings pot) transfers — internal movements, not real payments.
+ * Checks explicit Jar indicators and self-transfer heuristic (same name, currency, zero fee).
+ * The self-transfer heuristic works because real inter-account transfers (e.g. LHV→Wise)
+ * typically have slightly different names (e.g. "OÜ" vs "OU" from bank registration).
+ * If this incorrectly filters legitimate transfers, set skip_jar_transfers=false. */
 function isJarTransfer(row: WiseRow): boolean {
   const catLower = row.category.toLowerCase();
   const noteLower = row.note.toLowerCase();
@@ -251,12 +255,19 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
     "Skips REFUNDED, NEUTRAL, and zero-amount entries. " +
     "Uses type D for incoming rows and type C for outgoing rows. " +
     "Wise fees are created as separate transactions (for correct VAT/expense treatment). " +
+    "Inter-account transfers (TRANSFER-*, BANK_DETAILS_PAYMENT_RETURN-*) are auto-reconciled: " +
+    "if the other bank account already has a confirmed journal entry, the Wise transaction is left " +
+    "unconfirmed to avoid double-counting. Otherwise it is confirmed against the other bank account. " +
     "DRY RUN by default — set execute=true to actually create transactions.",
     {
       file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions"),
       accounts_dimensions_id: z.number().describe("Bank account dimension ID for the Wise account in e-arveldaja"),
       fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account. Use list_account_dimensions to find it."),
       fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),
+      inter_account_dimension_id: z.number().optional().describe(
+        "Bank account dimension ID for the other bank account (e.g. LHV) used for inter-account transfers. " +
+        "Auto-detected if only one other bank account exists. Required when there are 3+ bank accounts."
+      ),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: z.string().optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
@@ -268,6 +279,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       accounts_dimensions_id,
       fee_account_dimensions_id,
       fee_account_relation_id,
+      inter_account_dimension_id,
       execute,
       date_from,
       date_to,
@@ -533,6 +545,137 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         }
       }
 
+      // --- Post-import: auto-reconcile inter-account transfers ---
+      const interAccountResults: Array<{
+        api_id: number;
+        wise_id: string;
+        amount: number;
+        status: string;
+        journal_id?: number;
+      }> = [];
+
+      // Identify created transfer transactions (not fees, not card payments)
+      const transferEntries = created.filter(c =>
+        c.api_id &&
+        c.status === "created" &&
+        /^WISE:(TRANSFER|BANK_DETAILS_PAYMENT_RETURN)-/.test(c.description)
+      );
+
+      if (transferEntries.length > 0 && !dryRun) {
+        // Resolve the target bank account dimension for inter-account transfers
+        const allAccountDimensions = accountDimensions.length > 0
+          ? accountDimensions
+          : await api.readonly.getAccountDimensions();
+
+        const bankAccounts = await api.readonly.getBankAccounts();
+        const bankDimensionIds = new Set(
+          bankAccounts
+            .filter(ba => ba.accounts_dimensions_id)
+            .map(ba => ba.accounts_dimensions_id!)
+        );
+
+        let targetDimensionId = inter_account_dimension_id;
+        if (!targetDimensionId) {
+          // Auto-detect: find other bank account dimensions (not the Wise account)
+          const otherBankDims = [...bankDimensionIds].filter(d => d !== accounts_dimensions_id);
+          if (otherBankDims.length === 1) {
+            targetDimensionId = otherBankDims[0]!;
+          }
+          // If 0 or 2+ other bank accounts, skip auto-reconciliation
+        }
+
+        if (targetDimensionId) {
+          const targetDim = allAccountDimensions.find(d => d.id === targetDimensionId && !d.is_deleted);
+
+          if (targetDim) {
+            // Build index of existing inter-account journals to detect duplicates
+            const ownDimensionIds = new Set([accounts_dimensions_id, targetDimensionId]);
+            const existingInterAccountKeys = new Map<string, number>();
+            const allJournals = await api.journals.listAllWithPostings();
+            for (const j of allJournals) {
+              if (j.is_deleted || !j.registered || !j.postings) continue;
+              const bankPostings = j.postings.filter(p =>
+                !p.is_deleted && p.accounts_dimensions_id && ownDimensionIds.has(p.accounts_dimensions_id)
+              );
+              if (bankPostings.length !== 2) continue;
+              const [a, b] = bankPostings;
+              if (!a || !b || a.type === b.type) continue;
+              const debit = a.type === "D" ? a : b;
+              const credit = a.type === "C" ? a : b;
+              const amt = Math.round(((debit.base_amount ?? debit.amount) as number) * 100) / 100;
+              const key1 = `${credit.accounts_dimensions_id}|${debit.accounts_dimensions_id}|${amt}|${j.effective_date}`;
+              const key2 = `${debit.accounts_dimensions_id}|${credit.accounts_dimensions_id}|${amt}|${j.effective_date}`;
+              existingInterAccountKeys.set(key1, j.id!);
+              existingInterAccountKeys.set(key2, j.id!);
+            }
+
+            // Resolve company client for setting clients_id
+            let companyClientId: number | undefined;
+            const invoiceInfo = await api.readonly.getInvoiceInfo();
+            const companyName = invoiceInfo.invoice_company_name;
+            if (companyName) {
+              const clients = await api.clients.findByName(companyName);
+              companyClientId = clients[0]?.id;
+            }
+
+            for (const entry of transferEntries) {
+              const roundedAmount = Math.round(entry.amount * 100) / 100;
+              // Check both directions for existing journal
+              const key1 = `${accounts_dimensions_id}|${targetDimensionId}|${roundedAmount}|${entry.date}`;
+              const key2 = `${targetDimensionId}|${accounts_dimensions_id}|${roundedAmount}|${entry.date}`;
+              const existingJournal = existingInterAccountKeys.get(key1) ?? existingInterAccountKeys.get(key2);
+
+              if (existingJournal) {
+                interAccountResults.push({
+                  api_id: entry.api_id!,
+                  wise_id: entry.wise_id,
+                  amount: entry.amount,
+                  status: "already_journalized",
+                  journal_id: existingJournal,
+                });
+              } else {
+                // Confirm against the target bank account
+                try {
+                  if (companyClientId) {
+                    await api.transactions.update(entry.api_id!, { clients_id: companyClientId });
+                  }
+                  await api.transactions.confirm(entry.api_id!, [{
+                    related_table: "accounts",
+                    related_id: targetDim.accounts_id,
+                    related_sub_id: targetDim.id!,
+                    amount: entry.amount,
+                  }]);
+                  interAccountResults.push({
+                    api_id: entry.api_id!,
+                    wise_id: entry.wise_id,
+                    amount: entry.amount,
+                    status: "confirmed_inter_account",
+                  });
+                  // Update the created entry status
+                  entry.status = "created_and_confirmed_inter_account";
+                } catch (err: unknown) {
+                  interAccountResults.push({
+                    api_id: entry.api_id!,
+                    wise_id: entry.wise_id,
+                    amount: entry.amount,
+                    status: "confirm_failed: " + (err instanceof Error ? err.message : String(err)),
+                  });
+                }
+              }
+            }
+          }
+        }
+      } else if (transferEntries.length > 0 && dryRun) {
+        for (const entry of transferEntries) {
+          interAccountResults.push({
+            api_id: 0,
+            wise_id: entry.wise_id,
+            amount: entry.amount,
+            status: "would_check_inter_account",
+          });
+        }
+      }
+
       return {
         content: [{
           type: "text",
@@ -544,6 +687,14 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             ...(skippedJarCount > 0 ? { skipped_jar_transfers: skippedJarCount } : {}),
             created: created.length,
             skipped: skipped.length,
+            ...(interAccountResults.length > 0 ? {
+              inter_account_reconciliation: {
+                total: interAccountResults.length,
+                already_journalized: interAccountResults.filter(r => r.status === "already_journalized").length,
+                confirmed: interAccountResults.filter(r => r.status === "confirmed_inter_account").length,
+                details: interAccountResults,
+              },
+            } : {}),
             results: created,
             skipped_details: skipped,
           }, null, 2),

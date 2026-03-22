@@ -125,47 +125,44 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       for (const tx of unconfirmed) {
         const candidates: MatchCandidate[] = [];
 
-        // Match against sale invoices (incoming payments - type D)
-        if (tx.type === "D") {
-          for (const inv of openSales) {
-            const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
-            if (confidence >= threshold) {
-              candidates.push({
-                type: "sale_invoice",
-                id: inv.id!,
-                number: inv.number ?? `${inv.number_prefix ?? ""}${inv.number_suffix}`,
-                client_name: inv.client_name ?? "",
-                clients_id: inv.clients_id,
-                gross_price: inv.gross_price ?? 0,
-                payment_status: inv.payment_status ?? "NOT_PAID",
-                partially_paid_warning: partiallyPaidWarning,
-                ref_number: inv.bank_ref_number,
-                confidence,
-                match_reasons: reasons,
-              });
-            }
+        // Match against both sale and purchase invoices regardless of type.
+        // The API stores all bank transactions as type C even for incoming payments,
+        // so type-based filtering would miss sale invoice matches entirely.
+        for (const inv of openSales) {
+          const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
+          if (confidence >= threshold) {
+            candidates.push({
+              type: "sale_invoice",
+              id: inv.id!,
+              number: inv.number ?? `${inv.number_prefix ?? ""}${inv.number_suffix}`,
+              client_name: inv.client_name ?? "",
+              clients_id: inv.clients_id,
+              gross_price: inv.gross_price ?? 0,
+              payment_status: inv.payment_status ?? "NOT_PAID",
+              partially_paid_warning: partiallyPaidWarning,
+              ref_number: inv.bank_ref_number,
+              confidence,
+              match_reasons: reasons,
+            });
           }
         }
 
-        // Match against purchase invoices (outgoing payments - type C)
-        if (tx.type === "C") {
-          for (const inv of openPurchases) {
-            const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
-            if (confidence >= threshold) {
-              candidates.push({
-                type: "purchase_invoice",
-                id: inv.id!,
-                number: inv.number,
-                client_name: inv.client_name,
-                clients_id: inv.clients_id,
-                gross_price: inv.gross_price ?? 0,
-                payment_status: inv.payment_status ?? "NOT_PAID",
-                partially_paid_warning: partiallyPaidWarning,
-                ref_number: inv.bank_ref_number,
-                confidence,
-                match_reasons: reasons,
-              });
-            }
+        for (const inv of openPurchases) {
+          const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
+          if (confidence >= threshold) {
+            candidates.push({
+              type: "purchase_invoice",
+              id: inv.id!,
+              number: inv.number,
+              client_name: inv.client_name,
+              clients_id: inv.clients_id,
+              gross_price: inv.gross_price ?? 0,
+              payment_status: inv.payment_status ?? "NOT_PAID",
+              partially_paid_warning: partiallyPaidWarning,
+              ref_number: inv.bank_ref_number,
+              confidence,
+              match_reasons: reasons,
+            });
           }
         }
 
@@ -245,24 +242,40 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       for (let i = 0; i < unconfirmed.length; i++) {
         const tx = unconfirmed[i]!;
         await reportProgress(i, total);
-        // Only process known transaction types
-        if (tx.type !== "D" && tx.type !== "C") {
-          skipped.push({ transaction_id: tx.id, reason: `Unknown transaction type "${tx.type}"` });
-          continue;
-        }
-
         const candidates: MatchCandidate[] = [];
-        const invoices = tx.type === "D" ? openSales : openPurchases;
-        const table = tx.type === "D" ? "sale_invoices" : "purchase_invoices";
 
-        for (const inv of invoices) {
+        // Match against both sale and purchase invoices regardless of type.
+        // The API stores all bank transactions as type C, so type-based filtering
+        // would miss sale invoice matches entirely.
+        for (const inv of openSales) {
           if (inv.payment_status === "PARTIALLY_PAID") continue;
-          const invKey = `${tx.type === "D" ? "sale" : "purchase"}:${inv.id!}`;
+          const invKey = `sale:${inv.id!}`;
           if (consumedInvoiceKeys.has(invKey)) continue;
           const { confidence, reasons } = matchScore(tx, inv, tx.amount);
           if (confidence >= threshold) {
             candidates.push({
-              type: tx.type === "D" ? "sale_invoice" : "purchase_invoice",
+              type: "sale_invoice",
+              id: inv.id!,
+              number: inv.number ?? "",
+              client_name: inv.client_name ?? "",
+              clients_id: inv.clients_id,
+              gross_price: inv.gross_price ?? 0,
+              payment_status: inv.payment_status ?? "NOT_PAID",
+              partially_paid_warning: false,
+              confidence,
+              match_reasons: reasons,
+            });
+          }
+        }
+
+        for (const inv of openPurchases) {
+          if (inv.payment_status === "PARTIALLY_PAID") continue;
+          const invKey = `purchase:${inv.id!}`;
+          if (consumedInvoiceKeys.has(invKey)) continue;
+          const { confidence, reasons } = matchScore(tx, inv, tx.amount);
+          if (confidence >= threshold) {
+            candidates.push({
+              type: "purchase_invoice",
               id: inv.id!,
               number: inv.number ?? "",
               client_name: inv.client_name ?? "",
@@ -280,6 +293,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         if (candidates.length === 1) {
           const match = candidates[0]!;
           const invoiceKey = `${match.type.replace("_invoice", "")}:${match.id}`;
+          const table = match.type === "sale_invoice" ? "sale_invoices" : "purchase_invoices";
           if (dryRun) {
             consumedInvoiceKeys.add(invoiceKey);
             confirmed.push({

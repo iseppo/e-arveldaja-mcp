@@ -67,6 +67,20 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - Example: `PATCH /transactions/{id}/register` with body `[{"related_table":"purchase_invoices","related_id":123,"amount":59.94}]`
 - **Card payments often have `clients_id: null`** — confirmation fails with "buyer or supplier is missing". `TransactionsApi.confirm()` auto-fixes this by looking up the client from the linked invoice.
 
+### Transaction type field
+- **All bank transactions are `type: "C"`** regardless of direction (both CAMT-imported and API-created)
+- The `type` field is cosmetic — it does **not** affect accounting
+- **Journal entry direction is determined by the distribution** at confirmation time:
+  - Confirming against another bank account → "Laekumine" (receipt): debit target, credit source
+  - Confirming against expense/purchase invoice → "Tasumine" (payment): credit bank, debit expense
+- The API auto-detects incoming vs outgoing from the account relationship in the distribution
+
+### Transaction status
+- **`status: "CONFIRMED"`** — registered/confirmed (not an `is_confirmed` boolean)
+- **`status: "PROJECT"`** — unconfirmed/draft
+- **`status: "VOID"`** — invalidated
+- **To delete**: must `invalidate` confirmed transactions first (CONFIRMED → VOID → delete)
+
 ### Purchase invoice creation (non-VAT company)
 - Do **not** pass `gross_price` at creation — the API computes it
 - For VAT tracking on items: set `vat_rate_dropdown`, `vat_accounts_id`, `cl_vat_articles_id`, `project_no_vat_gross_price`
