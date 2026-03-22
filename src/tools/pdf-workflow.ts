@@ -359,7 +359,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "create_purchase_invoice_from_pdf",
-    "Create a draft purchase invoice from extracted and validated PDF data. Pass EXACT vat_price and gross_price from the original invoice for payment matching.",
+    "Create a draft purchase invoice from extracted and validated PDF data. " +
+    "Automatically uploads the source document if file_path is provided. " +
+    "Pass EXACT vat_price and gross_price from the original invoice for payment matching.",
     {
       supplier_client_id: z.number().describe("Supplier client ID (from resolve_supplier)"),
       invoice_number: z.string().describe("Invoice number"),
@@ -374,6 +376,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       ref_number: z.string().optional().describe("Reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
       currency: z.string().optional().describe("Currency code (default EUR)"),
+      file_path: z.string().optional().describe("Absolute path to the source invoice document (PDF/JPG/PNG) — auto-uploaded after creation"),
     },
     { ...create, title: "Create Purchase Invoice from PDF" },
     async (params) => {
@@ -406,11 +409,25 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         isVatReg,
       );
 
+      // Auto-upload source document if file_path provided
+      let uploaded = false;
+      if (params.file_path && result.id) {
+        try {
+          const resolved = await validateInvoiceDocumentPath(params.file_path);
+          const buffer = await readFile(resolved);
+          const base64 = buffer.toString("base64");
+          const fileName = resolved.split("/").pop() ?? "document";
+          await api.purchaseInvoices.uploadDocument(result.id, fileName, base64);
+          uploaded = true;
+        } catch { /* upload failure is non-fatal */ }
+      }
+
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
             result,
+            ...(uploaded ? { document_uploaded: true } : {}),
             note: "Purchase invoice created as DRAFT. Review and use confirm_purchase_invoice to confirm.",
           }, null, 2),
         }],
