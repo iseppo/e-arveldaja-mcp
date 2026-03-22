@@ -31,6 +31,7 @@ import { registerReceiptInboxTools } from "./tools/receipt-inbox.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
 import { registerCamtImportTools } from "./tools/camt-import.js";
+import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
 import { registerPrompts } from "./prompts.js";
@@ -326,6 +327,7 @@ Reporting:
   registerLightyearTools(scopedServer, api);
   registerWiseImportTools(scopedServer, api);
   registerCamtImportTools(scopedServer, api);
+  registerAnalyzeUnconfirmedTools(scopedServer, api);
 
   // Register resources via scopedServer so reads stay pinned to the selected connection
   registerResources(scopedServer, api);

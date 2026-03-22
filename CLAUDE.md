@@ -81,10 +81,20 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - **`status: "VOID"`** — invalidated
 - **To delete**: must `invalidate` confirmed transactions first (CONFIRMED → VOID → delete)
 
-### Purchase invoice creation (non-VAT company)
-- Do **not** pass `gross_price` at creation — the API computes it
+### Purchase invoice creation
+- **Always pass invoice-level `gross_price` and `vat_price`** — confirm fails without them ("Gross sum and net sum with taxes differ")
+- Do **not** pass item-level `gross_price` for non-VAT companies — the API computes it from `total_net_price`
+- `client_name` is required on creation (API field `client_name2`)
 - For VAT tracking on items: set `vat_rate_dropdown`, `vat_accounts_id`, `cl_vat_articles_id`, `project_no_vat_gross_price`
 - The API will compute `vat_amount` on the item but invoice-level `vat_price` stays 0 for non-VAT companies
+- **PATCH requires `items`** — updating invoice fields without including items fails with "Products/services are missing"
+
+### Inter-account transfer reconciliation
+- CAMT-imported transactions confirmed as inter-account transfers create journal entries touching both bank accounts
+- If the other side (e.g. Wise import) is also confirmed against the same bank account → **duplicate journal entries** and incorrect balance
+- **Always use `reconcile_inter_account_transfers`** for inter-account confirmation — it checks existing journals before confirming
+- The Wise import tool (`import_wise_transactions`) has built-in duplicate detection for inter-account transfers
+- When manually confirming transactions against another bank account, first check for existing journals at that date/amount
 
 ## Architecture
 

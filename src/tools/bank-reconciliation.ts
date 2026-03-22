@@ -20,7 +20,7 @@ function validateInterAccountDateGap(maxDateGap: number | undefined): number {
 }
 
 /** Normalize text for fuzzy company name matching: lowercase, strip diacritics, collapse whitespace */
-function normalizeCompanyName(name: string): string {
+export function normalizeCompanyName(name: string): string {
   return name.trim().toLowerCase()
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")  // strip diacritics (ü→u, ö→o, etc.)
     .replace(/\s+/g, " ");
@@ -55,7 +55,7 @@ function buildSuggestedDistribution(
   };
 }
 
-function matchScore(
+export function matchScore(
   tx: Transaction,
   invoice: { gross_price?: number; base_gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
   txAmount: number
