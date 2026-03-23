@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.5] - 2026-03-23
+
+### Fixed
+- **CAMT import cleanup** — removed dead `byRefNumber` and `descriptions` structures from duplicate lookup that were no longer consumed after the overmatch fix in 0.9.4
+- **HTTP retry test** — fixed unhandled promise rejection that caused CI exit code 1 despite all tests passing
+
+### Changed
+- **README** — updated Lightyear section to mention dividends/distributions/cash interest, corrected file access scope from "home directory" to "working directory", added Node.js 18+ requirement
+
 ## [0.9.4] - 2026-03-23
 
 ### Added
