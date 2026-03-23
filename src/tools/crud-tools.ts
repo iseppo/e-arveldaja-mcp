@@ -284,9 +284,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // JOURNALS
   // =====================
 
-  registerTool(server, "list_journals", "List journal entries. Paginated.", pageParam.shape, { ...readOnly, title: "List Journals" }, async (params) => {
+  registerTool(server, "list_journals", "List journal entries. Paginated. Postings omitted — use get_journal for full details.", pageParam.shape, { ...readOnly, title: "List Journals" }, async (params) => {
     const result = await api.journals.list(params);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    const compact = {
+      ...result,
+      items: result.items.map(({ postings: _postings, ...rest }) => rest),
+    };
+    return { content: [{ type: "text", text: JSON.stringify(compact, null, 2) }] };
   });
 
   registerTool(server, "get_journal", "Get a journal entry by ID (includes postings)", idParam.shape, { ...readOnly, title: "Get Journal" }, async ({ id }) => {
