@@ -138,13 +138,13 @@ The assistant will extract invoice data from the PDF, create a purchase invoice 
 The assistant will scan the folder, OCR-parse each PDF/JPG/PNG, extract invoice data, resolve suppliers, detect duplicates, create purchase invoices with correct VAT treatment, upload source documents, confirm, and match to bank transactions — all in one pass. Dry run by default so you can review before committing.
 If invoice creation succeeds but a later step like document upload or confirmation fails, the tool now auto-invalidates the created purchase invoice and reports that file as failed instead of leaving a stray draft behind.
 
-### Book Lightyear investment trades
+### Book Lightyear investment trades and income
 
 Download your Lightyear account statement CSV and capital gains report, then:
 
 > "Create e-arveldaja journal entries from these Lightyear CSVs"
 
-The assistant will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts.
+The assistant will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts. Dividends, fund distributions, and cash interest are also imported from the account statement CSV.
 
 ### Import bank statements (CAMT.053)
 
@@ -237,7 +237,8 @@ EARVELDAJA_INTEGRATION_TEST=true npm run test:integration
 - **Caching.** API responses are cached for 2–5 minutes and automatically invalidated when you create, update, or delete records through the server. Changes made directly in the e-arveldaja web UI may take a few minutes to appear.
 - **EUR by default.** All amounts are EUR unless a different currency is specified.
 - **Multi-company.** Place multiple `apikey*.txt` files and use `list_connections` / `switch_connection`. Switching clears all cached data to prevent cross-company leaks.
-- **File access scope.** By default, file-reading tools can access supported files anywhere under your home directory and `/tmp`. Set `EARVELDAJA_ALLOWED_PATHS` (colon-separated) to restrict reads to specific document folders.
+- **Node.js 18+** required.
+- **File access scope.** By default, file-reading tools can access supported files under the working directory and `/tmp`. Set `EARVELDAJA_ALLOWED_PATHS` (colon-separated) to allow additional directories, or `EARVELDAJA_ALLOW_HOME=true` to allow the entire home directory.
 
 ## Privacy
 
