@@ -24,7 +24,7 @@ interface AccountStatementRow {
   reference: string;      // OR-xxx, CN-xxx, DT-xxx, WL-xxx, IN-xxx, RW-xxx
   ticker: string;
   isin: string;
-  type: "Buy" | "Sell" | "Conversion" | "Deposit" | "Withdrawal" | "Distribution" | "Reward";
+  type: "Buy" | "Sell" | "Conversion" | "Deposit" | "Withdrawal" | "Distribution" | "Dividend" | "Interest" | "Reward";
   quantity: number;
   ccy: string;
   price_per_share: number;
@@ -291,7 +291,7 @@ function extractDistributions(rows: AccountStatementRow[]): Array<{
   tax_amount: number;
 }> {
   return rows
-    .filter(r => r.type === "Distribution" && r.ticker !== CASH_FUND_TICKER)
+    .filter(r => (r.type === "Distribution" || r.type === "Dividend" || r.type === "Interest") && r.ticker !== CASH_FUND_TICKER)
     .map(r => ({
       date: parseLightyearDate(r.date),
       reference: r.reference,
@@ -878,7 +878,9 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         const creditAmount = roundMoney(dist.net_amount + dist.tax_amount + dist.fee);
         postings.push({ accounts_id: income_account, type: "C", amount: creditAmount });
 
-        const title = `Lightyear tulu: ${dist.ticker} (${dist.isin})`;
+        const title = dist.ticker
+          ? `Lightyear tulu: ${dist.ticker} (${dist.isin})`
+          : "Lightyear tulu: intress";
 
         if (isDryRun) {
           results.push({
