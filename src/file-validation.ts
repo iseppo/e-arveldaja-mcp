@@ -11,15 +11,14 @@ function resolveAllowedRoots(roots: string[]): string[] {
 }
 
 /**
- * Default root directories for file reads: project parent dir + /tmp.
+ * Default root directories for file reads: working directory + /tmp.
  * Set EARVELDAJA_ALLOW_HOME=true to also include $HOME.
  * Override entirely with EARVELDAJA_ALLOWED_PATHS (colon-separated list).
  * Roots are resolved through symlinks so that the check works even if
  * e.g. /tmp is a symlink to /private/tmp (macOS).
  */
 function getDefaultRoots(): string[] {
-  const projectParent = resolve(getProjectRoot(), "..");
-  const roots = [projectParent, "/tmp"];
+  const roots = [process.cwd(), "/tmp"];
   if (process.env.EARVELDAJA_ALLOW_HOME === "true") {
     const home = homedir();
     if (!roots.includes(home)) roots.push(home);
