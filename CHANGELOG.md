@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.6] - 2026-03-23
+
+### Fixed
+- **MCP SDK version** — reverted exact pin `1.12.1` to `^1.12.1` and updated to 1.27.1. The exact pin broke the build because `registerResource`, `registerPrompt`, and `sendLoggingMessage` types were only added in later SDK versions.
+
 ## [0.9.5] - 2026-03-23
 
 ### Fixed
