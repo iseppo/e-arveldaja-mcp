@@ -638,7 +638,7 @@ async function createAndMaybeMatchPurchaseInvoice(
         `Created purchase invoice ${createdInvoice.id} could not be invalidated after ${reason}: ${message}. ` +
         `Automatic invalidation also failed: ${invalidateMessage}.`
       );
-      context.purchaseInvoices.push(createdInvoice);
+      // Don't push the invoice into context on double-failure — let the next run detect it fresh
       return {
         notes,
         status: "failed" as const,
@@ -697,7 +697,7 @@ async function createAndMaybeMatchPurchaseInvoice(
         await api.transactions.confirm(matchedCandidate.transaction_id, [{
           related_table: "purchase_invoices",
           related_id: createdInvoice.id,
-          amount: matchedCandidate.amount,
+          amount: createdInvoice.base_gross_price ?? createdInvoice.gross_price ?? matchedCandidate.amount,
         }]);
         consumedTransactionIds.add(matchedCandidate.transaction_id);
         linked = true;

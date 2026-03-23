@@ -428,6 +428,11 @@ export function parseCamt053Xml(xml: string): CamtParseResult {
     }
   }
 
+  const MAX_CAMT_ENTRIES = 50_000;
+  if (entries.length > MAX_CAMT_ENTRIES) {
+    throw new Error(`CAMT file contains ${entries.length} entries, exceeding the ${MAX_CAMT_ENTRIES} limit. Split the file into smaller date ranges.`);
+  }
+
   return {
     statement_metadata: {
       statement_id: textAt(statement, ["Id"]),

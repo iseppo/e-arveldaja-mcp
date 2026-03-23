@@ -419,7 +419,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "get_sale_invoice_document", "Download sales invoice PDF (base64)", idParam.shape, { ...readOnly, title: "Download Invoice PDF" }, async ({ id }) => {
-    const result = await api.saleInvoices.getDocument(id);
+    const result = await api.saleInvoices.getSystemPdf(id);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 

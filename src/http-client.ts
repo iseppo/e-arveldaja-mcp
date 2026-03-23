@@ -131,7 +131,8 @@ export class HttpClient {
           try {
             const body = await response.json() as { code?: number; messages?: string[] };
             if (body.messages && Array.isArray(body.messages)) {
-              errorMessage += `: ${body.messages.join("; ")}`;
+              const msgs = body.messages.join("; ").substring(0, 500);
+              errorMessage += `: ${msgs}`;
             }
           } catch {
             // Non-JSON error body — don't expose raw text

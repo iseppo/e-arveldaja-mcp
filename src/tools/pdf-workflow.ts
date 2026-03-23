@@ -158,7 +158,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           warnings.push(`Item ${idx + 1} "${item.custom_title ?? ""}": negative net price ${item.total_net_price}`);
         }
         if (item.total_net_price !== undefined && rate !== undefined) {
-          computedItemVat += roundMoney(item.total_net_price * (rate / 100));
+          computedItemVat += item.total_net_price * (rate / 100);
           itemVatInputs++;
         }
       }

@@ -11,8 +11,8 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "declaration": true,
-    "declarationMap": false,
-    "sourceMap": false
+    "declarationMap": true,
+    "sourceMap": true
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "**/*.test.ts", "src/__integration__/**", "src/__fixtures__/**", "vitest.config.ts", "vitest.integration.config.ts"]

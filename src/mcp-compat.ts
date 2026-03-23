@@ -95,6 +95,7 @@ export function registerTool(server: McpServer, name: string, ...rest: unknown[]
 
   const normalized = normalizeToolAnnotations(annotations);
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (server.registerTool as any)(name, {
     title: normalized.title ?? humanizeName(name),
     description,
@@ -131,6 +132,7 @@ export function registerPrompt(server: McpServer, name: string, ...rest: unknown
     throw new Error(`Invalid prompt registration for ${name}: unsupported legacy signature`);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (server.registerPrompt as any)(name, {
     title: humanizeName(name),
     description,
@@ -172,6 +174,7 @@ export function registerResource(
 
   const title = typeof metadata?.title === "string" ? metadata.title : humanizeName(name);
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (server.registerResource as any)(name, uriOrTemplate, {
     ...metadata,
     title,

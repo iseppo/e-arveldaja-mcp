@@ -51,8 +51,14 @@ export class TransactionsApi extends BaseResource<Transaction> {
         try {
           await this.update(id, { clients_id: null } as Partial<Transaction>);
         } catch (rollbackErr) {
+          const rollbackMsg = rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
           process.stderr.write(
-            `WARNING: Failed to roll back clients_id on transaction ${id}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}\n`
+            `WARNING: Failed to roll back clients_id on transaction ${id}: ${rollbackMsg}\n`
+          );
+          throw new Error(
+            `Transaction ${id} confirmation failed: ${error instanceof Error ? error.message : String(error)}. ` +
+            `Rollback of clients_id also failed: ${rollbackMsg}. ` +
+            `Transaction may have incorrect clients_id — manual review required.`
           );
         }
       }

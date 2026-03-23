@@ -17,7 +17,7 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
     return this.client.get<SaleInvoiceDeliveryOptions>(`/sale_invoices/${id}/delivery_options`);
   }
 
-  async getDocument(id: number): Promise<ApiFile> {
+  async getSystemPdf(id: number): Promise<ApiFile> {
     return this.client.get<ApiFile>(`/sale_invoices/${id}/pdf_system`);
   }
 
