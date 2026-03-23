@@ -50,8 +50,8 @@ export async function computeAllBalances(
       const amount = posting.base_amount ?? posting.amount;
       const entry = balances.get(posting.accounts_id) ?? { debit: 0, credit: 0 };
 
-      if (posting.type === "D") entry.debit += amount;
-      else entry.credit += amount;
+      if (posting.type === "D") entry.debit = roundMoney(entry.debit + amount);
+      else entry.credit = roundMoney(entry.credit + amount);
 
       balances.set(posting.accounts_id, entry);
     }

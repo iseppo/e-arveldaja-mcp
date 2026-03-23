@@ -92,7 +92,7 @@ export function matchScore(
   } else if (tx.bank_account_name && invoice.client_name) {
     const nameLower = normalizeCompanyName(tx.bank_account_name);
     const clientLower = normalizeCompanyName(invoice.client_name);
-    if (nameLower.includes(clientLower) || clientLower.includes(nameLower)) {
+    if (nameLower.length >= 4 && clientLower.length >= 4 && (nameLower.includes(clientLower) || clientLower.includes(nameLower))) {
       confidence += 10;
       reasons.push("client_name_partial");
     }

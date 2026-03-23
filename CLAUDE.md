@@ -151,7 +151,7 @@ src/
 - **Kulud** = Expenses (normal: D)
 
 ### Cache Invalidation
-All mutating API methods (`create`, `update`, `delete`, `confirm`, `merge`, `deactivate`, `uploadDocument`, `deleteDocument`) call `cache.invalidate(this.basePath)` before the API call.
+All mutating API methods (`create`, `update`, `delete`, `confirm`, `merge`, `deactivate`, `uploadDocument`, `deleteDocument`) call `cache.invalidate(this.basePath)` after a successful API call, ensuring stale data is never served from cache.
 
 ### Lightyear Investment CSV
 - **BRICEKSP** (IE000GWTNRJ7): money market cash fund, always excluded from trades

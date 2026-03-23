@@ -52,7 +52,7 @@ async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promis
       page++;
     }
   } else {
-    throw new Error(`Unexpected response shape from ${path}: ${JSON.stringify(first).substring(0, 200)}`);
+    throw new Error(`Unexpected response shape from ${path}`);
   }
 
   readonlyCache.set(cacheKey, allItems, 600);

@@ -60,8 +60,8 @@ async function computeAccountBalance(
 
       const amount = posting.base_amount ?? posting.amount;
 
-      if (type === "D") debitTotal += amount;
-      else creditTotal += amount;
+      if (type === "D") debitTotal = roundMoney(debitTotal + amount);
+      else creditTotal = roundMoney(creditTotal + amount);
 
       entries.push({
         journal_id: journal.id!,

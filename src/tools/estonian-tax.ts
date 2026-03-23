@@ -25,8 +25,8 @@ async function computeRetainedEarningsBalance(api: ApiContext, accountId: number
       if (posting.accounts_id !== accountId) continue;
       if (posting.is_deleted) continue;
       const amount = posting.base_amount ?? posting.amount;
-      if (posting.type === "D") debit += amount;
-      else if (posting.type === "C") credit += amount;
+      if (posting.type === "D") debit = roundMoney(debit + amount);
+      else if (posting.type === "C") credit = roundMoney(credit + amount);
     }
   }
 
@@ -47,9 +47,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       tax_payable_account: z.number().optional().describe("CIT payable account (default 2540)"),
       share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default 3000)"),
       force: z.boolean().optional().describe("Create journal even if retained earnings are insufficient (default false)"),
+      dry_run: z.boolean().optional().describe("Preview calculation and postings without creating journal (default false)"),
     },
     { ...create, title: "Prepare Dividend Distribution" },
-    async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, share_capital_account, force }) => {
+    async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, share_capital_account, force, dry_run }) => {
       const retainedAccount = retained_earnings_account ?? 3020;
       const payableAccount = dividend_payable_account ?? 2370;
       const taxAccount = tax_payable_account ?? 2540;
@@ -130,14 +131,37 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         { accounts_id: taxAccount, type: "C" as const, amount: cit },
       ];
 
-      const result = await api.journals.create({
+      const journalData = {
         title: `Dividendi väljamakse - ${shareholder.name}`,
         effective_date,
         clients_id: shareholder_client_id,
         cl_currencies_id: "EUR",
         document_number: `DIV-${effective_date}`,
         postings,
-      });
+      };
+
+      if (dry_run) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              dry_run: true,
+              calculation: {
+                net_dividend,
+                cit_rate: "22/78",
+                cit_amount: cit,
+                gross_dividend: grossDividend,
+              },
+              proposed_journal: journalData,
+              shareholder: { id: shareholder.id, name: shareholder.name },
+              retained_earnings_balance: retainedBalance,
+              note: "No journal created. Set dry_run=false to execute.",
+            }, null, 2),
+          }],
+        };
+      }
+
+      const result = await api.journals.create(journalData);
 
       return {
         content: [{
@@ -218,7 +242,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       }
 
       const total = roundMoney(net_amount + vat);
-      const expenseDebit = vatRegistered ? net_amount : total;
+      const expenseDebit = vatRegistered ? roundMoney(net_amount) : total;
 
       const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [
         { accounts_id: expense_account, type: "D", amount: expenseDebit },
