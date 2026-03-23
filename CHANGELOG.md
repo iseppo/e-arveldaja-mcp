@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.8] - 2026-03-24
+
+### Changed
+- **API key search location** — `apikey*.txt` and `.env` files are now scanned from the working directory (`cwd`) instead of the npm package root. This means `npx` users place credentials in the directory where they launch their AI assistant, not inside `node_modules`.
+
 ## [0.9.7] - 2026-03-24
 
 ### Added
