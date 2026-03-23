@@ -7,6 +7,7 @@ import type { Client, Transaction } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { readOnly, batch } from "../annotations.js";
+import { logAudit } from "../audit-log.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
@@ -676,6 +677,12 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
 
         try {
           const response = await api.transactions.create(payload);
+          logAudit({
+            tool: "import_camt053", action: "IMPORTED", entity_type: "transaction",
+            entity_id: response.created_object_id,
+            summary: `Imported CAMT transaction ${entry.amount} ${entry.currency} on ${entry.date}`,
+            details: { date: entry.date, amount: entry.amount, description: entry.description, counterparty: entry.counterparty_name, bank_reference: entry.bank_reference },
+          });
           results.push({
             status: "created",
             date: entry.date,

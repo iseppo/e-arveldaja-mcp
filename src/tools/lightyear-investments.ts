@@ -6,6 +6,7 @@ import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
+import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { parseCSVLine } from "../csv.js";
 import { validateAccounts } from "../account-validation.js";
@@ -714,6 +715,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             document_number: `LY:${trade.reference}`,
             postings,
           });
+          logAudit({
+            tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
+            entity_id: journal.created_object_id,
+            summary: `Lightyear Sell: ${trade.ticker} ${trade.quantity} @ ${proceeds} EUR, gain/loss ${gainLoss} EUR`,
+            details: {
+              effective_date: trade.date, ticker: trade.ticker, type: "Sell",
+              amount: proceeds, cost_basis: costBasis, gain_loss: gainLoss,
+              postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+            },
+          });
 
           resultEntry.journal_id = journal.created_object_id;
           results.push(resultEntry);
@@ -740,6 +751,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             cl_currencies_id: "EUR",
             document_number: `LY:${trade.reference}`,
             postings,
+          });
+          logAudit({
+            tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
+            entity_id: journal.created_object_id,
+            summary: `Lightyear Buy: ${trade.ticker} ${trade.quantity} @ ${trade.eur_amount} EUR`,
+            details: {
+              effective_date: trade.date, ticker: trade.ticker, type: "Buy",
+              amount: trade.eur_amount,
+              postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+            },
           });
 
           results.push({
@@ -903,6 +924,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             cl_currencies_id: "EUR",
             document_number: `LY:${dist.reference}`,
             postings,
+          });
+          logAudit({
+            tool: "book_lightyear_distributions", action: "CREATED", entity_type: "journal",
+            entity_id: journal.created_object_id,
+            summary: `Lightyear distribution: ${dist.ticker || "interest"} gross ${dist.gross_amount} EUR`,
+            details: {
+              effective_date: dist.date, ticker: dist.ticker,
+              total_gross: dist.gross_amount, tax_amount: dist.tax_amount, fee: dist.fee, net_amount: dist.net_amount,
+              postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+            },
           });
 
           results.push({

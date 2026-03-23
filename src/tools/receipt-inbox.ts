@@ -8,6 +8,7 @@ import { validateFilePath, getAllowedRoots, resolveFilePath } from "../file-vali
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { readOnly, batch } from "../annotations.js";
+import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { type ApiContext, isCompanyVatRegistered, safeJsonParse } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
@@ -603,6 +604,16 @@ async function createAndMaybeMatchPurchaseInvoice(
       extracted.total_gross,
       context.isVatRegistered,
     );
+    logAudit({
+      tool: "process_receipt_batch", action: "CREATED", entity_type: "purchase_invoice",
+      entity_id: createdInvoice.id,
+      summary: `Receipt batch: created invoice "${extracted.invoice_number}" from ${supplier.name}`,
+      details: {
+        supplier_name: supplier.name, invoice_number: extracted.invoice_number,
+        invoice_date: extracted.invoice_date, total_vat: extracted.total_vat, total_gross: extracted.total_gross,
+        file_name: file.name,
+      },
+    });
   } catch (error) {
     return {
       notes,
@@ -698,6 +709,12 @@ async function createAndMaybeMatchPurchaseInvoice(
           related_id: createdInvoice.id,
           amount: createdInvoice.base_gross_price ?? createdInvoice.gross_price ?? matchedCandidate.amount,
         }]);
+        logAudit({
+          tool: "process_receipt_batch", action: "CONFIRMED", entity_type: "transaction",
+          entity_id: matchedCandidate.transaction_id,
+          summary: `Receipt batch: confirmed transaction ${matchedCandidate.transaction_id} against invoice ${createdInvoice.id}`,
+          details: { amount: matchedCandidate.amount, invoice_id: createdInvoice.id },
+        });
         consumedTransactionIds.add(matchedCandidate.transaction_id);
         linked = true;
         notes.push(`Linked transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}.`);
@@ -1296,6 +1313,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               grossAmount,
               isVatRegistered,
             );
+            logAudit({
+              tool: "apply_transaction_classifications", action: "CREATED", entity_type: "purchase_invoice",
+              entity_id: invoice.id,
+              summary: `Auto-booked purchase invoice from transaction ${transaction.id} (${group.display_counterparty})`,
+              details: { supplier_name: supplier.name, invoice_number: `AUTO-TX-${transaction.id}`, date: transaction.date, total_gross: grossAmount },
+            });
 
             if (invoice.id) {
               const invalidateAutoCreatedInvoice = async (reason: string) => {
@@ -1323,6 +1346,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
                   related_id: invoice.id,
                   amount: transaction.amount,
                 }]);
+                logAudit({
+                  tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
+                  entity_id: transaction.id!,
+                  summary: `Auto-confirmed transaction ${transaction.id} against invoice ${invoice.id}`,
+                  details: { amount: transaction.amount, invoice_id: invoice.id },
+                });
               } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
                 await invalidateAutoCreatedInvoice(`automation failed after creation: ${message}`);

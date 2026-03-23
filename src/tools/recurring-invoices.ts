@@ -4,6 +4,7 @@ import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice } from "../types/api.js";
 import { batch } from "../annotations.js";
+import { logAudit } from "../audit-log.js";
 
 const RECURRING_CLONE_MARKER_PREFIX = "RECURRING_SOURCE_INVOICE";
 const RECURRING_CLONE_MARKER_RE = /RECURRING_SOURCE_INVOICE:\d+:TARGET_DATE:\d{4}-\d{2}-\d{2}/g;
@@ -158,6 +159,12 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             })),
           });
           existingCloneMarkers.set(recurringMarker, { id: result.created_object_id });
+          logAudit({
+            tool: "create_recurring_sale_invoices", action: "CREATED", entity_type: "sale_invoice",
+            entity_id: result.created_object_id,
+            summary: `Cloned sale invoice from #${source.id} (${full.client_name}) for ${target_date}`,
+            details: { source_id: source.id, source_number: source.number, client_name: full.client_name, date: target_date, total_gross: full.gross_price },
+          });
 
           let confirmed = false;
           let confirmError: string | undefined;

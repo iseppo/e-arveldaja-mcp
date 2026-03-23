@@ -4,6 +4,7 @@ import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice, BankAccount } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
+import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { buildBankAccountLookups, buildInterAccountJournalIndex } from "./inter-account-utils.js";
@@ -326,6 +327,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
                 related_id: match.id,
                 amount: tx.amount,
               }]);
+              logAudit({
+                tool: "auto_confirm_exact_matches", action: "CONFIRMED", entity_type: "transaction",
+                entity_id: tx.id!,
+                summary: `Confirmed transaction ${tx.id} against ${match.type} #${match.id} (${match.number})`,
+                details: { amount: tx.amount, distributions: [{ related_table: table, related_id: match.id, amount: tx.amount }] },
+              });
               consumedInvoiceKeys.add(invoiceKey);
               confirmed.push({
                 transaction_id: tx.id,
@@ -635,9 +642,21 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           try {
             await ensureClientsId(txOut.id, txOut.bank_account_name);
             await api.transactions.confirm(txOut.id, [buildAccountDistribution(txIn.accounts_dimensions_id, txOut.amount)]);
+            logAudit({
+              tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
+              entity_id: txOut.id,
+              summary: `Confirmed inter-account outgoing ${txOut.amount} EUR (${fromTitle} -> ${toTitle})`,
+              details: { amount: txOut.amount, date: txOut.date },
+            });
             try {
               await ensureClientsId(txIn.id!, txIn.bank_account_name);
               await api.transactions.confirm(txIn.id!, [buildAccountDistribution(txOut.accounts_dimensions_id, txIn.amount)]);
+              logAudit({
+                tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
+                entity_id: txIn.id!,
+                summary: `Confirmed inter-account incoming ${txIn.amount} EUR (${toTitle} <- ${fromTitle})`,
+                details: { amount: txIn.amount, date: txIn.date },
+              });
             } catch (err2: unknown) {
               // Outgoing confirmed but incoming failed — attempt to roll back outgoing
               let rollbackMsg = "";
@@ -743,6 +762,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           try {
             await ensureClientsId(tx.id, tx.bank_account_name);
             await api.transactions.confirm(tx.id, [buildAccountDistribution(targetDimension, tx.amount)]);
+            logAudit({
+              tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
+              entity_id: tx.id,
+              summary: `Confirmed one-sided inter-account transfer ${tx.amount} EUR (${sourceTitle} -> ${targetTitle})`,
+              details: { amount: tx.amount, date: tx.date },
+            });
             matchedOneSided.push({
               transaction_id: tx.id, type: tx.type, amount: tx.amount, date: tx.date,
               source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,

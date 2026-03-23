@@ -6,6 +6,7 @@ import type { AccountDimension } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { batch } from "../annotations.js";
+import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { parseCSV } from "../csv.js";
@@ -422,6 +423,12 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 bank_account_name: counterpartyName,
                 ref_number: row.reference || undefined,
               });
+              logAudit({
+                tool: "import_wise_transactions", action: "IMPORTED", entity_type: "transaction",
+                entity_id: result.created_object_id,
+                summary: `Imported Wise transaction ${amount} ${transactionCurrency} on ${date}`,
+                details: { date, amount, description: desc, counterparty: counterpartyName, wise_id: row.id },
+              });
               created.push({
                 wise_id: row.id,
                 date,
@@ -496,6 +503,12 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 description: feeDesc,
                 bank_account_name: "Wise",
                 clients_id: wiseClientId,
+              });
+              logAudit({
+                tool: "import_wise_transactions", action: "IMPORTED", entity_type: "transaction",
+                entity_id: feeResult.created_object_id,
+                summary: `Imported Wise fee ${fee} ${feeCurrency} on ${date}`,
+                details: { date, amount: fee, description: feeDesc, wise_id: `FEE:${row.id}` },
               });
               const feeId = feeResult.created_object_id;
 
@@ -625,6 +638,12 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                     related_sub_id: targetDim.id!,
                     amount: entry.amount,
                   }]);
+                  logAudit({
+                    tool: "import_wise_transactions", action: "CONFIRMED", entity_type: "transaction",
+                    entity_id: entry.api_id!,
+                    summary: `Confirmed Wise inter-account transfer ${entry.amount} EUR`,
+                    details: { amount: entry.amount, wise_id: entry.wise_id, target_dimension_id: targetDim.id },
+                  });
                   interAccountResults.push({
                     api_id: entry.api_id!,
                     wise_id: entry.wise_id,

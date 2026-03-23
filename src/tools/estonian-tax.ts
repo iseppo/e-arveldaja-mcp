@@ -5,6 +5,7 @@ import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
 import { computeAllBalances } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { create } from "../annotations.js";
+import { logAudit } from "../audit-log.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
@@ -138,6 +139,17 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       }
 
       const result = await api.journals.create(journalData);
+      logAudit({
+        tool: "prepare_dividend_package", action: "CREATED", entity_type: "journal",
+        entity_id: result.created_object_id,
+        summary: `Dividend journal: ${net_dividend} EUR net to ${shareholder.name}, CIT ${cit} EUR`,
+        details: {
+          effective_date, client_name: shareholder.name, amount: grossDividend,
+          total_net: net_dividend, total_gross: roundMoney(grossDividend),
+          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+          ...(warnings.length > 0 && { warnings }),
+        },
+      });
 
       return {
         content: [{
@@ -237,6 +249,15 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         cl_currencies_id: "EUR",
         document_number,
         postings,
+      });
+      logAudit({
+        tool: "create_owner_expense_reimbursement", action: "CREATED", entity_type: "journal",
+        entity_id: result.created_object_id,
+        summary: `Owner expense: ${description}, total ${total} EUR`,
+        details: {
+          effective_date, description, total_net: net_amount, total_vat: vat, total_gross: total,
+          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+        },
       });
 
       return {

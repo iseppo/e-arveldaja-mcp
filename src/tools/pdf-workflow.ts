@@ -8,6 +8,7 @@ import { validateFilePath } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { roundMoney } from "../money.js";
 import { readOnly, create, mutate } from "../annotations.js";
+import { logAudit } from "../audit-log.js";
 import { parseDocument } from "../document-parser.js";
 import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
@@ -428,6 +429,26 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         }
       }
 
+      logAudit({
+        tool: "create_purchase_invoice_from_pdf", action: "CREATED", entity_type: "purchase_invoice",
+        entity_id: result.id,
+        summary: `Created purchase invoice "${params.invoice_number}" from PDF`,
+        details: {
+          supplier_name: supplier.name, invoice_number: params.invoice_number,
+          invoice_date: params.invoice_date, total_vat: params.vat_price, total_gross: params.gross_price,
+          items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
+          ...(uploaded ? { file_name: params.file_path?.split("/").pop() } : {}),
+        },
+      });
+      if (uploaded && result.id) {
+        logAudit({
+          tool: "create_purchase_invoice_from_pdf", action: "UPLOADED", entity_type: "purchase_invoice",
+          entity_id: result.id,
+          summary: `Uploaded document to purchase invoice ${result.id}`,
+          details: { file_name: params.file_path?.split("/").pop() },
+        });
+      }
+
       return {
         content: [{
           type: "text",
@@ -455,6 +476,12 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const base64 = buffer.toString("base64");
       const fileName = (resolved.split("/").pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255);
       const result = await api.purchaseInvoices.uploadDocument(invoice_id, fileName, base64);
+      logAudit({
+        tool: "upload_invoice_document", action: "UPLOADED", entity_type: "purchase_invoice",
+        entity_id: invoice_id,
+        summary: `Uploaded document "${fileName}" to purchase invoice ${invoice_id}`,
+        details: { file_name: fileName },
+      });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }
   );

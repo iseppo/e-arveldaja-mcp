@@ -37,8 +37,9 @@ import { registerDynamicResources } from "./resources/dynamic-resources.js";
 import { registerPrompts } from "./prompts.js";
 import { toolError } from "./tool-error.js";
 import { setLogger, log } from "./logger.js";
-import { readOnly, mutate } from "./annotations.js";
+import { readOnly, mutate, destructive } from "./annotations.js";
 import { getAllowedRootsStartupWarning } from "./file-validation.js";
+import { initAuditLog, getAuditLog, getAuditLogByConnection, listAuditLogs, clearAuditLog } from "./audit-log.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
@@ -130,6 +131,7 @@ async function main() {
   }
   const allConfigs = loadAllConfigs();
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
+  initAuditLog(() => allConfigs[connectionState.activeIndex]!.name);
   const invocationStorage = new AsyncLocalStorage<ConnectionSnapshot>();
   const requestGuard = () => {
     const snapshot = invocationStorage.getStore();
@@ -253,6 +255,74 @@ Reporting:
             generation: snapshot.generation,
             note: "Caches cleared atomically. New tool calls use the new connection; interrupted in-flight tools cannot make further API requests, but a request already in flight may still have completed.",
           }, null, 2),
+        }],
+      };
+    }
+  );
+
+  // --- Audit log tools ---
+
+  registerTool(server, "get_session_log",
+    "Retrieve the audit log of all mutating operations. " +
+    "Returns human-readable Markdown. By default shows the current connection's log. " +
+    "Use 'connection' to view another company's log, or list_audit_logs to see available logs.",
+    {
+      connection: z.string().optional().describe("Connection/company name to view (default: current connection). Use list_audit_logs to see available names."),
+      entity_type: z.string().optional().describe("Filter by entity type (client, product, journal, transaction, sale_invoice, purchase_invoice)"),
+      action: z.string().optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT)"),
+      date_from: z.string().optional().describe("Return entries from this date (YYYY-MM-DD or ISO 8601)"),
+      date_to: z.string().optional().describe("Return entries up to this date (YYYY-MM-DD or ISO 8601)"),
+      limit: z.number().optional().describe("Maximum entries to return (default 100, returns most recent)"),
+    },
+    { ...readOnly, title: "Get Session Audit Log" },
+    async (params) => {
+      const filter = {
+        entity_type: params.entity_type,
+        action: params.action,
+        date_from: params.date_from,
+        date_to: params.date_to,
+        limit: params.limit,
+      };
+      const content = params.connection
+        ? getAuditLogByConnection(params.connection, filter)
+        : getAuditLog(filter);
+      return {
+        content: [{
+          type: "text",
+          text: content || "No audit log entries found.",
+        }],
+      };
+    }
+  );
+
+  registerTool(server, "list_audit_logs",
+    "List all available audit log files across connections/companies. Shows entry count and last entry date for each.",
+    {},
+    { ...readOnly, title: "List Audit Logs" },
+    async () => {
+      const logs = listAuditLogs();
+      if (logs.length === 0) {
+        return { content: [{ type: "text", text: "No audit logs found." }] };
+      }
+      const lines = logs.map(l =>
+        `- **${l.connection}** — ${l.entries} entries${l.last_entry ? `, last: ${l.last_entry}` : ""}`
+      );
+      return {
+        content: [{ type: "text", text: `## Available audit logs\n\n${lines.join("\n")}` }],
+      };
+    }
+  );
+
+  registerTool(server, "clear_session_log",
+    "Clear the audit log for the current connection. DESTRUCTIVE — cannot be undone.",
+    {},
+    { ...destructive, title: "Clear Session Audit Log" },
+    async () => {
+      clearAuditLog();
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ message: "Audit log cleared for current connection." }),
         }],
       };
     }
