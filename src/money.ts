@@ -6,7 +6,7 @@
 export const roundMoney = (v: number): number => {
   if (v === 0) return 0;
   if (Number.isNaN(v)) throw new Error("roundMoney received NaN — indicates a bug in the caller");
-  if (!Number.isFinite(v)) return 0;
+  if (!Number.isFinite(v)) throw new Error("roundMoney received Infinity — indicates a bug in the caller (e.g. division by zero)");
   const abs = Math.abs(v);
 
   // Once the scaled value reaches 1e21, Number stringification switches to
@@ -19,3 +19,8 @@ export const roundMoney = (v: number): number => {
   const rounded = Number(Math.round(parseFloat(abs + "e2")) + "e-2");
   return (v < 0 ? -rounded : rounded) || 0;
 };
+
+/** Invoice gross amount in base currency, falling back to gross_price. */
+export function effectiveGross(inv: { base_gross_price?: number | null; gross_price?: number | null }): number {
+  return inv.base_gross_price ?? inv.gross_price ?? 0;
+}

@@ -33,14 +33,6 @@ interface WiseRow {
   note: string;
 }
 
-const EXPECTED_HEADERS = [
-  "ID", "Status", "Direction", "Created on", "Finished on",
-  "Source fee amount", "Source fee currency", "Target fee amount", "Target fee currency",
-  "Source name", "Source amount (after fees)", "Source currency",
-  "Target name", "Target amount (after fees)", "Target currency",
-  "Exchange rate", "Reference", "Batch", "Created by", "Category", "Note",
-];
-
 function parseWiseCSV(csv: string): WiseRow[] {
   const records = parseCSV(csv).filter(record => record.some(field => field.trim() !== ""));
   if (records.length < 2) throw new Error("CSV has no data rows");

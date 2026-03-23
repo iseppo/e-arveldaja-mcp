@@ -1,5 +1,5 @@
 import type { HttpClient } from "../http-client.js";
-import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice, ApiResponse, ApiFile } from "../types/api.js";
+import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice, ApiResponse } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
 
 export class TransactionsApi extends BaseResource<Transaction> {
@@ -66,22 +66,4 @@ export class TransactionsApi extends BaseResource<Transaction> {
     return result;
   }
 
-  async getDocument(id: number): Promise<ApiFile> {
-    return this.client.get<ApiFile>(`/transactions/${id}/document_user`);
-  }
-
-  async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    const result = await this.client.request<ApiResponse>(`/transactions/${id}/document_user`, {
-      method: "PUT",
-      body: { name, contents },
-    });
-    this.invalidateCache();
-    return result;
-  }
-
-  async deleteDocument(id: number): Promise<ApiResponse> {
-    const result = await this.client.delete<ApiResponse>(`/transactions/${id}/document_user`);
-    this.invalidateCache();
-    return result;
-  }
 }

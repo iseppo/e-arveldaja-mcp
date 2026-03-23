@@ -118,6 +118,10 @@ function makeApi(
   return {
     readonly: {
       getAccounts: vi.fn(async () => accounts),
+      getAccount: vi.fn(async (id: number) => {
+        const acct = accounts.find(a => a.id === id);
+        return acct ?? { id, name_est: "", name_eng: "", balance_type: "C" };
+      }),
       getVatInfo: vi.fn(async () => ({ vat_number: vatRegistered ? "EE123456789" : null })),
     },
     clients: {

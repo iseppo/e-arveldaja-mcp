@@ -4,7 +4,7 @@ import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Account, Client, Journal, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { computeAllBalances, type AccountBalance } from "./financial-statements.js";
-import { roundMoney } from "../money.js";
+import { roundMoney, effectiveGross } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { validateAccounts } from "../account-validation.js";
@@ -286,7 +286,7 @@ function buildUnresolvedItems(
         id: invoice.id!,
         number: invoice.number ?? `${invoice.number_prefix ?? ""}${invoice.number_suffix}`,
         client: invoice.client_name ?? "",
-        gross: invoice.base_gross_price ?? invoice.gross_price ?? 0,
+        gross: effectiveGross(invoice),
       })),
     },
     unconfirmed_purchase_invoices: {
@@ -295,7 +295,7 @@ function buildUnresolvedItems(
         id: invoice.id!,
         number: invoice.number,
         client: invoice.client_name,
-        gross: invoice.base_gross_price ?? invoice.gross_price ?? 0,
+        gross: effectiveGross(invoice),
       })),
     },
     total_issues:

@@ -19,8 +19,8 @@ describe("roundMoney", () => {
     expect(roundMoney(-1.235)).toBe(-1.24);
     expect(roundMoney(-0.005)).toBe(-0.01);
     expect(() => roundMoney(NaN)).toThrow("roundMoney received NaN");
-    expect(roundMoney(Infinity)).toBe(0);
-    expect(roundMoney(-Infinity)).toBe(0);
+    expect(() => roundMoney(Infinity)).toThrow("roundMoney received Infinity");
+    expect(() => roundMoney(-Infinity)).toThrow("roundMoney received Infinity");
   });
 
   it("handles mid-range .005 boundaries correctly", () => {

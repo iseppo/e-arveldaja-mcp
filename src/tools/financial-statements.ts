@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Account, Journal, SaleInvoice, PurchaseInvoice } from "../types/api.js";
-import { roundMoney } from "../money.js";
+import { roundMoney, effectiveGross } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
 
@@ -333,7 +333,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
                 id: inv.id,
                 number: inv.number,
                 client: inv.client_name,
-                gross: inv.base_gross_price ?? inv.gross_price ?? 0,
+                gross: effectiveGross(inv),
                 payment_status: inv.payment_status ?? "NOT_PAID",
               })),
             },
@@ -343,29 +343,29 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
                 id: inv.id,
                 number: inv.number,
                 client: inv.client_name,
-                gross: inv.base_gross_price ?? inv.gross_price ?? 0,
+                gross: effectiveGross(inv),
                 payment_status: inv.payment_status ?? "NOT_PAID",
               })),
             },
             overdue_receivables: {
               count: overdueReceivables.length,
-              total: roundMoney(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0)),
+              total: roundMoney(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + (effectiveGross(inv)), 0)),
               items: overdueReceivables.slice(0, 10).map((inv: SaleInvoice) => ({
                 id: inv.id,
                 number: inv.number,
                 client: inv.client_name,
-                gross: inv.base_gross_price ?? inv.gross_price ?? 0,
+                gross: effectiveGross(inv),
                 payment_status: inv.payment_status ?? "NOT_PAID",
               })),
             },
             overdue_payables: {
               count: overduePayables.length,
-              total: roundMoney(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0)),
+              total: roundMoney(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + (effectiveGross(inv)), 0)),
               items: overduePayables.slice(0, 10).map((inv: PurchaseInvoice) => ({
                 id: inv.id,
                 number: inv.number,
                 client: inv.client_name,
-                gross: inv.base_gross_price ?? inv.gross_price ?? 0,
+                gross: effectiveGross(inv),
                 payment_status: inv.payment_status ?? "NOT_PAID",
               })),
             },

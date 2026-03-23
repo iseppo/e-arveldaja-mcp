@@ -23,7 +23,7 @@ interface AccountBalanceResult {
   entries: BalanceDetail[];
 }
 
-async function computeAccountBalance(
+export async function computeAccountBalance(
   api: ApiContext,
   accountId: number,
   clientId?: number,

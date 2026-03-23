@@ -2,37 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
-import type { Journal } from "../types/api.js";
 import { computeAllBalances } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { create } from "../annotations.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
-
-async function computeRetainedEarningsBalance(api: ApiContext, accountId: number, asOfDate?: string, preloadedJournals?: Journal[]): Promise<number> {
-  const allJournals = preloadedJournals ?? await api.journals.listAllWithPostings();
-  let debit = 0;
-  let credit = 0;
-
-  for (const journal of allJournals) {
-    if (journal.is_deleted) continue;
-    if (!journal.registered) continue;
-    if (asOfDate && journal.effective_date && journal.effective_date > asOfDate) continue;
-
-    if (!journal.postings) continue;
-
-    for (const posting of journal.postings) {
-      if (posting.accounts_id !== accountId) continue;
-      if (posting.is_deleted) continue;
-      const amount = posting.base_amount ?? posting.amount;
-      if (posting.type === "D") debit = roundMoney(debit + amount);
-      else if (posting.type === "C") credit = roundMoney(credit + amount);
-    }
-  }
-
-  // Retained earnings is a C-type account: balance = credit - debit
-  return roundMoney(credit - debit);
-}
+import { computeAccountBalance } from "./account-balance.js";
 
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
 
@@ -81,7 +56,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const allJournals = await api.journals.listAllWithPostings();
 
       // Check retained earnings balance
-      const retainedBalance = await computeRetainedEarningsBalance(api, retainedAccount, effective_date, allJournals);
+      const retainedResult = await computeAccountBalance(api, retainedAccount, undefined, undefined, effective_date, allJournals);
+      const retainedBalance = retainedResult.balance;
       const warnings: string[] = [];
       if (retainedBalance < grossDividend) {
         if (!force) {

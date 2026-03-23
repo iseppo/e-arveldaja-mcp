@@ -48,33 +48,6 @@ import {
   resolveSupplierInternal,
 } from "./supplier-resolution.js";
 
-// Re-export everything that tests and other modules import from this file
-export {
-  type TransactionGroupClassificationInput,
-  type TransactionGroupClassification,
-  categorizeTransactionGroup,
-  classifyReceiptDocument,
-  detectReceiptCurrency,
-  deriveAutoBookedNetAmount,
-  deriveAutoBookedVatPrice,
-  extractAmounts,
-  extractDates,
-  extractInvoiceNumber,
-  extractPdfIdentifiers,
-  extractReceiptFieldsFromText,
-  extractSupplierName,
-  getAutoBookedVatConfig,
-  getAutoBookedVatRateDropdown,
-  getClientCountryFromIban,
-  hasAutoBookableReceiptFields,
-  hasRecurringSimilarAmounts,
-  inferSupplierCountry,
-  looksLikePersonCounterparty,
-  normalizeCounterpartyName,
-  normalizeDate,
-  scoreTransactionToInvoice,
-  suggestBookingInternal,
-} from "./receipt-extraction.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const FILE_TYPE_EXTENSIONS = {

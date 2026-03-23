@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
-import { roundMoney } from "../money.js";
+import { roundMoney, effectiveGross } from "../money.js";
 import { readOnly } from "../annotations.js";
 
 interface AgingBucket {
@@ -60,7 +60,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
         const dueDateStr = addDaysToDate(inv.create_date, inv.term_days);
         const daysOverdue = daysBetween(dueDateStr, today);
         const label = bucketLabel(daysOverdue);
-        const amount = inv.base_gross_price ?? inv.gross_price ?? 0;
+        const amount = effectiveGross(inv);
 
         const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };
         bucket.count++;
@@ -106,7 +106,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
           type: "text",
           text: JSON.stringify({
             as_of_date: today,
-            total_unpaid: r(unpaid.reduce((s: number, inv: SaleInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0)),
+            total_unpaid: r(unpaid.reduce((s: number, inv: SaleInvoice) => s + (effectiveGross(inv)), 0)),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sortedBuckets,
@@ -142,7 +142,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
         const dueDateStr = addDaysToDate(inv.create_date, inv.term_days);
         const daysOverdue = daysBetween(dueDateStr, today);
         const label = bucketLabel(daysOverdue);
-        const amount = inv.base_gross_price ?? inv.gross_price ?? 0;
+        const amount = effectiveGross(inv);
 
         const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };
         bucket.count++;
@@ -188,7 +188,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
           type: "text",
           text: JSON.stringify({
             as_of_date: today,
-            total_unpaid: r(unpaid.reduce((s: number, inv: PurchaseInvoice) => s + (inv.base_gross_price ?? inv.gross_price ?? 0), 0)),
+            total_unpaid: r(unpaid.reduce((s: number, inv: PurchaseInvoice) => s + (effectiveGross(inv)), 0)),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sortedBuckets,

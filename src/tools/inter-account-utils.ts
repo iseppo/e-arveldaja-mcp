@@ -1,4 +1,42 @@
-import type { Journal } from "../types/api.js";
+import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
+
+export interface BankAccountLookups {
+  ownIbanToDimension: Map<string, number>;
+  dimensionToIban: Map<number, string>;
+  dimensionToTitle: Map<number, string>;
+  dimensionToAccountsId: Map<number, number>;
+  ownDimensionIds: Set<number>;
+}
+
+export function buildBankAccountLookups(
+  bankAccounts: BankAccount[],
+  accountDimensions: AccountDimension[],
+): BankAccountLookups {
+  const ownIbanToDimension = new Map<string, number>();
+  const dimensionToIban = new Map<number, string>();
+  const dimensionToTitle = new Map<number, string>();
+  const dimensionToAccountsId = new Map<number, number>();
+  for (const ba of bankAccounts) {
+    const iban = (ba.iban_code ?? ba.account_no ?? "").trim().toUpperCase();
+    if (iban && ba.accounts_dimensions_id) {
+      ownIbanToDimension.set(iban, ba.accounts_dimensions_id);
+      dimensionToIban.set(ba.accounts_dimensions_id, iban);
+      dimensionToTitle.set(ba.accounts_dimensions_id, ba.account_name_est);
+    }
+  }
+  for (const dim of accountDimensions) {
+    if (dim.id && !dim.is_deleted) {
+      dimensionToAccountsId.set(dim.id, dim.accounts_id);
+    }
+  }
+  return {
+    ownIbanToDimension,
+    dimensionToIban,
+    dimensionToTitle,
+    dimensionToAccountsId,
+    ownDimensionIds: new Set(dimensionToIban.keys()),
+  };
+}
 
 /**
  * Build a map from bidirectional "sourceDim|targetDim|amount|date" keys to journal IDs

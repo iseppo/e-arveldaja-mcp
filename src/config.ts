@@ -239,7 +239,3 @@ export function loadAllConfigs(): NamedConfig[] {
   return configs;
 }
 
-/** Load single config (first available). Backwards-compatible entry point. */
-export function loadConfig(): Config {
-  return loadAllConfigs()[0]!.config;
-}

@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { readFile } from "fs/promises";
 import { validateFilePath } from "../file-validation.js";
 import {
-  buildDryRunCreatedInvoicePreview,
   classifyReceiptDocument,
   categorizeTransactionGroup,
   detectReceiptCurrency,
@@ -24,6 +23,9 @@ import {
   normalizeCounterpartyName,
   scoreTransactionToInvoice,
   suggestBookingInternal,
+} from "./receipt-extraction.js";
+import {
+  buildDryRunCreatedInvoicePreview,
   readValidatedReceiptFile,
   revalidateReceiptFilePath,
 } from "./receipt-inbox.js";

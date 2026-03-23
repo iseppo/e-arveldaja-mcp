@@ -7,6 +7,7 @@ import { readOnly } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { matchScore, normalizeCompanyName } from "./bank-reconciliation.js";
+import { buildBankAccountLookups } from "./inter-account-utils.js";
 
 /** Known fee/charge patterns for expense detection */
 const EXPENSE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -76,26 +77,8 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
 
-      // Build bank account lookups
-      const ownIbanToDimension = new Map<string, number>();
-      const dimensionToIban = new Map<number, string>();
-      const dimensionToTitle = new Map<number, string>();
-      const dimensionToAccountsId = new Map<number, number>();
-
-      for (const ba of bankAccounts) {
-        const iban = (ba.iban_code ?? ba.account_no ?? "").trim().toUpperCase();
-        if (iban && ba.accounts_dimensions_id) {
-          ownIbanToDimension.set(iban, ba.accounts_dimensions_id);
-          dimensionToIban.set(ba.accounts_dimensions_id, iban);
-          dimensionToTitle.set(ba.accounts_dimensions_id, ba.account_name_est);
-        }
-      }
-      for (const dim of accountDimensions) {
-        if (dim.id && !dim.is_deleted) {
-          dimensionToAccountsId.set(dim.id, dim.accounts_id);
-        }
-      }
-      const ownDimensionIds = new Set(dimensionToIban.keys());
+      const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds } =
+        buildBankAccountLookups(bankAccounts, accountDimensions);
       const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
 
       // Build a broader index: journals with any posting touching a bank account dimension

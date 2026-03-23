@@ -22,34 +22,11 @@ export interface InvoiceExtractionFallback {
   guidance: string;
 }
 
-export interface IdentifierHintFallback {
-  recommended: boolean;
-  missing_identifier_hints: string[];
-  guidance: string;
-}
-
 const AUTO_INVOICE_NUMBER_PREFIX = "AUTO-";
 
 export function hasConfidentInvoiceNumber(value?: string): boolean {
   const normalized = value?.trim();
   return Boolean(normalized) && !normalized!.startsWith(AUTO_INVOICE_NUMBER_PREFIX);
-}
-
-export function summarizeIdentifierHintFallback(hints: Pick<InvoiceExtractionSnapshot, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number">): IdentifierHintFallback {
-  const missingIdentifierHints = [
-    hints.supplier_reg_code ? undefined : "supplier_reg_code",
-    hints.supplier_vat_no ? undefined : "supplier_vat_no",
-    hints.supplier_iban ? undefined : "supplier_iban",
-    hints.ref_number ? undefined : "ref_number",
-  ].filter((value): value is string => value !== undefined);
-
-  return {
-    recommended: missingIdentifierHints.length > 0,
-    missing_identifier_hints: missingIdentifierHints,
-    guidance: missingIdentifierHints.length > 0
-      ? "Regex identifiers are only hints. Continue from hints.raw_text and extract missing values manually instead of assuming they are absent."
-      : "Identifier hints look complete. Still use hints.raw_text as the source of truth for the full invoice."
-  };
 }
 
 export function summarizeInvoiceExtraction(snapshot: InvoiceExtractionSnapshot): InvoiceExtractionFallback {

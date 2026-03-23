@@ -19,13 +19,6 @@ export class ClientsApi extends BaseResource<Client> {
     return result;
   }
 
-  /** Not in OpenAPI spec — endpoint may not exist on all API versions */
-  async merge(targetId: number, sourceId: number): Promise<ApiResponse> {
-    const result = await this.client.post<ApiResponse>(`/clients/${targetId}/merge/${sourceId}`, {});
-    this.invalidateCache();
-    return result;
-  }
-
   async findByName(name: string): Promise<Client[]> {
     const all = await this.listAll();
     const lower = name.toLowerCase();
@@ -37,12 +30,4 @@ export class ClientsApi extends BaseResource<Client> {
     return all.find(c => c.code === code && !c.is_deleted);
   }
 
-  async findByVatNo(vatNo: string): Promise<Client | undefined> {
-    const normalized = vatNo.replace(/\s+/g, "").toUpperCase();
-    const all = await this.listAll();
-    return all.find(c =>
-      !c.is_deleted &&
-      c.invoice_vat_no?.replace(/\s+/g, "").toUpperCase() === normalized
-    );
-  }
 }

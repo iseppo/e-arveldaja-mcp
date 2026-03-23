@@ -6,7 +6,7 @@ import type { Transaction, SaleInvoice, PurchaseInvoice, BankAccount } from "../
 import { readOnly, batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
+import { buildBankAccountLookups, buildInterAccountJournalIndex } from "./inter-account-utils.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -390,26 +390,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       const unconfirmed = allTx.filter(isProjectTransaction);
       const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
 
-      // Build lookup: IBAN → accounts_dimensions_id for own bank accounts
-      const ownIbanToDimension = new Map<string, number>();
-      const dimensionToIban = new Map<number, string>();
-      const dimensionToTitle = new Map<number, string>();
-      const dimensionToAccountsId = new Map<number, number>();
-      for (const ba of bankAccounts) {
-        const iban = (ba.iban_code ?? ba.account_no ?? "").trim().toUpperCase();
-        if (iban && ba.accounts_dimensions_id) {
-          ownIbanToDimension.set(iban, ba.accounts_dimensions_id);
-          dimensionToIban.set(ba.accounts_dimensions_id, iban);
-          dimensionToTitle.set(ba.accounts_dimensions_id, ba.account_name_est);
-        }
-      }
-      // Map dimension IDs to their parent accounts_id
-      for (const dim of accountDimensions) {
-        if (dim.id && !dim.is_deleted) {
-          dimensionToAccountsId.set(dim.id, dim.accounts_id);
-        }
-      }
-      const ownDimensionIds = new Set(dimensionToIban.keys());
+      const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds } =
+        buildBankAccountLookups(bankAccounts, accountDimensions);
 
       // Split by type
       const outgoing = unconfirmed.filter(tx => tx.type === "C");
