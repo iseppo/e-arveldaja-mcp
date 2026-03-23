@@ -308,16 +308,6 @@ function findDuplicateTransactionIds(
   for (const id of lookup.byBankRef.get(bankReference) ?? []) {
     matches.add(id);
   }
-  for (const id of lookup.byRefNumber.get(bankReference) ?? []) {
-    matches.add(id);
-  }
-
-  const lower = bankReference.toLowerCase();
-  for (const transaction of lookup.descriptions) {
-    if (transaction.description.includes(lower)) {
-      matches.add(transaction.id);
-    }
-  }
 
   return [...matches].sort((left, right) => left - right);
 }

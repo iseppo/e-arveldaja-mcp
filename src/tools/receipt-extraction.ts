@@ -260,6 +260,9 @@ function parseAmount(raw: string): number | undefined {
     normalized = normalized.replace(/\./g, "").replace(",", ".");
   } else if ((normalized.match(/\./g) ?? []).length > 1) {
     normalized = normalized.replace(/\./g, "");
+  } else if (/^\d{1,3}\.\d{3}$/.test(normalized)) {
+    // Single dot as thousands separator (e.g., "1.000" → "1000")
+    normalized = normalized.replace(".", "");
   }
 
   const parsed = Number(normalized);

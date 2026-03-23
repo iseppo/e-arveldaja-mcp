@@ -9,6 +9,7 @@ import { batch } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { parseCSV } from "../csv.js";
+import { roundMoney } from "../money.js";
 import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
 
 interface WiseRow {
@@ -597,7 +598,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             }
 
             for (const entry of transferEntries) {
-              const roundedAmount = Math.round(entry.amount * 100) / 100;
+              const roundedAmount = roundMoney(entry.amount);
               // Check both directions for existing journal
               const key1 = `${accounts_dimensions_id}|${targetDimensionId}|${roundedAmount}|${entry.date}`;
               const key2 = `${targetDimensionId}|${accounts_dimensions_id}|${roundedAmount}|${entry.date}`;

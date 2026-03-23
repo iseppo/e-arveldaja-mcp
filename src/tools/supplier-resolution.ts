@@ -1,4 +1,4 @@
-import { closest } from "fastest-levenshtein";
+import { closest, distance } from "fastest-levenshtein";
 import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import {
@@ -52,7 +52,11 @@ export async function fetchRegistryData(regCode?: string, country = "EST", fallb
 
     if (!response.ok) return null;
 
-    const data = await response.json() as Array<Record<string, unknown>>;
+    const contentLength = Number(response.headers.get("content-length") ?? "0");
+    if (contentLength > 64 * 1024) return null;
+    const text = await response.text();
+    if (text.length > 64 * 1024) return null;
+    const data = JSON.parse(text) as Array<Record<string, unknown>>;
     const entry = data[0];
     if (!entry) return null;
 
@@ -107,8 +111,11 @@ export async function resolveSupplierInternal(
     if (names.length > 0) {
       const bestMatch = closest(fields.supplier_name, names);
       const matchedClient = activeClients.find(client => client.name === bestMatch);
+      const maxLen = Math.max(fields.supplier_name.length, bestMatch.length);
+      const similarity = maxLen > 0 ? 1 - distance(fields.supplier_name, bestMatch) / maxLen : 0;
       if (
         matchedClient &&
+        similarity >= 0.5 &&
         (
           bestMatch.toLowerCase().includes(fields.supplier_name.toLowerCase()) ||
           fields.supplier_name.toLowerCase().includes(bestMatch.toLowerCase())

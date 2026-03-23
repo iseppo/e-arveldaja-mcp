@@ -662,7 +662,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
 
   const currentAssets = buildStatementLine("Käibevara", yearEndBalances, (balance) =>
     balance.account_type_est === "Varad" &&
-    (hasPrefix(balance.account_id, "10") || hasPrefix(balance.account_id, "12") || hasPrefix(balance.account_id, "15") || hasPrefix(balance.account_id, "16")),
+    (hasPrefix(balance.account_id, "10") || hasPrefix(balance.account_id, "12") || hasPrefix(balance.account_id, "13") || hasPrefix(balance.account_id, "14") || hasPrefix(balance.account_id, "15") || hasPrefix(balance.account_id, "16")),
   );
   const nonCurrentAssets = buildStatementLine("Põhivara", yearEndBalances, (balance) =>
     balance.account_type_est === "Varad" &&

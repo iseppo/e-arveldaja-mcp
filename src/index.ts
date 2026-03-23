@@ -271,7 +271,7 @@ Reporting:
         });
       } catch (error) {
         log("error", `Tool handler error: ${error instanceof Error ? error.message : String(error)}`);
-        if (error instanceof Error && error.stack) {
+        if (process.env.EARVELDAJA_DEBUG === "true" && error instanceof Error && error.stack) {
           process.stderr.write(`[debug] ${error.stack}\n`);
         }
         return toolError(error);

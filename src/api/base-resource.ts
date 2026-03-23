@@ -26,7 +26,8 @@ export class BaseResource<T> {
   }
 
   async list(params?: ListParams): Promise<PaginatedResponse<T>> {
-    const cacheKey = this.cacheKey(`${this.basePath}:list:${JSON.stringify(params ?? {})}`);
+    const sortedParams = params ? Object.keys(params).sort().map(k => `${k}=${(params as Record<string, unknown>)[k]}`).join("&") : "";
+    const cacheKey = this.cacheKey(`${this.basePath}:list:${sortedParams}`);
     const cached = cache.get<PaginatedResponse<T>>(cacheKey);
     if (cached) return cached;
 
@@ -39,8 +40,15 @@ export class BaseResource<T> {
     const allItems: T[] = [];
     let page = 1;
     let totalPages = 1;
+    const deadline = Date.now() + 300_000; // 5 minute overall timeout
 
     do {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `${this.basePath}: pagination timed out after 5 minutes (${allItems.length} items loaded from ${page - 1} pages). ` +
+          `Use date filters to narrow the query.`
+        );
+      }
       if (page > maxPages) {
         throw new Error(
           `Data exceeds ${maxPages} pages (${allItems.length} items loaded). ` +
@@ -48,7 +56,7 @@ export class BaseResource<T> {
         );
       }
       const response = await this.list({ ...params, page });
-      allItems.push(...response.items);
+      allItems.push(...(response.items ?? []));
       totalPages = response.total_pages;
       if (totalPages > 1 && page === 1) {
         log("info", `${this.basePath}: fetching ${totalPages} pages...`);

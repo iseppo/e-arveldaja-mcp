@@ -639,10 +639,17 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               await ensureClientsId(txIn.id!, txIn.bank_account_name);
               await api.transactions.confirm(txIn.id!, [buildAccountDistribution(txOut.accounts_dimensions_id, txIn.amount)]);
             } catch (err2: unknown) {
-              // Outgoing confirmed but incoming failed — partial confirmation
+              // Outgoing confirmed but incoming failed — attempt to roll back outgoing
+              let rollbackMsg = "";
+              try {
+                await api.transactions.invalidate(txOut.id);
+                rollbackMsg = ` Outgoing ${txOut.id} was automatically invalidated.`;
+              } catch (rollbackErr: unknown) {
+                rollbackMsg = ` Automatic invalidation of ${txOut.id} also failed: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}. Manual invalidation required.`;
+              }
               errors.push({
                 transaction_ids: [txOut.id, txIn.id!],
-                reason: `PARTIAL: outgoing ${txOut.id} confirmed, but incoming ${txIn.id} failed: ${err2 instanceof Error ? err2.message : String(err2)}. Invalidate ${txOut.id} to roll back.`,
+                reason: `PARTIAL: outgoing ${txOut.id} confirmed, but incoming ${txIn.id} failed: ${err2 instanceof Error ? err2.message : String(err2)}.${rollbackMsg}`,
               });
               continue;
             }

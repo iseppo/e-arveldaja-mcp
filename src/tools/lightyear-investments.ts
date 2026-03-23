@@ -663,7 +663,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
           const costBasis = roundMoney(gainEntry.cost_basis_eur);
           const proceeds = roundMoney(gainEntry.proceeds_eur);
-          const gainLoss = roundMoney(gainEntry.capital_gains_eur);
+          // Derive gain/loss so the journal balances by construction (CSV columns are independently rounded)
+          const gainLoss = roundMoney(proceeds - costBasis);
 
           // Dr broker_account: proceeds (what we receive)
           // Cr investment_account: cost_basis (what we originally paid)
@@ -874,7 +875,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         }
 
         // Cr income_account: gross amount (net + tax + fee)
-        const creditAmount = dist.net_amount + dist.tax_amount + dist.fee;
+        const creditAmount = roundMoney(dist.net_amount + dist.tax_amount + dist.fee);
         postings.push({ accounts_id: income_account, type: "C", amount: creditAmount });
 
         const title = `Lightyear tulu: ${dist.ticker} (${dist.isin})`;

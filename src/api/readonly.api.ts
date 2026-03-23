@@ -48,7 +48,7 @@ async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promis
         throw new Error(`Reference data ${path} exceeds ${maxPages} pages (${allItems.length} items loaded).`);
       }
       const next = await client.get<PaginatedResponse<T>>(path, { page });
-      allItems.push(...next.items);
+      allItems.push(...(next.items ?? []));
       page++;
     }
   } else {
