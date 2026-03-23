@@ -816,12 +816,40 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const closingTaxLiabilities = sumStatementBalances(yearEndBalances, (balance) =>
     balance.account_type_est === "Kohustused" && hasPrefix(balance.account_id, "25"),
   );
+  const openingShortTermInvestments = sumStatementBalances(priorYearEndBalances, (balance) =>
+    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "13"),
+  );
+  const closingShortTermInvestments = sumStatementBalances(yearEndBalances, (balance) =>
+    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "13"),
+  );
+  const openingOtherReceivables = sumStatementBalances(priorYearEndBalances, (balance) =>
+    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "14"),
+  );
+  const closingOtherReceivables = sumStatementBalances(yearEndBalances, (balance) =>
+    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "14"),
+  );
+  const openingShortTermLiabilities = sumStatementBalances(priorYearEndBalances, (balance) =>
+    balance.account_type_est === "Kohustused" && (hasPrefix(balance.account_id, "20") || hasPrefix(balance.account_id, "21")),
+  );
+  const closingShortTermLiabilities = sumStatementBalances(yearEndBalances, (balance) =>
+    balance.account_type_est === "Kohustused" && (hasPrefix(balance.account_id, "20") || hasPrefix(balance.account_id, "21")),
+  );
+  const openingAccruedLiabilities = sumStatementBalances(priorYearEndBalances, (balance) =>
+    balance.account_type_est === "Kohustused" && hasPrefix(balance.account_id, "29"),
+  );
+  const closingAccruedLiabilities = sumStatementBalances(yearEndBalances, (balance) =>
+    balance.account_type_est === "Kohustused" && hasPrefix(balance.account_id, "29"),
+  );
 
   const receivablesAdjustment = roundMoney(openingReceivables - closingReceivables);
   const inventoriesAdjustment = roundMoney(openingInventories - closingInventories);
   const prepaymentsAdjustment = roundMoney(openingPrepayments - closingPrepayments);
   const payablesAdjustment = roundMoney(closingPayables - openingPayables);
   const taxLiabilitiesAdjustment = roundMoney(closingTaxLiabilities - openingTaxLiabilities);
+  const shortTermInvestmentsAdjustment = roundMoney(openingShortTermInvestments - closingShortTermInvestments);
+  const otherReceivablesAdjustment = roundMoney(openingOtherReceivables - closingOtherReceivables);
+  const shortTermLiabilitiesAdjustment = roundMoney(closingShortTermLiabilities - openingShortTermLiabilities);
+  const accruedLiabilitiesAdjustment = roundMoney(closingAccruedLiabilities - openingAccruedLiabilities);
   const netCashFromOperatingActivities = roundMoney(
     netProfit +
     depreciationLine.amount +
@@ -829,7 +857,11 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     inventoriesAdjustment +
     prepaymentsAdjustment +
     payablesAdjustment +
-    taxLiabilitiesAdjustment,
+    taxLiabilitiesAdjustment +
+    shortTermInvestmentsAdjustment +
+    otherReceivablesAdjustment +
+    shortTermLiabilitiesAdjustment +
+    accruedLiabilitiesAdjustment,
   );
 
   const cashFlowClassification = computeCashFlowClassification(allJournals, accountsById, from, to);
@@ -957,10 +989,14 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         net_profit: netProfit,
         depreciation_and_impairment: depreciationLine.amount,
         change_in_receivables: receivablesAdjustment,
+        change_in_other_receivables: otherReceivablesAdjustment,
+        change_in_short_term_investments: shortTermInvestmentsAdjustment,
         change_in_inventories: inventoriesAdjustment,
         change_in_prepayments: prepaymentsAdjustment,
         change_in_payables: payablesAdjustment,
+        change_in_short_term_liabilities: shortTermLiabilitiesAdjustment,
         change_in_tax_liabilities: taxLiabilitiesAdjustment,
+        change_in_accrued_liabilities: accruedLiabilitiesAdjustment,
         net_cash_from_operating_activities: netCashFromOperatingActivities,
       },
       investing_activities: {
