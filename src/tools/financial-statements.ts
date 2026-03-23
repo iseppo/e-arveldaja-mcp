@@ -349,7 +349,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             overdue_receivables: {
               count: overdueReceivables.length,
-              total: roundMoney(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + (effectiveGross(inv)), 0)),
+              total: roundMoney(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + effectiveGross(inv), 0)),
               items: overdueReceivables.slice(0, 10).map((inv: SaleInvoice) => ({
                 id: inv.id,
                 number: inv.number,
@@ -360,7 +360,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             overdue_payables: {
               count: overduePayables.length,
-              total: roundMoney(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + (effectiveGross(inv)), 0)),
+              total: roundMoney(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + effectiveGross(inv), 0)),
               items: overduePayables.slice(0, 10).map((inv: PurchaseInvoice) => ({
                 id: inv.id,
                 number: inv.number,

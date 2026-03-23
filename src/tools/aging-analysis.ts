@@ -106,7 +106,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
           type: "text",
           text: JSON.stringify({
             as_of_date: today,
-            total_unpaid: r(unpaid.reduce((s: number, inv: SaleInvoice) => s + (effectiveGross(inv)), 0)),
+            total_unpaid: r(unpaid.reduce((s: number, inv: SaleInvoice) => s + effectiveGross(inv), 0)),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sortedBuckets,
@@ -188,7 +188,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
           type: "text",
           text: JSON.stringify({
             as_of_date: today,
-            total_unpaid: r(unpaid.reduce((s: number, inv: PurchaseInvoice) => s + (effectiveGross(inv)), 0)),
+            total_unpaid: r(unpaid.reduce((s: number, inv: PurchaseInvoice) => s + effectiveGross(inv), 0)),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sortedBuckets,

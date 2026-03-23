@@ -6,7 +6,7 @@
 export const roundMoney = (v: number): number => {
   if (v === 0) return 0;
   if (Number.isNaN(v)) throw new Error("roundMoney received NaN — indicates a bug in the caller");
-  if (!Number.isFinite(v)) throw new Error("roundMoney received Infinity — indicates a bug in the caller (e.g. division by zero)");
+  if (!Number.isFinite(v)) throw new Error("roundMoney received a non-finite value — indicates a bug in the caller");
   const abs = Math.abs(v);
 
   // Once the scaled value reaches 1e21, Number stringification switches to
