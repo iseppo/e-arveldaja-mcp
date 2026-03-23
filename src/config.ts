@@ -1,8 +1,6 @@
 import dotenv from "dotenv";
 import { resolve } from "path";
 import { readFileSync, existsSync, statSync, readdirSync, realpathSync, lstatSync } from "fs";
-import { getProjectRoot } from "./paths.js";
-
 export interface Config {
   apiKeyId: string;
   apiPublicValue: string;
@@ -21,7 +19,7 @@ const SERVERS = {
   demo: "https://demo-rmp-api.rik.ee/v1",
 } as const;
 
-const PACKAGE_ROOT = getProjectRoot();
+const CWD = process.cwd();
 
 function getBaseUrl(): string {
   const server = process.env.EARVELDAJA_SERVER || "live";
@@ -88,11 +86,11 @@ function toUniqueDirs(dirs: string[]): string[] {
 
 export function getConfigSearchDirs(
   scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true",
-  packageRoot = PACKAGE_ROOT,
+  workingDir = CWD,
 ): string[] {
-  const dirs = [packageRoot];
+  const dirs = [workingDir];
   if (scanParent) {
-    dirs.push(resolve(packageRoot, ".."));
+    dirs.push(resolve(workingDir, ".."));
   }
   return toUniqueDirs(dirs);
 }

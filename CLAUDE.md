@@ -13,13 +13,13 @@ npm run dev            # tsx src/index.ts (development)
 
 ## Credentials
 
-All `apikey*.txt` files are scanned from the project root and its parent directory. Multiple files = multiple connections (companies).
+All `apikey*.txt` files are scanned from the working directory (where the server is launched). Multiple files = multiple connections (companies).
 
 Credentials are loaded in this priority order (see `src/config.ts`):
 
 1. **Environment variables**: `EARVELDAJA_API_KEY_ID`, `EARVELDAJA_API_PUBLIC_VALUE`, `EARVELDAJA_API_PASSWORD`
 2. **`EARVELDAJA_API_KEY_FILE`** env var pointing to a specific file
-3. **`apikey*.txt` files** — scanned from the project root. Set `EARVELDAJA_SCAN_PARENT=true` to also scan the parent directory.
+3. **`apikey*.txt` files** — scanned from the working directory. Set `EARVELDAJA_SCAN_PARENT=true` to also scan the parent directory.
 
 The `apikey.txt` format:
 ```
