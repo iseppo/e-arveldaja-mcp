@@ -387,14 +387,28 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   registerTool(server, "parse_lightyear_statement",
     "Parse a Lightyear account statement CSV. Extracts investment trades (Buy/Sell), " +
     "distributions, deposits, withdrawals. Filters out BRICEKSP money market fund trades. " +
-    "Pairs foreign currency trades with their FX conversion entries.",
+    "Pairs foreign currency trades with their FX conversion entries. " +
+    "Returns summary by default — set include_rows=true for individual trade/distribution details.",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
+      date_from: z.string().optional().describe("Only include entries from this date (YYYY-MM-DD)"),
+      date_to: z.string().optional().describe("Only include entries up to this date (YYYY-MM-DD)"),
+      include_rows: z.boolean().optional().describe("Include individual trade/distribution rows (default false — summary only)"),
     },
     { ...readOnly, openWorldHint: true, title: "Parse Lightyear Account Statement" },
-    async ({ file_path }) => {
+    async ({ file_path, date_from, date_to, include_rows }) => {
       const csv = await readCsvFile(file_path);
-      const rows = parseAccountStatement(csv);
+      let rows = parseAccountStatement(csv);
+
+      // Apply date filters
+      if (date_from || date_to) {
+        rows = rows.filter(r => {
+          const d = parseLightyearDate(r.date);
+          if (date_from && d < date_from) return false;
+          if (date_to && d > date_to) return false;
+          return true;
+        });
+      }
       const { trades, warnings: fxWarnings } = extractTrades(rows);
       const distributions = extractDistributions(rows);
 
@@ -442,14 +456,17 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           type: "text",
           text: JSON.stringify({
             total_rows: rows.length,
+            ...(date_from && { date_from }),
+            ...(date_to && { date_to }),
             trades: {
               count: trades.length,
-              items: trades,
+              ...(include_rows && { items: trades }),
               by_ticker: summary,
             },
             distributions: {
               count: distributions.length,
-              items: distributions,
+              ...(include_rows && { items: distributions }),
+              total_eur: roundMoney(distributions.reduce((s, d) => s + d.gross_amount, 0)),
             },
             deposits: {
               count: deposits.length,
@@ -464,8 +481,9 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               total_eur: roundMoney(rewards.reduce((s, r) => s + r.gross_amount, 0)),
             },
             ...(warnings.length > 0 && { warnings }),
-            note: "Review trades and use book_lightyear_trades to create journal entries. " +
-              "BRICEKSP trades (money market cash fund) are excluded — they are internal Lightyear cash management.",
+            note: include_rows
+              ? "Review trades and use book_lightyear_trades to create journal entries. BRICEKSP trades (money market cash fund) are excluded."
+              : "Summary only. Use include_rows=true for individual trade details, or date_from/date_to to narrow the range.",
           }, null, 2),
         }],
       };
