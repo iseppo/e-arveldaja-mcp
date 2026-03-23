@@ -81,17 +81,21 @@ describe("validateFilePath", () => {
     }
   });
 
-  it("warns when the default broad file-access scope is in use", () => {
+  it("warns with default roots (project parent + /tmp) when no paths configured", () => {
     const previous = process.env.EARVELDAJA_ALLOWED_PATHS;
+    const previousHome = process.env.EARVELDAJA_ALLOW_HOME;
     delete process.env.EARVELDAJA_ALLOWED_PATHS;
+    delete process.env.EARVELDAJA_ALLOW_HOME;
     try {
       const warning = getAllowedRootsStartupWarning();
-      expect(warning).toContain("EARVELDAJA_ALLOWED_PATHS is not set");
       expect(warning).toContain("/tmp");
-      expect(warning).toContain("restrict file access");
+      expect(warning).toContain("EARVELDAJA_ALLOWED_PATHS");
+      expect(warning).toContain("EARVELDAJA_ALLOW_HOME");
     } finally {
       if (previous === undefined) delete process.env.EARVELDAJA_ALLOWED_PATHS;
       else process.env.EARVELDAJA_ALLOWED_PATHS = previous;
+      if (previousHome === undefined) delete process.env.EARVELDAJA_ALLOW_HOME;
+      else process.env.EARVELDAJA_ALLOW_HOME = previousHome;
     }
   });
 

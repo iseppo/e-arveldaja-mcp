@@ -11,11 +11,22 @@ function resolveAllowedRoots(roots: string[]): string[] {
 }
 
 /**
- * Allowed root directories for file reads. Configurable via EARVELDAJA_ALLOWED_PATHS
- * (colon-separated list). Defaults to $HOME and /tmp.
+ * Default root directories for file reads: project parent dir + /tmp.
+ * Set EARVELDAJA_ALLOW_HOME=true to also include $HOME.
+ * Override entirely with EARVELDAJA_ALLOWED_PATHS (colon-separated list).
  * Roots are resolved through symlinks so that the check works even if
  * e.g. /tmp is a symlink to /private/tmp (macOS).
  */
+function getDefaultRoots(): string[] {
+  const projectParent = resolve(getProjectRoot(), "..");
+  const roots = [projectParent, "/tmp"];
+  if (process.env.EARVELDAJA_ALLOW_HOME === "true") {
+    const home = homedir();
+    if (!roots.includes(home)) roots.push(home);
+  }
+  return roots;
+}
+
 export function getAllowedRoots(): string[] {
   const raw = process.env.EARVELDAJA_ALLOWED_PATHS
     ? process.env.EARVELDAJA_ALLOWED_PATHS.split(":").map(p => {
@@ -25,7 +36,7 @@ export function getAllowedRoots(): string[] {
         }
         return resolved;
       })
-    : [homedir(), "/tmp"];
+    : getDefaultRoots();
 
   return resolveAllowedRoots(raw);
 }
@@ -33,10 +44,9 @@ export function getAllowedRoots(): string[] {
 export function getAllowedRootsStartupWarning(): string | undefined {
   if (process.env.EARVELDAJA_ALLOWED_PATHS) return undefined;
 
-  const roots = resolveAllowedRoots([homedir(), "/tmp"]);
-  return "WARNING: EARVELDAJA_ALLOWED_PATHS is not set. " +
-    `File-reading tools can access supported files anywhere under ${roots.join(", ")}. ` +
-    "Set EARVELDAJA_ALLOWED_PATHS to restrict file access to specific document folders.";
+  const roots = resolveAllowedRoots(getDefaultRoots());
+  return `File-reading tools can access supported files under ${roots.join(", ")}. ` +
+    "Set EARVELDAJA_ALLOWED_PATHS to restrict, or EARVELDAJA_ALLOW_HOME=true to also include $HOME.";
 }
 
 /**
