@@ -111,7 +111,7 @@ export class HttpClient {
             signal: controller.signal,
           });
         } catch (error) {
-          if (method === "GET" && HttpClient.isRetryableError(error) && attempt < MAX_RETRIES) {
+          if (HttpClient.isRetryableError(error) && attempt < MAX_RETRIES) {
             this.assertRequestAllowed();
             await HttpClient.sleep(INITIAL_RETRY_DELAY_MS * (2 ** attempt));
             continue;

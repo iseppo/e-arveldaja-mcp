@@ -502,8 +502,9 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               // Auto-confirm fee to expense account
               if (feeId && wiseClientId) {
                 try {
+                  if (!feeAccountDimensionsId) throw new Error("Fee account dimension ID is undefined — should not happen when hasFeeRows is true");
                   await api.transactions.confirm(feeId, [
-                    buildAccountDistributionFromDimension(accountDimensions, feeAccountDimensionsId!, fee),
+                    buildAccountDistributionFromDimension(accountDimensions, feeAccountDimensionsId, fee),
                   ]);
                   created.push({
                     wise_id: `FEE:${row.id}`,

@@ -353,6 +353,9 @@ function matchSellsToCapitalGains(
           Math.abs(gain.quantity - sell.quantity) < 0.000001) {
         // Proceeds tiebreaker (0.02 EUR tolerance for FX rounding)
         if (Math.abs(gain.proceeds_eur - sell.eur_amount) < 0.02) {
+          if (matchIdx !== -1 && !consumedGains.has(matchIdx)) {
+            ambiguousCount++; // exact-duplicate gains row
+          }
           matchIdx = i;
           break; // Exact match on all four criteria
         }

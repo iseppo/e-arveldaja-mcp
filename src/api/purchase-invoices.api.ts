@@ -112,15 +112,19 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         await this.invalidate(id);
       } catch (invalidateError) {
         const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
-        throw new Error(
+        const err = new Error(
           `Purchase invoice ${id} was created but follow-up failed: ${followUpMessage}. ` +
           `Automatic invalidation also failed: ${invalidateMessage}`
         );
+        (err as any).invoiceId = id;
+        throw err;
       }
 
-      throw new Error(
+      const err = new Error(
         `Purchase invoice ${id} was created but follow-up failed and the draft was invalidated: ${followUpMessage}`
       );
+      (err as any).invoiceId = id;
+      throw err;
     }
   }
 
