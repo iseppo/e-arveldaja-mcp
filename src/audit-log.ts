@@ -6,7 +6,6 @@
 
 import { appendFileSync, readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
-import { getProjectRoot } from "./paths.js";
 
 export interface AuditEntry {
   timestamp: string;
@@ -33,7 +32,7 @@ export function initAuditLog(getConnectionName: () => string): void {
 }
 
 function sanitizeFileName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 200);
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_").substring(0, 200);
 }
 
 function getLogFilePath(): string {
@@ -94,18 +93,22 @@ function entityLabel(entityType: string): string {
 
 function formatTimestamp(iso: string): string {
   // "2026-03-24T10:15:32.123Z" → "2026-03-24 10:15:32"
-  return iso.replace("T", " ").replace(/\.\d+Z$/, "");
+  return iso.replace("T", " ").replace(/\.\d+Z$|Z$/, "");
 }
 
 // ---------------------------------------------------------------------------
 // Markdown rendering
 // ---------------------------------------------------------------------------
 
+function escapeMarkdown(s: string): string {
+  return s.replace(/[|*_`[\]\\]/g, "\\$&");
+}
+
 function renderPostingsTable(postings: unknown): string {
   if (!Array.isArray(postings) || postings.length === 0) return "";
   const rows = postings.map((p: Record<string, unknown>) => {
     const account = String(p.account_name ?? p.accounts_id ?? "");
-    const type = p.type === "D" ? "D" : "K";
+    const type = p.type === "D" ? "D" : p.type === "C" ? "K" : String(p.type);
     const amount = typeof p.amount === "number" ? p.amount.toFixed(2) : String(p.amount ?? "");
     return `| ${account} | ${type} | ${amount} |`;
   });
@@ -120,17 +123,17 @@ function renderDetails(entry: Omit<AuditEntry, "timestamp"> & { timestamp: strin
 
   // Supplier / client info
   if (d.client_name || d.supplier_name) {
-    const name = String(d.client_name ?? d.supplier_name ?? "");
-    const reg = d.reg_code ? ` (reg: ${d.reg_code})` : "";
+    const name = escapeMarkdown(String(d.client_name ?? d.supplier_name ?? ""));
+    const reg = d.reg_code ? ` (reg: ${escapeMarkdown(String(d.reg_code))})` : "";
     lines.push(`**${entry.entity_type === "purchase_invoice" ? l("supplier") : l("client")}:** ${name}${reg}`);
   }
   if (d.name && (entry.entity_type === "client" || entry.entity_type === "product")) {
-    lines.push(`**${l("name")}:** ${d.name}`);
+    lines.push(`**${l("name")}:** ${escapeMarkdown(String(d.name))}`);
   }
 
   // Invoice number
   if (d.invoice_number) {
-    lines.push(`**${l("invoice_no")}:** ${d.invoice_number}`);
+    lines.push(`**${l("invoice_no")}:** ${escapeMarkdown(String(d.invoice_number))}`);
   }
 
   // Dates
@@ -167,7 +170,7 @@ function renderDetails(entry: Omit<AuditEntry, "timestamp"> & { timestamp: strin
 
   // Description
   if (d.description && !d.client_name && !d.supplier_name) {
-    lines.push(`**${l("description")}:** ${d.description}`);
+    lines.push(`**${l("description")}:** ${escapeMarkdown(String(d.description))}`);
   }
 
   // Items
@@ -195,7 +198,7 @@ function renderDetails(entry: Omit<AuditEntry, "timestamp"> & { timestamp: strin
 
   // File
   if (d.file_name) {
-    lines.push(`**${l("file")}:** ${d.file_name}`);
+    lines.push(`**${l("file")}:** ${escapeMarkdown(String(d.file_name))}`);
   }
 
   // Warnings
@@ -263,9 +266,7 @@ export interface AuditLogFilter {
   limit?: number;
 }
 
-/** Read the current connection's audit log. Returns raw Markdown content. */
-export function getAuditLog(filter?: AuditLogFilter): string {
-  const filePath = getLogFilePath();
+function getAuditLogFromFile(filePath: string, filter?: AuditLogFilter): string {
   if (!existsSync(filePath)) return "";
 
   let content: string;
@@ -317,6 +318,11 @@ export function getAuditLog(filter?: AuditLogFilter): string {
   return filtered.join(ENTRY_SEPARATOR) + (filtered.length > 0 ? ENTRY_SEPARATOR : "");
 }
 
+/** Read the current connection's audit log. Returns raw Markdown content. */
+export function getAuditLog(filter?: AuditLogFilter): string {
+  return getAuditLogFromFile(getLogFilePath(), filter);
+}
+
 /** Clear the current connection's audit log file. */
 export function clearAuditLog(): void {
   const filePath = getLogFilePath();
@@ -356,12 +362,5 @@ export function listAuditLogs(): Array<{ connection: string; file: string; entri
 /** Read a specific connection's audit log (not just the active one). */
 export function getAuditLogByConnection(connectionName: string, filter?: AuditLogFilter): string {
   const filePath = join(LOGS_DIR, `${sanitizeFileName(connectionName)}.audit.md`);
-  if (!existsSync(filePath)) return "";
-
-  // Temporarily override the getter to read the requested file
-  const originalGetter = activeConnectionNameGetter;
-  activeConnectionNameGetter = () => connectionName;
-  const result = getAuditLog(filter);
-  activeConnectionNameGetter = originalGetter;
-  return result;
+  return getAuditLogFromFile(filePath, filter);
 }

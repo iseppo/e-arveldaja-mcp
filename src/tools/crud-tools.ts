@@ -11,7 +11,7 @@ import type { ReferenceDataApi } from "../api/readonly.api.js";
 import type { Posting, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem, CreatePurchaseInvoiceData } from "../types/api.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { readOnly, create, mutate, destructive, send } from "../annotations.js";
-import { logAudit, getAuditLog, clearAuditLog } from "../audit-log.js";
+import { logAudit } from "../audit-log.js";
 
 export interface ApiContext {
   clients: ClientsApi;

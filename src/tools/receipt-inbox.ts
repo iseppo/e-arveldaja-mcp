@@ -670,6 +670,12 @@ async function createAndMaybeMatchPurchaseInvoice(
       await api.purchaseInvoices.uploadDocument(createdInvoice.id, file.name, contents);
       uploadedDocument = true;
       notes.push("Uploaded source document to created purchase invoice.");
+      logAudit({
+        tool: "process_receipt_batch", action: "UPLOADED", entity_type: "purchase_invoice",
+        entity_id: createdInvoice.id,
+        summary: `Uploaded document "${file.name}" to purchase invoice ${createdInvoice.id}`,
+        details: { file_name: file.name },
+      });
     } catch (error) {
       return rollbackCreatedInvoice("source document upload failed", error);
     }
@@ -681,6 +687,12 @@ async function createAndMaybeMatchPurchaseInvoice(
         preserveExistingTotals: true,
       });
       notes.push("Confirmed created purchase invoice for booking and bank matching.");
+      logAudit({
+        tool: "process_receipt_batch", action: "CONFIRMED", entity_type: "purchase_invoice",
+        entity_id: createdInvoice.id,
+        summary: `Confirmed purchase invoice ${createdInvoice.id} (${createdInvoice.number ?? ""})`,
+        details: { invoice_number: createdInvoice.number, file_name: file.name },
+      });
     } catch (error) {
       return rollbackCreatedInvoice("invoice confirmation failed", error);
     }
@@ -1340,6 +1352,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               try {
                 await api.purchaseInvoices.confirmWithTotals(invoice.id, isVatRegistered, {
                   preserveExistingTotals: true,
+                });
+                logAudit({
+                  tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "purchase_invoice",
+                  entity_id: invoice.id,
+                  summary: `Auto-confirmed purchase invoice ${invoice.id} for transaction ${transaction.id}`,
+                  details: { invoice_id: invoice.id, transaction_id: transaction.id },
                 });
                 await api.transactions.confirm(transaction.id!, [{
                   related_table: "purchase_invoices",

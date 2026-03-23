@@ -174,6 +174,12 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
               await api.saleInvoices.confirm(result.created_object_id);
               confirmed = true;
               status = "confirmed";
+              logAudit({
+                tool: "clone_sale_invoice", action: "CONFIRMED", entity_type: "sale_invoice",
+                entity_id: result.created_object_id,
+                summary: `Confirmed cloned sale invoice #${result.created_object_id} (${full.client_name}) for ${target_date}`,
+                details: { source_id: source.id, client_name: full.client_name, date: target_date },
+              });
             } catch (err: unknown) {
               confirmError = err instanceof Error ? err.message : String(err);
               status = "confirm_error";

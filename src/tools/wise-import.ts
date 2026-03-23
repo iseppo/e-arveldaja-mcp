@@ -519,6 +519,12 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                   await api.transactions.confirm(feeId, [
                     buildAccountDistributionFromDimension(accountDimensions, feeAccountDimensionsId, fee),
                   ]);
+                  logAudit({
+                    tool: "import_wise_transactions", action: "CONFIRMED", entity_type: "transaction",
+                    entity_id: feeId,
+                    summary: `Auto-confirmed Wise fee transaction ${feeId}: ${fee} ${feeCurrency} on ${date}`,
+                    details: { amount: fee, currency: feeCurrency, date, description: feeDesc },
+                  });
                   created.push({
                     wise_id: `FEE:${row.id}`,
                     date, type: feeType, amount: fee, description: feeDesc,

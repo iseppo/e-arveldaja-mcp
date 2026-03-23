@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { ApiContext } from "./crud-tools.js";
+import { logAudit } from "../audit-log.js";
 import type { Account, Client, Journal, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { computeAllBalances, type AccountBalance } from "./financial-statements.js";
 import { roundMoney, effectiveGross } from "../money.js";
@@ -1154,6 +1155,16 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
             type: posting.type,
             amount: posting.amount,
           })),
+        });
+        logAudit({
+          tool: "create_annual_closing_entries", action: "CREATED", entity_type: "journal",
+          entity_id: result.created_object_id,
+          summary: `Created year-end closing journal "${proposal.title}" for ${proposal.effective_date}`,
+          details: {
+            effective_date: proposal.effective_date,
+            document_number: proposal.document_number,
+            postings: proposal.postings,
+          },
         });
 
         created.push({

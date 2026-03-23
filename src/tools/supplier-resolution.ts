@@ -1,6 +1,7 @@
 import { closest, distance } from "fastest-levenshtein";
 import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
+import { logAudit } from "../audit-log.js";
 import {
   type ExtractedReceiptFields,
   type TransactionClassificationCategory,
@@ -171,6 +172,12 @@ export async function resolveSupplierInternal(
   if (client) {
     clients.push(client);
   }
+  logAudit({
+    tool: "resolve_supplier", action: "CREATED", entity_type: "client",
+    entity_id: createdId,
+    summary: `Created client "${previewClient.name}" (reg: ${fields.supplier_reg_code ?? ""})`,
+    details: { name: previewClient.name, reg_code: fields.supplier_reg_code },
+  });
 
   return {
     found: false,
