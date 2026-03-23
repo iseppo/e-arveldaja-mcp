@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.9.3] - 2026-03-23
+
+### Changed
+- **File access roots tightened** — file-reading tools now default to the working directory (and its subdirectories) + `/tmp`. Previously the default was the entire home directory. Set `EARVELDAJA_ALLOW_HOME=true` to restore the old behavior, or use `EARVELDAJA_ALLOWED_PATHS` for a custom allowlist.
+
+### Fixed
+- **`.env` symlink/permission blocking** — insecure `.env` files (symlinked or group/other-readable) are now skipped entirely, not just warned about. Matches the security posture of `apikey*.txt` validation.
+- **Company name normalization** — strips Estonian legal suffixes (AS, OÜ, MTÜ, SA, TÜ) for better bank reconciliation matching
+- **Upload filename sanitization** — special characters stripped, capped at 255 chars to prevent stored XSS on upstream UI
+- **Intermediate rounding in balance computation** — `roundMoney()` applied on each accumulation step in account balances, financial statements, and retained earnings to prevent IEEE 754 drift
+- **Short name false-positive matching** — company name substring matching now requires both strings >= 4 chars
+- **Dividend dry_run** — `prepare_dividend_package` now supports `dry_run` parameter for previewing without creating journal entries
+- **Expense debit rounding** — `owner_expense_reimbursement` now rounds `net_amount` for VAT-registered case
+- **Resource ID validation** — dynamic MCP resources reject non-integer/negative IDs instead of passing `NaN` to API
+- **Readonly API error message** — no longer leaks raw API response shape
+- **Capital gains match warning** — accurately says "picked first match" instead of misleading "tiebreaker"
+- **FX date extraction** — handles both space and `T` separators in Lightyear CSV dates
+- **HTTP 204 response** — returns minimal `ApiResponse` instead of unsafe `undefined as T` cast
+- **Dead code cleanup** — removed unreachable `|| 0` in `roundMoney` large-magnitude bypass
+- **Comment accuracy** — journal batch comment says "parallel" not "sequential"
+- **CLAUDE.md** — cache invalidation documentation now matches actual (post-mutation) behavior
+
 ## [0.9.2] - 2026-03-22
 
 ### Added
