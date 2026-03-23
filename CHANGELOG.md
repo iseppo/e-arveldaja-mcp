@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.9.4] - 2026-03-23
+
+### Added
+- **Lightyear Dividend/Interest support** — `book_lightyear_distributions` now imports Dividend and Interest entries from the account statement CSV alongside existing Distribution entries. Cash interest entries (no ticker) get a dedicated journal title.
+- **Cash flow: full working capital coverage** — indirect cash flow statement now includes 13xx (short-term investments), 14xx (other receivables), 20xx/21xx (short-term liabilities), and 29xx (accrued liabilities) in operating adjustments.
+- **HTTP retry for all methods** — network errors (timeout, connection reset) now trigger retries for PATCH/POST/DELETE, not just GET. Confirmations and registrations are idempotent and benefit from retry on flaky connections.
+- **Balance sheet: 13xx/14xx accounts** — current assets now includes short-term financial investments (13xx) and other short-term receivables (14xx).
+- **Pagination timeout** — `listAll()` enforces a 5-minute overall timeout to prevent indefinite hangs.
+- **Node.js engine requirement** — `package.json` now declares `engines.node >= 18.0.0`.
+
+### Fixed
+- **CRITICAL: parseAmount thousands separator** — `"1.000"` (European thousands format) was parsed as 1.00 instead of 1000, producing invoices with 1000x wrong amounts. Now correctly detects single-dot thousands separator pattern.
+- **CRITICAL: CAMT duplicate detection overmatch** — bank_reference was incorrectly looked up in the ref_number map (cross-field), and description substring matching could silently discard legitimate transactions. Removed both overmatch paths; duplicate detection now uses only the correct `bank_reference` field.
+- **Lightyear sell journal balance** — gain/loss is now derived as `proceeds - costBasis` instead of using independently rounded CSV columns, ensuring the journal entry always balances.
+- **Lightyear distribution credit rounding** — added missing `roundMoney()` on distribution income credit amount to prevent IEEE 754 drift.
+- **Wise inter-account key rounding** — replaced `Math.round(x*100)/100` with `roundMoney()` to prevent potential duplicate journal entries on specific float values.
+- **FX invoice bank-link amount** — receipt inbox now uses `base_gross_price` instead of transaction amount for distribution, preventing partial/over payment on foreign currency invoices.
+- **Inter-account partial confirmation** — if incoming transaction confirmation fails after outgoing is confirmed, the outgoing is now automatically invalidated instead of leaving books in an inconsistent state.
+- **Supplier fuzzy match false positives** — added Levenshtein distance ratio gate (≥ 0.5) to prevent short names (e.g. "LHV") from matching wrong clients.
+- **PDF VAT double-rounding** — per-item VAT is now accumulated unrounded; `roundMoney()` applied only on the final total.
+- **Receipt batch double-failure** — DRAFT invoices from failed rollbacks are no longer pushed into batch context, allowing re-processing on next run.
+- **Transaction rollback error surfacing** — when `clients_id` rollback fails after a failed confirmation, the error is now included in the thrown exception so callers know the transaction may be in an inconsistent state.
+- **Purchase invoice partial-create error** — `invoiceId` is now attached as a structured field on the error object for programmatic recovery.
+- **Wise fee assertion** — replaced fragile `!` non-null assertion on `feeAccountDimensionsId` with explicit runtime check.
+- **Lightyear ambiguous gains detection** — exact-duplicate capital gains rows (same date+ticker+qty+proceeds) are now counted in the ambiguity warning.
+- **roundMoney(Infinity)** — now throws instead of silently returning 0, surfacing upstream division-by-zero bugs.
+- **Cache key stability** — `list()` cache keys now use sorted params, preventing silent cache misses from parameter order variation.
+- **Registry API response limit** — 64KB response size cap on `ariregister.rik.ee` fetch to prevent OOM from oversized/hijacked responses.
+
+### Changed
+- **Source maps enabled** — `tsconfig.json` now enables `sourceMap` and `declarationMap` for debuggable production builds.
+- **MCP SDK pinned** — `@modelcontextprotocol/sdk` pinned to exact `1.12.1` (removed `^`).
+- **Sale invoice API rename** — `saleInvoices.getDocument()` renamed to `saleInvoices.getSystemPdf()` to accurately reflect the endpoint (`/pdf_system`).
+- **Debug stack traces gated** — tool handler stack traces now require `EARVELDAJA_DEBUG=true` instead of writing unconditionally to stderr.
+- **HTTP error truncation** — API error messages truncated to 500 chars to limit information leakage.
+- **Fatal error stack trace** — startup fatal errors now include the full stack trace in stderr output.
+
+### Removed
+- **Dead code cleanup** — removed 14 unused methods across API files (`merge`, `findByVatNo`, `findByName`/`findByCode` on products, document operations on journals/transactions/sale-invoices), dead `loadConfig()`, dead `summarizeIdentifierHintFallback()`, dead `EXPECTED_HEADERS` constant, and 25-line re-export barrel in receipt-inbox.
+- **Duplicate code consolidated** — extracted `buildBankAccountLookups()` (was duplicated verbatim in 2 files), `effectiveGross()` helper (replaced 12 inline copies), and reused `computeAccountBalance()` (deleted duplicate `computeRetainedEarningsBalance()`).
+
 ## [0.9.3] - 2026-03-23
 
 ### Changed
