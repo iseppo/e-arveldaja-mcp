@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.7] - 2026-03-24
+
+### Added
+- **Session audit log** — every mutating MCP operation now logs a detailed Markdown entry to `logs/{connection}.audit.md` in the working directory. Includes timestamps, tool name, entity details, account postings (D/K), financial amounts, and file uploads. Persists across sessions, one file per company/connection.
+- **`get_session_log` tool** — view the audit log with filters (entity_type, action, date_from, date_to, limit). Supports `connection` parameter to view other companies' logs.
+- **`list_audit_logs` tool** — list all available audit log files with entry counts and last entry dates.
+- **`clear_session_log` tool** — reset the current connection's audit log.
+- **Bilingual audit labels** — Estonian by default, set `EARVELDAJA_AUDIT_LANG=en` for English.
+- **66 logAudit calls** across 12 tool files covering all mutating operations: CRUD, imports (CAMT, Wise, Lightyear), batch processing, reconciliation, tax operations, and recurring invoices.
+
+### Fixed
+- **Audit log security** — user-controlled values (client names, descriptions, invoice numbers) are escaped to prevent Markdown injection. File names are sanitized (no path traversal). Rollback/error-recovery operations are intentionally excluded from the log.
+
 ## [0.9.6] - 2026-03-23
 
 ### Fixed
