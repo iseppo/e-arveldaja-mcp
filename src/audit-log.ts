@@ -217,7 +217,7 @@ function renderDetails(entry: Omit<AuditEntry, "timestamp"> & { timestamp: strin
     if (rendered.has(key)) continue;
     if (value === undefined || value === null) continue;
     if (typeof value === "object") continue; // skip complex nested objects
-    lines.push(`**${key}:** ${value}`);
+    lines.push(`**${key}:** ${escapeMarkdown(String(value))}`);
   }
 
   return lines.join("\n");
