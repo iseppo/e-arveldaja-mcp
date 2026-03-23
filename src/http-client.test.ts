@@ -66,17 +66,21 @@ describe("HttpClient", () => {
   it("retries POST requests after network errors", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn()
-      .mockRejectedValue(new TypeError("fetch failed"));
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockRejectedValueOnce(new TypeError("fetch failed"));
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new HttpClient(config);
-    const promise = client.post("/transactions", { amount: 10 });
+    let caughtError: Error | undefined;
+    const promise = client.post("/transactions", { amount: 10 }).catch((e: Error) => { caughtError = e; });
 
     await vi.runAllTimersAsync();
+    await promise;
 
-    await expect(promise).rejects.toThrow(
-      /API request failed: POST \/transactions → network error: fetch failed/,
-    );
+    expect(caughtError).toBeDefined();
+    expect(caughtError!.message).toMatch(/API request failed: POST \/transactions → network error: fetch failed/);
     expect(fetchMock).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
     vi.useRealTimers();
   });

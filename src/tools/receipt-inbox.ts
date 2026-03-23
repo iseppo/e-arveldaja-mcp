@@ -48,7 +48,6 @@ import {
   resolveSupplierInternal,
 } from "./supplier-resolution.js";
 
-
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const FILE_TYPE_EXTENSIONS = {
   pdf: [".pdf"],

@@ -76,8 +76,6 @@ export interface CamtParseResult {
 
 interface DuplicateLookup {
   byBankRef: Map<string, number[]>;
-  byRefNumber: Map<string, number[]>;
-  descriptions: Array<{ id: number; description: string }>;
 }
 
 interface ClientResolution {
@@ -271,30 +269,17 @@ function pickCounterparty(txDetails: unknown, direction: "CRDT" | "DBIT"): { par
 
 function buildDuplicateLookup(transactions: Transaction[]): DuplicateLookup {
   const byBankRef = new Map<string, number[]>();
-  const byRefNumber = new Map<string, number[]>();
-  const descriptions: Array<{ id: number; description: string }> = [];
-
-  const addToMap = (map: Map<string, number[]>, key: string | null | undefined, id: number) => {
-    const normalized = key?.trim();
-    if (!normalized) return;
-    const existing = map.get(normalized) ?? [];
-    existing.push(id);
-    map.set(normalized, existing);
-  };
 
   for (const transaction of transactions) {
     if (!transaction.id) continue;
-    addToMap(byBankRef, transaction.bank_ref_number, transaction.id);
-    addToMap(byRefNumber, transaction.ref_number, transaction.id);
-    if (transaction.description) {
-      descriptions.push({
-        id: transaction.id,
-        description: transaction.description.toLowerCase(),
-      });
-    }
+    const key = transaction.bank_ref_number?.trim();
+    if (!key) continue;
+    const existing = byBankRef.get(key) ?? [];
+    existing.push(transaction.id);
+    byBankRef.set(key, existing);
   }
 
-  return { byBankRef, byRefNumber, descriptions };
+  return { byBankRef };
 }
 
 function findDuplicateTransactionIds(
