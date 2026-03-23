@@ -225,7 +225,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
       // Lightyear pairs: CN-xxx has two rows (EUR side + foreign currency side)
       // The foreign currency amount matches the trade's gross_amount
       let matched = false;
-      const orderDatePrefix = row.date.split(" ")[0]; // DD/MM/YYYY
+      const orderDatePrefix = row.date.split(/[\sT]/)[0]; // date portion (DD/MM/YYYY or ISO)
 
       // Collect all candidate conversions to detect ambiguity
       const candidates: Array<{ ref: string; eurConv: AccountStatementRow; fgnConv: AccountStatementRow }> = [];
@@ -236,7 +236,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
         const fgnConv = convRows.find(c => c.ccy === row.ccy);
 
         if (eurConv && fgnConv) {
-          const convDatePrefix = fgnConv.date.split(" ")[0];
+          const convDatePrefix = fgnConv.date.split(/[\sT]/)[0];
           if (convDatePrefix !== orderDatePrefix) continue;
 
           if (Math.abs(Math.abs(fgnConv.gross_amount) - Math.abs(row.gross_amount)) < 0.02) {
@@ -365,7 +365,7 @@ function matchSellsToCapitalGains(
       const gain = gains[matchIdx]!;
       warnings.push(
         `Ambiguous FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
-        `${ambiguousCount} gains rows match date+ticker+qty. Using proceeds ${gain.proceeds_eur} EUR as tiebreaker.`
+        `${ambiguousCount} gains rows match date+ticker+qty. Picked first match (proceeds ${gain.proceeds_eur} EUR); verify cost basis manually.`
       );
     }
 

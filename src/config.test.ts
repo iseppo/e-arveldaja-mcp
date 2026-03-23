@@ -91,13 +91,15 @@ describe("loadAllConfigs", () => {
     const childDir = join(parentDir, "child");
 
     mkdirSync(childDir, { recursive: true });
-    writeFileSync(join(childDir, ".env"), "EARVELDAJA_SCAN_PARENT=true\n");
-    writeFileSync(join(parentDir, ".env"), [
+    const childEnv = join(childDir, ".env");
+    const parentEnv = join(parentDir, ".env");
+    writeFileSync(childEnv, "EARVELDAJA_SCAN_PARENT=true\n", { mode: 0o600 });
+    writeFileSync(parentEnv, [
       "EARVELDAJA_API_KEY_ID=parent-id",
       "EARVELDAJA_API_PUBLIC_VALUE=parent-public",
       "EARVELDAJA_API_PASSWORD=parent-secret",
       "",
-    ].join("\n"));
+    ].join("\n"), { mode: 0o600 });
 
     for (const key of CONFIG_ENV_KEYS) {
       delete process.env[key];
@@ -130,7 +132,7 @@ describe("loadAllConfigs", () => {
       "EARVELDAJA_API_PUBLIC_VALUE=parent-public",
       "EARVELDAJA_API_PASSWORD=parent-secret",
       "",
-    ].join("\n"));
+    ].join("\n"), { mode: 0o600 });
 
     for (const key of CONFIG_ENV_KEYS) {
       delete process.env[key];

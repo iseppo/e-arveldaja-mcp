@@ -150,7 +150,7 @@ export class HttpClient {
         }
 
         if (response.status === 204) {
-          return undefined as T;
+          return { code: 204, messages: [] } as T;
         }
 
         const contentType = response.headers.get("content-type") ?? "";

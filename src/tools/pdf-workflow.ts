@@ -67,7 +67,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const resolved = await validateInvoiceDocumentPath(file_path);
       const parsedDocument = await parseDocument(resolved);
       const hints = extractPdfHints(parsedDocument.text);
-      const extracted = extractReceiptFieldsFromText(parsedDocument.text, resolved.split("/").pop() ?? "document");
+      const extracted = extractReceiptFieldsFromText(parsedDocument.text, (resolved.split("/").pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255));
       const llmFallback = summarizeInvoiceExtraction(extracted);
 
       return {
@@ -420,7 +420,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           const resolved = await validateInvoiceDocumentPath(params.file_path);
           const buffer = await readFile(resolved);
           const base64 = buffer.toString("base64");
-          const fileName = resolved.split("/").pop() ?? "document";
+          const fileName = (resolved.split("/").pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255);
           await api.purchaseInvoices.uploadDocument(result.id, fileName, base64);
           uploaded = true;
         } catch (err: unknown) {
@@ -453,7 +453,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const resolved = await validateInvoiceDocumentPath(file_path);
       const buffer = await readFile(resolved);
       const base64 = buffer.toString("base64");
-      const fileName = resolved.split("/").pop() ?? "document";
+      const fileName = (resolved.split("/").pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255);
       const result = await api.purchaseInvoices.uploadDocument(invoice_id, fileName, base64);
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     }

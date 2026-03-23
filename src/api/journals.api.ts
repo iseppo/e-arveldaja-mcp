@@ -28,7 +28,7 @@ export class JournalsApi extends BaseResource<Journal> {
       }
     }
 
-    // Fetch in sequential batches of 5 to limit concurrent API calls
+    // Fetch in parallel batches of 5 to limit concurrent API calls
     const batchSize = 5;
     for (let i = 0; i < fetchIndices.length; i += batchSize) {
       const batch = fetchIndices.slice(i, i + batchSize);

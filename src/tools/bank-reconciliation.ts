@@ -24,7 +24,9 @@ function validateInterAccountDateGap(maxDateGap: number | undefined): number {
 export function normalizeCompanyName(name: string): string {
   return name.trim().toLowerCase()
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")  // strip diacritics (ü→u, ö→o, etc.)
-    .replace(/\s+/g, " ");
+    .replace(/\b(as|ou|mtu|sa|tu)\b/g, "")             // strip Estonian legal suffixes
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 interface MatchCandidate {

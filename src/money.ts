@@ -14,7 +14,7 @@ export const roundMoney = (v: number): number => {
   // (e.g. Number(Math.round(...)) + "e-2" => "1e+21e-2"). At that magnitude
   // the IEEE 754 spacing is already much larger than 0.01, so the original
   // value is the closest representable cent-rounded result.
-  if (abs >= 1e19) return v || 0;
+  if (abs >= 1e19) return v;
 
   const rounded = Number(Math.round(parseFloat(abs + "e2")) + "e-2");
   return (v < 0 ? -rounded : rounded) || 0;

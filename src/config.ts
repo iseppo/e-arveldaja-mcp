@@ -97,21 +97,24 @@ export function getConfigSearchDirs(
   return toUniqueDirs(dirs);
 }
 
-function warnIfInsecureEnvFile(envPath: string): void {
+/** Check .env file security. Returns true if safe to load. */
+function isSecureEnvFile(envPath: string): boolean {
   try {
     const info = lstatSync(envPath);
     if (info.isSymbolicLink()) {
       process.stderr.write(`WARNING: .env file is a symlink, skipping: ${envPath}\n`);
-      return;
+      return false;
     }
-    if (!info.isFile()) return;
+    if (!info.isFile()) return false;
     if (info.mode & 0o077) {
       process.stderr.write(
         `WARNING: ${envPath} is readable by group/others ` +
-        `(mode ${(info.mode & 0o777).toString(8)}). Run: chmod 600 ${envPath}\n`
+        `(mode ${(info.mode & 0o777).toString(8)}). Skipping. Run: chmod 600 ${envPath}\n`
       );
+      return false;
     }
-  } catch { /* file may not exist yet */ }
+    return true;
+  } catch { return true; /* file may not exist yet — let dotenv handle it */ }
 }
 
 export function loadDotenvFiles(): void {
@@ -130,8 +133,9 @@ export function loadDotenvFiles(): void {
       if (loaded.has(dedupeKey)) continue;
       loaded.add(dedupeKey);
 
-      warnIfInsecureEnvFile(envPath);
-      dotenv.config({ path: envPath });
+      if (isSecureEnvFile(envPath)) {
+        dotenv.config({ path: envPath });
+      }
     }
   };
 
@@ -192,7 +196,7 @@ export function loadAllConfigs(): NamedConfig[] {
         filePath: process.env.EARVELDAJA_API_KEY_FILE,
         config: { apiKeyId: parsed.keyId, apiPublicValue: parsed.publicValue, apiPassword: parsed.password, baseUrl },
       });
-      try { seen.add(realpathSync(process.env.EARVELDAJA_API_KEY_FILE)); } catch {}
+      try { seen.add(realpathSync(process.env.EARVELDAJA_API_KEY_FILE)); } catch { /* realpath failed — file may appear as duplicate */ }
     }
   }
 
