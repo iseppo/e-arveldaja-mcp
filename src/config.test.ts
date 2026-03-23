@@ -52,9 +52,8 @@ describe("getConfigSearchDirs", () => {
 });
 
 describe("loadAllConfigs", () => {
-  it("does not load apikey files from the current working directory", async () => {
+  it("loads apikey files from the current working directory", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-config-"));
-    const packageDir = mkdtempSync(join(tmpdir(), "earveldaja-package-"));
     const apiKeyFile = join(tempDir, "apikey.txt");
 
     process.env.EARVELDAJA_SERVER = "live";
@@ -75,13 +74,14 @@ describe("loadAllConfigs", () => {
     process.chdir(tempDir);
 
     try {
-      const { loadAllConfigs } = await importFreshConfig(packageDir);
+      const { loadAllConfigs } = await importFreshConfig();
+      const configs = loadAllConfigs();
 
-      expect(() => loadAllConfigs()).toThrow(/No API credentials found/);
+      expect(configs.length).toBe(1);
+      expect(configs[0]!.config.apiKeyId).toBe("key-id");
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });
-      rmSync(packageDir, { recursive: true, force: true });
     }
   });
 
@@ -181,8 +181,10 @@ describe("loadAllConfigs", () => {
     ].join("\n"));
     chmodSync(apiKeyFile, 0o640);
 
+    process.chdir(tempDir);
+
     try {
-      const { loadAllConfigs } = await importFreshConfig(tempDir);
+      const { loadAllConfigs } = await importFreshConfig();
       expect(() => loadAllConfigs()).toThrowError("No API credentials found");
 
       expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("accessible by group/others"));
@@ -214,8 +216,10 @@ describe("loadAllConfigs", () => {
     ].join("\n"));
     chmodSync(apiKeyFile, 0o600);
 
+    process.chdir(tempDir);
+
     try {
-      const { loadAllConfigs } = await importFreshConfig(tempDir);
+      const { loadAllConfigs } = await importFreshConfig();
       loadAllConfigs();
 
       expect(stderrSpy).not.toHaveBeenCalled();
