@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.10] - 2026-03-24
+
+### Added
+- **TOON format** — all MCP tool and resource responses now use Token-Oriented Object Notation (TOON) instead of JSON. TOON achieves 30-60% fewer tokens with indentation-based structure, CSV-style tabular arrays, and minimal quoting. Lossless — fully roundtrippable to JSON.
+- **`@toon-format/toon` dependency** for encoding/decoding.
+
+### Changed
+- **Null field stripping** — `toMcpJson()` removes all null/undefined fields before encoding, reducing response noise across all 85+ tool call sites.
+- **Default value omission** — `duplicate: false`, `duplicate_transaction_ids: []`, `partially_paid_warning: false`, `distribution_ready` removed from responses when at default values.
+- **CAMT import results compacted** — returns summary + sample (first 10) instead of full arrays. Skipped duplicates grouped into `skipped_summary`.
+- **Wise import results compacted** — skipped entries grouped by reason with count and sample IDs. Descriptions stripped from created entries.
+- **Reconciliation results compacted** — `other_candidates` replaced with `other_candidate_count`. Transaction `type` field removed (always "C").
+- **Static guidance moved to tool descriptions** — `extract_pdf_invoice` instructions string and UTC date warnings no longer in response bodies.
+- **Resource mimeType** — changed from `application/json` to `text/plain` to match TOON content.
+- **Prompts updated** — 5 prompts and 2 markdown workflow files updated for changed response field names (`distribution_ready` → `distribution` key presence, `skipped_duplicate_details` → `skipped_summary`).
+
 ## [0.9.9] - 2026-03-24
 
 ### Changed
