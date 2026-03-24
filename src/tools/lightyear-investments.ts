@@ -451,41 +451,66 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         );
       }
 
+      const summaryJson = {
+        total_rows: rows.length,
+        ...(date_from && { date_from }),
+        ...(date_to && { date_to }),
+        trades: { count: trades.length, by_ticker: summary },
+        distributions: {
+          count: distributions.length,
+          total_eur: roundMoney(distributions.reduce((s, d) => s + d.gross_amount, 0)),
+        },
+        deposits: {
+          count: deposits.length,
+          total_eur: roundMoney(deposits.reduce((s, r) => s + r.gross_amount, 0)),
+        },
+        withdrawals: {
+          count: withdrawals.length,
+          total_eur: roundMoney(withdrawals.reduce((s, r) => s + Math.abs(r.gross_amount), 0)),
+        },
+        rewards: {
+          count: rewards.length,
+          total_eur: roundMoney(rewards.reduce((s, r) => s + r.gross_amount, 0)),
+        },
+        ...(warnings.length > 0 && { warnings }),
+      };
+
+      if (!include_rows) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              ...summaryJson,
+              note: "Summary only. Use include_rows=true for individual trade details, or date_from/date_to to narrow the range.",
+            }, null, 2),
+          }],
+        };
+      }
+
+      // Compact markdown tables for LLM-friendly output
+      const tradeRows = trades.map(t =>
+        `| ${t.date} | ${t.reference} | ${t.ticker} | ${t.type} | ${t.quantity} | ${t.ccy} | ${t.eur_amount.toFixed(2)} | ${t.fee_eur.toFixed(2)} |`
+      );
+      const tradesTable = trades.length > 0
+        ? `## Trades (${trades.length})\n\n| Date | Ref | Ticker | Type | Qty | CCY | EUR | Fee |\n|------|-----|--------|------|-----|-----|-----|-----|\n${tradeRows.join("\n")}`
+        : "";
+
+      const distRows = distributions.map(d =>
+        `| ${d.date} | ${d.reference} | ${d.ticker || "—"} | ${d.gross_amount.toFixed(2)} | ${d.tax_amount.toFixed(2)} | ${d.net_amount.toFixed(2)} |`
+      );
+      const distTable = distributions.length > 0
+        ? `## Distributions (${distributions.length})\n\n| Date | Ref | Ticker | Gross | Tax | Net |\n|------|-----|--------|-------|-----|-----|\n${distRows.join("\n")}`
+        : "";
+
+      const parts = [
+        "```json\n" + JSON.stringify(summaryJson, null, 2) + "\n```",
+        tradesTable,
+        distTable,
+        "BRICEKSP trades (money market cash fund) are excluded.",
+      ].filter(Boolean);
+
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            total_rows: rows.length,
-            ...(date_from && { date_from }),
-            ...(date_to && { date_to }),
-            trades: {
-              count: trades.length,
-              ...(include_rows && { items: trades }),
-              by_ticker: summary,
-            },
-            distributions: {
-              count: distributions.length,
-              ...(include_rows && { items: distributions }),
-              total_eur: roundMoney(distributions.reduce((s, d) => s + d.gross_amount, 0)),
-            },
-            deposits: {
-              count: deposits.length,
-              total_eur: roundMoney(deposits.reduce((s, r) => s + r.gross_amount, 0)),
-            },
-            withdrawals: {
-              count: withdrawals.length,
-              total_eur: roundMoney(withdrawals.reduce((s, r) => s + Math.abs(r.gross_amount), 0)),
-            },
-            rewards: {
-              count: rewards.length,
-              total_eur: roundMoney(rewards.reduce((s, r) => s + r.gross_amount, 0)),
-            },
-            ...(warnings.length > 0 && { warnings }),
-            note: include_rows
-              ? "Review trades and use book_lightyear_trades to create journal entries. BRICEKSP trades (money market cash fund) are excluded."
-              : "Summary only. Use include_rows=true for individual trade details, or date_from/date_to to narrow the range.",
-          }, null, 2),
-        }],
+        content: [{ type: "text", text: parts.join("\n\n") }],
       };
     }
   );
