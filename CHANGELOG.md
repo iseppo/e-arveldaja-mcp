@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.9] - 2026-03-24
+
+### Changed
+- **Token optimization for list responses** — all 14 `list_*` tools now use compact JSON (no pretty-printing), saving ~40% tokens on large paginated results.
+- **`list_journals` strips postings** — journal list responses no longer include the `postings` array. Use `get_journal` for full details with postings.
+- **`parse_lightyear_statement` summary mode** — returns summary only by default (trade counts, totals by ticker). Set `include_rows=true` for individual trade details as compact markdown tables instead of JSON arrays.
+- **`parse_lightyear_statement` date filters** — new `date_from`/`date_to` parameters to filter entries before processing, avoiding token overflow on large CSV files.
+
+### Fixed
+- **Config tests** — updated to use `process.chdir()` instead of mocking `getProjectRoot()`, matching the cwd-based credential search from 0.9.8.
+
 ## [0.9.8] - 2026-03-24
 
 ### Changed
