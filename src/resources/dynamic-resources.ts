@@ -16,13 +16,13 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
   registerResource(server, 
     "client",
     new ResourceTemplate("earveldaja://clients/{id}", { list: undefined }),
-    { description: "Single client (buyer or supplier) by ID", mimeType: "application/json" },
+    { description: "Single client (buyer or supplier) by ID", mimeType: "text/plain" },
     async (uri, { id }) => {
       const client = await api.clients.get(parseResourceId(id as string));
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(client),
         }],
       };
@@ -32,13 +32,13 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
   registerResource(server, 
     "product",
     new ResourceTemplate("earveldaja://products/{id}", { list: undefined }),
-    { description: "Single product or service by ID", mimeType: "application/json" },
+    { description: "Single product or service by ID", mimeType: "text/plain" },
     async (uri, { id }) => {
       const product = await api.products.get(parseResourceId(id as string));
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(product),
         }],
       };
@@ -48,13 +48,13 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
   registerResource(server, 
     "journal",
     new ResourceTemplate("earveldaja://journals/{id}", { list: undefined }),
-    { description: "Single journal entry with postings by ID", mimeType: "application/json" },
+    { description: "Single journal entry with postings by ID", mimeType: "text/plain" },
     async (uri, { id }) => {
       const journal = await api.journals.get(parseResourceId(id as string));
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(journal),
         }],
       };
@@ -64,13 +64,13 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
   registerResource(server, 
     "sale_invoice",
     new ResourceTemplate("earveldaja://sale_invoices/{id}", { list: undefined }),
-    { description: "Single sale invoice with line items by ID", mimeType: "application/json" },
+    { description: "Single sale invoice with line items by ID", mimeType: "text/plain" },
     async (uri, { id }) => {
       const invoice = await api.saleInvoices.get(parseResourceId(id as string));
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(invoice),
         }],
       };
@@ -80,13 +80,13 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
   registerResource(server, 
     "purchase_invoice",
     new ResourceTemplate("earveldaja://purchase_invoices/{id}", { list: undefined }),
-    { description: "Single purchase invoice with line items by ID", mimeType: "application/json" },
+    { description: "Single purchase invoice with line items by ID", mimeType: "text/plain" },
     async (uri, { id }) => {
       const invoice = await api.purchaseInvoices.get(parseResourceId(id as string));
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(invoice),
         }],
       };
@@ -96,13 +96,13 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
   registerResource(server, 
     "transaction",
     new ResourceTemplate("earveldaja://transactions/{id}", { list: undefined }),
-    { description: "Single bank transaction by ID", mimeType: "application/json" },
+    { description: "Single bank transaction by ID", mimeType: "text/plain" },
     async (uri, { id }) => {
       const transaction = await api.transactions.get(parseResourceId(id as string));
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(transaction),
         }],
       };

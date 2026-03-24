@@ -8,13 +8,13 @@ export function registerResources(server: McpServer, api: ApiContext): void {
   registerResource(server, 
     "accounts",
     "earveldaja://accounts",
-    { description: "Chart of accounts (kontoplaan) - all available accounts with their types and balance directions", mimeType: "application/json" },
+    { description: "Chart of accounts (kontoplaan) - all available accounts with their types and balance directions", mimeType: "text/plain" },
     async (uri) => {
       const accounts = await api.readonly.getAccounts();
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(accounts),
         }],
       };
@@ -24,13 +24,13 @@ export function registerResources(server: McpServer, api: ApiContext): void {
   registerResource(server, 
     "sale_articles",
     "earveldaja://sale_articles",
-    { description: "Sales articles (müügiartiklid) - account mappings for sales", mimeType: "application/json" },
+    { description: "Sales articles (müügiartiklid) - account mappings for sales", mimeType: "text/plain" },
     async (uri) => {
       const articles = await api.readonly.getSaleArticles();
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(articles),
         }],
       };
@@ -40,13 +40,13 @@ export function registerResources(server: McpServer, api: ApiContext): void {
   registerResource(server, 
     "purchase_articles",
     "earveldaja://purchase_articles",
-    { description: "Purchase articles (ostuartiklid) - account mappings for purchases", mimeType: "application/json" },
+    { description: "Purchase articles (ostuartiklid) - account mappings for purchases", mimeType: "text/plain" },
     async (uri) => {
       const articles = await api.readonly.getPurchaseArticles();
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(articles),
         }],
       };
@@ -56,13 +56,13 @@ export function registerResources(server: McpServer, api: ApiContext): void {
   registerResource(server, 
     "templates",
     "earveldaja://templates",
-    { description: "Sales invoice templates", mimeType: "application/json" },
+    { description: "Sales invoice templates", mimeType: "text/plain" },
     async (uri) => {
       const templates = await api.readonly.getTemplates();
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(templates),
         }],
       };
@@ -72,13 +72,13 @@ export function registerResources(server: McpServer, api: ApiContext): void {
   registerResource(server, 
     "vat_info",
     "earveldaja://vat_info",
-    { description: "Company VAT information (KMKR number)", mimeType: "application/json" },
+    { description: "Company VAT information (KMKR number)", mimeType: "text/plain" },
     async (uri) => {
       const info = await api.readonly.getVatInfo();
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(info),
         }],
       };
@@ -88,13 +88,13 @@ export function registerResources(server: McpServer, api: ApiContext): void {
   registerResource(server, 
     "invoice_info",
     "earveldaja://invoice_info",
-    { description: "Company invoice settings (address, email, templates)", mimeType: "application/json" },
+    { description: "Company invoice settings (address, email, templates)", mimeType: "text/plain" },
     async (uri) => {
       const info = await api.readonly.getInvoiceInfo();
       return {
         contents: [{
           uri: uri.href,
-          mimeType: "application/json",
+          mimeType: "text/plain",
           text: toMcpJson(info),
         }],
       };

@@ -215,10 +215,10 @@ describe("registerPrompts", () => {
     }
   });
 
-  it("keeps shipped reconcile-bank markdown prompts aligned with distribution_ready handling", () => {
+  it("keeps shipped reconcile-bank markdown prompts aligned with distribution key handling", () => {
     for (const relativePath of ["workflows/reconcile-bank.md", ".claude/commands/reconcile-bank.md"]) {
       const text = readPromptSurface(relativePath);
-      expect(text).toContain("distribution_ready=false");
+      expect(text).toContain("no `distribution` key is present");
       expect(text).toContain("match.distribution");
       expect(text).toContain("prepare the distribution manually");
       expect(text).not.toContain("Call `get_transaction`");
