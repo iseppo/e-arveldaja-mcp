@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.11] - 2026-03-24
+
+### Fixed
+- **Prompt field name mismatches** — import-camt prompt and workflow now reference correct field names (`skipped_count`, `error_count`, `sample`, `skipped_summary`). Import-wise prompt now correctly describes `created`/`skipped` as counts and `results`/`skipped_details` as the arrays.
+- **Reconcile-bank workflow** — added missing inter-account transfers step with `reconcile_inter_account_transfers` dry-run/execute flow and duplicate journal warning.
+
 ## [0.9.10] - 2026-03-24
 
 ### Added
