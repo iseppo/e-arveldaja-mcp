@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import { registerResource } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 
 export function registerResources(server: McpServer, api: ApiContext): void {
 
@@ -14,7 +15,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(accounts, null, 2),
+          text: toMcpJson(accounts),
         }],
       };
     }
@@ -30,7 +31,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(articles, null, 2),
+          text: toMcpJson(articles),
         }],
       };
     }
@@ -46,7 +47,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(articles, null, 2),
+          text: toMcpJson(articles),
         }],
       };
     }
@@ -62,7 +63,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(templates, null, 2),
+          text: toMcpJson(templates),
         }],
       };
     }
@@ -78,7 +79,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(info, null, 2),
+          text: toMcpJson(info),
         }],
       };
     }
@@ -94,7 +95,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(info, null, 2),
+          text: toMcpJson(info),
         }],
       };
     }

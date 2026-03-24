@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
@@ -323,11 +324,11 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             total_unconfirmed: unconfirmed.length,
             summary: actionCounts,
             suggestions,
-          }, null, 2),
+          }),
         }],
       };
     }

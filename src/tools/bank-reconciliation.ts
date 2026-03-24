@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice, BankAccount } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
@@ -196,14 +197,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             transaction_id: tx.id,
             date: tx.date,
             amount: tx.amount,
-            type: tx.type,
             description: tx.description,
             bank_account_name: tx.bank_account_name,
             ref_number: tx.ref_number,
             best_match: bestMatch,
-            other_candidates: candidates.slice(1, 3),
+            other_candidate_count: candidates.length - 1,
             ...(distribution ? { distribution } : {}),
-            distribution_ready: distribution !== undefined,
             ...(bestMatch.partially_paid_warning
               ? { manual_review_required: "Invoice is PARTIALLY_PAID; verify the remaining open balance before confirming." }
               : {}),
@@ -214,12 +213,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             total_unconfirmed: unconfirmed.length,
             matched: results.length,
             unmatched: unconfirmed.length - results.length,
             matches: results,
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -350,14 +349,14 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             mode: dryRun ? "DRY_RUN" : "EXECUTED",
             total_unconfirmed: unconfirmed.length,
             auto_confirmed: confirmed.length,
             skipped: skipped.length,
             results: confirmed,
             errors: skipped,
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -787,7 +786,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             mode: dryRun ? "DRY_RUN" : "EXECUTED",
             company_name: invoiceInfo.invoice_company_name,
             total_unconfirmed: unconfirmed.length,
@@ -805,7 +804,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             one_sided: matchedOneSided,
             already_handled: skippedAlreadyHandled,
             errors,
-          }, null, 2),
+          }),
         }],
       };
     }

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { ClientsApi } from "../api/clients.api.js";
 import type { ProductsApi } from "../api/products.api.js";
 import type { JournalsApi } from "../api/journals.api.js";
@@ -127,12 +128,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "list_clients", "List all clients (buyers/suppliers). Paginated.", pageParam.shape, { ...readOnly, title: "List Clients" }, async (params) => {
     const result = await api.clients.list(params);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "get_client", "Get a single client by ID", idParam.shape, { ...readOnly, title: "Get Client" }, async ({ id }) => {
     const result = await api.clients.get(id);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "create_client", "Create a new client (buyer/supplier)", {
@@ -163,7 +164,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Created client "${params.name}"`,
       details: { name: params.name, code: params.code, is_client: params.is_client, is_supplier: params.is_supplier },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "update_client", "Update an existing client", {
@@ -177,7 +178,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Updated client ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "deactivate_client", "Deactivate a client (can be restored with restore_client)", idParam.shape, { ...mutate, title: "Deactivate Client" }, async ({ id }) => {
@@ -187,7 +188,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Deactivated client ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "restore_client", "Reactivate a deactivated client", idParam.shape, { ...mutate, title: "Restore Client" }, async ({ id }) => {
@@ -197,21 +198,21 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Restored client ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "search_client", "Search clients by name (fuzzy match)", {
     name: z.string().describe("Name to search for"),
   }, { ...readOnly, title: "Search Clients" }, async ({ name }) => {
     const results = await api.clients.findByName(name);
-    return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(results) }] };
   });
 
   registerTool(server, "find_client_by_code", "Find a client by business registry code or personal ID", {
     code: z.string().describe("Business registry code or personal ID"),
   }, { ...readOnly, title: "Find Client by Registry Code" }, async ({ code }) => {
     const result = await api.clients.findByCode(code);
-    return { content: [{ type: "text", text: result ? JSON.stringify(result, null, 2) : "Not found" }] };
+    return { content: [{ type: "text", text: result ? toMcpJson(result) : "Not found" }] };
   });
 
   // =====================
@@ -220,12 +221,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "list_products", "List all products/services. Paginated.", pageParam.shape, { ...readOnly, title: "List Products" }, async (params) => {
     const result = await api.products.list(params);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "get_product", "Get a single product by ID", idParam.shape, { ...readOnly, title: "Get Product" }, async ({ id }) => {
     const result = await api.products.get(id);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "create_product", "Create a new product/service", {
@@ -243,7 +244,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Created product "${params.name}" (${params.code})`,
       details: { name: params.name, code: params.code, sales_price: params.sales_price },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "update_product", "Update a product", {
@@ -257,7 +258,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Updated product ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "deactivate_product", "Deactivate a product (can be restored with restore_product)", idParam.shape, { ...mutate, title: "Deactivate Product" }, async ({ id }) => {
@@ -267,7 +268,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Deactivated product ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "restore_product", "Reactivate a deactivated product", idParam.shape, { ...mutate, title: "Restore Product" }, async ({ id }) => {
@@ -277,7 +278,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Restored product ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   // =====================
@@ -290,12 +291,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       ...result,
       items: result.items.map(({ postings: _postings, ...rest }) => rest),
     };
-    return { content: [{ type: "text", text: JSON.stringify(compact) }] };
+    return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_journal", "Get a journal entry by ID (includes postings)", idParam.shape, { ...readOnly, title: "Get Journal" }, async ({ id }) => {
     const result = await api.journals.get(id);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "create_journal", "Create a journal entry with postings", {
@@ -322,7 +323,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount, accounts_dimensions_id: p.accounts_dimensions_id })),
       },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "update_journal", "Update a journal entry", {
@@ -336,7 +337,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Updated journal ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "delete_journal", "Delete a journal entry", idParam.shape, { ...destructive, title: "Delete Journal" }, async ({ id }) => {
@@ -346,7 +347,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Deleted journal ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "confirm_journal", "Confirm/register a journal entry. IRREVERSIBLE — use invalidate_journal to reverse if needed.", idParam.shape, { ...destructive, title: "Confirm Journal" }, async ({ id }) => {
@@ -356,7 +357,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Confirmed journal ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "invalidate_journal",
@@ -368,7 +369,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         summary: `Invalidated journal ${id}`,
         details: {},
       });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: "text", text: toMcpJson(result) }] };
     });
 
   // =====================
@@ -377,12 +378,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "list_transactions", "List bank transactions. Paginated.", pageParam.shape, { ...readOnly, title: "List Transactions" }, async (params) => {
     const result = await api.transactions.list(params);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "get_transaction", "Get a transaction by ID", idParam.shape, { ...readOnly, title: "Get Transaction" }, async ({ id }) => {
     const result = await api.transactions.get(id);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "create_transaction", "Create a bank transaction", {
@@ -406,7 +407,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Created transaction ${params.amount} ${params.cl_currencies_id ?? "EUR"} on ${params.date}`,
       details: { date: params.date, amount: params.amount, type: params.type, description: params.description, accounts_dimensions_id: params.accounts_dimensions_id },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "confirm_transaction", "Confirm a bank transaction by providing distribution rows", {
@@ -420,7 +421,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Confirmed transaction ${id}`,
       details: { distributions: dist?.map(d => ({ related_table: d.related_table, related_id: d.related_id, amount: d.amount })) },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "invalidate_transaction",
@@ -432,7 +433,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         summary: `Invalidated transaction ${id}`,
         details: {},
       });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: "text", text: toMcpJson(result) }] };
     });
 
   registerTool(server, "delete_transaction", "Delete a transaction", idParam.shape, { ...destructive, title: "Delete Transaction" }, async ({ id }) => {
@@ -442,7 +443,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Deleted transaction ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   // =====================
@@ -451,12 +452,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "list_sale_invoices", "List sales invoices. Paginated.", pageParam.shape, { ...readOnly, title: "List Sale Invoices" }, async (params) => {
     const result = await api.saleInvoices.list(params);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "get_sale_invoice", "Get a sales invoice by ID (includes items, deliveries)", idParam.shape, { ...readOnly, title: "Get Sale Invoice" }, async ({ id }) => {
     const result = await api.saleInvoices.get(id);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "create_sale_invoice", "Create a sales invoice", {
@@ -489,7 +490,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Created sale invoice for client ${params.clients_id} on ${params.create_date}`,
       details: { clients_id: params.clients_id, date: params.create_date, items: items.map(i => ({ title: i.custom_title, amount: i.amount })) },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "update_sale_invoice", "Update a sales invoice", {
@@ -503,7 +504,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Updated sale invoice ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "delete_sale_invoice", "Delete a sales invoice", idParam.shape, { ...destructive, title: "Delete Sale Invoice" }, async ({ id }) => {
@@ -513,7 +514,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Deleted sale invoice ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "confirm_sale_invoice", "Confirm a sales invoice. IRREVERSIBLE — locks the invoice for editing.", idParam.shape, { ...destructive, title: "Confirm Sale Invoice" }, async ({ id }) => {
@@ -523,12 +524,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Confirmed sale invoice ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "get_sale_invoice_delivery_options", "Get available delivery methods for a sales invoice (e-invoice or email)", idParam.shape, { ...readOnly, title: "Get Sale Invoice Delivery Options" }, async ({ id }) => {
     const result = await api.saleInvoices.getDeliveryOptions(id);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "send_sale_invoice", "Send a sales invoice via e-invoice or email. DESTRUCTIVE — sends real documents to recipients.", {
@@ -545,12 +546,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Sent sale invoice ${id}`,
       details: { send_einvoice: request.send_einvoice, send_email: request.send_email },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "get_sale_invoice_document", "Download sales invoice PDF (base64)", idParam.shape, { ...readOnly, title: "Download Invoice PDF" }, async ({ id }) => {
     const result = await api.saleInvoices.getSystemPdf(id);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   // =====================
@@ -559,12 +560,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "list_purchase_invoices", "List purchase invoices. Paginated.", pageParam.shape, { ...readOnly, title: "List Purchase Invoices" }, async (params) => {
     const result = await api.purchaseInvoices.list(params);
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "get_purchase_invoice", "Get a purchase invoice by ID", idParam.shape, { ...readOnly, title: "Get Purchase Invoice" }, async ({ id }) => {
     const result = await api.purchaseInvoices.get(id);
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "create_purchase_invoice",
@@ -619,7 +620,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
           items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
         },
       });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: "text", text: toMcpJson(result) }] };
     });
 
   registerTool(server, "update_purchase_invoice", "Update a purchase invoice", {
@@ -633,7 +634,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Updated purchase invoice ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "delete_purchase_invoice", "Delete a purchase invoice", idParam.shape, { ...destructive, title: "Delete Purchase Invoice" }, async ({ id }) => {
@@ -643,7 +644,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Deleted purchase invoice ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "confirm_purchase_invoice",
@@ -656,7 +657,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         summary: `Confirmed purchase invoice ${id}`,
         details: {},
       });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: "text", text: toMcpJson(result) }] };
     });
 
   registerTool(server, "invalidate_purchase_invoice",
@@ -668,7 +669,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         summary: `Invalidated purchase invoice ${id}`,
         details: {},
       });
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: "text", text: toMcpJson(result) }] };
     });
 
   // =====================
@@ -677,53 +678,53 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "list_accounts", "Get chart of accounts (kontoplaani kontod)", {}, { ...readOnly, title: "List Accounts" }, async () => {
     const result = await api.readonly.getAccounts();
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "list_account_dimensions", "Get account dimensions (alamkontod)", {}, { ...readOnly, title: "List Account Dimensions" }, async () => {
     const result = await api.readonly.getAccountDimensions();
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "list_currencies", "Get available currencies", {}, { ...readOnly, title: "List Currencies" }, async () => {
     const result = await api.readonly.getCurrencies();
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "list_sale_articles", "Get sales articles (müügiartiklid)", {}, { ...readOnly, title: "List Sale Articles" }, async () => {
     const result = await api.readonly.getSaleArticles();
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "list_purchase_articles", "Get purchase articles (ostuartiklid)", {}, { ...readOnly, title: "List Purchase Articles" }, async () => {
     const result = await api.readonly.getPurchaseArticles();
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "list_templates", "Get sales invoice templates", {}, { ...readOnly, title: "List Invoice Templates" }, async () => {
     const result = await api.readonly.getTemplates();
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "list_projects", "Get cost/profit centers (projektid)", {}, { ...readOnly, title: "List Projects" }, async () => {
     const result = await api.readonly.getProjects();
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "get_invoice_info", "Get company invoice settings", {}, { ...readOnly, title: "Get Invoice Settings" }, async () => {
     const result = await api.readonly.getInvoiceInfo();
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "get_vat_info", "Get company VAT information (KMKR)", {}, { ...readOnly, title: "Get VAT Info" }, async () => {
     const result = await api.readonly.getVatInfo();
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   // Invoice series CRUD
   registerTool(server, "list_invoice_series", "Get invoice numbering series", {}, { ...readOnly, title: "List Invoice Series" }, async () => {
     const result = await api.readonly.getInvoiceSeries();
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "create_invoice_series", "Create an invoice series", {
@@ -741,13 +742,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Created invoice series "${params.number_prefix}"`,
       details: { number_prefix: params.number_prefix, number_start_value: params.number_start_value },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   // Bank accounts CRUD
   registerTool(server, "list_bank_accounts", "Get company bank accounts", {}, { ...readOnly, title: "List Bank Accounts" }, async () => {
     const result = await api.readonly.getBankAccounts();
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
   registerTool(server, "create_bank_account", "Create a bank account", {
@@ -764,6 +765,6 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Created bank account "${params.account_name_est}" (${params.account_no})`,
       details: { account_name: params.account_name_est, account_no: params.account_no },
     });
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 }

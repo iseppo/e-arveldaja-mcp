@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
@@ -38,14 +39,15 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "compute_receivables_aging",
     "Compute receivables aging report (nõuete vanusanalüüs). " +
-    "Groups unpaid sale invoices into aging buckets by client.",
+    "Groups unpaid sale invoices into aging buckets by client. " +
+    "Default as_of_date uses the server's UTC calendar date. Pass as_of_date explicitly if you need a local cutoff.",
     {
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },
     { ...readOnly, title: "Receivables Aging Report" },
     async ({ as_of_date }) => {
       const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
-      const usesDefaultUtcDate = !as_of_date;
+
 
       const allSales = await api.saleInvoices.listAll();
       const unpaid = allSales.filter((inv: SaleInvoice) =>
@@ -97,14 +99,10 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
       if (partiallyPaidCount > 0) {
         warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full amount — outstanding balance may be lower.`);
       }
-      if (usesDefaultUtcDate) {
-        warnings.push("Default as_of_date uses the server's UTC calendar date. Pass as_of_date explicitly if you need a local cutoff.");
-      }
-
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             as_of_date: today,
             total_unpaid: r(unpaid.reduce((s: number, inv: SaleInvoice) => s + effectiveGross(inv), 0)),
             total_invoices: unpaid.length,
@@ -112,7 +110,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
             aging_buckets: sortedBuckets,
             top_debtors: topDebtors,
             ...(warnings.length > 0 && { warnings }),
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -120,14 +118,15 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "compute_payables_aging",
     "Compute payables aging report (kohustuste vanusanalüüs). " +
-    "Groups unpaid purchase invoices into aging buckets by supplier.",
+    "Groups unpaid purchase invoices into aging buckets by supplier. " +
+    "Default as_of_date uses the server's UTC calendar date. Pass as_of_date explicitly if you need a local cutoff.",
     {
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },
     { ...readOnly, title: "Payables Aging Report" },
     async ({ as_of_date }) => {
       const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
-      const usesDefaultUtcDate = !as_of_date;
+
 
       const allPurchases = await api.purchaseInvoices.listAll();
       const unpaid = allPurchases.filter((inv: PurchaseInvoice) =>
@@ -179,14 +178,10 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
       if (partiallyPaidCount > 0) {
         warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full amount — outstanding balance may be lower.`);
       }
-      if (usesDefaultUtcDate) {
-        warnings.push("Default as_of_date uses the server's UTC calendar date. Pass as_of_date explicitly if you need a local cutoff.");
-      }
-
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             as_of_date: today,
             total_unpaid: r(unpaid.reduce((s: number, inv: PurchaseInvoice) => s + effectiveGross(inv), 0)),
             total_invoices: unpaid.length,
@@ -194,7 +189,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
             aging_buckets: sortedBuckets,
             top_creditors: topCreditors,
             ...(warnings.length > 0 && { warnings }),
-          }, null, 2),
+          }),
         }],
       };
     }

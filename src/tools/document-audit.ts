@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
@@ -54,7 +55,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             period: { from: date_from ?? "all", to: date_to ?? "all" },
             manual_journals_without_documents: {
               count: journalsWithout.length,
@@ -82,7 +83,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
               note: "Confirmed sale invoices have a system-generated PDF available via /pdf_system and are not flagged as missing documents.",
             },
             total_missing: journalsWithout.length + txWithout.length + purchasesWithout.length,
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -175,7 +176,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             exact_duplicates: {
               count: duplicates.length,
               items: duplicates,
@@ -211,7 +212,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
             candidate_duplicate_risk:
               candidateInvoiceNumberMatches.length > 0 || candidateSameAmountDateMatches.length > 0,
             total_invoices_checked: filtered.length,
-          }, null, 2),
+          }),
         }],
       };
     }

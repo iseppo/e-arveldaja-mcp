@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import { readFile } from "fs/promises";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
@@ -479,10 +480,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({
+            text: toMcpJson({
               ...summaryJson,
               note: "Summary only. Use include_rows=true for individual trade details, or date_from/date_to to narrow the range.",
-            }, null, 2),
+            }),
           }],
         };
       }
@@ -533,7 +534,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             sales: gains.map(g => ({
               date: parseLightyearDate(g.date),
               ticker: g.ticker,
@@ -553,7 +554,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               fees_eur: roundMoney(gains.reduce((s, g) => s + g.fees_eur, 0)),
             },
             note: "Capital gains calculated using FIFO method.",
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -835,7 +836,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             mode: isDryRun ? "DRY_RUN" : "EXECUTED",
             total_trades: trades.length,
             new_entries: newTrades.length,
@@ -855,7 +856,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             note: isDryRun
               ? "Set dry_run=false to create journal entries."
               : "Journal entries created. Review and register (confirm) them when ready.",
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -996,7 +997,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             mode: isDryRun ? "DRY_RUN" : "EXECUTED",
             total_distributions: distributions.length,
             new_entries: newDist.length,
@@ -1005,7 +1006,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             note: isDryRun
               ? "Set dry_run=false to create journal entries."
               : "Journal entries created. Review and register when ready.",
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -1111,7 +1112,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             active_holdings: active,
             closed_positions: closed,
             totals: {
@@ -1125,7 +1126,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               "book_lightyear_trades uses FIFO cost basis from the capital gains file, so this summary " +
               "may not match the investment account balance after booking sells. " +
               "For tax reporting, use parse_lightyear_capital_gains which uses FIFO.",
-          }, null, 2),
+          }),
         }],
       };
     }

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
 import { computeAllBalances } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
@@ -121,7 +122,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({
+            text: toMcpJson({
               dry_run: true,
               calculation: {
                 net_dividend,
@@ -133,7 +134,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               shareholder: { id: shareholder.id, name: shareholder.name },
               retained_earnings_balance: retainedBalance,
               note: "No journal created. Set dry_run=false to execute.",
-            }, null, 2),
+            }),
           }],
         };
       }
@@ -154,7 +155,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             calculation: {
               net_dividend,
               cit_rate: "22/78",
@@ -184,7 +185,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               ],
             },
             ...(warnings.length > 0 && { warnings }),
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -263,7 +264,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             expense: {
               description,
               net: net_amount,
@@ -284,7 +285,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             note: vatRegistered
               ? `Expense booked. Owner debt increased by ${total} EUR on account ${payAcc}.`
               : `Expense booked. Company is not VAT-registered, so the full gross amount was debited to expense account ${expense_account}. Owner debt increased by ${total} EUR on account ${payAcc}.`,
-          }, null, 2),
+          }),
         }],
       };
     }

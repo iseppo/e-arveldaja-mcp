@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { AccountDimension } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
@@ -684,7 +685,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             mode: dryRun ? "DRY_RUN" : "EXECUTED",
             total_csv_rows: rows.length,
             eligible: eligible.length,
@@ -700,9 +701,21 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 details: interAccountResults,
               },
             } : {}),
-            results: created,
-            skipped_details: skipped,
-          }, null, 2),
+            results: created.map(({ description: _desc, ...rest }) => rest),
+            skipped_details: (() => {
+              const groups = new Map<string, { reason: string; count: number; sample_ids: string[] }>();
+              for (const s of skipped) {
+                const existing = groups.get(s.reason);
+                if (existing) {
+                  existing.count++;
+                  if (existing.sample_ids.length < 5) existing.sample_ids.push(s.wise_id);
+                } else {
+                  groups.set(s.reason, { reason: s.reason, count: 1, sample_ids: [s.wise_id] });
+                }
+              }
+              return [...groups.values()];
+            })(),
+          }),
         }],
       };
     }

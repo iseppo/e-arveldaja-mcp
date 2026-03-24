@@ -106,8 +106,8 @@ describe("camt import tool", () => {
     const payload = JSON.parse(result.content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
-    expect(payload.skipped_duplicates).toBe(0);
-    expect(payload.results).toEqual(expect.arrayContaining([
+    expect(payload.skipped_count).toBe(0);
+    expect(payload.sample).toEqual(expect.arrayContaining([
       expect.objectContaining({
         status: "created",
         bank_reference: "REF-VOID-1",

@@ -36,6 +36,7 @@ import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
 import { registerPrompts } from "./prompts.js";
 import { toolError } from "./tool-error.js";
+import { toMcpJson } from "./mcp-json.js";
 import { setLogger, log } from "./logger.js";
 import { readOnly, mutate, destructive } from "./annotations.js";
 import { getAllowedRootsStartupWarning } from "./file-validation.js";
@@ -198,12 +199,12 @@ Reporting:
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             connections,
             active: connectionState.activeIndex,
             total: allConfigs.length,
             hint: "Use switch_connection with the index to switch between accounts.",
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -229,7 +230,7 @@ Reporting:
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({
+            text: toMcpJson({
               message: `Already connected to "${allConfigs[index]!.name}"`,
             }),
           }],
@@ -249,12 +250,12 @@ Reporting:
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             message: `Switched to "${target.name}"`,
             server: target.config.baseUrl.includes("demo") ? "demo" : "live",
             generation: snapshot.generation,
             note: "Caches cleared atomically. New tool calls use the new connection; interrupted in-flight tools cannot make further API requests, but a request already in flight may still have completed.",
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -322,7 +323,7 @@ Reporting:
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({ message: "Audit log cleared for current connection." }),
+          text: toMcpJson({ message: "Audit log cleared for current connection." }),
         }],
       };
     }

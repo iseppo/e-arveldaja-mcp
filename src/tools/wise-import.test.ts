@@ -117,7 +117,7 @@ describe("wise import tool", () => {
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(payload.skipped_details).toEqual([]);
     expect(payload.results).toEqual(expect.arrayContaining([
-      expect.objectContaining({ wise_id: "void-1", status: "created" }),
+      expect.objectContaining({ wise_id: "void-1" }),
     ]));
   });
 
@@ -149,7 +149,7 @@ describe("wise import tool", () => {
 
     expect(api.transactions.create).not.toHaveBeenCalled();
     expect(payload.skipped_details).toEqual([
-      { wise_id: "abc-1", reason: "Already imported (date/amount/counterparty/reference match)" },
+      { reason: "Already imported (date/amount/counterparty/reference match)", count: 1, sample_ids: ["abc-1"] },
     ]);
   });
 
@@ -181,7 +181,7 @@ describe("wise import tool", () => {
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(payload.skipped_details).toEqual([
-      { wise_id: "FEE:abc-2", reason: "Fee already imported (date/amount/counterparty match)" },
+      { reason: "Fee already imported (date/amount/counterparty match)", count: 1, sample_ids: ["FEE:abc-2"] },
     ]);
   });
 
@@ -219,10 +219,9 @@ describe("wise import tool", () => {
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
       description: "WISE:FEE:abc-3 Wise teenustasu",
     }));
-    expect(payload.skipped_details).toContainEqual({
-      wise_id: "abc-3",
-      reason: "Already imported (date/amount/counterparty/reference match)",
-    });
+    expect(payload.skipped_details).toContainEqual(
+      expect.objectContaining({ reason: "Already imported (date/amount/counterparty/reference match)", sample_ids: expect.arrayContaining(["abc-3"]) }),
+    );
     expect(payload.results).toEqual(expect.arrayContaining([
       expect.objectContaining({
         wise_id: "FEE:abc-3",
@@ -255,8 +254,8 @@ describe("wise import tool", () => {
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(payload.results).toEqual([]);
     expect(payload.skipped_details).toEqual(expect.arrayContaining([
-      { wise_id: "abc-4", reason: "Main create failed" },
-      { wise_id: "FEE:abc-4", reason: "Skipped because main transaction was not created" },
+      { reason: "Main create failed", count: 1, sample_ids: ["abc-4"] },
+      { reason: "Skipped because main transaction was not created", count: 1, sample_ids: ["FEE:abc-4"] },
     ]));
   });
 

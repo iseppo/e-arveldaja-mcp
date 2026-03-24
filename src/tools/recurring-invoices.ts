@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice } from "../types/api.js";
 import { batch } from "../annotations.js";
@@ -217,7 +218,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             mode: isDryRun ? "DRY_RUN" : "EXECUTED",
             source_month,
             target_date,
@@ -232,7 +233,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             confirm_errors: isDryRun ? undefined : confirmErrorsCount,
             results,
             ...(isDryRun && { note: "Preview only. Omit dry_run or set dry_run=false to create the invoices." }),
-          }, null, 2),
+          }),
         }],
       };
     }

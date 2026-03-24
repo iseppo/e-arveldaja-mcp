@@ -3,6 +3,7 @@ import { extname, join } from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { validateFilePath, getAllowedRoots, resolveFilePath } from "../file-validation.js";
 import { roundMoney } from "../money.js";
@@ -874,7 +875,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       return {
         content: [{
           type: "text",
-          text: JSON.stringify(result, null, 2),
+          text: toMcpJson(result),
         }],
       };
     },
@@ -1077,13 +1078,13 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             folder_path: scan.folder_path,
             accounts_dimensions_id,
             summary,
             skipped: scan.skipped,
             results,
-          }, null, 2),
+          }),
         }],
       };
     },
@@ -1149,7 +1150,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             schema_version: 1,
             accounts_dimensions_id,
             period: {
@@ -1160,7 +1161,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             total_unmatched: unmatched.length,
             category_counts: categoryCounts,
             groups: classifiedGroups,
-          }, null, 2),
+          }),
         }],
       };
     },
@@ -1404,7 +1405,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             dry_run: dryRun,
             summary: {
               applied: results.filter(result => result.status === "applied").length,
@@ -1413,7 +1414,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               failed: results.filter(result => result.status === "failed").length,
             },
             results,
-          }, null, 2),
+          }),
         }],
       };
     },

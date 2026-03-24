@@ -150,7 +150,6 @@ describe("reconcile_transactions", () => {
 
     expect(payload.matches).toHaveLength(1);
     expect(payload.matches[0]!.best_match.partially_paid_warning).toBe(true);
-    expect(payload.matches[0]!.distribution_ready).toBe(false);
     expect(payload.matches[0]!.distribution).toBeUndefined();
     expect(payload.matches[0]!.manual_review_required).toContain("remaining open balance");
   });
@@ -182,7 +181,6 @@ describe("reconcile_transactions", () => {
     const payload = JSON.parse(result.content[0]!.text);
 
     expect(payload.matches).toHaveLength(1);
-    expect(payload.matches[0]!.distribution_ready).toBe(true);
     expect(payload.matches[0]!.distribution).toEqual({
       related_table: "sale_invoices",
       related_id: 11,
@@ -219,7 +217,6 @@ describe("reconcile_transactions", () => {
 
     expect(payload.matches).toHaveLength(1);
     expect(payload.matches[0]!.best_match.type).toBe("sale_invoice");
-    expect(payload.matches[0]!.distribution_ready).toBe(true);
     expect(payload.matches[0]!.distribution).toEqual({
       related_table: "sale_invoices",
       related_id: 12,

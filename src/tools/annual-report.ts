@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
 import type { Account, Client, Journal, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
@@ -1078,7 +1079,7 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
       return {
         content: [{
           type: "text",
-          text: JSON.stringify(analysis, null, 2),
+          text: toMcpJson(analysis),
         }],
       };
     },
@@ -1093,7 +1094,7 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
       return {
         content: [{
           type: "text",
-          text: JSON.stringify(reportData, null, 2),
+          text: toMcpJson(reportData),
         }],
       };
     },
@@ -1135,10 +1136,10 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({
+            text: toMcpJson({
               message: "No executable year-end close entries were generated.",
               analysis,
-            }, null, 2),
+            }),
           }],
         };
       }
@@ -1179,7 +1180,7 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             year,
             created_journals: created,
             preflight: {
@@ -1189,7 +1190,7 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
               warnings: analysis.warnings,
             },
             note: "Closing journals were created as drafts. Review and confirm them separately.",
-          }, null, 2),
+          }),
         }],
       };
     },

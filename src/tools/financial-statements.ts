@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Account, Journal, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
@@ -127,7 +128,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             period: { from: date_from ?? "inception", to: date_to ?? "now" },
             accounts: balances,
             totals: {
@@ -136,7 +137,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               difference: roundMoney(totalDebit - totalCredit),
             },
             account_count: balances.length,
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -179,7 +180,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             date: date_to ?? "current",
             assets: {
               items: assets.map(a => ({ id: a.account_id, name: a.name_est, balance: a.balance })),
@@ -205,7 +206,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               balanced: Math.abs(totalAssets - totalLiabilities - totalEquityWithCurrentYearPL) < 0.01,
             },
             ...(warnings.length > 0 && { warnings }),
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -231,7 +232,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             period: { from: date_from, to: date_to },
             revenue: {
               items: revenue.map(a => ({ id: a.account_id, name: a.name_est, amount: a.balance })),
@@ -242,7 +243,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               total: roundMoney(totalExpenses),
             },
             net_profit: roundMoney(totalRevenue - totalExpenses),
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -250,7 +251,8 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
 
   registerTool(server, "month_end_close_checklist",
     "Generate month-end close checklist: unconfirmed journals/invoices, " +
-    "unreconciled bank transactions, overdue receivables/payables.",
+    "unreconciled bank transactions, overdue receivables/payables. " +
+    "Month-end due-date checks use UTC calendar dates. Borderline local-midnight cases may need manual review.",
     {
       month: z.string().regex(monthRegex, "Expected YYYY-MM").describe("Month to check (YYYY-MM, e.g. 2026-02)"),
     },
@@ -304,9 +306,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
 
       const partiallyPaidReceivables = overdueReceivables.filter((inv: SaleInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
       const partiallyPaidPayables = overduePayables.filter((inv: PurchaseInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
-      const warnings: string[] = [
-        "Month-end due-date checks use UTC calendar dates. Borderline local-midnight cases may need manual review.",
-      ];
+      const warnings: string[] = [];
       if (partiallyPaidReceivables > 0) {
         warnings.push(`${partiallyPaidReceivables} overdue receivable(s) are PARTIALLY_PAID and shown at full invoice amount; remaining balance may be lower.`);
       }
@@ -317,7 +317,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             month,
             unconfirmed_journals: {
               count: unconfirmedJournals.length,
@@ -376,8 +376,8 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               ready_to_close: unconfirmedJournals.length === 0 && unconfirmedTx.length === 0 &&
                 unconfirmedSales.length === 0 && unconfirmedPurchases.length === 0,
             },
-            warnings,
-          }, null, 2),
+            ...(warnings.length > 0 && { warnings }),
+          }),
         }],
       };
     }

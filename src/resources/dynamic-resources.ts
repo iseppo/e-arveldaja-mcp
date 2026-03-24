@@ -1,6 +1,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import { registerResource } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 
 function parseResourceId(id: string): number {
   const parsed = Number(id);
@@ -22,7 +23,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(client, null, 2),
+          text: toMcpJson(client),
         }],
       };
     }
@@ -38,7 +39,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(product, null, 2),
+          text: toMcpJson(product),
         }],
       };
     }
@@ -54,7 +55,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(journal, null, 2),
+          text: toMcpJson(journal),
         }],
       };
     }
@@ -70,7 +71,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(invoice, null, 2),
+          text: toMcpJson(invoice),
         }],
       };
     }
@@ -86,7 +87,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(invoice, null, 2),
+          text: toMcpJson(invoice),
         }],
       };
     }
@@ -102,7 +103,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "application/json",
-          text: JSON.stringify(transaction, null, 2),
+          text: toMcpJson(transaction),
         }],
       };
     }

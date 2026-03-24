@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
@@ -123,7 +124,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(include_entries && { entries: result.entries }),
       };
 
-      return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+      return { content: [{ type: "text", text: toMcpJson(summary) }] };
     }
   );
 
@@ -169,7 +170,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             client_id,
             accounts: results,
             summary: {
@@ -177,7 +178,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
               total_receivable_from_client: roundMoney(totalReceivable),
               net_position: roundMoney(totalReceivable - totalDebt),
             },
-          }, null, 2),
+          }),
         }],
       };
     }

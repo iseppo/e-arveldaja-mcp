@@ -137,7 +137,6 @@ describe("pdf workflow tools", () => {
         vat_rate_dropdown: "24",
         vat_accounts_id: 1510,
         cl_vat_articles_id: 1,
-        reversed_vat_id: null,
       }),
     ]);
   });

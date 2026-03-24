@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { toMcpJson } from "../mcp-json.js";
 import type { Client, Transaction } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
@@ -545,7 +546,14 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
       return {
         content: [{
           type: "text",
-          text: JSON.stringify(parsed, null, 2),
+          text: toMcpJson({
+            ...parsed,
+            entries: parsed.entries.map(entry => ({
+              ...entry,
+              ...(entry.duplicate ? { duplicate: true } : { duplicate: undefined }),
+              ...(entry.duplicate_transaction_ids.length > 0 ? { duplicate_transaction_ids: entry.duplicate_transaction_ids } : { duplicate_transaction_ids: undefined }),
+            })),
+          }),
         }],
       };
     }
@@ -711,19 +719,24 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
+          text: toMcpJson({
             mode: dryRun ? "DRY_RUN" : "EXECUTED",
             statement_metadata: parsed.statement_metadata,
             total_statement_entries: parsed.entries.length,
             eligible_entries: filteredEntries.length,
             filtered_out: parsed.entries.length - filteredEntries.length,
             created_count: results.length,
-            skipped_duplicates: skippedDuplicates.length,
-            errors_count: errors.length,
-            results,
-            skipped_duplicate_details: skippedDuplicates,
-            errors,
-          }, null, 2),
+            skipped_count: skippedDuplicates.length,
+            error_count: errors.length,
+            sample: results.slice(0, 10),
+            ...(errors.length > 0 && { errors }),
+            ...(skippedDuplicates.length > 0 && {
+              skipped_summary: {
+                count: skippedDuplicates.length,
+                sample_refs: skippedDuplicates.slice(0, 10).map(s => s.bank_reference),
+              },
+            }),
+          }),
         }],
       };
     }
