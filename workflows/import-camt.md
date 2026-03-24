@@ -35,10 +35,10 @@ Review:
 - `eligible_entries`
 - `filtered_out`
 - `created_count`
-- `skipped_duplicates`
-- `errors_count`
-- `results`
-- `skipped_duplicate_details`
+- `skipped_count`
+- `error_count`
+- `sample`
+- `skipped_summary`
 - `errors`
 
 Present which rows would create transactions and which are skipped as duplicates.
@@ -59,8 +59,8 @@ Call `import_camt053` again:
 
 Report:
 - `created_count`
-- `skipped_duplicates`
-- `errors_count`
+- `skipped_count`
+- `error_count`
 - any transactions still needing attention
 
 Offer reconciliation as the next step if the import succeeded.

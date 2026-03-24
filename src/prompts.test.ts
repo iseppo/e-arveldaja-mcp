@@ -116,7 +116,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("execute: true");
     expect(text).toContain("skipped_summary");
     expect(text).toContain("created_count");
-    expect(text).toContain("errors_count");
+    expect(text).toContain("error_count");
   });
 
   it("keeps import-wise aligned with fee account handling and dry-run fields", async () => {
@@ -132,7 +132,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("execute: false");
     expect(text).toContain("execute: true");
     expect(text).toContain("skipped_jar_transfers");
-    expect(text).toContain("skipped (grouped by reason with count and sample IDs)");
+    expect(text).toContain("skipped_details (grouped by reason with count and sample IDs)");
     expect(text).toContain("Do not disable Jar skipping");
   });
 

@@ -256,8 +256,8 @@ Follow these steps in order:
    - eligible_entries
    - filtered_out
    - created_count
-   - skipped_duplicates
-   - errors_count
+   - skipped_count
+   - error_count
    - sample (first 10 created entries)
    - skipped_summary
    - errors (if any)
@@ -279,8 +279,8 @@ Follow these steps in order:
 
 8. Report the execution result:
    - created_count
-   - skipped_duplicates
-   - errors_count
+   - skipped_count
+   - error_count
    - sample of created entries
    - any errors that need attention
 
@@ -346,8 +346,10 @@ Follow these steps in order:
    - eligible
    - filtered_out
    - skipped_jar_transfers
-   - created (entries with wise_id, date, amount, status)
-   - skipped (grouped by reason with count and sample IDs)
+   - created (count of created transactions)
+   - skipped (count of skipped transactions)
+   - results (list of created entries with wise_id, date, amount, status)
+   - skipped_details (grouped by reason with count and sample IDs)
 
 4. Present a clear preview:
    - transactions that would be created (wise_id, date, amount)
@@ -370,8 +372,10 @@ Follow these steps in order:
    ${skip_jar_transfers === false ? "- skip_jar_transfers: false" : ""}
 
 8. Report the execution result:
-   - created
-   - skipped
+   - created (count of created transactions)
+   - skipped (count of skipped transactions)
+   - results (list of created entries)
+   - skipped_details (grouped by reason)
    - which rows became fee transactions
    - any rows that still need manual follow-up
 `,

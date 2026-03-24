@@ -68,14 +68,30 @@ Call `reconcile_transactions` with `min_confidence: 0`, then filter the returned
 - If the user approves a match and `a `distribution` key is present`, call `confirm_transaction` with `distributions: JSON.stringify([match.distribution])`.
 - If `no `distribution` key is present`, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
 
-## Step 4: Unmatched transactions
+## Step 4: Inter-account transfers
+
+For transfers between your own bank accounts (counterparty matches company name or IBAN matches another own account):
+
+Call `reconcile_inter_account_transfers`:
+- `execute`: `false` (dry run first)
+
+Review the results:
+- `already_handled`: transfers already journalized from the other side — safe to delete
+- `one_sided`: would confirm against the other bank account
+- `pairs`: would confirm both outgoing and incoming sides
+
+Ask for approval. If approved, call again with `execute: true`.
+
+**WARNING:** Do not manually confirm Wise-side transfers that were already confirmed via LHV CAMT — this creates duplicate journal entries.
+
+## Step 5: Unmatched transactions
 
 List transactions with no matches and suggest actions:
 - Small amounts (<1 EUR): likely bank fees or interest — need a manual journal entry
 - Description contains "teenustasu", "intress", "service fee": bank charges
 - Larger amounts: check if the corresponding invoice exists in the system
 
-## Step 5: Summary
+## Step 6: Summary
 
 Report:
 - Transactions confirmed in this session
