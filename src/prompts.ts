@@ -258,13 +258,13 @@ Follow these steps in order:
    - created_count
    - skipped_duplicates
    - errors_count
-   - results
-   - skipped_duplicate_details
-   - errors
+   - sample (first 10 created entries)
+   - skipped_summary
+   - errors (if any)
 
 5. Present a clear import preview:
-   - transactions that would_create, with date, amount, currency, direction, counterparty, and reference
-   - skipped duplicates, including why each was skipped
+   - sample of transactions that would be created, with date, amount, counterparty, and reference
+   - skipped duplicate summary (count and sample bank references)
    - any import errors that would block execution
 
 6. Ask for approval before creating anything.
@@ -281,7 +281,8 @@ Follow these steps in order:
    - created_count
    - skipped_duplicates
    - errors_count
-   - any transactions that still need attention
+   - sample of created entries
+   - any errors that need attention
 
 9. If import completed successfully, offer the next logical step:
    - reconcile the imported bank account with \`reconcile-bank\`
@@ -345,14 +346,12 @@ Follow these steps in order:
    - eligible
    - filtered_out
    - skipped_jar_transfers
-   - created
-   - skipped
-   - results
-   - skipped_details
+   - created (entries with wise_id, date, amount, status)
+   - skipped (grouped by reason with count and sample IDs)
 
 4. Present a clear preview:
-   - each main transaction or fee transaction that would be created
-   - skipped duplicates and skipped fee rows, with their exact reasons
+   - transactions that would be created (wise_id, date, amount)
+   - skipped groups by reason and count
    - whether Jar transfers were skipped
    - whether fees will be auto-confirmed to the configured expense dimension
 
@@ -480,24 +479,24 @@ Follow these steps:
    - LOW confidence (<50%): These are uncertain — show for information only
 
    For each match show: transaction_id, transaction date, amount, description, matched invoice number, supplier/client name, confidence score, and any partially paid warning.
-   If \`distribution_ready=false\` or a partially paid warning is present, say clearly that no ready-to-use distribution is provided and the remaining open balance must be checked manually first.
+   If no \`distribution\` key is present or a partially paid warning is present, say clearly that no ready-to-use distribution is provided and the remaining open balance must be checked manually first.
 
 3. Based on the mode "${effectiveMode}":
    ${effectiveMode === "auto" ? `- AUTO mode: First call \`auto_confirm_exact_matches\` with \`execute: false\` to preview what would be confirmed.
    - Show the dry-run results and ask for approval.
    - After approval, call \`auto_confirm_exact_matches\` with \`execute: true\` to execute.` :
    effectiveMode === "review" ? `- REVIEW mode: Show all matches (high, medium, low confidence) for manual review.
-   - For each approved match with \`distribution_ready=true\`, call \`confirm_transaction\` with:
+   - For each approved match that has a \`distribution\` key, call \`confirm_transaction\` with:
      - id: transaction_id
      - distributions: JSON.stringify([match.distribution])
-   - If \`distribution_ready=false\` or the match is partially paid, inspect the invoice first and prepare the distribution manually instead of reusing \`match.distribution\`.
+   - If no \`distribution\` is present or the match is partially paid, inspect the invoice first and prepare the distribution manually.
    - Only confirm one explicitly approved match at a time; do not auto-confirm ambiguous transactions.` :
    `- TRANSACTION ID mode: Call \`reconcile_transactions\` with \`min_confidence: 0\`, then filter the returned matches to transaction ID ${effectiveMode}.
    - If no match exists for that transaction, report that and stop.
-   - If the user approves a match and \`distribution_ready=true\`, call \`confirm_transaction\` with:
+   - If the user approves a match and it has a \`distribution\` key, call \`confirm_transaction\` with:
      - id: transaction_id
      - distributions: JSON.stringify([match.distribution])
-   - If \`distribution_ready=false\`, inspect the invoice first and prepare the distribution manually instead of reusing \`match.distribution\``}
+   - If no \`distribution\` is present, inspect the invoice first and prepare the distribution manually`}
 
 4. For inter-account transfers (counterparty matches own company name or IBAN matches another own bank account):
    - Call \`reconcile_inter_account_transfers\` with execute=false first.
@@ -757,7 +756,7 @@ ${broker_dimension_id ? `Broker dimension ID: ${broker_dimension_id}` : ""}
 
 Follow these steps in order:
 
-1. Call \`parse_lightyear_statement\` with file_path: "${statement_path}".
+1. Call \`parse_lightyear_statement\` with file_path: "${statement_path}" and include_rows: true.
    Review the output:
    - Number of buy/sell trades
    - Distributions (dividends, interest)

@@ -81,7 +81,7 @@ describe("registerPrompts", () => {
     expect(autoText).toContain("execute: false");
     expect(autoText).toContain("execute: true");
     expect(reviewText).toContain("distributions: JSON.stringify([match.distribution])");
-    expect(reviewText).toContain("distribution_ready=false");
+    expect(reviewText).toContain("no `distribution` key is present");
     expect(reviewText).toContain("prepare the distribution manually");
   });
 
@@ -114,7 +114,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("statement_metadata");
     expect(text).toContain("execute: false");
     expect(text).toContain("execute: true");
-    expect(text).toContain("skipped_duplicate_details");
+    expect(text).toContain("skipped_summary");
     expect(text).toContain("created_count");
     expect(text).toContain("errors_count");
   });
@@ -132,7 +132,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("execute: false");
     expect(text).toContain("execute: true");
     expect(text).toContain("skipped_jar_transfers");
-    expect(text).toContain("skipped_details");
+    expect(text).toContain("skipped (grouped by reason with count and sample IDs)");
     expect(text).toContain("Do not disable Jar skipping");
   });
 
