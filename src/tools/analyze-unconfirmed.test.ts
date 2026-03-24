@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerAnalyzeUnconfirmedTools } from "./analyze-unconfirmed.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 function setupTool(options: {
   transactions?: unknown[];
@@ -105,7 +106,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
@@ -158,7 +159,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
       expect(payload.suggestions[0]!.confidence).toBe(60);
@@ -191,7 +192,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -248,7 +249,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -294,7 +295,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({ min_confidence: 0 });
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -329,7 +330,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -357,7 +358,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.suggestions[0]!.reason).toContain("USD");
     });
@@ -383,7 +384,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");

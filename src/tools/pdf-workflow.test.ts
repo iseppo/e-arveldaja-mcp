@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { validateFilePath } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import { registerPdfWorkflowTools } from "./pdf-workflow.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 vi.mock("../file-validation.js", () => ({
   validateFilePath: vi.fn(),
@@ -68,7 +69,7 @@ describe("pdf workflow tools", () => {
     const handler = setupPdfWorkflowTool("extract_pdf_invoice");
 
     const response = await handler({ file_path: "/tmp/invoice.pdf" });
-    const payload = JSON.parse(response.content[0]!.text);
+    const payload = parseMcpResponse(response.content[0]!.text);
 
     expect(mockedValidateFilePath).toHaveBeenCalledWith("/tmp/invoice.pdf", [".pdf", ".jpg", ".jpeg", ".png"], 50 * 1024 * 1024);
     expect(mockedParseDocument).toHaveBeenCalledWith("/tmp/invoice.pdf");
@@ -103,7 +104,7 @@ describe("pdf workflow tools", () => {
     const handler = setupPdfWorkflowTool("extract_pdf_invoice");
 
     const response = await handler({ file_path: "/tmp/invoice.pdf" });
-    const payload = JSON.parse(response.content[0]!.text);
+    const payload = parseMcpResponse(response.content[0]!.text);
 
     expect(payload.hints.supplier_vat_no).toBe("EE102814482");
     expect(payload.extracted).toEqual(expect.objectContaining({
@@ -124,7 +125,7 @@ describe("pdf workflow tools", () => {
       description: "internet",
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.supplier_id).toBe(7);
     expect(payload.suggestion).toContain("VAT settings");

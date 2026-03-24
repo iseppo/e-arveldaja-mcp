@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { parseMcpResponse } from "../mcp-json.js";
 import type { Journal } from "../types/api.js";
 
 // ---------------------------------------------------------------------------
@@ -104,7 +105,7 @@ describe("compute_account_balance tool", () => {
   }
 
   function parse(text: string) {
-    return JSON.parse(text) as Record<string, unknown>;
+    return parseMcpResponse(text) as Record<string, unknown>;
   }
 
   it("computes D-type balance as debits minus credits", async () => {

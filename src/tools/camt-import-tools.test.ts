@@ -2,6 +2,7 @@ import { readFile } from "fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { validateFilePath } from "../file-validation.js";
 import { registerCamtImportTools } from "./camt-import.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
@@ -103,7 +104,7 @@ describe("camt import tool", () => {
       accounts_dimensions_id: 7,
       execute: true,
     });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(payload.skipped_count).toBe(0);

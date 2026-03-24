@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { registerRecurringInvoiceTools } from "./recurring-invoices.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 function buildSaleInvoice(overrides: Record<string, unknown> = {}) {
   return {
@@ -81,7 +82,7 @@ describe("recurring invoices tool", () => {
       target_journal_date: "2026-02-01",
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.created).toBe(1);
@@ -101,7 +102,7 @@ describe("recurring invoices tool", () => {
       dry_run: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("DRY_RUN");
     expect(payload.would_create).toBe(1);
@@ -161,7 +162,7 @@ describe("recurring invoices tool", () => {
       target_journal_date: "2026-02-01",
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.created).toBe(0);
     expect(payload.skipped_existing).toBe(1);
@@ -188,7 +189,7 @@ describe("recurring invoices tool", () => {
       auto_confirm: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.created).toBe(1);
     expect(payload.confirmed).toBe(0);
@@ -215,7 +216,7 @@ describe("recurring invoices tool", () => {
       target_journal_date: "2026-02-01",
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.created).toBe(0);
     expect(payload.errors).toBe(1);

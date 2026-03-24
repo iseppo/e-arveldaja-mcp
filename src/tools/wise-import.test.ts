@@ -2,6 +2,7 @@ import { readFile } from "fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { validateFilePath } from "../file-validation.js";
 import { registerWiseImportTools } from "./wise-import.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
@@ -112,7 +113,7 @@ describe("wise import tool", () => {
       execute: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(payload.skipped_details).toEqual([]);
@@ -145,7 +146,7 @@ describe("wise import tool", () => {
       execute: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(api.transactions.create).not.toHaveBeenCalled();
     expect(payload.skipped_details).toEqual([
@@ -177,7 +178,7 @@ describe("wise import tool", () => {
       execute: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(payload.skipped_details).toEqual([
@@ -210,7 +211,7 @@ describe("wise import tool", () => {
       execute: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm).toHaveBeenCalledWith(9003, [
@@ -249,7 +250,7 @@ describe("wise import tool", () => {
       execute: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(payload.results).toEqual([]);
@@ -290,7 +291,7 @@ describe("wise import tool", () => {
       fee_account_dimensions_id: 9,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.skipped_jar_transfers).toBe(2);
     expect(payload.eligible).toBe(1);
@@ -317,7 +318,7 @@ describe("wise import tool", () => {
       skip_jar_transfers: false,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.skipped_jar_transfers).toBeUndefined();
     expect(payload.eligible).toBe(1);
@@ -341,7 +342,7 @@ describe("wise import tool", () => {
       fee_account_dimensions_id: 9,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.skipped_jar_transfers).toBe(1);
     expect(payload.eligible).toBe(0);
@@ -486,7 +487,7 @@ describe("wise import tool", () => {
       date_from: "2026-01-20",
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.eligible).toBe(1);
     expect(payload.created).toBe(1);
@@ -524,7 +525,7 @@ describe("wise import tool", () => {
       execute: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -577,7 +578,7 @@ describe("wise import tool", () => {
       execute: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.inter_account_reconciliation).toBeDefined();
     expect(payload.inter_account_reconciliation.already_journalized).toBe(1);
@@ -616,7 +617,7 @@ describe("wise import tool", () => {
       execute: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.inter_account_reconciliation).toBeDefined();
     expect(payload.inter_account_reconciliation.confirmed).toBe(1);
@@ -656,7 +657,7 @@ describe("wise import tool", () => {
       // execute not set → dry run
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("DRY_RUN");
     // In dry run, transfer rows are staged as would_create; no reconciliation is attempted
@@ -700,7 +701,7 @@ describe("wise import tool", () => {
       execute: true,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.inter_account_reconciliation).toBeDefined();
     expect(payload.inter_account_reconciliation.confirmed).toBe(1);

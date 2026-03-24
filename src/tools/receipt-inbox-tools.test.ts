@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 function setupReceiptTool(
   toolName: string,
@@ -87,7 +88,7 @@ describe("receipt inbox tool status handling", () => {
     });
 
     const result = await handler({ accounts_dimensions_id: 100 });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(1);
     expect(payload.total_unmatched).toBe(1);
@@ -131,7 +132,7 @@ describe("receipt inbox tool status handling", () => {
     });
 
     const result = await handler({ accounts_dimensions_id: 100 });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(1);
     expect(payload.total_unmatched).toBe(0);
@@ -217,7 +218,7 @@ describe("receipt inbox tool status handling", () => {
     }]);
 
     const result = await handler({ classifications_json: classificationsJson, execute: true });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.results).toHaveLength(1);
     expect(payload.results[0]!.status).toBe("skipped");
@@ -322,7 +323,7 @@ describe("receipt inbox tool status handling", () => {
     }]);
 
     const result = await handler({ classifications_json: classificationsJson, execute: true });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.results).toHaveLength(1);
     expect(payload.results[0]!.status).toBe("applied");

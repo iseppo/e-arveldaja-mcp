@@ -3,6 +3,7 @@ import type { Account, Journal, Posting } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { registerEstonianTaxTools } from "./estonian-tax.js";
 import { roundMoney } from "../money.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 // ---------------------------------------------------------------------------
 // Helpers to build test fixtures
@@ -93,7 +94,7 @@ function makeMockServer() {
 // Convenience: parse the JSON text from a tool result
 function parseResult(result: unknown): Record<string, unknown> {
   const r = result as { content: Array<{ type: string; text: string }> };
-  return JSON.parse(r.content[0].text) as Record<string, unknown>;
+  return parseMcpResponse(r.content[0].text) as Record<string, unknown>;
 }
 
 function isError(result: unknown): boolean {

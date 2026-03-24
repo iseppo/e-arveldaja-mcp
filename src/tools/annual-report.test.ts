@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Account, Journal, Posting } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { buildAnnualReportData, registerAnnualReportTools } from "./annual-report.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 function makeAccount(overrides: Partial<Account> & Pick<Account,
   "id" |
@@ -250,7 +251,7 @@ describe("buildAnnualReportData", () => {
     });
 
     const result = await handler({ year: 2025 });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.unresolved_items.unconfirmed_transactions.count).toBe(0);
     expect(payload.unresolved_items.total_issues).toBe(0);

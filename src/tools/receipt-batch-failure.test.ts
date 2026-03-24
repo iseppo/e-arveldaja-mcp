@@ -10,6 +10,7 @@ import {
 } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 vi.mock("fs/promises", async (importOriginal) => ({
   ...(await importOriginal<typeof import("fs/promises")>()),
@@ -183,7 +184,7 @@ describe("process_receipt_batch rollback handling", () => {
       accounts_dimensions_id: 100,
       execute: true,
     });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.summary.failed).toBe(1);
     expect(payload.summary.created).toBe(0);

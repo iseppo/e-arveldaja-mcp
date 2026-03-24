@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Account, Journal, Posting, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { computeAllBalances, registerFinancialStatementTools } from "./financial-statements.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -291,7 +292,7 @@ describe("compute_trial_balance", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.totals.debit).toBe(1000);
     expect(payload.totals.credit).toBe(1000);
@@ -305,7 +306,7 @@ describe("compute_trial_balance", () => {
     });
 
     const result = await handler({ date_from: "2024-01-01", date_to: "2024-12-31" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.period.from).toBe("2024-01-01");
     expect(payload.period.to).toBe("2024-12-31");
@@ -320,7 +321,7 @@ describe("compute_trial_balance", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.totals.debit).toBe(500);
     expect(payload.totals.credit).toBe(0);
@@ -350,7 +351,7 @@ describe("compute_balance_sheet", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.check.balanced).toBe(true);
     expect(payload.check.assets).toBe(10000);
@@ -376,7 +377,7 @@ describe("compute_balance_sheet", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.check.balanced).toBe(true);
     expect(payload.current_year_pl.net_profit).toBe(7000); // 10000 revenue - 3000 expenses
@@ -400,7 +401,7 @@ describe("compute_balance_sheet", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     // Assets: D-type 5000 + contra C-type subtracts 1000 = 4000
     expect(payload.assets.total).toBe(4000);
@@ -430,7 +431,7 @@ describe("compute_profit_and_loss", () => {
     });
 
     const result = await handler({ date_from: "2024-03-01", date_to: "2024-03-31" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.revenue.total).toBe(20000);
     expect(payload.expenses.total).toBe(10000);
@@ -452,7 +453,7 @@ describe("compute_profit_and_loss", () => {
     });
 
     const result = await handler({ date_from: "2024-03-01", date_to: "2024-03-31" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.net_profit).toBe(-3000);
   });
@@ -475,7 +476,7 @@ describe("compute_profit_and_loss", () => {
     });
 
     const result = await handler({ date_from: "2024-03-01", date_to: "2024-03-31" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     // expenses: D-type 3000 - C-type contra 500 = 2500
     expect(payload.expenses.total).toBe(2500);
@@ -489,7 +490,7 @@ describe("compute_profit_and_loss", () => {
     });
 
     const result = await handler({ date_from: "2024-01-01", date_to: "2024-01-31" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.net_profit).toBe(0);
   });
@@ -507,7 +508,7 @@ describe("getMonthLastDay (via month_end_close_checklist)", () => {
   it("returns 28 days for February in a non-leap year (2025-02)", async () => {
     const handler = setupChecklist();
     const result = await handler({ month: "2025-02" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
     expect(payload.month).toBe("2025-02");
     // The tool uses dateTo = `${month}-${lastDay}` — we verify the overdue filter works
     // without errors for 2025-02-28 (no errors = correct last day computed)
@@ -517,7 +518,7 @@ describe("getMonthLastDay (via month_end_close_checklist)", () => {
   it("returns 29 days for February in a leap year (2024-02)", async () => {
     const handler = setupChecklist();
     const result = await handler({ month: "2024-02" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
     expect(payload.month).toBe("2024-02");
     expect(payload.summary).toBeDefined();
   });
@@ -525,7 +526,7 @@ describe("getMonthLastDay (via month_end_close_checklist)", () => {
   it("returns 31 days for December (2024-12)", async () => {
     const handler = setupChecklist();
     const result = await handler({ month: "2024-12" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
     expect(payload.month).toBe("2024-12");
     expect(payload.summary).toBeDefined();
   });
@@ -533,7 +534,7 @@ describe("getMonthLastDay (via month_end_close_checklist)", () => {
   it("handles month with 30 days (2024-04)", async () => {
     const handler = setupChecklist();
     const result = await handler({ month: "2024-04" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
     expect(payload.month).toBe("2024-04");
     expect(payload.summary).toBeDefined();
   });
@@ -566,7 +567,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.unconfirmed_journals.count).toBe(1);
     expect(payload.unconfirmed_journals.items[0]!.id).toBe(1);
@@ -593,7 +594,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.unconfirmed_journals.count).toBe(0);
   });
@@ -618,7 +619,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.overdue_receivables.count).toBe(1);
     expect(payload.overdue_receivables.total).toBe(500);
@@ -642,7 +643,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.overdue_receivables.count).toBe(0);
   });
@@ -664,7 +665,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.overdue_receivables.count).toBe(0);
     // But it should appear in unconfirmed_sale_invoices
@@ -689,7 +690,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.unconfirmed_transactions.count).toBe(0);
     expect(payload.summary.ready_to_close).toBe(true);
@@ -714,7 +715,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.overdue_receivables.count).toBe(0);
   });
@@ -737,7 +738,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.overdue_payables.count).toBe(1);
     expect(payload.overdue_payables.total).toBe(800);
@@ -747,7 +748,7 @@ describe("month_end_close_checklist", () => {
     const handler = setupTool("month_end_close_checklist", {});
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.summary.ready_to_close).toBe(true);
     expect(payload.summary.issues_found).toBe(0);
@@ -767,7 +768,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.summary.ready_to_close).toBe(false);
   });
@@ -789,7 +790,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.overdue_receivables.count).toBe(1);
     const partialWarning = payload.warnings.some((w: string) => w.includes("PARTIALLY_PAID"));
@@ -814,7 +815,7 @@ describe("month_end_close_checklist", () => {
     });
 
     const result = await handler({ month: "2024-03" });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.overdue_receivables.total).toBe(100); // uses base_gross_price
   });

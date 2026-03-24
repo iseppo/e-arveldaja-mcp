@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { parseMcpResponse } from "../mcp-json.js";
 import type { SaleInvoice } from "../types/api.js";
 
 // ---------------------------------------------------------------------------
@@ -76,7 +77,7 @@ function setupReceivables(invoices: SaleInvoice[]) {
 }
 
 function parse(text: string) {
-  return JSON.parse(text) as Record<string, unknown>;
+  return parseMcpResponse(text) as Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------

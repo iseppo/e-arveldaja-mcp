@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 const RUN_LIVE_INTEGRATION = process.env.EARVELDAJA_INTEGRATION_TEST === "true";
 const DIST_ENTRYPOINT = "dist/index.js";
@@ -127,13 +128,13 @@ describe("MCP Server Integration", () => {
 
   it("switch_connection rejects invalid index without changing active connection", async () => {
     const before = await client.callTool({ name: "list_connections", arguments: {} });
-    const beforeData = JSON.parse((before.content as any)[0].text);
+    const beforeData = parseMcpResponse((before.content as any)[0].text);
 
     const result = await client.callTool({ name: "switch_connection", arguments: { index: -1 } });
-    const resultData = JSON.parse((result.content as any)[0].text);
+    const resultData = parseMcpResponse((result.content as any)[0].text);
 
     const after = await client.callTool({ name: "list_connections", arguments: {} });
-    const afterData = JSON.parse((after.content as any)[0].text);
+    const afterData = parseMcpResponse((after.content as any)[0].text);
 
     expect(result.isError).toBe(true);
     expect(resultData.error).toMatch(/Invalid index/);
@@ -158,7 +159,7 @@ describe.skipIf(!RUN_LIVE_INTEGRATION)("Live API MCP Integration", () => {
   it("get_vat_info returns data", async () => {
     const result = await client.callTool({ name: "get_vat_info", arguments: {} });
     expect(result.isError).toBeFalsy();
-    const data = JSON.parse((result.content as any)[0].text);
+    const data = parseMcpResponse((result.content as any)[0].text);
     expect(data).toHaveProperty("vat_number");
   });
 
@@ -170,7 +171,7 @@ describe.skipIf(!RUN_LIVE_INTEGRATION)("Live API MCP Integration", () => {
   it("compute_trial_balance returns balanced totals", async () => {
     const result = await client.callTool({ name: "compute_trial_balance", arguments: {} });
     expect(result.isError).toBeFalsy();
-    const data = JSON.parse((result.content as any)[0].text);
+    const data = parseMcpResponse((result.content as any)[0].text);
     expect(data.totals.difference).toBe(0);
   });
 });

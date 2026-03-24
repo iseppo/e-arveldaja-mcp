@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerBankReconciliationTools } from "./bank-reconciliation.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 function setupReconciliationTool(options: {
   transactions?: unknown[];
@@ -116,7 +117,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(0);
     expect(payload.matches).toHaveLength(0);
@@ -146,7 +147,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matches).toHaveLength(1);
     expect(payload.matches[0]!.best_match.partially_paid_warning).toBe(true);
@@ -178,7 +179,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matches).toHaveLength(1);
     expect(payload.matches[0]!.distribution).toEqual({
@@ -213,7 +214,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matches).toHaveLength(1);
     expect(payload.matches[0]!.best_match.type).toBe("sale_invoice");
@@ -274,7 +275,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({ execute: true });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(0);
     expect(payload.auto_confirmed).toBe(0);
@@ -292,7 +293,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("DRY_RUN");
     expect(payload.auto_confirmed).toBe(1);
@@ -311,7 +312,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({ execute: true });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.results[0]!.status).toBe("confirmed");
@@ -331,7 +332,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.auto_confirmed).toBe(0);
   });
@@ -348,7 +349,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.auto_confirmed).toBe(0);
   });
@@ -364,7 +365,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({ execute: true });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.auto_confirmed).toBe(1);
@@ -386,7 +387,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     // Only the first transaction should match; the second should find the invoice consumed
     expect(payload.auto_confirmed).toBe(1);
@@ -409,7 +410,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
     expect(payload.pairs[0]!.outgoing_transaction_id).toBe(1);
@@ -431,7 +432,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
     expect(payload.pairs[0]!.match_reasons).toContain("exact_amount");
@@ -461,7 +462,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
   });
@@ -476,7 +477,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
   });
@@ -491,7 +492,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
   });
@@ -510,7 +511,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({ execute: true });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.skipped_ambiguous).toBe(1);
@@ -534,7 +535,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({ execute: true });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.matched_pairs).toBe(1);
@@ -561,7 +562,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     // Only one pair matched, the second C stays unmatched
     expect(payload.matched_pairs).toBe(1);
@@ -577,7 +578,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
   });
@@ -592,7 +593,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({ execute: true });
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(1);
     expect(payload.matched_pairs).toBe(0);
@@ -616,7 +617,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(1);
       expect(payload.one_sided[0]!.transaction_id).toBe(20);
@@ -641,12 +642,12 @@ describe("reconcile_inter_account_transfers", () => {
 
       // Without target param → no match (ambiguous, 2 other accounts)
       const result1 = await handler({});
-      const payload1 = JSON.parse(result1.content[0]!.text);
+      const payload1 = parseMcpResponse(result1.content[0]!.text);
       expect(payload1.matched_one_sided).toBe(0);
 
       // With target param → matches
       const result2 = await handler({ target_accounts_dimensions_id: 100 });
-      const payload2 = JSON.parse(result2.content[0]!.text);
+      const payload2 = parseMcpResponse(result2.content[0]!.text);
       expect(payload2.matched_one_sided).toBe(1);
       expect(payload2.one_sided[0]!.target_dimension_id).toBe(100);
       expect(payload2.one_sided[0]!.match_reasons).toContain("target_from_parameter");
@@ -662,7 +663,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(1);
       expect(payload.one_sided[0]!.target_dimension_id).toBe(200);
@@ -680,7 +681,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
     });
@@ -700,7 +701,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({ execute: true });
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.mode).toBe("EXECUTED");
       expect(payload.matched_one_sided).toBe(1);
@@ -733,7 +734,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.skipped_already_handled).toBe(1);
@@ -767,7 +768,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = JSON.parse(result.content[0]!.text);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.skipped_already_handled).toBe(1);

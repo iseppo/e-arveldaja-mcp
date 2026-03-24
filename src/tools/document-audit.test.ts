@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerDocumentAuditTools } from "./document-audit.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 function setupDuplicateTool(existingPurchases: unknown[]) {
   const server = { registerTool: vi.fn() } as any;
@@ -39,7 +40,7 @@ describe("detect_duplicate_purchase_invoice", () => {
       gross_price: 124,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.exact_duplicates.count).toBe(0);
     expect(payload.suspicious_same_amount_date.count).toBe(0);
@@ -94,7 +95,7 @@ describe("detect_duplicate_purchase_invoice", () => {
       gross_price: 248,
     });
 
-    const payload = JSON.parse(result.content[0]!.text);
+    const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.candidate_invoice_number_matches.count).toBe(1);
     expect(payload.candidate_invoice_number_matches.items).toEqual([
