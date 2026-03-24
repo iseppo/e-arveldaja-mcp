@@ -253,4 +253,4 @@ If you'd rather not upload your invoice publicly, email it directly to indrek.se
 
 ## License
 
-[The Unlicense](LICENSE) — public domain. Do whatever you want with it.
+[Apache License 2.0](LICENSE)
