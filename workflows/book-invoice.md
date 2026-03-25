@@ -75,6 +75,7 @@ Call `suggest_booking`:
 Review `past_invoices` and reuse the most relevant:
 - `cl_purchase_articles_id`
 - `purchase_accounts_id`
+- `purchase_accounts_dimensions_id` (required when the account has sub-accounts)
 - VAT fields such as `vat_rate_dropdown`, `vat_accounts_id`, `cl_vat_articles_id`, `reversed_vat_id`
 
 If there is no suitable history, call `list_purchase_articles` or ask the user instead of inventing IDs.
@@ -104,7 +105,7 @@ Call `create_purchase_invoice_from_pdf`:
 - `invoice_date`
 - `journal_date`
 - `term_days`
-- `items`: JSON array with `cl_purchase_articles_id`, `purchase_accounts_id`, quantities, totals, VAT fields, `vat_accounts_id`, `cl_vat_articles_id`, and `reversed_vat_id` when applicable
+- `items`: JSON array with `cl_purchase_articles_id`, `purchase_accounts_id`, `purchase_accounts_dimensions_id` (when the account has dimensions), quantities, totals, VAT fields, `vat_accounts_id`, `cl_vat_articles_id`, and `reversed_vat_id` when applicable
 - `vat_price`: exact value from the invoice
 - `gross_price`: exact value from the invoice
 - `ref_number`

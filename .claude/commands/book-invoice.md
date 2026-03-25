@@ -74,7 +74,8 @@ Call `suggest_booking`:
 - clients_id: supplier client ID
 - description: first line item description
 
-Reuse the most relevant `cl_purchase_articles_id`, `purchase_accounts_id`, and VAT fields from similar `past_invoices`.
+Reuse the most relevant `cl_purchase_articles_id`, `purchase_accounts_id`, `purchase_accounts_dimensions_id`, and VAT fields from similar `past_invoices`.
+If `purchase_accounts_dimensions_id` is present in the history, include it — it is required for accounts with sub-accounts.
 If there is no suitable history, call `list_purchase_articles` or ask the user instead of inventing IDs.
 
 ### Step 7: Determine reverse charge VAT (pöördkäibemaks)
@@ -115,6 +116,7 @@ Call `create_purchase_invoice_from_pdf`:
   - custom_title: description from PDF
   - cl_purchase_articles_id
   - purchase_accounts_id
+  - purchase_accounts_dimensions_id (when the account has dimensions/sub-accounts)
   - total_net_price: net amount
   - vat_rate_dropdown
   - vat_accounts_id

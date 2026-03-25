@@ -72,8 +72,9 @@ Follow these steps in order:
 8. Call \`suggest_booking\` with:
    - clients_id: supplier_client_id
    - description: the first line item description
-   Review \`past_invoices\` and reuse the most relevant \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, and VAT fields
+   Review \`past_invoices\` and reuse the most relevant \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, \`purchase_accounts_dimensions_id\`, and VAT fields
    (\`vat_rate_dropdown\`, \`vat_accounts_id\`, \`cl_vat_articles_id\`, \`reversed_vat_id\`) from a similar line.
+   If \`purchase_accounts_dimensions_id\` is present in the history, include it — it is required for accounts with sub-accounts.
    If there is no suitable history, call \`list_purchase_articles\` or ask the user instead of inventing purchase article IDs.
 
 9. Determine VAT treatment per line:
@@ -101,8 +102,8 @@ Follow these steps in order:
    - invoice_date
    - journal_date
    - term_days
-   - items: JSON array with \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, quantities, totals, VAT fields,
-     \`vat_accounts_id\`, \`cl_vat_articles_id\`, and \`reversed_vat_id\` when applicable
+   - items: JSON array with \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, \`purchase_accounts_dimensions_id\` (when the account has dimensions),
+     quantities, totals, VAT fields, \`vat_accounts_id\`, \`cl_vat_articles_id\`, and \`reversed_vat_id\` when applicable
    - vat_price: EXACT value from invoice
    - gross_price: EXACT value from invoice
    - ref_number
