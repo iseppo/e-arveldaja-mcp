@@ -630,6 +630,44 @@ describe("wise import tool", () => {
     }]);
   });
 
+  it("uses an exact normalized company match instead of the first substring match", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "TRANSFER-xfer-2b", "COMPLETED", "IN", "2026-02-05 10:00:00", "2026-02-05 10:00:00",
+      "0", "EUR", "0", "EUR",
+      "LHV Bank", "750", "EUR",
+      "Seppo AI OÜ", "750", "EUR",
+      "1", "", "", "", "General", "",
+    ]));
+
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9201 });
+    const { api, handler } = setupWiseTool([], create, {
+      accountDimensions: [
+        { id: 5,  accounts_id: 1010, title_est: "Wise", is_deleted: false },
+        { id: 20, accounts_id: 1020, title_est: "LHV",  is_deleted: false },
+      ],
+      journals: [],
+      bankAccounts: [
+        { accounts_dimensions_id: 5 },
+        { accounts_dimensions_id: 20 },
+      ],
+      invoiceInfo: { invoice_company_name: "Seppo AI OÜ" },
+      findByNameResult: [
+        { id: 999, name: "Seppo AI OÜ Holdings" },
+        { id: 55, name: "Seppo AI OU" },
+      ],
+    });
+
+    await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      inter_account_dimension_id: 20,
+      execute: true,
+    });
+
+    expect(api.transactions.update).toHaveBeenCalledWith(9201, { clients_id: 55 });
+    expect(api.transactions.update).not.toHaveBeenCalledWith(9201, { clients_id: 999 });
+  });
+
   it("dry run reports would_create for transfer rows and does not call confirm", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "TRANSFER-xfer-3", "COMPLETED", "IN", "2026-02-10 10:00:00", "2026-02-10 10:00:00",

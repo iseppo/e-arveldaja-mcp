@@ -25,7 +25,19 @@ Call `import_camt053`:
 - execute: false
 - include `date_from` / `date_to` when provided
 
-Review `results`, `skipped_duplicate_details`, and `errors`.
+Review:
+- `mode`
+- `total_statement_entries`
+- `eligible_entries`
+- `filtered_out`
+- `created_count`
+- `skipped_count`
+- `error_count`
+- `sample`
+- `skipped_summary`
+- `errors`
+
+Present which rows would create transactions and which are skipped as duplicates.
 
 ### Step 3: Approval gate
 
@@ -35,6 +47,16 @@ If the user does not explicitly approve, stop.
 
 ### Step 4: Execute
 
-Call `import_camt053` again with execute: true.
+Call `import_camt053` again:
+- `file_path`: the provided file
+- `accounts_dimensions_id`: the provided dimension ID
+- execute: true
+- include `date_from` / `date_to` when provided
 
-Report created rows, skipped duplicates, errors, and suggest reconciliation as the next step.
+Report:
+- `created_count`
+- `skipped_count`
+- `error_count`
+- any transactions still needing attention
+
+Suggest reconciliation as the next step if the import succeeded.

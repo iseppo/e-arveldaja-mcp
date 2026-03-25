@@ -130,6 +130,14 @@ function normalizeWiseText(value?: string | null): string {
   return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+function normalizeWiseCompanyName(value?: string | null): string {
+  return normalizeWiseText(value)
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\b(as|ou|mtu|sa|tu)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function normalizeWiseCurrency(value?: string | null, fallback = "EUR"): string {
   const normalized = value?.trim().toUpperCase();
   return normalized || fallback;
@@ -256,6 +264,24 @@ function buildAccountDistributionFromDimension(
     related_sub_id: dimension.id,
     amount,
   };
+}
+
+function resolveOwnCompanyClientId(
+  companyName: string | undefined,
+  matches: Array<{ id?: number; name?: string | null }>,
+): number | undefined {
+  const normalizedTarget = normalizeWiseCompanyName(companyName);
+  if (!normalizedTarget) return undefined;
+
+  const exactMatches = matches.filter(
+    (client) => client.id !== undefined && normalizeWiseCompanyName(client.name) === normalizedTarget,
+  );
+
+  if (exactMatches.length === 1) {
+    return exactMatches[0]!.id;
+  }
+
+  return undefined;
 }
 
 export function registerWiseImportTools(server: McpServer, api: ApiContext): void {
@@ -629,7 +655,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             const companyName = invoiceInfo.invoice_company_name;
             if (companyName) {
               const clients = await api.clients.findByName(companyName);
-              companyClientId = clients[0]?.id;
+              companyClientId = resolveOwnCompanyClientId(companyName, clients);
             }
 
             for (const entry of transferEntries) {

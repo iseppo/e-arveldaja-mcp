@@ -20,6 +20,8 @@ export interface AuditEntry {
 const LOGS_DIR = join(process.cwd(), "logs");
 const ENTRY_SEPARATOR = "\n---\n\n";
 const META_RE = /^<!-- audit:(\{.*\}) -->$/m;
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const AUDIT_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
 let activeConnectionNameGetter: () => string = () => "default";
 
@@ -266,6 +268,40 @@ export interface AuditLogFilter {
   limit?: number;
 }
 
+function parseAuditTimestamp(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  if (AUDIT_TS_RE.test(trimmed)) {
+    const parsed = Date.parse(trimmed.replace(" ", "T") + "Z");
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseFilterBoundary(value: string, kind: "from" | "to"): number {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`Invalid ${kind === "from" ? "date_from" : "date_to"} filter: empty value`);
+  }
+
+  if (DATE_ONLY_RE.test(trimmed)) {
+    const suffix = kind === "from" ? "T00:00:00.000Z" : "T23:59:59.999Z";
+    const parsed = Date.parse(trimmed + suffix);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  const parsed = parseAuditTimestamp(trimmed);
+  if (parsed !== undefined) return parsed;
+
+  throw new Error(
+    `Invalid ${kind === "from" ? "date_from" : "date_to"} filter: "${value}". ` +
+    "Expected YYYY-MM-DD or ISO 8601."
+  );
+}
+
 function getAuditLogFromFile(filePath: string, filter?: AuditLogFilter): string {
   if (!existsSync(filePath)) return "";
 
@@ -283,14 +319,17 @@ function getAuditLogFromFile(filePath: string, filter?: AuditLogFilter): string 
   // Split into sections by separator
   const sections = content.split(ENTRY_SEPARATOR).filter(Boolean);
   let filtered = sections;
+  const dateFromMs = filter?.date_from ? parseFilterBoundary(filter.date_from, "from") : undefined;
+  const dateToMs = filter?.date_to ? parseFilterBoundary(filter.date_to, "to") : undefined;
 
   if (filter?.date_from || filter?.date_to) {
     filtered = filtered.filter(section => {
       const match = section.match(/^### (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
       if (!match) return true;
-      const ts = match[1]!;
-      if (filter.date_from && ts < filter.date_from) return false;
-      if (filter.date_to && ts > (filter.date_to.length === 10 ? filter.date_to + " 23:59:59" : filter.date_to)) return false;
+      const tsMs = parseAuditTimestamp(match[1]!);
+      if (tsMs === undefined) return true;
+      if (dateFromMs !== undefined && tsMs < dateFromMs) return false;
+      if (dateToMs !== undefined && tsMs > dateToMs) return false;
       return true;
     });
   }

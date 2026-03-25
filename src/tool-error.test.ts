@@ -1,28 +1,30 @@
 import { describe, expect, it } from "vitest";
+import { parseMcpResponse } from "./mcp-json.js";
 import { toolError } from "./tool-error.js";
 
 describe("toolError", () => {
   it("returns MCP isError results for strings", () => {
-    expect(toolError("Invalid input")).toEqual({
-      isError: true,
-      content: [{ type: "text", text: "Invalid input" }],
+    const result = toolError("Invalid input");
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse((result.content[0] as { type: string; text: string }).text)).toEqual({
+      error: "Invalid input",
     });
   });
 
   it("serializes structured payloads for tool self-correction", () => {
-    expect(toolError({ error: "Account validation failed", details: ["4000 missing"] })).toEqual({
-      isError: true,
-      content: [{
-        type: "text",
-        text: JSON.stringify({ error: "Account validation failed", details: ["4000 missing"] }, null, 2),
-      }],
+    const result = toolError({ error: "Account validation failed", details: ["4000 missing"] });
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse((result.content[0] as { type: string; text: string }).text)).toEqual({
+      error: "Account validation failed",
+      details: ["4000 missing"],
     });
   });
 
   it("falls back to a stable message for undefined throws", () => {
-    expect(toolError(undefined)).toEqual({
-      isError: true,
-      content: [{ type: "text", text: "Unknown error" }],
+    const result = toolError(undefined);
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse((result.content[0] as { type: string; text: string }).text)).toEqual({
+      error: "Unknown error",
     });
   });
 
@@ -34,6 +36,8 @@ describe("toolError", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content).toHaveLength(1);
-    expect((result.content[0] as { type: string; text: string }).text).toBe("Internal error");
+    expect(parseMcpResponse((result.content[0] as { type: string; text: string }).text)).toEqual({
+      error: "Internal error",
+    });
   });
 });

@@ -31,7 +31,7 @@ Show a summary grouped by confidence level:
 
 **LOW (<50):** Unlikely matches, shown for reference only.
 
-If `no `distribution` key is present` or a partially paid warning is present, say clearly that no ready-to-use distribution is provided and the remaining open balance must be checked manually first.
+If no `distribution` key is present or a partially paid warning is present, say clearly that no ready-to-use distribution is provided and the remaining open balance must be checked manually first.
 
 ## Step 3: Handle based on mode
 
@@ -57,16 +57,16 @@ For approved matches, call `confirm_transaction`:
 - `id`: transaction ID
 - `distributions`: `JSON.stringify([match.distribution])`
 
-Only do this when `a `distribution` key is present`.
-- If `no `distribution` key is present` or the invoice is partially paid, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
+Only do this when a `distribution` key is present.
+- If no `distribution` key is present or the invoice is partially paid, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
 - Only confirm one explicitly approved match at a time; do not auto-confirm ambiguous transactions.
 
 ### Single transaction mode
 
 Call `reconcile_transactions` with `min_confidence: 0`, then filter the returned matches to the requested transaction ID.
 - If no match exists for that transaction, report that and stop.
-- If the user approves a match and `a `distribution` key is present`, call `confirm_transaction` with `distributions: JSON.stringify([match.distribution])`.
-- If `no `distribution` key is present`, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
+- If the user approves a match and it has a `distribution` key, call `confirm_transaction` with `distributions: JSON.stringify([match.distribution])`.
+- If no `distribution` key is present, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
 
 ## Step 4: Inter-account transfers
 
@@ -81,6 +81,7 @@ Review the results:
 - `pairs`: would confirm both outgoing and incoming sides
 
 Ask for approval. If approved, call again with `execute: true`.
+- If there are 3+ bank accounts and IBAN is missing, provide `target_accounts_dimensions_id`.
 
 **WARNING:** Do not manually confirm Wise-side transfers that were already confirmed via LHV CAMT — this creates duplicate journal entries.
 
