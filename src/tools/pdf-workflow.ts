@@ -3,7 +3,7 @@ import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
-import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse, coerceId } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { validateFilePath } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
@@ -415,7 +415,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         liability_accounts_id: params.liability_accounts_id ?? 2310,
         bank_ref_number: params.ref_number,
         bank_account_no: params.bank_account_no,
-        notes: params.notes,
+        notes: tagNotes(params.notes),
         items,
       };
 

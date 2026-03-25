@@ -242,6 +242,7 @@ EARVELDAJA_INTEGRATION_TEST=true npm run test:integration
 - **Node.js 18+** required.
 - **File access scope.** By default, file-reading tools can access supported files under the working directory and `/tmp`. Set `EARVELDAJA_ALLOWED_PATHS` (colon-separated) to allow additional directories, or `EARVELDAJA_ALLOW_HOME=true` to allow the entire home directory.
 - **Session audit log.** Every mutating operation (create, update, delete, confirm, import) is logged to a human-readable Markdown file at `logs/{connection}.audit.md` in the working directory. Each entry includes timestamps, tool name, entity details, account postings, and financial amounts. Use `get_session_log` to view, `list_audit_logs` to browse all companies, and `clear_session_log` to reset. The log persists across sessions and is company-specific. Set `EARVELDAJA_AUDIT_LANG=en` for English labels (default: Estonian).
+- **Tag MCP-created invoices.** Set `EARVELDAJA_TAG_NOTES=true` to append `(e-arveldaja-mcp)` to the notes field of all invoices created by the server. Off by default.
 
 ## Privacy
 

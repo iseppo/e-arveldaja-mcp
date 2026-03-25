@@ -11,7 +11,7 @@ import { reportProgress } from "../progress.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { type ApiContext, isCompanyVatRegistered, safeJsonParse, coerceId } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import {
@@ -598,7 +598,7 @@ async function createAndMaybeMatchPurchaseInvoice(
         liability_accounts_id: DEFAULT_LIABILITY_ACCOUNT,
         bank_ref_number: extracted.ref_number,
         bank_account_no: extracted.supplier_iban,
-        notes: invoiceNotes,
+        notes: tagNotes(invoiceNotes),
         items: [item],
       },
       extracted.total_vat,
@@ -1319,7 +1319,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
                 term_days: 0,
                 cl_currencies_id: transaction.cl_currencies_id ?? "EUR",
                 liability_accounts_id: group.suggested_booking.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
-                notes: `Auto-created from classified bank transaction ${transaction.id}`,
+                notes: tagNotes(`Auto-created from classified bank transaction ${transaction.id}`),
                 items: [purchaseItem],
               },
               deriveAutoBookedVatPrice(grossAmount, vatConfig),

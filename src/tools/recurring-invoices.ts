@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
-import type { ApiContext } from "./crud-tools.js";
+import { type ApiContext, tagNotes } from "./crud-tools.js";
 import type { SaleInvoice } from "../types/api.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
@@ -139,7 +139,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             // Clone tax-critical invoice-level fields
             intra_community_supply: full.intra_community_supply,
             client_vat_no: full.client_vat_no,
-            notes: appendRecurringCloneMarker(full.notes, recurringMarker),
+            notes: tagNotes(appendRecurringCloneMarker(full.notes, recurringMarker)),
             items: full.items.map(item => ({
               products_id: item.products_id,
               cl_sale_articles_id: item.cl_sale_articles_id,

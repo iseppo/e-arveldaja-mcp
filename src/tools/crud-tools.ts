@@ -120,6 +120,14 @@ const pageParam = z.object({
 
 export const coerceId = z.coerce.number().int().positive();
 const idParam = z.object({ id: coerceId.describe("Object ID") });
+
+const MCP_TAG = "e-arveldaja-mcp";
+
+/** Append "(e-arveldaja-mcp)" to notes when EARVELDAJA_TAG_NOTES=true. */
+export function tagNotes(notes?: string): string | undefined {
+  if (process.env.EARVELDAJA_TAG_NOTES !== "true") return notes;
+  return notes ? `${notes} (${MCP_TAG})` : `(${MCP_TAG})`;
+}
 const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const isoDateString = (description: string) =>
   z.string().regex(isoDateRegex, "Expected YYYY-MM-DD").describe(description);
@@ -485,6 +493,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       cl_countries_id: params.cl_countries_id ?? "EST",
       sale_invoice_type: params.sale_invoice_type ?? "INVOICE",
       show_client_balance: params.show_client_balance ?? false,
+      notes: tagNotes(params.notes),
       items,
     });
     logAudit({
@@ -615,7 +624,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         liability_accounts_id: params.liability_accounts_id ?? 2310,
         bank_ref_number: params.bank_ref_number,
         bank_account_no: params.bank_account_no,
-        notes: params.notes,
+        notes: tagNotes(params.notes),
         items,
       };
       const result = await api.purchaseInvoices.createAndSetTotals(
