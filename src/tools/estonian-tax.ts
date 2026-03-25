@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
-import { type ApiContext, isCompanyVatRegistered } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered, coerceId } from "./crud-tools.js";
 import { computeAllBalances } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { create } from "../annotations.js";
@@ -17,7 +17,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     "Calculate dividend tax (22/78 CIT) and create draft journal entries for dividend payable and tax liability. Validates retained earnings balance and net assets.",
     {
       net_dividend: z.number().describe("Net dividend amount to shareholder (EUR)"),
-      shareholder_client_id: z.number().describe("Shareholder client ID"),
+      shareholder_client_id: coerceId.describe("Shareholder client ID"),
       effective_date: z.string().describe("Distribution date (YYYY-MM-DD)"),
       retained_earnings_account: z.number().optional().describe("Retained earnings account (default 3020)"),
       dividend_payable_account: z.number().optional().describe("Dividend payable account (default 2370)"),
@@ -194,7 +194,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   registerTool(server, "create_owner_expense_reimbursement",
     "Create a journal for a business expense paid personally by the owner. Splits input VAT for VAT-registered companies.",
     {
-      owner_client_id: z.number().describe("Owner/shareholder client ID"),
+      owner_client_id: coerceId.describe("Owner/shareholder client ID"),
       effective_date: z.string().describe("Expense date (YYYY-MM-DD)"),
       description: z.string().describe("Expense description"),
       net_amount: z.number().describe("Net amount (without VAT)"),

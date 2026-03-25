@@ -118,7 +118,8 @@ const pageParam = z.object({
   modified_since: z.string().optional().describe("Return only objects modified since this timestamp (ISO 8601)"),
 });
 
-const idParam = z.object({ id: z.number().describe("Object ID") });
+export const coerceId = z.coerce.number().int().positive();
+const idParam = z.object({ id: coerceId.describe("Object ID") });
 const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const isoDateString = (description: string) =>
   z.string().regex(isoDateRegex, "Expected YYYY-MM-DD").describe(description);
@@ -170,7 +171,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "update_client", "Update an existing client", {
-    id: z.number().describe("Client ID"),
+    id: coerceId.describe("Client ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, { ...mutate, title: "Update Client" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
@@ -250,7 +251,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "update_product", "Update a product", {
-    id: z.number().describe("Product ID"),
+    id: coerceId.describe("Product ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, { ...mutate, title: "Update Product" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
@@ -329,7 +330,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "update_journal", "Update a journal entry", {
-    id: z.number().describe("Journal ID"),
+    id: coerceId.describe("Journal ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
@@ -389,7 +390,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "create_transaction", "Create a bank transaction", {
-    accounts_dimensions_id: z.number().describe("Bank account dimension ID"),
+    accounts_dimensions_id: coerceId.describe("Bank account dimension ID"),
     type: z.string().describe("Transaction type: D (incoming) or C (outgoing)"),
     amount: z.number().describe("Transaction amount"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
@@ -413,7 +414,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "confirm_transaction", "Confirm a bank transaction by providing distribution rows", {
-    id: z.number().describe("Transaction ID"),
+    id: coerceId.describe("Transaction ID"),
     distributions: z.string().optional().describe("JSON array of distribution rows: [{related_table, related_id?, amount}]"),
   }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions }) => {
     const dist = distributions ? parseTransactionDistributions(distributions) : undefined;
@@ -463,8 +464,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "create_sale_invoice", "Create a sales invoice", {
-    clients_id: z.number().describe("Buyer client ID"),
-    cl_templates_id: z.number().describe("Invoice template ID"),
+    clients_id: coerceId.describe("Buyer client ID"),
+    cl_templates_id: coerceId.describe("Invoice template ID"),
     number_suffix: z.string().optional().describe("Invoice number suffix (omit or empty string for auto-assign from invoice series)"),
     create_date: isoDateString("Invoice date (YYYY-MM-DD)"),
     journal_date: isoDateString("Turnover date (YYYY-MM-DD)"),
@@ -496,7 +497,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "update_sale_invoice", "Update a sales invoice", {
-    id: z.number().describe("Invoice ID"),
+    id: coerceId.describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
@@ -535,7 +536,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "send_sale_invoice", "Send a sales invoice via e-invoice or email. DESTRUCTIVE — sends real documents to recipients.", {
-    id: z.number().describe("Invoice ID"),
+    id: coerceId.describe("Invoice ID"),
     send_einvoice: z.boolean().optional().describe("Send as e-invoice (machine-readable XML)"),
     send_email: z.boolean().optional().describe("Send as email (PDF)"),
     email_addresses: z.string().optional().describe("Email addresses"),
@@ -573,7 +574,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "create_purchase_invoice",
     "Create a draft purchase invoice with line items. Requires cl_purchase_articles_id (use list_purchase_articles). Pass EXACT vat_price and gross_price from the original invoice.",
     {
-      clients_id: z.number().describe("Supplier client ID"),
+      clients_id: coerceId.describe("Supplier client ID"),
       client_name: z.string().describe("Supplier name"),
       number: z.string().describe("Invoice number"),
       create_date: isoDateString("Invoice date (YYYY-MM-DD)"),
@@ -637,7 +638,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     });
 
   registerTool(server, "update_purchase_invoice", "Update a purchase invoice", {
-    id: z.number().describe("Invoice ID"),
+    id: coerceId.describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");

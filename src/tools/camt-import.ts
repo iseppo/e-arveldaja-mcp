@@ -5,7 +5,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import type { Client, Transaction } from "../types/api.js";
-import type { ApiContext } from "./crud-tools.js";
+import { type ApiContext, coerceId } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
@@ -564,7 +564,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     "Parse a CAMT.053 bank statement XML file and create bank transactions in e-arveldaja. Skips duplicates by AcctSvcrRef bank reference. DRY RUN by default.",
     {
       file_path: z.string().describe("Absolute path to the CAMT.053 XML file"),
-      accounts_dimensions_id: z.number().describe("Bank account dimension ID in e-arveldaja. Use list_account_dimensions to find it."),
+      accounts_dimensions_id: coerceId.describe("Bank account dimension ID in e-arveldaja. Use list_account_dimensions to find it."),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),

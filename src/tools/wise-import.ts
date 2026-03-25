@@ -4,7 +4,7 @@ import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import type { AccountDimension } from "../types/api.js";
-import type { ApiContext } from "./crud-tools.js";
+import { type ApiContext, coerceId } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
@@ -272,7 +272,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
     "DRY RUN by default — set execute=true to actually create transactions.",
     {
       file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions"),
-      accounts_dimensions_id: z.number().describe("Bank account dimension ID for the Wise account in e-arveldaja"),
+      accounts_dimensions_id: coerceId.describe("Bank account dimension ID for the Wise account in e-arveldaja"),
       fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account. Use list_account_dimensions to find it."),
       fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),
       inter_account_dimension_id: z.number().optional().describe(

@@ -11,7 +11,7 @@ import { reportProgress } from "../progress.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { type ApiContext, isCompanyVatRegistered, safeJsonParse } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered, safeJsonParse, coerceId } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import {
@@ -886,7 +886,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback for model/manual review. Purchase invoices can be created, confirmed, and matched to bank transactions when execute=true.",
     {
       folder_path: z.string().describe("Folder path with receipts"),
-      accounts_dimensions_id: z.number().describe("Bank account dimension ID used when matching bank transactions"),
+      accounts_dimensions_id: coerceId.describe("Bank account dimension ID used when matching bank transactions"),
       execute: z.boolean().optional().describe("Actually create and book invoices (default false = dry run)"),
       date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
@@ -1094,7 +1094,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     "classify_unmatched_transactions",
     "Classify unconfirmed bank transactions that do not match any sale or purchase invoice. Read-only analysis with suggested booking defaults.",
     {
-      accounts_dimensions_id: z.number().describe("Bank account dimension ID"),
+      accounts_dimensions_id: coerceId.describe("Bank account dimension ID"),
       date_from: z.string().optional().describe("Optional lower transaction date bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional upper transaction date bound (YYYY-MM-DD)"),
     },

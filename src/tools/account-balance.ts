@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
-import type { ApiContext } from "./crud-tools.js";
+import { type ApiContext, coerceId } from "./crud-tools.js";
 import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
@@ -131,7 +131,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
   registerTool(server, "compute_client_debt",
     "Compute how much the company owes the client and vice versa across selected accounts (default: 2110, 2310, 1210). Uses journal D/C postings.",
     {
-      client_id: z.number().describe("Client ID"),
+      client_id: coerceId.describe("Client ID"),
       account_ids: z.string().optional().describe("Comma-separated account IDs to check (default: 2110,2310,1210)"),
     },
     { ...readOnly, title: "Compute Client Net Position" },

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
-import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse, coerceId } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { validateFilePath } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
@@ -291,7 +291,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
   registerTool(server, "suggest_booking",
     "Suggest purchase articles, accounts, and VAT settings for a new invoice based on similar confirmed invoices from the same supplier.",
     {
-      clients_id: z.number().describe("Supplier client ID"),
+      clients_id: coerceId.describe("Supplier client ID"),
       description: z.string().optional().describe("Invoice item description to match"),
       limit: z.number().optional().describe("Max past invoices to return (default 3)"),
     },
@@ -370,7 +370,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     "Automatically uploads the source document if file_path is provided. " +
     "Pass EXACT vat_price and gross_price from the original invoice for payment matching.",
     {
-      supplier_client_id: z.number().describe("Supplier client ID (from resolve_supplier)"),
+      supplier_client_id: coerceId.describe("Supplier client ID (from resolve_supplier)"),
       invoice_number: z.string().describe("Invoice number"),
       invoice_date: z.string().describe("Invoice date (YYYY-MM-DD)"),
       journal_date: z.string().describe("Turnover/booking date (YYYY-MM-DD)"),
@@ -479,7 +479,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
   registerTool(server, "upload_invoice_document",
     "Upload a source invoice document (PDF/JPG/PNG) to an existing purchase invoice",
     {
-      invoice_id: z.number().describe("Purchase invoice ID"),
+      invoice_id: coerceId.describe("Purchase invoice ID"),
       file_path: z.string().describe("Absolute path to the invoice document (PDF/JPG/PNG)"),
     },
     { ...mutate, openWorldHint: true, title: "Upload Purchase Invoice Document" },
