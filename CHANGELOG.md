@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.9.12] - 2026-03-25
+
+### Fixed
+- **Security: `isSecureEnvFile` fail-closed** — catch block now only returns `true` for ENOENT (file not found). Previously any `lstatSync` error was silently treated as safe.
+- **Security: stack traces gated behind debug mode** — fatal error handler no longer writes `err.stack` to stderr unless `EARVELDAJA_DEBUG=true`.
+- **Security: audit log permissions** — log directory created with mode `0700`, files with mode `0600` to prevent other users reading financial data.
+- **Rounding consistency** — trial balance totals, `sumCategory`, client debt totals, aging analysis bucket/debtor/creditor accumulators, and overdue receivables/payables totals now use `roundMoney()` at each accumulation step, matching the pattern already used in `computeAllBalances`.
+- **Inter-account duplicate detection** — replaced `Math.round(x*100)/100` with `roundMoney()` in journal key generation (`inter-account-utils.ts`, `bank-reconciliation.ts`), fixing potential false negatives at X.XX5 boundaries.
+- **Dividend `grossDividend`** — now rounded before use in journal posting amounts.
+- **Rate limiter race condition** — `waitForRateLimitTurn()` uses `.then(onFulfilled, onRejected)` so concurrent callers chain correctly instead of potentially bypassing the 100ms spacing.
+- **Wise CSV import** — malformed numeric values now throw instead of silently defaulting to 0. Exchange rate no longer silently defaults to 1 on parse failure. Required header validation expanded from 4 to 6 columns.
+- **CSV BOM stripping** — `parseCSV()` now strips UTF-8 BOM (`\uFEFF`), fixing header matching issues with Windows/Excel exports.
+- **VAT rate comma replacement** — `normalizeVatRate()` uses regex `/,/g` for global replacement instead of string `.replace()` which only replaced the first comma.
+- **`toMcpJson` error handling** — circular reference serialization now throws a descriptive error instead of an opaque `TypeError`.
+- **Readonly pagination** — `readonlyCachedGetAll` now updates `totalPages` from each subsequent response, matching `BaseResource.listAll()` behavior.
+
+### Changed
+- **Aging report field rename** — `total_unpaid` renamed to `total_unpaid_face_value` to clarify that partially-paid invoices are shown at full invoice amount. Warning message updated.
+- **Owner expense `vat_rate` validation** — values > 1 are rejected with a clear error ("looks like a percentage, pass a decimal fraction instead").
+- **Purchase invoice tool descriptions** — `create_purchase_invoice` and `create_purchase_invoice_from_pdf` now document `purchase_accounts_dimensions_id` (required for accounts with sub-accounts). `suggest_purchase_booking` output includes the dimension ID from historical invoices.
+- **CLAUDE.md** — documented the account dimensions requirement under "Purchase invoice creation".
+
 ## [0.9.11] - 2026-03-24
 
 ### Fixed
