@@ -39,9 +39,10 @@ export function validateAccounts(
 }
 
 /**
- * Check that purchase invoice items include `purchase_accounts_dimensions_id`
- * when the target account requires dimensions. Returns an array of error
- * strings (empty = all OK).
+ * Ensure purchase invoice items have `purchase_accounts_dimensions_id` when
+ * the target account requires dimensions. Auto-fills when the account has
+ * exactly one active dimension. Returns an array of error strings (empty = all OK).
+ * Items are mutated in place when auto-filling.
  */
 export function validateItemDimensions(
   items: PurchaseInvoiceItem[],
@@ -62,15 +63,20 @@ export function validateItemDimensions(
     if (item.purchase_accounts_dimensions_id !== undefined && item.purchase_accounts_dimensions_id !== null) continue;
 
     // Account requires a dimension but none was provided
-    const dims = accountDimensions
-      .filter(d => d.accounts_id === accountId && !d.is_deleted)
-      .map(d => `${d.id} (${d.title_est})`);
+    const dims = accountDimensions.filter(d => d.accounts_id === accountId && !d.is_deleted);
 
+    if (dims.length === 1) {
+      // Auto-fill the only available dimension
+      item.purchase_accounts_dimensions_id = dims[0]!.id;
+      continue;
+    }
+
+    const dimLabels = dims.map(d => `${d.id} (${d.title_est})`);
     errors.push(
       `Item ${i + 1} "${item.custom_title}": account ${accountId} (${account.name_est}) has dimensions (sub-accounts) — ` +
       `purchase_accounts_dimensions_id is required. ` +
-      (dims.length > 0
-        ? `Available dimensions: ${dims.join(", ")}.`
+      (dimLabels.length > 0
+        ? `Available dimensions: ${dimLabels.join(", ")}.`
         : `Use list_account_dimensions to find valid dimension IDs.`)
     );
   }
