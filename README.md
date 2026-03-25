@@ -2,7 +2,9 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 90 tools, 10 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 93 tools, 10 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+
+> **Active development.** This package is under active development and has not seen extensive real-world testing yet. If you encounter a bug or unexpected behaviour, please let me know via [GitHub Issues](https://github.com/iseppo/e-arveldaja-mcp/issues) or email at indrek.seppo@gmail.com.
 
 ## Disclaimer
 
