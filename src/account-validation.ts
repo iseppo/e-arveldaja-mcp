@@ -63,11 +63,11 @@ export function validateItemDimensions(
     if (item.purchase_accounts_dimensions_id !== undefined && item.purchase_accounts_dimensions_id !== null) continue;
 
     // Account requires a dimension but none was provided
-    const dims = accountDimensions.filter(d => d.accounts_id === accountId && !d.is_deleted);
+    const dims = accountDimensions.filter(d => d.id !== undefined && d.accounts_id === accountId && !d.is_deleted);
 
     if (dims.length === 1) {
       // Auto-fill the only available dimension
-      item.purchase_accounts_dimensions_id = dims[0]!.id;
+      item.purchase_accounts_dimensions_id = dims[0]!.id!;
       continue;
     }
 

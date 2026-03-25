@@ -36,7 +36,7 @@ interface WiseRow {
   note: string;
 }
 
-function parseWiseNumber(value: string | undefined, fieldName: string, defaultValue: number): number {
+function parseWiseNumber(value: string | undefined | null, fieldName: string, defaultValue: number): number {
   if (value === undefined || value === null || value.trim() === "") return defaultValue;
   const parsed = parseFloat(value);
   if (!Number.isFinite(parsed)) {
