@@ -11,6 +11,8 @@ import type { PurchaseInvoicesApi } from "../api/purchase-invoices.api.js";
 import type { ReferenceDataApi } from "../api/readonly.api.js";
 import type { Posting, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem, CreatePurchaseInvoiceData } from "../types/api.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
+import { validateItemDimensions } from "../account-validation.js";
+import { toolError } from "../tool-error.js";
 import { readOnly, create, mutate, destructive, send } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 
@@ -590,6 +592,17 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
       const rawItems = parsePurchaseInvoiceItems(params.items);
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
+
+      // Validate dimension requirements before hitting the API
+      const [accounts, accountDimensions] = await Promise.all([
+        api.readonly.getAccounts(),
+        api.readonly.getAccountDimensions(),
+      ]);
+      const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
+      if (dimErrors.length > 0) {
+        return toolError({ error: "Account dimension validation failed", details: dimErrors });
+      }
+
       const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.clients_id,
         client_name: params.client_name,

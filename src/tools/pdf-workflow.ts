@@ -7,6 +7,8 @@ import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, saf
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { validateFilePath } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
+import { validateItemDimensions } from "../account-validation.js";
+import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
 import { readOnly, create, mutate } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
@@ -391,6 +393,16 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
       const rawItems = parsePurchaseInvoiceItems(params.items);
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
+
+      // Validate dimension requirements before hitting the API
+      const [accounts, accountDimensions] = await Promise.all([
+        api.readonly.getAccounts(),
+        api.readonly.getAccountDimensions(),
+      ]);
+      const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
+      if (dimErrors.length > 0) {
+        return toolError({ error: "Account dimension validation failed", details: dimErrors });
+      }
 
       const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.supplier_client_id,
