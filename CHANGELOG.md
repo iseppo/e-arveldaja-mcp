@@ -19,6 +19,8 @@
 ### Added
 - **Account dimension validation** — `create_purchase_invoice` and `create_purchase_invoice_from_pdf` now validate that items targeting accounts with dimensions include `purchase_accounts_dimensions_id`. When the account has exactly one dimension, it is auto-filled. When there are multiple, the error lists all available dimension IDs.
 
+- **ID parameter coercion** — all 22 ID parameters across all tools now use `z.coerce.number().int().positive()`, automatically converting string-typed numbers (e.g. `"5060945"` → `5060945`) while still rejecting invalid values. Prevents LLM tool-calling failures when IDs are passed as strings.
+
 ### Changed
 - **Aging report field rename** — `total_unpaid` renamed to `total_unpaid_face_value` to clarify that partially-paid invoices are shown at full invoice amount. Warning message updated.
 - **Owner expense `vat_rate` validation** — values > 1 are rejected with a clear error ("looks like a percentage, pass a decimal fraction instead").
