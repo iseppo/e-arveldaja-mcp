@@ -581,7 +581,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       gross_price: z.number().optional().describe("Total gross amount from original invoice (EXACT, for payment matching)"),
       cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
-      items: z.string().describe("JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, ...}]"),
+      items: z.string().describe("JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, ...}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts)."),
       notes: z.string().optional().describe("Notes"),
       bank_ref_number: z.string().optional().describe("Payment reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),

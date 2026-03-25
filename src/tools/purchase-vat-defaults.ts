@@ -50,7 +50,7 @@ export function normalizeVatRate(value: unknown): string | undefined {
   if (!trimmed) return undefined;
   if (trimmed === "-") return "-";
 
-  const normalized = trimmed.replace(",", ".");
+  const normalized = trimmed.replace(/,/g, ".");
   const parsed = Number(normalized);
   if (!Number.isFinite(parsed)) return trimmed;
   return String(parsed);

@@ -66,7 +66,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
         const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };
         bucket.count++;
-        bucket.total += amount;
+        bucket.total = roundMoney(bucket.total + amount);
         bucket.invoices.push({
           id: inv.id!,
           number: inv.number ?? "",
@@ -78,7 +78,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
         buckets.set(label, bucket);
 
         const clientEntry = byClient.get(inv.clients_id) ?? { name: inv.client_name ?? "", total: 0, oldest_days: 0 };
-        clientEntry.total += amount;
+        clientEntry.total = roundMoney(clientEntry.total + amount);
         clientEntry.oldest_days = Math.max(clientEntry.oldest_days, daysOverdue);
         byClient.set(inv.clients_id, clientEntry);
       }
@@ -97,14 +97,14 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
       const warnings = [];
       if (partiallyPaidCount > 0) {
-        warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full amount — outstanding balance may be lower.`);
+        warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
       }
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             as_of_date: today,
-            total_unpaid: r(unpaid.reduce((s: number, inv: SaleInvoice) => s + effectiveGross(inv), 0)),
+            total_unpaid_face_value: unpaid.reduce((s: number, inv: SaleInvoice) => roundMoney(s + effectiveGross(inv)), 0),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sortedBuckets,
@@ -145,7 +145,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
         const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };
         bucket.count++;
-        bucket.total += amount;
+        bucket.total = roundMoney(bucket.total + amount);
         bucket.invoices.push({
           id: inv.id!,
           number: inv.number,
@@ -157,7 +157,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
         buckets.set(label, bucket);
 
         const supplierEntry = bySupplier.get(inv.clients_id) ?? { name: inv.client_name, total: 0, oldest_days: 0 };
-        supplierEntry.total += amount;
+        supplierEntry.total = roundMoney(supplierEntry.total + amount);
         supplierEntry.oldest_days = Math.max(supplierEntry.oldest_days, daysOverdue);
         bySupplier.set(inv.clients_id, supplierEntry);
       }
@@ -176,14 +176,14 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
       const warnings = [];
       if (partiallyPaidCount > 0) {
-        warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full amount — outstanding balance may be lower.`);
+        warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
       }
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             as_of_date: today,
-            total_unpaid: r(unpaid.reduce((s: number, inv: PurchaseInvoice) => s + effectiveGross(inv), 0)),
+            total_unpaid_face_value: unpaid.reduce((s: number, inv: PurchaseInvoice) => roundMoney(s + effectiveGross(inv)), 0),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sortedBuckets,

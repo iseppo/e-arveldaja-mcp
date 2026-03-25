@@ -94,12 +94,12 @@ function sumCategory(accounts: AccountBalance[], normalType: "D" | "C"): number 
   let total = 0;
   for (const a of accounts) {
     if (a.balance_type === normalType) {
-      total += a.balance;
+      total = roundMoney(total + a.balance);
     } else {
-      total -= a.balance; // contra-account
+      total = roundMoney(total - a.balance); // contra-account
     }
   }
-  return roundMoney(total);
+  return total;
 }
 
 function getMonthLastDay(month: string): number {
@@ -122,8 +122,8 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     async ({ date_from, date_to }) => {
       const balances = await computeAllBalances(api, date_from, date_to);
 
-      const totalDebit = balances.reduce((s, b) => s + b.debit_total, 0);
-      const totalCredit = balances.reduce((s, b) => s + b.credit_total, 0);
+      const totalDebit = balances.reduce((s, b) => roundMoney(s + b.debit_total), 0);
+      const totalCredit = balances.reduce((s, b) => roundMoney(s + b.credit_total), 0);
 
       return {
         content: [{
@@ -349,7 +349,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             overdue_receivables: {
               count: overdueReceivables.length,
-              total: roundMoney(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + effectiveGross(inv), 0)),
+              total: overdueReceivables.reduce((s: number, inv: SaleInvoice) => roundMoney(s + effectiveGross(inv)), 0),
               items: overdueReceivables.slice(0, 10).map((inv: SaleInvoice) => ({
                 id: inv.id,
                 number: inv.number,
@@ -360,7 +360,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             overdue_payables: {
               count: overduePayables.length,
-              total: roundMoney(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + effectiveGross(inv), 0)),
+              total: overduePayables.reduce((s: number, inv: PurchaseInvoice) => roundMoney(s + effectiveGross(inv)), 0),
               items: overduePayables.slice(0, 10).map((inv: PurchaseInvoice) => ({
                 id: inv.id,
                 number: inv.number,

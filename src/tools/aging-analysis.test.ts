@@ -264,7 +264,7 @@ describe("base_gross_price fallback", () => {
     const handler = setupReceivables([inv]);
     const result = await handler({ as_of_date: "2024-01-01" });
     const data = parse((result.content[0] as { text: string }).text);
-    expect(data.total_unpaid).toBe(920);
+    expect(data.total_unpaid_face_value).toBe(920);
   });
 
   it("falls back to gross_price when base_gross_price is absent", async () => {
@@ -272,7 +272,7 @@ describe("base_gross_price fallback", () => {
     const handler = setupReceivables([inv]);
     const result = await handler({ as_of_date: "2024-01-01" });
     const data = parse((result.content[0] as { text: string }).text);
-    expect(data.total_unpaid).toBe(500);
+    expect(data.total_unpaid_face_value).toBe(500);
   });
 
   it("uses 0 when both base_gross_price and gross_price are null/undefined", async () => {
@@ -282,7 +282,7 @@ describe("base_gross_price fallback", () => {
     const handler = setupReceivables([inv]);
     const result = await handler({ as_of_date: "2024-01-01" });
     const data = parse((result.content[0] as { text: string }).text);
-    expect(data.total_unpaid).toBe(0);
+    expect(data.total_unpaid_face_value).toBe(0);
   });
 });
 
@@ -300,7 +300,7 @@ describe("invoice filtering", () => {
     const result = await handler({ as_of_date: "2024-01-31" });
     const data = parse((result.content[0] as { text: string }).text);
     expect(data.total_invoices).toBe(1);
-    expect(data.total_unpaid).toBe(200);
+    expect(data.total_unpaid_face_value).toBe(200);
   });
 
   it("excludes non-CONFIRMED invoices (e.g. draft)", async () => {
@@ -312,7 +312,7 @@ describe("invoice filtering", () => {
     const result = await handler({ as_of_date: "2024-01-31" });
     const data = parse((result.content[0] as { text: string }).text);
     expect(data.total_invoices).toBe(1);
-    expect(data.total_unpaid).toBe(300);
+    expect(data.total_unpaid_face_value).toBe(300);
   });
 
   it("includes PARTIALLY_PAID invoices and emits a warning", async () => {

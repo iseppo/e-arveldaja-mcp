@@ -27,7 +27,7 @@ let activeConnectionNameGetter: () => string = () => "default";
 export function initAuditLog(getConnectionName: () => string): void {
   activeConnectionNameGetter = getConnectionName;
   if (!existsSync(LOGS_DIR)) {
-    mkdirSync(LOGS_DIR, { recursive: true });
+    mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
   }
 }
 
@@ -249,10 +249,10 @@ export function logAudit(entry: Omit<AuditEntry, "timestamp">): void {
   try {
     const filePath = getLogFilePath();
     if (!existsSync(LOGS_DIR)) {
-      mkdirSync(LOGS_DIR, { recursive: true });
+      mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
     }
     const md = renderEntry(full) + ENTRY_SEPARATOR;
-    appendFileSync(filePath, md, "utf-8");
+    appendFileSync(filePath, md, { encoding: "utf-8", mode: 0o600 });
   } catch {
     // Audit logging is best-effort — do not crash the server
   }

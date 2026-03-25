@@ -28,18 +28,23 @@ export class HttpClient {
   }
 
   private async waitForRateLimitTurn(): Promise<void> {
-    const waitTurn = this.lastRequest
-      .catch(() => undefined)
-      .then(async () => {
-        const delayMs = Math.max(0, this.nextAllowedAt - Date.now());
-        if (delayMs > 0) {
-          await new Promise(resolve => setTimeout(resolve, delayMs));
-        }
-        this.nextAllowedAt = Date.now() + this.minIntervalMs;
-      });
-
-    this.lastRequest = waitTurn;
-    await waitTurn;
+    const myTurn = this.lastRequest.then(async () => {
+      const delayMs = Math.max(0, this.nextAllowedAt - Date.now());
+      if (delayMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+      this.nextAllowedAt = Date.now() + this.minIntervalMs;
+    }, async () => {
+      // Previous request failed — still enforce rate limit
+      const delayMs = Math.max(0, this.nextAllowedAt - Date.now());
+      if (delayMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+      this.nextAllowedAt = Date.now() + this.minIntervalMs;
+    });
+    // Assign before awaiting so concurrent callers chain off this promise
+    this.lastRequest = myTurn;
+    await myTurn;
   }
 
   private static async sleep(ms: number): Promise<void> {

@@ -112,7 +112,12 @@ function isSecureEnvFile(envPath: string): boolean {
       return false;
     }
     return true;
-  } catch { return true; /* file may not exist yet — let dotenv handle it */ }
+  } catch (err: unknown) {
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      return true; // file does not exist yet — let dotenv handle it
+    }
+    return false; // fail closed on unexpected errors
+  }
 }
 
 export function loadDotenvFiles(): void {

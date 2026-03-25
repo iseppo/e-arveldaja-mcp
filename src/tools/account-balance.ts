@@ -161,11 +161,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
 
       const totalDebt = results
         .filter(r => r.balance_type === "C") // liability accounts
-        .reduce((sum, r) => sum + r.balance, 0);
+        .reduce((sum, r) => roundMoney(sum + r.balance), 0);
 
       const totalReceivable = results
         .filter(r => r.balance_type === "D") // asset accounts
-        .reduce((sum, r) => sum + r.balance, 0);
+        .reduce((sum, r) => roundMoney(sum + r.balance), 0);
 
       return {
         content: [{

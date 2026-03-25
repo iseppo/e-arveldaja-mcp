@@ -88,6 +88,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - For VAT tracking on items: set `vat_rate_dropdown`, `vat_accounts_id`, `cl_vat_articles_id`, `project_no_vat_gross_price`
 - The API will compute `vat_amount` on the item but invoice-level `vat_price` stays 0 for non-VAT companies
 - **PATCH requires `items`** — updating invoice fields without including items fails with "Products/services are missing"
+- **Accounts with dimensions**: If an expense account (e.g. 5120) has dimensions (sub-accounts), you MUST pass both `purchase_accounts_id` (the account ID) AND `purchase_accounts_dimensions_id` (the dimension ID) on each item. Passing only one fails with "Entry must be made to account's dimension." Use `list_account_dimensions` to find dimension IDs for an account.
 
 ### Inter-account transfer reconciliation
 - CAMT-imported transactions confirmed as inter-account transfers create journal entries touching both bank accounts

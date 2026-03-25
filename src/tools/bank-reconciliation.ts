@@ -8,6 +8,7 @@ import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
+import { roundMoney } from "../money.js";
 import { buildBankAccountLookups, buildInterAccountJournalIndex } from "./inter-account-utils.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
@@ -465,7 +466,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       /** Check if an inter-account transfer is already journalized */
       function findExistingJournal(sourceDim: number, targetDim: number, amount: number, date: string, maxGapDays: number): number | undefined {
         // Round to avoid floating point mismatches
-        const roundedAmount = Math.round(amount * 100) / 100;
+        const roundedAmount = roundMoney(amount);
         const exactKey = `${sourceDim}|${targetDim}|${roundedAmount}|${date}`;
         if (existingInterAccountKeys.has(exactKey)) return existingInterAccountKeys.get(exactKey);
         // Check nearby dates

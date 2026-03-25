@@ -422,7 +422,10 @@ Reporting:
 }
 
 main().catch((err) => {
-  const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  const msg = err instanceof Error ? err.message : String(err);
   process.stderr.write(`Fatal: ${msg}\n`);
+  if (process.env.EARVELDAJA_DEBUG === "true" && err instanceof Error && err.stack) {
+    process.stderr.write(`[debug] ${err.stack}\n`);
+  }
   process.exit(1);
 });

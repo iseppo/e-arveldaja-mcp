@@ -52,7 +52,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // Estonian CIT rate on dividends: 22/78 of net dividend
       const taxRate = 22 / 78;
       const cit = roundMoney(net_dividend * taxRate);
-      const grossDividend = net_dividend + cit;
+      const grossDividend = roundMoney(net_dividend + cit);
 
       // Preload journals once for both retained earnings and balance sheet checks
       const allJournals = await api.journals.listAllWithPostings();
@@ -198,7 +198,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       effective_date: z.string().describe("Expense date (YYYY-MM-DD)"),
       description: z.string().describe("Expense description"),
       net_amount: z.number().describe("Net amount (without VAT)"),
-      vat_rate: z.number().describe("VAT rate as decimal (e.g. 0.24 for 24%, 0.13, 0.09, 0.05, or 0 for no VAT/non-deductible)"),
+      vat_rate: z.number().describe("VAT rate as decimal (e.g. 0.24 for 24%, 0.13, 0.09, 0.05, or 0 for no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),
       vat_amount: z.number().optional().describe("Exact VAT amount (overrides vat_rate if provided)"),
       expense_account: z.number().describe("Expense account number (e.g. 5000, 6000)"),
       vat_account: z.number().optional().describe("Input VAT account (default 1510)"),
@@ -207,6 +207,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     },
     { ...create, title: "Book Owner-Paid Expense" },
     async ({ owner_client_id, effective_date, description, net_amount, vat_rate, vat_amount, expense_account, vat_account, payable_account, document_number }) => {
+      if (vat_rate > 1) {
+        return toolError({
+          error: `vat_rate=${vat_rate} looks like a percentage. Pass a decimal fraction instead (e.g. 0.24 for 24%).`,
+        });
+      }
       const vatRegistered = await isCompanyVatRegistered(api);
       const vatAcc = vat_account ?? 1510;
       const payAcc = payable_account ?? 2110;

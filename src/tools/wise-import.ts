@@ -36,13 +36,27 @@ interface WiseRow {
   note: string;
 }
 
+function parseWiseNumber(value: string | undefined, fieldName: string, defaultValue: number): number {
+  if (value === undefined || value === null || value.trim() === "") return defaultValue;
+  const parsed = parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid numeric value in Wise CSV column "${fieldName}": "${value}"`);
+  }
+  return parsed;
+}
+
 function parseWiseCSV(csv: string): WiseRow[] {
   const records = parseCSV(csv).filter(record => record.some(field => field.trim() !== ""));
   if (records.length < 2) throw new Error("CSV has no data rows");
 
   const headers = records[0]!.map(header => header.replace(/^\uFEFF/, "").trim());
-  // Validate key headers exist
-  for (const expected of ["ID", "Status", "Direction", "Source amount (after fees)"]) {
+  // Validate required headers exist
+  const requiredHeaders = [
+    "ID", "Status", "Direction",
+    "Source amount (after fees)", "Target amount (after fees)",
+    "Exchange rate",
+  ];
+  for (const expected of requiredHeaders) {
     if (!headers.includes(expected)) {
       throw new Error(`Missing expected header "${expected}". Found: ${headers.slice(0, 10).join(", ")}`);
     }
@@ -61,17 +75,17 @@ function parseWiseCSV(csv: string): WiseRow[] {
       direction: fields[idx("Direction")] ?? "",
       createdOn: fields[idx("Created on")] ?? "",
       finishedOn: fields[idx("Finished on")] ?? "",
-      sourceFeeAmount: parseFloat(fields[idx("Source fee amount")] || "0") || 0,
+      sourceFeeAmount: parseWiseNumber(fields[idx("Source fee amount")], "Source fee amount", 0),
       sourceFeeCurrency: fields[idx("Source fee currency")] ?? "EUR",
-      targetFeeAmount: parseFloat(fields[idx("Target fee amount")] || "0") || 0,
+      targetFeeAmount: parseWiseNumber(fields[idx("Target fee amount")], "Target fee amount", 0),
       targetFeeCurrency: fields[idx("Target fee currency")] ?? "EUR",
       sourceName: fields[idx("Source name")] ?? "",
-      sourceAmount: parseFloat(fields[idx("Source amount (after fees)")] || "0") || 0,
+      sourceAmount: parseWiseNumber(fields[idx("Source amount (after fees)")], "Source amount (after fees)", 0),
       sourceCurrency: fields[idx("Source currency")] ?? "EUR",
       targetName: fields[idx("Target name")] ?? "",
-      targetAmount: parseFloat(fields[idx("Target amount (after fees)")] || "0") || 0,
+      targetAmount: parseWiseNumber(fields[idx("Target amount (after fees)")], "Target amount (after fees)", 0),
       targetCurrency: fields[idx("Target currency")] ?? "EUR",
-      exchangeRate: parseFloat(fields[idx("Exchange rate")] || "1") || 1,
+      exchangeRate: parseWiseNumber(fields[idx("Exchange rate")], "Exchange rate", 1),
       reference: fields[idx("Reference")] ?? "",
       category: fields[idx("Category")] ?? "",
       note: fields[idx("Note")] ?? "",
