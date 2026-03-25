@@ -16,10 +16,14 @@
 - **`toMcpJson` error handling** — circular reference serialization now throws a descriptive error instead of an opaque `TypeError`.
 - **Readonly pagination** — `readonlyCachedGetAll` now updates `totalPages` from each subsequent response, matching `BaseResource.listAll()` behavior.
 
+### Added
+- **Account dimension validation** — `create_purchase_invoice` and `create_purchase_invoice_from_pdf` now validate that items targeting accounts with dimensions include `purchase_accounts_dimensions_id`. When the account has exactly one dimension, it is auto-filled. When there are multiple, the error lists all available dimension IDs.
+
 ### Changed
 - **Aging report field rename** — `total_unpaid` renamed to `total_unpaid_face_value` to clarify that partially-paid invoices are shown at full invoice amount. Warning message updated.
 - **Owner expense `vat_rate` validation** — values > 1 are rejected with a clear error ("looks like a percentage, pass a decimal fraction instead").
 - **Purchase invoice tool descriptions** — `create_purchase_invoice` and `create_purchase_invoice_from_pdf` now document `purchase_accounts_dimensions_id` (required for accounts with sub-accounts). `suggest_purchase_booking` output includes the dimension ID from historical invoices.
+- **Book-invoice prompt/workflow/command** — all three now reference `purchase_accounts_dimensions_id` in the booking suggestion and invoice creation steps.
 - **CLAUDE.md** — documented the account dimensions requirement under "Purchase invoice creation".
 
 ## [0.9.11] - 2026-03-24
