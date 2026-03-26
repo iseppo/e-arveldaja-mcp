@@ -31,15 +31,10 @@ If fee rows require a fee account:
 ### Step 2: Review the preview
 
 Review:
-- `mode`
-- `total_csv_rows`
-- `eligible`
-- `filtered_out`
-- `skipped_jar_transfers`
-- `created`
-- `skipped`
-- `results`
-- `skipped_details`
+- Treat `execution` as the canonical batch payload when present.
+- Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
+- Use top-level `skipped_details` only as a grouped convenience summary for `execution.skipped` + `execution.errors`.
+- Fall back to top-level `total_csv_rows`, `eligible`, `filtered_out`, `created`, `skipped`, and `results` only if `execution` is absent.
 
 ### Step 3: Approval gate
 
@@ -53,4 +48,4 @@ If the user does not explicitly approve, stop.
 
 Call `import_wise_transactions` again with `execute: true`.
 
-Report created rows, skipped rows, fee handling, and any manual follow-up needed.
+Report `execution.summary.created`, `execution.summary.skipped`, `execution.summary.error_count`, fee handling, manual follow-up, and `execution.audit_reference`.

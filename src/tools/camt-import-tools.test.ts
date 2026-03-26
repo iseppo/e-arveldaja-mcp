@@ -114,5 +114,31 @@ describe("camt import tool", () => {
         bank_reference: "REF-VOID-1",
       }),
     ]));
+    expect(payload.execution).toMatchObject({
+      contract: "batch_execution_v1",
+      mode: "EXECUTED",
+      summary: {
+        total_statement_entries: 1,
+        eligible_entries: 1,
+        filtered_out: 0,
+        created_count: 1,
+        skipped_count: 0,
+        error_count: 0,
+      },
+      results: expect.arrayContaining([
+        expect.objectContaining({
+          status: "created",
+          bank_reference: "REF-VOID-1",
+        }),
+      ]),
+      skipped: [],
+      errors: [],
+      needs_review: [],
+      audit_reference: expect.objectContaining({
+        review_tool: "get_session_log",
+        list_tool: "list_audit_logs",
+        location: "logs/<company>.audit.md",
+      }),
+    });
   });
 });

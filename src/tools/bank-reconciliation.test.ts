@@ -316,6 +316,24 @@ describe("auto_confirm_exact_matches", () => {
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.results[0]!.status).toBe("confirmed");
+    expect(payload.execution).toMatchObject({
+      contract: "batch_execution_v1",
+      mode: "EXECUTED",
+      summary: {
+        total_unconfirmed: 1,
+        auto_confirmed: 1,
+        skipped: 0,
+        error_count: 0,
+      },
+      results: [
+        expect.objectContaining({
+          transaction_id: 2,
+          status: "confirmed",
+        }),
+      ],
+      errors: [],
+      needs_review: [],
+    });
     expect(api.transactions.confirm).toHaveBeenCalledWith(2, [
       { related_table: "sale_invoices", related_id: 11, amount: 200 },
     ]);
@@ -540,6 +558,27 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.matched_pairs).toBe(1);
     expect(payload.pairs[0]!.status).toBe("confirmed");
+    expect(payload.execution).toMatchObject({
+      contract: "batch_execution_v1",
+      mode: "EXECUTED",
+      summary: {
+        total_unconfirmed: 2,
+        matched_pairs: 1,
+        matched_one_sided: 0,
+        skipped_ambiguous: 0,
+        skipped_already_handled: 0,
+        error_count: 0,
+      },
+      results: [
+        expect.objectContaining({
+          outgoing_transaction_id: 11,
+          incoming_transaction_id: 12,
+          status: "confirmed",
+        }),
+      ],
+      skipped: [],
+      errors: [],
+    });
 
     // Outgoing confirmed with destination account + dimension
     expect(api.transactions.confirm).toHaveBeenCalledWith(11, [

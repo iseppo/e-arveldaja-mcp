@@ -6,6 +6,7 @@ import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice, BankAccount } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
+import { buildBatchExecutionContract } from "../batch-execution.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
@@ -347,16 +348,31 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         }
       }
 
+      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
+      const summary = {
+        total_unconfirmed: unconfirmed.length,
+        auto_confirmed: confirmed.length,
+        skipped: skipped.length,
+        error_count: skipped.length,
+      };
+
       return {
         content: [{
           type: "text",
           text: toMcpJson({
-            mode: dryRun ? "DRY_RUN" : "EXECUTED",
-            total_unconfirmed: unconfirmed.length,
-            auto_confirmed: confirmed.length,
-            skipped: skipped.length,
+            mode,
+            summary,
+            total_unconfirmed: summary.total_unconfirmed,
+            auto_confirmed: summary.auto_confirmed,
+            skipped: summary.skipped,
             results: confirmed,
             errors: skipped,
+            execution: buildBatchExecutionContract({
+              mode,
+              summary,
+              results: confirmed,
+              errors: skipped,
+            }),
           }),
         }],
       };
@@ -784,17 +800,28 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         }
       }
 
+      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
+      const summary = {
+        total_unconfirmed: unconfirmed.length,
+        matched_pairs: matchedPairs.length,
+        matched_one_sided: matchedOneSided.length,
+        skipped_ambiguous: ambiguousPairs.length,
+        skipped_already_handled: skippedAlreadyHandled.length,
+        error_count: errors.length,
+      };
+
       return {
         content: [{
           type: "text",
           text: toMcpJson({
-            mode: dryRun ? "DRY_RUN" : "EXECUTED",
+            mode,
+            summary,
             company_name: invoiceInfo.invoice_company_name,
-            total_unconfirmed: unconfirmed.length,
-            matched_pairs: matchedPairs.length,
-            matched_one_sided: matchedOneSided.length,
-            skipped_ambiguous: ambiguousPairs.length,
-            skipped_already_handled: skippedAlreadyHandled.length,
+            total_unconfirmed: summary.total_unconfirmed,
+            matched_pairs: summary.matched_pairs,
+            matched_one_sided: summary.matched_one_sided,
+            skipped_ambiguous: summary.skipped_ambiguous,
+            skipped_already_handled: summary.skipped_already_handled,
             own_bank_accounts: [...dimensionToIban.entries()].map(([dimId, iban]) => ({
               accounts_dimensions_id: dimId,
               iban,
@@ -805,6 +832,13 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             one_sided: matchedOneSided,
             already_handled: skippedAlreadyHandled,
             errors,
+            execution: buildBatchExecutionContract({
+              mode,
+              summary,
+              results: [...matchedPairs, ...matchedOneSided],
+              skipped: [...ambiguousPairs, ...skippedAlreadyHandled],
+              errors,
+            }),
           }),
         }],
       };

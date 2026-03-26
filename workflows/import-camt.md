@@ -31,17 +31,12 @@ Call `import_camt053`:
 - include `date_from` / `date_to` when provided
 
 Review:
-- `total_statement_entries`
-- `eligible_entries`
-- `filtered_out`
-- `created_count`
-- `skipped_count`
-- `error_count`
-- `sample`
-- `skipped_summary`
-- `errors`
+- Treat `execution` as the canonical batch payload when present.
+- Prefer `execution.summary.total_statement_entries`, `execution.summary.eligible_entries`, `execution.summary.filtered_out`, `execution.summary.created_count`, `execution.summary.skipped_count`, `execution.summary.error_count`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
+- Use the first 10 items from `execution.results` as the preview sample.
+- Fall back to top-level `created_count`, `skipped_count`, `error_count`, `sample`, `skipped_summary`, and `errors` only if `execution` is absent.
 
-Present which rows would create transactions and which are skipped as duplicates.
+Present which rows would create transactions and which are skipped as duplicates, using `execution.skipped` or `skipped_summary` as fallback.
 
 ### Step 3: Approval gate
 
@@ -58,9 +53,10 @@ Call `import_camt053` again:
 - include `date_from` / `date_to` when provided
 
 Report:
-- `created_count`
-- `skipped_count`
-- `error_count`
+- `execution.summary.created_count`
+- `execution.summary.skipped_count`
+- `execution.summary.error_count`
 - any transactions still needing attention
+- mention that side effects can be reviewed via `execution.audit_reference`
 
 Offer reconciliation as the next step if the import succeeded.

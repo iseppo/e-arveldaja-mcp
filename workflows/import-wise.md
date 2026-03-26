@@ -31,20 +31,15 @@ If the dry run fails because fee rows require a fee account:
 ### Step 2: Review the preview
 
 Review:
-- `mode`
-- `total_csv_rows`
-- `eligible`
-- `filtered_out`
-- `skipped_jar_transfers`
-- `created`
-- `skipped`
-- `results`
-- `skipped_details`
+- Treat `execution` as the canonical batch payload when present.
+- Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
+- Use top-level `skipped_details` only as a grouped convenience summary for `execution.skipped` + `execution.errors`.
+- Fall back to top-level `total_csv_rows`, `eligible`, `filtered_out`, `created`, `skipped`, and `results` only if `execution` is absent.
 
 Show:
-- main transactions that would be created
+- main transactions that would be created from `execution.results`
 - fee rows that would be created
-- exact duplicate / skip reasons
+- exact duplicate / skip reasons from `execution.skipped` / `execution.errors` or `skipped_details`
 - whether fees will be auto-confirmed to the chosen dimension
 
 ### Step 3: Approval gate
@@ -62,7 +57,9 @@ Call `import_wise_transactions` again:
 - execute: true
 
 Report:
-- created
-- skipped
+- `execution.summary.created`
+- `execution.summary.skipped`
+- `execution.summary.error_count`
 - fee transactions created
 - any rows still needing manual follow-up
+- mention that side effects can be reviewed via `execution.audit_reference`

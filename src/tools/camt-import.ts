@@ -9,6 +9,7 @@ import { type ApiContext, coerceId } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
+import { buildBatchExecutionContract } from "../batch-execution.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
@@ -716,19 +717,37 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         }
       }
 
+      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
+      const summary = {
+        total_statement_entries: parsed.entries.length,
+        eligible_entries: filteredEntries.length,
+        filtered_out: parsed.entries.length - filteredEntries.length,
+        created_count: results.length,
+        skipped_count: skippedDuplicates.length,
+        error_count: errors.length,
+      };
+
       return {
         content: [{
           type: "text",
           text: toMcpJson({
-            mode: dryRun ? "DRY_RUN" : "EXECUTED",
+            mode,
+            summary,
             statement_metadata: parsed.statement_metadata,
-            total_statement_entries: parsed.entries.length,
-            eligible_entries: filteredEntries.length,
-            filtered_out: parsed.entries.length - filteredEntries.length,
-            created_count: results.length,
-            skipped_count: skippedDuplicates.length,
-            error_count: errors.length,
+            total_statement_entries: summary.total_statement_entries,
+            eligible_entries: summary.eligible_entries,
+            filtered_out: summary.filtered_out,
+            created_count: summary.created_count,
+            skipped_count: summary.skipped_count,
+            error_count: summary.error_count,
             sample: results.slice(0, 10),
+            execution: buildBatchExecutionContract({
+              mode,
+              summary,
+              results,
+              skipped: skippedDuplicates,
+              errors,
+            }),
             ...(errors.length > 0 && { errors }),
             ...(skippedDuplicates.length > 0 && {
               skipped_summary: {

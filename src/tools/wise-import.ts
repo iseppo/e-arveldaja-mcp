@@ -8,6 +8,7 @@ import { type ApiContext, coerceId } from "./crud-tools.js";
 import { validateFilePath } from "../file-validation.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
+import { buildBatchExecutionContract } from "../batch-execution.js";
 import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { parseCSV } from "../csv.js";
@@ -124,6 +125,27 @@ function counterpartyNameForWiseRow(row: WiseRow): string | undefined {
     return row.targetName || row.sourceName || undefined;
   }
   return row.targetName || row.sourceName || undefined;
+}
+
+function isNonErrorWiseSkipReason(reason: string): boolean {
+  return reason.startsWith("Already imported") ||
+    reason.startsWith("Fee already imported") ||
+    reason.startsWith("Unsupported Wise direction") ||
+    reason === "Skipped because main transaction was not created";
+}
+
+function summarizeWiseSkippedEntries(skipped: Array<{ wise_id: string; reason: string }>) {
+  const groups = new Map<string, { reason: string; count: number; sample_ids: string[] }>();
+  for (const entry of skipped) {
+    const existing = groups.get(entry.reason);
+    if (existing) {
+      existing.count++;
+      if (existing.sample_ids.length < 5) existing.sample_ids.push(entry.wise_id);
+    } else {
+      groups.set(entry.reason, { reason: entry.reason, count: 1, sample_ids: [entry.wise_id] });
+    }
+  }
+  return [...groups.values()];
 }
 
 function normalizeWiseText(value?: string | null): string {
@@ -722,16 +744,31 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         }
       }
 
+      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
+      const executionSkipped = skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason));
+      const executionErrors = skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason));
+      const summary = {
+        total_csv_rows: rows.length,
+        eligible: eligible.length,
+        filtered_out: rows.length - eligible.length,
+        skipped_jar_transfers: skippedJarCount,
+        created: created.length,
+        skipped: executionSkipped.length,
+        error_count: executionErrors.length,
+        inter_account_total: interAccountResults.length,
+      };
+
       return {
         content: [{
           type: "text",
           text: toMcpJson({
-            mode: dryRun ? "DRY_RUN" : "EXECUTED",
-            total_csv_rows: rows.length,
-            eligible: eligible.length,
-            filtered_out: rows.length - eligible.length,
+            mode,
+            summary,
+            total_csv_rows: summary.total_csv_rows,
+            eligible: summary.eligible,
+            filtered_out: summary.filtered_out,
             ...(skippedJarCount > 0 ? { skipped_jar_transfers: skippedJarCount } : {}),
-            created: created.length,
+            created: summary.created,
             skipped: skipped.length,
             ...(interAccountResults.length > 0 ? {
               inter_account_reconciliation: {
@@ -742,19 +779,14 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               },
             } : {}),
             results: created.map(({ description: _desc, ...rest }) => rest),
-            skipped_details: (() => {
-              const groups = new Map<string, { reason: string; count: number; sample_ids: string[] }>();
-              for (const s of skipped) {
-                const existing = groups.get(s.reason);
-                if (existing) {
-                  existing.count++;
-                  if (existing.sample_ids.length < 5) existing.sample_ids.push(s.wise_id);
-                } else {
-                  groups.set(s.reason, { reason: s.reason, count: 1, sample_ids: [s.wise_id] });
-                }
-              }
-              return [...groups.values()];
-            })(),
+            skipped_details: summarizeWiseSkippedEntries(skipped),
+            execution: buildBatchExecutionContract({
+              mode,
+              summary,
+              results: created.map(({ description: _desc, ...rest }) => rest),
+              skipped: executionSkipped,
+              errors: executionErrors,
+            }),
           }),
         }],
       };

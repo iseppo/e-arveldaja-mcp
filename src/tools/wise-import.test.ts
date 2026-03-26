@@ -258,6 +258,27 @@ describe("wise import tool", () => {
       { reason: "Main create failed", count: 1, sample_ids: ["abc-4"] },
       { reason: "Skipped because main transaction was not created", count: 1, sample_ids: ["FEE:abc-4"] },
     ]));
+    expect(payload.execution).toMatchObject({
+      contract: "batch_execution_v1",
+      mode: "EXECUTED",
+      summary: {
+        total_csv_rows: 1,
+        eligible: 1,
+        filtered_out: 0,
+        skipped_jar_transfers: 0,
+        created: 0,
+        skipped: 1,
+        error_count: 1,
+        inter_account_total: 0,
+      },
+      results: [],
+      skipped: [
+        { wise_id: "FEE:abc-4", reason: "Skipped because main transaction was not created" },
+      ],
+      errors: [
+        { wise_id: "abc-4", reason: "Main create failed" },
+      ],
+    });
   });
 
   it("skips Jar transfers by default", async () => {

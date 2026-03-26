@@ -29,7 +29,9 @@ Call `apply_transaction_classifications`:
 - `classifications_json`: `JSON.stringify(the full response from step 1)`
 - `execute`: `false`
 
-Group the result into `dry_run_preview`, `skipped`, and `failed`.
+Treat `execution` as the canonical batch payload when present. Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
+
+Group the result into `execution.results` entries with `status="dry_run_preview"`, `execution.skipped`, and `execution.errors`.
 
 If only some groups should be applied, build a filtered JSON object and pass that as `classifications_json`.
 
@@ -43,4 +45,4 @@ If the user does not explicitly approve, stop.
 
 Call `apply_transaction_classifications` again with `execute: true`.
 
-Report applied, skipped, failed, `created_invoice_ids`, `linked_transaction_ids`, and remaining manual review items.
+Report `execution.summary.applied`, `execution.summary.skipped`, `execution.summary.failed`, `created_invoice_ids`, `linked_transaction_ids`, remaining manual review items, and `execution.audit_reference`.

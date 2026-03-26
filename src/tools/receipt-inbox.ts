@@ -10,6 +10,7 @@ import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
+import { buildBatchExecutionContract } from "../batch-execution.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { type ApiContext, isCompanyVatRegistered, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
@@ -1074,16 +1075,30 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         needs_review: results.filter(result => result.status === "needs_review").length,
         dry_run_preview: results.filter(result => result.status === "dry_run_preview").length,
       };
+      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
 
       return {
         content: [{
           type: "text",
           text: toMcpJson({
+            mode,
             folder_path: scan.folder_path,
             accounts_dimensions_id,
             summary,
             skipped: scan.skipped,
             results,
+            execution: buildBatchExecutionContract({
+              mode,
+              summary,
+              results: results.filter(result =>
+                result.status === "created" ||
+                result.status === "matched" ||
+                result.status === "dry_run_preview"
+              ),
+              skipped: results.filter(result => result.status === "skipped_duplicate"),
+              errors: results.filter(result => result.status === "failed"),
+              needs_review: results.filter(result => result.status === "needs_review"),
+            }),
           }),
         }],
       };
@@ -1402,18 +1417,32 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         }
       }
 
+      const summary = {
+        applied: results.filter(result => result.status === "applied").length,
+        skipped: results.filter(result => result.status === "skipped").length,
+        dry_run_preview: results.filter(result => result.status === "dry_run_preview").length,
+        failed: results.filter(result => result.status === "failed").length,
+      };
+      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
+
       return {
         content: [{
           type: "text",
           text: toMcpJson({
+            mode,
             dry_run: dryRun,
-            summary: {
-              applied: results.filter(result => result.status === "applied").length,
-              skipped: results.filter(result => result.status === "skipped").length,
-              dry_run_preview: results.filter(result => result.status === "dry_run_preview").length,
-              failed: results.filter(result => result.status === "failed").length,
-            },
+            summary,
             results,
+            execution: buildBatchExecutionContract({
+              mode,
+              summary,
+              results: results.filter(result =>
+                result.status === "applied" ||
+                result.status === "dry_run_preview"
+              ),
+              skipped: results.filter(result => result.status === "skipped"),
+              errors: results.filter(result => result.status === "failed"),
+            }),
           }),
         }],
       };

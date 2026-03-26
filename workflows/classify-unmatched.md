@@ -41,9 +41,11 @@ Call `apply_transaction_classifications`:
 - `execute`: `false`
 
 Group the result by status:
-- `dry_run_preview`: would create purchase invoices and link transactions, but nothing has been created yet
-- `skipped`: review-only or no longer applicable
-- `failed`: exact blocking errors
+- Treat `execution` as the canonical batch payload when present.
+- Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
+- `execution.results` entries with `status="dry_run_preview"`: would create purchase invoices and link transactions, but nothing has been created yet
+- `execution.skipped`: review-only or no longer applicable
+- `execution.errors`: exact blocking errors
 
 If the user wants only some groups applied:
 - build a filtered JSON object that preserves the top-level metadata and only the approved `groups`
@@ -62,9 +64,10 @@ Call `apply_transaction_classifications` again:
 - `execute`: `true`
 
 Report:
-- applied
-- skipped
-- failed
+- `execution.summary.applied`
+- `execution.summary.skipped`
+- `execution.summary.failed`
 - `created_invoice_ids`
 - `linked_transaction_ids`
 - which groups still need manual review
+- mention that side effects can be reviewed via `execution.audit_reference`

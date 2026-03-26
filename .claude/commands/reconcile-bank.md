@@ -44,6 +44,8 @@ Call `auto_confirm_exact_matches`:
 - execute: false (dry run first)
 - min_confidence: 90
 
+Treat `execution` as the canonical batch payload when present. Prefer `execution.summary`, `execution.results`, `execution.errors`, and `execution.audit_reference`.
+
 Show what would be confirmed. Ask user for approval.
 
 If approved, call `auto_confirm_exact_matches`:
@@ -79,9 +81,11 @@ Call `reconcile_inter_account_transfers`:
 - `execute`: `false` (dry run first)
 
 Review the results:
+- Treat `execution.summary` as the canonical source for counts, and use `pairs`, `one_sided`, `already_handled`, and `ambiguous_pairs` for detailed breakdown.
 - `already_handled`: transfers already journalized from the other side — safe to delete
 - `one_sided`: would confirm against the other bank account
 - `pairs`: would confirm both outgoing and incoming sides
+- `execution.errors`: any confirmation failures or other blocking issues
 
 Ask for approval. If approved, call again with `execute: true`.
 - If there are 3+ bank accounts and IBAN is missing, provide `target_accounts_dimensions_id`.
@@ -97,4 +101,4 @@ List transactions with no matches and suggest:
 
 ### Step 6: Summary
 
-Report: confirmed count, remaining unconfirmed, unmatched needing manual attention.
+Report: confirmed count, remaining unconfirmed, unmatched needing manual attention, and `execution.audit_reference` whenever mutating tools were executed.

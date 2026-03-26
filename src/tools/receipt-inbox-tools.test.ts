@@ -226,6 +226,25 @@ describe("receipt inbox tool status handling", () => {
       expect.stringContaining("status VOID"),
       "No unconfirmed transactions remain in this classification group.",
     ]));
+    expect(payload.execution).toMatchObject({
+      contract: "batch_execution_v1",
+      mode: "EXECUTED",
+      summary: {
+        applied: 0,
+        skipped: 1,
+        dry_run_preview: 0,
+        failed: 0,
+      },
+      results: [],
+      skipped: [
+        expect.objectContaining({
+          category: "saas_subscriptions",
+          status: "skipped",
+        }),
+      ],
+      errors: [],
+      needs_review: [],
+    });
     expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });

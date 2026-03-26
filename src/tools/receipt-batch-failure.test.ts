@@ -191,6 +191,31 @@ describe("process_receipt_batch rollback handling", () => {
     expect(payload.summary.matched).toBe(0);
     expect(payload.results[0]!.status).toBe("failed");
     expect(payload.results[0]!.error).toContain("upload failed");
+    expect(payload.execution).toMatchObject({
+      contract: "batch_execution_v1",
+      mode: "EXECUTED",
+      summary: {
+        dry_run: false,
+        scanned_files: 1,
+        skipped_invalid_files: 0,
+        created: 0,
+        matched: 0,
+        skipped_duplicate: 0,
+        failed: 1,
+        needs_review: 0,
+        dry_run_preview: 0,
+      },
+      results: [],
+      skipped: [],
+      errors: [
+        expect.objectContaining({
+          classification: "purchase_invoice",
+          status: "failed",
+          error: expect.stringContaining("upload failed"),
+        }),
+      ],
+      needs_review: [],
+    });
     expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
       "Invalidated created purchase invoice 9001 because source document upload failed: upload failed.",
     ]));
