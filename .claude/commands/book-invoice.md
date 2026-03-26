@@ -37,7 +37,7 @@ Call `validate_invoice_data`:
 - invoice_date: YYYY-MM-DD
 - due_date: YYYY-MM-DD (if available)
 
-Do NOT proceed until validation passes (valid: true). If errors, re-check the extracted values.
+If validation returns `valid=false` or any errors, stop and ask the user to review the extraction before creating anything.
 
 ### Step 3: Resolve the supplier without creating duplicates
 

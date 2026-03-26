@@ -22,6 +22,7 @@ const ENTRY_SEPARATOR = "\n---\n\n";
 const META_RE = /^<!-- audit:(\{.*\}) -->$/m;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const AUDIT_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+const ISO_TS_NO_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?$/;
 
 let activeConnectionNameGetter: () => string = () => "default";
 
@@ -274,6 +275,11 @@ function parseAuditTimestamp(value: string): number | undefined {
 
   if (AUDIT_TS_RE.test(trimmed)) {
     const parsed = Date.parse(trimmed.replace(" ", "T") + "Z");
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  if (ISO_TS_NO_TZ_RE.test(trimmed)) {
+    const parsed = Date.parse(trimmed + "Z");
     return Number.isFinite(parsed) ? parsed : undefined;
   }
 

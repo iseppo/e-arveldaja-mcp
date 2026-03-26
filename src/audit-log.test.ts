@@ -62,4 +62,42 @@ describe("audit log date filters", () => {
     expect(filtered).toContain("create_purchase_invoice");
     expect(filtered).not.toContain("#2");
   });
+
+  it("treats timezone-less ISO date-times as UTC to match audit headings", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-25T22:30:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 3,
+      summary: "Late UTC entry",
+      details: {},
+    });
+
+    vi.setSystemTime(new Date("2026-03-25T23:30:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 4,
+      summary: "Too late",
+      details: {},
+    });
+
+    const filtered = auditLog.getAuditLog({
+      date_from: "2026-03-25T22:00:00",
+      date_to: "2026-03-25T23:00:00",
+    });
+
+    expect(filtered).toContain("2026-03-25 22:30:00");
+    expect(filtered).not.toContain("2026-03-25 23:30:00");
+    expect(filtered).toContain("#3");
+    expect(filtered).not.toContain("#4");
+  });
 });
