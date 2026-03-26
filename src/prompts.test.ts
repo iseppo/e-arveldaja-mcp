@@ -3,11 +3,38 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 import { registerPrompts } from "./prompts.js";
 import { getProjectRoot } from "./paths.js";
+import type { CredentialSetupInfo } from "./config.js";
 
-function setupPromptServer() {
+function setupPromptServer(options: { setupInfo?: CredentialSetupInfo } = {}) {
   const server = { registerPrompt: vi.fn() } as any;
-  registerPrompts(server);
+  registerPrompts(server, options);
   return server;
+}
+
+function buildSetupInfo(): CredentialSetupInfo {
+  return {
+    mode: "setup",
+    message: "No API credentials configured. Server is running in setup mode.",
+    working_directory: "/tmp/project",
+    searched_directories: ["/tmp/project"],
+    scan_parent_enabled: false,
+    env_vars: [
+      "EARVELDAJA_API_KEY_ID",
+      "EARVELDAJA_API_PUBLIC_VALUE",
+      "EARVELDAJA_API_PASSWORD",
+    ],
+    credential_file_env_var: "EARVELDAJA_API_KEY_FILE",
+    credential_file_pattern: "apikey*.txt",
+    credential_file_directory: "/tmp/project",
+    file_format_example: [
+      "ApiKey ID: <your key id>",
+      "ApiKey public value: <your public value>",
+      "Password: <your password>",
+    ],
+    next_steps: [
+      "Configure credentials and restart the MCP server.",
+    ],
+  };
 }
 
 function readPromptSurface(relativePath: string): string {
@@ -48,6 +75,24 @@ describe("registerPrompts", () => {
       "company-overview",
       "lightyear-booking",
     ]);
+  });
+
+  it("returns setup-safe workflow prompts when setup mode guidance is enabled", async () => {
+    const server = setupPromptServer({ setupInfo: buildSetupInfo() });
+    const bookInvoiceText = await getPromptText(server, "book-invoice", { file_path: "/tmp/invoice.pdf" });
+    const overviewText = await getPromptText(server, "company-overview");
+
+    expect(bookInvoiceText).toContain("setup mode");
+    expect(bookInvoiceText).toContain("get_setup_instructions");
+    expect(bookInvoiceText).toContain("extract_pdf_invoice");
+    expect(bookInvoiceText).toContain("validate_invoice_data");
+    expect(bookInvoiceText).toContain("EARVELDAJA_API_KEY_FILE");
+    expect(bookInvoiceText).not.toContain("resolve_supplier");
+
+    expect(overviewText).toContain("setup mode");
+    expect(overviewText).toContain("get_setup_instructions");
+    expect(overviewText).not.toContain("get_vat_info");
+    expect(overviewText).not.toContain("compute_balance_sheet");
   });
 
   it("keeps the book-invoice prompt aligned with real tool parameters and output fields", async () => {

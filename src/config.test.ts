@@ -161,6 +161,20 @@ describe("loadAllConfigs", () => {
     }
   });
 
+  it("reports setup guidance for the working directory by default", async () => {
+    const { getCredentialSetupInfo } = await importFreshConfig();
+
+    const info = getCredentialSetupInfo(false, "/tmp/project");
+
+    expect(info.working_directory).toBe("/tmp/project");
+    expect(info.credential_file_directory).toBe("/tmp/project");
+    expect(info.credential_file_env_var).toBe("EARVELDAJA_API_KEY_FILE");
+    expect(info.searched_directories).toEqual(["/tmp/project"]);
+    expect(info.next_steps[0]).toContain("working directory");
+    expect(info.next_steps[0]).toContain("EARVELDAJA_API_KEY_FILE");
+    expect(info.next_steps[1]).toContain("EARVELDAJA_SCAN_PARENT=true");
+  });
+
   it("rejects API key files that are group-readable", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-config-perms-"));
     const apiKeyFile = join(tempDir, "apikey.txt");

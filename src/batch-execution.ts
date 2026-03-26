@@ -4,7 +4,7 @@ export interface BatchAuditReference {
   review_tool: "get_session_log";
   list_tool: "list_audit_logs";
   format: "human_readable_markdown";
-  location: "logs/<company>.audit.md";
+  location: "logs/<sanitized-connection-name>.audit.md";
   note: string;
 }
 
@@ -28,8 +28,8 @@ const DEFAULT_AUDIT_REFERENCE: BatchAuditReference = {
   review_tool: "get_session_log",
   list_tool: "list_audit_logs",
   format: "human_readable_markdown",
-  location: "logs/<company>.audit.md",
-  note: "Review mutating side effects in the per-company human-readable audit log.",
+  location: "logs/<sanitized-connection-name>.audit.md",
+  note: "Review mutating side effects in the per-connection human-readable audit log.",
 };
 
 export function buildBatchExecutionContract<

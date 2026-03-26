@@ -4,8 +4,14 @@ import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { registerTool } from "./mcp-compat.js";
-import { loadDotenvFiles, loadAllConfigs, type NamedConfig } from "./config.js";
+import { registerPrompt, registerTool } from "./mcp-compat.js";
+import {
+  loadDotenvFiles,
+  loadAllConfigs,
+  type NamedConfig,
+  NO_API_CREDENTIALS_FOUND_MESSAGE,
+  getCredentialSetupInfo,
+} from "./config.js";
 import { toolExtraStorage } from "./progress.js";
 import { HttpClient } from "./http-client.js";
 import { ClientsApi } from "./api/clients.api.js";
@@ -65,6 +71,78 @@ function buildApiContext(httpClient: HttpClient): ApiContext {
     purchaseInvoices: new PurchaseInvoicesApi(httpClient),
     readonly: new ReferenceDataApi(httpClient),
   };
+}
+
+function buildSetupModePayload(
+  setupInfo: ReturnType<typeof getCredentialSetupInfo>,
+  options?: {
+    hint?: string;
+    blockedTool?: string;
+    blockedResource?: string;
+    blockedApiMethod?: string;
+  },
+): Record<string, unknown> {
+  return {
+    mode: "setup",
+    error: `${setupInfo.message} Call get_setup_instructions for guidance.`,
+    hint: options?.hint ??
+      "Call get_setup_instructions to see how to configure EARVELDAJA_API_* or apikey*.txt in the working directory, or set EARVELDAJA_API_KEY_FILE to an explicit credential file path.",
+    credential_file_env_var: setupInfo.credential_file_env_var,
+    credential_file_pattern: setupInfo.credential_file_pattern,
+    working_directory: setupInfo.working_directory,
+    searched_directories: setupInfo.searched_directories,
+    scan_parent_enabled: setupInfo.scan_parent_enabled,
+    ...(options?.blockedTool ? { blocked_tool: options.blockedTool } : {}),
+    ...(options?.blockedResource ? { blocked_resource: options.blockedResource } : {}),
+    ...(options?.blockedApiMethod ? { blocked_api_method: options.blockedApiMethod } : {}),
+  };
+}
+
+function buildSetupModeError(
+  setupInfo: ReturnType<typeof getCredentialSetupInfo>,
+  blockedApiMethod?: string,
+): Error {
+  const payload = buildSetupModePayload(setupInfo, { blockedApiMethod });
+  return Object.assign(new Error(String(payload.error)), payload);
+}
+
+function createSetupModeApiContext(setupInfo: ReturnType<typeof getCredentialSetupInfo>): ApiContext {
+  return new Proxy({}, {
+    get(_target, apiSection) {
+      return new Proxy({}, {
+        get(_innerTarget, apiMethod) {
+          throw buildSetupModeError(setupInfo, `${String(apiSection)}.${String(apiMethod)}`);
+        },
+      });
+    },
+  }) as ApiContext;
+}
+
+function isSetupModeError(
+  error: unknown,
+): error is Error & {
+  mode?: string;
+  hint?: string;
+  blocked_api_method?: string;
+  working_directory?: string;
+  searched_directories?: string[];
+  scan_parent_enabled?: boolean;
+} {
+  return typeof error === "object" && error !== null &&
+    "mode" in error &&
+    (error as { mode?: unknown }).mode === "setup" &&
+    "working_directory" in error &&
+    "searched_directories" in error;
+}
+
+function getResourceUri(args: unknown[]): string {
+  const candidate = args[0];
+  if (candidate instanceof URL) return candidate.href;
+  if (typeof candidate === "object" && candidate !== null && "href" in candidate) {
+    const href = (candidate as { href?: unknown }).href;
+    if (typeof href === "string") return href;
+  }
+  return "earveldaja://setup";
 }
 
 function captureSnapshot(state: ConnectionState): ConnectionSnapshot {
@@ -130,9 +208,22 @@ async function main() {
   if (allowedRootsWarning) {
     log("warning", allowedRootsWarning);
   }
-  const allConfigs = loadAllConfigs();
+  let allConfigs: NamedConfig[];
+  let setupMode = false;
+  try {
+    allConfigs = loadAllConfigs();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.startsWith(NO_API_CREDENTIALS_FOUND_MESSAGE)) {
+      throw error;
+    }
+    allConfigs = [];
+    setupMode = true;
+  }
+
+  const setupInfo = getCredentialSetupInfo();
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
-  initAuditLog(() => allConfigs[connectionState.activeIndex]!.name);
+  initAuditLog(() => allConfigs[connectionState.activeIndex]?.name ?? "setup");
   const invocationStorage = new AsyncLocalStorage<ConnectionSnapshot>();
   const requestGuard = () => {
     const snapshot = invocationStorage.getStore();
@@ -143,7 +234,9 @@ async function main() {
   const connectionContexts = allConfigs.map((namedConfig, index) =>
     buildApiContext(new HttpClient(namedConfig.config, `connection:${index}`, requestGuard))
   );
-  const api = createScopedApiContext(connectionState, connectionContexts, invocationStorage);
+  const api = setupMode
+    ? createSetupModeApiContext(setupInfo)
+    : createScopedApiContext(connectionState, connectionContexts, invocationStorage);
 
   const server = new McpServer({
     name: "e-arveldaja",
@@ -156,7 +249,14 @@ async function main() {
       "PDF invoice extraction, supplier resolution with business registry lookup, " +
       "and smart booking suggestions based on past invoices.",
   }, {
-    instructions: `Purchase invoices:
+    instructions: setupMode ? `Setup mode:
+- No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.
+- Local file-analysis tools such as extract_pdf_invoice, validate_invoice_data, scan_receipt_folder, parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
+- Call get_setup_instructions for the exact credential setup steps.
+- list_connections returns the currently configured connections (0 until credentials are added).
+- Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.
+- Audit logs remain human-readable Markdown under logs/, but no configured-connection log file exists until a configured connection performs a mutating action.
+` : `Purchase invoices:
 - Before booking, call get_vat_info to check VAT registration status.
 - Resolve the supplier first, then check duplicate risk before creating.
 - If there is no existing supplier match yet, still run duplicate detection using invoice_number + gross_price + invoice_date filters.
@@ -183,6 +283,18 @@ Reporting:
 
   // --- Multi-account tools ---
 
+  registerTool(server, "get_setup_instructions",
+    "Show how to configure e-arveldaja API credentials when the server is running without connections.",
+    {},
+    { ...readOnly, openWorldHint: true, title: "Get Setup Instructions" },
+    async () => ({
+      content: [{
+        type: "text",
+        text: toMcpJson(setupInfo),
+      }],
+    })
+  );
+
   registerTool(server, "list_connections",
     "List all available e-arveldaja connections (API key files). " +
     "Shows which connection is currently active.",
@@ -201,9 +313,14 @@ Reporting:
           type: "text",
           text: toMcpJson({
             connections,
-            active: connectionState.activeIndex,
+            active: allConfigs.length > 0 ? connectionState.activeIndex : null,
             total: allConfigs.length,
-            hint: "Use switch_connection with the index to switch between accounts.",
+            setup_required: allConfigs.length === 0,
+            working_directory: setupInfo.working_directory,
+            searched_directories: setupInfo.searched_directories,
+            hint: allConfigs.length === 0
+              ? "No API credentials configured. Call get_setup_instructions or add EARVELDAJA_API_* env vars, set EARVELDAJA_API_KEY_FILE, or place apikey*.txt in the working directory."
+              : "Use switch_connection with the index to switch between accounts.",
           }),
         }],
       };
@@ -220,6 +337,10 @@ Reporting:
     },
     { ...mutate, title: "Switch Connection" },
     async ({ index }) => {
+      if (allConfigs.length === 0) {
+        return toolError(buildSetupModePayload(setupInfo, { blockedTool: "switch_connection" }));
+      }
+
       if (index < 0 || index >= allConfigs.length) {
         return toolError({
           error: `Invalid index ${index}. Valid range: 0-${allConfigs.length - 1}`,
@@ -266,9 +387,9 @@ Reporting:
   registerTool(server, "get_session_log",
     "Retrieve the audit log of all mutating operations. " +
     "Returns human-readable Markdown. By default shows the current connection's log. " +
-    "Use 'connection' to view another company's log, or list_audit_logs to see available logs.",
+    "Use 'connection' to view another configured connection's log, or list_audit_logs to see available logs.",
     {
-      connection: z.string().optional().describe("Connection/company name to view (default: current connection). Use list_audit_logs to see available names."),
+      connection: z.string().optional().describe("Connection name to view (default: current connection). Use list_audit_logs to see available names."),
       entity_type: z.string().optional().describe("Filter by entity type (client, product, journal, transaction, sale_invoice, purchase_invoice)"),
       action: z.string().optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT)"),
       date_from: z.string().optional().describe("Return entries from this date (YYYY-MM-DD or ISO 8601)"),
@@ -297,7 +418,7 @@ Reporting:
   );
 
   registerTool(server, "list_audit_logs",
-    "List all available audit log files across connections/companies. Shows entry count and last entry date for each.",
+    "List all available audit log files across configured connections. Shows entry count and last entry date for each.",
     {},
     { ...readOnly, title: "List Audit Logs" },
     async () => {
@@ -319,6 +440,12 @@ Reporting:
     {},
     { ...destructive, title: "Clear Session Audit Log" },
     async () => {
+      if (setupMode) {
+        return toolError(buildSetupModePayload(setupInfo, {
+          blockedTool: "clear_session_log",
+          hint: "Call get_setup_instructions and configure credentials before using mutating session-log tools.",
+        }));
+      }
       clearAuditLog();
       return {
         content: [{
@@ -329,7 +456,7 @@ Reporting:
     }
   );
 
-  function wrapToolHandler<T extends (...args: any[]) => any>(handler: T): T {
+  function wrapToolHandler<T extends (...args: any[]) => any>(toolName: string, handler: T): T {
     return (async (...args: unknown[]) => {
       const snapshot = captureSnapshot(connectionState);
       const extra = args.length >= 2 ? args[1] as any : undefined;
@@ -345,6 +472,13 @@ Reporting:
         if (process.env.EARVELDAJA_DEBUG === "true" && error instanceof Error && error.stack) {
           process.stderr.write(`[debug] ${error.stack}\n`);
         }
+        if (setupMode && isSetupModeError(error)) {
+          return toolError(buildSetupModePayload(setupInfo, {
+            blockedTool: toolName,
+            blockedApiMethod: error.blocked_api_method,
+            hint: error.hint,
+          }));
+        }
         return toolError(error);
       }
     }) as unknown as T;
@@ -353,7 +487,29 @@ Reporting:
   function wrapResourceHandler<T extends (...args: any[]) => any>(handler: T): T {
     return (async (...args: unknown[]) => {
       const snapshot = captureSnapshot(connectionState);
-      return invocationStorage.run(snapshot, async () => handler(...args));
+      try {
+        return await invocationStorage.run(snapshot, async () => handler(...args));
+      } catch (error) {
+        log("error", `Resource handler error: ${error instanceof Error ? error.message : String(error)}`);
+        if (process.env.EARVELDAJA_DEBUG === "true" && error instanceof Error && error.stack) {
+          process.stderr.write(`[debug] ${error.stack}\n`);
+        }
+        if (setupMode && isSetupModeError(error)) {
+          const uri = getResourceUri(args);
+          return {
+            contents: [{
+              uri,
+              mimeType: "text/plain",
+              text: toMcpJson(buildSetupModePayload(setupInfo, {
+                blockedResource: uri,
+                blockedApiMethod: error.blocked_api_method,
+                hint: error.hint,
+              })),
+            }],
+          };
+        }
+        throw error;
+      }
     }) as unknown as T;
   }
 
@@ -362,9 +518,10 @@ Reporting:
     get(target, prop, receiver) {
       if (prop === "registerTool") {
         return (...toolArgs: unknown[]) => {
+          const toolName = typeof toolArgs[0] === "string" ? toolArgs[0] : "unknown_tool";
           const lastIdx = toolArgs.length - 1;
           if (lastIdx >= 0 && typeof toolArgs[lastIdx] === "function") {
-            toolArgs[lastIdx] = wrapToolHandler(toolArgs[lastIdx] as any);
+            toolArgs[lastIdx] = wrapToolHandler(toolName, toolArgs[lastIdx] as any);
           }
           return (target.registerTool as any)(...toolArgs);
         };
@@ -406,7 +563,31 @@ Reporting:
   registerDynamicResources(scopedServer, api);
 
   // Register prompts
-  registerPrompts(server);
+  registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined });
+  registerPrompt(
+    server,
+    "setup-e-arveldaja",
+    "Explain how to configure e-arveldaja API credentials when the MCP server is running in setup mode.",
+    async () => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Explain how to configure e-arveldaja MCP credentials using this exact guidance:
+- Working directory: ${setupInfo.working_directory}
+- Searched directories: ${setupInfo.searched_directories.join(", ")}
+- Required environment variables: ${setupInfo.env_vars.join(", ")}
+- Optional direct credential file env var: ${setupInfo.credential_file_env_var}
+- Alternatively, place ${setupInfo.credential_file_pattern} in the working directory.
+- File format:
+  ${setupInfo.file_format_example.join("\n  ")}
+- ${setupInfo.next_steps.join("\n- ")}
+
+If the server is currently in setup mode, say so explicitly. Tell the user to restart the MCP server after adding credentials.`,
+        },
+      }],
+    }),
+  );
 
   // Start server
   const transport = new StdioServerTransport();
@@ -417,12 +598,20 @@ Reporting:
     server.sendLoggingMessage({ level, data: message });
   });
 
-  const names = allConfigs.map(c => c.name).join(", ");
-  process.stderr.write(
-    `e-arveldaja MCP server started (${allConfigs.length} connection(s): ${names}). ` +
-    "Review all mutating actions via get_session_log or list_audit_logs. " +
-    "The audit log is human-readable, stored under logs/, and kept separately for each company.\n"
-  );
+  if (setupMode) {
+    process.stderr.write(
+      `e-arveldaja MCP server started in setup mode (0 connections configured). ` +
+      `Call get_setup_instructions for credential setup. Working directory: ${setupInfo.working_directory}. ` +
+      `Looking for ${setupInfo.credential_file_pattern} in: ${setupInfo.searched_directories.join(", ")}.\n`
+    );
+  } else {
+    const names = allConfigs.map(c => c.name).join(", ");
+    process.stderr.write(
+      `e-arveldaja MCP server started (${allConfigs.length} connection(s): ${names}). ` +
+      "Review all mutating actions via get_session_log or list_audit_logs. " +
+      "The audit log is human-readable, stored under logs/, and kept separately for each configured connection.\n"
+    );
+  }
 }
 
 main().catch((err) => {

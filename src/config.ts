@@ -14,6 +14,22 @@ export interface NamedConfig {
   config: Config;
 }
 
+export interface CredentialSetupInfo {
+  mode: "setup";
+  message: string;
+  working_directory: string;
+  searched_directories: string[];
+  scan_parent_enabled: boolean;
+  env_vars: string[];
+  credential_file_env_var: string;
+  credential_file_pattern: string;
+  credential_file_directory: string;
+  file_format_example: string[];
+  next_steps: string[];
+}
+
+export const NO_API_CREDENTIALS_FOUND_MESSAGE = "No API credentials found.";
+
 const SERVERS = {
   live: "https://rmp-api.rik.ee/v1",
   demo: "https://demo-rmp-api.rik.ee/v1",
@@ -93,6 +109,42 @@ export function getConfigSearchDirs(
     dirs.push(resolve(workingDir, ".."));
   }
   return toUniqueDirs(dirs);
+}
+
+export function getCredentialSetupInfo(
+  scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true",
+  workingDir = CWD,
+): CredentialSetupInfo {
+  const resolvedWorkingDir = resolve(workingDir);
+  const searchedDirectories = getConfigSearchDirs(scanParent, workingDir);
+
+  return {
+    mode: "setup",
+    message: "No API credentials configured. Server is running in setup mode.",
+    working_directory: resolvedWorkingDir,
+    searched_directories: searchedDirectories,
+    scan_parent_enabled: scanParent,
+    env_vars: [
+      "EARVELDAJA_API_KEY_ID",
+      "EARVELDAJA_API_PUBLIC_VALUE",
+      "EARVELDAJA_API_PASSWORD",
+    ],
+    credential_file_env_var: "EARVELDAJA_API_KEY_FILE",
+    credential_file_pattern: "apikey*.txt",
+    credential_file_directory: resolvedWorkingDir,
+    file_format_example: [
+      "ApiKey ID: <your key id>",
+      "ApiKey public value: <your public value>",
+      "Password: <your password>",
+    ],
+    next_steps: [
+      "Set the EARVELDAJA_API_KEY_ID, EARVELDAJA_API_PUBLIC_VALUE, and EARVELDAJA_API_PASSWORD environment variables, set EARVELDAJA_API_KEY_FILE to an explicit credential file path, or place apikey*.txt in the working directory.",
+      scanParent
+        ? "Parent directory scanning is enabled via EARVELDAJA_SCAN_PARENT=true."
+        : "Set EARVELDAJA_SCAN_PARENT=true if you also want to scan the parent directory for .env and apikey*.txt files.",
+      "After adding credentials, restart the MCP server.",
+    ],
+  };
 }
 
 /** Check .env file security. Returns true if safe to load. */
@@ -234,11 +286,11 @@ export function loadAllConfigs(): NamedConfig[] {
 
   if (configs.length === 0) {
     throw new Error(
-      "No API credentials found. Set EARVELDAJA_API_KEY_ID/EARVELDAJA_API_PUBLIC_VALUE/EARVELDAJA_API_PASSWORD " +
-      "environment variables, or place apikey*.txt files in the package directory."
+      `${NO_API_CREDENTIALS_FOUND_MESSAGE} ` +
+      "Set EARVELDAJA_API_KEY_ID/EARVELDAJA_API_PUBLIC_VALUE/EARVELDAJA_API_PASSWORD " +
+      "environment variables, set EARVELDAJA_API_KEY_FILE, or place apikey*.txt files in the working directory."
     );
   }
 
   return configs;
 }
-

@@ -1,5 +1,7 @@
+import { mkdtempSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
+import { tmpdir } from "os";
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -7,7 +9,7 @@ import { initAuditLog, logAudit } from "../audit-log.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
 const RUN_LIVE_INTEGRATION = process.env.EARVELDAJA_INTEGRATION_TEST === "true";
-const DIST_ENTRYPOINT = "dist/index.js";
+const DIST_ENTRYPOINT = join(process.cwd(), "dist", "index.js");
 const TEST_AUDIT_CONNECTION = "integration-session-log-test";
 const TEST_AUDIT_LOG_PATH = join(process.cwd(), "logs", `${TEST_AUDIT_CONNECTION}.audit.md`);
 
@@ -27,12 +29,12 @@ function buildTransportEnv(overrides: Record<string, string> = {}): Record<strin
   };
 }
 
-function createTransport(env?: Record<string, string>): StdioClientTransport {
+function createTransport(options?: { env?: Record<string, string>; cwd?: string }): StdioClientTransport {
   return new StdioClientTransport({
     command: "node",
     args: [DIST_ENTRYPOINT],
-    cwd: process.cwd(),
-    env: env ?? buildTransportEnv(),
+    cwd: options?.cwd ?? process.cwd(),
+    env: options?.env ?? buildTransportEnv(),
   });
 }
 
@@ -61,12 +63,14 @@ describe("MCP Server Integration", () => {
   let transport: StdioClientTransport;
 
   beforeAll(async () => {
-    transport = createTransport(buildTransportEnv({
-      EARVELDAJA_API_KEY_ID: "integration-test-key-id",
-      EARVELDAJA_API_PUBLIC_VALUE: "integration-test-public-value",
-      EARVELDAJA_API_PASSWORD: "integration-test-password",
-      EARVELDAJA_SERVER: "demo",
-    }));
+    transport = createTransport({
+      env: buildTransportEnv({
+        EARVELDAJA_API_KEY_ID: "integration-test-key-id",
+        EARVELDAJA_API_PUBLIC_VALUE: "integration-test-public-value",
+        EARVELDAJA_API_PASSWORD: "integration-test-password",
+        EARVELDAJA_SERVER: "demo",
+      }),
+    });
     client = new Client({ name: "integration-test", version: "1.0.0" });
     await client.connect(transport);
   });
@@ -193,6 +197,130 @@ describe("MCP Server Integration", () => {
     expect(text).not.toContain("2026-03-25 23:30:00");
     expect(text).toContain("#101");
     expect(text).not.toContain("#102");
+  });
+});
+
+describe("MCP Server Setup Mode", () => {
+  let client: Client;
+  let transport: StdioClientTransport;
+  let tempDir: string;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "earveldaja-mcp-setup-"));
+    transport = createTransport({
+      cwd: tempDir,
+      env: buildTransportEnv({
+        EARVELDAJA_API_KEY_ID: "",
+        EARVELDAJA_API_PUBLIC_VALUE: "",
+        EARVELDAJA_API_PASSWORD: "",
+        EARVELDAJA_API_KEY_FILE: "",
+        EARVELDAJA_SCAN_PARENT: "",
+      }),
+    });
+    client = new Client({ name: "setup-mode-test", version: "1.0.0" });
+    await client.connect(transport);
+  });
+
+  afterAll(async () => {
+    try { await client.close(); } catch {}
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("keeps prompts and resources listed in setup mode", async () => {
+    const { prompts } = await client.listPrompts();
+    const { resources } = await client.listResources();
+    const { resourceTemplates } = await client.listResourceTemplates();
+    const { tools } = await client.listTools();
+
+    expect(prompts.map(prompt => prompt.name)).toEqual(expect.arrayContaining([
+      "setup-e-arveldaja",
+      "book-invoice",
+      "receipt-batch",
+    ]));
+    expect(resources.map(resource => resource.name)).toEqual(expect.arrayContaining([
+      "accounts",
+      "vat_info",
+      "invoice_info",
+    ]));
+    expect(resourceTemplates.map(resource => resource.name)).toEqual(expect.arrayContaining([
+      "client",
+      "purchase_invoice",
+      "transaction",
+    ]));
+    expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining([
+      "get_setup_instructions",
+      "list_connections",
+      "get_vat_info",
+      "validate_invoice_data",
+    ]));
+  });
+
+  it("reports zero connections and working-directory setup guidance", async () => {
+    const result = await client.callTool({ name: "list_connections", arguments: {} });
+    const data = parseMcpResponse((result.content as any)[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(data.connections).toEqual([]);
+    expect(data.active).toBeUndefined();
+    expect(data.total).toBe(0);
+    expect(data.setup_required).toBe(true);
+    expect(data.working_directory).toBe(tempDir);
+    expect(data.hint).toContain("get_setup_instructions");
+  });
+
+  it("returns structured setup guidance and blocks API tools consistently", async () => {
+    const setup = await client.callTool({ name: "get_setup_instructions", arguments: {} });
+    const setupData = parseMcpResponse((setup.content as any)[0].text);
+
+    expect(setup.isError).toBeFalsy();
+    expect(setupData.mode).toBe("setup");
+    expect(setupData.working_directory).toBe(tempDir);
+    expect(setupData.credential_file_pattern).toBe("apikey*.txt");
+    expect(setupData.credential_file_env_var).toBe("EARVELDAJA_API_KEY_FILE");
+    expect(setupData.env_vars).toEqual(expect.arrayContaining([
+      "EARVELDAJA_API_KEY_ID",
+      "EARVELDAJA_API_PUBLIC_VALUE",
+      "EARVELDAJA_API_PASSWORD",
+    ]));
+
+    const blocked = await client.callTool({ name: "get_vat_info", arguments: {} });
+    const blockedData = parseMcpResponse((blocked.content as any)[0].text);
+
+    expect(blocked.isError).toBe(true);
+    expect(blockedData.error).toContain("setup mode");
+    expect(blockedData.hint).toContain("get_setup_instructions");
+    expect(blockedData.blocked_tool).toBe("get_vat_info");
+    expect(blockedData.blocked_api_method).toBe("readonly.getVatInfo");
+    expect(blockedData.working_directory).toBe(tempDir);
+  });
+
+  it("returns setup guidance when reading API resources in setup mode", async () => {
+    const result = await client.readResource({ uri: "earveldaja://accounts" });
+    const data = parseMcpResponse((result.contents as any)[0].text);
+
+    expect(data.mode).toBe("setup");
+    expect(data.error).toContain("setup mode");
+    expect(data.blocked_resource).toBe("earveldaja://accounts");
+    expect(data.blocked_api_method).toBe("readonly.getAccounts");
+    expect(data.working_directory).toBe(tempDir);
+  });
+
+  it("still allows local offline tools in setup mode", async () => {
+    const result = await client.callTool({
+      name: "validate_invoice_data",
+      arguments: {
+        total_net: 100,
+        total_vat: 22,
+        total_gross: 122,
+        items: JSON.stringify([{ total_net_price: 100, vat_rate_dropdown: "22" }]),
+        invoice_date: "2026-03-26",
+        due_date: "2026-03-26",
+      },
+    });
+    const data = parseMcpResponse((result.content as any)[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(data.valid).toBe(true);
   });
 });
 

@@ -1,5 +1,5 @@
 /**
- * Disk-backed, company-specific session audit log.
+ * Disk-backed, connection-specific session audit log.
  * Entries are written as human-readable Markdown sections to
  * `{projectRoot}/logs/{connectionName}.audit.md`.
  */

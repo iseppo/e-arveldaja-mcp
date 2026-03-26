@@ -1,14 +1,83 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerPrompt } from "./mcp-compat.js";
+import type { CredentialSetupInfo } from "./config.js";
 
-export function registerPrompts(server: McpServer): void {
+interface SetupPromptOptions {
+  offlineTools?: string[];
+  note?: string;
+}
+
+interface PromptResult {
+  messages: Array<{
+    role: "user";
+    content: {
+      type: "text";
+      text: string;
+    };
+  }>;
+}
+
+function buildSetupModePromptText(
+  workflowName: string,
+  setupInfo: CredentialSetupInfo,
+  options: SetupPromptOptions = {},
+): string {
+  const availableTools = [
+    "get_setup_instructions",
+    "list_connections",
+    ...(options.offlineTools ?? []),
+  ];
+
+  return `The server is currently running in setup mode, so the \`${workflowName}\` workflow cannot complete yet.
+
+First call \`get_setup_instructions\` and configure credentials.
+- Working directory: ${setupInfo.working_directory}
+- Searched directories: ${setupInfo.searched_directories.join(", ")}
+- Required environment variables: ${setupInfo.env_vars.join(", ")}
+- Optional direct credential file env var: ${setupInfo.credential_file_env_var}
+- Credential file pattern: ${setupInfo.credential_file_pattern}
+
+Tools you can use right now:
+${availableTools.map(tool => `- \`${tool}\``).join("\n")}
+${options.note ? `\nSpecific guidance:\n- ${options.note}` : ""}
+
+After credentials are configured and the MCP server is restarted, run \`${workflowName}\` again.`;
+}
+
+function wrapPromptForSetup<TArgs>(
+  workflowName: string,
+  setupInfo: CredentialSetupInfo | undefined,
+  builder: (args: TArgs) => PromptResult | Promise<PromptResult>,
+  options: SetupPromptOptions = {},
+): (args: TArgs) => Promise<PromptResult> {
+  return async (args: TArgs) => {
+    if (!setupInfo) {
+      return await builder(args);
+    }
+    return {
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: buildSetupModePromptText(workflowName, setupInfo, options),
+        },
+      }],
+    };
+  };
+}
+
+export function registerPrompts(
+  server: McpServer,
+  options: { setupInfo?: CredentialSetupInfo } = {},
+): void {
+  const setupInfo = options.setupInfo;
 
   registerPrompt(server, 
     "book-invoice",
     "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, previews the booking, and creates + confirms the invoice after approval.",
     { file_path: z.string().describe("Absolute path to the invoice document file (PDF/JPG/PNG)") },
-    async ({ file_path }) => ({
+    wrapPromptForSetup("book-invoice", setupInfo, async ({ file_path }) => ({
       messages: [{
         role: "user",
         content: {
@@ -126,6 +195,9 @@ Follow these steps in order:
 `,
         },
       }],
+    }), {
+      offlineTools: ["extract_pdf_invoice", "validate_invoice_data"],
+      note: "Supplier resolution, duplicate detection, booking suggestions, invoice creation, and confirmation all require configured e-arveldaja credentials.",
     })
   );
 
@@ -138,7 +210,7 @@ Follow these steps in order:
       date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
     },
-    async ({ folder_path, accounts_dimensions_id, date_from, date_to }) => ({
+    wrapPromptForSetup("receipt-batch", setupInfo, async ({ folder_path, accounts_dimensions_id, date_from, date_to }) => ({
       messages: [{
         role: "user",
         content: {
@@ -204,6 +276,9 @@ Follow these steps in order:
 `,
         },
       }],
+    }), {
+      offlineTools: ["scan_receipt_folder"],
+      note: "Full receipt processing, supplier resolution, duplicate checks, bank matching, and invoice creation all require configured credentials.",
     })
   );
 
@@ -216,7 +291,7 @@ Follow these steps in order:
       date_from: z.string().optional().describe("Optional statement-entry lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional statement-entry upper bound (YYYY-MM-DD)"),
     },
-    async ({ file_path, accounts_dimensions_id, date_from, date_to }) => ({
+    wrapPromptForSetup("import-camt", setupInfo, async ({ file_path, accounts_dimensions_id, date_from, date_to }) => ({
       messages: [{
         role: "user",
         content: {
@@ -281,6 +356,9 @@ Follow these steps in order:
 `,
         },
       }],
+    }), {
+      offlineTools: ["parse_camt053"],
+      note: "Parsing the CAMT file can be done locally, but dry-run imports and transaction creation require configured e-arveldaja credentials.",
     })
   );
 
@@ -295,7 +373,7 @@ Follow these steps in order:
       date_to: z.string().optional().describe("Optional transaction-date upper bound (YYYY-MM-DD)"),
       skip_jar_transfers: z.boolean().optional().describe("Skip Jar transfers (default true)"),
     },
-    async ({
+    wrapPromptForSetup("import-wise", setupInfo, async ({
       file_path,
       accounts_dimensions_id,
       fee_account_dimensions_id,
@@ -370,6 +448,8 @@ Follow these steps in order:
 `,
         },
       }],
+    }), {
+      note: "Wise import preview and execution both depend on live e-arveldaja account and transaction data, so this workflow stays blocked until credentials are configured.",
     })
   );
 
@@ -381,7 +461,7 @@ Follow these steps in order:
       date_from: z.string().optional().describe("Optional lower transaction date bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional upper transaction date bound (YYYY-MM-DD)"),
     },
-    async ({ accounts_dimensions_id, date_from, date_to }) => ({
+    wrapPromptForSetup("classify-unmatched", setupInfo, async ({ accounts_dimensions_id, date_from, date_to }) => ({
       messages: [{
         role: "user",
         content: {
@@ -449,6 +529,8 @@ Follow these steps in order:
 `,
         },
       }],
+    }), {
+      note: "This workflow depends on live unmatched bank transactions and e-arveldaja booking data, so it cannot run before credentials are configured.",
     })
   );
 
@@ -456,7 +538,7 @@ Follow these steps in order:
     "reconcile-bank",
     "Match bank transactions to invoices and optionally auto-confirm exact matches.",
     { mode: z.string().optional().describe('Reconciliation mode: "auto" (default), "review", or a numeric transaction ID') },
-    async ({ mode }) => {
+    wrapPromptForSetup("reconcile-bank", setupInfo, async ({ mode }) => {
       const effectiveMode = mode ?? "auto";
       return {
         messages: [{
@@ -518,14 +600,16 @@ Follow these steps:
           },
         }],
       };
-    }
+    }, {
+      note: "Bank reconciliation requires live transactions, invoices, and journals from e-arveldaja, so it cannot run in setup mode.",
+    })
   );
 
   registerPrompt(server, 
     "month-end-close",
     "Run the month-end close checklist: check for blockers, find missing documents, detect duplicates, and generate financial statements.",
     { month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Expected YYYY-MM").describe('Month in YYYY-MM format, e.g. "2026-03"') },
-    async ({ month }) => {
+    wrapPromptForSetup("month-end-close", setupInfo, async ({ month }) => {
       // Parse month to get date range
       const [year, mm] = month.split("-");
       const lastDay = new Date(Number(year), Number(mm), 0).getDate();
@@ -586,14 +670,16 @@ Follow these steps in order:
           },
         }],
       };
-    }
+    }, {
+      note: "Month-end checks rely on live e-arveldaja invoices, transactions, journals, and reports, so this workflow stays blocked until credentials are configured.",
+    })
   );
 
   registerPrompt(server, 
     "new-supplier",
     "Create a new supplier by looking up registry data and creating a client record.",
     { identifier: z.string().describe("Supplier name or 8-digit Estonian registry code") },
-    async ({ identifier }) => ({
+    wrapPromptForSetup("new-supplier", setupInfo, async ({ identifier }) => ({
       messages: [{
         role: "user",
         content: {
@@ -655,13 +741,15 @@ Follow these steps:
 `,
         },
       }],
+    }), {
+      note: "Existing-client lookup, supplier resolution, and client creation are API-backed steps, so this workflow cannot complete before credentials are configured.",
     })
   );
 
   registerPrompt(server, 
     "company-overview",
     "Get a comprehensive dashboard overview of the company's current financial state.",
-    async () => {
+    wrapPromptForSetup("company-overview", setupInfo, async () => {
       const now = new Date();
       const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
       const yearStart = `${today.slice(0, 4)}-01-01`;
@@ -715,7 +803,9 @@ Follow these steps:
           },
         }],
       };
-    }
+    }, {
+      note: "This dashboard depends on live company settings and financial reports from e-arveldaja, so it cannot run before credentials are configured.",
+    })
   );
 
   registerPrompt(server, 
@@ -735,7 +825,7 @@ Follow these steps:
       investment_dimension_id: z.number().optional().describe("Optional dimension ID for the investment account"),
       broker_dimension_id: z.number().optional().describe("Optional dimension ID for the broker account"),
     },
-    async ({ statement_path, capital_gains_path, investment_account, broker_account, income_account, gain_loss_account, loss_account, fee_account, tax_account, investment_dimension_id, broker_dimension_id }) => ({
+    wrapPromptForSetup("lightyear-booking", setupInfo, async ({ statement_path, capital_gains_path, investment_account, broker_account, income_account, gain_loss_account, loss_account, fee_account, tax_account, investment_dimension_id, broker_dimension_id }) => ({
       messages: [{
         role: "user",
         content: {
@@ -836,6 +926,9 @@ ${income_account ? `7. Before booking distributions:
 `,
         },
       }],
+    }), {
+      offlineTools: ["parse_lightyear_statement", "parse_lightyear_capital_gains"],
+      note: "You can still parse the Lightyear exports locally, but account lookup and journal creation require configured e-arveldaja credentials.",
     })
   );
 
