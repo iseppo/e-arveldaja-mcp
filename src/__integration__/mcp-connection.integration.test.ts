@@ -1,10 +1,15 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { rm } from "fs/promises";
+import { join } from "path";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { initAuditLog, logAudit } from "../audit-log.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
 const RUN_LIVE_INTEGRATION = process.env.EARVELDAJA_INTEGRATION_TEST === "true";
 const DIST_ENTRYPOINT = "dist/index.js";
+const TEST_AUDIT_CONNECTION = "integration-session-log-test";
+const TEST_AUDIT_LOG_PATH = join(process.cwd(), "logs", `${TEST_AUDIT_CONNECTION}.audit.md`);
 
 function getEarveldajaEnvironment(): Record<string, string> {
   return Object.fromEntries(
@@ -31,6 +36,26 @@ function createTransport(env?: Record<string, string>): StdioClientTransport {
   });
 }
 
+async function seedAuditLog(entries: Array<{ timestamp: string; entityId: number; summary: string }>): Promise<void> {
+  initAuditLog(() => TEST_AUDIT_CONNECTION);
+  vi.useFakeTimers();
+  try {
+    for (const entry of entries) {
+      vi.setSystemTime(new Date(entry.timestamp));
+      logAudit({
+        tool: "create_purchase_invoice",
+        action: "CREATED",
+        entity_type: "purchase_invoice",
+        entity_id: entry.entityId,
+        summary: entry.summary,
+        details: {},
+      });
+    }
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 describe("MCP Server Integration", () => {
   let client: Client;
   let transport: StdioClientTransport;
@@ -48,6 +73,11 @@ describe("MCP Server Integration", () => {
 
   afterAll(async () => {
     try { await client.close(); } catch {}
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await rm(TEST_AUDIT_LOG_PATH, { force: true });
   });
 
   it("lists 85+ tools", async () => {
@@ -139,6 +169,30 @@ describe("MCP Server Integration", () => {
     expect(result.isError).toBe(true);
     expect(resultData.error).toMatch(/Invalid index/);
     expect(afterData.active).toBe(beforeData.active);
+  });
+
+  it("get_session_log applies ISO date filters end-to-end", async () => {
+    await seedAuditLog([
+      { timestamp: "2026-03-25T22:30:00Z", entityId: 101, summary: "Included entry" },
+      { timestamp: "2026-03-25T23:30:00Z", entityId: 102, summary: "Excluded entry" },
+    ]);
+
+    const result = await client.callTool({
+      name: "get_session_log",
+      arguments: {
+        connection: TEST_AUDIT_CONNECTION,
+        date_from: "2026-03-25T22:00:00",
+        date_to: "2026-03-25T23:00:00",
+      },
+    });
+
+    const text = (result.content as any)[0].text as string;
+
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain("2026-03-25 22:30:00");
+    expect(text).not.toContain("2026-03-25 23:30:00");
+    expect(text).toContain("#101");
+    expect(text).not.toContain("#102");
   });
 });
 

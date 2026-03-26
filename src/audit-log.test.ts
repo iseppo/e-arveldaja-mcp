@@ -100,4 +100,152 @@ describe("audit log date filters", () => {
     expect(filtered).toContain("#3");
     expect(filtered).not.toContain("#4");
   });
+
+  it("accepts explicit timezone offsets in ISO date filters", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-25T22:30:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 5,
+      summary: "Offset match",
+      details: {},
+    });
+
+    vi.setSystemTime(new Date("2026-03-25T23:30:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 6,
+      summary: "Offset miss",
+      details: {},
+    });
+
+    const filtered = auditLog.getAuditLog({
+      date_from: "2026-03-26T00:00:00+02:00",
+      date_to: "2026-03-26T01:00:00+02:00",
+    });
+
+    expect(filtered).toContain("2026-03-25 22:30:00");
+    expect(filtered).not.toContain("2026-03-25 23:30:00");
+    expect(filtered).toContain("#5");
+    expect(filtered).not.toContain("#6");
+  });
+
+  it("treats YYYY-MM-DD bounds as inclusive full-day filters", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-25T00:00:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 7,
+      summary: "Day start",
+      details: {},
+    });
+
+    vi.setSystemTime(new Date("2026-03-25T23:59:59Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 8,
+      summary: "Day end",
+      details: {},
+    });
+
+    vi.setSystemTime(new Date("2026-03-26T00:00:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 9,
+      summary: "Next day",
+      details: {},
+    });
+
+    const filtered = auditLog.getAuditLog({
+      date_from: "2026-03-25",
+      date_to: "2026-03-25",
+    });
+
+    expect(filtered).toContain("2026-03-25 00:00:00");
+    expect(filtered).toContain("2026-03-25 23:59:59");
+    expect(filtered).not.toContain("2026-03-26 00:00:00");
+    expect(filtered).toContain("#7");
+    expect(filtered).toContain("#8");
+    expect(filtered).not.toContain("#9");
+  });
+
+  it("throws a stable validation error for invalid date filters", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    expect(() => auditLog.getAuditLog({ date_from: "not-a-date" })).toThrow(
+      'Invalid date_from filter: "not-a-date". Expected YYYY-MM-DD or ISO 8601.',
+    );
+  });
+
+  it("applies limit after date filtering so the newest matching entry is kept", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-25T10:00:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 10,
+      summary: "Older same-day entry",
+      details: {},
+    });
+
+    vi.setSystemTime(new Date("2026-03-25T11:00:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 11,
+      summary: "Newest same-day entry",
+      details: {},
+    });
+
+    vi.setSystemTime(new Date("2026-03-26T09:00:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 12,
+      summary: "Other day entry",
+      details: {},
+    });
+
+    const filtered = auditLog.getAuditLog({
+      date_from: "2026-03-25",
+      date_to: "2026-03-25",
+      limit: 1,
+    });
+
+    expect(filtered).toContain("2026-03-25 11:00:00");
+    expect(filtered).toContain("#11");
+    expect(filtered).not.toContain("#10");
+    expect(filtered).not.toContain("#12");
+  });
 });

@@ -261,6 +261,27 @@ describe("registerPrompts", () => {
     }
   });
 
+  it("keeps shipped mutating workflow prompts explicit about approval stop-gates", () => {
+    const expectedStops: Record<string, string> = {
+      "workflows/book-invoice.md": "If the user has not explicitly approved the preview, stop here and wait.",
+      ".claude/commands/book-invoice.md": "If the user has not explicitly approved the preview, stop here and wait.",
+      "workflows/receipt-batch.md": "If the user does not explicitly approve, stop.",
+      ".claude/commands/receipt-batch.md": "If the user does not explicitly approve, stop.",
+      "workflows/import-camt.md": "If the user does not explicitly approve, stop.",
+      ".claude/commands/import-camt.md": "If the user does not explicitly approve, stop.",
+      "workflows/import-wise.md": "If the user does not explicitly approve, stop.",
+      ".claude/commands/import-wise.md": "If the user does not explicitly approve, stop.",
+      "workflows/classify-unmatched.md": "If the user does not explicitly approve, stop.",
+      ".claude/commands/classify-unmatched.md": "If the user does not explicitly approve, stop.",
+    };
+
+    for (const [relativePath, stopPhrase] of Object.entries(expectedStops)) {
+      const text = readPromptSurface(relativePath);
+      expect(text.toLowerCase()).toContain("approval");
+      expect(text).toContain(stopPhrase);
+    }
+  });
+
   it("keeps shipped import-camt markdown prompts aligned with actual dry-run fields", () => {
     const text = readPromptSurface(".claude/commands/import-camt.md");
 

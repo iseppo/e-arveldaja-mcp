@@ -15,12 +15,22 @@ function serializeUnknownError(error: unknown): string {
 }
 
 function toErrorPayload(error: unknown): Record<string, unknown> {
-  if (error instanceof Error) return { error: error.message };
+  if (error instanceof Error) {
+    const payload: Record<string, unknown> = { error: error.message };
+    if (error.name && error.name !== "Error") payload.name = error.name;
+    if ("cause" in error && error.cause !== undefined) payload.cause = error.cause;
+    for (const [key, value] of Object.entries(error as unknown as Record<string, unknown>)) {
+      if (key === "message" || key === "name" || key === "stack" || key === "cause") continue;
+      payload[key] = value;
+    }
+    return payload;
+  }
   if (typeof error === "string") return { error };
   if (error === undefined) return { error: "Unknown error" };
   if (typeof error === "object" && error !== null && !Array.isArray(error)) {
     const record = error as Record<string, unknown>;
     if (typeof record.error === "string") return record;
+    if (typeof record.message === "string") return { ...record, error: record.message };
   }
   return { error: serializeUnknownError(error) };
 }

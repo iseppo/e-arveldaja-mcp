@@ -309,6 +309,9 @@ function parseFilterBoundary(value: string, kind: "from" | "to"): number {
 }
 
 function getAuditLogFromFile(filePath: string, filter?: AuditLogFilter): string {
+  const dateFromMs = filter?.date_from ? parseFilterBoundary(filter.date_from, "from") : undefined;
+  const dateToMs = filter?.date_to ? parseFilterBoundary(filter.date_to, "to") : undefined;
+
   if (!existsSync(filePath)) return "";
 
   let content: string;
@@ -325,8 +328,6 @@ function getAuditLogFromFile(filePath: string, filter?: AuditLogFilter): string 
   // Split into sections by separator
   const sections = content.split(ENTRY_SEPARATOR).filter(Boolean);
   let filtered = sections;
-  const dateFromMs = filter?.date_from ? parseFilterBoundary(filter.date_from, "from") : undefined;
-  const dateToMs = filter?.date_to ? parseFilterBoundary(filter.date_to, "to") : undefined;
 
   if (filter?.date_from || filter?.date_to) {
     filtered = filtered.filter(section => {
