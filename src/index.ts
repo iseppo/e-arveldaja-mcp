@@ -418,7 +418,11 @@ Reporting:
   });
 
   const names = allConfigs.map(c => c.name).join(", ");
-  process.stderr.write(`e-arveldaja MCP server started (${allConfigs.length} connection(s): ${names})\n`);
+  process.stderr.write(
+    `e-arveldaja MCP server started (${allConfigs.length} connection(s): ${names}). ` +
+    "Review all mutating actions via get_session_log or list_audit_logs. " +
+    "The audit log is human-readable, stored under logs/, and kept separately for each company.\n"
+  );
 }
 
 main().catch((err) => {
