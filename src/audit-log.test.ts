@@ -249,3 +249,63 @@ describe("audit log date filters", () => {
     expect(filtered).not.toContain("#12");
   });
 });
+
+describe("audit log labels", () => {
+  let tempDir: string | undefined;
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  it("migrates an existing log file when a company label is assigned", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-label-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "env-file");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 13,
+      summary: "Migrated entry",
+      details: {},
+    });
+
+    expect(auditLog.listAuditLogs().map((log: { file: string }) => log.file)).toEqual(["env-file.audit.md"]);
+
+    auditLog.setAuditLogLabel("env-file", "Acme OÜ");
+
+    const logs = auditLog.listAuditLogs();
+    expect(logs.map((log: { file: string }) => log.file)).toEqual(["Acme OÜ.audit.md"]);
+    expect(auditLog.getAuditLog()).toContain("#13");
+    expect(auditLog.getAuditLogByConnection("env-file")).toContain("#13");
+    expect(auditLog.getAuditLogByConnection("Acme OÜ")).toContain("#13");
+  });
+
+  it("persists the resolved company label across module reloads", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-persist-"));
+    let auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "env");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 14,
+      summary: "Persisted entry",
+      details: {},
+    });
+    auditLog.setAuditLogLabel("env", "Acme OÜ");
+
+    auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "env");
+
+    expect(auditLog.getAuditLog()).toContain("#14");
+    expect(auditLog.listAuditLogs().map((log: { file: string }) => log.file)).toEqual(["Acme OÜ.audit.md"]);
+  });
+});

@@ -1,11 +1,24 @@
 /**
- * Disk-backed, connection-specific session audit log.
+ * Disk-backed session audit log.
  * Entries are written as human-readable Markdown sections to
- * `{projectRoot}/logs/{connectionName}.audit.md`.
+ * `{projectRoot}/logs/{companyOrConnectionLabel}.audit.md`.
  */
 
-import { appendFileSync, readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
+import {
+  normalizeAuditLabel,
+  sanitizeAuditLogName,
+} from "./audit-log-labels.js";
 
 export interface AuditEntry {
   timestamp: string;
@@ -18,6 +31,7 @@ export interface AuditEntry {
 }
 
 const LOGS_DIR = join(process.cwd(), "logs");
+const LABELS_FILE = join(LOGS_DIR, ".audit-labels.json");
 const ENTRY_SEPARATOR = "\n---\n\n";
 const META_RE = /^<!-- audit:(\{.*\}) -->$/m;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -25,21 +39,113 @@ const AUDIT_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 const ISO_TS_NO_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?$/;
 
 let activeConnectionNameGetter: () => string = () => "default";
+const auditLabelByConnection = new Map<string, string>();
 
-/** Initialize the audit log with a function that returns the current connection name. */
-export function initAuditLog(getConnectionName: () => string): void {
-  activeConnectionNameGetter = getConnectionName;
+function ensureLogsDir(): void {
   if (!existsSync(LOGS_DIR)) {
     mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
   }
 }
 
-function sanitizeFileName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9._-]/g, "_").substring(0, 200);
+function readPersistedAuditLabels(): Record<string, unknown> {
+  if (!existsSync(LABELS_FILE)) return {};
+  try {
+    return JSON.parse(readFileSync(LABELS_FILE, "utf-8")) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function loadAuditLabelMap(): void {
+  auditLabelByConnection.clear();
+  const persistedLabels = readPersistedAuditLabels();
+  for (const [connectionName, label] of Object.entries(persistedLabels)) {
+    if (typeof label !== "string") continue;
+    auditLabelByConnection.set(
+      normalizeAuditLabel(connectionName),
+      normalizeAuditLabel(label),
+    );
+  }
+}
+
+function persistAuditLabelMap(): void {
+  ensureLogsDir();
+  try {
+    writeFileSync(
+      LABELS_FILE,
+      `${JSON.stringify(Object.fromEntries(auditLabelByConnection), null, 2)}\n`,
+      { encoding: "utf-8", mode: 0o600 },
+    );
+  } catch {
+    // best-effort
+  }
+}
+
+/** Initialize the audit log with a function that returns the current connection name. */
+export function initAuditLog(getConnectionName: () => string): void {
+  activeConnectionNameGetter = getConnectionName;
+  ensureLogsDir();
+  loadAuditLabelMap();
+}
+
+function getAuditLabel(connectionName: string): string {
+  const normalizedConnection = normalizeAuditLabel(connectionName);
+  return auditLabelByConnection.get(normalizedConnection) ?? normalizedConnection;
+}
+
+function getLogFilePathForLabel(label: string): string {
+  return join(LOGS_DIR, `${sanitizeAuditLogName(label)}.audit.md`);
+}
+
+function getLogFilePathForConnection(connectionName: string): string {
+  return getLogFilePathForLabel(getAuditLabel(connectionName));
 }
 
 function getLogFilePath(): string {
-  return join(LOGS_DIR, `${sanitizeFileName(activeConnectionNameGetter())}.audit.md`);
+  return getLogFilePathForConnection(activeConnectionNameGetter());
+}
+
+function mergeAuditLogFiles(sourcePath: string, targetPath: string): void {
+  const sourceContent = readFileSync(sourcePath, "utf-8");
+  if (!sourceContent.trim()) {
+    unlinkSync(sourcePath);
+    return;
+  }
+
+  const targetContent = readFileSync(targetPath, "utf-8");
+  const separator = targetContent.length > 0 && !targetContent.endsWith(ENTRY_SEPARATOR)
+    ? ENTRY_SEPARATOR
+    : "";
+
+  writeFileSync(targetPath, `${targetContent}${separator}${sourceContent}`, {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+  unlinkSync(sourcePath);
+}
+
+function migrateAuditLogFile(previousLabel: string, nextLabel: string): void {
+  const previousPath = getLogFilePathForLabel(previousLabel);
+  const nextPath = getLogFilePathForLabel(nextLabel);
+  if (previousPath === nextPath || !existsSync(previousPath)) return;
+
+  if (!existsSync(nextPath)) {
+    renameSync(previousPath, nextPath);
+    return;
+  }
+
+  mergeAuditLogFiles(previousPath, nextPath);
+}
+
+export function setAuditLogLabel(connectionName: string, label: string): void {
+  const normalizedConnection = normalizeAuditLabel(connectionName);
+  const normalizedLabel = normalizeAuditLabel(label);
+  const previousLabel = getAuditLabel(normalizedConnection);
+  if (previousLabel === normalizedLabel) return;
+
+  migrateAuditLogFile(previousLabel, normalizedLabel);
+  auditLabelByConnection.set(normalizedConnection, normalizedLabel);
+  persistAuditLabelMap();
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +513,11 @@ export function listAuditLogs(): Array<{ connection: string; file: string; entri
 
 /** Read a specific connection's audit log (not just the active one). */
 export function getAuditLogByConnection(connectionName: string, filter?: AuditLogFilter): string {
-  const filePath = join(LOGS_DIR, `${sanitizeFileName(connectionName)}.audit.md`);
-  return getAuditLogFromFile(filePath, filter);
+  const normalizedName = normalizeAuditLabel(connectionName);
+  const mappedPath = getLogFilePathForConnection(normalizedName);
+  if (existsSync(mappedPath)) {
+    return getAuditLogFromFile(mappedPath, filter);
+  }
+
+  return getAuditLogFromFile(getLogFilePathForLabel(normalizedName), filter);
 }

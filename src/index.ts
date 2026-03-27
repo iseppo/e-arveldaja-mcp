@@ -46,7 +46,15 @@ import { toMcpJson } from "./mcp-json.js";
 import { setLogger, log } from "./logger.js";
 import { readOnly, mutate, destructive } from "./annotations.js";
 import { getAllowedRootsStartupWarning } from "./file-validation.js";
-import { initAuditLog, getAuditLog, getAuditLogByConnection, listAuditLogs, clearAuditLog } from "./audit-log.js";
+import {
+  initAuditLog,
+  getAuditLog,
+  getAuditLogByConnection,
+  listAuditLogs,
+  clearAuditLog,
+  setAuditLogLabel,
+} from "./audit-log.js";
+import { buildAuditLogLabels, normalizeAuditLabel } from "./audit-log-labels.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
@@ -202,6 +210,25 @@ function createScopedApiContext(
   return api;
 }
 
+function normalizeAuditCompanyName(companyName: string | null | undefined): string | null {
+  if (typeof companyName !== "string") return null;
+  const normalized = companyName.replace(/\s+/g, " ").trim();
+  return normalized || null;
+}
+
+function buildSetupInstructionsPayload(
+  setupInfo: ReturnType<typeof getCredentialSetupInfo>,
+  isSetupMode: boolean,
+): Record<string, unknown> {
+  return {
+    ...setupInfo,
+    mode: isSetupMode ? "setup" : "configured",
+    message: isSetupMode
+      ? "No API credentials configured. Server is running in setup mode."
+      : "API credentials are configured. These are the supported ways to provide credentials for this working directory.",
+  };
+}
+
 async function main() {
   loadDotenvFiles();
   const allowedRootsWarning = getAllowedRootsStartupWarning();
@@ -237,6 +264,55 @@ async function main() {
   const api = setupMode
     ? createSetupModeApiContext(setupInfo)
     : createScopedApiContext(connectionState, connectionContexts, invocationStorage);
+  const resolvedAuditCompanyNames = new Map<number, string | null>();
+  const auditLabelResolutionPromises = new Map<number, Promise<void>>();
+
+  function applyAuditLogLabels(): void {
+    const labels = buildAuditLogLabels(allConfigs.map((config, index) => ({
+      connectionName: config.name,
+      companyName: resolvedAuditCompanyNames.get(index),
+    })));
+
+    for (const config of allConfigs) {
+      const normalizedConnectionName = normalizeAuditLabel(config.name);
+      const label = labels.get(normalizedConnectionName) ?? normalizedConnectionName;
+      setAuditLogLabel(config.name, label);
+    }
+  }
+
+  async function ensureAuditLogLabelResolved(index: number): Promise<void> {
+    if (setupMode || index < 0 || index >= connectionContexts.length) return;
+    if (resolvedAuditCompanyNames.has(index)) return;
+
+    const existing = auditLabelResolutionPromises.get(index);
+    if (existing) {
+      await existing;
+      return;
+    }
+
+    const pending = (async () => {
+      try {
+        const invoiceInfo = await connectionContexts[index]!.readonly.getInvoiceInfo();
+        resolvedAuditCompanyNames.set(index, normalizeAuditCompanyName(invoiceInfo.invoice_company_name));
+        applyAuditLogLabels();
+      } catch (error) {
+        log(
+          "warning",
+          `Failed to resolve audit log company name for connection "${allConfigs[index]!.name}": ` +
+          `${error instanceof Error ? error.message : String(error)}`
+        );
+      } finally {
+        auditLabelResolutionPromises.delete(index);
+      }
+    })();
+
+    auditLabelResolutionPromises.set(index, pending);
+    await pending;
+  }
+
+  async function ensureAllAuditLogLabelsResolved(): Promise<void> {
+    await Promise.all(allConfigs.map((_config, index) => ensureAuditLogLabelResolved(index)));
+  }
 
   const server = new McpServer({
     name: "e-arveldaja",
@@ -255,7 +331,7 @@ async function main() {
 - Call get_setup_instructions for the exact credential setup steps.
 - list_connections returns the currently configured connections (0 until credentials are added).
 - Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.
-- Audit logs remain human-readable Markdown under logs/, but no configured-connection log file exists until a configured connection performs a mutating action.
+- Audit logs remain human-readable Markdown under logs/, but no audit log file exists until a configured connection performs a mutating action.
 ` : `Purchase invoices:
 - Before booking, call get_vat_info to check VAT registration status.
 - Resolve the supplier first, then check duplicate risk before creating.
@@ -290,7 +366,7 @@ Reporting:
     async () => ({
       content: [{
         type: "text",
-        text: toMcpJson(setupInfo),
+        text: toMcpJson(buildSetupInstructionsPayload(setupInfo, setupMode)),
       }],
     })
   );
@@ -387,9 +463,9 @@ Reporting:
   registerTool(server, "get_session_log",
     "Retrieve the audit log of all mutating operations. " +
     "Returns human-readable Markdown. By default shows the current connection's log. " +
-    "Use 'connection' to view another configured connection's log, or list_audit_logs to see available logs.",
+    "Use 'connection' to view another connection's or audit-log label's file, or list_audit_logs to see available logs.",
     {
-      connection: z.string().optional().describe("Connection name to view (default: current connection). Use list_audit_logs to see available names."),
+      connection: z.string().optional().describe("Connection name or audit-log label to view (default: current connection). Use list_audit_logs to see available names."),
       entity_type: z.string().optional().describe("Filter by entity type (client, product, journal, transaction, sale_invoice, purchase_invoice)"),
       action: z.string().optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT)"),
       date_from: z.string().optional().describe("Return entries from this date (YYYY-MM-DD or ISO 8601)"),
@@ -398,6 +474,20 @@ Reporting:
     },
     { ...readOnly, title: "Get Session Audit Log" },
     async (params) => {
+      if (!setupMode) {
+        if (!params.connection) {
+          await ensureAuditLogLabelResolved(connectionState.activeIndex);
+        } else {
+          const requestedConnection = normalizeAuditLabel(params.connection);
+          const matchingIndex = allConfigs.findIndex(
+            (config) => normalizeAuditLabel(config.name) === requestedConnection,
+          );
+          if (matchingIndex >= 0) {
+            await ensureAuditLogLabelResolved(matchingIndex);
+          }
+        }
+      }
+
       const filter = {
         entity_type: params.entity_type,
         action: params.action,
@@ -418,10 +508,13 @@ Reporting:
   );
 
   registerTool(server, "list_audit_logs",
-    "List all available audit log files across configured connections. Shows entry count and last entry date for each.",
+    "List all available human-readable audit log files. Names follow the company when known and add a connection suffix only when needed to disambiguate.",
     {},
     { ...readOnly, title: "List Audit Logs" },
     async () => {
+      if (!setupMode) {
+        await ensureAllAuditLogLabelsResolved();
+      }
       const logs = listAuditLogs();
       if (logs.length === 0) {
         return { content: [{ type: "text", text: "No audit logs found." }] };
@@ -456,12 +549,15 @@ Reporting:
     }
   );
 
-  function wrapToolHandler<T extends (...args: any[]) => any>(toolName: string, handler: T): T {
+  function wrapToolHandler<T extends (...args: any[]) => any>(toolName: string, isReadOnly: boolean, handler: T): T {
     return (async (...args: unknown[]) => {
       const snapshot = captureSnapshot(connectionState);
       const extra = args.length >= 2 ? args[1] as any : undefined;
       try {
         return await invocationStorage.run(snapshot, async () => {
+          if (!setupMode && !isReadOnly) {
+            await ensureAuditLogLabelResolved(snapshot.index);
+          }
           const runInExtra = extra
             ? () => toolExtraStorage.run(extra, () => handler(...args))
             : () => handler(...args);
@@ -519,9 +615,13 @@ Reporting:
       if (prop === "registerTool") {
         return (...toolArgs: unknown[]) => {
           const toolName = typeof toolArgs[0] === "string" ? toolArgs[0] : "unknown_tool";
+          const toolSpec = (toolArgs[1] && typeof toolArgs[1] === "object")
+            ? toolArgs[1] as { annotations?: { readOnlyHint?: boolean } }
+            : undefined;
+          const isReadOnly = toolSpec?.annotations?.readOnlyHint === true;
           const lastIdx = toolArgs.length - 1;
           if (lastIdx >= 0 && typeof toolArgs[lastIdx] === "function") {
-            toolArgs[lastIdx] = wrapToolHandler(toolName, toolArgs[lastIdx] as any);
+            toolArgs[lastIdx] = wrapToolHandler(toolName, isReadOnly, toolArgs[lastIdx] as any);
           }
           return (target.registerTool as any)(...toolArgs);
         };
@@ -583,7 +683,9 @@ Reporting:
   ${setupInfo.file_format_example.join("\n  ")}
 - ${setupInfo.next_steps.join("\n- ")}
 
-If the server is currently in setup mode, say so explicitly. Tell the user to restart the MCP server after adding credentials.`,
+Current server mode: ${setupMode ? "setup" : "configured"}.
+If the server is currently in setup mode, say so explicitly and tell the user to restart the MCP server after adding credentials.
+If the server is already configured, say that explicitly and treat this as reconfiguration guidance only.`,
         },
       }],
     }),
@@ -609,7 +711,7 @@ If the server is currently in setup mode, say so explicitly. Tell the user to re
     process.stderr.write(
       `e-arveldaja MCP server started (${allConfigs.length} connection(s): ${names}). ` +
       "Review all mutating actions via get_session_log or list_audit_logs. " +
-      "The audit log is human-readable, stored under logs/, and kept separately for each configured connection.\n"
+      "The audit log is human-readable, stored under logs/, named after the company when available, and gets a connection suffix only when needed to disambiguate.\n"
     );
   }
 }

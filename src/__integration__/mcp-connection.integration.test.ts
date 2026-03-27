@@ -198,6 +198,16 @@ describe("MCP Server Integration", () => {
     expect(text).toContain("#101");
     expect(text).not.toContain("#102");
   });
+
+  it("reports configured-mode setup guidance when credentials are present", async () => {
+    const result = await client.callTool({ name: "get_setup_instructions", arguments: {} });
+    const data = parseMcpResponse((result.content as any)[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(data.mode).toBe("configured");
+    expect(data.message).toContain("API credentials are configured");
+    expect(data.credential_file_env_var).toBe("EARVELDAJA_API_KEY_FILE");
+  });
 });
 
 describe("MCP Server Setup Mode", () => {
