@@ -287,11 +287,46 @@ describe("audit log labels", () => {
     expect(auditLog.getAuditLogByConnection("Acme OÜ")).toContain("#13");
   });
 
+  it("relabels colliding audit logs without merging the wrong connection's history", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-collision-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "env");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 20,
+      summary: "Env entry",
+      details: {},
+    });
+
+    auditLog.initAuditLog(() => "Acme OÜ");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 21,
+      summary: "Connection-name entry",
+      details: {},
+    });
+
+    auditLog.setAuditLogLabels([
+      { connectionName: "env", label: "Acme OÜ" },
+      { connectionName: "Acme OÜ", label: "Acme OÜ (connection)" },
+    ]);
+
+    expect(auditLog.getAuditLogByConnection("env")).toContain("#20");
+    expect(auditLog.getAuditLogByConnection("env")).not.toContain("#21");
+    expect(auditLog.getAuditLogByConnection("Acme OÜ")).toContain("#21");
+    expect(auditLog.getAuditLogByConnection("Acme OÜ")).not.toContain("#20");
+  });
+
   it("persists the resolved company label across module reloads", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-persist-"));
     let auditLog = await loadAuditLogModule(tempDir);
 
-    auditLog.initAuditLog(() => "env");
+    auditLog.initAuditLog(() => "env", { env: "fingerprint-1" });
     auditLog.logAudit({
       tool: "create_purchase_invoice",
       action: "CREATED",
@@ -303,9 +338,74 @@ describe("audit log labels", () => {
     auditLog.setAuditLogLabel("env", "Acme OÜ");
 
     auditLog = await loadAuditLogModule(tempDir);
-    auditLog.initAuditLog(() => "env");
+    auditLog.initAuditLog(() => "env", { env: "fingerprint-1" });
 
     expect(auditLog.getAuditLog()).toContain("#14");
     expect(auditLog.listAuditLogs().map((log: { file: string }) => log.file)).toEqual(["Acme OÜ.audit.md"]);
+  });
+
+  it("ignores persisted labels when the connection fingerprint changes", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-fingerprint-"));
+    let auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "env", { env: "fingerprint-old" });
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 15,
+      summary: "Old company entry",
+      details: {},
+    });
+    auditLog.setAuditLogLabel("env", "Acme OÜ");
+
+    auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "env", { env: "fingerprint-new" });
+
+    expect(auditLog.getAuditLog()).toBe("");
+    expect(auditLog.getAuditLogByConnection("Acme OÜ")).toContain("#15");
+  });
+
+  it("keeps merged audit logs in chronological order for limit and last-entry metadata", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-merge-order-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    vi.useFakeTimers();
+
+    auditLog.initAuditLog(() => "target");
+    vi.setSystemTime(new Date("2026-03-27T10:00:00Z"));
+    auditLog.logAudit({
+      tool: "confirm_purchase_invoice",
+      action: "CONFIRMED",
+      entity_type: "purchase_invoice",
+      entity_id: 17,
+      summary: "Newer entry",
+      details: {},
+    });
+
+    auditLog.initAuditLog(() => "source");
+    vi.setSystemTime(new Date("2026-03-25T10:00:00Z"));
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 16,
+      summary: "Older entry",
+      details: {},
+    });
+
+    auditLog.setAuditLogLabel("source", "target");
+
+    const limited = auditLog.getAuditLogByConnection("target", { limit: 1 });
+    const logs = auditLog.listAuditLogs();
+
+    expect(limited).toContain("#17");
+    expect(limited).not.toContain("#16");
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        file: "target.audit.md",
+        last_entry: "2026-03-27 10:00:00",
+      }),
+    ]));
   });
 });

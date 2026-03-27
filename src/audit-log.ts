@@ -30,6 +30,11 @@ export interface AuditEntry {
   details: Record<string, unknown>;
 }
 
+export interface AuditLogLabelAssignment {
+  connectionName: string;
+  label: string;
+}
+
 const LOGS_DIR = join(process.cwd(), "logs");
 const LABELS_FILE = join(LOGS_DIR, ".audit-labels.json");
 const ENTRY_SEPARATOR = "\n---\n\n";
@@ -40,6 +45,12 @@ const ISO_TS_NO_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?
 
 let activeConnectionNameGetter: () => string = () => "default";
 const auditLabelByConnection = new Map<string, string>();
+const auditFingerprintByConnection = new Map<string, string>();
+
+interface PersistedAuditLabel {
+  label: string;
+  fingerprint?: string;
+}
 
 function ensureLogsDir(): void {
   if (!existsSync(LOGS_DIR)) {
@@ -56,24 +67,56 @@ function readPersistedAuditLabels(): Record<string, unknown> {
   }
 }
 
+function parsePersistedAuditLabel(value: unknown): PersistedAuditLabel | null {
+  if (typeof value === "string") {
+    return { label: value };
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const label = (value as { label?: unknown }).label;
+  const fingerprint = (value as { fingerprint?: unknown }).fingerprint;
+  if (typeof label !== "string") return null;
+  if (fingerprint !== undefined && typeof fingerprint !== "string") return null;
+
+  return { label, fingerprint };
+}
+
 function loadAuditLabelMap(): void {
   auditLabelByConnection.clear();
   const persistedLabels = readPersistedAuditLabels();
-  for (const [connectionName, label] of Object.entries(persistedLabels)) {
-    if (typeof label !== "string") continue;
+  for (const [connectionName, persistedValue] of Object.entries(persistedLabels)) {
+    const normalizedConnection = normalizeAuditLabel(connectionName);
+    const persisted = parsePersistedAuditLabel(persistedValue);
+    if (!persisted) continue;
+
+    const expectedFingerprint = auditFingerprintByConnection.get(normalizedConnection);
+    if (expectedFingerprint && persisted.fingerprint !== expectedFingerprint) continue;
+
     auditLabelByConnection.set(
-      normalizeAuditLabel(connectionName),
-      normalizeAuditLabel(label),
+      normalizedConnection,
+      normalizeAuditLabel(persisted.label),
     );
   }
 }
 
 function persistAuditLabelMap(): void {
   ensureLogsDir();
+  const persisted = Object.fromEntries(
+    Array.from(auditLabelByConnection.entries()).map(([connectionName, label]) => {
+      const fingerprint = auditFingerprintByConnection.get(connectionName);
+      return [
+        connectionName,
+        fingerprint ? { label, fingerprint } : { label },
+      ];
+    }),
+  );
   try {
     writeFileSync(
       LABELS_FILE,
-      `${JSON.stringify(Object.fromEntries(auditLabelByConnection), null, 2)}\n`,
+      `${JSON.stringify(persisted, null, 2)}\n`,
       { encoding: "utf-8", mode: 0o600 },
     );
   } catch {
@@ -82,8 +125,18 @@ function persistAuditLabelMap(): void {
 }
 
 /** Initialize the audit log with a function that returns the current connection name. */
-export function initAuditLog(getConnectionName: () => string): void {
+export function initAuditLog(
+  getConnectionName: () => string,
+  connectionFingerprints?: Record<string, string>,
+): void {
   activeConnectionNameGetter = getConnectionName;
+  auditFingerprintByConnection.clear();
+  if (connectionFingerprints) {
+    for (const [connectionName, fingerprint] of Object.entries(connectionFingerprints)) {
+      if (typeof fingerprint !== "string" || !fingerprint) continue;
+      auditFingerprintByConnection.set(normalizeAuditLabel(connectionName), fingerprint);
+    }
+  }
   ensureLogsDir();
   loadAuditLabelMap();
 }
@@ -91,6 +144,10 @@ export function initAuditLog(getConnectionName: () => string): void {
 function getAuditLabel(connectionName: string): string {
   const normalizedConnection = normalizeAuditLabel(connectionName);
   return auditLabelByConnection.get(normalizedConnection) ?? normalizedConnection;
+}
+
+export function getCurrentAuditLogLabel(connectionName: string): string {
+  return getAuditLabel(connectionName);
 }
 
 function getLogFilePathForLabel(label: string): string {
@@ -105,6 +162,20 @@ function getLogFilePath(): string {
   return getLogFilePathForConnection(activeConnectionNameGetter());
 }
 
+function splitAuditSections(content: string): string[] {
+  return content.split(ENTRY_SEPARATOR).filter(Boolean);
+}
+
+function getSectionTimestampMs(section: string): number | undefined {
+  const match = section.match(/^### (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+  if (!match) return undefined;
+  return parseAuditTimestamp(match[1]!);
+}
+
+function renderMergedSections(sections: string[]): string {
+  return sections.join(ENTRY_SEPARATOR) + (sections.length > 0 ? ENTRY_SEPARATOR : "");
+}
+
 function mergeAuditLogFiles(sourcePath: string, targetPath: string): void {
   const sourceContent = readFileSync(sourcePath, "utf-8");
   if (!sourceContent.trim()) {
@@ -113,11 +184,26 @@ function mergeAuditLogFiles(sourcePath: string, targetPath: string): void {
   }
 
   const targetContent = readFileSync(targetPath, "utf-8");
-  const separator = targetContent.length > 0 && !targetContent.endsWith(ENTRY_SEPARATOR)
-    ? ENTRY_SEPARATOR
-    : "";
+  const mergedSections = [...splitAuditSections(targetContent), ...splitAuditSections(sourceContent)]
+    .map((section, index) => ({
+      section,
+      index,
+      timestampMs: getSectionTimestampMs(section),
+    }))
+    .sort((left, right) => {
+      if (left.timestampMs === undefined && right.timestampMs === undefined) {
+        return left.index - right.index;
+      }
+      if (left.timestampMs === undefined) return 1;
+      if (right.timestampMs === undefined) return -1;
+      if (left.timestampMs !== right.timestampMs) {
+        return left.timestampMs - right.timestampMs;
+      }
+      return left.index - right.index;
+    })
+    .map((entry) => entry.section);
 
-  writeFileSync(targetPath, `${targetContent}${separator}${sourceContent}`, {
+  writeFileSync(targetPath, renderMergedSections(mergedSections), {
     encoding: "utf-8",
     mode: 0o600,
   });
@@ -137,7 +223,7 @@ function migrateAuditLogFile(previousLabel: string, nextLabel: string): void {
   mergeAuditLogFiles(previousPath, nextPath);
 }
 
-export function setAuditLogLabel(connectionName: string, label: string): void {
+function setAuditLogLabelInternal(connectionName: string, label: string): void {
   const normalizedConnection = normalizeAuditLabel(connectionName);
   const normalizedLabel = normalizeAuditLabel(label);
   const previousLabel = getAuditLabel(normalizedConnection);
@@ -145,6 +231,33 @@ export function setAuditLogLabel(connectionName: string, label: string): void {
 
   migrateAuditLogFile(previousLabel, normalizedLabel);
   auditLabelByConnection.set(normalizedConnection, normalizedLabel);
+}
+
+export function setAuditLogLabel(connectionName: string, label: string): void {
+  setAuditLogLabelInternal(connectionName, label);
+  persistAuditLabelMap();
+}
+
+export function setAuditLogLabels(assignments: AuditLogLabelAssignment[]): void {
+  const changedAssignments = assignments
+    .map((assignment) => ({
+      connectionName: normalizeAuditLabel(assignment.connectionName),
+      label: normalizeAuditLabel(assignment.label),
+    }))
+    .filter((assignment) => getAuditLabel(assignment.connectionName) !== assignment.label);
+
+  if (changedAssignments.length === 0) return;
+
+  const tempPrefix = `__audit_tmp__${Date.now().toString(36)}`;
+  for (let index = 0; index < changedAssignments.length; index += 1) {
+    const assignment = changedAssignments[index]!;
+    setAuditLogLabelInternal(assignment.connectionName, `${tempPrefix}_${index}`);
+  }
+
+  for (const assignment of changedAssignments) {
+    setAuditLogLabelInternal(assignment.connectionName, assignment.label);
+  }
+
   persistAuditLabelMap();
 }
 
@@ -497,7 +610,7 @@ export function listAuditLogs(): Array<{ connection: string; file: string; entri
       let last_entry: string | undefined;
       try {
         const content = readFileSync(filePath, "utf-8");
-        const sections = content.split(ENTRY_SEPARATOR).filter(Boolean);
+        const sections = splitAuditSections(content);
         entries = sections.length;
         if (sections.length > 0) {
           const match = sections[sections.length - 1]!.match(/^### (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);

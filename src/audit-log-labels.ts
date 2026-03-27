@@ -1,12 +1,13 @@
 export interface AuditLogLabelInput {
   connectionName: string;
   companyName?: string | null;
+  currentLabel?: string | null;
 }
 
 interface NormalizedAuditLogLabelInput {
   connectionName: string;
   companyName: string | null;
-  baseLabel: string;
+  preferredLabel: string;
   baseKey: string;
 }
 
@@ -28,13 +29,14 @@ export function sanitizeAuditLogName(name: string): string {
 function normalizeAuditLogLabelInput(entry: AuditLogLabelInput): NormalizedAuditLogLabelInput {
   const connectionName = normalizeAuditLabel(entry.connectionName);
   const companyName = entry.companyName ? normalizeAuditLabel(entry.companyName) : null;
-  const baseLabel = companyName ?? connectionName;
+  const currentLabel = entry.currentLabel ? normalizeAuditLabel(entry.currentLabel) : connectionName;
+  const preferredLabel = companyName ?? currentLabel;
 
   return {
     connectionName,
     companyName,
-    baseLabel,
-    baseKey: sanitizeAuditLogName(baseLabel).toLowerCase(),
+    preferredLabel,
+    baseKey: sanitizeAuditLogName(preferredLabel).toLowerCase(),
   };
 }
 
@@ -48,7 +50,7 @@ function pickPreferredAuditLogLabel(
   resolvedWithSameBaseKey: number,
 ): string {
   if (totalWithSameBaseKey === 1) {
-    return entry.baseLabel;
+    return entry.preferredLabel;
   }
 
   if (entry.companyName && resolvedWithSameBaseKey === 1) {
@@ -59,7 +61,7 @@ function pickPreferredAuditLogLabel(
     return `${entry.companyName} (${entry.connectionName})`;
   }
 
-  return `${entry.baseLabel} (connection)`;
+  return `${entry.preferredLabel} (connection)`;
 }
 
 function makeUniqueAuditLogLabel(preferredLabel: string, usedKeys: Set<string>): string {

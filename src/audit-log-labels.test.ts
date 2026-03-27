@@ -41,6 +41,16 @@ describe("buildAuditLogLabels", () => {
     expect(labels.get("env")).toBe("env");
   });
 
+  it("keeps the current unresolved label instead of reverting to the raw connection name", () => {
+    const labels = buildAuditLogLabels([
+      { connectionName: "env", currentLabel: "Acme OÜ" },
+      { connectionName: "demo", companyName: "Beta AS" },
+    ]);
+
+    expect(labels.get("env")).toBe("Acme OÜ");
+    expect(labels.get("demo")).toBe("Beta AS");
+  });
+
   it("disambiguates a connection-name collision with another company's label", () => {
     const labels = buildAuditLogLabels([
       { connectionName: "Acme OÜ", companyName: null },

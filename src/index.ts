@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -52,7 +53,8 @@ import {
   getAuditLogByConnection,
   listAuditLogs,
   clearAuditLog,
-  setAuditLogLabel,
+  setAuditLogLabels,
+  getCurrentAuditLogLabel,
 } from "./audit-log.js";
 import { buildAuditLogLabels, normalizeAuditLabel } from "./audit-log-labels.js";
 
@@ -216,6 +218,12 @@ function normalizeAuditCompanyName(companyName: string | null | undefined): stri
   return normalized || null;
 }
 
+function buildConnectionFingerprint(namedConfig: NamedConfig): string {
+  return createHash("sha256")
+    .update(`${namedConfig.config.baseUrl}\n${namedConfig.config.apiKeyId}\n${namedConfig.config.apiPublicValue}`)
+    .digest("hex");
+}
+
 function buildSetupInstructionsPayload(
   setupInfo: ReturnType<typeof getCredentialSetupInfo>,
   isSetupMode: boolean,
@@ -250,7 +258,13 @@ async function main() {
 
   const setupInfo = getCredentialSetupInfo();
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
-  initAuditLog(() => allConfigs[connectionState.activeIndex]?.name ?? "setup");
+  const connectionFingerprints = Object.fromEntries(
+    allConfigs.map((config) => [config.name, buildConnectionFingerprint(config)]),
+  );
+  initAuditLog(
+    () => allConfigs[connectionState.activeIndex]?.name ?? "setup",
+    connectionFingerprints,
+  );
   const invocationStorage = new AsyncLocalStorage<ConnectionSnapshot>();
   const requestGuard = () => {
     const snapshot = invocationStorage.getStore();
@@ -270,14 +284,19 @@ async function main() {
   function applyAuditLogLabels(): void {
     const labels = buildAuditLogLabels(allConfigs.map((config, index) => ({
       connectionName: config.name,
-      companyName: resolvedAuditCompanyNames.get(index),
+      companyName: resolvedAuditCompanyNames.get(index) ?? undefined,
+      currentLabel: resolvedAuditCompanyNames.has(index)
+        ? config.name
+        : getCurrentAuditLogLabel(config.name),
     })));
 
-    for (const config of allConfigs) {
+    setAuditLogLabels(allConfigs.map((config) => {
       const normalizedConnectionName = normalizeAuditLabel(config.name);
-      const label = labels.get(normalizedConnectionName) ?? normalizedConnectionName;
-      setAuditLogLabel(config.name, label);
-    }
+      return {
+        connectionName: config.name,
+        label: labels.get(normalizedConnectionName) ?? normalizedConnectionName,
+      };
+    }));
   }
 
   async function ensureAuditLogLabelResolved(index: number): Promise<void> {
