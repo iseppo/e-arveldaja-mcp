@@ -232,10 +232,30 @@ function isLoanAccount(balance: AccountBalance): boolean {
   return inRange(balance.account_id, 2000, 2199);
 }
 
+function hasExplicitCurrentLiabilityMarker(name: string): boolean {
+  const hasCurrentPortionMarker = /\bcurrent\b.*\bportion\b/.test(name) && !/\bnon[-\s]+current\b.*\bportion\b/.test(name);
+  return (
+    name.includes("lühiajal") ||
+    /\bshort\b/.test(name) ||
+    hasCurrentPortionMarker
+  );
+}
+
+function hasExplicitNonCurrentLiabilityMarker(name: string): boolean {
+  return (
+    name.includes("pikaajal") ||
+    /\bnon(?:-|\s)?current\b/.test(name) ||
+    /\blong\b/.test(name)
+  );
+}
+
+// TODO: Replace this heuristic classifier with an explicit liability mapping layer.
+// Prefer account-id/account-range rules as the primary signal, then keep a narrow
+// override table for known naming patterns such as "current portion of long-term loan".
 function classifyLiabilitySection(balance: AccountBalance): "current" | "non_current" {
   const name = `${balance.name_est} ${balance.name_eng}`.toLowerCase();
-  if (name.includes("lühiajal") || name.includes("short") || /\bcurrent\b.*\bportion\b/.test(name)) return "current";
-  if (name.includes("pikaajal") || name.includes("long")) return "non_current";
+  if (hasExplicitNonCurrentLiabilityMarker(name) && !hasExplicitCurrentLiabilityMarker(name)) return "non_current";
+  if (hasExplicitCurrentLiabilityMarker(name)) return "current";
   if (hasPrefix(balance.account_id, "29")) return "non_current";
   if (isLoanAccount(balance)) return isCurrentLoanAccount(balance) ? "current" : "non_current";
   return "current";

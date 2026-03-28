@@ -312,4 +312,39 @@ describe("buildAnnualReportData", () => {
     expect(liabilities.pikaajalised_kohustused.amount).toBe(0);
     expect(liabilities.pikaajalised_kohustused.source_accounts).toEqual([]);
   });
+
+  it("keeps the english non-current portion of long-term debt as non-current", async () => {
+    const report = await buildAnnualReportData(createApi([
+      ...baseJournals,
+      makeJournal("2025-12-31", [
+        makePosting(1000, "D", 50),
+        makePosting(2900, "C", 50),
+      ]),
+    ], {
+      extraAccounts: [
+        makeAccount({
+          id: 2900,
+          balance_type: "C",
+          account_type_est: "Kohustused",
+          account_type_eng: "Liabilities",
+          name_est: "Loan",
+          name_eng: "Non-current portion of long-term loan",
+        }),
+      ],
+    }), 2025);
+
+    const liabilities = (report.balance_sheet as {
+      liabilities: {
+        luhiajalised_kohustused: { amount: number; source_accounts: Array<{ account_id: number }> };
+        pikaajalised_kohustused: { amount: number; source_accounts: Array<{ account_id: number }> };
+      };
+    }).liabilities;
+
+    expect(liabilities.luhiajalised_kohustused.amount).toBe(0);
+    expect(liabilities.luhiajalised_kohustused.source_accounts).toEqual([]);
+    expect(liabilities.pikaajalised_kohustused.amount).toBe(50);
+    expect(liabilities.pikaajalised_kohustused.source_accounts).toEqual([
+      expect.objectContaining({ account_id: 2900, amount: 50 }),
+    ]);
+  });
 });
