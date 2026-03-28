@@ -10,6 +10,7 @@ import { logAudit } from "../audit-log.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
+import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
 
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
 
@@ -28,10 +29,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     },
     { ...create, title: "Prepare Dividend Distribution" },
     async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, share_capital_account, force, dry_run }) => {
-      const retainedAccount = retained_earnings_account ?? 3020;
-      const payableAccount = dividend_payable_account ?? 2370;
-      const taxAccount = tax_payable_account ?? 2540;
-      const shareCapitalAccount = share_capital_account ?? 3000;
+      const retainedAccount = retained_earnings_account ?? RETAINED_EARNINGS_ACCOUNT;
+      const payableAccount = dividend_payable_account ?? DIVIDEND_PAYABLE_ACCOUNT;
+      const taxAccount = tax_payable_account ?? CIT_PAYABLE_ACCOUNT;
+      const shareCapitalAccount = share_capital_account ?? SHARE_CAPITAL_ACCOUNT;
 
       // Validate all accounts exist in chart of accounts
       const accounts = await api.readonly.getAccounts();
@@ -213,8 +214,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         });
       }
       const vatRegistered = await isCompanyVatRegistered(api);
-      const vatAcc = vat_account ?? 1510;
-      const payAcc = payable_account ?? 2110;
+      const vatAcc = vat_account ?? DEFAULT_VAT_ACCOUNT;
+      const payAcc = payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT;
 
       // Validate all accounts exist
       const accountsToCheck = [expense_account, payAcc];

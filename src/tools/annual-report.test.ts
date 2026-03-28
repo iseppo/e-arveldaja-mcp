@@ -3,6 +3,7 @@ import type { Account, Journal, Posting } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { buildAnnualReportData, registerAnnualReportTools } from "./annual-report.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { makePosting, makeJournal } from "../__fixtures__/accounting.js";
 
 function makeAccount(overrides: Partial<Account> & Pick<Account,
   "id" |
@@ -26,26 +27,6 @@ function makeAccount(overrides: Partial<Account> & Pick<Account,
     transaction_in_bindable: false,
     cl_account_groups: [],
     default_disabled: false,
-    transaction_in_user_bindable: false,
-    transaction_out_user_bindable: false,
-    is_product_account: false,
-    ...overrides,
-  };
-}
-
-function makePosting(accounts_id: number, type: "D" | "C", amount: number): Posting {
-  return { accounts_id, type, amount };
-}
-
-function makeJournal(
-  effective_date: string,
-  postings: Posting[],
-  overrides: Partial<Journal> = {},
-): Journal {
-  return {
-    effective_date,
-    registered: true,
-    postings,
     ...overrides,
   };
 }

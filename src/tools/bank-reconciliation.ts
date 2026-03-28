@@ -24,14 +24,8 @@ function validateInterAccountDateGap(maxDateGap: number | undefined): number {
   return value;
 }
 
-/** Normalize text for fuzzy company name matching: lowercase, strip diacritics, collapse whitespace */
-export function normalizeCompanyName(name: string): string {
-  return name.trim().toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")  // strip diacritics (ü→u, ö→o, etc.)
-    .replace(/\b(as|ou|mtu|sa|tu)\b/g, "")             // strip Estonian legal suffixes
-    .replace(/\s+/g, " ")
-    .trim();
-}
+import { normalizeCompanyName } from "../company-name.js";
+export { normalizeCompanyName };
 
 interface MatchCandidate {
   type: "sale_invoice" | "purchase_invoice";

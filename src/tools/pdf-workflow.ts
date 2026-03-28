@@ -12,6 +12,7 @@ import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
 import { readOnly, create, mutate } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
+import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
@@ -412,7 +413,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         journal_date: params.journal_date,
         term_days: params.term_days,
         cl_currencies_id: params.currency ?? "EUR",
-        liability_accounts_id: params.liability_accounts_id ?? 2310,
+        liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
         bank_ref_number: params.ref_number,
         bank_account_no: params.bank_account_no,
         notes: tagNotes(params.notes),

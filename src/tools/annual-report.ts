@@ -11,6 +11,7 @@ import { readOnly, batch } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
+import { CURRENT_YEAR_PROFIT_ACCOUNT } from "../accounting-defaults.js";
 
 type PostingType = "D" | "C";
 type CashFlowClass = "operating" | "investing" | "financing" | "unclassified";
@@ -354,11 +355,11 @@ function buildClosingProposal(
   const totalRevenue = sumStatementBalances(yearProfitAndLossBalances, (balance) => balance.account_type_est === "Tulud");
   const totalExpenses = sumStatementBalances(yearProfitAndLossBalances, (balance) => balance.account_type_est === "Kulud");
   const netProfit = roundMoney(totalRevenue - totalExpenses);
-  const currentYearProfitAccount = accountsById.get(3310);
+  const currentYearProfitAccount = accountsById.get(CURRENT_YEAR_PROFIT_ACCOUNT);
 
   if (Math.abs(netProfit) >= 0.005) {
     profitAndLossAccounts.push({
-      accounts_id: 3310,
+      accounts_id: CURRENT_YEAR_PROFIT_ACCOUNT,
       account_name: currentYearProfitAccount?.name_est ?? "Aruandeaasta kasum",
       type: netProfit > 0 ? "C" : "D",
       amount: roundMoney(Math.abs(netProfit)),
@@ -453,7 +454,7 @@ async function analyzeYearEndClose(api: ApiContext, year: number): Promise<YearE
     computeAllBalances(api, from, to, { preloadedAccounts: accounts, preloadedJournals: allJournals }),
   ]);
 
-  const accountErrors = validateAccounts(accounts, [{ id: 3310, label: "Current year profit account" }]);
+  const accountErrors = validateAccounts(accounts, [{ id: CURRENT_YEAR_PROFIT_ACCOUNT, label: "Current year profit account" }]);
   if (accountErrors.length > 0) {
     return {
       error: "Account validation failed",
@@ -487,7 +488,7 @@ async function analyzeYearEndClose(api: ApiContext, year: number): Promise<YearE
   if (Math.abs(balanceDifference) >= 0.01) {
     warnings.push(`Balance sheet does not balance at ${to}. Difference: ${balanceDifference} EUR.`);
   }
-  const currentYearProfitBalance = yearEndBalances.find((balance) => balance.account_id === 3310);
+  const currentYearProfitBalance = yearEndBalances.find((balance) => balance.account_id === CURRENT_YEAR_PROFIT_ACCOUNT);
   if (currentYearProfitBalance && Math.abs(statementAmount(currentYearProfitBalance)) >= 0.01 && closingProposal) {
     warnings.push(
       `Account 3310 already has a balance of ${roundMoney(statementAmount(currentYearProfitBalance))} EUR while P&L accounts are still open. Verify there is no partial close.`,
@@ -690,11 +691,11 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const totalLiabilities = sumStatementBalances(yearEndBalances, (balance) => balance.account_type_est === "Kohustused");
 
   const equityAccountLines = yearEndBalances
-    .filter((balance) => balance.account_type_est === "Omakapital" && balance.account_id !== 3310)
+    .filter((balance) => balance.account_type_est === "Omakapital" && balance.account_id !== CURRENT_YEAR_PROFIT_ACCOUNT)
     .map((balance) => buildBalanceLine(balance))
     .filter((line) => Math.abs(line.amount) >= 0.01);
   const currentYearProfitAccountLine = buildStatementLine("Aruandeaasta kasum", yearEndBalances, (balance) =>
-    balance.account_type_est === "Omakapital" && balance.account_id === 3310,
+    balance.account_type_est === "Omakapital" && balance.account_id === CURRENT_YEAR_PROFIT_ACCOUNT,
   );
 
   const revenueLine = buildStatementLine("Müügitulu", yearProfitAndLossBalances, (balance) =>

@@ -4,6 +4,13 @@ import { BaseResource } from "./base-resource.js";
 import { roundMoney } from "../money.js";
 import { log } from "../logger.js";
 
+export class InvoiceCreationError extends Error {
+  constructor(message: string, public readonly invoiceId: number, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "InvoiceCreationError";
+  }
+}
+
 interface ConfirmPurchaseInvoiceOptions {
   preserveExistingTotals?: boolean;
 }
@@ -112,19 +119,17 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         await this.invalidate(id);
       } catch (invalidateError) {
         const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
-        const err = new Error(
+        throw new InvoiceCreationError(
           `Purchase invoice ${id} was created but follow-up failed: ${followUpMessage}. ` +
-          `Automatic invalidation also failed: ${invalidateMessage}`
+          `Automatic invalidation also failed: ${invalidateMessage}`,
+          id,
         );
-        (err as any).invoiceId = id;
-        throw err;
       }
 
-      const err = new Error(
-        `Purchase invoice ${id} was created but follow-up failed and the draft was invalidated: ${followUpMessage}`
+      throw new InvoiceCreationError(
+        `Purchase invoice ${id} was created but follow-up failed and the draft was invalidated: ${followUpMessage}`,
+        id,
       );
-      (err as any).invoiceId = id;
-      throw err;
     }
   }
 

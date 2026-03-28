@@ -3,55 +3,11 @@ import type { Account, Journal, Posting, SaleInvoice, PurchaseInvoice } from "..
 import type { ApiContext } from "./crud-tools.js";
 import { computeAllBalances, registerFinancialStatementTools } from "./financial-statements.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function makeAccount(
-  id: number,
-  balance_type: "D" | "C",
-  account_type_est: string,
-  name_est = "Account",
-): Account {
-  return {
-    id,
-    balance_type,
-    account_type_est,
-    account_type_eng: account_type_est,
-    name_est,
-    name_eng: name_est,
-    is_valid: true,
-    allows_deactivation: true,
-    is_vat_account: false,
-    is_fixed_asset: false,
-    transaction_in_bindable: false,
-    transaction_out_bindable: false,
-    cl_account_groups: [],
-    default_disabled: false,
-    transaction_in_user_bindable: false,
-    transaction_out_user_bindable: false,
-    is_product_account: false,
-  };
-}
-
-function makePosting(accounts_id: number, type: "D" | "C", amount: number, base_amount?: number): Posting {
-  return {
-    accounts_id,
-    type,
-    amount,
-    ...(base_amount !== undefined && { base_amount }),
-  };
-}
-
-function makeJournal(effective_date: string, postings: Posting[], overrides: Partial<Journal> = {}): Journal {
-  return {
-    effective_date,
-    registered: true,
-    postings,
-    ...overrides,
-  };
-}
 
 function makeSaleInvoice(
   overrides: Partial<SaleInvoice> & Pick<SaleInvoice, "id" | "create_date" | "journal_date" | "term_days">,

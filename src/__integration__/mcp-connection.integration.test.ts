@@ -5,13 +5,16 @@ import { tmpdir } from "os";
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { initAuditLog, logAudit } from "../audit-log.js";
+import { initAuditLog, logAudit, setAuditLogLabel } from "../audit-log.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
 const RUN_LIVE_INTEGRATION = process.env.EARVELDAJA_INTEGRATION_TEST === "true";
 const DIST_ENTRYPOINT = join(process.cwd(), "dist", "index.js");
 const TEST_AUDIT_CONNECTION = "integration-session-log-test";
 const TEST_AUDIT_LOG_PATH = join(process.cwd(), "logs", `${TEST_AUDIT_CONNECTION}.audit.md`);
+const TEST_AUDIT_LABEL = "Integration Session Label";
+const TEST_AUDIT_LABEL_PATH = join(process.cwd(), "logs", `${TEST_AUDIT_LABEL}.audit.md`);
+const TEST_AUDIT_LABELS_PATH = join(process.cwd(), "logs", ".audit-labels.json");
 
 function getEarveldajaEnvironment(): Record<string, string> {
   return Object.fromEntries(
@@ -82,6 +85,8 @@ describe("MCP Server Integration", () => {
   afterEach(async () => {
     vi.useRealTimers();
     await rm(TEST_AUDIT_LOG_PATH, { force: true });
+    await rm(TEST_AUDIT_LABEL_PATH, { force: true });
+    await rm(TEST_AUDIT_LABELS_PATH, { force: true });
   });
 
   it("lists 85+ tools", async () => {
@@ -197,6 +202,34 @@ describe("MCP Server Integration", () => {
     expect(text).not.toContain("2026-03-25 23:30:00");
     expect(text).toContain("#101");
     expect(text).not.toContain("#102");
+  });
+
+  it("get_session_log reads by audit-log label and explicit raw connection selector", async () => {
+    await seedAuditLog([
+      { timestamp: "2026-03-26T10:00:00Z", entityId: 103, summary: "Label-selected entry" },
+    ]);
+    setAuditLogLabel(TEST_AUDIT_CONNECTION, TEST_AUDIT_LABEL);
+
+    const byLabel = await client.callTool({
+      name: "get_session_log",
+      arguments: {
+        connection: TEST_AUDIT_LABEL,
+      },
+    });
+    const byRawConnection = await client.callTool({
+      name: "get_session_log",
+      arguments: {
+        connection: `connection:${TEST_AUDIT_CONNECTION}`,
+      },
+    });
+
+    const byLabelText = (byLabel.content as any)[0].text as string;
+    const byRawConnectionText = (byRawConnection.content as any)[0].text as string;
+
+    expect(byLabel.isError).toBeFalsy();
+    expect(byRawConnection.isError).toBeFalsy();
+    expect(byLabelText).toContain("#103");
+    expect(byRawConnectionText).toContain("#103");
   });
 
   it("reports configured-mode setup guidance when credentials are present", async () => {

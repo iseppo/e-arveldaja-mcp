@@ -58,7 +58,7 @@ const FILE_TYPE_EXTENSIONS = {
   png: [".png"],
 } as const;
 const SUPPORTED_EXTENSIONS = [...FILE_TYPE_EXTENSIONS.pdf, ...FILE_TYPE_EXTENSIONS.jpg, ...FILE_TYPE_EXTENSIONS.png];
-const DEFAULT_LIABILITY_ACCOUNT = 2310;
+import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 const EXACT_MATCH_THRESHOLD = 90;
 const POSSIBLE_MATCH_THRESHOLD = 70;
 

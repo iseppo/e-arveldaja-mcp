@@ -4,57 +4,7 @@ import type { ApiContext } from "./crud-tools.js";
 import { registerEstonianTaxTools } from "./estonian-tax.js";
 import { roundMoney } from "../money.js";
 import { parseMcpResponse } from "../mcp-json.js";
-
-// ---------------------------------------------------------------------------
-// Helpers to build test fixtures
-// ---------------------------------------------------------------------------
-
-function makeAccount(
-  id: number,
-  balance_type: string,
-  account_type_est: string,
-  name_est: string,
-  name_eng: string,
-  overrides: Partial<Account> = {},
-): Account {
-  return {
-    id,
-    balance_type,
-    account_type_est,
-    account_type_eng: name_eng,
-    name_est,
-    name_eng,
-    is_valid: true,
-    allows_deactivation: true,
-    is_vat_account: false,
-    is_fixed_asset: false,
-    transaction_in_bindable: false,
-    transaction_out_bindable: false,
-    cl_account_groups: [],
-    default_disabled: false,
-    transaction_in_user_bindable: false,
-    transaction_out_user_bindable: false,
-    is_product_account: false,
-    ...overrides,
-  };
-}
-
-function makePosting(accounts_id: number, type: "D" | "C", amount: number): Posting {
-  return { accounts_id, type, amount };
-}
-
-function makeJournal(
-  effective_date: string,
-  postings: Posting[],
-  overrides: Partial<Journal> = {},
-): Journal {
-  return {
-    effective_date,
-    registered: true,
-    postings,
-    ...overrides,
-  };
-}
+import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 
 // Standard chart of accounts used across tests
 function makeStandardAccounts(): Account[] {

@@ -88,15 +88,14 @@ function loadAuditLabelMap(): void {
   auditLabelByConnection.clear();
   const persistedLabels = readPersistedAuditLabels();
   for (const [connectionName, persistedValue] of Object.entries(persistedLabels)) {
-    const normalizedConnection = normalizeAuditLabel(connectionName);
     const persisted = parsePersistedAuditLabel(persistedValue);
     if (!persisted) continue;
 
-    const expectedFingerprint = auditFingerprintByConnection.get(normalizedConnection);
+    const expectedFingerprint = auditFingerprintByConnection.get(connectionName);
     if (expectedFingerprint && persisted.fingerprint !== expectedFingerprint) continue;
 
     auditLabelByConnection.set(
-      normalizedConnection,
+      connectionName,
       normalizeAuditLabel(persisted.label),
     );
   }
@@ -113,15 +112,11 @@ function persistAuditLabelMap(): void {
       ];
     }),
   );
-  try {
-    writeFileSync(
-      LABELS_FILE,
-      `${JSON.stringify(persisted, null, 2)}\n`,
-      { encoding: "utf-8", mode: 0o600 },
-    );
-  } catch {
-    // best-effort
-  }
+  writeFileSync(
+    LABELS_FILE,
+    `${JSON.stringify(persisted, null, 2)}\n`,
+    { encoding: "utf-8", mode: 0o600 },
+  );
 }
 
 /** Initialize the audit log with a function that returns the current connection name. */
@@ -134,7 +129,7 @@ export function initAuditLog(
   if (connectionFingerprints) {
     for (const [connectionName, fingerprint] of Object.entries(connectionFingerprints)) {
       if (typeof fingerprint !== "string" || !fingerprint) continue;
-      auditFingerprintByConnection.set(normalizeAuditLabel(connectionName), fingerprint);
+      auditFingerprintByConnection.set(connectionName, fingerprint);
     }
   }
   ensureLogsDir();
@@ -142,8 +137,7 @@ export function initAuditLog(
 }
 
 function getAuditLabel(connectionName: string): string {
-  const normalizedConnection = normalizeAuditLabel(connectionName);
-  return auditLabelByConnection.get(normalizedConnection) ?? normalizedConnection;
+  return auditLabelByConnection.get(connectionName) ?? connectionName;
 }
 
 export function getCurrentAuditLogLabel(connectionName: string): string {
@@ -224,41 +218,77 @@ function migrateAuditLogFile(previousLabel: string, nextLabel: string): void {
 }
 
 function setAuditLogLabelInternal(connectionName: string, label: string): void {
-  const normalizedConnection = normalizeAuditLabel(connectionName);
   const normalizedLabel = normalizeAuditLabel(label);
-  const previousLabel = getAuditLabel(normalizedConnection);
+  const previousLabel = getAuditLabel(connectionName);
   if (previousLabel === normalizedLabel) return;
 
   migrateAuditLogFile(previousLabel, normalizedLabel);
-  auditLabelByConnection.set(normalizedConnection, normalizedLabel);
+  auditLabelByConnection.set(connectionName, normalizedLabel);
 }
 
 export function setAuditLogLabel(connectionName: string, label: string): void {
-  setAuditLogLabelInternal(connectionName, label);
-  persistAuditLabelMap();
+  setAuditLogLabels([{ connectionName, label }]);
 }
 
 export function setAuditLogLabels(assignments: AuditLogLabelAssignment[]): void {
   const changedAssignments = assignments
     .map((assignment) => ({
-      connectionName: normalizeAuditLabel(assignment.connectionName),
+      connectionName: assignment.connectionName,
       label: normalizeAuditLabel(assignment.label),
     }))
     .filter((assignment) => getAuditLabel(assignment.connectionName) !== assignment.label);
 
   if (changedAssignments.length === 0) return;
 
+  const originalLabels = new Map(auditLabelByConnection);
   const tempPrefix = `__audit_tmp__${Date.now().toString(36)}`;
-  for (let index = 0; index < changedAssignments.length; index += 1) {
-    const assignment = changedAssignments[index]!;
-    setAuditLogLabelInternal(assignment.connectionName, `${tempPrefix}_${index}`);
+  const tempAssignments = changedAssignments.map((assignment, index) => ({
+    ...assignment,
+    tempLabel: `${tempPrefix}_${index}`,
+  }));
+  const touchedPaths = new Set<string>([LABELS_FILE]);
+
+  for (const assignment of tempAssignments) {
+    touchedPaths.add(getLogFilePathForLabel(getAuditLabel(assignment.connectionName)));
+    touchedPaths.add(getLogFilePathForLabel(assignment.tempLabel));
+    touchedPaths.add(getLogFilePathForLabel(assignment.label));
   }
 
-  for (const assignment of changedAssignments) {
-    setAuditLogLabelInternal(assignment.connectionName, assignment.label);
+  const originalFiles = new Map<string, string | null>();
+  for (const path of touchedPaths) {
+    originalFiles.set(path, existsSync(path) ? readFileSync(path, "utf-8") : null);
   }
 
-  persistAuditLabelMap();
+  try {
+    for (const assignment of tempAssignments) {
+      setAuditLogLabelInternal(assignment.connectionName, assignment.tempLabel);
+    }
+
+    for (const assignment of tempAssignments) {
+      setAuditLogLabelInternal(assignment.connectionName, assignment.label);
+    }
+
+    persistAuditLabelMap();
+  } catch (error) {
+    auditLabelByConnection.clear();
+    for (const [connectionName, label] of originalLabels.entries()) {
+      auditLabelByConnection.set(connectionName, label);
+    }
+
+    for (const [path, content] of originalFiles.entries()) {
+      try {
+        if (content === null) {
+          if (existsSync(path)) unlinkSync(path);
+        } else {
+          writeFileSync(path, content, { encoding: "utf-8", mode: 0o600 });
+        }
+      } catch {
+        // best-effort rollback
+      }
+    }
+
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +622,7 @@ export function getAuditLog(filter?: AuditLogFilter): string {
 export function clearAuditLog(): void {
   const filePath = getLogFilePath();
   try {
-    writeFileSync(filePath, "", "utf-8");
+    writeFileSync(filePath, "", { encoding: "utf-8", mode: 0o600 });
   } catch {
     // best-effort
   }
@@ -626,11 +656,15 @@ export function listAuditLogs(): Array<{ connection: string; file: string; entri
 
 /** Read a specific connection's audit log (not just the active one). */
 export function getAuditLogByConnection(connectionName: string, filter?: AuditLogFilter): string {
-  const normalizedName = normalizeAuditLabel(connectionName);
-  const mappedPath = getLogFilePathForConnection(normalizedName);
+  const mappedPath = getLogFilePathForConnection(connectionName);
   if (existsSync(mappedPath)) {
     return getAuditLogFromFile(mappedPath, filter);
   }
 
-  return getAuditLogFromFile(getLogFilePathForLabel(normalizedName), filter);
+  return getAuditLogFromFile(getLogFilePathForLabel(normalizeAuditLabel(connectionName)), filter);
+}
+
+/** Read an audit log by its human-readable label / file stem. */
+export function getAuditLogByLabel(label: string, filter?: AuditLogFilter): string {
+  return getAuditLogFromFile(getLogFilePathForLabel(label), filter);
 }

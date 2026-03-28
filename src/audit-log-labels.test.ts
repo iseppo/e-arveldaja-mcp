@@ -60,4 +60,21 @@ describe("buildAuditLogLabels", () => {
     expect(labels.get("env")).toBe("Acme OÜ");
     expect(labels.get("Acme OÜ")).toBe("Acme OÜ (connection)");
   });
+
+  it("strips path traversal sequences from sanitized names", () => {
+    expect(sanitizeAuditLogName("../etc/passwd")).toBe("__etc_passwd");
+    expect(sanitizeAuditLogName("company..name")).toBe("company_name");
+    expect(sanitizeAuditLogName("a...b")).toBe("a_b");
+  });
+
+  it("keeps raw-distinct connection names separate even if normalization would collapse them", () => {
+    const labels = buildAuditLogLabels([
+      { connectionName: "apikey foo", companyName: "Acme OÜ" },
+      { connectionName: "apikey  foo", companyName: "Beta AS" },
+    ]);
+
+    expect(labels.size).toBe(2);
+    expect(labels.get("apikey foo")).toBe("Acme OÜ");
+    expect(labels.get("apikey  foo")).toBe("Beta AS");
+  });
 });

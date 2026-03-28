@@ -15,6 +15,7 @@ import { validateItemDimensions } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { readOnly, create, mutate, destructive, send } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
+import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 
 export interface ApiContext {
   clients: ClientsApi;
@@ -82,9 +83,22 @@ export function requireFields(items: Record<string, unknown>[], label: string, f
   });
 }
 
+export function requireNumericFields(items: Record<string, unknown>[], label: string, fields: string[]): void {
+  items.forEach((item, index) => {
+    for (const field of fields) {
+      if (field in item && item[field] !== null && item[field] !== undefined) {
+        if (typeof item[field] !== "number" || !Number.isFinite(item[field] as number)) {
+          throw new Error(`"${label}" item ${index + 1} field "${field}" must be a finite number, got ${typeof item[field]}`);
+        }
+      }
+    }
+  });
+}
+
 function parsePostings(input: string): Posting[] {
   const postings = parseJsonObjectArray(input, "postings");
   requireFields(postings, "postings", ["accounts_id", "type", "amount"]);
+  requireNumericFields(postings, "postings", ["accounts_id", "amount"]);
 
   postings.forEach((posting, index) => {
     if (posting.type !== "D" && posting.type !== "C") {
@@ -98,18 +112,21 @@ function parsePostings(input: string): Posting[] {
 function parseTransactionDistributions(input: string): TransactionDistribution[] {
   const distributions = parseJsonObjectArray(input, "distributions");
   requireFields(distributions, "distributions", ["related_table", "amount"]);
+  requireNumericFields(distributions, "distributions", ["amount", "related_id", "related_sub_id"]);
   return distributions as unknown as TransactionDistribution[];
 }
 
 function parseSaleInvoiceItems(input: string): SaleInvoiceItem[] {
   const items = parseJsonObjectArray(input, "items");
   requireFields(items, "items", ["products_id", "custom_title", "amount"]);
+  requireNumericFields(items, "items", ["products_id", "amount", "unit_net_price"]);
   return items as unknown as SaleInvoiceItem[];
 }
 
 export function parsePurchaseInvoiceItems(input: string): PurchaseInvoiceItem[] {
   const items = parseJsonObjectArray(input, "items");
   requireFields(items, "items", ["cl_purchase_articles_id", "custom_title"]);
+  requireNumericFields(items, "items", ["cl_purchase_articles_id", "total_net_price", "unit_net_price", "amount", "vat_accounts_id"]);
   return items as unknown as PurchaseInvoiceItem[];
 }
 
@@ -621,7 +638,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         journal_date: params.journal_date,
         term_days: params.term_days,
         cl_currencies_id: params.cl_currencies_id ?? "EUR",
-        liability_accounts_id: params.liability_accounts_id ?? 2310,
+        liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
         bank_ref_number: params.bank_ref_number,
         bank_account_no: params.bank_account_no,
         notes: tagNotes(params.notes),

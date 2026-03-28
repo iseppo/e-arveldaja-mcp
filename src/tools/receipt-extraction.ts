@@ -1,4 +1,5 @@
 import { basename, extname } from "path";
+import { normalizeCompanyName as normalizeCompanyNameShared } from "../company-name.js";
 import { roundMoney } from "../money.js";
 import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
 import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
@@ -844,13 +845,7 @@ export function extractDates(text: string): { invoice_date?: string; due_date?: 
 }
 
 export function normalizeCounterpartyName(name?: string | null): string {
-  return name
-    ?.toLowerCase()
-    .normalize("NFKD")
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\b(ou|oü|as|mtu|mtü|fie|uab|sia|llc|ltd|inc|gmbh|oy|ab|tmi|pank)\b/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim() ?? "";
+  return normalizeCompanyNameShared(name, { stripNonAlphanumeric: true });
 }
 
 export function hasRecurringSimilarAmounts(amounts: number[]): boolean {

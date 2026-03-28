@@ -6,6 +6,7 @@ import { type ApiContext, coerceId } from "./crud-tools.js";
 import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
+import { DEFAULT_DEBT_CHECK_ACCOUNTS } from "../accounting-defaults.js";
 
 interface BalanceDetail {
   journal_id: number;
@@ -138,7 +139,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     async ({ client_id, account_ids }) => {
       const ids = account_ids
         ? account_ids.split(",").map(s => parseInt(s.trim(), 10))
-        : [2110, 2310, 1210]; // short-term loans, accounts payable, accounts receivable
+        : DEFAULT_DEBT_CHECK_ACCOUNTS;
 
       // Load journals once, share across all account balance computations
       const allJournals = await api.journals.listAllWithPostings();

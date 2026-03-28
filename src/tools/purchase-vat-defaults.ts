@@ -1,9 +1,10 @@
 import type { PurchaseArticle, PurchaseInvoiceItem } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { log } from "../logger.js";
+import { DEFAULT_VAT_ACCOUNT } from "../accounting-defaults.js";
 
 const VAT_REGISTERED_FALLBACK = {
-  vat_accounts_id: 1510,
+  vat_accounts_id: DEFAULT_VAT_ACCOUNT,
   cl_vat_articles_id: 1,
 } as const;
 

@@ -1,15 +1,27 @@
-import { mkdtemp, rm } from "fs/promises";
+import { mkdtemp, readdir, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-async function loadAuditLogModule(tempDir: string) {
+async function loadAuditLogModule(
+  tempDir: string,
+  fsOverrides?: Partial<typeof import("fs")>,
+) {
   vi.resetModules();
+  if (fsOverrides) {
+    vi.doMock("fs", async () => {
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      return { ...actual, ...fsOverrides };
+    });
+  } else {
+    vi.doUnmock("fs");
+  }
   const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(tempDir);
   try {
     return await import("./audit-log.js");
   } finally {
     cwdSpy.mockRestore();
+    vi.doUnmock("fs");
   }
 }
 
@@ -320,6 +332,8 @@ describe("audit log labels", () => {
     expect(auditLog.getAuditLogByConnection("env")).not.toContain("#21");
     expect(auditLog.getAuditLogByConnection("Acme OÜ")).toContain("#21");
     expect(auditLog.getAuditLogByConnection("Acme OÜ")).not.toContain("#20");
+    expect(auditLog.getAuditLogByLabel("Acme OÜ")).toContain("#20");
+    expect(auditLog.getAuditLogByLabel("Acme OÜ")).not.toContain("#21");
   });
 
   it("persists the resolved company label across module reloads", async () => {
@@ -407,5 +421,109 @@ describe("audit log labels", () => {
         last_entry: "2026-03-27 10:00:00",
       }),
     ]));
+  });
+
+  it("rolls back partial batched relabels without leaving temp audit files behind", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-rollback-"));
+    const actualFs = await vi.importActual<typeof import("fs")>("fs");
+    const auditLog = await loadAuditLogModule(tempDir, {
+      renameSync: (sourcePath, targetPath) => {
+        if (sourcePath.includes("__audit_tmp__") && targetPath.endsWith("Acme OÜ.audit.md")) {
+          throw new Error("simulated relabel failure");
+        }
+        return actualFs.renameSync(sourcePath, targetPath);
+      },
+    });
+
+    auditLog.initAuditLog(() => "env");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 18,
+      summary: "Rollback entry",
+      details: {},
+    });
+
+    expect(() => auditLog.setAuditLogLabels([
+      { connectionName: "env", label: "Acme OÜ" },
+    ])).toThrow("simulated relabel failure");
+
+    const files = (await readdir(join(tempDir, "logs"))).sort();
+    expect(files).toEqual(["env.audit.md"]);
+    expect(auditLog.getAuditLogByConnection("env")).toContain("#18");
+    expect(auditLog.getAuditLogByConnection("Acme OÜ")).toBe("");
+  });
+
+  it("rolls back relabeling when persisting the label cache fails", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-persist-failure-"));
+    const actualFs = await vi.importActual<typeof import("fs")>("fs");
+    const labelsPath = join(tempDir, "logs", ".audit-labels.json");
+    let failLabelWrite = true;
+    const auditLog = await loadAuditLogModule(tempDir, {
+      writeFileSync: ((filePath: Parameters<typeof actualFs.writeFileSync>[0], data: Parameters<typeof actualFs.writeFileSync>[1], options?: Parameters<typeof actualFs.writeFileSync>[2]) => {
+        if (String(filePath) === labelsPath && failLabelWrite) {
+          failLabelWrite = false;
+          throw new Error("simulated label-cache failure");
+        }
+        return actualFs.writeFileSync(filePath, data as never, options as never);
+      }) as typeof actualFs.writeFileSync,
+    });
+
+    auditLog.initAuditLog(() => "env");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 21,
+      summary: "Persist failure entry",
+      details: {},
+    });
+
+    expect(() => auditLog.setAuditLogLabel("env", "Acme OÜ")).toThrow("simulated label-cache failure");
+
+    const files = (await readdir(join(tempDir, "logs"))).sort();
+    expect(files).toEqual(["env.audit.md"]);
+    expect(auditLog.getAuditLogByConnection("env")).toContain("#21");
+    expect(auditLog.getAuditLogByLabel("Acme OÜ")).toBe("");
+  });
+
+  it("keeps persisted labels separate for raw-distinct connection names", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-raw-keys-"));
+    let auditLog = await loadAuditLogModule(tempDir);
+    const connectionFingerprints = {
+      "apikey foo": "fingerprint-1",
+      "apikey  foo": "fingerprint-2",
+    };
+
+    auditLog.initAuditLog(() => "apikey foo", connectionFingerprints);
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 19,
+      summary: "First raw-name entry",
+      details: {},
+    });
+    auditLog.setAuditLogLabel("apikey foo", "Acme OÜ");
+
+    auditLog.initAuditLog(() => "apikey  foo", connectionFingerprints);
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 20,
+      summary: "Second raw-name entry",
+      details: {},
+    });
+    auditLog.setAuditLogLabel("apikey  foo", "Beta AS");
+
+    auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "apikey foo", connectionFingerprints);
+
+    expect(auditLog.getAuditLog()).toContain("#19");
+    expect(auditLog.getAuditLog()).not.toContain("#20");
+    expect(auditLog.getAuditLogByConnection("apikey  foo")).toContain("#20");
+    expect(auditLog.getAuditLogByConnection("apikey  foo")).not.toContain("#19");
   });
 });

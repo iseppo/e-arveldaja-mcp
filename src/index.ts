@@ -50,13 +50,14 @@ import { getAllowedRootsStartupWarning } from "./file-validation.js";
 import {
   initAuditLog,
   getAuditLog,
+  getAuditLogByLabel,
   getAuditLogByConnection,
   listAuditLogs,
   clearAuditLog,
   setAuditLogLabels,
   getCurrentAuditLogLabel,
 } from "./audit-log.js";
-import { buildAuditLogLabels, normalizeAuditLabel } from "./audit-log-labels.js";
+import { buildAuditLogLabels } from "./audit-log-labels.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
@@ -291,10 +292,9 @@ async function main() {
     })));
 
     setAuditLogLabels(allConfigs.map((config) => {
-      const normalizedConnectionName = normalizeAuditLabel(config.name);
       return {
         connectionName: config.name,
-        label: labels.get(normalizedConnectionName) ?? normalizedConnectionName,
+        label: labels.get(config.name) ?? getCurrentAuditLogLabel(config.name),
       };
     }));
   }
@@ -312,8 +312,19 @@ async function main() {
     const pending = (async () => {
       try {
         const invoiceInfo = await connectionContexts[index]!.readonly.getInvoiceInfo();
+        const hadPrevious = resolvedAuditCompanyNames.has(index);
+        const previousCompanyName = resolvedAuditCompanyNames.get(index);
         resolvedAuditCompanyNames.set(index, normalizeAuditCompanyName(invoiceInfo.invoice_company_name));
-        applyAuditLogLabels();
+        try {
+          applyAuditLogLabels();
+        } catch (error) {
+          if (hadPrevious) {
+            resolvedAuditCompanyNames.set(index, previousCompanyName ?? null);
+          } else {
+            resolvedAuditCompanyNames.delete(index);
+          }
+          throw error;
+        }
       } catch (error) {
         log(
           "warning",
@@ -327,10 +338,6 @@ async function main() {
 
     auditLabelResolutionPromises.set(index, pending);
     await pending;
-  }
-
-  async function ensureAllAuditLogLabelsResolved(): Promise<void> {
-    await Promise.all(allConfigs.map((_config, index) => ensureAuditLogLabelResolved(index)));
   }
 
   const server = new McpServer({
@@ -482,9 +489,10 @@ Reporting:
   registerTool(server, "get_session_log",
     "Retrieve the audit log of all mutating operations. " +
     "Returns human-readable Markdown. By default shows the current connection's log. " +
-    "Use 'connection' to view another connection's or audit-log label's file, or list_audit_logs to see available logs.",
+    "Use 'connection' to view another connection's or audit-log label's file, or list_audit_logs to see available logs. " +
+    "When a raw connection name differs from the displayed audit-log label, use the prefix 'connection:' for the raw connection name.",
     {
-      connection: z.string().optional().describe("Connection name or audit-log label to view (default: current connection). Use list_audit_logs to see available names."),
+      connection: z.string().optional().describe("Audit-log label from list_audit_logs, or prefix a raw connection name with 'connection:' (default: current connection)."),
       entity_type: z.string().optional().describe("Filter by entity type (client, product, journal, transaction, sale_invoice, purchase_invoice)"),
       action: z.string().optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT)"),
       date_from: z.string().optional().describe("Return entries from this date (YYYY-MM-DD or ISO 8601)"),
@@ -493,20 +501,6 @@ Reporting:
     },
     { ...readOnly, title: "Get Session Audit Log" },
     async (params) => {
-      if (!setupMode) {
-        if (!params.connection) {
-          await ensureAuditLogLabelResolved(connectionState.activeIndex);
-        } else {
-          const requestedConnection = normalizeAuditLabel(params.connection);
-          const matchingIndex = allConfigs.findIndex(
-            (config) => normalizeAuditLabel(config.name) === requestedConnection,
-          );
-          if (matchingIndex >= 0) {
-            await ensureAuditLogLabelResolved(matchingIndex);
-          }
-        }
-      }
-
       const filter = {
         entity_type: params.entity_type,
         action: params.action,
@@ -515,7 +509,9 @@ Reporting:
         limit: params.limit,
       };
       const content = params.connection
-        ? getAuditLogByConnection(params.connection, filter)
+        ? params.connection.startsWith("connection:")
+          ? getAuditLogByConnection(params.connection.slice("connection:".length), filter)
+          : getAuditLogByLabel(params.connection, filter) || getAuditLogByConnection(params.connection, filter)
         : getAuditLog(filter);
       return {
         content: [{
@@ -531,9 +527,6 @@ Reporting:
     {},
     { ...readOnly, title: "List Audit Logs" },
     async () => {
-      if (!setupMode) {
-        await ensureAllAuditLogLabelsResolved();
-      }
       const logs = listAuditLogs();
       if (logs.length === 0) {
         return { content: [{ type: "text", text: "No audit logs found." }] };

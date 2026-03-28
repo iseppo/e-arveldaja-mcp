@@ -13,6 +13,7 @@ import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { parseCSV } from "../csv.js";
 import { roundMoney } from "../money.js";
+import { normalizeCompanyName } from "../company-name.js";
 import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
 
 interface WiseRow {
@@ -47,7 +48,7 @@ function parseWiseNumber(value: string | undefined | null, fieldName: string, de
 }
 
 function parseWiseCSV(csv: string): WiseRow[] {
-  const records = parseCSV(csv).filter(record => record.some(field => field.trim() !== ""));
+  const records = parseCSV(csv, ",", 10 * 1024 * 1024).filter(record => record.some(field => field.trim() !== ""));
   if (records.length < 2) throw new Error("CSV has no data rows");
 
   const headers = records[0]!.map(header => header.replace(/^\uFEFF/, "").trim());
@@ -153,11 +154,7 @@ function normalizeWiseText(value?: string | null): string {
 }
 
 function normalizeWiseCompanyName(value?: string | null): string {
-  return normalizeWiseText(value)
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/\b(as|ou|mtu|sa|tu)\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  return normalizeCompanyName(value);
 }
 
 function normalizeWiseCurrency(value?: string | null, fallback = "EUR"): string {

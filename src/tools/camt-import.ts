@@ -16,6 +16,7 @@ import { isNonVoidTransaction } from "../transaction-status.js";
 
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const XML_DTD_PATTERN = /<!(?:DOCTYPE|ENTITY)/i;
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
@@ -329,6 +330,9 @@ function summarizeEntries(entries: ParsedCamtEntry[]): CamtParseResult["summary"
 }
 
 export function parseCamt053Xml(xml: string): CamtParseResult {
+  if (XML_DTD_PATTERN.test(xml)) {
+    throw new Error("CAMT.053 files must not contain DOCTYPE or ENTITY declarations");
+  }
   const parsed = xmlParser.parse(xml);
   const statements = asArray(valueAt(parsed, ["Document", "BkToCstmrStmt", "Stmt"]));
 
