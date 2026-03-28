@@ -689,6 +689,44 @@ describe("wise import tool", () => {
     expect(api.transactions.update).not.toHaveBeenCalledWith(9201, { clients_id: 999 });
   });
 
+  it("matches exact normalized company names when punctuation differs around legal suffixes", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "TRANSFER-xfer-2p", "COMPLETED", "IN", "2026-02-05 10:00:00", "2026-02-05 10:00:00",
+      "0", "EUR", "0", "EUR",
+      "LHV Bank", "750", "EUR",
+      "OpenAI Inc.", "750", "EUR",
+      "1", "", "", "", "General", "",
+    ]));
+
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9205 });
+    const { api, handler } = setupWiseTool([], create, {
+      accountDimensions: [
+        { id: 5,  accounts_id: 1010, title_est: "Wise", is_deleted: false },
+        { id: 20, accounts_id: 1020, title_est: "LHV",  is_deleted: false },
+      ],
+      journals: [],
+      bankAccounts: [
+        { accounts_dimensions_id: 5 },
+        { accounts_dimensions_id: 20 },
+      ],
+      invoiceInfo: { invoice_company_name: "OpenAI, Inc." },
+      findByNameResult: [
+        { id: 999, name: "OpenAI Inc Holdings" },
+        { id: 55, name: "OpenAI Inc" },
+      ],
+    });
+
+    await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      inter_account_dimension_id: 20,
+      execute: true,
+    });
+
+    expect(api.transactions.update).toHaveBeenCalledWith(9205, { clients_id: 55 });
+    expect(api.transactions.update).not.toHaveBeenCalledWith(9205, { clients_id: 999 });
+  });
+
   it("does not attach a client when multiple exact normalized matches exist", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "TRANSFER-xfer-2c", "COMPLETED", "IN", "2026-02-05 10:00:00", "2026-02-05 10:00:00",

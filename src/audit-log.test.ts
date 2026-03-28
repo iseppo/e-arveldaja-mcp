@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "fs/promises";
+import { chmod, mkdtemp, readdir, rm, stat } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -486,6 +486,38 @@ describe("audit log labels", () => {
     expect(files).toEqual(["env.audit.md"]);
     expect(auditLog.getAuditLogByConnection("env")).toContain("#21");
     expect(auditLog.getAuditLogByLabel("Acme OÜ")).toBe("");
+  });
+
+  it("tightens permissions when rewriting existing audit files and label cache", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-permissions-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    const logsDir = join(tempDir, "logs");
+    const envPath = join(logsDir, "env.audit.md");
+    const labelsPath = join(logsDir, ".audit-labels.json");
+    const acmePath = join(logsDir, "Acme OÜ.audit.md");
+    const betaPath = join(logsDir, "Beta AS.audit.md");
+
+    auditLog.initAuditLog(() => "env");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 22,
+      summary: "Permissions entry",
+      details: {},
+    });
+
+    await chmod(envPath, 0o644);
+    auditLog.clearAuditLog();
+    expect((await stat(envPath)).mode & 0o777).toBe(0o600);
+
+    auditLog.setAuditLogLabel("env", "Acme OÜ");
+    await chmod(acmePath, 0o644);
+    await chmod(labelsPath, 0o644);
+
+    auditLog.setAuditLogLabel("env", "Beta AS");
+    expect((await stat(betaPath)).mode & 0o777).toBe(0o600);
+    expect((await stat(labelsPath)).mode & 0o777).toBe(0o600);
   });
 
   it("keeps persisted labels separate for raw-distinct connection names", async () => {

@@ -6,6 +6,7 @@
 
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -42,6 +43,7 @@ const META_RE = /^<!-- audit:(\{.*\}) -->$/m;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const AUDIT_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 const ISO_TS_NO_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?$/;
+const PRIVATE_FILE_MODE = 0o600;
 
 let activeConnectionNameGetter: () => string = () => "default";
 const auditLabelByConnection = new Map<string, string>();
@@ -56,6 +58,30 @@ function ensureLogsDir(): void {
   if (!existsSync(LOGS_DIR)) {
     mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
   }
+}
+
+function enforcePrivateFileMode(filePath: string): void {
+  try {
+    chmodSync(filePath, PRIVATE_FILE_MODE);
+  } catch {
+    // best-effort
+  }
+}
+
+function writePrivateTextFile(filePath: string, content: string): void {
+  writeFileSync(filePath, content, {
+    encoding: "utf-8",
+    mode: PRIVATE_FILE_MODE,
+  });
+  enforcePrivateFileMode(filePath);
+}
+
+function appendPrivateTextFile(filePath: string, content: string): void {
+  appendFileSync(filePath, content, {
+    encoding: "utf-8",
+    mode: PRIVATE_FILE_MODE,
+  });
+  enforcePrivateFileMode(filePath);
 }
 
 function readPersistedAuditLabels(): Record<string, unknown> {
@@ -112,11 +138,7 @@ function persistAuditLabelMap(): void {
       ];
     }),
   );
-  writeFileSync(
-    LABELS_FILE,
-    `${JSON.stringify(persisted, null, 2)}\n`,
-    { encoding: "utf-8", mode: 0o600 },
-  );
+  writePrivateTextFile(LABELS_FILE, `${JSON.stringify(persisted, null, 2)}\n`);
 }
 
 /** Initialize the audit log with a function that returns the current connection name. */
@@ -199,8 +221,9 @@ function mergeAuditLogFiles(sourcePath: string, targetPath: string): void {
 
   writeFileSync(targetPath, renderMergedSections(mergedSections), {
     encoding: "utf-8",
-    mode: 0o600,
+    mode: PRIVATE_FILE_MODE,
   });
+  enforcePrivateFileMode(targetPath);
   unlinkSync(sourcePath);
 }
 
@@ -211,6 +234,7 @@ function migrateAuditLogFile(previousLabel: string, nextLabel: string): void {
 
   if (!existsSync(nextPath)) {
     renameSync(previousPath, nextPath);
+    enforcePrivateFileMode(nextPath);
     return;
   }
 
@@ -280,7 +304,7 @@ export function setAuditLogLabels(assignments: AuditLogLabelAssignment[]): void 
         if (content === null) {
           if (existsSync(path)) unlinkSync(path);
         } else {
-          writeFileSync(path, content, { encoding: "utf-8", mode: 0o600 });
+          writePrivateTextFile(path, content);
         }
       } catch {
         // best-effort rollback
@@ -504,7 +528,7 @@ export function logAudit(entry: Omit<AuditEntry, "timestamp">): void {
       mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
     }
     const md = renderEntry(full) + ENTRY_SEPARATOR;
-    appendFileSync(filePath, md, { encoding: "utf-8", mode: 0o600 });
+    appendPrivateTextFile(filePath, md);
   } catch {
     // Audit logging is best-effort — do not crash the server
   }
@@ -622,7 +646,7 @@ export function getAuditLog(filter?: AuditLogFilter): string {
 export function clearAuditLog(): void {
   const filePath = getLogFilePath();
   try {
-    writeFileSync(filePath, "", { encoding: "utf-8", mode: 0o600 });
+    writePrivateTextFile(filePath, "");
   } catch {
     // best-effort
   }
