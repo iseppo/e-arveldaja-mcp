@@ -58,6 +58,7 @@ function setupCamtTool(options: {
   existingTransactions?: unknown[];
   findByCodeResult?: unknown;
   findByNameResult?: unknown[];
+  findByNameImpl?: (name: string) => unknown[] | Promise<unknown[]>;
 } = {}) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
@@ -72,7 +73,9 @@ function setupCamtTool(options: {
     },
     clients: {
       findByCode: vi.fn().mockResolvedValue(options.findByCodeResult),
-      findByName: vi.fn().mockResolvedValue(options.findByNameResult ?? []),
+      findByName: options.findByNameImpl
+        ? vi.fn().mockImplementation(options.findByNameImpl)
+        : vi.fn().mockResolvedValue(options.findByNameResult ?? []),
     },
   } as any;
 
@@ -178,6 +181,80 @@ describe("camt import tool", () => {
         clients_id: 81,
         client_match: "exact_name",
         counterparty: "OpenAI, Inc.",
+      }),
+    ]));
+  });
+
+  it("keeps separate cache entries for different legal-entity variants with the same normalized stem", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-variants</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">10.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <AcctSvcrRef>REF-1</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-1</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Acme OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Payment 1</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+      <Ntry>
+        <Amt Ccy="EUR">20.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-02</Dt></BookgDt>
+        <AcctSvcrRef>REF-2</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-2</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">20.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Acme AS</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Payment 2</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { api, handler } = setupCamtTool({
+      findByNameImpl: (name: string) => {
+        if (name === "Acme OÜ") {
+          return [{ id: 11, name: "Acme OÜ" }];
+        }
+        if (name === "Acme AS") {
+          return [{ id: 22, name: "Acme AS" }];
+        }
+        return [];
+      },
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.clients.findByName).toHaveBeenCalledTimes(2);
+    expect(payload.sample).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        counterparty: "Acme OÜ",
+        clients_id: 11,
+      }),
+      expect.objectContaining({
+        counterparty: "Acme AS",
+        clients_id: 22,
       }),
     ]));
   });

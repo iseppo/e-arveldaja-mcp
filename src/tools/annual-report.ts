@@ -234,8 +234,8 @@ function isLoanAccount(balance: AccountBalance): boolean {
 
 function classifyLiabilitySection(balance: AccountBalance): "current" | "non_current" {
   const name = `${balance.name_est} ${balance.name_eng}`.toLowerCase();
+  if (name.includes("lühiajal") || name.includes("short") || /\bcurrent\b.*\bportion\b/.test(name)) return "current";
   if (name.includes("pikaajal") || name.includes("long")) return "non_current";
-  if (name.includes("lühiajal") || name.includes("short")) return "current";
   if (hasPrefix(balance.account_id, "29")) return "non_current";
   if (isLoanAccount(balance)) return isCurrentLoanAccount(balance) ? "current" : "non_current";
   return "current";

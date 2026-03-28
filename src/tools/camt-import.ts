@@ -501,10 +501,13 @@ async function resolveClientForEntry(
     if (resolution.clients_id) return resolution;
   }
 
+  const cacheKey = entry.counterparty_name?.trim().replace(/\s+/g, " ").toLowerCase();
+  if (!cacheKey) return {};
+
   const normalizedName = normalizeCompanyName(entry.counterparty_name);
   if (!normalizedName) return {};
 
-  const cached = cache.byName.get(normalizedName);
+  const cached = cache.byName.get(cacheKey);
   if (cached) return cached;
 
   const matches = await api.clients.findByName(entry.counterparty_name!);
@@ -528,7 +531,7 @@ async function resolveClientForEntry(
       }
     : {};
 
-  cache.byName.set(normalizedName, resolution);
+  cache.byName.set(cacheKey, resolution);
   return resolution;
 }
 
