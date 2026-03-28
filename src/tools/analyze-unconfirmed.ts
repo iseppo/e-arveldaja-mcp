@@ -38,6 +38,15 @@ interface Suggestion {
   match_confidence?: number;
 }
 
+function buildBankJournalDuplicateKey(
+  accountsDimensionsId: number,
+  type: "D" | "C",
+  amount: number,
+  date: string,
+): string {
+  return `${accountsDimensionsId}|${type}|${amount}|${date}`;
+}
+
 export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "analyze_unconfirmed_transactions",
@@ -83,7 +92,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
 
       // Build a broader index: journals with any posting touching a bank account dimension
-      // Key: "dimensionId|amount|date" -> journal_ids[]
+      // Key: "dimensionId|type|amount|date" -> journal_ids[]
       // Storing all matching journal IDs to detect ambiguous duplicates.
       const bankJournalIndex = new Map<string, number[]>();
       for (const j of allJournals) {
@@ -91,8 +100,9 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         for (const p of j.postings) {
           if (p.is_deleted || !p.accounts_dimensions_id) continue;
           if (!ownDimensionIds.has(p.accounts_dimensions_id)) continue;
+          if (p.type !== "D" && p.type !== "C") continue;
           const amount = Math.round(((p.base_amount ?? p.amount) as number) * 100) / 100;
-          const key = `${p.accounts_dimensions_id}|${amount}|${j.effective_date}`;
+          const key = buildBankJournalDuplicateKey(p.accounts_dimensions_id, p.type, amount, j.effective_date);
           const existing = bankJournalIndex.get(key);
           if (existing) {
             existing.push(j.id!);
@@ -110,12 +120,15 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         await reportProgress(i, total);
 
         const txDim = tx.accounts_dimensions_id;
+        const txType = tx.type;
         const txAmount = Math.round(tx.amount * 100) / 100;
         const bankTitle = dimensionToTitle.get(txDim) ?? `dim:${txDim}`;
 
         // --- 1. Duplicate detection: journal already exists for this amount/date/bank account ---
-        const dupKey = `${txDim}|${txAmount}|${tx.date}`;
-        const dupJournalIds = bankJournalIndex.get(dupKey);
+        const dupJournalIds =
+          txType === "D" || txType === "C"
+            ? bankJournalIndex.get(buildBankJournalDuplicateKey(txDim, txType, txAmount, tx.date))
+            : undefined;
         if (dupJournalIds) {
           const isAmbiguous = dupJournalIds.length > 1;
           const confidence = isAmbiguous ? 60 : 80;

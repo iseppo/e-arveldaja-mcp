@@ -232,6 +232,15 @@ function isLoanAccount(balance: AccountBalance): boolean {
   return inRange(balance.account_id, 2000, 2199);
 }
 
+function classifyLiabilitySection(balance: AccountBalance): "current" | "non_current" {
+  const name = `${balance.name_est} ${balance.name_eng}`.toLowerCase();
+  if (name.includes("pikaajal") || name.includes("long")) return "non_current";
+  if (name.includes("lühiajal") || name.includes("short")) return "current";
+  if (hasPrefix(balance.account_id, "29")) return "non_current";
+  if (isLoanAccount(balance)) return isCurrentLoanAccount(balance) ? "current" : "non_current";
+  return "current";
+}
+
 function buildUnresolvedItems(
   dateFrom: string,
   dateTo: string,
@@ -675,18 +684,11 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
 
   const currentLiabilities = buildStatementLine("Lühiajalised kohustused", yearEndBalances, (balance) =>
     balance.account_type_est === "Kohustused" &&
-    (
-      hasPrefix(balance.account_id, "23") ||
-      hasPrefix(balance.account_id, "25") ||
-      (isLoanAccount(balance) && isCurrentLoanAccount(balance))
-    ),
+    classifyLiabilitySection(balance) === "current",
   );
   const nonCurrentLiabilities = buildStatementLine("Pikaajalised kohustused", yearEndBalances, (balance) =>
     balance.account_type_est === "Kohustused" &&
-    (
-      hasPrefix(balance.account_id, "29") ||
-      (isLoanAccount(balance) && !isCurrentLoanAccount(balance))
-    ),
+    classifyLiabilitySection(balance) === "non_current",
   );
   const totalLiabilities = sumStatementBalances(yearEndBalances, (balance) => balance.account_type_est === "Kohustused");
 

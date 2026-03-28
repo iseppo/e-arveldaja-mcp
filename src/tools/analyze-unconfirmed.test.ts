@@ -98,6 +98,7 @@ describe("analyze_unconfirmed_transactions", () => {
           registered: true,
           postings: [{
             accounts_dimensions_id: 100,
+            type: "C",
             amount: 120,
             base_amount: null,
             is_deleted: false,
@@ -138,6 +139,7 @@ describe("analyze_unconfirmed_transactions", () => {
             registered: true,
             postings: [{
               accounts_dimensions_id: 100,
+              type: "C",
               amount: 50,
               base_amount: null,
               is_deleted: false,
@@ -150,6 +152,7 @@ describe("analyze_unconfirmed_transactions", () => {
             registered: true,
             postings: [{
               accounts_dimensions_id: 100,
+              type: "C",
               amount: 50,
               base_amount: null,
               is_deleted: false,
@@ -165,6 +168,45 @@ describe("analyze_unconfirmed_transactions", () => {
       expect(payload.suggestions[0]!.confidence).toBe(60);
       expect(payload.suggestions[0]!.reason).toContain("ambiguous");
       expect(payload.suggestions[0]!.reason).toContain("2 matching journals");
+    });
+
+    it("does not flag opposite-direction bank postings as duplicates", async () => {
+      const handler = setupTool({
+        transactions: [{
+          id: 3,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 100,
+          date: "2026-03-22",
+          accounts_dimensions_id: 100,
+          cl_currencies_id: "EUR",
+          description: "Incoming customer payment",
+          bank_account_name: "Acme OÜ",
+          bank_account_no: null,
+        }],
+        bankAccounts: defaultBankAccounts,
+        journals: [{
+          id: 99,
+          effective_date: "2026-03-22",
+          is_deleted: false,
+          registered: true,
+          postings: [{
+            accounts_dimensions_id: 100,
+            type: "C",
+            amount: 100,
+            base_amount: null,
+            is_deleted: false,
+          }],
+        }],
+      });
+
+      const result = await handler({});
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.suggestions).toHaveLength(1);
+      expect(payload.suggestions[0]!.suggested_action).not.toBe("likely_duplicate");
+      expect(payload.summary.likely_duplicate ?? 0).toBe(0);
     });
   });
 

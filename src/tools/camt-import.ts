@@ -13,6 +13,7 @@ import { buildBatchExecutionContract } from "../batch-execution.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
+import { normalizeCompanyName } from "../company-name.js";
 
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -500,14 +501,14 @@ async function resolveClientForEntry(
     if (resolution.clients_id) return resolution;
   }
 
-  const normalizedName = entry.counterparty_name?.trim().toLowerCase();
+  const normalizedName = normalizeCompanyName(entry.counterparty_name);
   if (!normalizedName) return {};
 
   const cached = cache.byName.get(normalizedName);
   if (cached) return cached;
 
   const matches = await api.clients.findByName(entry.counterparty_name!);
-  const exactMatches = matches.filter(client => client.name.trim().toLowerCase() === normalizedName);
+  const exactMatches = matches.filter(client => normalizeCompanyName(client.name) === normalizedName);
 
   let selected: Client | undefined;
   let matchType: ClientResolution["match_type"];

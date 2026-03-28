@@ -54,7 +54,11 @@ const singleEntryXml = `<?xml version="1.0" encoding="UTF-8"?>
   </BkToCstmrStmt>
 </Document>`;
 
-function setupCamtTool(existingTransactions: unknown[]) {
+function setupCamtTool(options: {
+  existingTransactions?: unknown[];
+  findByCodeResult?: unknown;
+  findByNameResult?: unknown[];
+} = {}) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
     readonly: {
@@ -63,12 +67,12 @@ function setupCamtTool(existingTransactions: unknown[]) {
       ]),
     },
     transactions: {
-      listAll: vi.fn().mockResolvedValue(existingTransactions),
+      listAll: vi.fn().mockResolvedValue(options.existingTransactions ?? []),
       create: vi.fn().mockResolvedValue({ created_object_id: 9001 }),
     },
     clients: {
-      findByCode: vi.fn().mockResolvedValue(undefined),
-      findByName: vi.fn().mockResolvedValue([]),
+      findByCode: vi.fn().mockResolvedValue(options.findByCodeResult),
+      findByName: vi.fn().mockResolvedValue(options.findByNameResult ?? []),
     },
   } as any;
 
@@ -88,16 +92,18 @@ describe("camt import tool", () => {
     mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
-    const { api, handler } = setupCamtTool([
-      {
-        id: 12,
-        status: "VOID",
-        is_deleted: false,
-        bank_ref_number: "REF-VOID-1",
-        ref_number: null,
-        description: "REF-VOID-1 old voided import",
-      },
-    ]);
+    const { api, handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 12,
+          status: "VOID",
+          is_deleted: false,
+          bank_ref_number: "REF-VOID-1",
+          ref_number: null,
+          description: "REF-VOID-1 old voided import",
+        },
+      ],
+    });
 
     const result = await handler({
       file_path: "/tmp/camt.xml",
@@ -141,5 +147,38 @@ describe("camt import tool", () => {
         note: "Review mutating side effects in the human-readable audit log named after the company when available; a connection suffix is added only when needed to disambiguate.",
       }),
     });
+  });
+
+  it("matches clients by normalized company name when findByName returns multiple variants", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedReadFile.mockResolvedValue(singleEntryXml.replace("Vendor OÜ", "OpenAI, Inc."));
+
+    const { handler } = setupCamtTool({
+      findByNameResult: [
+        {
+          id: 81,
+          name: "OpenAI Inc",
+        },
+        {
+          id: 82,
+          name: "OpenAI Operations Ireland Limited",
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.sample).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "would_create",
+        clients_id: 81,
+        client_match: "exact_name",
+        counterparty: "OpenAI, Inc.",
+      }),
+    ]));
   });
 });

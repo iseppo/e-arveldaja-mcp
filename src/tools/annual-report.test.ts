@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Account, Journal, Posting } from "../types/api.js";
+import type { Account, Journal } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { buildAnnualReportData, registerAnnualReportTools } from "./annual-report.js";
 import { parseMcpResponse } from "../mcp-json.js";
@@ -31,7 +31,10 @@ function makeAccount(overrides: Partial<Account> & Pick<Account,
   };
 }
 
-function createApi(journals: Journal[], options: { transactions?: unknown[] } = {}): ApiContext {
+function createApi(
+  journals: Journal[],
+  options: { transactions?: unknown[]; extraAccounts?: Account[] } = {},
+): ApiContext {
   const accounts: Account[] = [
     makeAccount({
       id: 1000,
@@ -89,6 +92,7 @@ function createApi(journals: Journal[], options: { transactions?: unknown[] } = 
       name_est: "Mitmesugused tegevuskulud",
       name_eng: "Operating expenses",
     }),
+    ...(options.extraAccounts ?? []),
   ];
 
   return {
@@ -236,5 +240,41 @@ describe("buildAnnualReportData", () => {
 
     expect(payload.unresolved_items.unconfirmed_transactions.count).toBe(0);
     expect(payload.unresolved_items.total_issues).toBe(0);
+  });
+
+  it("keeps non-loan liabilities in the balance sheet sections instead of dropping them", async () => {
+    const report = await buildAnnualReportData(createApi([
+      ...baseJournals,
+      makeJournal("2025-12-31", [
+        makePosting(1000, "D", 50),
+        makePosting(2400, "C", 50),
+      ]),
+    ], {
+      extraAccounts: [
+        makeAccount({
+          id: 2400,
+          balance_type: "C",
+          account_type_est: "Kohustused",
+          account_type_eng: "Liabilities",
+          name_est: "Muud lühiajalised kohustused",
+          name_eng: "Other current liabilities",
+        }),
+      ],
+    }), 2025);
+
+    const liabilities = (report.balance_sheet as {
+      liabilities: {
+        luhiajalised_kohustused: { amount: number; source_accounts: Array<{ account_id: number }> };
+        pikaajalised_kohustused: { amount: number };
+        total_liabilities: number;
+      };
+    }).liabilities;
+
+    expect(liabilities.luhiajalised_kohustused.amount).toBe(50);
+    expect(liabilities.luhiajalised_kohustused.source_accounts).toEqual([
+      expect.objectContaining({ account_id: 2400, amount: 50 }),
+    ]);
+    expect(liabilities.pikaajalised_kohustused.amount).toBe(0);
+    expect(liabilities.total_liabilities).toBe(50);
   });
 });

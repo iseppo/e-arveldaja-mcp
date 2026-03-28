@@ -688,6 +688,10 @@ async function createAndMaybeMatchPurchaseInvoice(
       await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered, {
         preserveExistingTotals: true,
       });
+      createdInvoice = {
+        ...createdInvoice,
+        status: "CONFIRMED",
+      };
       notes.push("Confirmed created purchase invoice for booking and bank matching.");
       logAudit({
         tool: "process_receipt_batch", action: "CONFIRMED", entity_type: "purchase_invoice",
