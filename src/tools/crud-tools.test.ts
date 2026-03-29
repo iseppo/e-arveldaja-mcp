@@ -101,9 +101,14 @@ describe("parsePurchaseInvoiceItems", () => {
 });
 
 describe("parseSaleInvoiceItems", () => {
+  it("coerces string-typed discount_percent to number", () => {
+    const items = parseSaleInvoiceItems('[{"products_id":1,"custom_title":"Service","amount":1,"discount_percent":"10"}]');
+    expect(items[0]!.discount_percent).toBe(10);
+  });
+
   it("rejects non-numeric discount_percent values", () => {
     expect(() =>
-      parseSaleInvoiceItems('[{"products_id":1,"custom_title":"Service","amount":1,"discount_percent":"10"}]')
+      parseSaleInvoiceItems('[{"products_id":1,"custom_title":"Service","amount":1,"discount_percent":"bad"}]')
     ).toThrow("discount_percent");
   });
 });

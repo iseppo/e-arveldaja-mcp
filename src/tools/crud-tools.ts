@@ -83,7 +83,22 @@ export function requireFields(items: Record<string, unknown>[], label: string, f
   });
 }
 
+/** Coerce string-typed numbers to actual numbers (LLMs often quote numbers in JSON). */
+export function coerceNumericFields(items: Record<string, unknown>[], fields: string[]): void {
+  for (const item of items) {
+    for (const field of fields) {
+      if (field in item && typeof item[field] === "string") {
+        const parsed = Number(item[field]);
+        if (Number.isFinite(parsed)) {
+          item[field] = parsed;
+        }
+      }
+    }
+  }
+}
+
 export function requireNumericFields(items: Record<string, unknown>[], label: string, fields: string[]): void {
+  coerceNumericFields(items, fields);
   items.forEach((item, index) => {
     for (const field of fields) {
       if (field in item && item[field] !== null && item[field] !== undefined) {

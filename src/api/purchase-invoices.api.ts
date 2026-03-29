@@ -79,13 +79,14 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     grossPrice?: number,
     isVatRegistered = true,
   ): Promise<PurchaseInvoice> {
+    const normalizedItems = normalizeItemsForNonVat(
+      data.items,
+      isVatRegistered,
+      grossPrice,
+    );
     const createData: CreatePurchaseInvoiceData = {
       ...data,
-      items: normalizeItemsForNonVat(
-        data.items,
-        isVatRegistered,
-        grossPrice,
-      ),
+      items: normalizedItems,
     };
     const response = await this.create(createData);
     const id = response.created_object_id;
@@ -94,10 +95,10 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     try {
       // Read back to get item-level VAT computed by API
       const invoice = await this.get(id);
-      const items = invoice.items;
+      const apiItems = invoice.items;
 
-      const itemVat = items ? roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0)) : 0;
-      const itemNet = items ? roundMoney(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0)) : 0;
+      const itemVat = apiItems ? roundMoney(apiItems.reduce((s, i) => s + (i.vat_amount ?? 0), 0)) : 0;
+      const itemNet = apiItems ? roundMoney(apiItems.reduce((s, i) => s + (i.total_net_price ?? 0), 0)) : 0;
 
       // Invoice-level VAT: explicit value wins for VAT-registered companies.
       // Non-VAT companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
@@ -110,7 +111,29 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         ? grossPrice
         : roundMoney(itemNet + itemVat);
 
-      await this.update(id, { vat_price: vat, gross_price: gross, items: invoice.items } as Partial<PurchaseInvoice>);
+      // Merge API-returned item IDs back into our original items (preserving
+      // cl_fringe_benefits_id and other fields the API GET doesn't return).
+      // If the API items have different count (shouldn't happen), fall back to API items.
+      const patchItems = apiItems && apiItems.length === normalizedItems.length
+        ? normalizedItems.map((orig, idx) => ({
+            ...orig,
+            id: apiItems[idx]!.id,
+            // Let the API recompute vat_amount from our fields
+          }))
+        : apiItems;
+
+      // When explicit VAT differs from item-computed VAT (rounding), adjust
+      // project_no_vat_gross_price on items so the API computes matching totals.
+      if (patchItems && vatPrice !== undefined && isVatRegistered && itemVat !== vatPrice) {
+        const vatDiff = roundMoney(vatPrice - itemVat);
+        // Apply the rounding difference to the last item's gross
+        const lastItem = patchItems[patchItems.length - 1]!;
+        const currentGross = lastItem.project_no_vat_gross_price
+          ?? roundMoney((lastItem.total_net_price ?? 0) * (1 + (Number(String(lastItem.vat_rate_dropdown ?? "0").replace(",", ".")) || 0) / 100));
+        lastItem.project_no_vat_gross_price = roundMoney(currentGross + vatDiff);
+      }
+
+      await this.update(id, { vat_price: vat, gross_price: gross, items: patchItems } as Partial<PurchaseInvoice>);
 
       return this.get(id);
     } catch (error) {
