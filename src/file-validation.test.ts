@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { getAllowedRootsStartupWarning, validateFilePath } from "./file-validation.js";
+import { getAllowedRootsStartupWarning, isPathWithinRoot, splitAllowedPaths, validateFilePath } from "./file-validation.js";
 import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync } from "fs";
-import { join } from "path";
+import { join, win32 } from "path";
 import { tmpdir } from "os";
 
 describe("validateFilePath", () => {
@@ -88,7 +88,7 @@ describe("validateFilePath", () => {
     delete process.env.EARVELDAJA_ALLOW_HOME;
     try {
       const warning = getAllowedRootsStartupWarning();
-      expect(warning).toContain("/tmp");
+      expect(warning).toContain(tmpdir());
       expect(warning).toContain("EARVELDAJA_ALLOWED_PATHS");
       expect(warning).toContain("EARVELDAJA_ALLOW_HOME");
     } finally {
@@ -108,5 +108,17 @@ describe("validateFilePath", () => {
       if (previous === undefined) delete process.env.EARVELDAJA_ALLOWED_PATHS;
       else process.env.EARVELDAJA_ALLOWED_PATHS = previous;
     }
+  });
+
+  it("splits EARVELDAJA_ALLOWED_PATHS using the provided platform separator", () => {
+    expect(splitAllowedPaths("C:\\docs;D:\\tmp", ";")).toEqual(["C:\\docs", "D:\\tmp"]);
+  });
+
+  it("treats Windows-style child paths inside the allowed root as valid", () => {
+    expect(isPathWithinRoot(
+      "C:\\Users\\Seppo\\Documents\\invoice.pdf",
+      "C:\\Users\\Seppo",
+      win32,
+    )).toBe(true);
   });
 });

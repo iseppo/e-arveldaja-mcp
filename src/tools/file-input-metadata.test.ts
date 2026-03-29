@@ -20,6 +20,7 @@ describe("file input tool metadata", () => {
   it("marks file and folder based tools as open-world", () => {
     const toolConfigs = [
       getToolConfig(registerPdfWorkflowTools, "extract_pdf_invoice"),
+      getToolConfig(registerPdfWorkflowTools, "create_purchase_invoice_from_pdf"),
       getToolConfig(registerPdfWorkflowTools, "upload_invoice_document"),
       getToolConfig(registerLightyearTools, "parse_lightyear_statement"),
       getToolConfig(registerLightyearTools, "book_lightyear_trades"),

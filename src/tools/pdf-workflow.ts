@@ -26,6 +26,24 @@ async function validateInvoiceDocumentPath(filePath: string): Promise<string> {
   return validateFilePath(filePath, INVOICE_DOCUMENT_EXTENSIONS, MAX_INVOICE_DOCUMENT_SIZE);
 }
 
+function sanitizeInvoiceDocumentFileName(resolvedPath: string): string {
+  return (resolvedPath.split(/[\\/]/).pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255);
+}
+
+async function prepareInvoiceDocumentUpload(filePath: string): Promise<{
+  resolvedPath: string;
+  fileName: string;
+  contentsBase64: string;
+}> {
+  const resolvedPath = await validateInvoiceDocumentPath(filePath);
+  const buffer = await readFile(resolvedPath);
+  return {
+    resolvedPath,
+    fileName: sanitizeInvoiceDocumentFileName(resolvedPath),
+    contentsBase64: buffer.toString("base64"),
+  };
+}
+
 function parseVatRate(rateValue?: string): number | undefined {
   if (rateValue === undefined) return undefined;
   const normalized = rateValue.trim();
@@ -78,7 +96,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const resolved = await validateInvoiceDocumentPath(file_path);
       const parsedDocument = await parseDocument(resolved);
       const hints = extractPdfHints(parsedDocument.text);
-      const extracted = extractReceiptFieldsFromText(parsedDocument.text, (resolved.split("/").pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255));
+      const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved));
       const llmFallback = summarizeInvoiceExtraction(extracted);
 
       return {
@@ -367,8 +385,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "create_purchase_invoice_from_pdf",
-    "Create a draft purchase invoice from extracted and validated PDF data. " +
-    "Automatically uploads the source document if file_path is provided. " +
+    "Create a draft purchase invoice from extracted and validated PDF/JPG/PNG data and attach the source document to it. " +
+    "The source file is required and upload is mandatory; if upload fails after invoice creation, the draft invoice is invalidated. " +
     "Pass EXACT vat_price and gross_price from the original invoice for payment matching.",
     {
       supplier_client_id: coerceId.describe("Supplier client ID (from resolve_supplier)"),
@@ -384,11 +402,12 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       ref_number: z.string().optional().describe("Reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
       currency: z.string().optional().describe("Currency code (default EUR)"),
-      file_path: z.string().optional().describe("Absolute path to the source invoice document (PDF/JPG/PNG) — auto-uploaded after creation"),
+      file_path: z.string().describe("Absolute path to the source invoice document (PDF/JPG/PNG) — uploaded to the invoice during creation"),
     },
-    { ...create, title: "Create Purchase Invoice from PDF" },
+    { ...create, openWorldHint: true, title: "Create Purchase Invoice from PDF" },
     async (params) => {
       const supplier = await api.clients.get(params.supplier_client_id);
+      const documentUpload = await prepareInvoiceDocumentUpload(params.file_path);
 
       const isVatReg = await isCompanyVatRegistered(api);
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
@@ -426,21 +445,30 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         params.gross_price,
         isVatReg,
       );
+      if (!result.id) {
+        return toolError({ error: "Purchase invoice was created but no invoice ID was returned." });
+      }
 
-      // Auto-upload source document if file_path provided
-      let uploaded = false;
-      let uploadError: string | undefined;
-      if (params.file_path && result.id) {
+      try {
+        await api.purchaseInvoices.uploadDocument(result.id, documentUpload.fileName, documentUpload.contentsBase64);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
         try {
-          const resolved = await validateInvoiceDocumentPath(params.file_path);
-          const buffer = await readFile(resolved);
-          const base64 = buffer.toString("base64");
-          const fileName = (resolved.split("/").pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255);
-          await api.purchaseInvoices.uploadDocument(result.id, fileName, base64);
-          uploaded = true;
-        } catch (err: unknown) {
-          uploadError = err instanceof Error ? err.message : String(err);
+          await api.purchaseInvoices.invalidate(result.id);
+        } catch (invalidateError: unknown) {
+          const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
+          return toolError({
+            error:
+              `Purchase invoice ${result.id} was created but source document upload failed: ${message}. ` +
+              `Automatic invalidation also failed: ${invalidateMessage}`,
+            invoice_id: result.id,
+          });
         }
+
+        return toolError({
+          error: `Purchase invoice ${result.id} was created but source document upload failed and the draft was invalidated: ${message}`,
+          invoice_id: result.id,
+        });
       }
 
       logAudit({
@@ -451,25 +479,22 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           supplier_name: supplier.name, invoice_number: params.invoice_number,
           invoice_date: params.invoice_date, total_vat: params.vat_price, total_gross: params.gross_price,
           items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
-          ...(uploaded ? { file_name: params.file_path?.split("/").pop() } : {}),
+          file_name: documentUpload.fileName,
         },
       });
-      if (uploaded && result.id) {
-        logAudit({
-          tool: "create_purchase_invoice_from_pdf", action: "UPLOADED", entity_type: "purchase_invoice",
-          entity_id: result.id,
-          summary: `Uploaded document to purchase invoice ${result.id}`,
-          details: { file_name: params.file_path?.split("/").pop() },
-        });
-      }
+      logAudit({
+        tool: "create_purchase_invoice_from_pdf", action: "UPLOADED", entity_type: "purchase_invoice",
+        entity_id: result.id,
+        summary: `Uploaded document to purchase invoice ${result.id}`,
+        details: { file_name: documentUpload.fileName },
+      });
 
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             result,
-            ...(uploaded ? { document_uploaded: true } : {}),
-            ...(uploadError ? { document_upload_error: uploadError } : {}),
+            document_uploaded: true,
             note: "Purchase invoice created as DRAFT. Review and use confirm_purchase_invoice to confirm.",
           }),
         }],
@@ -485,16 +510,13 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     },
     { ...mutate, openWorldHint: true, title: "Upload Purchase Invoice Document" },
     async ({ invoice_id, file_path }) => {
-      const resolved = await validateInvoiceDocumentPath(file_path);
-      const buffer = await readFile(resolved);
-      const base64 = buffer.toString("base64");
-      const fileName = (resolved.split("/").pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255);
-      const result = await api.purchaseInvoices.uploadDocument(invoice_id, fileName, base64);
+      const documentUpload = await prepareInvoiceDocumentUpload(file_path);
+      const result = await api.purchaseInvoices.uploadDocument(invoice_id, documentUpload.fileName, documentUpload.contentsBase64);
       logAudit({
         tool: "upload_invoice_document", action: "UPLOADED", entity_type: "purchase_invoice",
         entity_id: invoice_id,
-        summary: `Uploaded document "${fileName}" to purchase invoice ${invoice_id}`,
-        details: { file_name: fileName },
+        summary: `Uploaded document "${documentUpload.fileName}" to purchase invoice ${invoice_id}`,
+        details: { file_name: documentUpload.fileName },
       });
       return { content: [{ type: "text", text: toMcpJson(result) }] };
     }

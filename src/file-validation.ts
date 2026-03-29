@@ -1,7 +1,7 @@
 import { stat, realpath } from "fs/promises";
-import { resolve, extname, isAbsolute } from "path";
+import { resolve, extname, isAbsolute, relative, delimiter } from "path";
 import { existsSync, realpathSync } from "fs";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 import { getProjectRoot } from "./paths.js";
 
 function resolveAllowedRoots(roots: string[]): string[] {
@@ -11,14 +11,14 @@ function resolveAllowedRoots(roots: string[]): string[] {
 }
 
 /**
- * Default root directories for file reads: working directory + /tmp.
+ * Default root directories for file reads: working directory + OS temp dir.
  * Set EARVELDAJA_ALLOW_HOME=true to also include $HOME.
- * Override entirely with EARVELDAJA_ALLOWED_PATHS (colon-separated list).
+ * Override entirely with EARVELDAJA_ALLOWED_PATHS (platform-delimited list).
  * Roots are resolved through symlinks so that the check works even if
- * e.g. /tmp is a symlink to /private/tmp (macOS).
+ * e.g. the temp dir is a symlink on macOS.
  */
 function getDefaultRoots(): string[] {
-  const roots = [process.cwd(), "/tmp"];
+  const roots = [process.cwd(), tmpdir()];
   if (process.env.EARVELDAJA_ALLOW_HOME === "true") {
     const home = homedir();
     if (!roots.includes(home)) roots.push(home);
@@ -26,9 +26,30 @@ function getDefaultRoots(): string[] {
   return roots;
 }
 
+export function splitAllowedPaths(raw: string, separator = delimiter): string[] {
+  return raw
+    .split(separator)
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
+type PathContainmentOps = {
+  relative(from: string, to: string): string;
+  isAbsolute(path: string): boolean;
+};
+
+export function isPathWithinRoot(
+  targetPath: string,
+  rootPath: string,
+  pathOps: PathContainmentOps = { relative, isAbsolute },
+): boolean {
+  const rel = pathOps.relative(rootPath, targetPath);
+  return rel === "" || (!rel.startsWith("..") && !pathOps.isAbsolute(rel));
+}
+
 export function getAllowedRoots(): string[] {
   const raw = process.env.EARVELDAJA_ALLOWED_PATHS
-    ? process.env.EARVELDAJA_ALLOWED_PATHS.split(":").map(p => {
+    ? splitAllowedPaths(process.env.EARVELDAJA_ALLOWED_PATHS).map(p => {
         const resolved = resolve(p);
         if (resolved === "/") {
           process.stderr.write("WARNING: EARVELDAJA_ALLOWED_PATHS includes filesystem root '/'. This is insecure.\n");
@@ -97,7 +118,7 @@ export async function validateFilePath(
 
   // Check allowed directory roots
   const roots = getAllowedRoots();
-  if (!roots.some(root => real.startsWith(root + "/") || real === root)) {
+  if (!roots.some(root => isPathWithinRoot(real, root))) {
     throw new Error(
       `File path outside allowed directories. Allowed roots: ${roots.join(", ")}. ` +
       `Set EARVELDAJA_ALLOWED_PATHS to override.`

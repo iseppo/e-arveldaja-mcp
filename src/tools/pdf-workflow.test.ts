@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
+import { readFile } from "fs/promises";
 import { validateFilePath } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import { registerPdfWorkflowTools } from "./pdf-workflow.js";
@@ -12,10 +16,36 @@ vi.mock("../document-parser.js", () => ({
   parseDocument: vi.fn(),
 }));
 
+vi.mock("fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises");
+  return {
+    ...actual,
+    readFile: vi.fn(actual.readFile),
+  };
+});
+
 const mockedValidateFilePath = vi.mocked(validateFilePath);
 const mockedParseDocument = vi.mocked(parseDocument);
+const mockedReadFile = vi.mocked(readFile);
 
-function setupPdfWorkflowTool(toolName: string) {
+const tempDirs: string[] = [];
+
+function createTempInvoiceFile(fileName = "invoice.pdf", contents = "invoice-bytes"): string {
+  const dir = mkdtempSync(join(tmpdir(), "pdf-workflow-test-"));
+  tempDirs.push(dir);
+  const filePath = join(dir, fileName);
+  writeFileSync(filePath, contents);
+  return filePath;
+}
+
+function setupPdfWorkflowTool(
+  toolName: string,
+  options: {
+    purchaseInvoices?: Record<string, unknown>;
+    clients?: Record<string, unknown>;
+    readonly?: Record<string, unknown>;
+  } = {},
+) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
     purchaseInvoices: {
@@ -44,6 +74,46 @@ function setupPdfWorkflowTool(toolName: string) {
           reversed_vat_id: null,
         }],
       }),
+      createAndSetTotals: vi.fn().mockResolvedValue({
+        id: 9001,
+        number: "PI-9001",
+      }),
+      uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
+      invalidate: vi.fn().mockResolvedValue({ ok: true }),
+      ...options.purchaseInvoices,
+    },
+    clients: {
+      get: vi.fn().mockResolvedValue({
+        id: 7,
+        name: "Supplier OÜ",
+      }),
+      ...options.clients,
+    },
+    readonly: {
+      getPurchaseArticles: vi.fn().mockResolvedValue([
+        {
+          id: 45,
+          name_est: "Internet subscription",
+          name_eng: "Internet subscription",
+          accounts_id: 5230,
+          vat_accounts_id: 1510,
+          cl_vat_articles_id: 1,
+          is_disabled: false,
+          priority: 1,
+        },
+      ]),
+      getAccounts: vi.fn().mockResolvedValue([
+        {
+          id: 5230,
+          name_est: "Internet expense",
+          name_eng: "Internet expense",
+          account_type_est: "Kulud",
+          account_type_eng: "Expenses",
+        },
+      ]),
+      getAccountDimensions: vi.fn().mockResolvedValue([]),
+      getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+      ...options.readonly,
     },
   } as any;
 
@@ -54,8 +124,20 @@ function setupPdfWorkflowTool(toolName: string) {
     throw new Error("Tool was not registered");
   }
 
-  return registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+  return {
+    handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>,
+    api,
+  };
 }
+
+afterEach(() => {
+  mockedValidateFilePath.mockReset();
+  mockedParseDocument.mockReset();
+  mockedReadFile.mockClear();
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe("pdf workflow tools", () => {
   it("extract_pdf_invoice uses LiteParse output for raw text and page count", async () => {
@@ -66,7 +148,7 @@ describe("pdf workflow tools", () => {
       result: { text: "", pages: [] } as any,
     });
 
-    const handler = setupPdfWorkflowTool("extract_pdf_invoice");
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice");
 
     const response = await handler({ file_path: "/tmp/invoice.pdf" });
     const payload = parseMcpResponse(response.content[0]!.text);
@@ -101,7 +183,7 @@ describe("pdf workflow tools", () => {
       result: { text: "", pages: [] } as any,
     });
 
-    const handler = setupPdfWorkflowTool("extract_pdf_invoice");
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice");
 
     const response = await handler({ file_path: "/tmp/invoice.pdf" });
     const payload = parseMcpResponse(response.content[0]!.text);
@@ -118,7 +200,7 @@ describe("pdf workflow tools", () => {
   });
 
   it("returns purchase account and VAT metadata from similar invoices", async () => {
-    const handler = setupPdfWorkflowTool("suggest_booking");
+    const { handler } = setupPdfWorkflowTool("suggest_booking");
 
     const result = await handler({
       clients_id: 7,
@@ -140,5 +222,119 @@ describe("pdf workflow tools", () => {
         cl_vat_articles_id: 1,
       }),
     ]);
+  });
+
+  it("uploads the source document when creating a purchase invoice from a file", async () => {
+    const filePath = createTempInvoiceFile("invoice-upload.pdf", "pdf-bytes");
+    mockedValidateFilePath.mockResolvedValue(filePath);
+
+    const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
+
+    const response = await handler({
+      supplier_client_id: 7,
+      invoice_number: "PI-9001",
+      invoice_date: "2026-03-20",
+      journal_date: "2026-03-20",
+      term_days: 14,
+      items: JSON.stringify([{
+        cl_purchase_articles_id: 45,
+        custom_title: "Internet subscription",
+        purchase_accounts_id: 5230,
+        total_net_price: 100,
+        vat_rate_dropdown: "24",
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+      }]),
+      vat_price: 24,
+      gross_price: 124,
+      file_path: filePath,
+    });
+
+    const payload = parseMcpResponse(response.content[0]!.text);
+
+    expect(response.isError).not.toBe(true);
+    expect(payload.document_uploaded).toBe(true);
+    expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledWith(
+      9001,
+      "invoice-upload.pdf",
+      Buffer.from("pdf-bytes").toString("base64"),
+    );
+    expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
+  });
+
+  it("invalidates the draft invoice and returns an error when document upload fails", async () => {
+    const filePath = createTempInvoiceFile("invoice-fail.pdf", "pdf-bytes");
+    mockedValidateFilePath.mockResolvedValue(filePath);
+
+    const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+      purchaseInvoices: {
+        uploadDocument: vi.fn().mockRejectedValue(new Error("upload failed")),
+      },
+    });
+
+    const response = await handler({
+      supplier_client_id: 7,
+      invoice_number: "PI-9002",
+      invoice_date: "2026-03-20",
+      journal_date: "2026-03-20",
+      term_days: 14,
+      items: JSON.stringify([{
+        cl_purchase_articles_id: 45,
+        custom_title: "Internet subscription",
+        purchase_accounts_id: 5230,
+        total_net_price: 100,
+        vat_rate_dropdown: "24",
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+      }]),
+      vat_price: 24,
+      gross_price: 124,
+      file_path: filePath,
+    });
+
+    const payload = parseMcpResponse(response.content[0]!.text);
+
+    expect(response.isError).toBe(true);
+    expect(payload.error).toContain("source document upload failed");
+    expect(payload.error).toContain("draft was invalidated");
+    expect(payload.invoice_id).toBe(9001);
+    expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9001);
+  });
+
+  it("sanitizes Windows-style source paths down to the base file name", async () => {
+    mockedValidateFilePath.mockResolvedValue("C:\\Users\\Seppo\\Documents\\invoice-upload.pdf");
+    mockedReadFile.mockResolvedValue(Buffer.from("pdf-bytes"));
+
+    const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
+
+    const response = await handler({
+      supplier_client_id: 7,
+      invoice_number: "PI-9003",
+      invoice_date: "2026-03-20",
+      journal_date: "2026-03-20",
+      term_days: 14,
+      items: JSON.stringify([{
+        cl_purchase_articles_id: 45,
+        custom_title: "Internet subscription",
+        purchase_accounts_id: 5230,
+        total_net_price: 100,
+        vat_rate_dropdown: "24",
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+      }]),
+      vat_price: 24,
+      gross_price: 124,
+      file_path: "C:\\Users\\Seppo\\Documents\\invoice-upload.pdf",
+    });
+
+    const payload = parseMcpResponse(response.content[0]!.text);
+
+    expect(response.isError).not.toBe(true);
+    expect(payload.document_uploaded).toBe(true);
+    expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledWith(
+      9001,
+      "invoice-upload.pdf",
+      Buffer.from("pdf-bytes").toString("base64"),
+    );
   });
 });
