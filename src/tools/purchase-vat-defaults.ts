@@ -15,10 +15,14 @@ const NON_VAT_REGISTERED_FALLBACK = {
 const warnedFallbackKeys = new Set<string>();
 let connectionScope = "";
 
-/** Clear the fallback-warning dedup set and set the connection scope. Call on connection switch. */
+/** Clear the fallback-warning dedup set for the previous scope and set the new connection scope. Call on connection switch. */
 export function clearVatWarnings(scope?: string): void {
+  const oldScope = connectionScope;
   if (scope !== undefined) connectionScope = scope;
-  warnedFallbackKeys.clear();
+  // Only clear keys for the old scope to preserve warnings from other connections
+  for (const key of warnedFallbackKeys) {
+    if (key.startsWith(`${oldScope}:`)) warnedFallbackKeys.delete(key);
+  }
 }
 
 type PurchaseArticleWithVat = PurchaseArticle & {

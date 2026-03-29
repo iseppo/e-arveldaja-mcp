@@ -309,7 +309,9 @@ function serializeEnvFile(
   ];
 
   const escapeEnvValue = (v: string): string =>
-    /[\n\r"\\$`#]/.test(v) ? `"${v.replace(/[\\"$`]/g, "\\$&")}"` : v;
+    /[\n\r"\\$`#]/.test(v)
+      ? `"${v.replace(/[\\"$`]/g, "\\$&").replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`
+      : v;
 
   return `${header.join("\n")}\n${keys.map((key) => `${key}=${escapeEnvValue(env[key]!)}`).join("\n")}\n`;
 }

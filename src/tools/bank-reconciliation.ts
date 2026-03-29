@@ -59,7 +59,11 @@ function buildInvoiceIndex<T extends { gross_price?: number; bank_ref_number?: s
   return { byRef, byAmount };
 }
 
-/** Collect candidate invoices that could match a transaction on amount or ref_number. */
+/**
+ * Collect candidate invoices that could match a transaction on amount or ref_number.
+ * Safe to skip invoices not in any index bucket: client-only matches (max 15 pts)
+ * can never reach the minimum practical threshold (50), so they would be filtered anyway.
+ */
 function getIndexedCandidates<T>(
   index: InvoiceIndex<T>,
   refNumber: string | null | undefined,
