@@ -688,6 +688,7 @@ export function listAuditLogs(): Array<{ connection: string; file: string; entri
 
 /** Read a specific connection's audit log (not just the active one). */
 export function getAuditLogByConnection(connectionName: string, filter?: AuditLogFilter): string {
+  loadAuditLabelMap();
   const mappedPath = getLogFilePathForConnection(connectionName);
   if (existsSync(mappedPath)) {
     return getAuditLogFromFile(mappedPath, filter);

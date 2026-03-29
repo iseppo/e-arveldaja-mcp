@@ -369,6 +369,28 @@ describe("audit log labels", () => {
     expect(auditLog.listAuditLogs().map((log: { file: string }) => log.file)).toEqual(["Acme OÜ.audit.md"]);
   });
 
+  it("refreshes persisted labels before resolving raw connection lookups", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-refresh-"));
+    const auditLogReader = await loadAuditLogModule(tempDir);
+
+    auditLogReader.initAuditLog(() => "env");
+    auditLogReader.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 140,
+      summary: "Pre-label entry",
+      details: {},
+    });
+
+    const auditLogWriter = await loadAuditLogModule(tempDir);
+    auditLogWriter.initAuditLog(() => "env");
+    auditLogWriter.setAuditLogLabel("env", "Acme OÜ");
+
+    expect(auditLogReader.getAuditLogByConnection("env")).toContain("#140");
+    expect(auditLogReader.getAuditLogByLabel("Acme OÜ")).toContain("#140");
+  });
+
   it("ignores persisted labels when the connection fingerprint changes", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-fingerprint-"));
     let auditLog = await loadAuditLogModule(tempDir);
