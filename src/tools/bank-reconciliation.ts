@@ -60,6 +60,10 @@ function comparableTransactionAmount(tx: Transaction): number {
   return roundMoney(tx.base_amount ?? tx.amount);
 }
 
+function hasMeaningfulComparableAmount(tx: Transaction): boolean {
+  return Math.abs(comparableTransactionAmount(tx) - roundMoney(tx.amount)) >= 0.01;
+}
+
 export function matchScore(
   tx: Transaction,
   invoice: { gross_price?: number; base_gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
@@ -471,6 +475,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       }> = [];
       const errors: Array<{ transaction_ids: number[]; reason: string }> = [];
       const consumedTxIds = new Set<number>();
+      const blockedOneSidedTxIds = new Set<number>();
 
       // Build index of existing confirmed inter-account journals for duplicate detection.
       // Key: "sourceDim|targetDim|amount|date" → journal_id
@@ -549,15 +554,22 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           const reasons: string[] = [];
           const txOutComparableAmount = comparableTransactionAmount(txOut);
           const txInComparableAmount = comparableTransactionAmount(txIn);
+          const nominalAmountsMatch = Math.abs(txOut.amount - txIn.amount) < 0.01;
+          const comparableAmountsMatch = Math.abs(txOutComparableAmount - txInComparableAmount) < 0.01;
+          const hasMeaningfulComparableAmounts =
+            hasMeaningfulComparableAmount(txOut) ||
+            hasMeaningfulComparableAmount(txIn);
+          const conflictingComparableAmounts =
+            nominalAmountsMatch &&
+            hasMeaningfulComparableAmounts &&
+            !comparableAmountsMatch;
 
-          if (Math.abs(txOut.amount - txIn.amount) < 0.01) {
-            confidence += 40;
-            reasons.push("exact_amount");
-          } else if (
-            Math.abs(txOutComparableAmount - txInComparableAmount) < 0.01 &&
-            (Math.abs(txOutComparableAmount - roundMoney(txOut.amount)) >= 0.01 ||
-              Math.abs(txInComparableAmount - roundMoney(txIn.amount)) >= 0.01)
-          ) {
+          if (nominalAmountsMatch) {
+            if (!conflictingComparableAmounts) {
+              confidence += 40;
+              reasons.push("exact_amount");
+            }
+          } else if (comparableAmountsMatch && hasMeaningfulComparableAmounts) {
             confidence += 40;
             reasons.push("exact_base_amount");
           } else {
@@ -574,6 +586,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             confidence += 10;
             reasons.push(`date_gap_${Math.round(daysDiff)}d`);
           } else {
+            continue;
+          }
+
+          if (conflictingComparableAmounts) {
+            blockedOneSidedTxIds.add(txOut.id);
+            blockedOneSidedTxIds.add(txIn.id);
             continue;
           }
 
@@ -719,7 +737,9 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       }
 
       // --- Phase 2: one-sided transfers (counterparty = company name or own IBAN) ---
-      const remaining = unconfirmed.filter(tx => tx.id && !consumedTxIds.has(tx.id));
+      const remaining = unconfirmed.filter(
+        tx => tx.id && !consumedTxIds.has(tx.id) && !blockedOneSidedTxIds.has(tx.id),
+      );
 
       for (const tx of remaining) {
         if (!tx.id) continue;

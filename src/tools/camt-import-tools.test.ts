@@ -336,4 +336,99 @@ describe("camt import tool", () => {
       }),
     ]));
   });
+
+  it("only skips the already imported split row when a prior import used the same shared bank reference", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-split</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">300.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-03</Dt></BookgDt>
+        <AcctSvcrRef>REF-SPLIT-1</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs>
+              <EndToEndId>E2E-1</EndToEndId>
+            </Refs>
+            <AmtDtls>
+              <TxAmt><Amt Ccy="EUR">100.00</Amt></TxAmt>
+            </AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor A OÜ</Nm></Cdtr>
+            </RltdPties>
+            <RmtInf>
+              <Ustrd>Split payment A</Ustrd>
+            </RmtInf>
+          </TxDtls>
+          <TxDtls>
+            <Refs>
+              <EndToEndId>E2E-2</EndToEndId>
+            </Refs>
+            <AmtDtls>
+              <TxAmt><Amt Ccy="EUR">200.00</Amt></TxAmt>
+            </AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor B OÜ</Nm></Cdtr>
+            </RltdPties>
+            <RmtInf>
+              <Ustrd>Split payment B</Ustrd>
+            </RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 501,
+          status: "PROJECT",
+          is_deleted: false,
+          bank_ref_number: "REF-SPLIT-1",
+          date: "2026-02-03",
+          type: "C",
+          amount: 100,
+          cl_currencies_id: "EUR",
+          ref_number: "E2E-1",
+          bank_account_name: "Vendor A OÜ",
+          description: "Split payment A",
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.created_count).toBe(1);
+    expect(payload.skipped_count).toBe(1);
+    expect(payload.sample).toEqual([
+      expect.objectContaining({
+        status: "would_create",
+        amount: 200,
+        bank_reference: "REF-SPLIT-1",
+        description: "Split payment B",
+      }),
+    ]);
+    expect(payload.execution.skipped).toEqual([
+      expect.objectContaining({
+        amount: 100,
+        bank_reference: "REF-SPLIT-1",
+        duplicate_transaction_ids: [501],
+        reason: "Existing transaction matched by bank reference",
+      }),
+    ]);
+  });
 });

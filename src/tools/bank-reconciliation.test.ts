@@ -556,6 +556,44 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.pairs[0]!.match_reasons).toContain("exact_base_amount");
   });
 
+  it("does not pair or one-side-match nominal FX amounts when their base amounts conflict", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        {
+          id: 103,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 100,
+          base_amount: 92,
+          cl_currencies_id: "USD",
+          date: "2026-03-20",
+          accounts_dimensions_id: 100,
+          bank_account_no: "EE987654321098765432",
+        },
+        {
+          id: 104,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 100,
+          base_amount: 100,
+          cl_currencies_id: "EUR",
+          date: "2026-03-20",
+          accounts_dimensions_id: 200,
+          bank_account_no: "EE123456789012345678",
+        },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.matched_one_sided).toBe(0);
+  });
+
   it("skips ambiguous pair matches instead of picking the first incoming candidate", async () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [

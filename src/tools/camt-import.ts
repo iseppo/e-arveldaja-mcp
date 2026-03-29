@@ -81,6 +81,7 @@ export interface CamtParseResult {
 
 interface DuplicateLookup {
   byBankRef: Map<string, number[]>;
+  byEntryKey: Map<string, number[]>;
 }
 
 interface ClientResolution {
@@ -274,24 +275,90 @@ function pickCounterparty(txDetails: unknown, direction: "CRDT" | "DBIT"): { par
 
 function buildDuplicateLookup(transactions: Transaction[]): DuplicateLookup {
   const byBankRef = new Map<string, number[]>();
+  const byEntryKey = new Map<string, number[]>();
 
   for (const transaction of transactions) {
     if (!transaction.id) continue;
-    const key = transaction.bank_ref_number?.trim();
-    if (!key) continue;
-    const existing = byBankRef.get(key) ?? [];
+    const bankRef = normalizeOptionalReference(transaction.bank_ref_number ?? undefined);
+    if (!bankRef) continue;
+    const existing = byBankRef.get(bankRef) ?? [];
     existing.push(transaction.id);
-    byBankRef.set(key, existing);
+    byBankRef.set(bankRef, existing);
+
+    const entryKey = buildExistingTransactionDuplicateKey(transaction, bankRef);
+    if (!entryKey) continue;
+
+    const exactExisting = byEntryKey.get(entryKey) ?? [];
+    exactExisting.push(transaction.id);
+    byEntryKey.set(entryKey, exactExisting);
   }
 
-  return { byBankRef };
+  return { byBankRef, byEntryKey };
+}
+
+function buildExistingTransactionDuplicateKey(
+  transaction: Pick<Transaction,
+    "bank_ref_number" |
+    "date" |
+    "type" |
+    "amount" |
+    "cl_currencies_id" |
+    "ref_number" |
+    "bank_account_no" |
+    "bank_account_name" |
+    "description"
+  >,
+  normalizedBankReference = normalizeOptionalReference(transaction.bank_ref_number ?? undefined),
+): string | undefined {
+  if (!normalizedBankReference || !transaction.date || !transaction.type || !Number.isFinite(transaction.amount)) {
+    return undefined;
+  }
+
+  return [
+    normalizedBankReference,
+    transaction.date,
+    transaction.type,
+    transaction.cl_currencies_id ?? "",
+    roundMoney(transaction.amount).toFixed(2),
+    normalizeBatchDuplicateKeyPart(transaction.ref_number ?? undefined),
+    normalizeBatchDuplicateKeyPart(transaction.bank_account_no ?? undefined),
+    normalizeBatchDuplicateKeyPart(transaction.bank_account_name ?? undefined),
+    normalizeBatchDuplicateKeyPart(transaction.description ?? undefined),
+  ].join("|");
+}
+
+function buildExistingDuplicateKeyForEntry(entry: ParsedCamtEntry): string | undefined {
+  const bankReference = normalizeOptionalReference(entry.bank_reference);
+  if (!bankReference) return undefined;
+
+  return [
+    bankReference,
+    entry.date,
+    transactionTypeForDirection(entry.direction),
+    entry.currency,
+    roundMoney(entry.amount).toFixed(2),
+    normalizeBatchDuplicateKeyPart(entry.reference_number),
+    normalizeBatchDuplicateKeyPart(entry.counterparty_iban),
+    normalizeBatchDuplicateKeyPart(entry.counterparty_name),
+    normalizeBatchDuplicateKeyPart(entry.description),
+  ].join("|");
 }
 
 function findDuplicateTransactionIds(
-  bankReference: string | undefined,
+  entry: ParsedCamtEntry,
   lookup: DuplicateLookup,
+  repeatedBankReferences: ReadonlySet<string>,
 ): number[] {
-  if (!bankReference) return [];
+  const exactKey = buildExistingDuplicateKeyForEntry(entry);
+  if (exactKey) {
+    const exactMatches = lookup.byEntryKey.get(exactKey) ?? [];
+    if (exactMatches.length > 0) {
+      return [...new Set(exactMatches)].sort((left, right) => left - right);
+    }
+  }
+
+  const bankReference = normalizeOptionalReference(entry.bank_reference);
+  if (!bankReference || repeatedBankReferences.has(bankReference)) return [];
 
   const matches = new Set<number>();
 
@@ -321,6 +388,22 @@ function buildBatchDuplicateKey(entry: ParsedCamtEntry): string | undefined {
     normalizeBatchDuplicateKeyPart(entry.counterparty_name),
     normalizeBatchDuplicateKeyPart(entry.description),
   ].join("|");
+}
+
+function findRepeatedBankReferences(entries: ParsedCamtEntry[]): Set<string> {
+  const counts = new Map<string, number>();
+
+  for (const entry of entries) {
+    const bankReference = normalizeOptionalReference(entry.bank_reference);
+    if (!bankReference) continue;
+    counts.set(bankReference, (counts.get(bankReference) ?? 0) + 1);
+  }
+
+  return new Set(
+    [...counts.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([bankReference]) => bankReference),
+  );
 }
 
 function summarizeEntries(entries: ParsedCamtEntry[]): CamtParseResult["summary"] {
@@ -475,8 +558,9 @@ async function loadParsedCamt053(filePath: string): Promise<CamtParseResult> {
 async function enrichWithDuplicates(parsed: CamtParseResult, api: ApiContext): Promise<CamtParseResult> {
   const existingTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
   const duplicateLookup = buildDuplicateLookup(existingTransactions);
+  const repeatedBankReferences = findRepeatedBankReferences(parsed.entries);
   const entries = parsed.entries.map(entry => {
-    const duplicateIds = findDuplicateTransactionIds(entry.bank_reference, duplicateLookup);
+    const duplicateIds = findDuplicateTransactionIds(entry, duplicateLookup, repeatedBankReferences);
     return {
       ...entry,
       duplicate: duplicateIds.length > 0,
