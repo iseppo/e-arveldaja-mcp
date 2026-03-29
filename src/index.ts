@@ -670,7 +670,7 @@ Reporting:
       action: z.string().optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT)"),
       date_from: z.string().optional().describe("Return entries from this date (YYYY-MM-DD or ISO 8601)"),
       date_to: z.string().optional().describe("Return entries up to this date (YYYY-MM-DD or ISO 8601)"),
-      limit: z.number().optional().describe("Maximum entries to return (default 100, returns most recent)"),
+      limit: z.number().int().min(1).optional().describe("Maximum entries to return (positive integer, default 100, returns most recent)"),
     },
     { ...readOnly, title: "Get Session Audit Log" },
     async (params) => {

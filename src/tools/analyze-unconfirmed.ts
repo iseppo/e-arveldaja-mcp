@@ -122,12 +122,13 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         const txDim = tx.accounts_dimensions_id;
         const txType = tx.type;
         const txAmount = Math.round(tx.amount * 100) / 100;
+        const txDuplicateAmount = Math.round(((tx.base_amount ?? tx.amount) as number) * 100) / 100;
         const bankTitle = dimensionToTitle.get(txDim) ?? `dim:${txDim}`;
 
         // --- 1. Duplicate detection: journal already exists for this amount/date/bank account ---
         const dupJournalIds =
           txType === "D" || txType === "C"
-            ? bankJournalIndex.get(buildBankJournalDuplicateKey(txDim, txType, txAmount, tx.date))
+            ? bankJournalIndex.get(buildBankJournalDuplicateKey(txDim, txType, txDuplicateAmount, tx.date))
             : undefined;
         if (dupJournalIds) {
           const isAmbiguous = dupJournalIds.length > 1;
@@ -145,7 +146,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             bank_account_name: tx.bank_account_name,
             suggested_action: "likely_duplicate",
             confidence,
-            reason: `Journal #${dupJournalId} already exists with amount ${txAmount} on ${tx.date} in ${bankTitle}${reasonSuffix}`,
+            reason: `Journal #${dupJournalId} already exists with amount ${txDuplicateAmount} on ${tx.date} in ${bankTitle}${reasonSuffix}`,
             duplicate_journal_id: dupJournalId,
           });
           continue;

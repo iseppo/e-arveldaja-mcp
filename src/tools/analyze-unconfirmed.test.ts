@@ -208,6 +208,47 @@ describe("analyze_unconfirmed_transactions", () => {
       expect(payload.suggestions[0]!.suggested_action).not.toBe("likely_duplicate");
       expect(payload.summary.likely_duplicate ?? 0).toBe(0);
     });
+
+    it("detects duplicates using base amounts for foreign-currency transactions", async () => {
+      const handler = setupTool({
+        transactions: [{
+          id: 4,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 100,
+          base_amount: 92,
+          date: "2026-03-23",
+          accounts_dimensions_id: 100,
+          cl_currencies_id: "USD",
+          description: "USD payment",
+          bank_account_name: "Acme OÜ",
+          bank_account_no: null,
+        }],
+        bankAccounts: defaultBankAccounts,
+        journals: [{
+          id: 77,
+          effective_date: "2026-03-23",
+          is_deleted: false,
+          registered: true,
+          postings: [{
+            accounts_dimensions_id: 100,
+            type: "C",
+            amount: 100,
+            base_amount: 92,
+            is_deleted: false,
+          }],
+        }],
+      });
+
+      const result = await handler({});
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.suggestions).toHaveLength(1);
+      expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
+      expect(payload.suggestions[0]!.duplicate_journal_id).toBe(77);
+      expect(payload.suggestions[0]!.reason).toContain("amount 92");
+    });
   });
 
   describe("inter-account detection", () => {

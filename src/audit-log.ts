@@ -581,9 +581,18 @@ function parseFilterBoundary(value: string, kind: "from" | "to"): number {
   );
 }
 
+function parseLimitFilter(value: number | undefined): number {
+  if (value === undefined) return 100;
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`Invalid limit filter: "${value}". Expected a positive integer.`);
+  }
+  return value;
+}
+
 function getAuditLogFromFile(filePath: string, filter?: AuditLogFilter): string {
   const dateFromMs = filter?.date_from ? parseFilterBoundary(filter.date_from, "from") : undefined;
   const dateToMs = filter?.date_to ? parseFilterBoundary(filter.date_to, "to") : undefined;
+  const limit = parseLimitFilter(filter?.limit);
 
   if (!existsSync(filePath)) return "";
 
@@ -629,7 +638,6 @@ function getAuditLogFromFile(filePath: string, filter?: AuditLogFilter): string 
     });
   }
 
-  const limit = filter?.limit ?? 100;
   if (filtered.length > limit) {
     filtered = filtered.slice(-limit);
   }

@@ -212,6 +212,17 @@ describe("audit log date filters", () => {
     );
   });
 
+  it("throws a stable validation error for invalid limit filters", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    expect(() => auditLog.getAuditLog({ limit: 0 })).toThrow(
+      'Invalid limit filter: "0". Expected a positive integer.',
+    );
+  });
+
   it("applies limit after date filtering so the newest matching entry is kept", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
     const auditLog = await loadAuditLogModule(tempDir);

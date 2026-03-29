@@ -67,6 +67,11 @@ const SERVERS = {
 const APP_CONFIG_DIR_NAME = "e-arveldaja-mcp";
 const GLOBAL_ENV_FILE_NAME = ".env";
 const CWD = process.cwd();
+const API_CREDENTIAL_ENV_KEYS = [
+  "EARVELDAJA_API_KEY_ID",
+  "EARVELDAJA_API_PUBLIC_VALUE",
+  "EARVELDAJA_API_PASSWORD",
+] as const;
 
 function getBaseUrl(): string {
   const server = process.env.EARVELDAJA_SERVER || "live";
@@ -247,18 +252,30 @@ function parseEnvFile(envPath: string): Record<string, string> {
   return dotenv.parse(readFileSync(envPath, "utf-8"));
 }
 
+function hasAnyApiCredentialEnv(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): boolean {
+  return API_CREDENTIAL_ENV_KEYS.some((key) => Boolean(env[key]));
+}
+
 function hasCompleteApiCredentialEnv(env: NodeJS.ProcessEnv | Record<string, string>): boolean {
-  return Boolean(env.EARVELDAJA_API_KEY_ID && env.EARVELDAJA_API_PUBLIC_VALUE && env.EARVELDAJA_API_PASSWORD);
+  return API_CREDENTIAL_ENV_KEYS.every((key) => Boolean(env[key]));
 }
 
 function writePrivateEnvFile(filePath: string, content: string): void {
   try {
     const info = lstatSync(filePath);
     if (info.isSymbolicLink()) {
-      process.stderr.write(`WARNING: Refusing to write global .env through symlink: ${filePath}\n`);
-      return;
+      throw new Error(`Refusing to write .env through symlink: ${filePath}`);
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      // File may not exist yet.
+    } else if (error instanceof Error) {
+      throw error;
+    } else {
+      throw new Error(`Could not prepare env file for writing: ${filePath}`);
+    }
     // File may not exist yet.
   }
 
@@ -296,6 +313,9 @@ function serializeEnvFile(
 
 export function loadDotenvFiles(): void {
   const loaded = new Set<string>();
+  const explicitServerProvided = process.env.EARVELDAJA_SERVER !== undefined;
+  let credentialKeysAlreadyProvided = hasCompleteApiCredentialEnv(process.env);
+  let serverLoadedFromStandaloneFile = false;
 
   const loadFiles = (envPaths: string[]): void => {
     for (const envPath of envPaths) {
@@ -308,8 +328,48 @@ export function loadDotenvFiles(): void {
       if (loaded.has(dedupeKey)) continue;
       loaded.add(dedupeKey);
 
-      if (isSecureEnvFile(envPath)) {
-        dotenv.config({ path: envPath });
+      const parsed = parseEnvFile(envPath);
+      if (Object.keys(parsed).length === 0) continue;
+
+      const hasAnyCredentialKeys = hasAnyApiCredentialEnv(parsed);
+      const hasCompleteCredentialSet = hasCompleteApiCredentialEnv(parsed);
+      if (hasAnyCredentialKeys && !hasCompleteCredentialSet) {
+        process.stderr.write(
+          `WARNING: Ignoring incomplete e-arveldaja credential keys in ${envPath}. ` +
+          "Provide all EARVELDAJA_API_KEY_* values in the same file.\n"
+        );
+      }
+
+      for (const [key, value] of Object.entries(parsed)) {
+        if (API_CREDENTIAL_ENV_KEYS.includes(key as typeof API_CREDENTIAL_ENV_KEYS[number])) continue;
+        if (key === "EARVELDAJA_SERVER") {
+          if (explicitServerProvided) continue;
+          if (hasAnyCredentialKeys) continue;
+          if (process.env.EARVELDAJA_SERVER === undefined) {
+            process.env.EARVELDAJA_SERVER = value;
+            serverLoadedFromStandaloneFile = true;
+          }
+          continue;
+        }
+        if (process.env[key] === undefined) {
+          process.env[key] = value;
+        }
+      }
+
+      if (hasCompleteCredentialSet && !credentialKeysAlreadyProvided) {
+        for (const key of API_CREDENTIAL_ENV_KEYS) {
+          process.env[key] = parsed[key]!;
+        }
+        if (!explicitServerProvided) {
+          if (parsed.EARVELDAJA_SERVER !== undefined) {
+            process.env.EARVELDAJA_SERVER = parsed.EARVELDAJA_SERVER;
+            serverLoadedFromStandaloneFile = false;
+          } else if (serverLoadedFromStandaloneFile) {
+            delete process.env.EARVELDAJA_SERVER;
+            serverLoadedFromStandaloneFile = false;
+          }
+        }
+        credentialKeysAlreadyProvided = true;
       }
     }
   };

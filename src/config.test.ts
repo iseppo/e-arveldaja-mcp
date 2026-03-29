@@ -160,6 +160,125 @@ describe("loadAllConfigs", () => {
     }
   });
 
+  it("does not synthesize a credential set from partial local and shared .env files", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-partial-env-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    mkdirSync(workDir, { recursive: true });
+    mkdirSync(globalDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    writeFileSync(join(workDir, ".env"), "EARVELDAJA_API_KEY_ID=local-id\n", { mode: 0o600 });
+    writeFileSync(join(globalDir, ".env"), [
+      "EARVELDAJA_API_PUBLIC_VALUE=global-public",
+      "EARVELDAJA_API_PASSWORD=global-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+
+      expect(process.env.EARVELDAJA_API_KEY_ID).toBeUndefined();
+      expect(process.env.EARVELDAJA_API_PUBLIC_VALUE).toBeUndefined();
+      expect(process.env.EARVELDAJA_API_PASSWORD).toBeUndefined();
+      expect(() => loadAllConfigs()).toThrowError("No API credentials found");
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("Ignoring incomplete e-arveldaja credential keys"));
+    } finally {
+      stderrSpy.mockRestore();
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let an incomplete local env override the server of a complete shared credential set", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-server-mix-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+
+    mkdirSync(workDir, { recursive: true });
+    mkdirSync(globalDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    writeFileSync(join(workDir, ".env"), [
+      "EARVELDAJA_SERVER=demo",
+      "EARVELDAJA_API_KEY_ID=local-only",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    writeFileSync(join(globalDir, ".env"), [
+      "EARVELDAJA_SERVER=live",
+      "EARVELDAJA_API_KEY_ID=global-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=global-public",
+      "EARVELDAJA_API_PASSWORD=global-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(process.env.EARVELDAJA_SERVER).toBe("live");
+      expect(configs).toHaveLength(1);
+      expect(configs[0]!.config.apiKeyId).toBe("global-id");
+      expect(configs[0]!.config.baseUrl).toBe("https://rmp-api.rik.ee/v1");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let a partial shell credential block a complete env file", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-partial-shell-env-"));
+    const workDir = join(tempDir, "work");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_API_KEY_ID = "partial-shell-id";
+
+    writeFileSync(join(workDir, ".env"), [
+      "EARVELDAJA_SERVER=live",
+      "EARVELDAJA_API_KEY_ID=file-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=file-public",
+      "EARVELDAJA_API_PASSWORD=file-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(process.env.EARVELDAJA_API_KEY_ID).toBe("file-id");
+      expect(process.env.EARVELDAJA_API_PUBLIC_VALUE).toBe("file-public");
+      expect(process.env.EARVELDAJA_API_PASSWORD).toBe("file-secret");
+      expect(configs).toHaveLength(1);
+      expect(configs[0]!.config.apiKeyId).toBe("file-id");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("imports a verified apikey file into the local working-directory .env", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-local-bootstrap-"));
     const workDir = join(tempDir, "work");
@@ -235,6 +354,47 @@ describe("loadAllConfigs", () => {
       })).rejects.toThrow("401 Unauthorized");
 
       expect(() => readFileSync(globalEnvFile, "utf8")).toThrow();
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails instead of reporting success when the target .env is a symlink", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-import-symlink-env-"));
+    const workDir = join(tempDir, "work");
+    const apiKeyFile = join(workDir, "apikey.txt");
+    const actualEnvFile = join(workDir, "actual.env");
+    const localEnvFile = join(workDir, ".env");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: key-id",
+      "ApiKey public value: public-value",
+      "Password: secret-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    writeFileSync(actualEnvFile, "# original\n", { mode: 0o600 });
+    symlinkSync(actualEnvFile, localEnvFile);
+
+    process.chdir(workDir);
+
+    try {
+      const { importApiKeyCredentials } = await importFreshConfig(workDir);
+
+      await expect(importApiKeyCredentials({
+        apiKeyFile,
+        storageScope: "local",
+        workingDir: workDir,
+        verify: async () => ({ companyName: "Gamma OÜ", verifiedAt: "2026-03-29T14:00:00.000Z" }),
+      })).rejects.toThrow(`Refusing to write .env through symlink: ${localEnvFile}`);
+
+      expect(readFileSync(actualEnvFile, "utf8")).toBe("# original\n");
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });
