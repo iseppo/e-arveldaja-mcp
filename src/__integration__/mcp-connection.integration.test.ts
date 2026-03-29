@@ -257,7 +257,6 @@ describe("MCP Server Setup Mode", () => {
         EARVELDAJA_API_PUBLIC_VALUE: "",
         EARVELDAJA_API_PASSWORD: "",
         EARVELDAJA_API_KEY_FILE: "",
-        EARVELDAJA_SCAN_PARENT: "",
       }),
     });
     client = new Client({ name: "setup-mode-test", version: "1.0.0" });

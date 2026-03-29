@@ -10,7 +10,6 @@ const CONFIG_ENV_KEYS = [
   "EARVELDAJA_API_PASSWORD",
   "EARVELDAJA_API_KEY_FILE",
   "EARVELDAJA_CONFIG_DIR",
-  "EARVELDAJA_SCAN_PARENT",
 ] as const;
 
 const ORIGINAL_CWD = process.cwd();
@@ -46,7 +45,7 @@ describe("getConfigSearchDirs", () => {
   it("includes the working directory and global config directory by default", async () => {
     const { getConfigSearchDirs } = await importFreshConfig();
 
-    expect(getConfigSearchDirs(false, "/opt/e-arveldaja-mcp", "/home/test/.config/e-arveldaja-mcp")).toEqual([
+    expect(getConfigSearchDirs("/opt/e-arveldaja-mcp", "/home/test/.config/e-arveldaja-mcp")).toEqual([
       "/opt/e-arveldaja-mcp",
       "/home/test/.config/e-arveldaja-mcp",
     ]);
@@ -89,7 +88,6 @@ describe("loadAllConfigs", () => {
     process.env.EARVELDAJA_API_PUBLIC_VALUE = "";
     process.env.EARVELDAJA_API_PASSWORD = "";
     process.env.EARVELDAJA_API_KEY_FILE = "";
-    process.env.EARVELDAJA_SCAN_PARENT = "";
 
     writeFileSync(apiKeyFile, [
       "ApiKey ID: key-id",
@@ -107,82 +105,6 @@ describe("loadAllConfigs", () => {
 
       expect(configs.length).toBe(1);
       expect(configs[0]!.config.apiKeyId).toBe("key-id");
-    } finally {
-      process.chdir(ORIGINAL_CWD);
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("does not let the runtime .env enable parent scanning", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-parent-env-"));
-    const parentDir = join(tempDir, "parent");
-    const childDir = join(parentDir, "child");
-
-    mkdirSync(childDir, { recursive: true });
-    const childEnv = join(childDir, ".env");
-    const parentEnv = join(parentDir, ".env");
-    writeFileSync(childEnv, "EARVELDAJA_SCAN_PARENT=true\n", { mode: 0o600 });
-    writeFileSync(parentEnv, [
-      "EARVELDAJA_API_KEY_ID=parent-id",
-      "EARVELDAJA_API_PUBLIC_VALUE=parent-public",
-      "EARVELDAJA_API_PASSWORD=parent-secret",
-      "",
-    ].join("\n"), { mode: 0o600 });
-
-    for (const key of CONFIG_ENV_KEYS) {
-      delete process.env[key];
-    }
-
-    process.chdir(childDir);
-
-    try {
-      const { loadDotenvFiles } = await importFreshConfig(childDir);
-      loadDotenvFiles();
-
-      expect(process.env.EARVELDAJA_SCAN_PARENT).toBe("true");
-      expect(process.env.EARVELDAJA_API_KEY_ID).toBeUndefined();
-      expect(process.env.EARVELDAJA_API_PUBLIC_VALUE).toBeUndefined();
-      expect(process.env.EARVELDAJA_API_PASSWORD).toBeUndefined();
-    } finally {
-      process.chdir(ORIGINAL_CWD);
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  it("loads parent .env values when parent scanning is enabled in the process environment", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-parent-env-opt-in-"));
-    const parentDir = join(tempDir, "parent");
-    const childDir = join(parentDir, "child");
-
-    mkdirSync(childDir, { recursive: true });
-    writeFileSync(join(parentDir, ".env"), [
-      "EARVELDAJA_API_KEY_ID=parent-id",
-      "EARVELDAJA_API_PUBLIC_VALUE=parent-public",
-      "EARVELDAJA_API_PASSWORD=parent-secret",
-      "",
-    ].join("\n"), { mode: 0o600 });
-
-    for (const key of CONFIG_ENV_KEYS) {
-      delete process.env[key];
-    }
-    process.env.EARVELDAJA_SCAN_PARENT = "true";
-
-    process.chdir(childDir);
-
-    try {
-      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(childDir);
-      loadDotenvFiles();
-      const configs = loadAllConfigs();
-
-      expect(configs).toEqual(expect.arrayContaining([expect.objectContaining({
-        name: "env",
-        config: {
-          apiKeyId: "parent-id",
-          apiPublicValue: "parent-public",
-          apiPassword: "parent-secret",
-          baseUrl: "https://rmp-api.rik.ee/v1",
-        },
-      })]));
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });
@@ -358,7 +280,7 @@ describe("loadAllConfigs", () => {
     const { getCredentialSetupInfo } = await importFreshConfig();
 
     process.env.EARVELDAJA_CONFIG_DIR = "/tmp/global-config";
-    const info = getCredentialSetupInfo(false, "/tmp/project");
+    const info = getCredentialSetupInfo("/tmp/project");
 
     expect(info.working_directory).toBe("/tmp/project");
     expect(info.credential_file_directory).toBe("/tmp/project");
@@ -366,10 +288,11 @@ describe("loadAllConfigs", () => {
     expect(info.global_config_directory).toBe("/tmp/global-config");
     expect(info.global_env_file).toBe("/tmp/global-config/.env");
     expect(info.searched_directories).toEqual(["/tmp/project", "/tmp/global-config"]);
-    expect(info.next_steps[0]).toContain("working directory");
+    expect(info.next_steps[0]).toContain("this folder");
     expect(info.next_steps[0]).toContain("import_apikey_credentials");
     expect(info.next_steps[1]).toContain("secure apikey*.txt");
-    expect(info.next_steps[2]).toContain("EARVELDAJA_SCAN_PARENT=true");
+    expect(info.next_steps[1]).toContain("any folder");
+    expect(info.next_steps[2]).toContain("Shared config directory");
   });
 
   it("rejects API key files that are group-readable", async () => {
@@ -382,7 +305,6 @@ describe("loadAllConfigs", () => {
     process.env.EARVELDAJA_API_PUBLIC_VALUE = "";
     process.env.EARVELDAJA_API_PASSWORD = "";
     process.env.EARVELDAJA_API_KEY_FILE = "";
-    process.env.EARVELDAJA_SCAN_PARENT = "";
 
     writeFileSync(apiKeyFile, [
       "ApiKey ID: key-id",
@@ -417,7 +339,6 @@ describe("loadAllConfigs", () => {
     process.env.EARVELDAJA_API_PUBLIC_VALUE = "";
     process.env.EARVELDAJA_API_PASSWORD = "";
     process.env.EARVELDAJA_API_KEY_FILE = "";
-    process.env.EARVELDAJA_SCAN_PARENT = "";
 
     writeFileSync(apiKeyFile, [
       "ApiKey ID: key-id",
@@ -452,7 +373,6 @@ describe("loadAllConfigs", () => {
     process.env.EARVELDAJA_API_PUBLIC_VALUE = "";
     process.env.EARVELDAJA_API_PASSWORD = "";
     process.env.EARVELDAJA_API_KEY_FILE = symlinkFile;
-    process.env.EARVELDAJA_SCAN_PARENT = "";
 
     writeFileSync(actualFile, [
       "ApiKey ID: key-id",

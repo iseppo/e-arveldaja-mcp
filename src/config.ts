@@ -22,7 +22,6 @@ export interface CredentialSetupInfo {
   message: string;
   working_directory: string;
   searched_directories: string[];
-  scan_parent_enabled: boolean;
   env_vars: string[];
   credential_file_env_var: string;
   credential_file_pattern: string;
@@ -137,23 +136,17 @@ function toUniqueDirs(dirs: string[]): string[] {
 }
 
 function getWorkingDirSearchDirs(
-  scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true",
   workingDir = CWD,
 ): string[] {
-  const dirs = [workingDir];
-  if (scanParent) {
-    dirs.push(resolve(workingDir, ".."));
-  }
-  return toUniqueDirs(dirs);
+  return toUniqueDirs([workingDir]);
 }
 
 export function getConfigSearchDirs(
-  scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true",
   workingDir = CWD,
   globalConfigDir = getGlobalConfigDir(),
 ): string[] {
   return toUniqueDirs([
-    ...getWorkingDirSearchDirs(scanParent, workingDir),
+    ...getWorkingDirSearchDirs(workingDir),
     globalConfigDir,
   ]);
 }
@@ -185,12 +178,11 @@ export function getGlobalEnvFile(globalConfigDir = getGlobalConfigDir()): string
 }
 
 export function getCredentialSetupInfo(
-  scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true",
   workingDir = CWD,
 ): CredentialSetupInfo {
   const resolvedWorkingDir = resolve(workingDir);
   const globalConfigDirectory = getGlobalConfigDir();
-  const searchedDirectories = getConfigSearchDirs(scanParent, workingDir, globalConfigDirectory);
+  const searchedDirectories = getConfigSearchDirs(workingDir, globalConfigDirectory);
   const globalEnvFile = getGlobalEnvFile(globalConfigDirectory);
 
   return {
@@ -198,7 +190,6 @@ export function getCredentialSetupInfo(
     message: "No API credentials configured. Server is running in setup mode.",
     working_directory: resolvedWorkingDir,
     searched_directories: searchedDirectories,
-    scan_parent_enabled: scanParent,
     env_vars: [
       "EARVELDAJA_API_KEY_ID",
       "EARVELDAJA_API_PUBLIC_VALUE",
@@ -216,12 +207,9 @@ export function getCredentialSetupInfo(
       "Password: <your password>",
     ],
     next_steps: [
-      "Set the EARVELDAJA_API_KEY_ID, EARVELDAJA_API_PUBLIC_VALUE, and EARVELDAJA_API_PASSWORD environment variables, set EARVELDAJA_API_KEY_FILE to an explicit credential file path, or place apikey*.txt in the working directory and run import_apikey_credentials.",
-      "If exactly one secure apikey*.txt is present in the working directory and the MCP client supports prompts, the server will offer to verify it and save the resulting .env locally or in the native global config directory.",
-      scanParent
-        ? "Parent directory scanning is enabled via EARVELDAJA_SCAN_PARENT=true for local .env discovery."
-        : "Set EARVELDAJA_SCAN_PARENT=true if you also want to scan the parent directory for a local .env file before falling back to the global .env.",
-      `Native global config directory: ${globalConfigDirectory}. Global env file: ${globalEnvFile}. Override the directory with EARVELDAJA_CONFIG_DIR if needed.`,
+      "Set the EARVELDAJA_API_KEY_ID, EARVELDAJA_API_PUBLIC_VALUE, and EARVELDAJA_API_PASSWORD environment variables, set EARVELDAJA_API_KEY_FILE to an explicit credential file path, or place apikey*.txt in this folder and run import_apikey_credentials.",
+      "If exactly one secure apikey*.txt is present in this folder and the MCP client supports prompts, the server will offer to verify it and save the resulting .env either only for this folder or so it works when you start the MCP server from any folder.",
+      `Shared config directory (used when you want the configuration available from any folder): ${globalConfigDirectory}. Shared env file: ${globalEnvFile}. Override the directory with EARVELDAJA_CONFIG_DIR if needed.`,
       "Keep secrets in the chosen .env once verified; treat apikey*.txt as an import source, not the long-term store.",
       "After adding credentials, restart the MCP server.",
     ],
@@ -308,7 +296,6 @@ function serializeEnvFile(
 
 export function loadDotenvFiles(): void {
   const loaded = new Set<string>();
-  const scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true";
 
   const loadFiles = (envPaths: string[]): void => {
     for (const envPath of envPaths) {
@@ -328,7 +315,7 @@ export function loadDotenvFiles(): void {
   };
 
   loadFiles([
-    ...getWorkingDirSearchDirs(scanParent).map((dir) => resolve(dir, ".env")),
+    ...getWorkingDirSearchDirs().map((dir) => resolve(dir, ".env")),
     getGlobalEnvFile(),
   ]);
 }

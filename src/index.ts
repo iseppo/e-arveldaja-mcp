@@ -105,7 +105,7 @@ function buildSetupModePayload(
     mode: "setup",
     error: `${setupInfo.message} Call get_setup_instructions for guidance.`,
     hint: options?.hint ??
-      "Call get_setup_instructions to see how to configure EARVELDAJA_API_*, use import_apikey_credentials to verify and store a local apikey*.txt, or set EARVELDAJA_API_KEY_FILE to an explicit credential file path.",
+      "Call get_setup_instructions to see how to configure EARVELDAJA_API_*, use import_apikey_credentials to verify an apikey*.txt and save the configuration either only for this folder or for any folder you start the MCP server from, or set EARVELDAJA_API_KEY_FILE to an explicit credential file path.",
     credential_file_env_var: setupInfo.credential_file_env_var,
     credential_file_pattern: setupInfo.credential_file_pattern,
     working_directory: setupInfo.working_directory,
@@ -113,7 +113,6 @@ function buildSetupModePayload(
     global_config_directory: setupInfo.global_config_directory,
     global_env_file: setupInfo.global_env_file,
     import_tool: "import_apikey_credentials",
-    scan_parent_enabled: setupInfo.scan_parent_enabled,
     ...(options?.blockedTool ? { blocked_tool: options.blockedTool } : {}),
     ...(options?.blockedResource ? { blocked_resource: options.blockedResource } : {}),
     ...(options?.blockedApiMethod ? { blocked_api_method: options.blockedApiMethod } : {}),
@@ -148,7 +147,6 @@ function isSetupModeError(
   blocked_api_method?: string;
   working_directory?: string;
   searched_directories?: string[];
-  scan_parent_enabled?: boolean;
 } {
   return typeof error === "object" && error !== null &&
     "mode" in error &&
@@ -265,17 +263,17 @@ async function resolveCredentialStorageScope(
   try {
     const result = await server.server.elicitInput({
       mode: "form",
-      message: "Where should the imported e-arveldaja credentials be stored?",
+      message: "Where should this e-arveldaja configuration be available?",
       requestedSchema: {
         type: "object",
         properties: {
           storage_scope: {
             type: "string",
-            title: "Credential storage",
-            description: "Choose whether the verified credentials should be stored only for this working directory or in the native global config location.",
+            title: "Configuration availability",
+            description: "Choose whether this verified configuration should work only when you start the MCP server from this folder, or from any folder on this computer.",
             oneOf: [
-              { const: "global", title: "Global (.env in native config directory)" },
-              { const: "local", title: "Local (.env in current working directory)" },
+              { const: "global", title: "Any folder on this computer" },
+              { const: "local", title: "Only this folder" },
             ],
             default: "global",
           },
@@ -292,11 +290,17 @@ async function resolveCredentialStorageScope(
   } catch (error) {
     if (error instanceof Error && /Client does not support form elicitation/i.test(error.message)) {
       throw new Error(
-        "Client does not support interactive setup prompting. Call import_apikey_credentials with storage_scope=\"local\" or \"global\"."
+        "Client does not support interactive setup prompting. Call import_apikey_credentials with storage_scope=\"local\" for this folder only or storage_scope=\"global\" to make it available when starting the MCP server from any folder."
       );
     }
     throw error;
   }
+}
+
+function describeCredentialAvailability(storageScope: CredentialStorageScope): string {
+  return storageScope === "global"
+    ? "The configuration will be available when you start the MCP server from any folder."
+    : "The configuration will be available only when you start the MCP server from this folder.";
 }
 
 function reportStartupCredentialImportOutcome(outcome: StartupCredentialImportOutcome): void {
@@ -312,7 +316,8 @@ function reportStartupCredentialImportOutcome(outcome: StartupCredentialImportOu
     case "imported":
       process.stderr.write(
         `Verified credentials for ${outcome.result.companyName ?? "the target company"} and wrote them to ` +
-        `${outcome.result.envFile}. Restart the MCP server to start using the stored .env.\n`
+        `${outcome.result.envFile}. ${describeCredentialAvailability(outcome.result.storageScope)} ` +
+        "Restart the MCP server to start using the stored .env.\n"
       );
       return;
     case "failed":
@@ -486,11 +491,11 @@ Reporting:
   );
 
   registerTool(server, "import_apikey_credentials",
-    "Verify credentials from an apikey*.txt file and write them into a local or global .env file. " +
-    "If storage_scope is omitted and the client supports form elicitation, asks whether to store credentials locally or globally.",
+    "Verify credentials from an apikey*.txt file and write them into a .env file. " +
+    "If storage_scope is omitted and the client supports form elicitation, asks whether the configuration should work only in this folder or whenever you start the MCP server from any folder.",
     {
-      file_path: z.string().optional().describe("Absolute path to an apikey*.txt file. Defaults to the only secure apikey*.txt in the current working directory."),
-      storage_scope: z.enum(["local", "global"]).optional().describe("Where to write the verified .env file. Omit to use an interactive choice prompt when supported."),
+      file_path: z.string().optional().describe("Absolute path to an apikey*.txt file. Defaults to the only secure apikey*.txt in the current folder."),
+      storage_scope: z.enum(["local", "global"]).optional().describe("Use `local` to keep the configuration only for this folder, or `global` to make it available when starting the MCP server from any folder. Omit to use an interactive choice prompt when supported."),
       overwrite: z.boolean().optional().describe("Replace existing e-arveldaja credentials in the target .env file if they differ. Default false."),
     },
     { ...mutate, openWorldHint: true, title: "Import API Key Credentials" },
@@ -500,13 +505,13 @@ Reporting:
         const candidates = findImportableApiKeyFiles();
         if (candidates.length === 0) {
           return toolError({
-            error: "No secure apikey*.txt file found in the current working directory.",
-            hint: "Place a valid apikey*.txt in the working directory or pass file_path explicitly.",
+            error: "No secure apikey*.txt file found in the current folder.",
+            hint: "Place a valid apikey*.txt in this folder or pass file_path explicitly.",
           });
         }
         if (candidates.length > 1) {
           return toolError({
-            error: "Multiple apikey*.txt files found in the current working directory.",
+            error: "Multiple apikey*.txt files found in the current folder.",
             hint: "Pass file_path explicitly so the server knows which file to import.",
             candidates,
           });
@@ -527,7 +532,7 @@ Reporting:
               type: "text",
               text: toMcpJson({
                 cancelled: true,
-                message: "Credential import cancelled before choosing local/global storage.",
+                message: "Credential import cancelled before choosing whether the configuration should work only in this folder or from any folder.",
               }),
             }],
           };
@@ -546,7 +551,7 @@ Reporting:
           content: [{
             type: "text",
             text: toMcpJson({
-              message: `Verified credentials for ${imported.companyName ?? "the target company"} and wrote them to ${imported.envFile}. Restart the MCP server to use them.`,
+              message: `Verified credentials for ${imported.companyName ?? "the target company"} and wrote them to ${imported.envFile}. ${describeCredentialAvailability(imported.storageScope)} Restart the MCP server to use them.`,
               company_name: imported.companyName,
               env_file: imported.envFile,
               storage_scope: imported.storageScope,
@@ -589,7 +594,7 @@ Reporting:
             global_env_file: setupInfo.global_env_file,
             import_tool: "import_apikey_credentials",
             hint: allConfigs.length === 0
-              ? "No API credentials configured. Call get_setup_instructions, run import_apikey_credentials for a local apikey*.txt, or add EARVELDAJA_API_* env vars / EARVELDAJA_API_KEY_FILE."
+              ? "No API credentials configured. Call get_setup_instructions, run import_apikey_credentials for an apikey*.txt in this folder, or add EARVELDAJA_API_* env vars / EARVELDAJA_API_KEY_FILE."
               : "Use switch_connection with the index to switch between accounts.",
           }),
         }],
@@ -856,12 +861,12 @@ Reporting:
           text: `Explain how to configure e-arveldaja MCP credentials using this exact guidance:
 - Working directory: ${setupInfo.working_directory}
 - Searched directories: ${setupInfo.searched_directories.join(", ")}
-- Native global config directory: ${setupInfo.global_config_directory}
-- Native global env file: ${setupInfo.global_env_file}
+- Shared config directory used when the configuration should work from any folder: ${setupInfo.global_config_directory}
+- Shared env file: ${setupInfo.global_env_file}
 - Import tool: import_apikey_credentials
 - Required environment variables: ${setupInfo.env_vars.join(", ")}
 - Optional direct credential file env var: ${setupInfo.credential_file_env_var}
-- Alternatively, place ${setupInfo.credential_file_pattern} in the working directory and run import_apikey_credentials to verify it and choose local/global storage.
+- Alternatively, place ${setupInfo.credential_file_pattern} in this folder and run import_apikey_credentials to verify it and choose whether it should work only in this folder or whenever the MCP server is started from any folder.
 - File format:
   ${setupInfo.file_format_example.join("\n  ")}
 - ${setupInfo.next_steps.join("\n- ")}

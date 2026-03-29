@@ -35,13 +35,13 @@ function buildSetupModePromptText(
 First call \`get_setup_instructions\` and configure credentials.
 - Working directory: ${setupInfo.working_directory}
 - Searched directories: ${setupInfo.searched_directories.join(", ")}
-- Native global config directory: ${setupInfo.global_config_directory}
-- Native global env file: ${setupInfo.global_env_file}
+- Shared config directory used when the configuration should work from any folder: ${setupInfo.global_config_directory}
+- Shared env file: ${setupInfo.global_env_file}
 - Import tool: \`import_apikey_credentials\`
 - Required environment variables: ${setupInfo.env_vars.join(", ")}
 - Optional direct credential file env var: ${setupInfo.credential_file_env_var}
 - Credential file pattern: ${setupInfo.credential_file_pattern} (working directory import source)
-- If exactly one secure \`${setupInfo.credential_file_pattern}\` is present and the client supports prompts, the server may offer to verify it and save the resulting \`.env\` locally or globally.
+- If exactly one secure \`${setupInfo.credential_file_pattern}\` is present and the client supports prompts, the server may offer to verify it and save the resulting \`.env\` either only for this folder or so it works when you start the MCP server from any folder.
 
 Tools you can use right now:
 ${availableTools.map(tool => `- \`${tool}\``).join("\n")}

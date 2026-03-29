@@ -17,7 +17,6 @@ function buildSetupInfo(): CredentialSetupInfo {
     message: "No API credentials configured. Server is running in setup mode.",
     working_directory: "/tmp/project",
     searched_directories: ["/tmp/project"],
-    scan_parent_enabled: false,
     env_vars: [
       "EARVELDAJA_API_KEY_ID",
       "EARVELDAJA_API_PUBLIC_VALUE",
@@ -91,7 +90,8 @@ describe("registerPrompts", () => {
     expect(bookInvoiceText).toContain("validate_invoice_data");
     expect(bookInvoiceText).toContain("EARVELDAJA_API_KEY_FILE");
     expect(bookInvoiceText).toContain("import_apikey_credentials");
-    expect(bookInvoiceText).toContain("save the resulting `.env` locally or globally");
+    expect(bookInvoiceText).toContain("only for this folder");
+    expect(bookInvoiceText).toContain("from any folder");
     expect(bookInvoiceText).not.toContain("resolve_supplier");
 
     expect(overviewText).toContain("setup mode");
