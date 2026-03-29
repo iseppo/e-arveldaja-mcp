@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.1] - 2026-03-30
+
+### Fixed
+- **Purchase invoice VAT rounding** — `createAndSetTotals` now auto-adjusts `project_no_vat_gross_price` on the last item when explicit `vat_price` differs from API-computed item VAT by a rounding cent (e.g. 9% on 9.16 → 0.82 vs invoice's 0.83). Previously this caused "Invoice rows net sum and VAT does not match invoice gross sum" and required manually splitting items.
+- **Purchase invoice PATCH preserves `cl_fringe_benefits_id`** — `createAndSetTotals` now sends original items (with all required fields) back in the PATCH instead of API-returned items that lacked `cl_fringe_benefits_id`, preventing NOT NULL constraint errors.
+- **String-typed numbers in JSON coerced** — `requireNumericFields` now auto-coerces valid numeric strings to numbers before validation (e.g. `related_id: "102011324307"` → `102011324307`), matching the `z.coerce` behavior on top-level ID parameters. LLMs often quote numbers in JSON string arguments.
+
+### Added
+- **`clients_id` parameter on `confirm_transaction`** — CAMT-imported transactions often lack `clients_id`, causing "buyer or supplier is missing" when confirming against accounts (not invoices). The new optional parameter sets the client on the transaction before confirming, avoiding the workaround of recreating the transaction manually.
+
 ## [0.10.0] - 2026-03-29
 
 **Major update.** Large parts of the codebase have been rewritten — credential management, bank reconciliation, audit logging, and batch workflows all received significant changes. **You may need to re-add your API credentials** after updating, as the credential storage system has been redesigned.
