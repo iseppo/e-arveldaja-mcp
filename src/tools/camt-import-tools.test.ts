@@ -258,4 +258,82 @@ describe("camt import tool", () => {
       }),
     ]));
   });
+
+  it("does not skip split CAMT rows that only share a statement-level bank reference", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-split</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">300.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-03</Dt></BookgDt>
+        <AcctSvcrRef>REF-SPLIT-1</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs>
+              <EndToEndId>E2E-1</EndToEndId>
+            </Refs>
+            <AmtDtls>
+              <TxAmt><Amt Ccy="EUR">100.00</Amt></TxAmt>
+            </AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor A OÜ</Nm></Cdtr>
+            </RltdPties>
+            <RmtInf>
+              <Ustrd>Split payment A</Ustrd>
+            </RmtInf>
+          </TxDtls>
+          <TxDtls>
+            <Refs>
+              <EndToEndId>E2E-2</EndToEndId>
+            </Refs>
+            <AmtDtls>
+              <TxAmt><Amt Ccy="EUR">200.00</Amt></TxAmt>
+            </AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor B OÜ</Nm></Cdtr>
+            </RltdPties>
+            <RmtInf>
+              <Ustrd>Split payment B</Ustrd>
+            </RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { api, handler } = setupCamtTool();
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.created_count).toBe(2);
+    expect(payload.skipped_count).toBe(0);
+    expect(payload.sample).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "would_create",
+        amount: 100,
+        bank_reference: "REF-SPLIT-1",
+        description: "Split payment A",
+      }),
+      expect.objectContaining({
+        status: "would_create",
+        amount: 200,
+        bank_reference: "REF-SPLIT-1",
+        description: "Split payment B",
+      }),
+    ]));
+  });
 });

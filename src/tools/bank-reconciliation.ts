@@ -56,6 +56,10 @@ function buildSuggestedDistribution(
   };
 }
 
+function comparableTransactionAmount(tx: Transaction): number {
+  return roundMoney(tx.base_amount ?? tx.amount);
+}
+
 export function matchScore(
   tx: Transaction,
   invoice: { gross_price?: number; base_gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
@@ -543,10 +547,19 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
           let confidence = 0;
           const reasons: string[] = [];
+          const txOutComparableAmount = comparableTransactionAmount(txOut);
+          const txInComparableAmount = comparableTransactionAmount(txIn);
 
           if (Math.abs(txOut.amount - txIn.amount) < 0.01) {
             confidence += 40;
             reasons.push("exact_amount");
+          } else if (
+            Math.abs(txOutComparableAmount - txInComparableAmount) < 0.01 &&
+            (Math.abs(txOutComparableAmount - roundMoney(txOut.amount)) >= 0.01 ||
+              Math.abs(txInComparableAmount - roundMoney(txIn.amount)) >= 0.01)
+          ) {
+            confidence += 40;
+            reasons.push("exact_base_amount");
           } else {
             continue;
           }
@@ -593,7 +606,13 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             txIn,
             confidence: Math.min(confidence, 100),
             reasons,
-            existingJournalId: findExistingJournal(txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, txOut.amount, txOut.date, maxGap),
+            existingJournalId: findExistingJournal(
+              txOut.accounts_dimensions_id,
+              txIn.accounts_dimensions_id,
+              txOutComparableAmount,
+              txOut.date,
+              maxGap,
+            ),
           });
         }
 
@@ -744,7 +763,13 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         if (confidence < 50 || !targetDimension) continue;
 
         // Check if this transfer is already journalized from the other side
-        const existingJournalId = findExistingJournal(tx.accounts_dimensions_id, targetDimension, tx.amount, tx.date, maxGap);
+        const existingJournalId = findExistingJournal(
+          tx.accounts_dimensions_id,
+          targetDimension,
+          comparableTransactionAmount(tx),
+          tx.date,
+          maxGap,
+        );
         if (existingJournalId) {
           consumedTxIds.add(tx.id);
           skippedAlreadyHandled.push({

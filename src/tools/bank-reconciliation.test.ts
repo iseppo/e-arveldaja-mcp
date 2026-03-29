@@ -515,6 +515,47 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.matched_pairs).toBe(0);
   });
 
+  it("matches FX pairs by base amount and does not fall back to one-sided matches", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        {
+          id: 101,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 100,
+          base_amount: 100,
+          cl_currencies_id: "EUR",
+          date: "2026-03-20",
+          accounts_dimensions_id: 100,
+          bank_account_no: "EE987654321098765432",
+        },
+        {
+          id: 102,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 110,
+          base_amount: 100,
+          cl_currencies_id: "USD",
+          date: "2026-03-20",
+          accounts_dimensions_id: 200,
+          bank_account_no: "EE123456789012345678",
+        },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_one_sided).toBe(0);
+    expect(payload.pairs[0]!.outgoing_transaction_id).toBe(101);
+    expect(payload.pairs[0]!.incoming_transaction_id).toBe(102);
+    expect(payload.pairs[0]!.match_reasons).toContain("exact_base_amount");
+  });
+
   it("skips ambiguous pair matches instead of picking the first incoming candidate", async () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
@@ -779,6 +820,48 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.skipped_already_handled).toBe(1);
       expect(payload.already_handled[0]!.transaction_id).toBe(30);
       expect(payload.already_handled[0]!.existing_journal_id).toBe(999);
+    });
+
+    it("detects already-journalized FX transfers using the transaction base amount", async () => {
+      const twoAccounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+        { id: 2, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+      ];
+
+      const { handler } = setupInterAccountTool({
+        transactions: [
+          {
+            id: 32,
+            status: "PROJECT",
+            is_deleted: false,
+            type: "C",
+            amount: 110,
+            base_amount: 100,
+            cl_currencies_id: "USD",
+            date: "2025-12-05",
+            accounts_dimensions_id: 300,
+            bank_account_name: "Test OÜ",
+            bank_account_no: null,
+          },
+        ],
+        bankAccounts: twoAccounts,
+        companyName: "Test OÜ",
+        journals: [{
+          id: 1001, effective_date: "2025-12-05", is_deleted: false, registered: true,
+          postings: [
+            { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 100, is_deleted: false },
+            { accounts_id: 1020, accounts_dimensions_id: 300, type: "D", amount: 100, is_deleted: false },
+          ],
+        }],
+      });
+
+      const result = await handler({});
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.skipped_already_handled).toBe(1);
+      expect(payload.already_handled[0]!.transaction_id).toBe(32);
+      expect(payload.already_handled[0]!.existing_journal_id).toBe(1001);
     });
 
     it("detects already-journalized transfers even when bank dimensions use non-1020 parent accounts", async () => {

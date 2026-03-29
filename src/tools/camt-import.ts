@@ -302,6 +302,27 @@ function findDuplicateTransactionIds(
   return [...matches].sort((left, right) => left - right);
 }
 
+function normalizeBatchDuplicateKeyPart(value: string | undefined): string {
+  return value?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+}
+
+function buildBatchDuplicateKey(entry: ParsedCamtEntry): string | undefined {
+  if (!entry.bank_reference) return undefined;
+
+  return [
+    entry.bank_reference,
+    entry.date,
+    entry.direction,
+    entry.currency,
+    roundMoney(entry.amount).toFixed(2),
+    normalizeBatchDuplicateKeyPart(entry.reference_number),
+    normalizeBatchDuplicateKeyPart(entry.end_to_end_id),
+    normalizeBatchDuplicateKeyPart(entry.counterparty_iban),
+    normalizeBatchDuplicateKeyPart(entry.counterparty_name),
+    normalizeBatchDuplicateKeyPart(entry.description),
+  ].join("|");
+}
+
 function summarizeEntries(entries: ParsedCamtEntry[]): CamtParseResult["summary"] {
   const summary = {
     entry_count: entries.length,
@@ -570,7 +591,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
 
   registerTool(server, 
     "import_camt053",
-    "Parse a CAMT.053 bank statement XML file and create bank transactions in e-arveldaja. Skips duplicates by AcctSvcrRef bank reference. DRY RUN by default.",
+    "Parse a CAMT.053 bank statement XML file and create bank transactions in e-arveldaja. Skips existing duplicates by AcctSvcrRef bank reference and exact duplicate rows within the same file. DRY RUN by default.",
     {
       file_path: z.string().describe("Absolute path to the CAMT.053 XML file"),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID in e-arveldaja. Use list_account_dimensions to find it."),
@@ -594,10 +615,11 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
       });
 
       const dryRun = execute !== true;
-      const seenBankReferences = new Set(
+      const seenBatchDuplicateKeys = new Set(
         filteredEntries
-          .filter(entry => entry.duplicate && entry.bank_reference)
-          .map(entry => entry.bank_reference!)
+          .filter(entry => entry.duplicate)
+          .map(entry => buildBatchDuplicateKey(entry))
+          .filter((key): key is string => !!key)
       );
       const clientCache: ClientResolutionCache = {
         byCode: new Map<string, ClientResolution>(),
@@ -634,6 +656,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
 
       for (let index = 0; index < filteredEntries.length; index++) {
         const entry = filteredEntries[index]!;
+        const batchDuplicateKey = buildBatchDuplicateKey(entry);
         await reportProgress(index, filteredEntries.length);
 
         if (entry.duplicate) {
@@ -647,13 +670,13 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
           continue;
         }
 
-        if (entry.bank_reference && seenBankReferences.has(entry.bank_reference)) {
+        if (batchDuplicateKey && seenBatchDuplicateKeys.has(batchDuplicateKey)) {
           skippedDuplicates.push({
             date: entry.date,
             amount: entry.amount,
             bank_reference: entry.bank_reference,
             duplicate_transaction_ids: [],
-            reason: "Duplicate bank reference inside current import batch",
+            reason: "Duplicate CAMT entry inside current import batch",
           });
           continue;
         }
@@ -688,7 +711,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             clients_id: clientResolution.clients_id,
             client_match: clientResolution.match_type,
           });
-          if (entry.bank_reference) seenBankReferences.add(entry.bank_reference);
+          if (batchDuplicateKey) seenBatchDuplicateKeys.add(batchDuplicateKey);
           continue;
         }
 
@@ -714,7 +737,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             client_match: clientResolution.match_type,
             api_id: response.created_object_id,
           });
-          if (entry.bank_reference) seenBankReferences.add(entry.bank_reference);
+          if (batchDuplicateKey) seenBatchDuplicateKeys.add(batchDuplicateKey);
         } catch (error) {
           errors.push({
             date: entry.date,
