@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.10.0] - 2026-03-29
+
+**Major update.** Large parts of the codebase have been rewritten — credential management, bank reconciliation, audit logging, and batch workflows all received significant changes. **You may need to re-add your API credentials** after updating, as the credential storage system has been redesigned.
+
+### Breaking Changes
+- **Credential storage redesigned** — credentials are now stored in `.env` files (local or global config directory) instead of being read directly from `apikey*.txt` at startup. Existing `apikey*.txt` files are detected and can be imported via the new `import_apikey_credentials` tool or the `setup-credentials` workflow prompt. After import, the `.env` file becomes the canonical credential store.
+- **Parent directory scanning removed** — the server no longer searches parent directories for `apikey*.txt` files. Only the working directory is scanned.
+- **Global config directory** — credentials can now be stored in a platform-native global config directory (`~/.config/e-arveldaja-mcp` on Linux, `~/Library/Application Support/e-arveldaja-mcp` on macOS, `%APPDATA%/e-arveldaja-mcp` on Windows). Override with `EARVELDAJA_CONFIG_DIR`. This lets the server find credentials regardless of which directory you launch it from.
+
+### Added
+- **Credential import workflow** — new `import_apikey_credentials` tool verifies API credentials against the live server and saves them to a `.env` file (local or global). Startup auto-detects `apikey*.txt` files and offers to import them via the `setup-credentials` prompt.
+- **Stored credential management** — `list_stored_credentials` shows all saved `.env` credential sets. `remove_stored_credentials` removes a stored credential by index.
+- **Setup credentials prompt** — new `setup-credentials` workflow prompt guides through credential verification and storage.
+- **`.env` value quoting** — `serializeEnvFile` now quotes values containing special characters (`#`, `$`, `\`, `` ` ``, `"`, newlines) and escapes them properly, preventing credential corruption on re-read.
+- **Invoice index for O(1) matching** — `reconcile_transactions` and `auto_confirm_exact_matches` now build index maps by ref_number and amount for fast candidate narrowing instead of O(n*m) full scans.
+- **Multi-currency matching fallback** — `matchScore` computes `base_gross_price` from `gross_price * currency_rate` when the base price field is absent, fixing false-negative matches on foreign-currency purchase invoices.
+- **ClientsApi aggregate cache** — `findByName` and `findByCode` now use a 120s TTL cached `listAll()`, avoiding redundant pagination on repeated lookups.
+- **`EARVELDAJA_TAG_NOTES` option** — set to `true` to append `(e-arveldaja-mcp)` to the notes field of all invoices created by the server.
+- **Standardized batch execution contracts** — all batch tools now use a consistent `DRY_RUN`/`EXECUTED` mode pattern with typed result/skipped/error arrays and audit references.
+
+### Fixed
+- **Credential source precedence** — `EARVELDAJA_API_KEY_FILE` now takes priority over env vars and `.env` files. Incomplete credential sets in one `.env` no longer block a complete set in another. Standalone `EARVELDAJA_SERVER` in a local `.env` no longer overrides the server setting from a complete credential file.
+- **FX transfer reconciliation** — fixed multiple edge cases in foreign currency inter-account transfers, CAMT split imports, and Wise import FX handling.
+- **Inter-account transfer pairing** — refined target inference, dedupe rules, and blocking logic for CAMT-imported inter-account transfers. Unified invoice direction rules across all bank matching tools.
+- **Annual report liability classification** — tightened account classification for balance sheet reporting.
+- **Supplier fuzzy match hardened** — raised Levenshtein similarity threshold from 0.5 to 0.7 and added minimum name length of 4 characters to prevent false-positive matches on short company names.
+- **Journal ID null guard** — `buildInterAccountJournalIndex` now checks `j.id == null` before use instead of relying on a non-null assertion.
+- **Connection-scoped VAT warnings** — fallback warning dedup keys are now scoped per connection, preventing one connection's warnings from suppressing another's.
+- **Runtime input validation** — all optional numeric fields in `parsePostings`, `parseSaleInvoiceItems`, and `parsePurchaseInvoiceItems` are now type-checked at the trust boundary, catching string-as-number bugs from LLM-generated JSON.
+- **Cross-platform invoice file handling** — fixed file path handling for invoice documents across different platforms.
+- **Audit log label resolution** — company-based labels, refreshed on raw log lookup, with proper permission hardening.
+- **MCP error handling** — fixed prompt workflow drift and error propagation in edge cases.
+
+### Changed
+- **96 tools** (was 93), **11 workflow prompts** (was 10), **15 resources** (was 12).
+- **Audit log labels** — now company-specific with bilingual label resolution and improved metadata.
+- **Claude command prompts** — normalized to match workflow definitions.
+- **663 unit tests** covering all changes.
+
 ## [0.9.12] - 2026-03-25
 
 ### Fixed

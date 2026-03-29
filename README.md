@@ -2,7 +2,9 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 93 tools, 10 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 96 tools, 11 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+
+> **v0.10.0 is a major update.** Large parts of the codebase have been rewritten — credential management, bank reconciliation, audit logging, and batch workflows all received significant changes. **You may need to re-add your API credentials** after updating, as the credential storage has moved from reading `apikey*.txt` directly to `.env` files. Your existing `apikey*.txt` files will be detected automatically and the server will offer to import them on first start. See the [changelog](CHANGELOG.md) for full details.
 
 > **Active development.** This package is under active development and has not seen extensive real-world testing yet. If you encounter a bug or unexpected behaviour, please let me know via [GitHub Issues](https://github.com/iseppo/e-arveldaja-mcp/issues) or email at indrek.seppo@gmail.com.
 
@@ -75,9 +77,13 @@ claude mcp add e-arveldaja -- npx -y e-arveldaja-mcp
 
 </details>
 
-### 2. Place your API key
+### 2. Add your API credentials
 
-Put the downloaded `apikey.txt` in the working directory where you run your AI assistant. That's it — the server finds it automatically.
+Put the downloaded `apikey.txt` in the working directory where you run your AI assistant. On the first start, the server detects it and offers to verify and import it into a `.env` file — either locally (just this folder) or globally (works from any folder).
+
+You can also import manually at any time by asking your AI assistant:
+
+> "Import my API key from apikey.txt"
 
 For multiple companies, place multiple files (`apikey.txt`, `apikey-company2.txt`, etc.) and use `list_connections` / `switch_connection` to switch between them.
 
@@ -106,7 +112,7 @@ npm install && npm run build
 
 ## Workflows (MCP Prompts)
 
-The server includes 10 built-in workflow prompts that any MCP client can discover and use. These guide the AI through multi-step accounting tasks:
+The server includes 11 built-in workflow prompts that any MCP client can discover and use. These guide the AI through multi-step accounting tasks:
 
 | Prompt | Description |
 |---|---|
@@ -120,8 +126,9 @@ The server includes 10 built-in workflow prompts that any MCP client can discove
 | `new-supplier` | Create supplier with Estonian business registry lookup |
 | `company-overview` | Financial dashboard: balance sheet, P&L, receivables, payables |
 | `lightyear-booking` | Book Lightyear investment trades and distributions from CSV |
+| `setup-credentials` | Verify and import API credentials from `apikey.txt` into `.env` storage |
 
-**Claude Code** also has these as slash commands: `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`.
+**Claude Code** also has these as slash commands: `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`, `/setup-credentials`.
 
 ## Usage Examples
 
