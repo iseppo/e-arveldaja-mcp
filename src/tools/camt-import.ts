@@ -373,11 +373,9 @@ function normalizeBatchDuplicateKeyPart(value: string | undefined): string {
   return value?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
 }
 
-function buildBatchDuplicateKey(entry: ParsedCamtEntry): string | undefined {
-  if (!entry.bank_reference) return undefined;
-
+function buildBatchDuplicateKey(entry: ParsedCamtEntry): string {
   return [
-    entry.bank_reference,
+    normalizeOptionalReference(entry.bank_reference) ?? "",
     entry.date,
     entry.direction,
     entry.currency,
@@ -703,7 +701,6 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         filteredEntries
           .filter(entry => entry.duplicate)
           .map(entry => buildBatchDuplicateKey(entry))
-          .filter((key): key is string => !!key)
       );
       const clientCache: ClientResolutionCache = {
         byCode: new Map<string, ClientResolution>(),
@@ -754,7 +751,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
           continue;
         }
 
-        if (batchDuplicateKey && seenBatchDuplicateKeys.has(batchDuplicateKey)) {
+        if (seenBatchDuplicateKeys.has(batchDuplicateKey)) {
           skippedDuplicates.push({
             date: entry.date,
             amount: entry.amount,
@@ -795,7 +792,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             clients_id: clientResolution.clients_id,
             client_match: clientResolution.match_type,
           });
-          if (batchDuplicateKey) seenBatchDuplicateKeys.add(batchDuplicateKey);
+          seenBatchDuplicateKeys.add(batchDuplicateKey);
           continue;
         }
 
@@ -821,7 +818,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             client_match: clientResolution.match_type,
             api_id: response.created_object_id,
           });
-          if (batchDuplicateKey) seenBatchDuplicateKeys.add(batchDuplicateKey);
+          seenBatchDuplicateKeys.add(batchDuplicateKey);
         } catch (error) {
           errors.push({
             date: entry.date,

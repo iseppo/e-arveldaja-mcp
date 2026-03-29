@@ -556,7 +556,7 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.pairs[0]!.match_reasons).toContain("exact_base_amount");
   });
 
-  it("does not pair or one-side-match nominal FX amounts when their base amounts conflict", async () => {
+  it("does not pair or one-side-match conflicting nominal FX amounts when both legs strongly point to each other", async () => {
     const { handler } = setupInterAccountTool({
       transactions: [
         {
@@ -592,6 +592,52 @@ describe("reconcile_inter_account_transfers", () => {
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.matched_one_sided).toBe(0);
+  });
+
+  it("still allows a valid one-sided own-IBAN match when an unrelated opposite-side transaction shares the nominal amount", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        {
+          id: 105,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 100,
+          base_amount: 92,
+          cl_currencies_id: "USD",
+          date: "2026-03-20",
+          accounts_dimensions_id: 100,
+          bank_account_name: "Transfer",
+          bank_account_no: "BE08905767222113",
+        },
+        {
+          id: 106,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 100,
+          base_amount: 100,
+          cl_currencies_id: "EUR",
+          date: "2026-03-20",
+          accounts_dimensions_id: 200,
+          bank_account_name: "Customer",
+          bank_account_no: "EE000000000000000000",
+        },
+      ],
+      bankAccounts: [
+        ...bankAccounts,
+        { id: 3, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+      ],
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.matched_one_sided).toBe(1);
+    expect(payload.one_sided[0]!.transaction_id).toBe(105);
+    expect(payload.one_sided[0]!.target_dimension_id).toBe(300);
+    expect(payload.one_sided[0]!.match_reasons).toContain("counterparty_iban_is_own_account");
   });
 
   it("skips ambiguous pair matches instead of picking the first incoming candidate", async () => {

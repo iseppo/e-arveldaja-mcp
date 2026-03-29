@@ -589,16 +589,27 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             continue;
           }
 
-          if (conflictingComparableAmounts) {
-            blockedOneSidedTxIds.add(txOut.id);
-            blockedOneSidedTxIds.add(txIn.id);
-            continue;
-          }
-
           const outCounterpartyIban = (txOut.bank_account_no ?? "").trim().toUpperCase();
           const inCounterpartyIban = (txIn.bank_account_no ?? "").trim().toUpperCase();
           const inAccountIban = dimensionToIban.get(txIn.accounts_dimensions_id) ?? "";
           const outAccountIban = dimensionToIban.get(txOut.accounts_dimensions_id) ?? "";
+
+          if (conflictingComparableAmounts) {
+            const hasStrongCrossAccountEvidence =
+              (outCounterpartyIban && outCounterpartyIban === inAccountIban) ||
+              (inCounterpartyIban && inCounterpartyIban === outAccountIban) ||
+              (
+                outCounterpartyIban &&
+                ownIbanToDimension.has(outCounterpartyIban) &&
+                inCounterpartyIban &&
+                ownIbanToDimension.has(inCounterpartyIban)
+              );
+            if (hasStrongCrossAccountEvidence) {
+              blockedOneSidedTxIds.add(txOut.id);
+              blockedOneSidedTxIds.add(txIn.id);
+            }
+            continue;
+          }
 
           if (outCounterpartyIban && outCounterpartyIban === inAccountIban) {
             confidence += 30;
