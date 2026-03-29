@@ -308,12 +308,36 @@ function serializeEnvFile(
     ...Object.keys(env).filter((key) => env[key] && !orderedKeys.includes(key)).sort(),
   ];
 
-  const escapeEnvValue = (v: string): string =>
-    /[\n\r"\\$`#]/.test(v)
-      ? `"${v.replace(/[\\"$`]/g, "\\$&").replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`
-      : v;
+  const serializeEnvValue = (v: string): string => {
+    const needsQuoting = v === "" || /^[\s]|[\s]$/.test(v) || /[#\n\r]/.test(v);
+    if (!needsQuoting) return v;
 
-  return `${header.join("\n")}\n${keys.map((key) => `${key}=${escapeEnvValue(env[key]!)}`).join("\n")}\n`;
+    const hasNewline = /[\n\r]/.test(v);
+    if (hasNewline) {
+      if (v.includes(`"`)) {
+        throw new Error("Cannot serialize env value containing both newlines and double quotes safely.");
+      }
+      return `"${v.replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`;
+    }
+
+    if (v.includes("#")) {
+      if (!v.includes(`'`)) {
+        return `'${v}'`;
+      }
+      if (!v.includes(`"`)) {
+        return `"${v}"`;
+      }
+
+      throw new Error("Cannot serialize env value containing both quote characters when quoting is required.");
+    }
+
+    if (!v.includes(`'`)) {
+      return `'${v}'`;
+    }
+    return `"${v}"`;
+  };
+
+  return `${header.join("\n")}\n${keys.map((key) => `${key}=${serializeEnvValue(env[key]!)}`).join("\n")}\n`;
 }
 
 export function loadDotenvFiles(): void {

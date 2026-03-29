@@ -116,10 +116,10 @@ function parseTransactionDistributions(input: string): TransactionDistribution[]
   return distributions as unknown as TransactionDistribution[];
 }
 
-function parseSaleInvoiceItems(input: string): SaleInvoiceItem[] {
+export function parseSaleInvoiceItems(input: string): SaleInvoiceItem[] {
   const items = parseJsonObjectArray(input, "items");
   requireFields(items, "items", ["products_id", "custom_title", "amount"]);
-  requireNumericFields(items, "items", ["products_id", "amount", "unit_net_price", "vat_accounts_id", "discount_pct"]);
+  requireNumericFields(items, "items", ["products_id", "amount", "unit_net_price", "vat_accounts_id", "discount_percent"]);
   return items as unknown as SaleInvoiceItem[];
 }
 

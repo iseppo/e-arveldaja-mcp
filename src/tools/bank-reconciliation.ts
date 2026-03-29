@@ -33,10 +33,37 @@ export { normalizeCompanyName };
 
 interface InvoiceIndex<T> {
   byRef: Map<string, T[]>;
-  byAmount: Map<number, T[]>; // keyed by Math.round(gross_price)
+  byAmount: Map<number, T[]>; // keyed by Math.round of comparable local/base amounts
 }
 
-function buildInvoiceIndex<T extends { gross_price?: number; bank_ref_number?: string | null }>(
+type MatchableInvoiceAmounts = {
+  gross_price?: number | null;
+  base_gross_price?: number | null;
+  currency_rate?: number | null;
+};
+
+function getComparableBaseInvoiceAmount(invoice: MatchableInvoiceAmounts): number | undefined {
+  if (invoice.base_gross_price != null) return invoice.base_gross_price;
+  if (invoice.gross_price == null) return undefined;
+  if (invoice.currency_rate != null) {
+    return roundMoney(invoice.gross_price * invoice.currency_rate);
+  }
+  return invoice.gross_price;
+}
+
+function getComparableInvoiceAmountBuckets(invoice: MatchableInvoiceAmounts): number[] {
+  const buckets = new Set<number>();
+  if (invoice.gross_price != null) {
+    buckets.add(Math.round(invoice.gross_price));
+  }
+  const baseAmount = getComparableBaseInvoiceAmount(invoice);
+  if (baseAmount != null) {
+    buckets.add(Math.round(baseAmount));
+  }
+  return [...buckets];
+}
+
+function buildInvoiceIndex<T extends MatchableInvoiceAmounts & { bank_ref_number?: string | null }>(
   invoices: T[],
 ): InvoiceIndex<T> {
   const byRef = new Map<string, T[]>();
@@ -48,8 +75,7 @@ function buildInvoiceIndex<T extends { gross_price?: number; bank_ref_number?: s
       if (!list) { list = []; byRef.set(inv.bank_ref_number, list); }
       list.push(inv);
     }
-    if (inv.gross_price != null) {
-      const key = Math.round(inv.gross_price);
+    for (const key of getComparableInvoiceAmountBuckets(inv)) {
       let list = byAmount.get(key);
       if (!list) { list = []; byAmount.set(key, list); }
       list.push(inv);
@@ -143,8 +169,7 @@ export function matchScore(
   // Amount match (check both local and base currency amounts)
   const invoiceAmount = invoice.gross_price ?? 0;
   const baseAmount = tx.base_amount ?? txAmount;
-  const baseInvoiceAmount = invoice.base_gross_price
-    ?? (invoice.currency_rate ? roundMoney(invoiceAmount * invoice.currency_rate) : invoiceAmount);
+  const baseInvoiceAmount = getComparableBaseInvoiceAmount(invoice) ?? invoiceAmount;
   if (Math.abs(txAmount - invoiceAmount) < 0.01) {
     confidence += 40;
     reasons.push("exact_amount");

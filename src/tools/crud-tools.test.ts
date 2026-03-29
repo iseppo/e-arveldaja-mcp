@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   safeJsonParse,
+  parseSaleInvoiceItems,
   parsePurchaseInvoiceItems,
   parseJsonObject,
   parseJsonObjectArray,
@@ -96,5 +97,13 @@ describe("parsePurchaseInvoiceItems", () => {
 
   it("throws when custom_title missing", () => {
     expect(() => parsePurchaseInvoiceItems('[{"cl_purchase_articles_id":1}]')).toThrow("custom_title");
+  });
+});
+
+describe("parseSaleInvoiceItems", () => {
+  it("rejects non-numeric discount_percent values", () => {
+    expect(() =>
+      parseSaleInvoiceItems('[{"products_id":1,"custom_title":"Service","amount":1,"discount_percent":"10"}]')
+    ).toThrow("discount_percent");
   });
 });

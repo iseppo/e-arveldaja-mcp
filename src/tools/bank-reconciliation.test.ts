@@ -257,6 +257,41 @@ describe("reconcile_transactions", () => {
     expect(payload.matched).toBe(0);
     expect(payload.matches).toEqual([]);
   });
+
+  it("matches invoices via base amounts even when nominal currencies differ", async () => {
+    const handler = setupReconciliationTool({
+      transactions: [{
+        id: 32,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 1000,
+        base_amount: 92,
+        cl_currencies_id: "SEK",
+        date: "2026-03-21",
+        description: "Incoming payment",
+        bank_account_name: "Acme OU",
+      }],
+      sales: [{
+        id: 22,
+        status: "CONFIRMED",
+        payment_status: "NOT_PAID",
+        number: "ARV-22",
+        clients_id: 32,
+        client_name: "Acme OU",
+        gross_price: 100,
+        base_gross_price: 92,
+        cl_currencies_id: "USD",
+      }],
+    });
+
+    const result = await handler({ min_confidence: 50 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched).toBe(1);
+    expect(payload.matches[0]!.best_match.id).toBe(22);
+    expect(payload.matches[0]!.best_match.match_reasons).toContain("exact_base_amount");
+  });
 });
 
 function setupAutoConfirmTool(options: {
@@ -461,6 +496,48 @@ describe("auto_confirm_exact_matches", () => {
 
     // Only the first transaction should match; the second should find the invoice consumed
     expect(payload.auto_confirmed).toBe(1);
+  });
+
+  it("auto-confirms base-amount matches when the reference number is exact", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [
+        {
+          id: 18,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 1000,
+          base_amount: 92,
+          cl_currencies_id: "SEK",
+          date: "2026-03-21",
+          bank_account_name: "Acme OU",
+          ref_number: "RF-BASE-92",
+        },
+      ],
+      sales: [
+        {
+          id: 27,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+          number: "ARV-27",
+          clients_id: 37,
+          client_name: "Acme OU",
+          gross_price: 100,
+          base_gross_price: 92,
+          cl_currencies_id: "USD",
+          bank_ref_number: "RF-BASE-92",
+        },
+      ],
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.auto_confirmed).toBe(1);
+    expect(payload.results[0]!.match.id).toBe(27);
+    expect(api.transactions.confirm).toHaveBeenCalledWith(18, [
+      { related_table: "sale_invoices", related_id: 27, amount: 1000 },
+    ]);
   });
 });
 

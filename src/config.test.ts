@@ -160,6 +160,55 @@ describe("loadAllConfigs", () => {
     }
   });
 
+  it("round-trips quoted credential values with dollars, backslashes, hashes, and quotes", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-quoted-creds-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+    const apiKeyFile = join(workDir, "apikey.txt");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    const keyId = "id'quote#1";
+    const publicValue = 'public"value#x';
+    const password = String.raw`pa$$\path#1`;
+
+    writeFileSync(apiKeyFile, [
+      `ApiKey ID: ${keyId}`,
+      `ApiKey public value: ${publicValue}`,
+      `Password: ${password}`,
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { importApiKeyCredentials, loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      await importApiKeyCredentials({
+        apiKeyFile,
+        storageScope: "global",
+        globalConfigDir: globalDir,
+        verify: async () => ({ companyName: "Acme OÜ", verifiedAt: "2026-03-29T12:00:00.000Z" }),
+      });
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(process.env.EARVELDAJA_API_KEY_ID).toBe(keyId);
+      expect(process.env.EARVELDAJA_API_PUBLIC_VALUE).toBe(publicValue);
+      expect(process.env.EARVELDAJA_API_PASSWORD).toBe(password);
+      expect(configs[0]!.config.apiKeyId).toBe(keyId);
+      expect(configs[0]!.config.apiPublicValue).toBe(publicValue);
+      expect(configs[0]!.config.apiPassword).toBe(password);
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not synthesize a credential set from partial local and shared .env files", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-partial-env-"));
     const workDir = join(tempDir, "work");
