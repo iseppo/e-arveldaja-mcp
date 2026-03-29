@@ -78,6 +78,78 @@ export function registerPrompts(
 ): void {
   const setupInfo = options.setupInfo;
 
+  registerPrompt(server,
+    "setup-credentials",
+    "Inspect the current e-arveldaja credential setup, import credentials from an apikey file, and explain the required restart and next steps.",
+    {
+      file_path: z.string().optional().describe("Optional absolute path to an apikey*.txt file to import"),
+      storage_scope: z.enum(["local", "global"]).optional().describe("Optional target scope: local for this folder only, global for any folder"),
+    },
+    async ({ file_path, storage_scope }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Set up e-arveldaja API credentials${file_path ? ` from: ${file_path}` : ""}${storage_scope ? ` using storage_scope=${storage_scope}` : ""}.
+
+Follow these steps in order:
+
+1. Call \`get_setup_instructions\` first and treat its response as the source of truth for:
+   - whether the server is currently in \`setup\` or \`configured\` mode
+   - working_directory
+   - searched_directories
+   - the shared config directory and shared env file
+   - the credential file env var and supported apikey file pattern
+
+2. Present the setup status clearly:
+   - If \`mode="setup"\`, say that API-backed workflows are blocked until credentials are configured.
+   - If \`mode="configured"\`, say that credentials already exist and this workflow can be used to inspect or replace them.
+   - Explain the difference between:
+     - \`local\`: only works when the MCP server is started from this folder
+     - \`global\`: works when the MCP server is started from any folder on this computer
+
+3. Decide how to import credentials:
+   ${file_path
+    ? `- Use \`import_apikey_credentials\` with:
+     - file_path: "${file_path}"
+     ${storage_scope ? `- storage_scope: "${storage_scope}"` : "- omit storage_scope to let the client choose interactively when supported"}
+     - Do not set \`overwrite\` unless the tool reports that different credentials already exist and the user explicitly wants to replace them."`
+    : `- First try \`import_apikey_credentials\` without \`file_path\`.
+     ${storage_scope ? `- Include storage_scope: "${storage_scope}"` : "- Omit storage_scope to let the client choose interactively when supported"}
+     - This will succeed automatically if exactly one secure \`apikey*.txt\` is available in the working directory.
+     - If the tool reports that there are multiple candidate files, stop and ask the user which file should be imported.
+     - If the tool reports that no secure apikey file is available, explain the available setup paths from \`get_setup_instructions\` and stop.`}
+
+4. If \`import_apikey_credentials\` reports that the target env file already contains different credentials:
+   - Explain which env file would be replaced.
+   - Ask the user whether they want to replace the existing credentials.
+   - Only retry with \`overwrite: true\` after explicit approval.
+
+5. If \`import_apikey_credentials\` reports that the client does not support interactive setup prompting:
+   - explain that \`storage_scope\` must be provided explicitly
+   - ask the user to choose between \`local\` and \`global\`
+   - retry with the chosen \`storage_scope\`
+
+6. If import succeeds, report:
+   - envFile
+   - storageScope
+   - companyName
+   - verifiedAt
+   - sourceFile
+
+7. Make the restart requirement explicit:
+   - tell the user that the MCP server must be restarted before the stored credentials become active
+   - do not imply that the newly imported credentials are already in use in the current server process
+
+8. After restart, recommend the first verification step:
+   - call \`list_connections\`
+   - if at least one connection is present, continue with the desired workflow
+`,
+        },
+      }],
+    })
+  );
+
   registerPrompt(server, 
     "book-invoice",
     "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, previews the booking, and creates + confirms the invoice after approval.",
