@@ -9,7 +9,7 @@ import type { TransactionsApi } from "../api/transactions.api.js";
 import type { SaleInvoicesApi } from "../api/sale-invoices.api.js";
 import type { PurchaseInvoicesApi } from "../api/purchase-invoices.api.js";
 import type { ReferenceDataApi } from "../api/readonly.api.js";
-import type { Posting, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem, CreatePurchaseInvoiceData } from "../types/api.js";
+import type { Posting, Transaction, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem, CreatePurchaseInvoiceData } from "../types/api.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { validateItemDimensions } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
@@ -457,10 +457,22 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "confirm_transaction", "Confirm a bank transaction by providing distribution rows", {
+  registerTool(server, "confirm_transaction",
+    "Confirm a bank transaction by providing distribution rows. " +
+    "If the transaction has no clients_id (common for CAMT imports), pass clients_id to set it before confirming — " +
+    "otherwise the API rejects with 'buyer or supplier is missing'. " +
+    "For invoice distributions, clients_id is auto-resolved from the invoice.",
+    {
     id: coerceId.describe("Transaction ID"),
     distributions: z.string().optional().describe("JSON array of distribution rows: [{related_table, related_id?, amount}]"),
-  }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions }) => {
+    clients_id: coerceId.optional().describe("Client ID to set on the transaction before confirming (required when transaction has no clients_id and distribution is against accounts, not invoices)"),
+  }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions, clients_id }) => {
+    if (clients_id) {
+      const tx = await api.transactions.get(id);
+      if (!tx.clients_id) {
+        await api.transactions.update(id, { clients_id } as Partial<Transaction>);
+      }
+    }
     const dist = distributions ? parseTransactionDistributions(distributions) : undefined;
     const result = await api.transactions.confirm(id, dist);
     logAudit({
