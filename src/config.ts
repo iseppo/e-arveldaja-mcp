@@ -121,6 +121,8 @@ interface CredentialBlockMetadata {
   sourceFile?: string;
 }
 
+type CredentialMetadataMap = Partial<Record<"primary" | `connection_${number}`, CredentialBlockMetadata>>;
+
 function getBaseUrl(): string {
   const server = process.env.EARVELDAJA_SERVER || "live";
   return getBaseUrlForServer(server);
@@ -299,6 +301,91 @@ function parseEnvFile(envPath: string): Record<string, string> {
   if (!existsSync(envPath)) return {};
   if (!isSecureEnvFile(envPath)) return {};
   return dotenv.parse(readFileSync(envPath, "utf-8"));
+}
+
+function parseEnvMetadata(envPath: string): CredentialMetadataMap {
+  if (!existsSync(envPath)) return {};
+  if (!isSecureEnvFile(envPath)) return {};
+
+  const metadataByTarget: CredentialMetadataMap = {};
+  const pendingPrimary: CredentialBlockMetadata = {};
+  let currentTarget: "primary" | `connection_${number}` | null = null;
+
+  const ensureTarget = (target: "primary" | `connection_${number}`): CredentialBlockMetadata => {
+    const existing = metadataByTarget[target];
+    if (existing) return existing;
+    const created: CredentialBlockMetadata = {};
+    metadataByTarget[target] = created;
+    return created;
+  };
+
+  const assignMetadata = (field: keyof CredentialBlockMetadata, value: string): void => {
+    if (currentTarget) {
+      ensureTarget(currentTarget)[field] = value;
+    } else {
+      pendingPrimary[field] = value;
+    }
+  };
+
+  const adoptPendingPrimary = (): void => {
+    if (!pendingPrimary.companyName && !pendingPrimary.verifiedAt && !pendingPrimary.sourceFile) return;
+    metadataByTarget.primary = {
+      ...(metadataByTarget.primary ?? {}),
+      ...pendingPrimary,
+    };
+    delete pendingPrimary.companyName;
+    delete pendingPrimary.verifiedAt;
+    delete pendingPrimary.sourceFile;
+  };
+
+  const lines = readFileSync(envPath, "utf-8").split(/\r?\n/);
+  for (const line of lines) {
+    const defaultMatch = line.match(/^# Default connection\s*$/);
+    if (defaultMatch) {
+      currentTarget = "primary";
+      ensureTarget(currentTarget);
+      continue;
+    }
+
+    const additionalMatch = line.match(/^# Additional connection (\d+)\s*$/);
+    if (additionalMatch) {
+      currentTarget = getEnvConnectionTarget(Number(additionalMatch[1]));
+      ensureTarget(currentTarget);
+      continue;
+    }
+
+    const companyMatch = line.match(/^# Company:\s*(.*)$/);
+    if (companyMatch) {
+      assignMetadata("companyName", companyMatch[1]);
+      continue;
+    }
+
+    const verifiedAtMatch = line.match(/^# Verified at:\s*(.*)$/);
+    if (verifiedAtMatch) {
+      assignMetadata("verifiedAt", verifiedAtMatch[1]);
+      continue;
+    }
+
+    const sourceFileMatch = line.match(/^# Imported from:\s*(.*)$/);
+    if (sourceFileMatch) {
+      assignMetadata("sourceFile", sourceFileMatch[1]);
+      continue;
+    }
+
+    if (/^(EARVELDAJA_SERVER|EARVELDAJA_API_KEY_ID|EARVELDAJA_API_PUBLIC_VALUE|EARVELDAJA_API_PASSWORD)=/.test(line)) {
+      currentTarget = "primary";
+      adoptPendingPrimary();
+      continue;
+    }
+
+    const extraKeyMatch = line.match(/^EARVELDAJA_CONNECTION_(\d+)_/);
+    if (extraKeyMatch) {
+      currentTarget = getEnvConnectionTarget(Number(extraKeyMatch[1]));
+      ensureTarget(currentTarget);
+    }
+  }
+
+  return metadataByTarget;
 }
 
 function hasAnyApiCredentialEnv(
@@ -503,7 +590,7 @@ function writePrivateEnvFile(filePath: string, content: string): void {
 
 function serializeEnvFile(
   env: Record<string, string>,
-  metadataByTarget: Partial<Record<"primary" | `connection_${number}`, CredentialBlockMetadata>> = {},
+  metadataByTarget: CredentialMetadataMap = {},
 ): string {
   const serializeEnvValue = (v: string): string => {
     const needsQuoting = v === "" || /^[\s]|[\s]$/.test(v) || /[#\n\r]/.test(v);
@@ -724,6 +811,7 @@ export async function importApiKeyCredentials(
   const targetEnvFileExists = existsSync(targetEnvFile);
 
   const existingEnv = parseEnvFile(targetEnvFile);
+  const existingMetadata = parseEnvMetadata(targetEnvFile);
   const existingHasPrimaryCredentials = hasCompleteApiCredentialEnv(existingEnv);
   const existingBlocks = readStoredCredentialBlocks(existingEnv, { includePrimary: true, extraNamePrefix: "env" });
   const matchingTarget = findMatchingStoredCredentialTarget(existingBlocks, {
@@ -747,6 +835,7 @@ export async function importApiKeyCredentials(
   }
 
   let mergedEnv = { ...existingEnv };
+  const mergedMetadata: CredentialMetadataMap = { ...existingMetadata };
   let action: "created" | "appended" | "replaced" | "unchanged";
   let target: "primary" | `connection_${number}`;
 
@@ -761,6 +850,7 @@ export async function importApiKeyCredentials(
     });
     if (matchingTarget) {
       mergedEnv = removeStoredCredentialBlock(mergedEnv, matchingTarget);
+      delete mergedMetadata[matchingTarget];
     }
   } else {
     const slot = findNextConnectionSlot(mergedEnv);
@@ -774,13 +864,13 @@ export async function importApiKeyCredentials(
     });
   }
 
-  writePrivateEnvFile(targetEnvFile, serializeEnvFile(mergedEnv, {
-    [target]: {
-      companyName: verification.companyName,
-      verifiedAt,
-      sourceFile: options.apiKeyFile,
-    },
-  }));
+  mergedMetadata[target] = {
+    companyName: verification.companyName,
+    verifiedAt,
+    sourceFile: options.apiKeyFile,
+  };
+
+  writePrivateEnvFile(targetEnvFile, serializeEnvFile(mergedEnv, mergedMetadata));
 
   return {
     envFile: targetEnvFile,
@@ -978,6 +1068,7 @@ export function removeStoredCredential(
   const target = parseStoredCredentialTarget(options.target);
   const envFile = getTargetEnvFile(options.storageScope, options);
   const existingEnv = parseEnvFile(envFile);
+  const existingMetadata = parseEnvMetadata(envFile);
   const existingTargets = new Set(
     readStoredCredentialBlocks(existingEnv, { includePrimary: true, extraNamePrefix: "env" }).map((block) => block.target)
   );
@@ -987,7 +1078,8 @@ export function removeStoredCredential(
   }
 
   const updatedEnv = removeStoredCredentialBlock(existingEnv, target);
-  writePrivateEnvFile(envFile, serializeEnvFile(updatedEnv));
+  delete existingMetadata[target];
+  writePrivateEnvFile(envFile, serializeEnvFile(updatedEnv, existingMetadata));
 
   const remainingCredentials = readStoredCredentialBlocks(updatedEnv, {
     includePrimary: true,

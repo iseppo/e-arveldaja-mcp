@@ -307,17 +307,18 @@ function describeCredentialAvailability(storageScope: CredentialStorageScope): s
 
 function describeCredentialImportAction(
   action: "created" | "appended" | "replaced" | "unchanged",
+  envFile: string,
   target: "primary" | `connection_${number}`,
 ): string {
   switch (action) {
     case "created":
-      return "Stored them as the default connection in the target .env file.";
+      return `Stored them as the default connection in ${envFile}.`;
     case "appended":
-      return `Stored them as an additional connection (${target}) in the target .env file.`;
+      return `Stored them as an additional connection (${target}) in ${envFile}.`;
     case "replaced":
-      return "Replaced the default connection in the target .env file.";
+      return `Replaced the default connection in ${envFile}.`;
     case "unchanged":
-      return `They were already stored as ${target}, so no new credential block was added.`;
+      return `They were already stored as ${target} in ${envFile}, so no new credential block was added.`;
   }
 }
 
@@ -333,8 +334,8 @@ function reportStartupCredentialImportOutcome(outcome: StartupCredentialImportOu
       return;
     case "imported":
       process.stderr.write(
-        `Verified credentials for ${outcome.result.companyName ?? "the target company"} and wrote them to ` +
-        `${outcome.result.envFile}. ${describeCredentialImportAction(outcome.result.action, outcome.result.target)} ` +
+        `Verified credentials for ${outcome.result.companyName ?? "the target company"}. ` +
+        `${describeCredentialImportAction(outcome.result.action, outcome.result.envFile, outcome.result.target)} ` +
         `${describeCredentialAvailability(outcome.result.storageScope)} ` +
         "Restart the MCP server to start using the stored .env.\n"
       );
@@ -571,7 +572,7 @@ Reporting:
           content: [{
             type: "text",
             text: toMcpJson({
-              message: `Verified credentials for ${imported.companyName ?? "the target company"} and wrote them to ${imported.envFile}. ${describeCredentialImportAction(imported.action, imported.target)} ${describeCredentialAvailability(imported.storageScope)} Restart the MCP server to use them.`,
+              message: `Verified credentials for ${imported.companyName ?? "the target company"}. ${describeCredentialImportAction(imported.action, imported.envFile, imported.target)} ${describeCredentialAvailability(imported.storageScope)} Restart the MCP server to use them.`,
               action: imported.action,
               company_name: imported.companyName,
               env_file: imported.envFile,

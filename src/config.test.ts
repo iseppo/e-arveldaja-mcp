@@ -571,6 +571,13 @@ describe("loadAllConfigs", () => {
         globalConfigDir: globalDir,
         verify: async () => ({ companyName: "Second OÜ", verifiedAt: "2026-03-29T15:05:00.000Z" }),
       });
+      const beforeRepeatImport = readFileSync(globalEnvFile, "utf8");
+      const unchanged = await importApiKeyCredentials({
+        apiKeyFile: secondApiKeyFile,
+        storageScope: "global",
+        globalConfigDir: globalDir,
+        verify: async () => ({ companyName: "Second OÜ", verifiedAt: "2026-03-29T15:06:00.000Z" }),
+      });
 
       loadDotenvFiles();
       const configs = loadAllConfigs();
@@ -580,7 +587,15 @@ describe("loadAllConfigs", () => {
       expect(first.target).toBe("primary");
       expect(second.action).toBe("appended");
       expect(second.target).toBe("connection_1");
+      expect(unchanged.action).toBe("unchanged");
+      expect(envText).toBe(beforeRepeatImport);
+      expect(envText).toContain("# Company: Primary OÜ");
+      expect(envText).toContain("# Verified at: 2026-03-29T15:00:00.000Z");
+      expect(envText).toContain(`# Imported from: ${firstApiKeyFile}`);
       expect(envText).toContain("EARVELDAJA_API_KEY_ID=first-id");
+      expect(envText).toContain("# Company: Second OÜ");
+      expect(envText).toContain("# Verified at: 2026-03-29T15:05:00.000Z");
+      expect(envText).toContain(`# Imported from: ${secondApiKeyFile}`);
       expect(envText).toContain("EARVELDAJA_CONNECTION_1_API_KEY_ID=second-id");
       expect(configs).toHaveLength(2);
       expect(configs[0]!.name).toBe("env");
@@ -654,8 +669,11 @@ describe("loadAllConfigs", () => {
         target: "connection_1",
         globalConfigDir: globalDir,
       });
+      const afterRemovingExtra = readFileSync(globalEnvFile, "utf8");
       expect(removedExtra.remainingCredentials).toBe(1);
-      expect(readFileSync(globalEnvFile, "utf8")).not.toContain("EARVELDAJA_CONNECTION_1_API_KEY_ID");
+      expect(afterRemovingExtra).not.toContain("EARVELDAJA_CONNECTION_1_API_KEY_ID");
+      expect(afterRemovingExtra).toContain("# Company: Primary OÜ");
+      expect(afterRemovingExtra).toContain("# Verified at: 2026-03-29T16:00:00.000Z");
 
       await importApiKeyCredentials({
         apiKeyFile: secondApiKeyFile,
@@ -668,9 +686,12 @@ describe("loadAllConfigs", () => {
         target: "primary",
         globalConfigDir: globalDir,
       });
+      const afterRemovingPrimary = readFileSync(globalEnvFile, "utf8");
 
       expect(removedPrimary.remainingCredentials).toBe(1);
-      expect(readFileSync(globalEnvFile, "utf8")).not.toContain("EARVELDAJA_API_KEY_ID=first-id");
+      expect(afterRemovingPrimary).not.toContain("EARVELDAJA_API_KEY_ID=first-id");
+      expect(afterRemovingPrimary).toContain("# Company: Second OÜ");
+      expect(afterRemovingPrimary).toContain("# Verified at: 2026-03-29T16:10:00.000Z");
 
       rmSync(firstApiKeyFile, { force: true });
       rmSync(secondApiKeyFile, { force: true });
