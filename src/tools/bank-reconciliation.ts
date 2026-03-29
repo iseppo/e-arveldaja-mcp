@@ -408,7 +408,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
     "Match and confirm inter-account transfers (own bank account to own bank account). " +
     "DUPLICATE-SAFE: checks existing journal entries before confirming — skips transfers already " +
     "journalized from the other account side (e.g. confirmed via CAMT import). " +
-    "Phase 1: finds C↔D transaction pairs across different bank accounts with matching amounts and dates. " +
+    "Phase 1: finds reciprocal transaction pairs across different bank accounts with matching amounts, dates, and own-account evidence, including mislabelled same-type bank rows. " +
     "Phase 2: detects one-sided transfers where counterparty name matches the company name or " +
     "counterparty IBAN matches another own bank account — confirms them with the target account. " +
     "If there are 2+ other bank accounts and IBAN is missing, provide target_accounts_dimensions_id. " +
@@ -613,6 +613,105 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         return result;
       }
 
+      function getTransferPairCompatibility(
+        txA: Transaction,
+        txB: Transaction,
+      ): {
+        confidence: number;
+        reasons: string[];
+        txAComparableAmount: number;
+        conflictingComparableAmounts: boolean;
+      } | undefined {
+        const reasons: string[] = [];
+        let confidence = 0;
+        const txAComparableAmount = comparableTransactionAmount(txA);
+        const txBComparableAmount = comparableTransactionAmount(txB);
+        const nominalAmountsMatch = Math.abs(txA.amount - txB.amount) < 0.01;
+        const comparableAmountsMatch = Math.abs(txAComparableAmount - txBComparableAmount) < 0.01;
+        const hasMeaningfulComparableAmounts =
+          hasMeaningfulComparableAmount(txA) ||
+          hasMeaningfulComparableAmount(txB);
+        const conflictingComparableAmounts =
+          nominalAmountsMatch &&
+          hasMeaningfulComparableAmounts &&
+          !comparableAmountsMatch;
+
+        if (nominalAmountsMatch) {
+          if (!conflictingComparableAmounts) {
+            confidence += 40;
+            reasons.push("exact_amount");
+          }
+        } else if (comparableAmountsMatch && hasMeaningfulComparableAmounts) {
+          confidence += 40;
+          reasons.push("exact_base_amount");
+        } else {
+          return undefined;
+        }
+
+        const dA = new Date(txA.date);
+        const dB = new Date(txB.date);
+        const daysDiff = Math.abs((dA.getTime() - dB.getTime()) / 86_400_000);
+        if (daysDiff === 0) {
+          confidence += 20;
+          reasons.push("same_date");
+        } else if (daysDiff <= maxGap) {
+          confidence += 10;
+          reasons.push(`date_gap_${Math.round(daysDiff)}d`);
+        } else {
+          return undefined;
+        }
+
+        return {
+          confidence,
+          reasons,
+          txAComparableAmount,
+          conflictingComparableAmounts,
+        };
+      }
+
+      function hasReciprocalOwnIbanEvidence(txA: Transaction, txB: Transaction): boolean {
+        const txACounterpartyIban = (txA.bank_account_no ?? "").trim().toUpperCase();
+        const txBCounterpartyIban = (txB.bank_account_no ?? "").trim().toUpperCase();
+        const txAAccountIban = dimensionToIban.get(txA.accounts_dimensions_id) ?? "";
+        const txBAccountIban = dimensionToIban.get(txB.accounts_dimensions_id) ?? "";
+
+        return Boolean(
+          txACounterpartyIban &&
+          txBCounterpartyIban &&
+          txAAccountIban &&
+          txBAccountIban &&
+          txACounterpartyIban === txBAccountIban &&
+          txBCounterpartyIban === txAAccountIban
+        );
+      }
+
+      function getSameTypeReciprocalEvidence(
+        txA: Transaction,
+        txB: Transaction,
+        txAInference: OneSidedInference,
+        txBInference: OneSidedInference,
+      ): { confidenceBonus: number; reasons: string[] } | undefined {
+        if (hasReciprocalOwnIbanEvidence(txA, txB)) {
+          return {
+            confidenceBonus: 40,
+            reasons: ["same_type_reciprocal_own_iban"],
+          };
+        }
+
+        const mutuallyStrongOneSidedInference =
+          txAInference.confidence >= 80 &&
+          txBInference.confidence >= 80;
+
+        if (mutuallyStrongOneSidedInference) {
+          return {
+            confidenceBonus: 20,
+            reasons: ["same_type_reciprocal_target_inference"],
+          };
+        }
+
+        return undefined;
+      }
+
       // --- Phase 1: C↔D pair matching ---
       for (let i = 0; i < outgoing.length; i++) {
         const txOut = outgoing[i]!;
@@ -630,44 +729,13 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           if (!txIn.id || consumedTxIds.has(txIn.id)) continue;
           if (txOut.accounts_dimensions_id === txIn.accounts_dimensions_id) continue;
 
-          let confidence = 0;
-          const reasons: string[] = [];
-          const txOutComparableAmount = comparableTransactionAmount(txOut);
-          const txInComparableAmount = comparableTransactionAmount(txIn);
-          const nominalAmountsMatch = Math.abs(txOut.amount - txIn.amount) < 0.01;
-          const comparableAmountsMatch = Math.abs(txOutComparableAmount - txInComparableAmount) < 0.01;
-          const hasMeaningfulComparableAmounts =
-            hasMeaningfulComparableAmount(txOut) ||
-            hasMeaningfulComparableAmount(txIn);
-          const conflictingComparableAmounts =
-            nominalAmountsMatch &&
-            hasMeaningfulComparableAmounts &&
-            !comparableAmountsMatch;
+          const compatibility = getTransferPairCompatibility(txOut, txIn);
+          if (!compatibility) continue;
 
-          if (nominalAmountsMatch) {
-            if (!conflictingComparableAmounts) {
-              confidence += 40;
-              reasons.push("exact_amount");
-            }
-          } else if (comparableAmountsMatch && hasMeaningfulComparableAmounts) {
-            confidence += 40;
-            reasons.push("exact_base_amount");
-          } else {
-            continue;
-          }
-
-          const dOut = new Date(txOut.date);
-          const dIn = new Date(txIn.date);
-          const daysDiff = Math.abs((dOut.getTime() - dIn.getTime()) / 86_400_000);
-          if (daysDiff === 0) {
-            confidence += 20;
-            reasons.push("same_date");
-          } else if (daysDiff <= maxGap) {
-            confidence += 10;
-            reasons.push(`date_gap_${Math.round(daysDiff)}d`);
-          } else {
-            continue;
-          }
+          let confidence = compatibility.confidence;
+          const reasons = [...compatibility.reasons];
+          const txOutComparableAmount = compatibility.txAComparableAmount;
+          const conflictingComparableAmounts = compatibility.conflictingComparableAmounts;
 
           const outCounterpartyIban = (txOut.bank_account_no ?? "").trim().toUpperCase();
           const inCounterpartyIban = (txIn.bank_account_no ?? "").trim().toUpperCase();
@@ -817,6 +885,199 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           } catch (err: unknown) {
             errors.push({
               transaction_ids: [txOut.id, txIn.id!],
+              reason: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+
+      // --- Phase 1b: reciprocal same-type pairs with strong mutual target evidence ---
+      const phaseOneRemaining = unconfirmed.filter(
+        tx => tx.id && !consumedTxIds.has(tx.id) && !blockedOneSidedTxIds.has(tx.id),
+      );
+
+      for (const tx of phaseOneRemaining) {
+        if (!tx.id || consumedTxIds.has(tx.id) || blockedOneSidedTxIds.has(tx.id)) continue;
+
+        const txInference = inferOneSidedTransfer(tx);
+        if (txInference.confidence < 50 || !txInference.targetDimension) continue;
+
+        const candidates: Array<{
+          counterpart: Transaction;
+          confidence: number;
+          reasons: string[];
+          existingJournalId?: number;
+        }> = [];
+
+        for (const other of phaseOneRemaining) {
+          if (!other.id || other.id === tx.id || consumedTxIds.has(other.id) || blockedOneSidedTxIds.has(other.id)) continue;
+          if (other.type !== tx.type) continue;
+          if (other.accounts_dimensions_id !== txInference.targetDimension) continue;
+
+          const otherInference = inferOneSidedTransfer(other);
+          if (otherInference.confidence < 50 || otherInference.targetDimension !== tx.accounts_dimensions_id) continue;
+
+          const reciprocalEvidence = getSameTypeReciprocalEvidence(tx, other, txInference, otherInference);
+          if (!reciprocalEvidence) continue;
+
+          const compatibility = getTransferPairCompatibility(tx, other);
+          if (!compatibility) continue;
+
+          if (compatibility.conflictingComparableAmounts) {
+            blockedOneSidedTxIds.add(tx.id);
+            blockedOneSidedTxIds.add(other.id);
+            continue;
+          }
+
+          candidates.push({
+            counterpart: other,
+            confidence: Math.min(compatibility.confidence + reciprocalEvidence.confidenceBonus, 100),
+            reasons: [...compatibility.reasons, ...reciprocalEvidence.reasons],
+            existingJournalId: findExistingJournal(
+              tx.accounts_dimensions_id,
+              other.accounts_dimensions_id,
+              compatibility.txAComparableAmount,
+              tx.date,
+              maxGap,
+            ),
+          });
+        }
+
+        if (candidates.length === 0) continue;
+
+        candidates.sort((a, b) => {
+          if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+          return (a.counterpart.id ?? 0) - (b.counterpart.id ?? 0);
+        });
+
+        const topConfidence = candidates[0]!.confidence;
+        const topCandidates = candidates.filter(candidate => candidate.confidence === topConfidence);
+        if (topCandidates.length > 1) {
+          ambiguousPairs.push({
+            outgoing_transaction_id: tx.id,
+            amount: tx.amount,
+            date_out: tx.date,
+            from_dimension_id: tx.accounts_dimensions_id,
+            candidate_incoming_transaction_ids: topCandidates.map(candidate => candidate.counterpart.id!),
+            candidate_incoming_dimension_ids: topCandidates.map(candidate => candidate.counterpart.accounts_dimensions_id),
+            confidence: topConfidence,
+            reason: `Multiple reciprocal same-type own-account candidates matched transaction ${tx.id} with confidence ${topConfidence}.`,
+          });
+          blockedOneSidedTxIds.add(tx.id);
+          for (const candidate of topCandidates) blockedOneSidedTxIds.add(candidate.counterpart.id!);
+          continue;
+        }
+
+        const bestCandidate = topCandidates[0]!;
+        const counterpart = bestCandidate.counterpart;
+
+        if (!counterpart.id || consumedTxIds.has(counterpart.id) || blockedOneSidedTxIds.has(counterpart.id)) {
+          continue;
+        }
+
+        if (bestCandidate.existingJournalId) {
+          consumedTxIds.add(tx.id);
+          consumedTxIds.add(counterpart.id);
+          skippedAlreadyHandled.push(
+            {
+              transaction_id: tx.id,
+              amount: tx.amount,
+              date: tx.date,
+              source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? "",
+              existing_journal_id: bestCandidate.existingJournalId,
+              reason: "Already journalized",
+            },
+            {
+              transaction_id: counterpart.id,
+              amount: counterpart.amount,
+              date: counterpart.date,
+              source_account: dimensionToTitle.get(counterpart.accounts_dimensions_id) ?? "",
+              existing_journal_id: bestCandidate.existingJournalId,
+              reason: "Already journalized",
+            },
+          );
+          continue;
+        }
+
+        const fromTitle = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;
+        const toTitle = dimensionToTitle.get(counterpart.accounts_dimensions_id) ?? `dim:${counterpart.accounts_dimensions_id}`;
+
+        consumedTxIds.add(tx.id);
+        consumedTxIds.add(counterpart.id);
+
+        if (dryRun) {
+          matchedPairs.push({
+            outgoing_transaction_id: tx.id,
+            incoming_transaction_id: counterpart.id,
+            amount: tx.amount,
+            date_out: tx.date,
+            date_in: counterpart.date,
+            from_account: fromTitle,
+            to_account: toTitle,
+            from_dimension_id: tx.accounts_dimensions_id,
+            to_dimension_id: counterpart.accounts_dimensions_id,
+            description_out: tx.description,
+            description_in: counterpart.description,
+            confidence: bestCandidate.confidence,
+            match_reasons: bestCandidate.reasons,
+            status: "would_confirm",
+          });
+        } else {
+          try {
+            await ensureClientsId(tx.id, tx.bank_account_name);
+            await api.transactions.confirm(tx.id, [buildAccountDistribution(counterpart.accounts_dimensions_id, tx.amount)]);
+            logAudit({
+              tool: "reconcile_inter_account_transfers",
+              action: "CONFIRMED",
+              entity_type: "transaction",
+              entity_id: tx.id,
+              summary: `Confirmed reciprocal same-type inter-account transfer ${tx.amount} EUR (${fromTitle} -> ${toTitle})`,
+              details: { amount: tx.amount, date: tx.date },
+            });
+            try {
+              await ensureClientsId(counterpart.id, counterpart.bank_account_name);
+              await api.transactions.confirm(counterpart.id, [buildAccountDistribution(tx.accounts_dimensions_id, counterpart.amount)]);
+              logAudit({
+                tool: "reconcile_inter_account_transfers",
+                action: "CONFIRMED",
+                entity_type: "transaction",
+                entity_id: counterpart.id,
+                summary: `Confirmed reciprocal same-type inter-account transfer ${counterpart.amount} EUR (${toTitle} -> ${fromTitle})`,
+                details: { amount: counterpart.amount, date: counterpart.date },
+              });
+            } catch (err2: unknown) {
+              let rollbackMsg = "";
+              try {
+                await api.transactions.invalidate(tx.id);
+                rollbackMsg = ` Transaction ${tx.id} was automatically invalidated.`;
+              } catch (rollbackErr: unknown) {
+                rollbackMsg = ` Automatic invalidation of ${tx.id} also failed: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}. Manual invalidation required.`;
+              }
+              errors.push({
+                transaction_ids: [tx.id, counterpart.id],
+                reason: `PARTIAL: transaction ${tx.id} confirmed, but reciprocal transaction ${counterpart.id} failed: ${err2 instanceof Error ? err2.message : String(err2)}.${rollbackMsg}`,
+              });
+              continue;
+            }
+            matchedPairs.push({
+              outgoing_transaction_id: tx.id,
+              incoming_transaction_id: counterpart.id,
+              amount: tx.amount,
+              date_out: tx.date,
+              date_in: counterpart.date,
+              from_account: fromTitle,
+              to_account: toTitle,
+              from_dimension_id: tx.accounts_dimensions_id,
+              to_dimension_id: counterpart.accounts_dimensions_id,
+              description_out: tx.description,
+              description_in: counterpart.description,
+              confidence: bestCandidate.confidence,
+              match_reasons: bestCandidate.reasons,
+              status: "confirmed",
+            });
+          } catch (err: unknown) {
+            errors.push({
+              transaction_ids: [tx.id, counterpart.id],
               reason: err instanceof Error ? err.message : String(err),
             });
           }

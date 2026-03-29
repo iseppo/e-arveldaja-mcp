@@ -567,6 +567,86 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.matched_pairs).toBe(0);
   });
 
+  it("pairs reciprocal same-type own-IBAN transfers instead of treating both legs as one-sided", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        { id: 109, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description: "Transfer to SEB" },
+        { id: 110, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", bank_account_name: "LHV", description: "Transfer from LHV" },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_one_sided).toBe(0);
+    expect(payload.pairs[0]!.outgoing_transaction_id).toBe(109);
+    expect(payload.pairs[0]!.incoming_transaction_id).toBe(110);
+    expect(payload.pairs[0]!.match_reasons).toContain("same_type_reciprocal_own_iban");
+  });
+
+  it("pairs reciprocal same-type company-name transfers when both sides strongly infer each other", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        { id: 115, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: null, bank_account_name: "Test OÜ", description: "Transfer out" },
+        { id: 116, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: null, bank_account_name: "Test OÜ", description: "Transfer in" },
+      ],
+      bankAccounts,
+      companyName: "Test OÜ",
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_one_sided).toBe(0);
+    expect(payload.pairs[0]!.outgoing_transaction_id).toBe(115);
+    expect(payload.pairs[0]!.incoming_transaction_id).toBe(116);
+    expect(payload.pairs[0]!.match_reasons).toContain("same_type_reciprocal_target_inference");
+  });
+
+  it("confirms reciprocal same-type own-IBAN transfers through the pair path when execute=true", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 111, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description: "Transfer to SEB" },
+        { id: 112, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", bank_account_name: "LHV", description: "Transfer from LHV" },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.mode).toBe("EXECUTED");
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_one_sided).toBe(0);
+    expect(payload.pairs[0]!.status).toBe("confirmed");
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
+    expect(api.transactions.confirm).toHaveBeenCalledWith(111, [
+      { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 500 },
+    ]);
+    expect(api.transactions.confirm).toHaveBeenCalledWith(112, [
+      { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 500 },
+    ]);
+  });
+
+  it("does not pair or one-side-match reciprocal same-type transfers when base amounts conflict", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        { id: 113, status: "PROJECT", is_deleted: false, type: "C", amount: 100, base_amount: 92, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB" },
+        { id: 114, status: "PROJECT", is_deleted: false, type: "C", amount: 100, base_amount: 100, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", bank_account_name: "LHV" },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.matched_one_sided).toBe(0);
+  });
+
   it("matches FX pairs by base amount and does not fall back to one-sided matches", async () => {
     const { handler } = setupInterAccountTool({
       transactions: [
