@@ -308,7 +308,10 @@ function serializeEnvFile(
     ...Object.keys(env).filter((key) => env[key] && !orderedKeys.includes(key)).sort(),
   ];
 
-  return `${header.join("\n")}\n${keys.map((key) => `${key}=${env[key]}`).join("\n")}\n`;
+  const escapeEnvValue = (v: string): string =>
+    /[\n\r"\\$`#]/.test(v) ? `"${v.replace(/[\\"$`]/g, "\\$&")}"` : v;
+
+  return `${header.join("\n")}\n${keys.map((key) => `${key}=${escapeEnvValue(env[key]!)}`).join("\n")}\n`;
 }
 
 export function loadDotenvFiles(): void {

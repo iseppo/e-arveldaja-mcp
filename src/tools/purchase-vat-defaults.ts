@@ -13,9 +13,11 @@ const NON_VAT_REGISTERED_FALLBACK = {
 } as const;
 
 const warnedFallbackKeys = new Set<string>();
+let connectionScope = "";
 
-/** Clear the fallback-warning dedup set. Call on connection switch. */
-export function clearVatWarnings(): void {
+/** Clear the fallback-warning dedup set and set the connection scope. Call on connection switch. */
+export function clearVatWarnings(scope?: string): void {
+  if (scope !== undefined) connectionScope = scope;
   warnedFallbackKeys.clear();
 }
 
@@ -32,8 +34,9 @@ interface PurchaseVatDefaults {
 }
 
 function warnFallbackOnce(key: string, message: string): void {
-  if (warnedFallbackKeys.has(key)) return;
-  warnedFallbackKeys.add(key);
+  const scopedKey = `${connectionScope}:${key}`;
+  if (warnedFallbackKeys.has(scopedKey)) return;
+  warnedFallbackKeys.add(scopedKey);
   log("warning", `WARNING: ${message}`);
 }
 

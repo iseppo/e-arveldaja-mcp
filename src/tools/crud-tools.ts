@@ -98,7 +98,7 @@ export function requireNumericFields(items: Record<string, unknown>[], label: st
 function parsePostings(input: string): Posting[] {
   const postings = parseJsonObjectArray(input, "postings");
   requireFields(postings, "postings", ["accounts_id", "type", "amount"]);
-  requireNumericFields(postings, "postings", ["accounts_id", "amount"]);
+  requireNumericFields(postings, "postings", ["accounts_id", "amount", "accounts_dimensions_id", "projects_project_id", "base_amount"]);
 
   postings.forEach((posting, index) => {
     if (posting.type !== "D" && posting.type !== "C") {
@@ -119,14 +119,18 @@ function parseTransactionDistributions(input: string): TransactionDistribution[]
 function parseSaleInvoiceItems(input: string): SaleInvoiceItem[] {
   const items = parseJsonObjectArray(input, "items");
   requireFields(items, "items", ["products_id", "custom_title", "amount"]);
-  requireNumericFields(items, "items", ["products_id", "amount", "unit_net_price"]);
+  requireNumericFields(items, "items", ["products_id", "amount", "unit_net_price", "vat_accounts_id", "discount_pct"]);
   return items as unknown as SaleInvoiceItem[];
 }
 
 export function parsePurchaseInvoiceItems(input: string): PurchaseInvoiceItem[] {
   const items = parseJsonObjectArray(input, "items");
   requireFields(items, "items", ["cl_purchase_articles_id", "custom_title"]);
-  requireNumericFields(items, "items", ["cl_purchase_articles_id", "total_net_price", "unit_net_price", "amount", "vat_accounts_id"]);
+  requireNumericFields(items, "items", [
+    "cl_purchase_articles_id", "total_net_price", "unit_net_price", "amount",
+    "vat_accounts_id", "purchase_accounts_id", "purchase_accounts_dimensions_id",
+    "cl_vat_articles_id", "project_no_vat_gross_price", "cl_fringe_benefits_id",
+  ]);
   return items as unknown as PurchaseInvoiceItem[];
 }
 

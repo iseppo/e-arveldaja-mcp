@@ -27,6 +27,70 @@ function validateInterAccountDateGap(maxDateGap: number | undefined): number {
 import { normalizeCompanyName } from "../company-name.js";
 export { normalizeCompanyName };
 
+// ---------------------------------------------------------------------------
+// Invoice index for O(1) candidate narrowing by ref_number and amount
+// ---------------------------------------------------------------------------
+
+interface InvoiceIndex<T> {
+  byRef: Map<string, T[]>;
+  byAmount: Map<number, T[]>; // keyed by Math.round(gross_price)
+}
+
+function buildInvoiceIndex<T extends { gross_price?: number; bank_ref_number?: string | null }>(
+  invoices: T[],
+): InvoiceIndex<T> {
+  const byRef = new Map<string, T[]>();
+  const byAmount = new Map<number, T[]>();
+
+  for (const inv of invoices) {
+    if (inv.bank_ref_number) {
+      let list = byRef.get(inv.bank_ref_number);
+      if (!list) { list = []; byRef.set(inv.bank_ref_number, list); }
+      list.push(inv);
+    }
+    if (inv.gross_price != null) {
+      const key = Math.round(inv.gross_price);
+      let list = byAmount.get(key);
+      if (!list) { list = []; byAmount.set(key, list); }
+      list.push(inv);
+    }
+  }
+
+  return { byRef, byAmount };
+}
+
+/** Collect candidate invoices that could match a transaction on amount or ref_number. */
+function getIndexedCandidates<T>(
+  index: InvoiceIndex<T>,
+  refNumber: string | null | undefined,
+  amount: number,
+  baseAmount?: number,
+): T[] {
+  const seen = new Set<T>();
+  const result: T[] = [];
+  const add = (inv: T) => { if (!seen.has(inv)) { seen.add(inv); result.push(inv); } };
+
+  if (refNumber) {
+    for (const inv of index.byRef.get(refNumber) ?? []) add(inv);
+  }
+
+  // Check ±1 integer buckets to cover close_amount matches (within 1.0)
+  const key = Math.round(amount);
+  for (let offset = -1; offset <= 1; offset++) {
+    for (const inv of index.byAmount.get(key + offset) ?? []) add(inv);
+  }
+
+  // Also check base_amount buckets if different from local amount
+  if (baseAmount != null && Math.round(baseAmount) !== key) {
+    const baseKey = Math.round(baseAmount);
+    for (let offset = -1; offset <= 1; offset++) {
+      for (const inv of index.byAmount.get(baseKey + offset) ?? []) add(inv);
+    }
+  }
+
+  return result;
+}
+
 interface MatchCandidate {
   type: "sale_invoice" | "purchase_invoice";
   id: number;
@@ -66,7 +130,7 @@ function hasMeaningfulComparableAmount(tx: Transaction): boolean {
 
 export function matchScore(
   tx: Transaction,
-  invoice: { gross_price?: number; base_gross_price?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
+  invoice: { gross_price?: number; base_gross_price?: number; currency_rate?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
   txAmount: number
 ): { confidence: number; reasons: string[]; partiallyPaidWarning: boolean } {
   let confidence = 0;
@@ -75,7 +139,8 @@ export function matchScore(
   // Amount match (check both local and base currency amounts)
   const invoiceAmount = invoice.gross_price ?? 0;
   const baseAmount = tx.base_amount ?? txAmount;
-  const baseInvoiceAmount = invoice.base_gross_price ?? invoiceAmount;
+  const baseInvoiceAmount = invoice.base_gross_price
+    ?? (invoice.currency_rate ? roundMoney(invoiceAmount * invoice.currency_rate) : invoiceAmount);
   if (Math.abs(txAmount - invoiceAmount) < 0.01) {
     confidence += 40;
     reasons.push("exact_amount");
@@ -161,6 +226,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
 
+      const saleIndex = buildInvoiceIndex(openSales);
+      const purchaseIndex = buildInvoiceIndex(openPurchases);
       const results = [];
 
       for (const tx of unconfirmed) {
@@ -168,7 +235,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
 
         if (allowSaleInvoices) {
-          for (const inv of openSales) {
+          for (const inv of getIndexedCandidates(saleIndex, tx.ref_number, tx.amount, tx.base_amount)) {
             const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
             if (confidence >= threshold) {
               candidates.push({
@@ -189,7 +256,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         }
 
         if (allowPurchaseInvoices) {
-          for (const inv of openPurchases) {
+          for (const inv of getIndexedCandidates(purchaseIndex, tx.ref_number, tx.amount, tx.base_amount)) {
             const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
             if (confidence >= threshold) {
               candidates.push({
@@ -274,6 +341,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
 
+      const saleIndex = buildInvoiceIndex(openSales);
+      const purchaseIndex = buildInvoiceIndex(openPurchases);
       const confirmed = [];
       const skipped = [];
       // Track consumed invoices to avoid double-matching (keyed by type:id to prevent cross-table collisions)
@@ -287,7 +356,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
 
         if (allowSaleInvoices) {
-          for (const inv of openSales) {
+          for (const inv of getIndexedCandidates(saleIndex, tx.ref_number, tx.amount, tx.base_amount)) {
             if (inv.payment_status === "PARTIALLY_PAID") continue;
             const invKey = `sale:${inv.id!}`;
             if (consumedInvoiceKeys.has(invKey)) continue;
@@ -310,7 +379,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         }
 
         if (allowPurchaseInvoices) {
-          for (const inv of openPurchases) {
+          for (const inv of getIndexedCandidates(purchaseIndex, tx.ref_number, tx.amount, tx.base_amount)) {
             if (inv.payment_status === "PARTIALLY_PAID") continue;
             const invKey = `purchase:${inv.id!}`;
             if (consumedInvoiceKeys.has(invKey)) continue;

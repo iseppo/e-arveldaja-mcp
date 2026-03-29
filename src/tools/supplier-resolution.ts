@@ -114,9 +114,11 @@ export async function resolveSupplierInternal(
       const matchedClient = activeClients.find(client => client.name === bestMatch);
       const maxLen = Math.max(fields.supplier_name.length, bestMatch.length);
       const similarity = maxLen > 0 ? 1 - distance(fields.supplier_name, bestMatch) / maxLen : 0;
+      const shorterLen = Math.min(fields.supplier_name.length, bestMatch.length);
       if (
         matchedClient &&
-        similarity >= 0.5 &&
+        similarity >= 0.7 &&
+        shorterLen >= 4 &&
         (
           bestMatch.toLowerCase().includes(fields.supplier_name.toLowerCase()) ||
           fields.supplier_name.toLowerCase().includes(bestMatch.toLowerCase())

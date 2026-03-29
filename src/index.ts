@@ -185,7 +185,7 @@ function clearAllCaches(connectionIndex: number): void {
   const connectionPrefix = `connection:${connectionIndex}:`;
   cache.invalidate(connectionPrefix);
   readonlyCache.invalidate(connectionPrefix);
-  clearVatWarnings();
+  clearVatWarnings(connectionPrefix);
 }
 
 function createScopedApiContext(
