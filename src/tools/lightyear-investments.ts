@@ -257,7 +257,9 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
         // Do NOT pick a candidate — leave eur_amount = 0 so trade is flagged as unmatched
       } else if (candidates.length === 1) {
         const best = candidates[0]!;
-        trade.eur_amount = Math.abs(best.eurConv.gross_amount);
+        // Use net_amount (gross minus FX fee) — the actual EUR leaving the account.
+        // gross_amount is the EUR equivalent before FX fee deduction.
+        trade.eur_amount = Math.abs(best.eurConv.net_amount);
         trade.fx_rate = best.eurConv.fx_rate || best.fgnConv.fx_rate || null;
         trade.fx_fee_eur = Math.abs(best.eurConv.fee);
         trade.conversion_ref = best.ref;
@@ -478,7 +480,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           sells: sells.length,
           total_invested_eur: roundMoney(buys.reduce((s, t) => {
             const tradeFeeEur = t.fee_eur > 0 && t.fx_rate ? t.fee_eur / t.fx_rate : t.fee_eur;
-            return s + t.eur_amount + tradeFeeEur;
+            return s + t.eur_amount + t.fx_fee_eur + tradeFeeEur;
           }, 0)),
           total_sold_eur: roundMoney(sells.reduce((s, t) => s + t.eur_amount, 0)),
         };
@@ -700,25 +702,31 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           continue;
         }
 
-        // eur_amount (from EUR conversion gross) already includes FX fee.
-        // Only trade.fee_eur is an additional cost (converted to EUR for foreign trades).
+        // eur_amount is the EUR conversion net (after FX fee deduction).
+        // fx_fee_eur is the FX conversion fee. trade.fee_eur is the trade platform fee.
         const tradeFeeEur = trade.fee_eur > 0 && trade.fx_rate
           ? roundMoney(trade.fee_eur / trade.fx_rate)
           : trade.fee_eur;
         const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
 
         if (trade.type === "Buy") {
-          // totalCostEur = EUR conversion gross (includes FX fee) + trade fee in EUR
-          const totalCostEur = roundMoney(trade.eur_amount + tradeFeeEur);
+          // eur_amount = net EUR (after FX fee). Investment cost = net + FX fee (= conversion gross).
+          const investmentCostEur = roundMoney(trade.eur_amount + trade.fx_fee_eur);
+          const totalCashOutEur = roundMoney(trade.eur_amount + trade.fx_fee_eur + tradeFeeEur);
 
-          if (fee_account && tradeFeeEur > 0) {
+          if (fee_account && (tradeFeeEur > 0 || trade.fx_fee_eur > 0)) {
             postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: trade.eur_amount });
-            postings.push({ accounts_id: fee_account, type: "D", amount: tradeFeeEur });
-            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: totalCostEur });
+            if (trade.fx_fee_eur > 0) {
+              postings.push({ accounts_id: fee_account, type: "D", amount: trade.fx_fee_eur });
+            }
+            if (tradeFeeEur > 0) {
+              postings.push({ accounts_id: fee_account, type: "D", amount: tradeFeeEur });
+            }
+            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: totalCashOutEur });
           } else {
             // Fees included in investment cost
-            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: totalCostEur });
-            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: totalCostEur });
+            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: totalCashOutEur });
+            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: totalCashOutEur });
           }
         } else {
           // Sell: need cost basis from capital gains file
@@ -1101,12 +1109,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         };
 
         if (trade.type === "Buy") {
-          // eur_amount (EUR conversion gross) already includes FX fee;
-          // only add trade fee converted to EUR
+          // eur_amount is EUR conversion net (after FX fee).
+          // Total cost = net + FX fee + trade platform fee.
           const tradeFeeEur = trade.fee_eur > 0 && trade.fx_rate
             ? trade.fee_eur / trade.fx_rate
             : trade.fee_eur;
-          h.total_cost_eur += trade.eur_amount + tradeFeeEur;
+          h.total_cost_eur += trade.eur_amount + trade.fx_fee_eur + tradeFeeEur;
           h.quantity += trade.quantity;
           h.buy_count++;
         } else {
