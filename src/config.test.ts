@@ -527,6 +527,170 @@ describe("loadAllConfigs", () => {
     }
   });
 
+  it("appends additional credentials into indexed .env connection blocks", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-append-bootstrap-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+    const firstApiKeyFile = join(workDir, "apikey-primary.txt");
+    const secondApiKeyFile = join(workDir, "apikey-second.txt");
+    const globalEnvFile = join(globalDir, ".env");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    writeFileSync(firstApiKeyFile, [
+      "ApiKey ID: first-id",
+      "ApiKey public value: first-public",
+      "Password: first-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    writeFileSync(secondApiKeyFile, [
+      "ApiKey ID: second-id",
+      "ApiKey public value: second-public",
+      "Password: second-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { importApiKeyCredentials, loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      const first = await importApiKeyCredentials({
+        apiKeyFile: firstApiKeyFile,
+        storageScope: "global",
+        globalConfigDir: globalDir,
+        verify: async () => ({ companyName: "Primary OÜ", verifiedAt: "2026-03-29T15:00:00.000Z" }),
+      });
+      const second = await importApiKeyCredentials({
+        apiKeyFile: secondApiKeyFile,
+        storageScope: "global",
+        globalConfigDir: globalDir,
+        verify: async () => ({ companyName: "Second OÜ", verifiedAt: "2026-03-29T15:05:00.000Z" }),
+      });
+
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+      const envText = readFileSync(globalEnvFile, "utf8");
+
+      expect(first.action).toBe("created");
+      expect(first.target).toBe("primary");
+      expect(second.action).toBe("appended");
+      expect(second.target).toBe("connection_1");
+      expect(envText).toContain("EARVELDAJA_API_KEY_ID=first-id");
+      expect(envText).toContain("EARVELDAJA_CONNECTION_1_API_KEY_ID=second-id");
+      expect(configs).toHaveLength(2);
+      expect(configs[0]!.name).toBe("env");
+      expect(configs[0]!.config.apiKeyId).toBe("first-id");
+      expect(configs[1]!.name).toBe("env-global-1");
+      expect(configs[1]!.config.apiKeyId).toBe("second-id");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists and removes stored credential blocks, leaving appended connections loadable", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-remove-bootstrap-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+    const firstApiKeyFile = join(workDir, "apikey-primary.txt");
+    const secondApiKeyFile = join(workDir, "apikey-second.txt");
+    const globalEnvFile = join(globalDir, ".env");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    writeFileSync(firstApiKeyFile, [
+      "ApiKey ID: first-id",
+      "ApiKey public value: first-public",
+      "Password: first-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    writeFileSync(secondApiKeyFile, [
+      "ApiKey ID: second-id",
+      "ApiKey public value: second-public",
+      "Password: second-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const {
+        importApiKeyCredentials,
+        listStoredCredentials,
+        removeStoredCredential,
+        loadDotenvFiles,
+        loadAllConfigs,
+      } = await importFreshConfig(workDir);
+
+      await importApiKeyCredentials({
+        apiKeyFile: firstApiKeyFile,
+        storageScope: "global",
+        globalConfigDir: globalDir,
+        verify: async () => ({ companyName: "Primary OÜ", verifiedAt: "2026-03-29T16:00:00.000Z" }),
+      });
+      await importApiKeyCredentials({
+        apiKeyFile: secondApiKeyFile,
+        storageScope: "global",
+        globalConfigDir: globalDir,
+        verify: async () => ({ companyName: "Second OÜ", verifiedAt: "2026-03-29T16:05:00.000Z" }),
+      });
+
+      const before = listStoredCredentials();
+      expect(before).toHaveLength(1);
+      expect(before[0]!.credentials.map((entry) => entry.target)).toEqual(["primary", "connection_1"]);
+
+      const removedExtra = removeStoredCredential({
+        storageScope: "global",
+        target: "connection_1",
+        globalConfigDir: globalDir,
+      });
+      expect(removedExtra.remainingCredentials).toBe(1);
+      expect(readFileSync(globalEnvFile, "utf8")).not.toContain("EARVELDAJA_CONNECTION_1_API_KEY_ID");
+
+      await importApiKeyCredentials({
+        apiKeyFile: secondApiKeyFile,
+        storageScope: "global",
+        globalConfigDir: globalDir,
+        verify: async () => ({ companyName: "Second OÜ", verifiedAt: "2026-03-29T16:10:00.000Z" }),
+      });
+      const removedPrimary = removeStoredCredential({
+        storageScope: "global",
+        target: "primary",
+        globalConfigDir: globalDir,
+      });
+
+      expect(removedPrimary.remainingCredentials).toBe(1);
+      expect(readFileSync(globalEnvFile, "utf8")).not.toContain("EARVELDAJA_API_KEY_ID=first-id");
+
+      rmSync(firstApiKeyFile, { force: true });
+      rmSync(secondApiKeyFile, { force: true });
+
+      for (const key of CONFIG_ENV_KEYS) {
+        delete process.env[key];
+      }
+      process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(configs).toHaveLength(1);
+      expect(configs[0]!.name).toBe("env-global-1");
+      expect(configs[0]!.config.apiKeyId).toBe("second-id");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not write a .env file when credential verification fails", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-import-verify-fail-"));
     const workDir = join(tempDir, "work");
@@ -659,9 +823,11 @@ describe("loadAllConfigs", () => {
     expect(info.searched_directories).toEqual(["/tmp/project", "/tmp/global-config"]);
     expect(info.next_steps[0]).toContain("this folder");
     expect(info.next_steps[0]).toContain("import_apikey_credentials");
-    expect(info.next_steps[1]).toContain("secure apikey*.txt");
-    expect(info.next_steps[1]).toContain("any folder");
-    expect(info.next_steps[2]).toContain("Shared config directory");
+    expect(info.next_steps[1]).toContain("append another stored connection");
+    expect(info.next_steps[1]).toContain("remove_stored_credentials");
+    expect(info.next_steps[2]).toContain("secure apikey*.txt");
+    expect(info.next_steps[2]).toContain("any folder");
+    expect(info.next_steps[3]).toContain("Shared config directory");
   });
 
   it("rejects API key files that are group-readable", async () => {

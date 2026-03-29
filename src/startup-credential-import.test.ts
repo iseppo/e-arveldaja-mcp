@@ -17,7 +17,9 @@ function buildOptions(
       companyName: "Acme OÜ",
       verifiedAt: "2026-03-29T12:00:00.000Z",
       created: true,
+      action: "created" as const,
       sourceFile: "/tmp/apikey.txt",
+      target: "primary" as const,
     })),
     ...overrides,
   };
@@ -70,7 +72,9 @@ describe("maybeImportCredentialsOnStartup", () => {
       companyName: "Beta AS",
       verifiedAt: "2026-03-29T13:00:00.000Z",
       created: true,
+      action: "created" as const,
       sourceFile: "/tmp/project/apikey.txt",
+      target: "primary" as const,
     }));
 
     const result = await maybeImportCredentialsOnStartup(buildOptions({
@@ -87,7 +91,9 @@ describe("maybeImportCredentialsOnStartup", () => {
         companyName: "Beta AS",
         verifiedAt: "2026-03-29T13:00:00.000Z",
         created: true,
+        action: "created",
         sourceFile: "/tmp/project/apikey.txt",
+        target: "primary",
       },
     });
     expect(promptForScope).toHaveBeenCalledTimes(1);

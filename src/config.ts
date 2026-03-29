@@ -54,7 +54,37 @@ export interface ImportApiKeyCredentialsResult {
   companyName: string | null;
   verifiedAt: string;
   created: boolean;
+  action: "created" | "appended" | "replaced" | "unchanged";
   sourceFile: string;
+  target: "primary" | `connection_${number}`;
+}
+
+export interface StoredCredentialSummary {
+  target: "primary" | `connection_${number}`;
+  name: string;
+  server: "live" | "demo";
+  apiKeyId: string;
+  isDefault: boolean;
+}
+
+export interface StoredCredentialInventory {
+  storageScope: CredentialStorageScope;
+  envFile: string;
+  credentials: StoredCredentialSummary[];
+}
+
+export interface RemoveStoredCredentialOptions {
+  storageScope: CredentialStorageScope;
+  target: "primary" | `connection_${number}`;
+  workingDir?: string;
+  globalConfigDir?: string;
+}
+
+export interface RemoveStoredCredentialResult {
+  envFile: string;
+  storageScope: CredentialStorageScope;
+  removedTarget: "primary" | `connection_${number}`;
+  remainingCredentials: number;
 }
 
 export const NO_API_CREDENTIALS_FOUND_MESSAGE = "No API credentials found.";
@@ -72,6 +102,24 @@ const API_CREDENTIAL_ENV_KEYS = [
   "EARVELDAJA_API_PUBLIC_VALUE",
   "EARVELDAJA_API_PASSWORD",
 ] as const;
+const ENV_CONNECTION_KEY_RE = /^EARVELDAJA_CONNECTION_(\d+)_(SERVER|API_KEY_ID|API_PUBLIC_VALUE|API_PASSWORD)$/;
+
+type CredentialServer = keyof typeof SERVERS;
+
+interface StoredCredentialBlock {
+  target: "primary" | `connection_${number}`;
+  name: string;
+  server: CredentialServer;
+  apiKeyId: string;
+  apiPublicValue: string;
+  apiPassword: string;
+}
+
+interface CredentialBlockMetadata {
+  companyName?: string | null;
+  verifiedAt?: string;
+  sourceFile?: string;
+}
 
 function getBaseUrl(): string {
   const server = process.env.EARVELDAJA_SERVER || "live";
@@ -213,6 +261,7 @@ export function getCredentialSetupInfo(
     ],
     next_steps: [
       "Set the EARVELDAJA_API_KEY_ID, EARVELDAJA_API_PUBLIC_VALUE, and EARVELDAJA_API_PASSWORD environment variables, set EARVELDAJA_API_KEY_FILE to an explicit credential file path, or place apikey*.txt in this folder and run import_apikey_credentials.",
+      "If credentials are already stored, import_apikey_credentials can append another stored connection by default, and list_stored_credentials / remove_stored_credentials can inspect or delete stored .env connections.",
       "If exactly one secure apikey*.txt is present in this folder and the MCP client supports prompts, the server will offer to verify it and save the resulting .env either only for this folder or so it works when you start the MCP server from any folder.",
       `Shared config directory (used when you want the configuration available from any folder): ${globalConfigDirectory}. Shared env file: ${globalEnvFile}. Override the directory with EARVELDAJA_CONFIG_DIR if needed.`,
       "Keep secrets in the chosen .env once verified; treat apikey*.txt as an import source, not the long-term store.",
@@ -262,6 +311,170 @@ function hasCompleteApiCredentialEnv(env: NodeJS.ProcessEnv | Record<string, str
   return API_CREDENTIAL_ENV_KEYS.every((key) => Boolean(env[key]));
 }
 
+function getEnvConnectionKey(slot: number, field: "SERVER" | "API_KEY_ID" | "API_PUBLIC_VALUE" | "API_PASSWORD"): string {
+  return `EARVELDAJA_CONNECTION_${slot}_${field}`;
+}
+
+function getEnvConnectionTarget(slot: number): `connection_${number}` {
+  return `connection_${slot}`;
+}
+
+function getStoredCredentialSlot(target: "primary" | `connection_${number}`): number | null {
+  if (target === "primary") return null;
+  return Number(target.replace("connection_", ""));
+}
+
+function parseStoredCredentialTarget(value: string): "primary" | `connection_${number}` {
+  if (value === "primary") return value;
+  const match = value.match(/^connection_(\d+)$/);
+  if (!match) {
+    throw new Error(`Invalid stored credential target "${value}". Use "primary" or "connection_N".`);
+  }
+  return value as `connection_${number}`;
+}
+
+function getTargetEnvFile(
+  storageScope: CredentialStorageScope,
+  options: { workingDir?: string; globalConfigDir?: string } = {},
+): string {
+  return storageScope === "local"
+    ? resolve(options.workingDir ?? CWD, ".env")
+    : getGlobalEnvFile(options.globalConfigDir);
+}
+
+function normalizeCredentialServer(server: string | undefined): CredentialServer | null {
+  if (server === undefined || server === "") return "live";
+  return server === "live" || server === "demo" ? server : null;
+}
+
+function readStoredCredentialBlocks(
+  env: Record<string, string>,
+  options: { includePrimary?: boolean; extraNamePrefix?: string } = {},
+): StoredCredentialBlock[] {
+  const blocks: StoredCredentialBlock[] = [];
+
+  if (options.includePrimary !== false && hasCompleteApiCredentialEnv(env)) {
+    const server = normalizeCredentialServer(env.EARVELDAJA_SERVER);
+    if (server) {
+      blocks.push({
+        target: "primary",
+        name: "env",
+        server,
+        apiKeyId: env.EARVELDAJA_API_KEY_ID!,
+        apiPublicValue: env.EARVELDAJA_API_PUBLIC_VALUE!,
+        apiPassword: env.EARVELDAJA_API_PASSWORD!,
+      });
+    }
+  }
+
+  const grouped = new Map<number, Partial<Record<"SERVER" | "API_KEY_ID" | "API_PUBLIC_VALUE" | "API_PASSWORD", string>>>();
+  for (const [key, value] of Object.entries(env)) {
+    const match = key.match(ENV_CONNECTION_KEY_RE);
+    if (!match) continue;
+
+    const slot = Number(match[1]);
+    if (!Number.isInteger(slot) || slot <= 0) continue;
+
+    const field = match[2] as "SERVER" | "API_KEY_ID" | "API_PUBLIC_VALUE" | "API_PASSWORD";
+    const group = grouped.get(slot) ?? {};
+    group[field] = value;
+    grouped.set(slot, group);
+  }
+
+  const extraNamePrefix = options.extraNamePrefix ?? "env";
+  const slots = [...grouped.keys()].sort((a, b) => a - b);
+  for (const slot of slots) {
+    const group = grouped.get(slot)!;
+    if (!group.API_KEY_ID || !group.API_PUBLIC_VALUE || !group.API_PASSWORD) continue;
+
+    const server = normalizeCredentialServer(group.SERVER);
+    if (!server) continue;
+
+    blocks.push({
+      target: getEnvConnectionTarget(slot),
+      name: `${extraNamePrefix}-${slot}`,
+      server,
+      apiKeyId: group.API_KEY_ID,
+      apiPublicValue: group.API_PUBLIC_VALUE,
+      apiPassword: group.API_PASSWORD,
+    });
+  }
+
+  return blocks;
+}
+
+function findMatchingStoredCredentialTarget(
+  blocks: StoredCredentialBlock[],
+  candidate: { server: CredentialServer; apiKeyId: string; apiPublicValue: string; apiPassword: string },
+): "primary" | `connection_${number}` | null {
+  const match = blocks.find((block) =>
+    block.server === candidate.server &&
+    block.apiKeyId === candidate.apiKeyId &&
+    block.apiPublicValue === candidate.apiPublicValue &&
+    block.apiPassword === candidate.apiPassword
+  );
+  return match?.target ?? null;
+}
+
+function findNextConnectionSlot(env: Record<string, string>): number {
+  const used = new Set<number>();
+  for (const key of Object.keys(env)) {
+    const match = key.match(ENV_CONNECTION_KEY_RE);
+    if (!match) continue;
+    const slot = Number(match[1]);
+    if (Number.isInteger(slot) && slot > 0) used.add(slot);
+  }
+
+  let slot = 1;
+  while (used.has(slot)) slot += 1;
+  return slot;
+}
+
+function setStoredCredentialBlock(
+  env: Record<string, string>,
+  target: "primary" | `connection_${number}`,
+  values: { server: CredentialServer; apiKeyId: string; apiPublicValue: string; apiPassword: string },
+): Record<string, string> {
+  const next = { ...env };
+
+  if (target === "primary") {
+    next.EARVELDAJA_SERVER = values.server;
+    next.EARVELDAJA_API_KEY_ID = values.apiKeyId;
+    next.EARVELDAJA_API_PUBLIC_VALUE = values.apiPublicValue;
+    next.EARVELDAJA_API_PASSWORD = values.apiPassword;
+    return next;
+  }
+
+  const slot = getStoredCredentialSlot(target)!;
+  next[getEnvConnectionKey(slot, "SERVER")] = values.server;
+  next[getEnvConnectionKey(slot, "API_KEY_ID")] = values.apiKeyId;
+  next[getEnvConnectionKey(slot, "API_PUBLIC_VALUE")] = values.apiPublicValue;
+  next[getEnvConnectionKey(slot, "API_PASSWORD")] = values.apiPassword;
+  return next;
+}
+
+function removeStoredCredentialBlock(
+  env: Record<string, string>,
+  target: "primary" | `connection_${number}`,
+): Record<string, string> {
+  const next = { ...env };
+
+  if (target === "primary") {
+    delete next.EARVELDAJA_SERVER;
+    delete next.EARVELDAJA_API_KEY_ID;
+    delete next.EARVELDAJA_API_PUBLIC_VALUE;
+    delete next.EARVELDAJA_API_PASSWORD;
+    return next;
+  }
+
+  const slot = getStoredCredentialSlot(target)!;
+  delete next[getEnvConnectionKey(slot, "SERVER")];
+  delete next[getEnvConnectionKey(slot, "API_KEY_ID")];
+  delete next[getEnvConnectionKey(slot, "API_PUBLIC_VALUE")];
+  delete next[getEnvConnectionKey(slot, "API_PASSWORD")];
+  return next;
+}
+
 function writePrivateEnvFile(filePath: string, content: string): void {
   try {
     const info = lstatSync(filePath);
@@ -290,24 +503,8 @@ function writePrivateEnvFile(filePath: string, content: string): void {
 
 function serializeEnvFile(
   env: Record<string, string>,
-  metadata?: { companyName?: string | null; verifiedAt?: string; sourceFile?: string },
+  metadataByTarget: Partial<Record<"primary" | `connection_${number}`, CredentialBlockMetadata>> = {},
 ): string {
-  const header: string[] = ["# e-arveldaja credentials"];
-  if (metadata?.companyName) header.push(`# Company: ${metadata.companyName}`);
-  if (metadata?.verifiedAt) header.push(`# Verified at: ${metadata.verifiedAt}`);
-  if (metadata?.sourceFile) header.push(`# Imported from: ${metadata.sourceFile}`);
-
-  const orderedKeys = [
-    "EARVELDAJA_SERVER",
-    "EARVELDAJA_API_KEY_ID",
-    "EARVELDAJA_API_PUBLIC_VALUE",
-    "EARVELDAJA_API_PASSWORD",
-  ];
-  const keys = [
-    ...orderedKeys.filter((key) => env[key]),
-    ...Object.keys(env).filter((key) => env[key] && !orderedKeys.includes(key)).sort(),
-  ];
-
   const serializeEnvValue = (v: string): string => {
     const needsQuoting = v === "" || /^[\s]|[\s]$/.test(v) || /[#\n\r]/.test(v);
     if (!needsQuoting) return v;
@@ -337,7 +534,66 @@ function serializeEnvFile(
     return `"${v}"`;
   };
 
-  return `${header.join("\n")}\n${keys.map((key) => `${key}=${serializeEnvValue(env[key]!)}`).join("\n")}\n`;
+  const buildMetadataLines = (metadata?: CredentialBlockMetadata): string[] => {
+    const lines: string[] = [];
+    if (metadata?.companyName) lines.push(`# Company: ${metadata.companyName}`);
+    if (metadata?.verifiedAt) lines.push(`# Verified at: ${metadata.verifiedAt}`);
+    if (metadata?.sourceFile) lines.push(`# Imported from: ${metadata.sourceFile}`);
+    return lines;
+  };
+
+  const sections: string[] = [];
+  const primary = readStoredCredentialBlocks(env, { includePrimary: true, extraNamePrefix: "env" })
+    .find((block) => block.target === "primary");
+  const extras = readStoredCredentialBlocks(env, { includePrimary: false, extraNamePrefix: "env" });
+
+  if (primary || extras.length > 0) {
+    sections.push("# e-arveldaja credentials");
+  }
+
+  if (primary) {
+    sections.push([
+      "# Default connection",
+      ...buildMetadataLines(metadataByTarget.primary),
+      `EARVELDAJA_SERVER=${serializeEnvValue(primary.server)}`,
+      `EARVELDAJA_API_KEY_ID=${serializeEnvValue(primary.apiKeyId)}`,
+      `EARVELDAJA_API_PUBLIC_VALUE=${serializeEnvValue(primary.apiPublicValue)}`,
+      `EARVELDAJA_API_PASSWORD=${serializeEnvValue(primary.apiPassword)}`,
+    ].join("\n"));
+  }
+
+  for (const block of extras) {
+    const slot = getStoredCredentialSlot(block.target)!;
+    sections.push([
+      `# Additional connection ${slot}`,
+      ...buildMetadataLines(metadataByTarget[block.target]),
+      `${getEnvConnectionKey(slot, "SERVER")}=${serializeEnvValue(block.server)}`,
+      `${getEnvConnectionKey(slot, "API_KEY_ID")}=${serializeEnvValue(block.apiKeyId)}`,
+      `${getEnvConnectionKey(slot, "API_PUBLIC_VALUE")}=${serializeEnvValue(block.apiPublicValue)}`,
+      `${getEnvConnectionKey(slot, "API_PASSWORD")}=${serializeEnvValue(block.apiPassword)}`,
+    ].join("\n"));
+  }
+
+  const managedKeys = new Set<string>([
+    "EARVELDAJA_SERVER",
+    "EARVELDAJA_API_KEY_ID",
+    "EARVELDAJA_API_PUBLIC_VALUE",
+    "EARVELDAJA_API_PASSWORD",
+  ]);
+  for (const key of Object.keys(env)) {
+    if (ENV_CONNECTION_KEY_RE.test(key)) managedKeys.add(key);
+  }
+
+  const otherKeys = Object.keys(env)
+    .filter((key) => env[key] && !managedKeys.has(key))
+    .sort();
+
+  if (otherKeys.length > 0) {
+    sections.push(otherKeys.map((key) => `${key}=${serializeEnvValue(env[key]!)}`).join("\n"));
+  }
+
+  if (sections.length === 0) return "";
+  return `${sections.join("\n\n")}\n`;
 }
 
 export function loadDotenvFiles(): void {
@@ -373,6 +629,7 @@ export function loadDotenvFiles(): void {
 
       for (const [key, value] of Object.entries(parsed)) {
         if (API_CREDENTIAL_ENV_KEYS.includes(key as typeof API_CREDENTIAL_ENV_KEYS[number])) continue;
+        if (ENV_CONNECTION_KEY_RE.test(key)) continue;
         if (key === "EARVELDAJA_SERVER") {
           if (explicitServerProvided) continue;
           if (credentialKeysAlreadyProvided) continue;
@@ -463,39 +720,66 @@ export async function importApiKeyCredentials(
   const verification = await options.verify(config);
   const verifiedAt = verification.verifiedAt ?? new Date().toISOString();
 
-  const targetEnvFile = options.storageScope === "local"
-    ? resolve(options.workingDir ?? CWD, ".env")
-    : getGlobalEnvFile(options.globalConfigDir);
+  const targetEnvFile = getTargetEnvFile(options.storageScope, options);
   const targetEnvFileExists = existsSync(targetEnvFile);
 
   const existingEnv = parseEnvFile(targetEnvFile);
-  const existingHasCredentials = hasCompleteApiCredentialEnv(existingEnv);
-  const credentialsDiffer = existingHasCredentials && (
-    existingEnv.EARVELDAJA_API_KEY_ID !== parsed.keyId ||
-    existingEnv.EARVELDAJA_API_PUBLIC_VALUE !== parsed.publicValue ||
-    existingEnv.EARVELDAJA_API_PASSWORD !== parsed.password ||
-    (existingEnv.EARVELDAJA_SERVER ?? "live") !== server
-  );
+  const existingHasPrimaryCredentials = hasCompleteApiCredentialEnv(existingEnv);
+  const existingBlocks = readStoredCredentialBlocks(existingEnv, { includePrimary: true, extraNamePrefix: "env" });
+  const matchingTarget = findMatchingStoredCredentialTarget(existingBlocks, {
+    server,
+    apiKeyId: parsed.keyId,
+    apiPublicValue: parsed.publicValue,
+    apiPassword: parsed.password,
+  });
 
-  if (credentialsDiffer && options.overwrite !== true) {
-    throw new Error(
-      `Target env file already contains different e-arveldaja credentials: ${targetEnvFile}. ` +
-      "Pass overwrite=true to replace them."
-    );
+  if (matchingTarget && !(options.overwrite === true && matchingTarget !== "primary")) {
+    return {
+      envFile: targetEnvFile,
+      storageScope: options.storageScope,
+      companyName: verification.companyName,
+      verifiedAt,
+      created: false,
+      action: "unchanged",
+      sourceFile: options.apiKeyFile,
+      target: matchingTarget,
+    };
   }
 
-  const mergedEnv: Record<string, string> = {
-    ...existingEnv,
-    EARVELDAJA_SERVER: server,
-    EARVELDAJA_API_KEY_ID: parsed.keyId,
-    EARVELDAJA_API_PUBLIC_VALUE: parsed.publicValue,
-    EARVELDAJA_API_PASSWORD: parsed.password,
-  };
+  let mergedEnv = { ...existingEnv };
+  let action: "created" | "appended" | "replaced" | "unchanged";
+  let target: "primary" | `connection_${number}`;
+
+  if (options.overwrite === true || !existingHasPrimaryCredentials) {
+    target = "primary";
+    action = existingHasPrimaryCredentials ? "replaced" : "created";
+    mergedEnv = setStoredCredentialBlock(mergedEnv, target, {
+      server,
+      apiKeyId: parsed.keyId,
+      apiPublicValue: parsed.publicValue,
+      apiPassword: parsed.password,
+    });
+    if (matchingTarget) {
+      mergedEnv = removeStoredCredentialBlock(mergedEnv, matchingTarget);
+    }
+  } else {
+    const slot = findNextConnectionSlot(mergedEnv);
+    target = getEnvConnectionTarget(slot);
+    action = "appended";
+    mergedEnv = setStoredCredentialBlock(mergedEnv, target, {
+      server,
+      apiKeyId: parsed.keyId,
+      apiPublicValue: parsed.publicValue,
+      apiPassword: parsed.password,
+    });
+  }
 
   writePrivateEnvFile(targetEnvFile, serializeEnvFile(mergedEnv, {
-    companyName: verification.companyName,
-    verifiedAt,
-    sourceFile: options.apiKeyFile,
+    [target]: {
+      companyName: verification.companyName,
+      verifiedAt,
+      sourceFile: options.apiKeyFile,
+    },
   }));
 
   return {
@@ -503,8 +787,10 @@ export async function importApiKeyCredentials(
     storageScope: options.storageScope,
     companyName: verification.companyName,
     verifiedAt,
-    created: !targetEnvFileExists || !existingHasCredentials,
+    created: action === "created",
+    action,
     sourceFile: options.apiKeyFile,
+    target,
   };
 }
 
@@ -563,6 +849,50 @@ export function loadAllConfigs(): NamedConfig[] {
     });
   }
 
+  const envFiles = [
+    ...getWorkingDirSearchDirs().map((dir) => ({
+      envFile: resolve(dir, ".env"),
+      extraNamePrefix: "env-local",
+    })),
+    {
+      envFile: getGlobalEnvFile(),
+      extraNamePrefix: "env-global",
+    },
+  ];
+  const seenEnvFiles = new Set<string>();
+
+  for (const candidate of envFiles) {
+    let dedupeKey = candidate.envFile;
+    try {
+      dedupeKey = realpathSync(candidate.envFile);
+    } catch {
+      // Keep the resolved path if the file does not exist.
+    }
+    if (seenEnvFiles.has(dedupeKey)) continue;
+    seenEnvFiles.add(dedupeKey);
+
+    const parsedEnv = parseEnvFile(candidate.envFile);
+    if (Object.keys(parsedEnv).length === 0) continue;
+
+    const storedConnections = readStoredCredentialBlocks(parsedEnv, {
+      includePrimary: false,
+      extraNamePrefix: candidate.extraNamePrefix,
+    });
+
+    for (const stored of storedConnections) {
+      addConfig({
+        name: stored.name,
+        filePath: candidate.envFile,
+        config: {
+          apiKeyId: stored.apiKeyId,
+          apiPublicValue: stored.apiPublicValue,
+          apiPassword: stored.apiPassword,
+          baseUrl: getBaseUrlForServer(stored.server),
+        },
+      });
+    }
+  }
+
   // 3. Scan local credential files only. The global directory is reserved for the canonical .env.
   const searchDirs = getWorkingDirSearchDirs();
 
@@ -601,4 +931,73 @@ export function loadAllConfigs(): NamedConfig[] {
   }
 
   return configs;
+}
+
+export function listStoredCredentials(
+  options: { workingDir?: string; globalConfigDir?: string } = {},
+): StoredCredentialInventory[] {
+  const candidates: Array<{ storageScope: CredentialStorageScope; envFile: string; extraNamePrefix: string }> = [
+    {
+      storageScope: "local",
+      envFile: getTargetEnvFile("local", options),
+      extraNamePrefix: "env-local",
+    },
+    {
+      storageScope: "global",
+      envFile: getTargetEnvFile("global", options),
+      extraNamePrefix: "env-global",
+    },
+  ];
+
+  return candidates
+    .map((candidate) => {
+      const env = parseEnvFile(candidate.envFile);
+      const credentials = readStoredCredentialBlocks(env, {
+        includePrimary: true,
+        extraNamePrefix: candidate.extraNamePrefix,
+      }).map((block, index) => ({
+        target: block.target,
+        name: block.name,
+        server: block.server,
+        apiKeyId: block.apiKeyId,
+        isDefault: index === 0,
+      }));
+
+      return {
+        storageScope: candidate.storageScope,
+        envFile: candidate.envFile,
+        credentials,
+      };
+    })
+    .filter((inventory) => inventory.credentials.length > 0);
+}
+
+export function removeStoredCredential(
+  options: RemoveStoredCredentialOptions,
+): RemoveStoredCredentialResult {
+  const target = parseStoredCredentialTarget(options.target);
+  const envFile = getTargetEnvFile(options.storageScope, options);
+  const existingEnv = parseEnvFile(envFile);
+  const existingTargets = new Set(
+    readStoredCredentialBlocks(existingEnv, { includePrimary: true, extraNamePrefix: "env" }).map((block) => block.target)
+  );
+
+  if (!existingTargets.has(target)) {
+    throw new Error(`Stored credential target "${target}" was not found in ${envFile}.`);
+  }
+
+  const updatedEnv = removeStoredCredentialBlock(existingEnv, target);
+  writePrivateEnvFile(envFile, serializeEnvFile(updatedEnv));
+
+  const remainingCredentials = readStoredCredentialBlocks(updatedEnv, {
+    includePrimary: true,
+    extraNamePrefix: "env",
+  }).length;
+
+  return {
+    envFile,
+    storageScope: options.storageScope,
+    removedTarget: target,
+    remainingCredentials,
+  };
 }

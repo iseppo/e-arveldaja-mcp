@@ -22,7 +22,7 @@ Treat its response as the source of truth for:
 ## Step 2: Explain the current status
 
 - If `mode="setup"`, say clearly that API-backed workflows are blocked until credentials are configured.
-- If `mode="configured"`, say clearly that credentials already exist and this workflow can be used to inspect or replace them.
+- If `mode="configured"`, say clearly that credentials already exist and this workflow can be used to inspect, append, replace, or remove stored `.env` credentials.
 
 Explain the two storage scopes:
 - `local`: works only when the MCP server is started from this folder
@@ -36,7 +36,9 @@ Call `import_apikey_credentials` with:
 - `file_path`: the provided path
 - `storage_scope`: the provided scope when present; otherwise omit it so the client can choose interactively when supported
 
-Do not set `overwrite` unless the tool reports that different credentials already exist and the user explicitly approves replacing them.
+By default, different credentials are appended as an additional stored connection when a default connection already exists.
+
+Set `overwrite: true` only if the user explicitly approves replacing the default stored connection.
 
 ### If `file_path` was not provided
 
@@ -49,12 +51,15 @@ Handle the outcomes:
 - If the tool reports multiple candidate files, stop and ask the user which file should be imported.
 - If the tool reports no secure apikey file, explain the setup paths from `get_setup_instructions` and stop.
 
-## Step 4: Handle replacement explicitly
+## Step 4: Handle stored-credential removal explicitly
 
-If `import_apikey_credentials` reports that the target env file already contains different credentials:
-- show which env file would be replaced
-- ask the user whether they want to replace the existing credentials
-- retry with `overwrite: true` only after explicit approval
+If the user wants to remove stored credentials instead of importing:
+- call `list_stored_credentials`
+- explain that it only shows credentials stored in local/global `.env` files, not shell env vars, `EARVELDAJA_API_KEY_FILE`, or raw `apikey*.txt` files
+- if the user confirms a specific stored target should be removed, call `remove_stored_credentials` with:
+  - `storage_scope`
+  - `target`
+- state clearly that removal is destructive and requires restart
 
 ## Step 5: Handle clients without interactive prompting
 

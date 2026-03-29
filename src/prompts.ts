@@ -103,7 +103,7 @@ Follow these steps in order:
 
 2. Present the setup status clearly:
    - If \`mode="setup"\`, say that API-backed workflows are blocked until credentials are configured.
-   - If \`mode="configured"\`, say that credentials already exist and this workflow can be used to inspect or replace them.
+   - If \`mode="configured"\`, say that credentials already exist and this workflow can be used to inspect, append, replace, or remove stored .env credentials.
    - Explain the difference between:
      - \`local\`: only works when the MCP server is started from this folder
      - \`global\`: works when the MCP server is started from any folder on this computer
@@ -113,17 +113,21 @@ Follow these steps in order:
     ? `- Use \`import_apikey_credentials\` with:
      - file_path: "${file_path}"
      ${storage_scope ? `- storage_scope: "${storage_scope}"` : "- omit storage_scope to let the client choose interactively when supported"}
-     - Do not set \`overwrite\` unless the tool reports that different credentials already exist and the user explicitly wants to replace them."`
+     - By default, different credentials are appended as an additional stored connection when a default connection already exists.
+     - Only set \`overwrite: true\` if the user explicitly wants the imported credentials to replace the default stored connection."`
     : `- First try \`import_apikey_credentials\` without \`file_path\`.
      ${storage_scope ? `- Include storage_scope: "${storage_scope}"` : "- Omit storage_scope to let the client choose interactively when supported"}
      - This will succeed automatically if exactly one secure \`apikey*.txt\` is available in the working directory.
      - If the tool reports that there are multiple candidate files, stop and ask the user which file should be imported.
      - If the tool reports that no secure apikey file is available, explain the available setup paths from \`get_setup_instructions\` and stop.`}
 
-4. If \`import_apikey_credentials\` reports that the target env file already contains different credentials:
-   - Explain which env file would be replaced.
-   - Ask the user whether they want to replace the existing credentials.
-   - Only retry with \`overwrite: true\` after explicit approval.
+4. If the user wants to remove stored credentials instead of importing:
+   - Call \`list_stored_credentials\`.
+   - Explain that it only shows credentials stored in local/global \`.env\` files, not shell env vars, \`EARVELDAJA_API_KEY_FILE\`, or raw \`apikey*.txt\` files.
+   - If the user confirms a specific stored target should be removed, call \`remove_stored_credentials\` with:
+     - storage_scope
+     - target
+   - Make the removal explicit as destructive and state that restart is required afterward.
 
 5. If \`import_apikey_credentials\` reports that the client does not support interactive setup prompting:
    - explain that \`storage_scope\` must be provided explicitly

@@ -66,6 +66,7 @@ describe("registerPrompts", () => {
 
     const names = server.registerPrompt.mock.calls.map(([name]) => name);
     expect(names).toEqual([
+      "setup-credentials",
       "book-invoice",
       "receipt-batch",
       "import-camt",
@@ -77,6 +78,20 @@ describe("registerPrompts", () => {
       "company-overview",
       "lightyear-booking",
     ]);
+  });
+
+  it("keeps setup-credentials aligned with append and removal tooling", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "setup-credentials", {
+      file_path: "/tmp/apikey.txt",
+      storage_scope: "global",
+    });
+
+    expect(text).toContain("append");
+    expect(text).toContain("overwrite: true");
+    expect(text).toContain("list_stored_credentials");
+    expect(text).toContain("remove_stored_credentials");
+    expect(text).toContain("EARVELDAJA_API_KEY_FILE");
   });
 
   it("returns setup-safe workflow prompts when setup mode guidance is enabled", async () => {

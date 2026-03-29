@@ -9,6 +9,8 @@ import { registerPrompt, registerTool } from "./mcp-compat.js";
 import {
   loadDotenvFiles,
   loadAllConfigs,
+  listStoredCredentials,
+  removeStoredCredential,
   type NamedConfig,
   NO_API_CREDENTIALS_FOUND_MESSAGE,
   getCredentialSetupInfo,
@@ -303,6 +305,22 @@ function describeCredentialAvailability(storageScope: CredentialStorageScope): s
     : "The configuration will be available only when you start the MCP server from this folder.";
 }
 
+function describeCredentialImportAction(
+  action: "created" | "appended" | "replaced" | "unchanged",
+  target: "primary" | `connection_${number}`,
+): string {
+  switch (action) {
+    case "created":
+      return "Stored them as the default connection in the target .env file.";
+    case "appended":
+      return `Stored them as an additional connection (${target}) in the target .env file.`;
+    case "replaced":
+      return "Replaced the default connection in the target .env file.";
+    case "unchanged":
+      return `They were already stored as ${target}, so no new credential block was added.`;
+  }
+}
+
 function reportStartupCredentialImportOutcome(outcome: StartupCredentialImportOutcome): void {
   switch (outcome.status) {
     case "skipped":
@@ -316,7 +334,8 @@ function reportStartupCredentialImportOutcome(outcome: StartupCredentialImportOu
     case "imported":
       process.stderr.write(
         `Verified credentials for ${outcome.result.companyName ?? "the target company"} and wrote them to ` +
-        `${outcome.result.envFile}. ${describeCredentialAvailability(outcome.result.storageScope)} ` +
+        `${outcome.result.envFile}. ${describeCredentialImportAction(outcome.result.action, outcome.result.target)} ` +
+        `${describeCredentialAvailability(outcome.result.storageScope)} ` +
         "Restart the MCP server to start using the stored .env.\n"
       );
       return;
@@ -492,11 +511,12 @@ Reporting:
 
   registerTool(server, "import_apikey_credentials",
     "Verify credentials from an apikey*.txt file and write them into a .env file. " +
+    "If the target .env already has a default connection and overwrite is false, different credentials are appended as an additional stored connection instead of replacing the default. " +
     "If storage_scope is omitted and the client supports form elicitation, asks whether the configuration should work only in this folder or whenever you start the MCP server from any folder.",
     {
       file_path: z.string().optional().describe("Absolute path to an apikey*.txt file. Defaults to the only secure apikey*.txt in the current folder."),
       storage_scope: z.enum(["local", "global"]).optional().describe("Use `local` to keep the configuration only for this folder, or `global` to make it available when starting the MCP server from any folder. Omit to use an interactive choice prompt when supported."),
-      overwrite: z.boolean().optional().describe("Replace existing e-arveldaja credentials in the target .env file if they differ. Default false."),
+      overwrite: z.boolean().optional().describe("Replace the default stored connection in the target .env file instead of appending a new additional connection. Default false."),
     },
     { ...mutate, openWorldHint: true, title: "Import API Key Credentials" },
     async ({ file_path, storage_scope, overwrite = false }) => {
@@ -551,12 +571,77 @@ Reporting:
           content: [{
             type: "text",
             text: toMcpJson({
-              message: `Verified credentials for ${imported.companyName ?? "the target company"} and wrote them to ${imported.envFile}. ${describeCredentialAvailability(imported.storageScope)} Restart the MCP server to use them.`,
+              message: `Verified credentials for ${imported.companyName ?? "the target company"} and wrote them to ${imported.envFile}. ${describeCredentialImportAction(imported.action, imported.target)} ${describeCredentialAvailability(imported.storageScope)} Restart the MCP server to use them.`,
+              action: imported.action,
               company_name: imported.companyName,
               env_file: imported.envFile,
               storage_scope: imported.storageScope,
               source_file: imported.sourceFile,
+              target: imported.target,
               verified_at: imported.verifiedAt,
+              restart_required: true,
+            }),
+          }],
+        };
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  registerTool(server, "list_stored_credentials",
+    "Inspect e-arveldaja credentials stored in local/global .env files. " +
+    "This does not include shell env vars, EARVELDAJA_API_KEY_FILE, or raw apikey*.txt files.",
+    {
+      storage_scope: z.enum(["local", "global"]).optional().describe("Optional scope filter."),
+    },
+    { ...readOnly, openWorldHint: true, title: "List Stored Credentials" },
+    async ({ storage_scope }) => {
+      const scopes = listStoredCredentials();
+      const filtered = storage_scope
+        ? scopes.filter((scope) => scope.storageScope === storage_scope)
+        : scopes;
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            scopes: filtered,
+            total_scopes: filtered.length,
+            total_credentials: filtered.reduce((sum, scope) => sum + scope.credentials.length, 0),
+            hint: filtered.length === 0
+              ? "No stored credentials found in local/global .env files."
+              : "Use remove_stored_credentials with storage_scope and target to delete one stored credential block. Restart the MCP server after removing credentials.",
+          }),
+        }],
+      };
+    }
+  );
+
+  registerTool(server, "remove_stored_credentials",
+    "Remove one stored e-arveldaja credential block from a local/global .env file. " +
+    "This only affects credentials previously stored in .env files by the setup flow; it does not remove shell env vars, EARVELDAJA_API_KEY_FILE, or raw apikey*.txt files.",
+    {
+      storage_scope: z.enum(["local", "global"]).describe("Which .env file to modify."),
+      target: z.string().describe("Stored credential target from list_stored_credentials, for example primary or connection_1."),
+    },
+    { ...destructive, openWorldHint: true, title: "Remove Stored Credentials" },
+    async ({ storage_scope, target }) => {
+      try {
+        const removed = removeStoredCredential({
+          storageScope: storage_scope as CredentialStorageScope,
+          target: target as "primary" | `connection_${number}`,
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson({
+              message: `Removed stored credential block ${removed.removedTarget} from ${removed.envFile}. Restart the MCP server for the change to take effect.`,
+              env_file: removed.envFile,
+              storage_scope: removed.storageScope,
+              removed_target: removed.removedTarget,
+              remaining_credentials: removed.remainingCredentials,
               restart_required: true,
             }),
           }],
@@ -888,17 +973,19 @@ If the server is already configured, say that explicitly and treat this as recon
     server.sendLoggingMessage({ level, data: message });
   });
 
-  const startupImportOutcome = await maybeImportCredentialsOnStartup({
-    env: process.env,
-    candidateFiles: findImportableApiKeyFiles(),
-    promptForScope: () => resolveCredentialStorageScope(server),
-    importCredentials: ({ apiKeyFile, storageScope }) => importApiKeyCredentials({
-      apiKeyFile,
-      storageScope,
-      verify: verifyImportedCredentials,
-    }),
-  });
-  reportStartupCredentialImportOutcome(startupImportOutcome);
+  if (setupMode) {
+    const startupImportOutcome = await maybeImportCredentialsOnStartup({
+      env: process.env,
+      candidateFiles: findImportableApiKeyFiles(),
+      promptForScope: () => resolveCredentialStorageScope(server),
+      importCredentials: ({ apiKeyFile, storageScope }) => importApiKeyCredentials({
+        apiKeyFile,
+        storageScope,
+        verify: verifyImportedCredentials,
+      }),
+    });
+    reportStartupCredentialImportOutcome(startupImportOutcome);
+  }
 
   if (setupMode) {
     process.stderr.write(
