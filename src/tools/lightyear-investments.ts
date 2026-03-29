@@ -178,6 +178,7 @@ function parseCapitalGains(csv: string): CapitalGainsRow[] {
 interface TradeExtractionResult {
   trades: InvestmentTrade[];
   warnings: string[];
+  consumedConversionRefs: Set<string>;
 }
 
 function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
@@ -275,7 +276,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
 
   // Sort by date ascending
   trades.sort((a, b) => a.date.localeCompare(b.date) || a.datetime.localeCompare(b.datetime));
-  return { trades, warnings: fxWarnings };
+  return { trades, warnings: fxWarnings, consumedConversionRefs: consumedConversions };
 }
 
 /**
@@ -410,13 +411,52 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           return true;
         });
       }
-      const { trades, warnings: fxWarnings } = extractTrades(rows);
+      const { trades, warnings: fxWarnings, consumedConversionRefs } = extractTrades(rows);
       const distributions = extractDistributions(rows);
 
       // Summarize deposits/withdrawals
       const deposits = rows.filter(r => r.type === "Deposit");
       const withdrawals = rows.filter(r => r.type === "Withdrawal");
-      const rewards = rows.filter(r => r.type === "Reward");
+
+      // Find rows not handled by any extraction
+      const handledRefs = new Set<string>();
+      for (const t of trades) {
+        handledRefs.add(t.reference);
+        if (t.conversion_ref) handledRefs.add(t.conversion_ref);
+      }
+      for (const d of distributions) handledRefs.add(d.reference);
+      for (const r of deposits) handledRefs.add(r.reference);
+      for (const r of withdrawals) handledRefs.add(r.reference);
+      for (const ref of consumedConversionRefs) handledRefs.add(ref);
+      // BRICEKSP trades and their conversions are intentionally excluded
+      const bricekspRefs = new Set<string>();
+      for (const r of rows) {
+        if (r.ticker === CASH_FUND_TICKER && (r.type === "Buy" || r.type === "Sell")) bricekspRefs.add(r.reference);
+      }
+      for (const r of rows) {
+        if (r.type === "Conversion" && bricekspRefs.has(r.reference)) handledRefs.add(r.reference);
+        if (bricekspRefs.has(r.reference)) handledRefs.add(r.reference);
+      }
+
+      const unhandled = rows.filter(r => !handledRefs.has(r.reference));
+      const unhandledSuggestions = unhandled.map(r => {
+        let suggestion = "Review manually";
+        if (r.type === "Conversion") suggestion = "Standalone FX conversion — may be paired with a reward, deposit, or manual trade. Book as FX gain/loss if material.";
+        else if (r.type === "Reward") suggestion = "Platform reward — book as other financial income (e.g. 9900 Muud tulud or income_account).";
+        else if (r.type === "Interest") suggestion = "Interest income — book via book_lightyear_distributions.";
+        else if (r.type === "Dividend" || r.type === "Distribution") suggestion = "Distribution — book via book_lightyear_distributions.";
+        else if (r.type === "Buy" || r.type === "Sell") suggestion = `${r.type} of ${r.ticker} — likely BRICEKSP or missing FX conversion. Check if intentional.`;
+        return {
+          date: parseLightyearDate(r.date),
+          reference: r.reference,
+          type: r.type,
+          ticker: r.ticker || undefined,
+          ccy: r.ccy,
+          gross_amount: r.gross_amount,
+          fee: r.fee,
+          suggestion,
+        };
+      });
 
       // Check for unmatched FX trades
       const unmatchedFx = trades.filter(t => t.ccy !== "EUR" && t.eur_amount === 0);
@@ -469,10 +509,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           count: withdrawals.length,
           total_eur: roundMoney(withdrawals.reduce((s, r) => s + Math.abs(r.gross_amount), 0)),
         },
-        rewards: {
-          count: rewards.length,
-          total_eur: roundMoney(rewards.reduce((s, r) => s + r.gross_amount, 0)),
-        },
+        ...(unhandledSuggestions.length > 0 && {
+          unhandled: {
+            count: unhandledSuggestions.length,
+            rows: unhandledSuggestions,
+          },
+        }),
         ...(warnings.length > 0 && { warnings }),
       };
 
