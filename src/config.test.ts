@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -9,6 +9,7 @@ const CONFIG_ENV_KEYS = [
   "EARVELDAJA_API_PUBLIC_VALUE",
   "EARVELDAJA_API_PASSWORD",
   "EARVELDAJA_API_KEY_FILE",
+  "EARVELDAJA_CONFIG_DIR",
   "EARVELDAJA_SCAN_PARENT",
 ] as const;
 
@@ -42,12 +43,39 @@ afterEach(() => {
 });
 
 describe("getConfigSearchDirs", () => {
-  it("only includes the package root by default", async () => {
+  it("includes the working directory and global config directory by default", async () => {
     const { getConfigSearchDirs } = await importFreshConfig();
 
-    expect(getConfigSearchDirs(false, "/opt/e-arveldaja-mcp")).toEqual([
+    expect(getConfigSearchDirs(false, "/opt/e-arveldaja-mcp", "/home/test/.config/e-arveldaja-mcp")).toEqual([
       "/opt/e-arveldaja-mcp",
+      "/home/test/.config/e-arveldaja-mcp",
     ]);
+  });
+});
+
+describe("getNativeGlobalConfigDir", () => {
+  it("uses XDG config home on linux", async () => {
+    const { getNativeGlobalConfigDir } = await importFreshConfig();
+
+    expect(getNativeGlobalConfigDir("linux", { XDG_CONFIG_HOME: "/tmp/xdg" }, "/home/test")).toBe(
+      "/tmp/xdg/e-arveldaja-mcp",
+    );
+  });
+
+  it("uses Application Support on macOS", async () => {
+    const { getNativeGlobalConfigDir } = await importFreshConfig();
+
+    expect(getNativeGlobalConfigDir("darwin", {}, "/Users/test")).toBe(
+      "/Users/test/Library/Application Support/e-arveldaja-mcp",
+    );
+  });
+
+  it("uses APPDATA on Windows", async () => {
+    const { getNativeGlobalConfigDir } = await importFreshConfig();
+
+    expect(getNativeGlobalConfigDir("win32", { APPDATA: "C:/Users/Test/AppData/Roaming" }, "C:/Users/Test")).toBe(
+      "C:\\Users\\Test\\AppData\\Roaming\\e-arveldaja-mcp",
+    );
   });
 });
 
@@ -161,17 +189,96 @@ describe("loadAllConfigs", () => {
     }
   });
 
+  it("bootstraps the native global .env from a working-directory apikey file", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-global-bootstrap-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+    const apiKeyFile = join(workDir, "apikey.txt");
+    const globalEnvFile = join(globalDir, ".env");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: key-id",
+      "ApiKey public value: public-value",
+      "Password: secret-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(readFileSync(globalEnvFile, "utf8")).toContain("EARVELDAJA_API_KEY_ID=key-id");
+      expect(readFileSync(globalEnvFile, "utf8")).toContain("EARVELDAJA_API_PUBLIC_VALUE=public-value");
+      expect(readFileSync(globalEnvFile, "utf8")).toContain("EARVELDAJA_API_PASSWORD=secret-password");
+      expect(process.env.EARVELDAJA_API_KEY_ID).toBe("key-id");
+      expect(configs).toHaveLength(1);
+      expect(configs[0]!.name).toBe("env");
+      expect(configs[0]!.config.apiKeyId).toBe("key-id");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat the global config directory as another apikey scan directory", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-global-no-scan-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+    const globalApiKeyFile = join(globalDir, "apikey.txt");
+
+    mkdirSync(workDir, { recursive: true });
+    mkdirSync(globalDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    writeFileSync(globalApiKeyFile, [
+      "ApiKey ID: key-id",
+      "ApiKey public value: public-value",
+      "Password: secret-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+
+      expect(() => loadAllConfigs()).toThrowError("No API credentials found");
+      expect(process.env.EARVELDAJA_API_KEY_ID).toBeUndefined();
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("reports setup guidance for the working directory by default", async () => {
     const { getCredentialSetupInfo } = await importFreshConfig();
 
+    process.env.EARVELDAJA_CONFIG_DIR = "/tmp/global-config";
     const info = getCredentialSetupInfo(false, "/tmp/project");
 
     expect(info.working_directory).toBe("/tmp/project");
     expect(info.credential_file_directory).toBe("/tmp/project");
     expect(info.credential_file_env_var).toBe("EARVELDAJA_API_KEY_FILE");
-    expect(info.searched_directories).toEqual(["/tmp/project"]);
+    expect(info.global_config_directory).toBe("/tmp/global-config");
+    expect(info.global_env_file).toBe("/tmp/global-config/.env");
+    expect(info.searched_directories).toEqual(["/tmp/project", "/tmp/global-config"]);
     expect(info.next_steps[0]).toContain("working directory");
-    expect(info.next_steps[0]).toContain("EARVELDAJA_API_KEY_FILE");
+    expect(info.next_steps[0]).toContain("bootstrap");
     expect(info.next_steps[1]).toContain("EARVELDAJA_SCAN_PARENT=true");
   });
 

@@ -34,9 +34,11 @@ function buildSetupModePromptText(
 First call \`get_setup_instructions\` and configure credentials.
 - Working directory: ${setupInfo.working_directory}
 - Searched directories: ${setupInfo.searched_directories.join(", ")}
+- Native global config directory: ${setupInfo.global_config_directory}
+- Native global env file: ${setupInfo.global_env_file}
 - Required environment variables: ${setupInfo.env_vars.join(", ")}
 - Optional direct credential file env var: ${setupInfo.credential_file_env_var}
-- Credential file pattern: ${setupInfo.credential_file_pattern}
+- Credential file pattern: ${setupInfo.credential_file_pattern} (working directory bootstrap source)
 
 Tools you can use right now:
 ${availableTools.map(tool => `- \`${tool}\``).join("\n")}

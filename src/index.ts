@@ -97,11 +97,13 @@ function buildSetupModePayload(
     mode: "setup",
     error: `${setupInfo.message} Call get_setup_instructions for guidance.`,
     hint: options?.hint ??
-      "Call get_setup_instructions to see how to configure EARVELDAJA_API_* or apikey*.txt in the working directory, or set EARVELDAJA_API_KEY_FILE to an explicit credential file path.",
+      "Call get_setup_instructions to see how to configure EARVELDAJA_API_* or bootstrap the native global .env from apikey*.txt in the working directory, or set EARVELDAJA_API_KEY_FILE to an explicit credential file path.",
     credential_file_env_var: setupInfo.credential_file_env_var,
     credential_file_pattern: setupInfo.credential_file_pattern,
     working_directory: setupInfo.working_directory,
     searched_directories: setupInfo.searched_directories,
+    global_config_directory: setupInfo.global_config_directory,
+    global_env_file: setupInfo.global_env_file,
     scan_parent_enabled: setupInfo.scan_parent_enabled,
     ...(options?.blockedTool ? { blocked_tool: options.blockedTool } : {}),
     ...(options?.blockedResource ? { blocked_resource: options.blockedResource } : {}),
@@ -420,8 +422,10 @@ Reporting:
             setup_required: allConfigs.length === 0,
             working_directory: setupInfo.working_directory,
             searched_directories: setupInfo.searched_directories,
+            global_config_directory: setupInfo.global_config_directory,
+            global_env_file: setupInfo.global_env_file,
             hint: allConfigs.length === 0
-              ? "No API credentials configured. Call get_setup_instructions or add EARVELDAJA_API_* env vars, set EARVELDAJA_API_KEY_FILE, or place apikey*.txt in the working directory."
+              ? "No API credentials configured. Call get_setup_instructions or add EARVELDAJA_API_* env vars, set EARVELDAJA_API_KEY_FILE, or place apikey*.txt in the working directory to bootstrap the native global .env."
               : "Use switch_connection with the index to switch between accounts.",
           }),
         }],
@@ -688,9 +692,11 @@ Reporting:
           text: `Explain how to configure e-arveldaja MCP credentials using this exact guidance:
 - Working directory: ${setupInfo.working_directory}
 - Searched directories: ${setupInfo.searched_directories.join(", ")}
+- Native global config directory: ${setupInfo.global_config_directory}
+- Native global env file: ${setupInfo.global_env_file}
 - Required environment variables: ${setupInfo.env_vars.join(", ")}
 - Optional direct credential file env var: ${setupInfo.credential_file_env_var}
-- Alternatively, place ${setupInfo.credential_file_pattern} in the working directory.
+- Alternatively, place ${setupInfo.credential_file_pattern} in the working directory to bootstrap the global .env.
 - File format:
   ${setupInfo.file_format_example.join("\n  ")}
 - ${setupInfo.next_steps.join("\n- ")}

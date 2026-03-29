@@ -26,6 +26,9 @@ function buildSetupInfo(): CredentialSetupInfo {
     credential_file_env_var: "EARVELDAJA_API_KEY_FILE",
     credential_file_pattern: "apikey*.txt",
     credential_file_directory: "/tmp/project",
+    global_config_directory: "/home/test/.config/e-arveldaja-mcp",
+    global_config_directory_env_var: "EARVELDAJA_CONFIG_DIR",
+    global_env_file: "/home/test/.config/e-arveldaja-mcp/.env",
     file_format_example: [
       "ApiKey ID: <your key id>",
       "ApiKey public value: <your public value>",
