@@ -1,15 +1,14 @@
 # Import Wise Transactions
 
-Preview Wise import results, including fees and skipped duplicates, before creating any bank transactions.
+Preview Wise transaction import results, including fee rows and skipped duplicates, before creating anything.
 
 ## Arguments
 
-`$ARGUMENTS` should provide:
-- Wise `transaction-history.csv` path
-- Wise `accounts_dimensions_id`
-- optional `fee_account_dimensions_id`
-- optional `date_from` / `date_to`
-- optional `skip_jar_transfers`
+- `file_path`: absolute path to the regular Wise `transaction-history.csv`
+- `accounts_dimensions_id`: bank account dimension ID for the Wise account
+- Optional `fee_account_dimensions_id`: expense dimension used for Wise fees
+- Optional `date_from` / `date_to`: transaction-date filter in `YYYY-MM-DD`
+- Optional `skip_jar_transfers`: defaults to `true`
 
 ## Workflow
 
@@ -18,15 +17,16 @@ Preview Wise import results, including fees and skipped duplicates, before creat
 Call `import_wise_transactions`:
 - `file_path`: the provided file
 - `accounts_dimensions_id`: the provided dimension ID
-- include `fee_account_dimensions_id` when available
+- `fee_account_dimensions_id`: include it when available
 - execute: false
 - include `date_from` / `date_to` when provided
-- include `skip_jar_transfers: false` only if the user explicitly wants Jar transfers imported
+- include `skip_jar_transfers: false` only when the user explicitly wants Jar transfers imported
 
-If fee rows require a fee account:
+If the dry run fails because fee rows require a fee account:
 - call `list_account_dimensions`
 - show the available dimensions
-- ask the user to choose the fee expense dimension
+- ask the user which expense dimension should be used
+- retry with `fee_account_dimensions_id`
 
 ### Step 2: Review the preview
 
@@ -36,16 +36,30 @@ Review:
 - Use top-level `skipped_details` only as a grouped convenience summary for `execution.skipped` + `execution.errors`.
 - Fall back to top-level `total_csv_rows`, `eligible`, `filtered_out`, `created`, `skipped`, and `results` only if `execution` is absent.
 
+Show:
+- main transactions that would be created from `execution.results`
+- fee rows that would be created
+- exact duplicate / skip reasons from `execution.skipped` / `execution.errors` or `skipped_details`
+- whether fees will be auto-confirmed to the chosen dimension
+
 ### Step 3: Approval gate
 
 Do not disable Jar skipping unless the user explicitly wants those internal Wise movements imported.
 
-Ask for approval before calling `import_wise_transactions` with execute: true.
+Ask for approval before running with `execute: true`.
 
 If the user does not explicitly approve, stop.
 
 ### Step 4: Execute
 
-Call `import_wise_transactions` again with `execute: true`.
+Call `import_wise_transactions` again:
+- same arguments as the dry run
+- execute: true
 
-Report `execution.summary.created`, `execution.summary.skipped`, `execution.summary.error_count`, fee handling, manual follow-up, and `execution.audit_reference`.
+Report:
+- `execution.summary.created`
+- `execution.summary.skipped`
+- `execution.summary.error_count`
+- fee transactions created
+- any rows still needing manual follow-up
+- mention that side effects can be reviewed via `execution.audit_reference`

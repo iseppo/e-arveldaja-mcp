@@ -1,63 +1,62 @@
 # Create New Supplier
 
-Create a new supplier (client) in e-arveldaja with proper fields.
+Create a new supplier (client) in e-arveldaja with proper fields and optional business registry lookup.
 
-## Arguments
+**Input:** Supplier name or Estonian registry code (8 digits).
 
-$ARGUMENTS should be the supplier name or Estonian registry code (8 digits). If not provided, ask the user.
+## Step 1: Determine input type
 
-## Workflow
+- 8-digit number → treat as registry code
+- Text → treat as supplier name
 
-### Step 1: Determine input type
+## Step 2: Check if supplier already exists
 
-- 8-digit number: treat as registry code
-- Text: treat as supplier name
+If registry code provided: call `find_client_by_code`:
+- `code`: the registry code
 
-### Step 2: Check if supplier already exists
+If name provided: call `search_client`:
+- `name`: the supplier name
 
-If registry code: call `find_client_by_code` with code: the registry code.
-If name: call `search_client` with name: the supplier name.
+If a clear match is found, show the existing client details and stop. Do not create a duplicate.
 
-If a clear match is found, show the existing client and stop. Do not create a duplicate.
-
-### Step 3: Resolve supplier details
+## Step 3: Resolve supplier details
 
 Call `resolve_supplier`:
-- name: supplier name (if provided)
-- reg_code: registry code (if provided)
-- auto_create: false (check registry data first)
-- country: "EST" (default)
+- `name`: supplier name (if provided)
+- `reg_code`: registry code (if provided)
+- `auto_create`: `false` (review registry data before creating)
+- `country`: `"EST"` (default)
 
-If an Estonian code was provided, the tool queries the business registry for the official company name and address. Show this to the user.
+For Estonian codes, the tool queries the business registry (äriregister.rik.ee) for the official company name and address. Show this data to the user for review.
 Name-only lookup does not provide Estonian Business Registry data.
 `resolve_supplier` also does not fetch a VAT number from the registry lookup, so ask for `invoice_vat_no` separately if needed.
 
-### Step 4: Gather additional information
+## Step 4: Gather additional information
 
-Ask the user for any details they want to add:
-- Bank account (IBAN)
-- VAT number (KMKR, e.g. EE123456789)
+Ask the user for any details to add:
+- Bank account (IBAN) — useful for payment matching
+- VAT number (KMKR, e.g. EE123456789) — needed for EU intra-community supply
 - Email address
 - Phone number
 - Address (if not found from registry)
 
-### Step 5: Create the supplier
+## Step 5: Create the supplier
 
 Call `create_client`:
-- name: official name from registry, or user-provided name
-- code: registry code (if known)
-- is_client: false
-- is_supplier: true
-- cl_code_country: "EST" (or as specified)
-- is_juridical_entity: true (default, false for natural persons)
-- bank_account_no: IBAN (if provided)
-- invoice_vat_no: VAT number (if provided)
-- email: (if provided)
-- telephone: (if provided)
-- address_text: from registry or user
+- `name`: official name from registry, or user-provided name
+- `code`: registry code (if known)
+- `is_client`: `false`
+- `is_supplier`: `true`
+- `cl_code_country`: `"EST"` (or as specified)
+- `is_juridical_entity`: `true` (default; `false` for natural persons)
+- `bank_account_no`: IBAN (if provided)
+- `invoice_vat_no`: VAT number (if provided)
+- `email`: (if provided)
+- `telephone`: (if provided)
+- `address_text`: from registry or user input
 
-### Step 6: Report
+## Step 6: Report
 
-Show created supplier: client ID, name, registry code, country, any additional fields.
+Show created supplier: client ID, name, registry code, country, and any additional fields set.
 
-Remind user this supplier is now available for `/book-invoice`.
+The supplier is now available for use when booking purchase invoices.

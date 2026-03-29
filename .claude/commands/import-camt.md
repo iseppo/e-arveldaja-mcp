@@ -1,21 +1,26 @@
 # Import CAMT.053
 
-Parse a CAMT.053 bank statement, preview the import, and only create transactions after approval.
+Parse a CAMT.053 statement, preview the import, and only create bank transactions after approval.
 
 ## Arguments
 
-`$ARGUMENTS` should provide:
-- CAMT.053 XML file path
-- bank `accounts_dimensions_id`
-- optional `date_from` / `date_to`
+- `file_path`: absolute path to the CAMT.053 XML file
+- `accounts_dimensions_id`: bank account dimension ID in e-arveldaja
+- Optional `date_from` / `date_to`: statement-entry filter in `YYYY-MM-DD`
 
 ## Workflow
 
 ### Step 1: Parse the statement
 
-Call `parse_camt053` with the provided file path.
+Call `parse_camt053`:
+- `file_path`: the provided file
 
-Show `statement_metadata`, entry counts, totals, and duplicate hints.
+Show:
+- `statement_metadata`
+- `summary.entry_count`
+- `summary.credit_count` and `summary.credit_total`
+- `summary.debit_count` and `summary.debit_total`
+- `summary.duplicate_count`
 
 ### Step 2: Dry-run the import
 
@@ -52,6 +57,6 @@ Report:
 - `execution.summary.skipped_count`
 - `execution.summary.error_count`
 - any transactions still needing attention
-- `execution.audit_reference`
+- mention that side effects can be reviewed via `execution.audit_reference`
 
-Suggest reconciliation as the next step if the import succeeded.
+Offer reconciliation as the next step if the import succeeded.
