@@ -1,4 +1,4 @@
-import { mkdtempSync } from "fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -292,6 +292,7 @@ describe("MCP Server Setup Mode", () => {
     ]));
     expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining([
       "get_setup_instructions",
+      "import_apikey_credentials",
       "list_connections",
       "get_vat_info",
       "validate_invoice_data",
@@ -337,6 +338,24 @@ describe("MCP Server Setup Mode", () => {
     expect(blockedData.working_directory).toBe(tempDir);
   });
 
+  it("falls back cleanly when interactive credential prompting is unavailable", async () => {
+    const apiKeyFile = join(tempDir, "apikey.txt");
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: key-id",
+      "ApiKey public value: public-value",
+      "Password: secret-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    chmodSync(apiKeyFile, 0o600);
+
+    const result = await client.callTool({ name: "import_apikey_credentials", arguments: {} });
+    const data = parseMcpResponse((result.content as any)[0].text);
+
+    expect(result.isError).toBe(true);
+    expect(data.error).toContain("Client does not support interactive setup prompting");
+    expect(data.error).toContain("storage_scope");
+  });
+
   it("returns setup guidance when reading API resources in setup mode", async () => {
     const result = await client.readResource({ uri: "earveldaja://accounts" });
     const data = parseMcpResponse((result.contents as any)[0].text);
@@ -364,6 +383,56 @@ describe("MCP Server Setup Mode", () => {
 
     expect(result.isError).toBeFalsy();
     expect(data.valid).toBe(true);
+  });
+});
+
+describe("MCP Server Startup Credential Import", () => {
+  let client: Client;
+  let transport: StdioClientTransport;
+  let tempDir: string;
+  let globalDir: string;
+
+  beforeAll(async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "earveldaja-mcp-startup-import-"));
+    globalDir = join(tempDir, "global");
+    mkdirSync(globalDir, { recursive: true });
+
+    const apiKeyFile = join(tempDir, "apikey.txt");
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: startup-key-id",
+      "ApiKey public value: startup-public-value",
+      "Password: startup-secret-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    chmodSync(apiKeyFile, 0o600);
+
+    transport = createTransport({
+      cwd: tempDir,
+      env: buildTransportEnv({
+        EARVELDAJA_API_KEY_ID: "",
+        EARVELDAJA_API_PUBLIC_VALUE: "",
+        EARVELDAJA_API_PASSWORD: "",
+        EARVELDAJA_API_KEY_FILE: "",
+        EARVELDAJA_CONFIG_DIR: globalDir,
+      }),
+    });
+    client = new Client({ name: "startup-import-test", version: "1.0.0" });
+    await client.connect(transport);
+  });
+
+  afterAll(async () => {
+    try { await client.close(); } catch {}
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("keeps serving when startup prompting is unsupported and leaves the global env untouched", async () => {
+    const result = await client.callTool({ name: "list_connections", arguments: {} });
+    const data = parseMcpResponse((result.content as any)[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(data.total).toBe(1);
+    expect(data.connections[0].name).toBe("apikey");
+    expect(existsSync(join(globalDir, ".env"))).toBe(false);
   });
 });
 

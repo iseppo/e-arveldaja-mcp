@@ -90,6 +90,8 @@ describe("registerPrompts", () => {
     expect(bookInvoiceText).toContain("extract_pdf_invoice");
     expect(bookInvoiceText).toContain("validate_invoice_data");
     expect(bookInvoiceText).toContain("EARVELDAJA_API_KEY_FILE");
+    expect(bookInvoiceText).toContain("import_apikey_credentials");
+    expect(bookInvoiceText).toContain("save the resulting `.env` locally or globally");
     expect(bookInvoiceText).not.toContain("resolve_supplier");
 
     expect(overviewText).toContain("setup mode");

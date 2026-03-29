@@ -26,6 +26,7 @@ function buildSetupModePromptText(
   const availableTools = [
     "get_setup_instructions",
     "list_connections",
+    "import_apikey_credentials",
     ...(options.offlineTools ?? []),
   ];
 
@@ -36,9 +37,11 @@ First call \`get_setup_instructions\` and configure credentials.
 - Searched directories: ${setupInfo.searched_directories.join(", ")}
 - Native global config directory: ${setupInfo.global_config_directory}
 - Native global env file: ${setupInfo.global_env_file}
+- Import tool: \`import_apikey_credentials\`
 - Required environment variables: ${setupInfo.env_vars.join(", ")}
 - Optional direct credential file env var: ${setupInfo.credential_file_env_var}
-- Credential file pattern: ${setupInfo.credential_file_pattern} (working directory bootstrap source)
+- Credential file pattern: ${setupInfo.credential_file_pattern} (working directory import source)
+- If exactly one secure \`${setupInfo.credential_file_pattern}\` is present and the client supports prompts, the server may offer to verify it and save the resulting \`.env\` locally or globally.
 
 Tools you can use right now:
 ${availableTools.map(tool => `- \`${tool}\``).join("\n")}

@@ -15,6 +15,8 @@ export interface NamedConfig {
   config: Config;
 }
 
+export type CredentialStorageScope = "local" | "global";
+
 export interface CredentialSetupInfo {
   mode: "setup";
   message: string;
@@ -32,6 +34,30 @@ export interface CredentialSetupInfo {
   next_steps: string[];
 }
 
+export interface CredentialVerificationResult {
+  companyName: string | null;
+  verifiedAt?: string;
+}
+
+export interface ImportApiKeyCredentialsOptions {
+  apiKeyFile: string;
+  storageScope: CredentialStorageScope;
+  overwrite?: boolean;
+  workingDir?: string;
+  globalConfigDir?: string;
+  server?: "live" | "demo";
+  verify: (config: Config) => Promise<CredentialVerificationResult>;
+}
+
+export interface ImportApiKeyCredentialsResult {
+  envFile: string;
+  storageScope: CredentialStorageScope;
+  companyName: string | null;
+  verifiedAt: string;
+  created: boolean;
+  sourceFile: string;
+}
+
 export const NO_API_CREDENTIALS_FOUND_MESSAGE = "No API credentials found.";
 
 const SERVERS = {
@@ -45,6 +71,10 @@ const CWD = process.cwd();
 
 function getBaseUrl(): string {
   const server = process.env.EARVELDAJA_SERVER || "live";
+  return getBaseUrlForServer(server);
+}
+
+export function getBaseUrlForServer(server = process.env.EARVELDAJA_SERVER || "live"): string {
   if (!(server in SERVERS)) {
     throw new Error(`Invalid EARVELDAJA_SERVER="${server}". Must be "live" or "demo".`);
   }
@@ -186,12 +216,13 @@ export function getCredentialSetupInfo(
       "Password: <your password>",
     ],
     next_steps: [
-      "Set the EARVELDAJA_API_KEY_ID, EARVELDAJA_API_PUBLIC_VALUE, and EARVELDAJA_API_PASSWORD environment variables, set EARVELDAJA_API_KEY_FILE to an explicit credential file path, or place apikey*.txt in the working directory to bootstrap the global .env file.",
+      "Set the EARVELDAJA_API_KEY_ID, EARVELDAJA_API_PUBLIC_VALUE, and EARVELDAJA_API_PASSWORD environment variables, set EARVELDAJA_API_KEY_FILE to an explicit credential file path, or place apikey*.txt in the working directory and run import_apikey_credentials.",
+      "If exactly one secure apikey*.txt is present in the working directory and the MCP client supports prompts, the server will offer to verify it and save the resulting .env locally or in the native global config directory.",
       scanParent
         ? "Parent directory scanning is enabled via EARVELDAJA_SCAN_PARENT=true for local .env discovery."
         : "Set EARVELDAJA_SCAN_PARENT=true if you also want to scan the parent directory for a local .env file before falling back to the global .env.",
       `Native global config directory: ${globalConfigDirectory}. Global env file: ${globalEnvFile}. Override the directory with EARVELDAJA_CONFIG_DIR if needed.`,
-      "Keep secrets in the global .env once bootstrapped; treat apikey*.txt as an import source, not the long-term store.",
+      "Keep secrets in the chosen .env once verified; treat apikey*.txt as an import source, not the long-term store.",
       "After adding credentials, restart the MCP server.",
     ],
   };
@@ -252,7 +283,15 @@ function writePrivateEnvFile(filePath: string, content: string): void {
   }
 }
 
-function serializeEnvFile(env: Record<string, string>): string {
+function serializeEnvFile(
+  env: Record<string, string>,
+  metadata?: { companyName?: string | null; verifiedAt?: string; sourceFile?: string },
+): string {
+  const header: string[] = ["# e-arveldaja credentials"];
+  if (metadata?.companyName) header.push(`# Company: ${metadata.companyName}`);
+  if (metadata?.verifiedAt) header.push(`# Verified at: ${metadata.verifiedAt}`);
+  if (metadata?.sourceFile) header.push(`# Imported from: ${metadata.sourceFile}`);
+
   const orderedKeys = [
     "EARVELDAJA_SERVER",
     "EARVELDAJA_API_KEY_ID",
@@ -264,47 +303,12 @@ function serializeEnvFile(env: Record<string, string>): string {
     ...Object.keys(env).filter((key) => env[key] && !orderedKeys.includes(key)).sort(),
   ];
 
-  return `${keys.map((key) => `${key}=${env[key]}`).join("\n")}\n`;
-}
-
-function importWorkingDirApiKeyIntoGlobalEnv(workingDir = CWD, globalConfigDir = getGlobalConfigDir()): void {
-  if (hasCompleteApiCredentialEnv(process.env)) return;
-
-  const globalEnvFile = getGlobalEnvFile(globalConfigDir);
-  const existingGlobalEnv = parseEnvFile(globalEnvFile);
-  if (hasCompleteApiCredentialEnv(existingGlobalEnv)) return;
-
-  let files: string[];
-  try {
-    files = readdirSync(workingDir).filter((file) => /^apikey.*\.txt$/i.test(file)).sort();
-  } catch {
-    return;
-  }
-
-  if (files.length !== 1) return;
-
-  const sourceFile = resolve(workingDir, files[0]!);
-  const parsed = parseApiKeyFile(sourceFile);
-  if (!parsed) return;
-
-  const mergedEnv: Record<string, string> = {
-    ...existingGlobalEnv,
-    EARVELDAJA_API_KEY_ID: parsed.keyId,
-    EARVELDAJA_API_PUBLIC_VALUE: parsed.publicValue,
-    EARVELDAJA_API_PASSWORD: parsed.password,
-  };
-
-  if (process.env.EARVELDAJA_SERVER && !mergedEnv.EARVELDAJA_SERVER) {
-    mergedEnv.EARVELDAJA_SERVER = process.env.EARVELDAJA_SERVER;
-  }
-
-  writePrivateEnvFile(globalEnvFile, serializeEnvFile(mergedEnv));
+  return `${header.join("\n")}\n${keys.map((key) => `${key}=${env[key]}`).join("\n")}\n`;
 }
 
 export function loadDotenvFiles(): void {
   const loaded = new Set<string>();
   const scanParent = process.env.EARVELDAJA_SCAN_PARENT === "true";
-  importWorkingDirApiKeyIntoGlobalEnv();
 
   const loadFiles = (envPaths: string[]): void => {
     for (const envPath of envPaths) {
@@ -329,7 +333,7 @@ export function loadDotenvFiles(): void {
   ]);
 }
 
-function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string; password: string } | null {
+export function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string; password: string } | null {
   if (!existsSync(filePath)) return null;
 
   if (!validateCredentialFile(filePath)) return null;
@@ -347,6 +351,82 @@ function parseApiKeyFile(filePath: string): { keyId: string; publicValue: string
     };
   }
   return null;
+}
+
+export function findImportableApiKeyFiles(workingDir = CWD): string[] {
+  let files: string[];
+  try {
+    files = readdirSync(workingDir).filter((file) => /^apikey.*\.txt$/i.test(file)).sort();
+  } catch {
+    return [];
+  }
+
+  return files
+    .map((file) => resolve(workingDir, file))
+    .filter((filePath) => parseApiKeyFile(filePath) !== null);
+}
+
+export async function importApiKeyCredentials(
+  options: ImportApiKeyCredentialsOptions,
+): Promise<ImportApiKeyCredentialsResult> {
+  const parsed = parseApiKeyFile(options.apiKeyFile);
+  if (!parsed) {
+    throw new Error(`Could not read a valid apikey file from ${options.apiKeyFile}`);
+  }
+
+  const server = options.server ?? (process.env.EARVELDAJA_SERVER === "demo" ? "demo" : "live");
+  const config: Config = {
+    apiKeyId: parsed.keyId,
+    apiPublicValue: parsed.publicValue,
+    apiPassword: parsed.password,
+    baseUrl: getBaseUrlForServer(server),
+  };
+  const verification = await options.verify(config);
+  const verifiedAt = verification.verifiedAt ?? new Date().toISOString();
+
+  const targetEnvFile = options.storageScope === "local"
+    ? resolve(options.workingDir ?? CWD, ".env")
+    : getGlobalEnvFile(options.globalConfigDir);
+  const targetEnvFileExists = existsSync(targetEnvFile);
+
+  const existingEnv = parseEnvFile(targetEnvFile);
+  const existingHasCredentials = hasCompleteApiCredentialEnv(existingEnv);
+  const credentialsDiffer = existingHasCredentials && (
+    existingEnv.EARVELDAJA_API_KEY_ID !== parsed.keyId ||
+    existingEnv.EARVELDAJA_API_PUBLIC_VALUE !== parsed.publicValue ||
+    existingEnv.EARVELDAJA_API_PASSWORD !== parsed.password ||
+    (existingEnv.EARVELDAJA_SERVER ?? "live") !== server
+  );
+
+  if (credentialsDiffer && options.overwrite !== true) {
+    throw new Error(
+      `Target env file already contains different e-arveldaja credentials: ${targetEnvFile}. ` +
+      "Pass overwrite=true to replace them."
+    );
+  }
+
+  const mergedEnv: Record<string, string> = {
+    ...existingEnv,
+    EARVELDAJA_SERVER: server,
+    EARVELDAJA_API_KEY_ID: parsed.keyId,
+    EARVELDAJA_API_PUBLIC_VALUE: parsed.publicValue,
+    EARVELDAJA_API_PASSWORD: parsed.password,
+  };
+
+  writePrivateEnvFile(targetEnvFile, serializeEnvFile(mergedEnv, {
+    companyName: verification.companyName,
+    verifiedAt,
+    sourceFile: options.apiKeyFile,
+  }));
+
+  return {
+    envFile: targetEnvFile,
+    storageScope: options.storageScope,
+    companyName: verification.companyName,
+    verifiedAt,
+    created: !targetEnvFileExists || !existingHasCredentials,
+    sourceFile: options.apiKeyFile,
+  };
 }
 
 /**
@@ -424,7 +504,7 @@ export function loadAllConfigs(): NamedConfig[] {
     throw new Error(
       `${NO_API_CREDENTIALS_FOUND_MESSAGE} ` +
       "Set EARVELDAJA_API_KEY_ID/EARVELDAJA_API_PUBLIC_VALUE/EARVELDAJA_API_PASSWORD " +
-      "environment variables, set EARVELDAJA_API_KEY_FILE, or place apikey*.txt in the working directory to bootstrap the global .env."
+      "environment variables, set EARVELDAJA_API_KEY_FILE, or place apikey*.txt in the working directory and run import_apikey_credentials."
     );
   }
 
