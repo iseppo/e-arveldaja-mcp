@@ -115,6 +115,25 @@ export function matchScore(
   return { confidence: Math.min(confidence, 100), reasons, partiallyPaidWarning };
 }
 
+export function getInvoiceMatchEligibility(
+  tx: Pick<Transaction, "type">,
+): { allowSaleInvoices: boolean; allowPurchaseInvoices: boolean } {
+  // Treat explicit D as authoritative incoming direction. Do not treat C as
+  // authoritative outgoing direction because upstream bank transaction APIs and
+  // imports still surface some incoming payments as type C.
+  if (tx.type === "D") {
+    return {
+      allowSaleInvoices: true,
+      allowPurchaseInvoices: false,
+    };
+  }
+
+  return {
+    allowSaleInvoices: true,
+    allowPurchaseInvoices: true,
+  };
+}
+
 export function registerBankReconciliationTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "reconcile_transactions",
@@ -146,45 +165,47 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
       for (const tx of unconfirmed) {
         const candidates: MatchCandidate[] = [];
+        const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
 
-        // Match against both sale and purchase invoices regardless of type.
-        // The API stores all bank transactions as type C even for incoming payments,
-        // so type-based filtering would miss sale invoice matches entirely.
-        for (const inv of openSales) {
-          const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
-          if (confidence >= threshold) {
-            candidates.push({
-              type: "sale_invoice",
-              id: inv.id!,
-              number: inv.number ?? `${inv.number_prefix ?? ""}${inv.number_suffix}`,
-              client_name: inv.client_name ?? "",
-              clients_id: inv.clients_id,
-              gross_price: inv.gross_price ?? 0,
-              payment_status: inv.payment_status ?? "NOT_PAID",
-              partially_paid_warning: partiallyPaidWarning,
-              ref_number: inv.bank_ref_number,
-              confidence,
-              match_reasons: reasons,
-            });
+        if (allowSaleInvoices) {
+          for (const inv of openSales) {
+            const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
+            if (confidence >= threshold) {
+              candidates.push({
+                type: "sale_invoice",
+                id: inv.id!,
+                number: inv.number ?? `${inv.number_prefix ?? ""}${inv.number_suffix}`,
+                client_name: inv.client_name ?? "",
+                clients_id: inv.clients_id,
+                gross_price: inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
+                partially_paid_warning: partiallyPaidWarning,
+                ref_number: inv.bank_ref_number,
+                confidence,
+                match_reasons: reasons,
+              });
+            }
           }
         }
 
-        for (const inv of openPurchases) {
-          const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
-          if (confidence >= threshold) {
-            candidates.push({
-              type: "purchase_invoice",
-              id: inv.id!,
-              number: inv.number,
-              client_name: inv.client_name,
-              clients_id: inv.clients_id,
-              gross_price: inv.gross_price ?? 0,
-              payment_status: inv.payment_status ?? "NOT_PAID",
-              partially_paid_warning: partiallyPaidWarning,
-              ref_number: inv.bank_ref_number,
-              confidence,
-              match_reasons: reasons,
-            });
+        if (allowPurchaseInvoices) {
+          for (const inv of openPurchases) {
+            const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
+            if (confidence >= threshold) {
+              candidates.push({
+                type: "purchase_invoice",
+                id: inv.id!,
+                number: inv.number,
+                client_name: inv.client_name,
+                clients_id: inv.clients_id,
+                gross_price: inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
+                partially_paid_warning: partiallyPaidWarning,
+                ref_number: inv.bank_ref_number,
+                confidence,
+                match_reasons: reasons,
+              });
+            }
           }
         }
 
@@ -263,49 +284,51 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         const tx = unconfirmed[i]!;
         await reportProgress(i, total);
         const candidates: MatchCandidate[] = [];
+        const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
 
-        // Match against both sale and purchase invoices regardless of type.
-        // The API stores all bank transactions as type C, so type-based filtering
-        // would miss sale invoice matches entirely.
-        for (const inv of openSales) {
-          if (inv.payment_status === "PARTIALLY_PAID") continue;
-          const invKey = `sale:${inv.id!}`;
-          if (consumedInvoiceKeys.has(invKey)) continue;
-          const { confidence, reasons } = matchScore(tx, inv, tx.amount);
-          if (confidence >= threshold) {
-            candidates.push({
-              type: "sale_invoice",
-              id: inv.id!,
-              number: inv.number ?? "",
-              client_name: inv.client_name ?? "",
-              clients_id: inv.clients_id,
-              gross_price: inv.gross_price ?? 0,
-              payment_status: inv.payment_status ?? "NOT_PAID",
-              partially_paid_warning: false,
-              confidence,
-              match_reasons: reasons,
-            });
+        if (allowSaleInvoices) {
+          for (const inv of openSales) {
+            if (inv.payment_status === "PARTIALLY_PAID") continue;
+            const invKey = `sale:${inv.id!}`;
+            if (consumedInvoiceKeys.has(invKey)) continue;
+            const { confidence, reasons } = matchScore(tx, inv, tx.amount);
+            if (confidence >= threshold) {
+              candidates.push({
+                type: "sale_invoice",
+                id: inv.id!,
+                number: inv.number ?? "",
+                client_name: inv.client_name ?? "",
+                clients_id: inv.clients_id,
+                gross_price: inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
+                partially_paid_warning: false,
+                confidence,
+                match_reasons: reasons,
+              });
+            }
           }
         }
 
-        for (const inv of openPurchases) {
-          if (inv.payment_status === "PARTIALLY_PAID") continue;
-          const invKey = `purchase:${inv.id!}`;
-          if (consumedInvoiceKeys.has(invKey)) continue;
-          const { confidence, reasons } = matchScore(tx, inv, tx.amount);
-          if (confidence >= threshold) {
-            candidates.push({
-              type: "purchase_invoice",
-              id: inv.id!,
-              number: inv.number ?? "",
-              client_name: inv.client_name ?? "",
-              clients_id: inv.clients_id,
-              gross_price: inv.gross_price ?? 0,
-              payment_status: inv.payment_status ?? "NOT_PAID",
-              partially_paid_warning: false,
-              confidence,
-              match_reasons: reasons,
-            });
+        if (allowPurchaseInvoices) {
+          for (const inv of openPurchases) {
+            if (inv.payment_status === "PARTIALLY_PAID") continue;
+            const invKey = `purchase:${inv.id!}`;
+            if (consumedInvoiceKeys.has(invKey)) continue;
+            const { confidence, reasons } = matchScore(tx, inv, tx.amount);
+            if (confidence >= threshold) {
+              candidates.push({
+                type: "purchase_invoice",
+                id: inv.id!,
+                number: inv.number ?? "",
+                client_name: inv.client_name ?? "",
+                clients_id: inv.clients_id,
+                gross_price: inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
+                partially_paid_warning: false,
+                confidence,
+                match_reasons: reasons,
+              });
+            }
           }
         }
 

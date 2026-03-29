@@ -50,6 +50,7 @@ import {
   type SupplierResolutionOptions,
   resolveSupplierInternal,
 } from "./supplier-resolution.js";
+import { getInvoiceMatchEligibility } from "./bank-reconciliation.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const FILE_TYPE_EXTENSIONS = {
@@ -769,12 +770,26 @@ async function createAndMaybeMatchPurchaseInvoice(
 
 function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): boolean {
   if (tx.type !== "D" && tx.type !== "C") return false;
-  for (const invoice of [...openSales, ...openPurchases]) {
-    const { confidence } = scoreTransactionToInvoice(tx, invoice);
-    if (confidence >= POSSIBLE_MATCH_THRESHOLD) {
-      return true;
+  const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
+
+  if (allowSaleInvoices) {
+    for (const invoice of openSales) {
+      const { confidence } = scoreTransactionToInvoice(tx, invoice);
+      if (confidence >= POSSIBLE_MATCH_THRESHOLD) {
+        return true;
+      }
     }
   }
+
+  if (allowPurchaseInvoices) {
+    for (const invoice of openPurchases) {
+      const { confidence } = scoreTransactionToInvoice(tx, invoice);
+      if (confidence >= POSSIBLE_MATCH_THRESHOLD) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 

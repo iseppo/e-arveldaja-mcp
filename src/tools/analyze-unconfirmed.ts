@@ -7,7 +7,7 @@ import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js"
 import { readOnly } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { matchScore, normalizeCompanyName } from "./bank-reconciliation.js";
+import { getInvoiceMatchEligibility, matchScore, normalizeCompanyName } from "./bank-reconciliation.js";
 import { buildBankAccountLookups } from "./inter-account-utils.js";
 
 /** Known fee/charge patterns for expense detection */
@@ -242,25 +242,25 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           reasons: string[];
           partiallyPaidWarning: boolean;
         } | undefined;
-        const hasExplicitIncomingDirection = tx.type === "D";
+        const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
 
-        for (const inv of openSales) {
-          const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
-          if (confidence >= threshold && (!bestInvoiceMatch || confidence > bestInvoiceMatch.confidence)) {
-            bestInvoiceMatch = {
-              type: "sale_invoice",
-              id: inv.id!,
-              number: inv.number ?? `${inv.number_prefix ?? ""}${inv.number_suffix}`,
-              confidence,
-              reasons,
-              partiallyPaidWarning,
-            };
+        if (allowSaleInvoices) {
+          for (const inv of openSales) {
+            const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
+            if (confidence >= threshold && (!bestInvoiceMatch || confidence > bestInvoiceMatch.confidence)) {
+              bestInvoiceMatch = {
+                type: "sale_invoice",
+                id: inv.id!,
+                number: inv.number ?? `${inv.number_prefix ?? ""}${inv.number_suffix}`,
+                confidence,
+                reasons,
+                partiallyPaidWarning,
+              };
+            }
           }
         }
 
-        // Treat explicit D as authoritative incoming direction. Keep C permissive
-        // because some API flows still expose incoming payments as type C.
-        if (!hasExplicitIncomingDirection) {
+        if (allowPurchaseInvoices) {
           for (const inv of openPurchases) {
             const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
             if (confidence >= threshold && (!bestInvoiceMatch || confidence > bestInvoiceMatch.confidence)) {

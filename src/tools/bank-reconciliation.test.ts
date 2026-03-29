@@ -224,6 +224,39 @@ describe("reconcile_transactions", () => {
       amount: 300,
     });
   });
+
+  it("does not match explicit incoming transactions against purchase invoices", async () => {
+    const handler = setupReconciliationTool({
+      transactions: [{
+        id: 31,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "D",
+        amount: 200,
+        date: "2026-03-21",
+        description: "Incoming transfer",
+        bank_account_name: "Supplier OU",
+        ref_number: "RF-200",
+      }],
+      purchases: [{
+        id: 21,
+        status: "CONFIRMED",
+        payment_status: "NOT_PAID",
+        number: "OST-21",
+        clients_id: 31,
+        client_name: "Supplier OU",
+        gross_price: 200,
+        bank_ref_number: "RF-200",
+      }],
+    });
+
+    const result = await handler({ min_confidence: 0 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.total_unconfirmed).toBe(1);
+    expect(payload.matched).toBe(0);
+    expect(payload.matches).toEqual([]);
+  });
 });
 
 function setupAutoConfirmTool(options: {
@@ -391,6 +424,25 @@ describe("auto_confirm_exact_matches", () => {
     expect(api.transactions.confirm).toHaveBeenCalledWith(7, [
       { related_table: "sale_invoices", related_id: 16, amount: 150 },
     ]);
+  });
+
+  it("does not auto-confirm explicit incoming transactions against purchase invoices", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [
+        { id: 17, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-21", bank_account_name: "Supplier OU", ref_number: "RF200" },
+      ],
+      purchases: [
+        { id: 26, status: "CONFIRMED", payment_status: "NOT_PAID", number: "OST-26", clients_id: 36, client_name: "Supplier OU", gross_price: 200, bank_ref_number: "RF200" },
+      ],
+    });
+
+    const result = await handler({ execute: true, min_confidence: 0 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.mode).toBe("EXECUTED");
+    expect(payload.auto_confirmed).toBe(0);
+    expect(payload.results).toEqual([]);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
   it("does not double-match the same invoice to two transactions", async () => {

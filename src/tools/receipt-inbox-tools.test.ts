@@ -139,6 +139,50 @@ describe("receipt inbox tool status handling", () => {
     expect(payload.groups).toEqual([]);
   });
 
+  it("classify_unmatched_transactions keeps explicit incoming credits with only purchase-invoice matches in the unmatched flow", async () => {
+    const { handler } = setupReceiptTool("classify_unmatched_transactions", {
+      transactions: [
+        {
+          id: 4,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 200,
+          date: "2026-03-21",
+          accounts_dimensions_id: 100,
+          bank_account_name: "Supplier OU",
+          ref_number: "RF-200",
+          description: "Incoming transfer",
+          cl_currencies_id: "EUR",
+        },
+      ],
+      purchaseInvoices: [
+        {
+          id: 44,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+          number: "OST-44",
+          clients_id: 24,
+          client_name: "Supplier OU",
+          gross_price: 200,
+          bank_ref_number: "RF-200",
+          cl_currencies_id: "EUR",
+        },
+      ],
+      purchaseArticles: [],
+      accounts: [],
+    });
+
+    const result = await handler({ accounts_dimensions_id: 100 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.total_unconfirmed).toBe(1);
+    expect(payload.total_unmatched).toBe(1);
+    expect(payload.groups).toHaveLength(1);
+    expect(payload.groups[0]!.transactions).toHaveLength(1);
+    expect(payload.groups[0]!.transactions[0]!.id).toBe(4);
+  });
+
   it("apply_transaction_classifications skips stale VOID transactions before creating invoices", async () => {
     const { handler, api } = setupReceiptTool("apply_transaction_classifications", {
       clients: [
