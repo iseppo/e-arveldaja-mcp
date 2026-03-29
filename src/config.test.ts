@@ -279,6 +279,89 @@ describe("loadAllConfigs", () => {
     }
   });
 
+  it("does not let a local .env override an explicit EARVELDAJA_API_KEY_FILE", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-explicit-file-precedence-"));
+    const workDir = join(tempDir, "work");
+    const explicitFile = join(tempDir, "explicit-apikey.txt");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_API_KEY_FILE = explicitFile;
+
+    writeFileSync(explicitFile, [
+      "ApiKey ID: explicit-id",
+      "ApiKey public value: explicit-public",
+      "Password: explicit-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    writeFileSync(join(workDir, ".env"), [
+      "EARVELDAJA_SERVER=demo",
+      "EARVELDAJA_API_KEY_ID=env-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=env-public",
+      "EARVELDAJA_API_PASSWORD=env-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(process.env.EARVELDAJA_API_KEY_ID).toBeUndefined();
+      expect(process.env.EARVELDAJA_API_PUBLIC_VALUE).toBeUndefined();
+      expect(process.env.EARVELDAJA_API_PASSWORD).toBeUndefined();
+      expect(process.env.EARVELDAJA_SERVER).toBeUndefined();
+      expect(configs).toHaveLength(1);
+      expect(configs[0]!.name).toBe("env-file");
+      expect(configs[0]!.config.apiKeyId).toBe("explicit-id");
+      expect(configs[0]!.config.baseUrl).toBe("https://rmp-api.rik.ee/v1");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let a standalone .env server override shell-provided credentials", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-shell-server-mix-"));
+    const workDir = join(tempDir, "work");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_API_KEY_ID = "shell-id";
+    process.env.EARVELDAJA_API_PUBLIC_VALUE = "shell-public";
+    process.env.EARVELDAJA_API_PASSWORD = "shell-secret";
+
+    writeFileSync(join(workDir, ".env"), [
+      "EARVELDAJA_SERVER=demo",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(process.env.EARVELDAJA_SERVER).toBeUndefined();
+      expect(configs).toHaveLength(1);
+      expect(configs[0]!.name).toBe("env");
+      expect(configs[0]!.config.apiKeyId).toBe("shell-id");
+      expect(configs[0]!.config.baseUrl).toBe("https://rmp-api.rik.ee/v1");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("imports a verified apikey file into the local working-directory .env", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-local-bootstrap-"));
     const workDir = join(tempDir, "work");

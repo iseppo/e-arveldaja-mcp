@@ -314,7 +314,9 @@ function serializeEnvFile(
 export function loadDotenvFiles(): void {
   const loaded = new Set<string>();
   const explicitServerProvided = process.env.EARVELDAJA_SERVER !== undefined;
-  let credentialKeysAlreadyProvided = hasCompleteApiCredentialEnv(process.env);
+  const explicitCredentialFileProvided = Boolean(process.env.EARVELDAJA_API_KEY_FILE?.trim());
+  let credentialKeysAlreadyProvided =
+    hasCompleteApiCredentialEnv(process.env) || explicitCredentialFileProvided;
   let serverLoadedFromStandaloneFile = false;
 
   const loadFiles = (envPaths: string[]): void => {
@@ -344,6 +346,7 @@ export function loadDotenvFiles(): void {
         if (API_CREDENTIAL_ENV_KEYS.includes(key as typeof API_CREDENTIAL_ENV_KEYS[number])) continue;
         if (key === "EARVELDAJA_SERVER") {
           if (explicitServerProvided) continue;
+          if (credentialKeysAlreadyProvided) continue;
           if (hasAnyCredentialKeys) continue;
           if (process.env.EARVELDAJA_SERVER === undefined) {
             process.env.EARVELDAJA_SERVER = value;
