@@ -293,7 +293,7 @@ function extractDistributions(rows: AccountStatementRow[]): Array<{
   tax_amount: number;
 }> {
   return rows
-    .filter(r => (r.type === "Distribution" || r.type === "Dividend" || r.type === "Interest") && r.ticker !== CASH_FUND_TICKER)
+    .filter(r => (r.type === "Distribution" || r.type === "Dividend" || r.type === "Interest" || r.type === "Reward") && r.ticker !== CASH_FUND_TICKER)
     .map(r => ({
       date: parseLightyearDate(r.date),
       reference: r.reference,
@@ -863,7 +863,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   );
 
   registerTool(server, "book_lightyear_distributions",
-    "Create journal entries for Lightyear dividend and interest distributions, including withheld tax. DRY RUN by default.",
+    "Create journal entries for Lightyear dividend, interest, and reward distributions, including withheld tax. DRY RUN by default.",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
@@ -948,7 +948,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
         const title = dist.ticker
           ? `Lightyear tulu: ${dist.ticker} (${dist.isin})`
-          : "Lightyear tulu: intress";
+          : `Lightyear tulu: ${dist.reference.startsWith("RW-") ? "boonus" : "intress"}`;
 
         if (isDryRun) {
           results.push({
