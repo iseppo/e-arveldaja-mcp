@@ -242,6 +242,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           reasons: string[];
           partiallyPaidWarning: boolean;
         } | undefined;
+        const hasExplicitIncomingDirection = tx.type === "D";
 
         for (const inv of openSales) {
           const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
@@ -257,17 +258,21 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           }
         }
 
-        for (const inv of openPurchases) {
-          const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
-          if (confidence >= threshold && (!bestInvoiceMatch || confidence > bestInvoiceMatch.confidence)) {
-            bestInvoiceMatch = {
-              type: "purchase_invoice",
-              id: inv.id!,
-              number: inv.number,
-              confidence,
-              reasons,
-              partiallyPaidWarning,
-            };
+        // Treat explicit D as authoritative incoming direction. Keep C permissive
+        // because some API flows still expose incoming payments as type C.
+        if (!hasExplicitIncomingDirection) {
+          for (const inv of openPurchases) {
+            const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
+            if (confidence >= threshold && (!bestInvoiceMatch || confidence > bestInvoiceMatch.confidence)) {
+              bestInvoiceMatch = {
+                type: "purchase_invoice",
+                id: inv.id!,
+                number: inv.number,
+                confidence,
+                reasons,
+                partiallyPaidWarning,
+              };
+            }
           }
         }
 

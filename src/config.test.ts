@@ -326,6 +326,43 @@ describe("loadAllConfigs", () => {
     }
   });
 
+  it("fails with a targeted error when EARVELDAJA_API_KEY_FILE is invalid even if a local .env exists", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-invalid-explicit-file-"));
+    const workDir = join(tempDir, "work");
+    const missingFile = join(tempDir, "missing-apikey.txt");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_API_KEY_FILE = missingFile;
+
+    writeFileSync(join(workDir, ".env"), [
+      "EARVELDAJA_API_KEY_ID=env-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=env-public",
+      "EARVELDAJA_API_PASSWORD=env-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+
+      expect(() => loadAllConfigs()).toThrowError(
+        `EARVELDAJA_API_KEY_FILE points to an unreadable or invalid credential file: ${missingFile}`
+      );
+      expect(process.env.EARVELDAJA_API_KEY_ID).toBeUndefined();
+      expect(process.env.EARVELDAJA_API_PUBLIC_VALUE).toBeUndefined();
+      expect(process.env.EARVELDAJA_API_PASSWORD).toBeUndefined();
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not let a standalone .env server override shell-provided credentials", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-shell-server-mix-"));
     const workDir = join(tempDir, "work");
@@ -669,7 +706,9 @@ describe("loadAllConfigs", () => {
 
     try {
       const { loadAllConfigs } = await importFreshConfig(tempDir);
-      expect(() => loadAllConfigs()).toThrowError("No API credentials found");
+      expect(() => loadAllConfigs()).toThrowError(
+        `EARVELDAJA_API_KEY_FILE points to an unreadable or invalid credential file: ${symlinkFile}`
+      );
 
       expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("Ignoring symlinked credential file"));
     } finally {

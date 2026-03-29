@@ -489,6 +489,16 @@ export function loadAllConfigs(): NamedConfig[] {
   const configs: NamedConfig[] = [];
   const seen = new Set<string>();
   const seenConnections = new Set<string>();
+  const explicitApiKeyFile = process.env.EARVELDAJA_API_KEY_FILE?.trim();
+  const explicitApiKeyConfig = explicitApiKeyFile
+    ? parseApiKeyFile(explicitApiKeyFile)
+    : null;
+
+  if (explicitApiKeyFile && !explicitApiKeyConfig) {
+    throw new Error(
+      `EARVELDAJA_API_KEY_FILE points to an unreadable or invalid credential file: ${explicitApiKeyFile}`
+    );
+  }
 
   const addConfig = (entry: NamedConfig): void => {
     const connectionKey = `${entry.config.baseUrl}\n${entry.config.apiKeyId}\n${entry.config.apiPublicValue}`;
@@ -499,16 +509,18 @@ export function loadAllConfigs(): NamedConfig[] {
 
   // 1. Check specific file from env var first so the explicitly selected
   // credential source becomes the active connection when multiple sources exist.
-  if (process.env.EARVELDAJA_API_KEY_FILE) {
-    const parsed = parseApiKeyFile(process.env.EARVELDAJA_API_KEY_FILE);
-    if (parsed) {
-      addConfig({
-        name: "env-file",
-        filePath: process.env.EARVELDAJA_API_KEY_FILE,
-        config: { apiKeyId: parsed.keyId, apiPublicValue: parsed.publicValue, apiPassword: parsed.password, baseUrl },
-      });
-      try { seen.add(realpathSync(process.env.EARVELDAJA_API_KEY_FILE)); } catch { /* realpath failed — file may appear as duplicate */ }
-    }
+  if (explicitApiKeyFile && explicitApiKeyConfig) {
+    addConfig({
+      name: "env-file",
+      filePath: explicitApiKeyFile,
+      config: {
+        apiKeyId: explicitApiKeyConfig.keyId,
+        apiPublicValue: explicitApiKeyConfig.publicValue,
+        apiPassword: explicitApiKeyConfig.password,
+        baseUrl,
+      },
+    });
+    try { seen.add(realpathSync(explicitApiKeyFile)); } catch { /* realpath failed — file may appear as duplicate */ }
   }
 
   // 2. Check env vars

@@ -350,6 +350,57 @@ describe("analyze_unconfirmed_transactions", () => {
   });
 
   describe("invoice matching", () => {
+    it("treats explicit incoming transactions as sale-invoice candidates, not purchase-invoice payments", async () => {
+      const handler = setupTool({
+        transactions: [{
+          id: 50,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 200,
+          date: "2026-03-20",
+          accounts_dimensions_id: 100,
+          cl_currencies_id: "EUR",
+          description: "Incoming payment",
+          bank_account_name: "Vendor OÜ",
+          bank_account_no: null,
+        }],
+        bankAccounts: defaultBankAccounts,
+        sales: [{
+          id: 30,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+          number: "ARV-30",
+          clients_id: 30,
+          client_name: "Vendor OÜ",
+          gross_price: 200,
+        }],
+        purchases: [{
+          id: 20,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+          number: "OST-20",
+          clients_id: 30,
+          client_name: "Vendor OÜ",
+          gross_price: 200,
+        }],
+      });
+
+      const result = await handler({ min_confidence: 0 });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.suggestions).toHaveLength(1);
+      const s = payload.suggestions[0]!;
+      expect(s.suggested_action).toBe("confirm_invoice");
+      expect(s.reason).toContain("sale_invoice");
+      expect(s.reason).not.toContain("purchase_invoice");
+      expect(s.distribution).toEqual({
+        related_table: "sale_invoices",
+        related_id: 30,
+        amount: 200,
+      });
+    });
+
     it("matches a purchase invoice by amount", async () => {
       const handler = setupTool({
         transactions: [{
