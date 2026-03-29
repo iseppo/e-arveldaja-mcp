@@ -497,18 +497,8 @@ export function loadAllConfigs(): NamedConfig[] {
     configs.push(entry);
   };
 
-  // 1. Check env vars
-  const envKeyId = process.env.EARVELDAJA_API_KEY_ID;
-  const envPublicValue = process.env.EARVELDAJA_API_PUBLIC_VALUE;
-  const envPassword = process.env.EARVELDAJA_API_PASSWORD;
-  if (envKeyId && envPublicValue && envPassword) {
-    addConfig({
-      name: "env",
-      config: { apiKeyId: envKeyId, apiPublicValue: envPublicValue, apiPassword: envPassword, baseUrl },
-    });
-  }
-
-  // 2. Check specific file from env var
+  // 1. Check specific file from env var first so the explicitly selected
+  // credential source becomes the active connection when multiple sources exist.
   if (process.env.EARVELDAJA_API_KEY_FILE) {
     const parsed = parseApiKeyFile(process.env.EARVELDAJA_API_KEY_FILE);
     if (parsed) {
@@ -519,6 +509,17 @@ export function loadAllConfigs(): NamedConfig[] {
       });
       try { seen.add(realpathSync(process.env.EARVELDAJA_API_KEY_FILE)); } catch { /* realpath failed — file may appear as duplicate */ }
     }
+  }
+
+  // 2. Check env vars
+  const envKeyId = process.env.EARVELDAJA_API_KEY_ID;
+  const envPublicValue = process.env.EARVELDAJA_API_PUBLIC_VALUE;
+  const envPassword = process.env.EARVELDAJA_API_PASSWORD;
+  if (envKeyId && envPublicValue && envPassword) {
+    addConfig({
+      name: "env",
+      config: { apiKeyId: envKeyId, apiPublicValue: envPublicValue, apiPassword: envPassword, baseUrl },
+    });
   }
 
   // 3. Scan local credential files only. The global directory is reserved for the canonical .env.

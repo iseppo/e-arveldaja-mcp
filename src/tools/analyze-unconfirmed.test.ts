@@ -445,6 +445,32 @@ describe("analyze_unconfirmed_transactions", () => {
 
       expect(payload.suggestions[0]!.reason).toContain("USD");
     });
+
+    it("does not suggest expenses for incoming credits that match expense keywords", async () => {
+      const handler = setupTool({
+        transactions: [{
+          id: 9,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 3.1,
+          date: "2026-03-15",
+          accounts_dimensions_id: 100,
+          cl_currencies_id: "EUR",
+          description: "Interest payment",
+          bank_account_name: "LHV",
+          bank_account_no: null,
+        }],
+        bankAccounts: defaultBankAccounts,
+      });
+
+      const result = await handler({});
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.suggestions).toHaveLength(1);
+      expect(payload.suggestions[0]!.suggested_action).not.toBe("confirm_expense");
+      expect(payload.summary.confirm_expense ?? 0).toBe(0);
+    });
   });
 
   describe("fallback", () => {

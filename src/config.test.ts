@@ -362,6 +362,46 @@ describe("loadAllConfigs", () => {
     }
   });
 
+  it("prioritizes an explicit EARVELDAJA_API_KEY_FILE over shell env credentials", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-explicit-file-vs-shell-"));
+    const workDir = join(tempDir, "work");
+    const explicitFile = join(tempDir, "explicit-apikey.txt");
+
+    mkdirSync(workDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_API_KEY_ID = "shell-id";
+    process.env.EARVELDAJA_API_PUBLIC_VALUE = "shell-public";
+    process.env.EARVELDAJA_API_PASSWORD = "shell-secret";
+    process.env.EARVELDAJA_API_KEY_FILE = explicitFile;
+
+    writeFileSync(explicitFile, [
+      "ApiKey ID: explicit-id",
+      "ApiKey public value: explicit-public",
+      "Password: explicit-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(configs).toHaveLength(2);
+      expect(configs[0]!.name).toBe("env-file");
+      expect(configs[0]!.config.apiKeyId).toBe("explicit-id");
+      expect(configs[1]!.name).toBe("env");
+      expect(configs[1]!.config.apiKeyId).toBe("shell-id");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("imports a verified apikey file into the local working-directory .env", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-local-bootstrap-"));
     const workDir = join(tempDir, "work");

@@ -297,8 +297,8 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         // --- 4. Expense detection ---
         const desc = (tx.description ?? "").toLowerCase();
         const absAmount = Math.abs(tx.amount);
-        // All transactions from the API are type C (see CLAUDE.md); no need to filter by type.
-        if (absAmount <= MAX_EXPENSE_AMOUNT) {
+        // Only outgoing bank transactions should be suggested as expenses.
+        if (tx.type === "C" && absAmount <= MAX_EXPENSE_AMOUNT) {
           const matchedPattern = EXPENSE_PATTERNS.find(ep => ep.pattern.test(desc));
           if (matchedPattern) {
             suggestions.push({
