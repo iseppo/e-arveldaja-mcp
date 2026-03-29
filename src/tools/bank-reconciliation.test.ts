@@ -640,6 +640,61 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.one_sided[0]!.match_reasons).toContain("counterparty_iban_is_own_account");
   });
 
+  it("does not suppress distinct one-sided transfers just because both counterparty IBANs are own accounts", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        {
+          id: 107,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 100,
+          base_amount: 92,
+          cl_currencies_id: "USD",
+          date: "2026-03-20",
+          accounts_dimensions_id: 100,
+          bank_account_name: "Transfer to Wise",
+          bank_account_no: "BE08905767222113",
+        },
+        {
+          id: 108,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 100,
+          base_amount: 100,
+          cl_currencies_id: "EUR",
+          date: "2026-03-20",
+          accounts_dimensions_id: 200,
+          bank_account_name: "Transfer from LHV",
+          bank_account_no: "EE123456789012345678",
+        },
+      ],
+      bankAccounts: [
+        ...bankAccounts,
+        { id: 3, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+      ],
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.matched_one_sided).toBe(2);
+    expect(payload.one_sided).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        transaction_id: 107,
+        target_dimension_id: 300,
+        match_reasons: expect.arrayContaining(["counterparty_iban_is_own_account"]),
+      }),
+      expect.objectContaining({
+        transaction_id: 108,
+        target_dimension_id: 100,
+        match_reasons: expect.arrayContaining(["counterparty_iban_is_own_account"]),
+      }),
+    ]));
+  });
+
   it("skips ambiguous pair matches instead of picking the first incoming candidate", async () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [

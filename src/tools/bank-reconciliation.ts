@@ -466,6 +466,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         status: string;
       }
 
+      interface OneSidedInference {
+        targetDimension?: number;
+        confidence: number;
+        reasons: string[];
+      }
+
       const matchedPairs: PairResult[] = [];
       const ambiguousPairs: AmbiguousPairResult[] = [];
       const matchedOneSided: OneSidedResult[] = [];
@@ -533,6 +539,57 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         };
       }
 
+      const oneSidedInferenceCache = new Map<number, OneSidedInference>();
+      function inferOneSidedTransfer(tx: Transaction): OneSidedInference {
+        if (tx.id && oneSidedInferenceCache.has(tx.id)) {
+          return oneSidedInferenceCache.get(tx.id)!;
+        }
+
+        const counterpartyName = normalizeCompanyName(tx.bank_account_name ?? "");
+        const counterpartyIban = (tx.bank_account_no ?? "").trim().toUpperCase();
+
+        let targetDimension: number | undefined;
+        let confidence = 0;
+        const reasons: string[] = [];
+
+        if (counterpartyIban && ownIbanToDimension.has(counterpartyIban)) {
+          const ibanDim = ownIbanToDimension.get(counterpartyIban)!;
+          if (ibanDim !== tx.accounts_dimensions_id) {
+            targetDimension = ibanDim;
+            confidence += 90;
+            reasons.push("counterparty_iban_is_own_account");
+          }
+        }
+
+        if (!targetDimension && companyName.length >= 4 && counterpartyName.length >= 4) {
+          const nameMatch = counterpartyName.includes(companyName) || companyName.includes(counterpartyName);
+          if (nameMatch) {
+            confidence += 60;
+            reasons.push("counterparty_name_matches_company");
+
+            const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== tx.accounts_dimensions_id);
+            if (target_accounts_dimensions_id && target_accounts_dimensions_id !== tx.accounts_dimensions_id && dimensionToIban.has(target_accounts_dimensions_id)) {
+              targetDimension = target_accounts_dimensions_id;
+              reasons.push("target_from_parameter");
+            } else if (otherDimensions.length === 1) {
+              targetDimension = otherDimensions[0]!;
+              confidence += 20;
+              reasons.push("only_one_other_account");
+            }
+          }
+        }
+
+        const result: OneSidedInference = {
+          targetDimension,
+          confidence: Math.min(confidence, 100),
+          reasons,
+        };
+        if (tx.id) {
+          oneSidedInferenceCache.set(tx.id, result);
+        }
+        return result;
+      }
+
       // --- Phase 1: C↔D pair matching ---
       for (let i = 0; i < outgoing.length; i++) {
         const txOut = outgoing[i]!;
@@ -595,16 +652,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           const outAccountIban = dimensionToIban.get(txOut.accounts_dimensions_id) ?? "";
 
           if (conflictingComparableAmounts) {
-            const hasStrongCrossAccountEvidence =
-              (outCounterpartyIban && outCounterpartyIban === inAccountIban) ||
-              (inCounterpartyIban && inCounterpartyIban === outAccountIban) ||
-              (
-                outCounterpartyIban &&
-                ownIbanToDimension.has(outCounterpartyIban) &&
-                inCounterpartyIban &&
-                ownIbanToDimension.has(inCounterpartyIban)
-              );
-            if (hasStrongCrossAccountEvidence) {
+            const txOutOneSided = inferOneSidedTransfer(txOut);
+            const txInOneSided = inferOneSidedTransfer(txIn);
+            const mutuallyConsistentOneSidedTargets =
+              txOutOneSided.targetDimension === txIn.accounts_dimensions_id &&
+              txInOneSided.targetDimension === txOut.accounts_dimensions_id;
+            if (mutuallyConsistentOneSidedTargets) {
               blockedOneSidedTxIds.add(txOut.id);
               blockedOneSidedTxIds.add(txIn.id);
             }
@@ -754,42 +807,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
       for (const tx of remaining) {
         if (!tx.id) continue;
-        const counterpartyName = normalizeCompanyName(tx.bank_account_name ?? "");
-        const counterpartyIban = (tx.bank_account_no ?? "").trim().toUpperCase();
-
-        let targetDimension: number | undefined;
-        let confidence = 0;
-        const reasons: string[] = [];
-
-        // Check if counterparty IBAN matches another own bank account
-        if (counterpartyIban && ownIbanToDimension.has(counterpartyIban)) {
-          const ibanDim = ownIbanToDimension.get(counterpartyIban)!;
-          if (ibanDim !== tx.accounts_dimensions_id) {
-            targetDimension = ibanDim;
-            confidence += 90;
-            reasons.push("counterparty_iban_is_own_account");
-          }
-        }
-
-        // Check if counterparty name matches company name (min 4 chars to avoid false positives)
-        if (!targetDimension && companyName.length >= 4 && counterpartyName.length >= 4) {
-          const nameMatch = counterpartyName.includes(companyName) || companyName.includes(counterpartyName);
-          if (nameMatch) {
-            confidence += 60;
-            reasons.push("counterparty_name_matches_company");
-
-            // Determine target: user-specified (must differ from source), or auto if only one other account exists
-            const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== tx.accounts_dimensions_id);
-            if (target_accounts_dimensions_id && target_accounts_dimensions_id !== tx.accounts_dimensions_id && dimensionToIban.has(target_accounts_dimensions_id)) {
-              targetDimension = target_accounts_dimensions_id;
-              reasons.push("target_from_parameter");
-            } else if (otherDimensions.length === 1) {
-              targetDimension = otherDimensions[0]!;
-              confidence += 20;
-              reasons.push("only_one_other_account");
-            }
-          }
-        }
+        const { targetDimension, confidence, reasons } = inferOneSidedTransfer(tx);
 
         if (confidence < 50 || !targetDimension) continue;
 
