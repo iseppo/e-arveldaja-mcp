@@ -392,7 +392,8 @@ export interface CreatePurchaseInvoiceData extends Pick<PurchaseInvoice,
   "liability_accounts_id" |
   "bank_ref_number" |
   "bank_account_no" |
-  "notes"
+  "notes" |
+  "overdue_charge"
 > {
   items: PurchaseInvoiceItem[];
 }

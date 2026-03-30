@@ -636,6 +636,18 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         /^WISE:(TRANSFER|BANK_DETAILS_PAYMENT_RETURN)-/.test(c.description)
       );
 
+      let autoDetectedInterAccountDimId: number | undefined;
+      if (transferEntries.length > 0 && !inter_account_dimension_id) {
+        // Pre-compute auto-detection for dry-run visibility
+        const bankAccounts = await api.readonly.getBankAccounts();
+        const otherBankDims = bankAccounts
+          .filter(ba => ba.accounts_dimensions_id && ba.accounts_dimensions_id !== accounts_dimensions_id)
+          .map(ba => ba.accounts_dimensions_id!);
+        if (otherBankDims.length === 1) {
+          autoDetectedInterAccountDimId = otherBankDims[0]!;
+        }
+      }
+
       if (transferEntries.length > 0 && !dryRun) {
         // Resolve the target bank account dimension for inter-account transfers
         const allAccountDimensions = accountDimensions.length > 0
@@ -767,6 +779,9 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             ...(skippedJarCount > 0 ? { skipped_jar_transfers: skippedJarCount } : {}),
             created: summary.created,
             skipped: skipped.length,
+            ...(autoDetectedInterAccountDimId && transferEntries.length > 0 && dryRun ? {
+              inter_account_auto_detected_dimension_id: autoDetectedInterAccountDimId,
+            } : {}),
             ...(interAccountResults.length > 0 ? {
               inter_account_reconciliation: {
                 total: interAccountResults.length,

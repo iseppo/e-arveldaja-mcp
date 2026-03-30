@@ -12,8 +12,9 @@ export class ClientsApi extends BaseResource<Client> {
     const cacheKey = this.cacheKey(`${this.basePath}:all`);
     const cached = cache.get<Client[]>(cacheKey);
     if (cached) return cached;
+    const gen = cache.generation;
     const all = await this.listAll();
-    cache.set(cacheKey, all, 120);
+    cache.setIfSameGeneration(cacheKey, all, gen, 120);
     return all;
   }
 

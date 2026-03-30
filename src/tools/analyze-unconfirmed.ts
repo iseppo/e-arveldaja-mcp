@@ -7,7 +7,7 @@ import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js"
 import { readOnly } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { getInvoiceMatchEligibility, matchScore } from "./bank-reconciliation.js";
+import { getInvoiceMatchEligibility, matchScore, buildInvoiceIndex, getIndexedCandidates } from "./bank-reconciliation.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { buildBankAccountLookups } from "./inter-account-utils.js";
 
@@ -87,6 +87,8 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       const openPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
         inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
+      const saleIndex = buildInvoiceIndex(openSales);
+      const purchaseIndex = buildInvoiceIndex(openPurchases);
 
       const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds } =
         buildBankAccountLookups(bankAccounts, accountDimensions);
@@ -246,7 +248,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
 
         if (allowSaleInvoices) {
-          for (const inv of openSales) {
+          for (const inv of getIndexedCandidates(saleIndex, tx.ref_number, tx.amount, tx.base_amount)) {
             const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
             if (confidence >= threshold && (!bestInvoiceMatch || confidence > bestInvoiceMatch.confidence)) {
               bestInvoiceMatch = {
@@ -262,7 +264,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         }
 
         if (allowPurchaseInvoices) {
-          for (const inv of openPurchases) {
+          for (const inv of getIndexedCandidates(purchaseIndex, tx.ref_number, tx.amount, tx.base_amount)) {
             const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
             if (confidence >= threshold && (!bestInvoiceMatch || confidence > bestInvoiceMatch.confidence)) {
               bestInvoiceMatch = {

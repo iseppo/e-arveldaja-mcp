@@ -17,6 +17,7 @@ export class JournalsApi extends BaseResource<Journal> {
     const cached = cache.get<Journal[]>(cacheKey);
     if (cached) return cached;
 
+    const gen = cache.generation;
     const all = await this.listAll();
 
     // Identify which journals need individual fetch (missing postings)
@@ -38,7 +39,7 @@ export class JournalsApi extends BaseResource<Journal> {
       }
     }
 
-    cache.set(cacheKey, all, 120);
+    cache.setIfSameGeneration(cacheKey, all, gen, 120);
     return all;
   }
 

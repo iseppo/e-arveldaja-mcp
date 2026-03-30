@@ -31,8 +31,9 @@ export class BaseResource<T> {
     const cached = cache.get<PaginatedResponse<T>>(cacheKey);
     if (cached) return cached;
 
+    const gen = cache.generation;
     const result = await this.client.get<PaginatedResponse<T>>(this.basePath, params as Record<string, string | number>);
-    cache.set(cacheKey, result, 120);
+    cache.setIfSameGeneration(cacheKey, result, gen, 120);
     return result;
   }
 
@@ -75,8 +76,9 @@ export class BaseResource<T> {
     const cached = cache.get<T>(cacheKey);
     if (cached) return cached;
 
+    const gen = cache.generation;
     const result = await this.client.get<T>(`${this.basePath}/${id}`);
-    cache.set(cacheKey, result, 120);
+    cache.setIfSameGeneration(cacheKey, result, gen, 120);
     return result;
   }
 

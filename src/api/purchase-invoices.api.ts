@@ -1,7 +1,7 @@
 import type { HttpClient } from "../http-client.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse, ApiFile } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
-import { roundMoney } from "../money.js";
+import { roundMoney, parseVatRateDropdown } from "../money.js";
 import { log } from "../logger.js";
 
 export class InvoiceCreationError extends Error {
@@ -36,20 +36,14 @@ function normalizeItemsForNonVat(
         ? roundMoney(item.unit_net_price * item.amount)
         : undefined);
 
-    const rateStr = item.vat_rate_dropdown !== undefined ? String(item.vat_rate_dropdown) : undefined;
-    const rate = rateStr === "-" ? 0
-      : rateStr !== undefined
-        ? Number(rateStr.replace(",", "."))
-        : undefined;
-
-    if (rate !== undefined && !Number.isFinite(rate)) {
-      log("warning", `Purchase invoice item "${item.custom_title ?? "(no title)"}": unparseable vat_rate_dropdown "${rateStr}"`);
-    }
+    const rate = item.vat_rate_dropdown !== undefined
+      ? parseVatRateDropdown(item.vat_rate_dropdown)
+      : undefined;
 
     // Single-item invoice: use explicit gross_price if available
     const derivedGross =
       items.length === 1 && grossPrice !== undefined ? grossPrice :
-      net !== undefined && rate !== undefined && Number.isFinite(rate) ? roundMoney(net * (1 + rate / 100)) :
+      net !== undefined && rate !== undefined ? roundMoney(net * (1 + rate / 100)) :
       undefined;
 
     if (derivedGross === undefined) return item; // best-effort: skip if not derivable
@@ -129,7 +123,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         // Apply the rounding difference to the last item's gross
         const lastItem = patchItems[patchItems.length - 1]!;
         const currentGross = lastItem.project_no_vat_gross_price
-          ?? roundMoney((lastItem.total_net_price ?? 0) * (1 + (Number(String(lastItem.vat_rate_dropdown ?? "0").replace(",", ".")) || 0) / 100));
+          ?? roundMoney((lastItem.total_net_price ?? 0) * (1 + parseVatRateDropdown(lastItem.vat_rate_dropdown) / 100));
         lastItem.project_no_vat_gross_price = roundMoney(currentGross + vatDiff);
       }
 

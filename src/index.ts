@@ -624,7 +624,7 @@ Reporting:
     "This only affects credentials previously stored in .env files by the setup flow; it does not remove shell env vars, EARVELDAJA_API_KEY_FILE, or raw apikey*.txt files.",
     {
       storage_scope: z.enum(["local", "global"]).describe("Which .env file to modify."),
-      target: z.string().describe("Stored credential target from list_stored_credentials, for example primary or connection_1."),
+      target: z.string().regex(/^(primary|connection_\d+)$/, "Must be 'primary' or 'connection_N'").describe("Stored credential target from list_stored_credentials, for example primary or connection_1."),
     },
     { ...destructive, openWorldHint: true, title: "Remove Stored Credentials" },
     async ({ storage_scope, target }) => {

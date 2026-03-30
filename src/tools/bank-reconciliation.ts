@@ -62,7 +62,7 @@ function getComparableInvoiceAmountBuckets(invoice: MatchableInvoiceAmounts): nu
   return [...buckets];
 }
 
-function buildInvoiceIndex<T extends MatchableInvoiceAmounts & { bank_ref_number?: string | null }>(
+export function buildInvoiceIndex<T extends MatchableInvoiceAmounts & { bank_ref_number?: string | null }>(
   invoices: T[],
 ): InvoiceIndex<T> {
   const byRef = new Map<string, T[]>();
@@ -89,7 +89,7 @@ function buildInvoiceIndex<T extends MatchableInvoiceAmounts & { bank_ref_number
  * Safe to skip invoices not in any index bucket: client-only matches (max 15 pts)
  * can never reach the minimum practical threshold (50), so they would be filtered anyway.
  */
-function getIndexedCandidates<T>(
+export function getIndexedCandidates<T>(
   index: InvoiceIndex<T>,
   refNumber: string | null | undefined,
   amount: number,

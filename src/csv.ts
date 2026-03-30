@@ -1,4 +1,4 @@
-const CSV_MAX_SIZE_DEFAULT = 1_048_576; // 1 MB — consistent with safeJsonParse
+const CSV_MAX_SIZE_DEFAULT = 10_485_760; // 10 MB — CSV exports (bank statements, Lightyear) can be large
 
 export function parseCSV(content: string, delimiter = ",", maxSize = CSV_MAX_SIZE_DEFAULT): string[][] {
   // Strip UTF-8 BOM if present (common in Windows/Excel exports)

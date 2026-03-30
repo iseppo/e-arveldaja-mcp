@@ -20,7 +20,21 @@ export const roundMoney = (v: number): number => {
   return (v < 0 ? -rounded : rounded) || 0;
 };
 
-/** Invoice gross amount in base currency, falling back to gross_price. */
-export function effectiveGross(inv: { base_gross_price?: number | null; gross_price?: number | null }): number {
-  return inv.base_gross_price ?? inv.gross_price ?? 0;
+/** Parse a vat_rate_dropdown string (e.g. "9", "24", "-", "9,5") to a numeric rate or 0 for "-". */
+export function parseVatRateDropdown(value: string | number | null | undefined): number {
+  if (value == null) return 0;
+  const str = String(value).trim();
+  if (!str || str === "-") return 0;
+  const parsed = Number(str.replace(",", ".").replace("%", ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** Invoice gross amount in base currency, falling back to gross_price. Returns 0 with a warning if both are null. */
+export function effectiveGross(inv: { base_gross_price?: number | null; gross_price?: number | null; id?: number }): number {
+  const value = inv.base_gross_price ?? inv.gross_price;
+  if (value == null) {
+    process.stderr.write(`WARNING: Invoice ${inv.id ?? "unknown"} has no gross_price or base_gross_price — treating as 0\n`);
+    return 0;
+  }
+  return value;
 }

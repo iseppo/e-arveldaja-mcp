@@ -36,7 +36,7 @@ export async function isCompanyVatRegistered(api: ApiContext): Promise<boolean> 
 export const MAX_JSON_INPUT_SIZE = 1024 * 1024; // 1 MB
 
 export function safeJsonParse(input: string, label: string): unknown {
-  if (input.length > MAX_JSON_INPUT_SIZE) {
+  if (Buffer.byteLength(input, "utf-8") > MAX_JSON_INPUT_SIZE) {
     throw new Error(`JSON input for "${label}" exceeds maximum size of ${MAX_JSON_INPUT_SIZE} bytes`);
   }
   try {
@@ -467,14 +467,26 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     distributions: z.string().optional().describe("JSON array of distribution rows: [{related_table, related_id?, amount}]"),
     clients_id: coerceId.optional().describe("Client ID to set on the transaction before confirming (required when transaction has no clients_id and distribution is against accounts, not invoices)"),
   }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions, clients_id }) => {
+    let clientsIdWasSet = false;
     if (clients_id) {
       const tx = await api.transactions.get(id);
       if (!tx.clients_id) {
         await api.transactions.update(id, { clients_id } as Partial<Transaction>);
+        clientsIdWasSet = true;
       }
     }
     const dist = distributions ? parseTransactionDistributions(distributions) : undefined;
-    const result = await api.transactions.confirm(id, dist);
+    let result: Awaited<ReturnType<typeof api.transactions.confirm>>;
+    try {
+      result = await api.transactions.confirm(id, dist);
+    } catch (error) {
+      if (clientsIdWasSet) {
+        try {
+          await api.transactions.update(id, { clients_id: null } as Partial<Transaction>);
+        } catch { /* best effort rollback */ }
+      }
+      throw error;
+    }
     logAudit({
       tool: "confirm_transaction", action: "CONFIRMED", entity_type: "transaction", entity_id: id,
       summary: `Confirmed transaction ${id}`,
