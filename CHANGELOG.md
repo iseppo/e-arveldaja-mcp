@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.10.2] - 2026-03-30
+
+### Security
+- **XXE defense-in-depth** — CAMT XML parser now rejects files containing `<!DOCTYPE` or `<!ENTITY` declarations before parsing, preventing potential XXE attacks even if `processEntities` is bypassed in a future parser update.
+- **Audit log path traversal prevention** — `sanitizeAuditLogName` now strips `..` sequences from company-name-derived filenames, preventing writes outside the `logs/` directory.
+- **npm audit clean** — fixed transitive ReDoS vulnerabilities in `path-to-regexp` and `picomatch`.
+- **Audit log file permissions** — `clearAuditLog` now writes with mode `0o600` via the shared `writePrivateTextFile` helper.
+
+### Added
+- **Shared company name normalizer** (`src/company-name.ts`) — unified three divergent implementations (bank-reconciliation, wise-import, receipt-extraction) into a single function with comprehensive international legal suffix list (`ou`, `as`, `mtu`, `llc`, `ltd`, `gmbh`, `oy`, etc.) and NFKD normalization. Optional `stripNonAlphanumeric` mode for grouping/deduplication.
+- **Centralized account defaults** (`src/accounting-defaults.ts`) — named constants for standard Estonian chart-of-accounts numbers (`DEFAULT_LIABILITY_ACCOUNT`, `DEFAULT_VAT_ACCOUNT`, `CURRENT_YEAR_PROFIT_ACCOUNT`, etc.), replacing magic numbers across 6+ files.
+- **Shared test fixtures** (`src/__fixtures__/accounting.ts`) — `makeAccount`, `makePosting`, `makeJournal`, `makeTransaction`, `makeBankAccount` factory functions, eliminating duplicate fixture builders across test files.
+- **158 new unit tests** — `inter-account-utils.test.ts` (26 tests), `receipt-extraction.test.ts` (80 tests), `transaction-status.test.ts` (8 tests), `invoice-extraction-fallback.test.ts` (41 tests), plus additional security tests for XXE and path traversal.
+
+### Fixed
+- **Unsafe type cast in `buildInterAccountJournalIndex`** — replaced `as number` cast with null guard to prevent potential `NaN` keys in the journal index map.
+- **Unsafe `(err as any).invoiceId`** — replaced with typed `InvoiceCreationError` class in `purchase-invoices.api.ts`.
+- **Runtime type validation on JSON parse helpers** — `requireNumericFields` now validates that `amount`, `accounts_id`, `total_net_price`, and other critical numeric fields are actual numbers (not strings), catching malformed LLM-generated JSON at the trust boundary.
+- **CSV size limit mismatch** — `parseCSV` now accepts a caller-specified `maxSize` parameter. Wise import passes 10MB to match its file-read limit, preventing confusing errors on large CSV files.
+- **Unnecessary re-export removed** — `analyze-unconfirmed.ts` now imports `normalizeCompanyName` directly from `company-name.ts` instead of through `bank-reconciliation.ts`.
+
+### Changed
+- **664 unit tests** across 44 test files (was 442 across 38).
+
 ## [0.10.1] - 2026-03-30
 
 ### Fixed
