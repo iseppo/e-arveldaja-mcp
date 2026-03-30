@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { registerBankReconciliationTools } from "./bank-reconciliation.js";
+import { registerBankReconciliationTools, matchScore } from "./bank-reconciliation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
 function setupReconciliationTool(options: {
@@ -1245,5 +1245,84 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.already_handled[0]!.transaction_id).toBe(31);
       expect(payload.already_handled[0]!.existing_journal_id).toBe(1000);
     });
+  });
+});
+
+describe("matchScore", () => {
+  const baseTx = {
+    id: 1,
+    type: "C",
+    amount: 100,
+    date: "2026-03-20",
+    cl_currencies_id: "EUR",
+    accounts_dimensions_id: 100,
+  };
+
+  it("returns exact_amount when transaction amount matches invoice gross_price", () => {
+    const result = matchScore(baseTx, { gross_price: 100 }, 100);
+    expect(result.confidence).toBeGreaterThanOrEqual(40);
+    expect(result.reasons).toContain("exact_amount");
+  });
+
+  it("returns exact_base_amount when base amounts match via currency_rate fallback", () => {
+    // Invoice has no base_gross_price but has currency_rate.
+    // getComparableBaseInvoiceAmount computes: gross_price * currency_rate = 100 * 0.92 = 92
+    // tx.base_amount = 92, txAmount = 1000 (SEK), invoice.gross_price = 100 (USD)
+    // txAmount (1000) !== invoiceAmount (100) so exact_amount is skipped;
+    // baseAmount (92) === baseInvoiceAmount (92) triggers exact_base_amount.
+    const tx = { ...baseTx, amount: 1000, base_amount: 92, cl_currencies_id: "SEK" };
+    const invoice = { gross_price: 100, currency_rate: 0.92 };
+    const result = matchScore(tx, invoice, 1000);
+    expect(result.reasons).toContain("exact_base_amount");
+    expect(result.confidence).toBeGreaterThanOrEqual(40);
+  });
+
+  it("returns exact_base_amount when base_gross_price is explicit on invoice", () => {
+    const tx = { ...baseTx, amount: 1000, base_amount: 92, cl_currencies_id: "SEK" };
+    const invoice = { gross_price: 100, base_gross_price: 92 };
+    const result = matchScore(tx, invoice, 1000);
+    expect(result.reasons).toContain("exact_base_amount");
+  });
+
+  it("adds ref_number score when references match", () => {
+    const tx = { ...baseTx, ref_number: "RF123" };
+    const invoice = { gross_price: 100, bank_ref_number: "RF123" };
+    const result = matchScore(tx, invoice, 100);
+    expect(result.reasons).toContain("ref_number");
+    expect(result.confidence).toBeGreaterThanOrEqual(80);
+  });
+
+  it("adds client_id score when client IDs match", () => {
+    const tx = { ...baseTx, clients_id: 42 };
+    const invoice = { gross_price: 100, clients_id: 42 };
+    const result = matchScore(tx, invoice, 100);
+    expect(result.reasons).toContain("client_id");
+  });
+
+  it("adds client_name_partial score when company names partially match", () => {
+    const tx = { ...baseTx, bank_account_name: "Acme Solutions OU" };
+    const invoice = { gross_price: 100, client_name: "Acme Solutions" };
+    const result = matchScore(tx, invoice, 100);
+    expect(result.reasons).toContain("client_name_partial");
+  });
+
+  it("penalizes partially paid invoices", () => {
+    const fullResult = matchScore(baseTx, { gross_price: 100, payment_status: "NOT_PAID" }, 100);
+    const partialResult = matchScore(baseTx, { gross_price: 100, payment_status: "PARTIALLY_PAID" }, 100);
+    expect(partialResult.partiallyPaidWarning).toBe(true);
+    expect(partialResult.confidence).toBeLessThan(fullResult.confidence);
+    expect(partialResult.reasons).toContain("partially_paid_warning");
+  });
+
+  it("returns close_amount when amounts are within 1 but not exact", () => {
+    const result = matchScore(baseTx, { gross_price: 100.5 }, 100);
+    expect(result.reasons).toContain("close_amount");
+  });
+
+  it("caps confidence at 100", () => {
+    const tx = { ...baseTx, ref_number: "RF123", clients_id: 42 };
+    const invoice = { gross_price: 100, bank_ref_number: "RF123", clients_id: 42 };
+    const result = matchScore(tx, invoice, 100);
+    expect(result.confidence).toBeLessThanOrEqual(100);
   });
 });

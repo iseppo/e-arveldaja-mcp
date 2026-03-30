@@ -111,4 +111,58 @@ describe("Cache", () => {
     vi.advanceTimersByTime(11_000);
     expect(cache.get("default-ttl")).toBeUndefined();
   });
+
+  describe("generation guard", () => {
+    it("setIfSameGeneration writes when generation matches", () => {
+      const cache = new Cache(300);
+      const gen = cache.generation;
+      cache.setIfSameGeneration("key", "value", gen);
+      expect(cache.get("key")).toBe("value");
+    });
+
+    it("setIfSameGeneration skips write when generation changed after invalidate", () => {
+      const cache = new Cache(300);
+      const gen = cache.generation;
+      cache.invalidate(); // increments generation
+      cache.setIfSameGeneration("key", "stale-value", gen);
+      expect(cache.get("key")).toBeUndefined();
+    });
+
+    it("invalidate increments generation", () => {
+      const cache = new Cache(300);
+      const before = cache.generation;
+      cache.invalidate();
+      expect(cache.generation).toBe(before + 1);
+    });
+
+    it("pattern invalidate also increments generation", () => {
+      const cache = new Cache(300);
+      cache.set("prefix:a", 1);
+      const before = cache.generation;
+      cache.invalidate("prefix:");
+      expect(cache.generation).toBe(before + 1);
+    });
+
+    it("setIfSameGeneration respects custom TTL", () => {
+      const cache = new Cache(300);
+      const gen = cache.generation;
+      cache.setIfSameGeneration("short", "value", gen, 5);
+      expect(cache.get("short")).toBe("value");
+      vi.advanceTimersByTime(6_000);
+      expect(cache.get("short")).toBeUndefined();
+    });
+
+    it("generation starts at 0", () => {
+      const cache = new Cache(300);
+      expect(cache.generation).toBe(0);
+    });
+
+    it("multiple invalidates increment generation each time", () => {
+      const cache = new Cache(300);
+      cache.invalidate();
+      cache.invalidate();
+      cache.invalidate();
+      expect(cache.generation).toBe(3);
+    });
+  });
 });

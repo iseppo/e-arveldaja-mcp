@@ -6,6 +6,7 @@ import {
   parseJsonObject,
   parseJsonObjectArray,
   requireFields,
+  coerceNumericFields,
   MAX_JSON_INPUT_SIZE,
 } from "./crud-tools.js";
 
@@ -110,5 +111,73 @@ describe("parseSaleInvoiceItems", () => {
     expect(() =>
       parseSaleInvoiceItems('[{"products_id":1,"custom_title":"Service","amount":1,"discount_percent":"bad"}]')
     ).toThrow("discount_percent");
+  });
+});
+
+describe("coerceNumericFields", () => {
+  it("coerces integer string to number", () => {
+    const items = [{ price: "10" }];
+    coerceNumericFields(items, ["price"]);
+    expect(items[0]!.price).toBe(10);
+  });
+
+  it("coerces decimal string to number", () => {
+    const items = [{ rate: "3.14" }];
+    coerceNumericFields(items, ["rate"]);
+    expect(items[0]!.rate).toBe(3.14);
+  });
+
+  it("does not coerce non-numeric string", () => {
+    const items = [{ name: "bad" }];
+    coerceNumericFields(items, ["name"]);
+    expect(items[0]!.name).toBe("bad");
+  });
+
+  it("coerces empty string to 0 (Number('') is 0 which is finite)", () => {
+    const items = [{ value: "" }];
+    coerceNumericFields(items, ["value"]);
+    expect(items[0]!.value).toBe(0);
+  });
+
+  it("does not touch null or undefined values", () => {
+    const items = [{ a: null, b: undefined }];
+    coerceNumericFields(items, ["a", "b"]);
+    expect(items[0]!.a).toBeNull();
+    expect(items[0]!.b).toBeUndefined();
+  });
+
+  it("does not coerce NaN or Infinity strings", () => {
+    const items = [{ a: "NaN", b: "Infinity", c: "-Infinity" }];
+    coerceNumericFields(items, ["a", "b", "c"]);
+    expect(items[0]!.a).toBe("NaN");
+    expect(items[0]!.b).toBe("Infinity");
+    expect(items[0]!.c).toBe("-Infinity");
+  });
+
+  it("only coerces specified fields", () => {
+    const items = [{ price: "10", name: "test" }];
+    coerceNumericFields(items, ["price"]);
+    expect(items[0]!.price).toBe(10);
+    expect(items[0]!.name).toBe("test");
+  });
+
+  it("coerces across multiple items", () => {
+    const items = [{ amount: "5" }, { amount: "7.5" }];
+    coerceNumericFields(items, ["amount"]);
+    expect(items[0]!.amount).toBe(5);
+    expect(items[1]!.amount).toBe(7.5);
+  });
+
+  it("ignores fields not present on item", () => {
+    const items = [{ a: "1" }];
+    coerceNumericFields(items, ["a", "b"]);
+    expect(items[0]!.a).toBe(1);
+    expect("b" in items[0]!).toBe(false);
+  });
+
+  it("does not coerce non-string values", () => {
+    const items = [{ price: 42 }];
+    coerceNumericFields(items, ["price"]);
+    expect(items[0]!.price).toBe(42);
   });
 });

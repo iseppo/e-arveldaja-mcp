@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { roundMoney } from "./money.js";
+import { describe, it, expect, vi } from "vitest";
+import { roundMoney, parseVatRateDropdown, effectiveGross } from "./money.js";
 
 describe("roundMoney", () => {
   it("rounds to 2 decimal places", () => {
@@ -55,5 +55,72 @@ describe("roundMoney", () => {
     expect(roundMoney(1.2351)).toBe(1.24);
     expect(roundMoney(-1.2349)).toBe(-1.23);
     expect(roundMoney(-1.2351)).toBe(-1.24);
+  });
+});
+
+describe("parseVatRateDropdown", () => {
+  it("parses integer rate string", () => {
+    expect(parseVatRateDropdown("9")).toBe(9);
+    expect(parseVatRateDropdown("24")).toBe(24);
+  });
+
+  it("returns 0 for dash (no VAT)", () => {
+    expect(parseVatRateDropdown("-")).toBe(0);
+  });
+
+  it("parses comma-separated decimal rate", () => {
+    expect(parseVatRateDropdown("9,5")).toBe(9.5);
+  });
+
+  it("parses rate with percent sign", () => {
+    expect(parseVatRateDropdown("9.5%")).toBe(9.5);
+  });
+
+  it("returns 0 for null or undefined", () => {
+    expect(parseVatRateDropdown(null)).toBe(0);
+    expect(parseVatRateDropdown(undefined)).toBe(0);
+  });
+
+  it("returns 0 for empty string", () => {
+    expect(parseVatRateDropdown("")).toBe(0);
+  });
+
+  it("returns 0 for non-numeric string", () => {
+    expect(parseVatRateDropdown("abc")).toBe(0);
+  });
+
+  it("passes through numeric values", () => {
+    expect(parseVatRateDropdown(24)).toBe(24);
+    expect(parseVatRateDropdown(9.5)).toBe(9.5);
+  });
+});
+
+describe("effectiveGross", () => {
+  it("returns base_gross_price when present", () => {
+    expect(effectiveGross({ base_gross_price: 92, gross_price: 100, id: 1 })).toBe(92);
+  });
+
+  it("falls back to gross_price when base_gross_price is null", () => {
+    expect(effectiveGross({ base_gross_price: null, gross_price: 100, id: 2 })).toBe(100);
+  });
+
+  it("falls back to gross_price when base_gross_price is undefined", () => {
+    expect(effectiveGross({ gross_price: 55.5, id: 3 })).toBe(55.5);
+  });
+
+  it("returns 0 and warns on stderr when both are null", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = effectiveGross({ base_gross_price: null, gross_price: null, id: 42 });
+    expect(result).toBe(0);
+    expect(stderrSpy).toHaveBeenCalledOnce();
+    expect(stderrSpy.mock.calls[0]![0]).toContain("42");
+    stderrSpy.mockRestore();
+  });
+
+  it("includes 'unknown' in warning when id is missing", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    effectiveGross({ base_gross_price: null, gross_price: null });
+    expect(stderrSpy.mock.calls[0]![0]).toContain("unknown");
+    stderrSpy.mockRestore();
   });
 });
