@@ -982,13 +982,15 @@ ${income_account ? `7. Before booking distributions:
    - file_path: "${statement_path}"
    - broker_account: ${broker_account}
    - income_account: ${income_account}
+   - reward_account: 8600 (for platform rewards — Lightyear bonuses go to Muud äritulud, not investment income)
    ${tax_account ? `- tax_account: ${tax_account}` : ""}
    ${fee_account ? `- fee_account: ${fee_account}` : ""}
    ${broker_dimension_id ? `- broker_dimension_id: ${broker_dimension_id}` : ""}
    - dry_run: true (preview first!)
 
    Review the distributions preview:
-   - Dividends by ticker and amount
+   - Dividends and interest by ticker and amount
+   - Platform rewards (Reward type entries)
    - Withheld tax amounts (if any)
 
    After user confirms, call again with dry_run: false.

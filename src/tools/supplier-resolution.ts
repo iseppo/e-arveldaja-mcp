@@ -57,14 +57,17 @@ export async function fetchRegistryData(regCode?: string, country = "EST", fallb
     if (contentLength > 64 * 1024) return null;
     const text = await response.text();
     if (text.length > 64 * 1024) return null;
-    const data = JSON.parse(text) as Array<Record<string, unknown>>;
-    const entry = data[0];
-    if (!entry) return null;
+    const data: unknown = JSON.parse(text);
+    if (!Array.isArray(data) || data.length === 0) return null;
+    const entry = data[0] as Record<string, unknown> | undefined;
+    if (!entry || typeof entry !== "object") return null;
 
+    const name = entry.company_name ?? entry.nimi ?? fallbackName ?? "";
+    const address = entry.address ?? entry.aadress ?? "";
     return {
-      name: String(entry.company_name ?? entry.nimi ?? fallbackName ?? ""),
+      name: typeof name === "string" ? name : String(name),
       reg_code: regCode,
-      address: String(entry.address ?? entry.aadress ?? ""),
+      address: typeof address === "string" ? address : String(address),
     };
   } catch {
     return null;

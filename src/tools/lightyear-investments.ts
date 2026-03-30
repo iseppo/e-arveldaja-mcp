@@ -73,6 +73,18 @@ function parseNumber(s: string): number {
   return parseFloat(s.replace(/,/g, ""));
 }
 
+const KNOWN_LIGHTYEAR_TYPES = new Set<AccountStatementRow["type"]>([
+  "Buy", "Sell", "Conversion", "Deposit", "Withdrawal", "Distribution", "Dividend", "Interest", "Reward",
+]);
+
+function validateLightyearType(value: string): AccountStatementRow["type"] {
+  if (KNOWN_LIGHTYEAR_TYPES.has(value as AccountStatementRow["type"])) {
+    return value as AccountStatementRow["type"];
+  }
+  process.stderr.write(`WARNING: Unknown Lightyear transaction type: "${value}" — treating as-is, may be skipped by filters\n`);
+  return value as AccountStatementRow["type"];
+}
+
 function parseLightyearDate(d: string): string {
   // DD/MM/YYYY HH:MM:SS -> YYYY-MM-DD
   const parts = d.split(" ")[0]!.split("/");
@@ -124,7 +136,7 @@ function parseAccountStatement(csv: string): AccountStatementRow[] {
       reference: fields[1]!,
       ticker: fields[2]!,
       isin: fields[3]!,
-      type: fields[4]! as AccountStatementRow["type"],
+      type: validateLightyearType(fields[4]!),
       quantity: parseNumber(fields[5]!),
       ccy: fields[6]!,
       price_per_share: parseNumber(fields[7]!),
@@ -227,7 +239,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
       // Foreign currency trade - find the paired Conversion entry
       // Lightyear pairs: CN-xxx has two rows (EUR side + foreign currency side)
       // The foreign currency amount matches the trade's gross_amount
-      let matched = false;
+      let fxMatched = false;
       const orderDatePrefix = row.date.split(/[\sT]/)[0]; // date portion (DD/MM/YYYY or ISO)
 
       // Collect all candidate conversions to detect ambiguity
@@ -264,12 +276,11 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
         trade.fx_fee_eur = Math.abs(best.eurConv.fee);
         trade.conversion_ref = best.ref;
         consumedConversions.add(best.ref);
-        matched = true;
+        fxMatched = true;
       }
 
-      if (!matched) {
-        // No matching conversion found - flag as unmatched, do NOT silently treat as EUR
-        trade.eur_amount = 0;
+      if (!fxMatched) {
+        fxWarnings.push(`${trade.reference}: no FX conversion found for ${trade.ccy} trade`);
       }
     }
 
@@ -288,6 +299,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
 function extractDistributions(rows: AccountStatementRow[]): Array<{
   date: string;
   reference: string;
+  type: AccountStatementRow["type"];
   ticker: string;
   isin: string;
   gross_amount: number;
@@ -300,6 +312,7 @@ function extractDistributions(rows: AccountStatementRow[]): Array<{
     .map(r => ({
       date: parseLightyearDate(r.date),
       reference: r.reference,
+      type: r.type,
       ticker: r.ticker,
       isin: r.isin,
       gross_amount: r.gross_amount,
@@ -431,13 +444,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       for (const r of withdrawals) handledRefs.add(r.reference);
       for (const ref of consumedConversionRefs) handledRefs.add(ref);
       // BRICEKSP trades and their conversions are intentionally excluded
-      const bricekspRefs = new Set<string>();
       for (const r of rows) {
-        if (r.ticker === CASH_FUND_TICKER && (r.type === "Buy" || r.type === "Sell")) bricekspRefs.add(r.reference);
-      }
-      for (const r of rows) {
-        if (r.type === "Conversion" && bricekspRefs.has(r.reference)) handledRefs.add(r.reference);
-        if (bricekspRefs.has(r.reference)) handledRefs.add(r.reference);
+        if (r.ticker === CASH_FUND_TICKER && (r.type === "Buy" || r.type === "Sell")) {
+          handledRefs.add(r.reference);
+        }
+        // BRICEKSP conversions share the same reference as the trade
+        if (r.type === "Conversion" && !handledRefs.has(r.reference)) {
+          // Check if this conversion's ref matches a BRICEKSP trade
+          const isBricekspConv = rows.some(t => t.ticker === CASH_FUND_TICKER && (t.type === "Buy" || t.type === "Sell") && t.reference === r.reference);
+          if (isBricekspConv) handledRefs.add(r.reference);
+        }
       }
 
       const unhandled = rows.filter(r => !handledRefs.has(r.reference));
@@ -1008,12 +1024,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
         // Cr income_account: gross amount (net + tax + fee)
         const creditAmount = roundMoney(dist.net_amount + dist.tax_amount + dist.fee);
-        const isReward = dist.reference.startsWith("RW-");
+        const isReward = dist.type === "Reward";
         postings.push({ accounts_id: isReward ? reward_account : income_account, type: "C", amount: creditAmount });
 
         const title = dist.ticker
           ? `Lightyear tulu: ${dist.ticker} (${dist.isin})`
-          : `Lightyear tulu: ${dist.reference.startsWith("RW-") ? "boonus" : "intress"}`;
+          : `Lightyear tulu: ${dist.type === "Reward" ? "boonus" : "intress"}`;
 
         if (isDryRun) {
           results.push({

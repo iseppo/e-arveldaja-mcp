@@ -37,7 +37,7 @@ export class BaseResource<T> {
     return result;
   }
 
-  async listAll(params?: Omit<ListParams, "page">, maxPages = 200): Promise<T[]> {
+  async listAll(params?: Omit<ListParams, "page">, maxPages = 200, maxItems = 50_000): Promise<T[]> {
     const allItems: T[] = [];
     let page = 1;
     let totalPages = 1;
@@ -58,6 +58,12 @@ export class BaseResource<T> {
       }
       const response = await this.list({ ...params, page });
       allItems.push(...(response.items ?? []));
+      if (allItems.length > maxItems) {
+        throw new Error(
+          `${this.basePath}: item count (${allItems.length}) exceeds limit of ${maxItems}. ` +
+          `Use date filters to narrow the query.`
+        );
+      }
       totalPages = response.total_pages;
       if (totalPages > 1 && page === 1) {
         log("info", `${this.basePath}: fetching ${totalPages} pages...`);
