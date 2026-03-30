@@ -444,7 +444,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const unhandledSuggestions = unhandled.map(r => {
         let suggestion = "Review manually";
         if (r.type === "Conversion") suggestion = "Standalone FX conversion — may be paired with a reward, deposit, or manual trade. Book as FX gain/loss if material.";
-        else if (r.type === "Reward") suggestion = "Platform reward — book as other financial income (e.g. 9900 Muud tulud or income_account).";
+        else if (r.type === "Reward") suggestion = "Platform reward — book via book_lightyear_distributions (defaults to 8600 Muud äritulud).";
         else if (r.type === "Interest") suggestion = "Interest income — book via book_lightyear_distributions.";
         else if (r.type === "Dividend" || r.type === "Distribution") suggestion = "Distribution — book via book_lightyear_distributions.";
         else if (r.type === "Buy" || r.type === "Sell") suggestion = `${r.type} of ${r.ticker} — likely BRICEKSP or missing FX conversion. Check if intentional.`;
@@ -923,20 +923,23 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
       broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
       income_account: z.number().describe("Investment income account (e.g. 8320 Tulu fondiosakutelt, 8400 Intressitulu)"),
+      reward_account: z.number().optional().describe("Account for platform rewards (default: 8600 Muud äritulud). Rewards are non-investment income."),
       tax_account: z.number().optional().describe("Withheld tax receivable/expense account (for tax_amount from CSV)"),
       fee_account: z.number().optional().describe("Platform fee expense account (default 8610 Muud finantskulud)"),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
     { ...batch, openWorldHint: true, title: "Book Lightyear Distributions" },
-    async ({ file_path, broker_account, broker_dimension_id, income_account, tax_account, fee_account: fee_account_param, dry_run }) => {
+    async ({ file_path, broker_account, broker_dimension_id, income_account, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
       const fee_account = fee_account_param ?? 8610;
+      const reward_account = reward_account_param ?? 8600;
 
       // Validate accounts exist and are active
       const accounts = await api.readonly.getAccounts();
       const errors = validateAccounts(accounts, [
         { id: broker_account, label: "Broker account" },
         { id: income_account, label: "Income account" },
+        { id: reward_account, label: "Reward account" },
         ...(tax_account ? [{ id: tax_account, label: "Tax account" }] : []),
         { id: fee_account, label: "Fee account" },
       ]);
@@ -998,7 +1001,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
         // Cr income_account: gross amount (net + tax + fee)
         const creditAmount = roundMoney(dist.net_amount + dist.tax_amount + dist.fee);
-        postings.push({ accounts_id: income_account, type: "C", amount: creditAmount });
+        const isReward = dist.reference.startsWith("RW-");
+        postings.push({ accounts_id: isReward ? reward_account : income_account, type: "C", amount: creditAmount });
 
         const title = dist.ticker
           ? `Lightyear tulu: ${dist.ticker} (${dist.isin})`
