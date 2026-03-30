@@ -781,9 +781,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             postings.push({ accounts_id: lossAcct, type: "D", amount: Math.abs(gainLoss) });
           }
 
-          if (fee_account && tradeFeeEur > 0) {
-            postings.push({ accounts_id: fee_account, type: "D", amount: tradeFeeEur });
-            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: tradeFeeEur });
+          const sellFees = roundMoney(tradeFeeEur + trade.fx_fee_eur);
+          if (sellFees > 0) {
+            const feeAcct = fee_account ?? 8610;
+            if (trade.fx_fee_eur > 0) {
+              postings.push({ accounts_id: feeAcct, type: "D", amount: trade.fx_fee_eur });
+            }
+            if (tradeFeeEur > 0) {
+              postings.push({ accounts_id: feeAcct, type: "D", amount: tradeFeeEur });
+            }
+            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: sellFees });
           }
 
           // Store cost basis info in result

@@ -124,7 +124,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
 
       // When explicit VAT differs from item-computed VAT (rounding), adjust
       // project_no_vat_gross_price on items so the API computes matching totals.
-      if (patchItems && vatPrice !== undefined && isVatRegistered && itemVat !== vatPrice) {
+      if (patchItems && patchItems.length > 0 && vatPrice !== undefined && isVatRegistered && itemVat !== vatPrice) {
         const vatDiff = roundMoney(vatPrice - itemVat);
         // Apply the rounding difference to the last item's gross
         const lastItem = patchItems[patchItems.length - 1]!;
