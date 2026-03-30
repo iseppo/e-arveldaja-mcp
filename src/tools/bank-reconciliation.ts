@@ -25,7 +25,6 @@ function validateInterAccountDateGap(maxDateGap: number | undefined): number {
 }
 
 import { normalizeCompanyName } from "../company-name.js";
-export { normalizeCompanyName };
 
 // ---------------------------------------------------------------------------
 // Invoice index for O(1) candidate narrowing by ref_number and amount

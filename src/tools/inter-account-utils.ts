@@ -61,7 +61,9 @@ export function buildInterAccountJournalIndex(
     if (j.id == null) continue;
     const debit = a.type === "D" ? a : b;
     const credit = a.type === "C" ? a : b;
-    const amount = roundMoney((debit.base_amount ?? debit.amount) as number);
+    const rawAmount = debit.base_amount ?? debit.amount;
+    if (rawAmount == null) continue;
+    const amount = roundMoney(rawAmount);
     // Insert in both directions so we catch it regardless of which side we're checking from
     const key1 = `${credit.accounts_dimensions_id}|${debit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
     const key2 = `${debit.accounts_dimensions_id}|${credit.accounts_dimensions_id}|${amount}|${j.effective_date}`;

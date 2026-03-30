@@ -64,10 +64,16 @@ export function makeTransaction(
   overrides: Partial<Transaction> & Pick<Transaction, "amount" | "date">,
 ): Transaction {
   return {
+    id: 1,
     accounts_dimensions_id: 100,
     type: "C",
     cl_currencies_id: "EUR",
     status: "PROJECT",
+    description: "",
+    bank_account_name: "",
+    bank_account_no: "",
+    ref_number: "",
+    bank_ref_number: "",
     ...overrides,
   } as Transaction;
 }
@@ -79,6 +85,9 @@ export function makeBankAccount(
   return {
     accounts_id: 1020,
     is_deleted: false,
+    name: "Bank",
+    iban: "",
+    currency: "EUR",
     ...overrides,
   } as BankAccount;
 }

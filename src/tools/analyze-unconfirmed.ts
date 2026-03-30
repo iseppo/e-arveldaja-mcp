@@ -7,7 +7,8 @@ import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js"
 import { readOnly } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { getInvoiceMatchEligibility, matchScore, normalizeCompanyName } from "./bank-reconciliation.js";
+import { getInvoiceMatchEligibility, matchScore } from "./bank-reconciliation.js";
+import { normalizeCompanyName } from "../company-name.js";
 import { buildBankAccountLookups } from "./inter-account-utils.js";
 
 /** Known fee/charge patterns for expense detection */
