@@ -15,6 +15,7 @@ import { parseCSV } from "../csv.js";
 import { roundMoney } from "../money.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
+import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 
 interface WiseRow {
   id: string;
@@ -246,6 +247,7 @@ function buildWiseTransactionSignature(
 }
 
 function resolveWiseFeeAccountDimensionId(
+  accountDimensions: AccountDimension[],
   feeAccountDimensionId: number | undefined,
   deprecatedFeeAccountRelationId: number | undefined,
 ): number {
@@ -258,11 +260,29 @@ function resolveWiseFeeAccountDimensionId(
   }
 
   const resolved = feeAccountDimensionId ?? deprecatedFeeAccountRelationId;
-  if (resolved === undefined) {
-    throw new Error("Wise fee rows require fee_account_dimensions_id. Use list_account_dimensions to find it.");
+  if (resolved !== undefined) {
+    return resolved;
   }
 
-  return resolved;
+  const defaultFeeDimensions = accountDimensions.filter((item) =>
+    !item.is_deleted &&
+    item.accounts_id === DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT &&
+    item.id !== undefined,
+  );
+  if (defaultFeeDimensions.length === 1) {
+    return defaultFeeDimensions[0]!.id!;
+  }
+
+  if (defaultFeeDimensions.length > 1) {
+    const candidateIds = defaultFeeDimensions.map((item) => item.id).join(", ");
+    throw new Error(
+      `Wise fee rows require fee_account_dimensions_id because account ${DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT} has multiple active dimensions (${candidateIds}).`
+    );
+  }
+
+  throw new Error(
+    `Wise fee rows require fee_account_dimensions_id. No unique active dimension for account ${DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT} was found. Use list_account_dimensions to find it.`
+  );
 }
 
 function buildAccountDistributionFromDimension(
@@ -360,12 +380,12 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         return true;
       });
       const hasFeeRows = eligible.some(row => bookedFeeAmountForWiseRow(row) > 0);
-      const feeAccountDimensionsId = hasFeeRows
-        ? resolveWiseFeeAccountDimensionId(fee_account_dimensions_id, fee_account_relation_id)
-        : undefined;
       const accountDimensions = hasFeeRows
         ? await api.readonly.getAccountDimensions()
         : [];
+      const feeAccountDimensionsId = hasFeeRows
+        ? resolveWiseFeeAccountDimensionId(accountDimensions, fee_account_dimensions_id, fee_account_relation_id)
+        : undefined;
 
       // Find Wise client for fee transactions
       let wiseClientId: number | undefined;

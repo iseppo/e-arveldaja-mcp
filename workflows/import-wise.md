@@ -23,9 +23,10 @@ Call `import_wise_transactions`:
 - include `skip_jar_transfers: false` only when the user explicitly wants Jar transfers imported
 
 If the dry run fails because fee rows require a fee account:
+- first note that the tool already auto-detects a unique active `8610` fee dimension when possible
 - call `list_account_dimensions`
 - show the available dimensions
-- ask the user which expense dimension should be used
+- ask the user which expense dimension should be used only when auto-detection was not possible
 - retry with `fee_account_dimensions_id`
 
 ### Step 2: Review the preview

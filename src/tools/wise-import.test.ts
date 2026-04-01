@@ -477,12 +477,73 @@ describe("wise import tool", () => {
       "0.92", "PAY-FX-FEE", "", "", "General", "",
     ]));
 
-    const { handler } = setupWiseTool([]);
+    const { handler } = setupWiseTool([], undefined, {
+      accountDimensions: [{
+        id: 99,
+        accounts_id: 5000,
+        title_est: "Muud kulud",
+        is_deleted: false,
+      }],
+    });
 
     await expect(handler({
       file_path: "/tmp/wise.csv",
       accounts_dimensions_id: 5,
-    })).rejects.toThrow("Wise fee rows require fee_account_dimensions_id");
+    })).rejects.toThrow("No unique active dimension for account 8610 was found");
+  });
+
+  it("auto-detects the unique active 8610 fee dimension when fee_account_dimensions_id is omitted", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "fee-auto-1", "COMPLETED", "OUT", "2026-01-19 09:00:00", "2026-01-19 09:00:00",
+      "1.2", "EUR", "0", "EUR",
+      "Seppo OU", "25", "EUR",
+      "Acme Ltd", "25", "EUR",
+      "1", "INV-AUTO", "", "", "General", "",
+    ]));
+
+    const create = vi.fn()
+      .mockResolvedValueOnce({ created_object_id: 9050 })
+      .mockResolvedValueOnce({ created_object_id: 9051 });
+    const { api, handler } = setupWiseTool([], create, {
+      accountDimensions: [{
+        id: 9,
+        accounts_id: 8610,
+        title_est: "Muud finantskulud",
+        is_deleted: false,
+      }],
+    });
+
+    await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      execute: true,
+    });
+
+    expect(api.transactions.confirm).toHaveBeenCalledWith(9051, [
+      { related_table: "accounts", related_id: 8610, related_sub_id: 9, amount: 1.2 },
+    ]);
+  });
+
+  it("lists candidate IDs when account 8610 has multiple active fee dimensions", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "fee-auto-2", "COMPLETED", "OUT", "2026-01-19 09:00:00", "2026-01-19 09:00:00",
+      "1.2", "EUR", "0", "EUR",
+      "Seppo OU", "25", "EUR",
+      "Acme Ltd", "25", "EUR",
+      "1", "INV-AUTO", "", "", "General", "",
+    ]));
+
+    const { handler } = setupWiseTool([], undefined, {
+      accountDimensions: [
+        { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+        { id: 10, accounts_id: 8610, title_est: "Muud finantskulud 2", is_deleted: false },
+      ],
+    });
+
+    await expect(handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+    })).rejects.toThrow("multiple active dimensions (9, 10)");
   });
 
   it("does not require fee_account_dimensions_id when only filtered-out rows have fees", async () => {

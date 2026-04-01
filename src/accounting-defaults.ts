@@ -27,5 +27,8 @@ export const SHARE_CAPITAL_ACCOUNT = 3000;
 /** Current year profit/loss (Aruandeaasta kasum/kahjum) */
 export const CURRENT_YEAR_PROFIT_ACCOUNT = 3310;
 
+/** Other financial expenses (Muud finantskulud) */
+export const DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT = 8610;
+
 /** Default debt-check accounts for compute_client_debt */
 export const DEFAULT_DEBT_CHECK_ACCOUNTS = [DEFAULT_OWNER_PAYABLE_ACCOUNT, DEFAULT_LIABILITY_ACCOUNT, DEFAULT_ACCOUNTS_RECEIVABLE];

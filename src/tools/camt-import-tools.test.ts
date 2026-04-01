@@ -185,6 +185,146 @@ describe("camt import tool", () => {
     ]));
   });
 
+  it("flags likely duplicates against older manual transactions in dry run", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 77,
+          status: "CONFIRMED",
+          accounts_dimensions_id: 7,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          bank_ref_number: null,
+          bank_account_name: "Vendor OÜ",
+          ref_number: null,
+          description: "Test payment",
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.summary.possible_duplicate_count).toBe(1);
+    expect(payload.execution.needs_review).toEqual([
+      expect.objectContaining({
+        date: "2026-02-01",
+        amount: 10,
+        recommended_default_action: "link_confirmed_transaction_then_delete_new_project_transaction",
+        existing_transactions: [
+          expect.objectContaining({
+            id: 77,
+            status: "CONFIRMED",
+            match_reasons: expect.arrayContaining(["counterparty_name", "description"]),
+            suggested_patch_missing_fields: expect.objectContaining({
+              bank_ref_number: "REF-VOID-1",
+            }),
+          }),
+        ],
+      }),
+    ]);
+    expect(payload.possible_duplicate_summary).toEqual(expect.objectContaining({
+      count: 1,
+      default_policy: "link_confirmed_transaction_else_review_status",
+    }));
+  });
+
+  it("keeps likely duplicates in needs_review after execute and includes the new transaction id", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 77,
+          status: "CONFIRMED",
+          accounts_dimensions_id: 7,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          bank_ref_number: null,
+          bank_account_name: "Vendor OÜ",
+          ref_number: null,
+          description: "Test payment",
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+      execute: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.execution.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "created",
+        api_id: 9001,
+      }),
+    ]));
+    expect(payload.execution.needs_review).toEqual([
+      expect.objectContaining({
+        new_transaction_api_id: 9001,
+        recommended_default_action: "link_confirmed_transaction_then_delete_new_project_transaction",
+        existing_transactions: [
+          expect.objectContaining({ id: 77 }),
+        ],
+      }),
+    ]);
+  });
+
+  it("requires status review when the older likely duplicate is still a PROJECT row", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 88,
+          status: "PROJECT",
+          accounts_dimensions_id: 7,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          bank_ref_number: null,
+          bank_account_name: "Vendor OÜ",
+          ref_number: null,
+          description: "Test payment",
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.execution.needs_review).toEqual([
+      expect.objectContaining({
+        recommended_default_action: "review_status_before_cleanup",
+        recommendation_note: expect.stringContaining("older match is not confirmed"),
+        existing_transactions: [
+          expect.objectContaining({
+            id: 88,
+            status: "PROJECT",
+          }),
+        ],
+      }),
+    ]);
+  });
+
   it("keeps separate cache entries for different legal-entity variants with the same normalized stem", async () => {
     mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
     mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>

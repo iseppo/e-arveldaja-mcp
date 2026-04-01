@@ -84,6 +84,14 @@ interface DuplicateLookup {
   byEntryKey: Map<string, number[]>;
 }
 
+interface PossibleDuplicateLookup {
+  byCandidateKey: Map<string, Transaction[]>;
+}
+
+type PossibleDuplicateAction =
+  | "link_confirmed_transaction_then_delete_new_project_transaction"
+  | "review_status_before_cleanup";
+
 interface ClientResolution {
   clients_id?: number;
   match_type?: "reg_code" | "exact_name" | "single_name_match";
@@ -296,6 +304,28 @@ function buildDuplicateLookup(transactions: Transaction[]): DuplicateLookup {
   return { byBankRef, byEntryKey };
 }
 
+function buildPossibleDuplicateLookup(
+  transactions: Transaction[],
+  accountsDimensionsId: number,
+): PossibleDuplicateLookup {
+  const byCandidateKey = new Map<string, Transaction[]>();
+
+  for (const transaction of transactions) {
+    if (transaction.accounts_dimensions_id !== accountsDimensionsId) continue;
+    const candidateKey = buildPossibleDuplicateCandidateKey(
+      transaction.date,
+      transaction.type,
+      transaction.cl_currencies_id ?? "EUR",
+      transaction.amount,
+    );
+    const existing = byCandidateKey.get(candidateKey) ?? [];
+    existing.push(transaction);
+    byCandidateKey.set(candidateKey, existing);
+  }
+
+  return { byCandidateKey };
+}
+
 function buildExistingTransactionDuplicateKey(
   transaction: Pick<Transaction,
     "bank_ref_number" |
@@ -371,6 +401,121 @@ function findDuplicateTransactionIds(
 
 function normalizeBatchDuplicateKeyPart(value: string | undefined): string {
   return value?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+}
+
+function normalizePossibleDuplicateIban(value: string | undefined): string {
+  return value?.replace(/\s+/g, "").toUpperCase() ?? "";
+}
+
+function normalizedCounterpartyName(value: string | undefined): string {
+  return normalizeCompanyName(value) || normalizeBatchDuplicateKeyPart(value);
+}
+
+function buildPossibleDuplicateCandidateKey(
+  date: string,
+  type: string,
+  currency: string,
+  amount: number,
+): string {
+  return [
+    date,
+    type,
+    currency,
+    roundMoney(amount).toFixed(2),
+  ].join("|");
+}
+
+function findPossibleDuplicateMatches(
+  entry: ParsedCamtEntry,
+  lookup: PossibleDuplicateLookup,
+): Array<{
+  id: number;
+  status?: string;
+  counterparty?: string | null;
+  description?: string | null;
+  ref_number?: string | null;
+  match_reasons: string[];
+  suggested_patch_missing_fields: Partial<Transaction>;
+}> {
+  const candidateKey = buildPossibleDuplicateCandidateKey(
+    entry.date,
+    transactionTypeForDirection(entry.direction),
+    entry.currency,
+    entry.amount,
+  );
+  const candidates = lookup.byCandidateKey.get(candidateKey) ?? [];
+  const entryCounterparty = normalizedCounterpartyName(entry.counterparty_name);
+  const entryDescription = normalizeBatchDuplicateKeyPart(entry.description);
+  const entryReference = normalizeBatchDuplicateKeyPart(entry.reference_number);
+  const entryIban = normalizePossibleDuplicateIban(entry.counterparty_iban);
+
+  return candidates
+    .filter((transaction) => !normalizeOptionalReference(transaction.bank_ref_number ?? undefined))
+    .map((transaction) => {
+      const matchReasons: string[] = [];
+      if (entryReference && entryReference === normalizeBatchDuplicateKeyPart(transaction.ref_number ?? undefined)) {
+        matchReasons.push("reference_number");
+      }
+      if (entryIban && entryIban === normalizePossibleDuplicateIban(transaction.bank_account_no ?? undefined)) {
+        matchReasons.push("counterparty_iban");
+      }
+      if (entryCounterparty && entryCounterparty === normalizedCounterpartyName(transaction.bank_account_name ?? undefined)) {
+        matchReasons.push("counterparty_name");
+      }
+      if (entryDescription && entryDescription === normalizeBatchDuplicateKeyPart(transaction.description ?? undefined)) {
+        matchReasons.push("description");
+      }
+      return {
+        id: transaction.id ?? 0,
+        status: transaction.status,
+        counterparty: transaction.bank_account_name,
+        description: transaction.description,
+        ref_number: transaction.ref_number,
+        match_reasons: matchReasons,
+        suggested_patch_missing_fields: {
+          ...(!normalizeOptionalReference(transaction.bank_ref_number ?? undefined) && entry.bank_reference
+            ? { bank_ref_number: entry.bank_reference }
+            : {}),
+          ...(!normalizeOptionalReference(transaction.ref_number ?? undefined) && entry.reference_number
+            ? { ref_number: entry.reference_number }
+            : {}),
+          ...(!normalizePossibleDuplicateIban(transaction.bank_account_no ?? undefined) && entry.counterparty_iban
+            ? { bank_account_no: entry.counterparty_iban }
+            : {}),
+          ...(!normalizedCounterpartyName(transaction.bank_account_name ?? undefined) && entry.counterparty_name
+            ? { bank_account_name: entry.counterparty_name }
+            : {}),
+          ...(!normalizeBatchDuplicateKeyPart(transaction.description ?? undefined) && entry.description
+            ? { description: entry.description }
+            : {}),
+        },
+      };
+    })
+    .filter((match) => match.id > 0 && match.match_reasons.length > 0)
+    .sort((left, right) => left.id - right.id);
+}
+
+function hasConfirmedPossibleDuplicate(
+  matches: Array<{ status?: string }>,
+): boolean {
+  return matches.some((match) => match.status === "CONFIRMED");
+}
+
+function determinePossibleDuplicateAction(
+  matches: Array<{ status?: string }>,
+): PossibleDuplicateAction {
+  return hasConfirmedPossibleDuplicate(matches)
+    ? "link_confirmed_transaction_then_delete_new_project_transaction"
+    : "review_status_before_cleanup";
+}
+
+function buildPossibleDuplicateRecommendationNote(
+  action: PossibleDuplicateAction,
+): string {
+  if (action === "link_confirmed_transaction_then_delete_new_project_transaction") {
+    return "Default cleanup is to enrich the older confirmed transaction with the CAMT bank reference and any other missing metadata, then delete the new PROJECT transaction.";
+  }
+  return "A likely duplicate was found, but the older match is not confirmed. Review both transaction statuses before deciding whether to keep the old row or the newly imported PROJECT transaction.";
 }
 
 function buildBatchDuplicateKey(entry: ParsedCamtEntry): string {
@@ -690,6 +835,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
       await ensureAccountDimensionExists(api, accounts_dimensions_id);
 
       const parsed = await enrichWithDuplicates(await loadParsedCamt053(file_path), api);
+      const existingTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
       const filteredEntries = parsed.entries.filter(entry => {
         if (date_from && entry.date < date_from) return false;
         if (date_to && entry.date > date_to) return false;
@@ -706,6 +852,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         byCode: new Map<string, ClientResolution>(),
         byName: new Map<string, ClientResolution>(),
       };
+      const possibleDuplicateLookup = buildPossibleDuplicateLookup(existingTransactions, accounts_dimensions_id);
 
       const results: Array<{
         status: "would_create" | "created";
@@ -733,6 +880,27 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         amount: number;
         bank_reference?: string;
         message: string;
+      }> = [];
+      const possibleDuplicates: Array<{
+        date: string;
+        amount: number;
+        currency: string;
+        type: "C" | "D";
+        counterparty?: string;
+        bank_reference?: string;
+        ref_number?: string;
+        new_transaction_api_id?: number;
+        existing_transactions: Array<{
+          id: number;
+          status?: string;
+          counterparty?: string | null;
+          description?: string | null;
+          ref_number?: string | null;
+          match_reasons: string[];
+          suggested_patch_missing_fields: Partial<Transaction>;
+        }>;
+        recommended_default_action: PossibleDuplicateAction;
+        recommendation_note: string;
       }> = [];
 
       for (let index = 0; index < filteredEntries.length; index++) {
@@ -764,6 +932,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
 
         const clientResolution = await resolveClientForEntry(api, entry, clientCache);
         const transactionType = transactionTypeForDirection(entry.direction);
+        const possibleDuplicateMatches = findPossibleDuplicateMatches(entry, possibleDuplicateLookup);
         const payload: CreateTransactionPayload = {
           accounts_dimensions_id,
           type: transactionType,
@@ -792,6 +961,21 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             clients_id: clientResolution.clients_id,
             client_match: clientResolution.match_type,
           });
+          if (possibleDuplicateMatches.length > 0) {
+            const recommendedDefaultAction = determinePossibleDuplicateAction(possibleDuplicateMatches);
+            possibleDuplicates.push({
+              date: entry.date,
+              amount: entry.amount,
+              currency: entry.currency,
+              type: transactionType,
+              counterparty: entry.counterparty_name,
+              bank_reference: entry.bank_reference,
+              ref_number: entry.reference_number,
+              existing_transactions: possibleDuplicateMatches,
+              recommended_default_action: recommendedDefaultAction,
+              recommendation_note: buildPossibleDuplicateRecommendationNote(recommendedDefaultAction),
+            });
+          }
           seenBatchDuplicateKeys.add(batchDuplicateKey);
           continue;
         }
@@ -818,6 +1002,22 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             client_match: clientResolution.match_type,
             api_id: response.created_object_id,
           });
+          if (possibleDuplicateMatches.length > 0) {
+            const recommendedDefaultAction = determinePossibleDuplicateAction(possibleDuplicateMatches);
+            possibleDuplicates.push({
+              date: entry.date,
+              amount: entry.amount,
+              currency: entry.currency,
+              type: transactionType,
+              counterparty: entry.counterparty_name,
+              bank_reference: entry.bank_reference,
+              ref_number: entry.reference_number,
+              new_transaction_api_id: response.created_object_id,
+              existing_transactions: possibleDuplicateMatches,
+              recommended_default_action: recommendedDefaultAction,
+              recommendation_note: buildPossibleDuplicateRecommendationNote(recommendedDefaultAction),
+            });
+          }
           seenBatchDuplicateKeys.add(batchDuplicateKey);
         } catch (error) {
           errors.push({
@@ -837,6 +1037,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         created_count: results.length,
         skipped_count: skippedDuplicates.length,
         error_count: errors.length,
+        possible_duplicate_count: possibleDuplicates.length,
       };
 
       return {
@@ -859,12 +1060,23 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
               results,
               skipped: skippedDuplicates,
               errors,
+              needs_review: possibleDuplicates,
             }),
             ...(errors.length > 0 && { errors }),
             ...(skippedDuplicates.length > 0 && {
               skipped_summary: {
                 count: skippedDuplicates.length,
                 sample_refs: skippedDuplicates.slice(0, 10).map(s => s.bank_reference),
+              },
+            }),
+            ...(possibleDuplicates.length > 0 && {
+              possible_duplicate_summary: {
+                count: possibleDuplicates.length,
+                sample_existing_transaction_ids: possibleDuplicates
+                  .slice(0, 10)
+                  .flatMap(item => item.existing_transactions.map(match => match.id))
+                  .slice(0, 10),
+                default_policy: "link_confirmed_transaction_else_review_status",
               },
             }),
           }),

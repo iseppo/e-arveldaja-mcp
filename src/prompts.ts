@@ -406,13 +406,20 @@ Follow these steps in order:
 4. Review the import dry run:
    - Treat \`execution\` as the canonical batch payload when present.
    - Prefer \`execution.summary.total_statement_entries\`, \`execution.summary.eligible_entries\`, \`execution.summary.filtered_out\`, \`execution.summary.created_count\`, \`execution.summary.skipped_count\`, \`execution.summary.error_count\`, \`execution.results\`, \`execution.skipped\`, \`execution.errors\`, and \`execution.audit_reference\`.
+   - Also inspect \`execution.needs_review\` for possible duplicates against older manual transactions that lack CAMT bank references.
    - Use the first 10 items from \`execution.results\` as the preview sample.
    - Fall back to top-level \`created_count\`, \`skipped_count\`, \`error_count\`, \`sample\`, \`skipped_summary\`, and \`errors\` only if \`execution\` is absent.
 
 5. Present a clear import preview:
    - sample of transactions that would be created, with date, amount, counterparty, and reference
    - skipped duplicate summary from \`execution.skipped\` (or \`skipped_summary\` as fallback)
+   - possible duplicates from \`execution.needs_review\`, if any
    - any import errors that would block execution from \`execution.errors\`
+
+   For possible duplicates, default recommendation:
+   - keep the older matched transaction
+   - update it with the CAMT \`bank_ref_number\` and other missing metadata
+   - avoid creating, or if already created, delete the new \`PROJECT\` transaction
 
 6. Ask for approval before creating anything.
    If the user does not explicitly approve, stop here.
@@ -429,6 +436,7 @@ Follow these steps in order:
    - \`execution.summary.skipped_count\`
    - \`execution.summary.error_count\`
    - sample of created entries from \`execution.results\`
+   - any possible duplicates from \`execution.needs_review\` that should be resolved
    - any errors from \`execution.errors\` that need attention
    - remind the user that mutating side effects can be reviewed via \`execution.audit_reference\`
 
@@ -486,9 +494,10 @@ Follow these steps in order:
    ${skip_jar_transfers === false ? "- skip_jar_transfers: false" : ""}
 
 2. If the dry run fails because Wise fee rows require \`fee_account_dimensions_id\`:
+   - first explain that the tool already auto-detects a unique active \`8610\` fee dimension when possible
    - call \`list_account_dimensions\`
-   - show the available dimensions to the user
-   - ask the user which expense dimension should be used for Wise fees
+   - show the available candidate dimensions to the user
+   - ask the user which expense dimension should be used only when auto-detection was not possible
    - then retry step 1 with \`fee_account_dimensions_id\`
 
 3. Review the dry run output:
