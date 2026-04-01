@@ -1,6 +1,6 @@
 {
   "name": "e-arveldaja-mcp",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "MCP server for Estonian e-arveldaja (e-Financials) API",
   "type": "module",
   "main": "dist/index.js",

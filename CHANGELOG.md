@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.3] - 2026-04-01
+
+### Fixed
+- **Markdown accounting rules reload** — `accounting-rules.md` is now reloaded when the file changes, so corrected or updated company rules take effect without restarting the server.
+- **Owner expense VAT defaults** — markdown rules can now define partial VAT-deduction defaults with a ratio, and stable company policy can be reused without re-answering the same question every time.
+- **Receipt inbox VAT preservation** — supplier-history VAT metadata is now preserved when OCR misses an invoice VAT total, avoiding accidental loss of reverse-charge or prior confirmed VAT treatment.
+- **User guidance cleanup** — accounting override messages now consistently point to `accounting-rules.md`, and documented examples in the template are no longer misread as active rules.
+
 ## [0.10.2] - 2026-03-30
 
 ### Security
