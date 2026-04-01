@@ -1,11 +1,12 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import { isAbsolute, resolve } from "path";
 import { z } from "zod";
 import { getProjectRoot } from "./paths.js";
 
 const liabilityClassificationSchema = z.enum(["current", "non_current"]);
 const cashFlowCategorySchema = z.enum(["operating", "investing", "financing"]);
-const vatDeductionModeSchema = z.enum(["none", "full"]);
+const vatDeductionModeSchema = z.enum(["none", "full", "partial"]);
+const vatDeductionRatioSchema = z.number().min(0).max(1);
 const transactionCategorySchema = z.enum([
   "saas_subscriptions",
   "bank_fees",
@@ -29,13 +30,27 @@ const autoBookingRuleSchema = z.object({
   reason: z.string().optional(),
 });
 
+const ownerExpenseVatRuleSchema = z.object({
+  mode: vatDeductionModeSchema,
+  ratio: vatDeductionRatioSchema.optional(),
+}).superRefine((value, ctx) => {
+  if (value.mode === "partial" && value.ratio === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "partial VAT deduction rules require a ratio between 0 and 1",
+      path: ["ratio"],
+    });
+  }
+});
+
 const accountingRulesSchema = z.object({
   auto_booking: z.object({
     counterparties: z.array(autoBookingRuleSchema).optional(),
   }).optional(),
   owner_expense_reimbursement: z.object({
     default_vat_deduction_mode: vatDeductionModeSchema.optional(),
-    account_overrides: z.record(z.string(), vatDeductionModeSchema).optional(),
+    default_vat_deduction_ratio: vatDeductionRatioSchema.optional(),
+    account_overrides: z.record(z.string(), ownerExpenseVatRuleSchema).optional(),
   }).optional(),
   annual_report: z.object({
     liability_classification: z.record(z.string(), liabilityClassificationSchema).optional(),
@@ -52,6 +67,7 @@ type AccountingRules = z.infer<typeof accountingRulesSchema>;
 
 let cachedRules: AccountingRules | undefined;
 let cachedRulesPath: string | undefined;
+let cachedRulesSignature: string | undefined;
 
 function getRulesPath(): string {
   const configured = process.env.EARVELDAJA_RULES_FILE?.trim();
@@ -63,6 +79,14 @@ function getRulesPath(): string {
 
 function normalizeHeader(header: string): string {
   return header.trim().toLowerCase().replace(/\s+/g, "_");
+}
+
+function getRulesSignature(filePath: string): string {
+  if (!existsSync(filePath)) {
+    return `${filePath}:missing`;
+  }
+  const info = statSync(filePath);
+  return `${filePath}:${info.mtimeMs}:${info.size}`;
 }
 
 function splitMarkdownSections(markdown: string): Map<string, string[]> {
@@ -119,22 +143,42 @@ function parseOptionalInt(value: string | undefined): number | undefined {
   return Number.isInteger(parsed) ? parsed : undefined;
 }
 
+function parseOptionalRatio(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : undefined;
+}
+
 function parseOwnerExpenseDefaults(sectionLines: string[]): AccountingRules["owner_expense_reimbursement"] {
   const rules: NonNullable<AccountingRules["owner_expense_reimbursement"]> = {};
-  const defaultLine = sectionLines.find(line => /default vat deduction mode:/i.test(line));
-  const match = defaultLine?.match(/default vat deduction mode:\s*(none|full)/i);
+  const defaultLine = sectionLines
+    .map(line => line.trim())
+    .find(line => /^default vat deduction mode:/i.test(line));
+  const match = defaultLine?.match(/^default vat deduction mode:\s*(none|full|partial)(?:\s+ratio\s+([0-9]*\.?[0-9]+))?$/i);
   if (match) {
-    rules.default_vat_deduction_mode = match[1]!.toLowerCase() as OwnerExpenseVatDeductionModeRule;
+    const parsed = ownerExpenseVatRuleSchema.safeParse({
+      mode: match[1]!.toLowerCase(),
+      ratio: parseOptionalRatio(match[2]),
+    });
+    if (parsed.success) {
+      rules.default_vat_deduction_mode = parsed.data.mode;
+      if (parsed.data.ratio !== undefined) {
+        rules.default_vat_deduction_ratio = parsed.data.ratio;
+      }
+    }
   }
 
   const rows = parseMarkdownTable(sectionLines);
   if (rows.length > 0) {
-    const overrides: Record<string, OwnerExpenseVatDeductionModeRule> = {};
+    const overrides: NonNullable<AccountingRules["owner_expense_reimbursement"]>["account_overrides"] = {};
     for (const row of rows) {
       const accountId = row.expense_account;
-      const mode = row.vat_deduction_mode?.toLowerCase();
-      if (!accountId || (mode !== "none" && mode !== "full")) continue;
-      overrides[accountId] = mode;
+      const parsed = ownerExpenseVatRuleSchema.safeParse({
+        mode: row.vat_deduction_mode?.toLowerCase(),
+        ratio: parseOptionalRatio(row.vat_deduction_ratio),
+      });
+      if (!accountId || !parsed.success) continue;
+      overrides[accountId] = parsed.data;
     }
     if (Object.keys(overrides).length > 0) {
       rules.account_overrides = overrides;
@@ -208,24 +252,28 @@ function parseMarkdownRules(markdown: string): AccountingRules {
 
 function loadAccountingRules(): AccountingRules {
   const filePath = getRulesPath();
-  if (cachedRules && cachedRulesPath === filePath) {
+  const signature = getRulesSignature(filePath);
+  if (cachedRules && cachedRulesPath === filePath && cachedRulesSignature === signature) {
     return cachedRules;
   }
 
   cachedRulesPath = filePath;
   if (!existsSync(filePath)) {
     cachedRules = {};
+    cachedRulesSignature = signature;
     return cachedRules;
   }
 
   try {
     const parsed = parseMarkdownRules(readFileSync(filePath, "utf-8"));
     cachedRules = parsed;
+    cachedRulesSignature = signature;
     return parsed;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`WARNING: Could not load accounting rules from ${filePath}: ${message}\n`);
     cachedRules = {};
+    cachedRulesSignature = signature;
     return cachedRules;
   }
 }
@@ -233,6 +281,7 @@ function loadAccountingRules(): AccountingRules {
 export function resetAccountingRulesCache(): void {
   cachedRules = undefined;
   cachedRulesPath = undefined;
+  cachedRulesSignature = undefined;
 }
 
 export function findAutoBookingRule(
@@ -258,8 +307,18 @@ export function getDefaultOwnerExpenseVatDeductionMode(): OwnerExpenseVatDeducti
   return loadAccountingRules().owner_expense_reimbursement?.default_vat_deduction_mode;
 }
 
+export function getDefaultOwnerExpenseVatDeductionRatio(): number | undefined {
+  return loadAccountingRules().owner_expense_reimbursement?.default_vat_deduction_ratio;
+}
+
 export function getOwnerExpenseVatDeductionModeForAccount(
   expenseAccount: number,
 ): OwnerExpenseVatDeductionModeRule | undefined {
-  return loadAccountingRules().owner_expense_reimbursement?.account_overrides?.[String(expenseAccount)];
+  return loadAccountingRules().owner_expense_reimbursement?.account_overrides?.[String(expenseAccount)]?.mode;
+}
+
+export function getOwnerExpenseVatDeductionRatioForAccount(
+  expenseAccount: number,
+): number | undefined {
+  return loadAccountingRules().owner_expense_reimbursement?.account_overrides?.[String(expenseAccount)]?.ratio;
 }

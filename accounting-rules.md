@@ -22,11 +22,15 @@ Columns:
 
 Set a default only if your policy is stable.
 
-If you want a global default, add a plain text line here using the documented key and value.
+If you want a global default, add a plain text line here using:
+- `Default VAT deduction mode: full`
+- `Default VAT deduction mode: none`
+- `Default VAT deduction mode: partial ratio 0.5`
 
 Optional account overrides table:
 - `expense_account`
 - `vat_deduction_mode`
+- `vat_deduction_ratio`
 
 ## Liability Classification
 

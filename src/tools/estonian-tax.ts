@@ -13,7 +13,9 @@ import { computeAccountBalance } from "./account-balance.js";
 import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
 import {
   getDefaultOwnerExpenseVatDeductionMode,
+  getDefaultOwnerExpenseVatDeductionRatio,
   getOwnerExpenseVatDeductionModeForAccount,
+  getOwnerExpenseVatDeductionRatioForAccount,
 } from "../accounting-rules.js";
 
 function requiresOwnerExpenseVatReview(accountName: string | undefined, description: string): boolean {
@@ -202,7 +204,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "create_owner_expense_reimbursement",
-    "Create a journal for a business expense paid personally by the owner. VAT deduction is conservative by default and should be stated explicitly.",
+    "Create a journal for a business expense paid personally by the owner. Ordinary business VAT defaults to deductible, while likely restricted categories ask for confirmation unless local rules define the policy.",
     {
       owner_client_id: coerceId.describe("Owner/shareholder client ID"),
       effective_date: z.string().describe("Expense date (YYYY-MM-DD)"),
@@ -210,8 +212,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       net_amount: z.number().describe("Net amount (without VAT)"),
       vat_rate: z.number().describe("VAT rate as decimal (e.g. 0.24 for 24%, 0.13, 0.09, 0.05, or 0 for no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),
       vat_amount: z.number().optional().describe("Exact VAT amount (overrides vat_rate if provided)"),
-      vat_deduction_mode: z.enum(["none", "full", "partial"]).optional().describe("How much of the receipt VAT is deductible. Defaults conservatively to none unless overridden by local accounting rules."),
-      deductible_vat_amount: z.number().optional().describe("Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default."),
+      vat_deduction_mode: z.enum(["none", "full", "partial"]).optional().describe("How much of the receipt VAT is deductible. Defaults to full for ordinary VAT-registered expenses, while restricted categories ask for confirmation unless local accounting rules define a policy."),
+      deductible_vat_amount: z.number().optional().describe("Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default or configured ratio."),
       expense_account: z.number().describe("Expense account number (e.g. 5000, 6000)"),
       vat_account: z.number().optional().describe("Input VAT account (default 1510)"),
       payable_account: z.number().optional().describe("Payable to owner account (default 2110)"),
@@ -245,6 +247,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const expenseAccountRecord = accounts.find(account => account.id === expense_account);
       const requiresReview = requiresOwnerExpenseVatReview(expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng, description);
       const configuredMode = getOwnerExpenseVatDeductionModeForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionMode();
+      const configuredRatio = getOwnerExpenseVatDeductionRatioForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionRatio();
       const deductionMode = !vatRegistered || grossVat <= 0
         ? "none"
         : deductible_vat_amount !== undefined
@@ -263,10 +266,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         });
       }
 
-      if (deductionMode === "partial" && deductible_vat_amount === undefined) {
+      if (deductionMode === "partial" && deductible_vat_amount === undefined && configuredRatio === undefined) {
         return toolError({
           error: "deductible_vat_amount is required when vat_deduction_mode=partial",
-          hint: "Suggested default: use vat_deduction_mode='none' unless you have checked the receipt and deduction support.",
+          hint: "Suggested default: set deductible_vat_amount explicitly or define a partial ratio in accounting-rules.md when the policy is stable.",
         });
       }
 
@@ -275,7 +278,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         : deductionMode === "full"
           ? grossVat
           : deductionMode === "partial"
-            ? deductible_vat_amount ?? 0
+            ? roundMoney(deductible_vat_amount ?? (configuredRatio !== undefined ? grossVat * configuredRatio : 0))
             : 0;
 
       if (deductibleVat < 0 || deductibleVat - grossVat > 0.01) {

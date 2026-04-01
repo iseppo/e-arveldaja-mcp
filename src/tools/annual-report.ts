@@ -788,7 +788,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     );
   }
   if (Math.abs(manualReviewLiabilities.amount) >= 0.01) {
-    warnings.push("Some liabilities could not be classified as current or non-current from ledger data alone. Review klassifitseerimata_kohustused or define account overrides in accounting-rules.json.");
+    warnings.push("Some liabilities could not be classified as current or non-current from ledger data alone. Review klassifitseerimata_kohustused or define account overrides in accounting-rules.md.");
   }
 
   const openingCash = sumStatementBalances(priorYearEndBalances, (balance) =>
@@ -891,7 +891,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     warnings.push("Changes in financing liabilities were excluded from operating cash flow and should be reviewed in financing activities.");
   }
   if (Math.abs(cashFlowClassification.unclassified) >= 0.01) {
-    warnings.push("Some cash journals touched multiple non-cash categories and were left unclassified instead of being proportionally allocated. Review accounting-rules.json cash_flow_category overrides if needed.");
+    warnings.push("Some cash journals touched multiple non-cash categories and were left unclassified instead of being proportionally allocated. Review accounting-rules.md cash_flow_category overrides if needed.");
   }
 
   const relatedPartyClients = allClients.filter((client) => !client.is_deleted && getRelatedPartyFlags(client).length > 0);

@@ -360,7 +360,7 @@ function buildSuggestionFromRule(
     vat_rate_dropdown: rule.vat_rate_dropdown,
     reversed_vat_id: rule.reversed_vat_id,
     source: "local_rules",
-    reason: rule.reason ?? "Defaulted from local accounting-rules.json counterparty rule.",
+    reason: rule.reason ?? "Defaulted from local accounting-rules.md counterparty rule.",
   };
 }
 
@@ -695,7 +695,7 @@ async function createAndMaybeMatchPurchaseInvoice(
     itemNetAmount,
     context.purchaseArticlesWithVat,
     context.isVatRegistered,
-    extracted.total_vat === 0 ? "-" : extracted.total_vat !== undefined ? bookingSuggestion.item.vat_rate_dropdown : "-",
+    extracted.total_vat === 0 ? "-" : extracted.total_vat !== undefined ? bookingSuggestion.item.vat_rate_dropdown : undefined,
   );
 
   const invoiceDraft: InvoiceSummaryForMatching = {

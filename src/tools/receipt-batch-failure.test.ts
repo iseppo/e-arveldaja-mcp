@@ -377,4 +377,153 @@ describe("process_receipt_batch rollback handling", () => {
       preserveExistingTotals: true,
     });
   });
+
+  it("preserves supplier-history VAT metadata when OCR misses invoice VAT totals", async () => {
+    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(readdir).mockResolvedValue([
+      { name: "receipt.pdf", isFile: () => true },
+    ] as any);
+    vi.mocked(stat).mockImplementation(async (path) => {
+      if (String(path) === "/tmp/receipts") {
+        return { isDirectory: () => true } as any;
+      }
+
+      return {
+        isDirectory: () => false,
+        size: 512,
+        mtime: new Date("2026-03-20T10:00:00.000Z"),
+      } as any;
+    });
+    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
+
+    vi.mocked(resolveFilePath).mockImplementation((path) => path);
+    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
+    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+
+    vi.mocked(parseDocument).mockResolvedValue({
+      text: "ignored",
+      pageCount: 1,
+    } as any);
+    vi.mocked(classifyReceiptDocument).mockReturnValue("purchase_invoice");
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "OpenAI Ireland Limited",
+      invoice_number: "INV-2026-03",
+      invoice_date: "2026-03-20",
+      due_date: "2026-03-20",
+      total_net: 100,
+      total_vat: undefined,
+      total_gross: 100,
+      currency: "EUR",
+      description: "OpenAI API credits",
+      raw_text: "ignored",
+    } as any);
+    vi.mocked(hasAutoBookableReceiptFields).mockReturnValue(true);
+    vi.mocked(suggestBookingInternal).mockResolvedValue({
+      item: {
+        custom_title: "OpenAI API credits",
+        amount: 1,
+        total_net_price: 100,
+        cl_purchase_articles_id: 501,
+        purchase_accounts_id: 5230,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        vat_rate_dropdown: "24",
+        reversed_vat_id: 1,
+      },
+      source: "supplier_history",
+      suggested_purchase_article: { id: 501, name: "Software" },
+      matched_invoice_id: 12,
+      matched_invoice_number: "OA-2026-02",
+    } as any);
+    vi.mocked(resolveSupplierInternal).mockResolvedValue({
+      found: true,
+      created: false,
+      match_type: "exact_name",
+      client: {
+        id: 7,
+        name: "OpenAI Ireland Limited",
+        is_supplier: true,
+        is_client: false,
+        cl_code_country: "IRL",
+        is_member: false,
+        send_invoice_to_email: false,
+        send_invoice_to_accounting_email: false,
+        is_deleted: false,
+      },
+    } as any);
+
+    const server = { registerTool: vi.fn() } as any;
+    const api = {
+      clients: {
+        listAll: vi.fn().mockResolvedValue([{
+          id: 7,
+          name: "OpenAI Ireland Limited",
+          is_supplier: true,
+          is_client: false,
+          cl_code_country: "IRL",
+          is_member: false,
+          send_invoice_to_email: false,
+          send_invoice_to_accounting_email: false,
+          is_deleted: false,
+        }]),
+      },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        createAndSetTotals: vi.fn().mockResolvedValue({
+          id: 9001,
+          clients_id: 7,
+          client_name: "OpenAI Ireland Limited",
+          number: "INV-2026-03",
+          create_date: "2026-03-20",
+          cl_currencies_id: "EUR",
+          gross_price: 100,
+          bank_ref_number: null,
+          status: "PROJECT",
+        }),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+        confirmWithTotals: vi.fn().mockResolvedValue({}),
+      },
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([{
+          id: 5230,
+          name_est: "Software expense",
+          name_eng: "Software expense",
+          account_type_est: "Kulud",
+          account_type_eng: "Expenses",
+        }]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([{
+          id: 501,
+          name_est: "Software",
+          name_eng: "Software",
+          accounts_id: 5230,
+          vat_accounts_id: 1510,
+          cl_vat_articles_id: 1,
+          is_disabled: false,
+          priority: 1,
+        }]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+      },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+    } as any;
+
+    registerReceiptInboxTools(server, api);
+
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
+    if (!registration) throw new Error("Tool was not registered");
+
+    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    await handler({
+      folder_path: "/tmp/receipts",
+      accounts_dimensions_id: 100,
+      execute: true,
+    });
+
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(api.purchaseInvoices.createAndSetTotals.mock.calls[0]![0].items[0]).toMatchObject({
+      vat_rate_dropdown: "24",
+      reversed_vat_id: 1,
+    });
+  });
 });
