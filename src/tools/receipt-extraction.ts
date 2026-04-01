@@ -197,6 +197,7 @@ export interface BookingSuggestion {
   source: "supplier_history" | "keyword_match" | "fallback";
   matched_invoice_id?: number;
   matched_invoice_number?: string;
+  suggested_liability_account_id?: number;
   suggested_account?: Account;
   suggested_purchase_article?: { id: number; name: string };
 }
@@ -878,15 +879,8 @@ export function getAutoBookedVatConfig(
   if (category === "bank_fees") {
     return { vat_rate_dropdown: "-" };
   }
-
-  if (category === "saas_subscriptions" && !isDomesticClientCountry(supplierCountry)) {
-    return {
-      vat_rate_dropdown: "24",
-      reversed_vat_id: 1,
-    };
-  }
-
-  return { vat_rate_dropdown: isDomesticClientCountry(supplierCountry) ? "24" : "-" };
+  void supplierCountry;
+  return { vat_rate_dropdown: "-" };
 }
 
 export function getAutoBookedVatRateDropdown(
@@ -894,6 +888,26 @@ export function getAutoBookedVatRateDropdown(
   supplierCountry?: string | null,
 ): string {
   return getAutoBookedVatConfig(category, supplierCountry).vat_rate_dropdown ?? "-";
+}
+
+export function getBookingSuggestionVatConfig(
+  bookingSuggestion?: Pick<BookingSuggestion, "item"> | null,
+): Pick<PurchaseInvoiceItem, "vat_rate_dropdown" | "reversed_vat_id"> | undefined {
+  if (!bookingSuggestion) {
+    return undefined;
+  }
+
+  const vatRateDropdown = bookingSuggestion.item.vat_rate_dropdown;
+  const reversedVatId = bookingSuggestion.item.reversed_vat_id;
+
+  if (vatRateDropdown === undefined && reversedVatId === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(vatRateDropdown !== undefined ? { vat_rate_dropdown: vatRateDropdown } : {}),
+    ...(reversedVatId !== undefined && reversedVatId !== null ? { reversed_vat_id: reversedVatId } : {}),
+  };
 }
 
 export function deriveAutoBookedNetAmount(
@@ -1160,7 +1174,7 @@ export function scoreTransactionToInvoice(tx: Transaction, invoice: InvoiceSumma
 }
 
 export function suggestBookingInternal(
-  api: { purchaseInvoices: { get(id: number): Promise<{ id?: number; number?: string; items?: PurchaseInvoiceItem[] }> } },
+  api: { purchaseInvoices: { get(id: number): Promise<{ id?: number; number?: string; liability_accounts_id?: number; items?: PurchaseInvoiceItem[] }> } },
   context: {
     purchaseInvoices: Array<{ id?: number; clients_id?: number; status?: string; create_date?: string }>;
     purchaseArticlesWithVat: Array<{ id: number; name_est: string; name_eng: string; accounts_id?: number; is_disabled?: boolean; priority?: number }>;
@@ -1173,7 +1187,7 @@ export function suggestBookingInternal(
 }
 
 async function suggestBookingInternalImpl(
-  api: { purchaseInvoices: { get(id: number): Promise<{ id?: number; number?: string; items?: PurchaseInvoiceItem[] }> } },
+  api: { purchaseInvoices: { get(id: number): Promise<{ id?: number; number?: string; liability_accounts_id?: number; items?: PurchaseInvoiceItem[] }> } },
   context: {
     purchaseInvoices: Array<{ id?: number; clients_id?: number; status?: string; create_date?: string }>;
     purchaseArticlesWithVat: Array<{ id: number; name_est: string; name_eng: string; accounts_id?: number; is_disabled?: boolean; priority?: number }>;
@@ -1206,6 +1220,7 @@ async function suggestBookingInternalImpl(
       source: "supplier_history",
       matched_invoice_id: fullInvoice.id,
       matched_invoice_number: fullInvoice.number,
+      suggested_liability_account_id: fullInvoice.liability_accounts_id,
       suggested_account: suggestedAccount,
       suggested_purchase_article: suggestedArticle
         ? { id: suggestedArticle.id, name: suggestedArticle.name_est || suggestedArticle.name_eng }

@@ -12,9 +12,11 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { CURRENT_YEAR_PROFIT_ACCOUNT } from "../accounting-defaults.js";
+import { getCashFlowCategoryRule, getLiabilityClassificationRule } from "../accounting-rules.js";
 
 type PostingType = "D" | "C";
 type CashFlowClass = "operating" | "investing" | "financing" | "unclassified";
+type LiabilityClass = "current" | "non_current" | "manual_review";
 
 interface PostingPreview {
   accounts_id: number;
@@ -221,17 +223,6 @@ function buildOffsettingPosting(balance: AccountBalance): PostingPreview | null 
   };
 }
 
-function isCurrentLoanAccount(balance: AccountBalance): boolean {
-  const name = `${balance.name_est} ${balance.name_eng}`.toLowerCase();
-  if (name.includes("lühiajal") || name.includes("short")) return true;
-  if (name.includes("pikaajal") || name.includes("long")) return false;
-  return inRange(balance.account_id, 2100, 2199);
-}
-
-function isLoanAccount(balance: AccountBalance): boolean {
-  return inRange(balance.account_id, 2000, 2199);
-}
-
 function hasExplicitCurrentLiabilityMarker(name: string): boolean {
   const hasCurrentPortionMarker = /\bcurrent\b.*\bportion\b/.test(name) && !/\bnon[-\s]+current\b.*\bportion\b/.test(name);
   return (
@@ -252,13 +243,15 @@ function hasExplicitNonCurrentLiabilityMarker(name: string): boolean {
 // TODO: Replace this heuristic classifier with an explicit liability mapping layer.
 // Prefer account-id/account-range rules as the primary signal, then keep a narrow
 // override table for known naming patterns such as "current portion of long-term loan".
-function classifyLiabilitySection(balance: AccountBalance): "current" | "non_current" {
+function classifyLiabilitySection(balance: AccountBalance): LiabilityClass {
   const name = `${balance.name_est} ${balance.name_eng}`.toLowerCase();
+  const configured = getLiabilityClassificationRule(balance.account_id);
+  if (configured) return configured;
   if (hasExplicitNonCurrentLiabilityMarker(name) && !hasExplicitCurrentLiabilityMarker(name)) return "non_current";
   if (hasExplicitCurrentLiabilityMarker(name)) return "current";
-  if (hasPrefix(balance.account_id, "29")) return "non_current";
-  if (isLoanAccount(balance)) return isCurrentLoanAccount(balance) ? "current" : "non_current";
-  return "current";
+  if (inRange(balance.account_id, 2300, 2399)) return "current";
+  if (inRange(balance.account_id, 2500, 2599)) return "current";
+  return "manual_review";
 }
 
 function buildUnresolvedItems(
@@ -592,6 +585,9 @@ function getRelatedPartyFlags(client: Client): string[] {
 
 function classifyCashFlowCategory(account: Account | undefined): CashFlowClass {
   if (!account) return "unclassified";
+  const configured = getCashFlowCategoryRule(account.id);
+  if (configured) return configured;
+  if (inRange(account.id, 1300, 1399) && account.account_type_est === "Varad") return "investing";
   if ((account.is_fixed_asset || inRange(account.id, 1700, 1999)) && account.account_type_est === "Varad") return "investing";
   if (account.account_type_est === "Omakapital") return "financing";
   if (account.account_type_est === "Kohustused" && inRange(account.id, 2000, 2199)) return "financing";
@@ -639,28 +635,14 @@ function computeCashFlowClassification(
       continue;
     }
 
-    const weights: Record<CashFlowClass, number> = {
-      operating: 0,
-      investing: 0,
-      financing: 0,
-      unclassified: 0,
-    };
-
-    for (const posting of counterpartPostings) {
-      const category = classifyCashFlowCategory(accountsById.get(posting.accounts_id));
-      weights[category] += Math.abs(posting.base_amount ?? posting.amount);
-    }
-
-    const totalWeight = Object.values(weights).reduce((sum, amount) => sum + amount, 0);
-    if (Math.abs(totalWeight) < 0.005) {
-      totals.unclassified = roundMoney(totals.unclassified + netCash);
+    const categories = new Set(counterpartPostings.map((posting) => classifyCashFlowCategory(accountsById.get(posting.accounts_id))));
+    if (categories.size === 1 && !categories.has("unclassified")) {
+      const [category] = [...categories];
+      totals[category!] = roundMoney(totals[category!] + netCash);
       continue;
     }
 
-    for (const [category, weight] of Object.entries(weights) as Array<[CashFlowClass, number]>) {
-      if (weight === 0) continue;
-      totals[category] = roundMoney(totals[category] + netCash * (weight / totalWeight));
-    }
+    totals.unclassified = roundMoney(totals.unclassified + netCash);
   }
 
   return totals;
@@ -709,6 +691,10 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const nonCurrentLiabilities = buildStatementLine("Pikaajalised kohustused", yearEndBalances, (balance) =>
     balance.account_type_est === "Kohustused" &&
     classifyLiabilitySection(balance) === "non_current",
+  );
+  const manualReviewLiabilities = buildStatementLine("Klassifitseerimata kohustused", yearEndBalances, (balance) =>
+    balance.account_type_est === "Kohustused" &&
+    classifyLiabilitySection(balance) === "manual_review",
   );
   const totalLiabilities = sumStatementBalances(yearEndBalances, (balance) => balance.account_type_est === "Kohustused");
 
@@ -801,7 +787,9 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
       `(${netProfit} EUR). YECL-* journals were excluded from the income statement, so review whether a partial close was posted.`,
     );
   }
-  warnings.push("Loan accounts were split between current and non-current liabilities using account-name heuristics and the 21xx fallback.");
+  if (Math.abs(manualReviewLiabilities.amount) >= 0.01) {
+    warnings.push("Some liabilities could not be classified as current or non-current from ledger data alone. Review klassifitseerimata_kohustused or define account overrides in accounting-rules.json.");
+  }
 
   const openingCash = sumStatementBalances(priorYearEndBalances, (balance) =>
     balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "10"),
@@ -841,17 +829,17 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const closingTaxLiabilities = sumStatementBalances(yearEndBalances, (balance) =>
     balance.account_type_est === "Kohustused" && hasPrefix(balance.account_id, "25"),
   );
-  const openingShortTermInvestments = sumStatementBalances(priorYearEndBalances, (balance) =>
-    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "13"),
-  );
-  const closingShortTermInvestments = sumStatementBalances(yearEndBalances, (balance) =>
-    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "13"),
-  );
   const openingOtherReceivables = sumStatementBalances(priorYearEndBalances, (balance) =>
     balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "14"),
   );
   const closingOtherReceivables = sumStatementBalances(yearEndBalances, (balance) =>
     balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "14"),
+  );
+  const openingShortTermInvestments = sumStatementBalances(priorYearEndBalances, (balance) =>
+    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "13"),
+  );
+  const closingShortTermInvestments = sumStatementBalances(yearEndBalances, (balance) =>
+    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "13"),
   );
   const openingShortTermLiabilities = sumStatementBalances(priorYearEndBalances, (balance) =>
     balance.account_type_est === "Kohustused" && (hasPrefix(balance.account_id, "20") || hasPrefix(balance.account_id, "21")),
@@ -871,10 +859,10 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const prepaymentsAdjustment = roundMoney(openingPrepayments - closingPrepayments);
   const payablesAdjustment = roundMoney(closingPayables - openingPayables);
   const taxLiabilitiesAdjustment = roundMoney(closingTaxLiabilities - openingTaxLiabilities);
-  const shortTermInvestmentsAdjustment = roundMoney(openingShortTermInvestments - closingShortTermInvestments);
   const otherReceivablesAdjustment = roundMoney(openingOtherReceivables - closingOtherReceivables);
-  const shortTermLiabilitiesAdjustment = roundMoney(closingShortTermLiabilities - openingShortTermLiabilities);
   const accruedLiabilitiesAdjustment = roundMoney(closingAccruedLiabilities - openingAccruedLiabilities);
+  const shortTermInvestmentsAdjustment = roundMoney(openingShortTermInvestments - closingShortTermInvestments);
+  const shortTermLiabilitiesAdjustment = roundMoney(closingShortTermLiabilities - openingShortTermLiabilities);
   const netCashFromOperatingActivities = roundMoney(
     netProfit +
     depreciationLine.amount +
@@ -883,9 +871,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     prepaymentsAdjustment +
     payablesAdjustment +
     taxLiabilitiesAdjustment +
-    shortTermInvestmentsAdjustment +
     otherReceivablesAdjustment +
-    shortTermLiabilitiesAdjustment +
     accruedLiabilitiesAdjustment,
   );
 
@@ -898,6 +884,15 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     netCashFromFinancingActivities,
   );
   const statementCashChangeWithUnclassified = roundMoney(statementCashChange + cashFlowClassification.unclassified);
+  if (Math.abs(shortTermInvestmentsAdjustment) >= 0.01) {
+    warnings.push("Changes in short-term investments were excluded from operating cash flow and should be reviewed in investing activities.");
+  }
+  if (Math.abs(shortTermLiabilitiesAdjustment) >= 0.01) {
+    warnings.push("Changes in financing liabilities were excluded from operating cash flow and should be reviewed in financing activities.");
+  }
+  if (Math.abs(cashFlowClassification.unclassified) >= 0.01) {
+    warnings.push("Some cash journals touched multiple non-cash categories and were left unclassified instead of being proportionally allocated. Review accounting-rules.json cash_flow_category overrides if needed.");
+  }
 
   const relatedPartyClients = allClients.filter((client) => !client.is_deleted && getRelatedPartyFlags(client).length > 0);
   const relatedPartyIds = new Set(relatedPartyClients.map((client) => client.id));
@@ -960,6 +955,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
       liabilities: {
         luhiajalised_kohustused: currentLiabilities,
         pikaajalised_kohustused: nonCurrentLiabilities,
+        klassifitseerimata_kohustused: manualReviewLiabilities,
         total_liabilities: totalLiabilities,
       },
       equity: {
@@ -1015,14 +1011,16 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         depreciation_and_impairment: depreciationLine.amount,
         change_in_receivables: receivablesAdjustment,
         change_in_other_receivables: otherReceivablesAdjustment,
-        change_in_short_term_investments: shortTermInvestmentsAdjustment,
         change_in_inventories: inventoriesAdjustment,
         change_in_prepayments: prepaymentsAdjustment,
         change_in_payables: payablesAdjustment,
-        change_in_short_term_liabilities: shortTermLiabilitiesAdjustment,
         change_in_tax_liabilities: taxLiabilitiesAdjustment,
         change_in_accrued_liabilities: accruedLiabilitiesAdjustment,
         net_cash_from_operating_activities: netCashFromOperatingActivities,
+        excluded_from_operating_adjustments: {
+          change_in_short_term_investments: shortTermInvestmentsAdjustment,
+          change_in_short_term_financing_liabilities: shortTermLiabilitiesAdjustment,
+        },
       },
       investing_activities: {
         net_cash_from_investing_activities: netCashFromInvestingActivities,
@@ -1045,7 +1043,9 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
       },
     },
     key_ratios: {
-      current_ratio: safeRatio(currentAssets.amount, currentLiabilities.amount),
+      current_ratio: Math.abs(manualReviewLiabilities.amount) >= 0.01
+        ? null
+        : safeRatio(currentAssets.amount, currentLiabilities.amount),
       debt_ratio: safeRatio(totalLiabilities, totalAssets),
       roe: safeRatio(netProfit, averageEquity),
       profit_margin: safeRatio(netProfit, revenueLine.amount),

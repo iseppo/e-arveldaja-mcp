@@ -13,6 +13,7 @@ function setupReceiptTool(
     accounts?: unknown[];
     saleInvoices?: unknown[];
     purchaseInvoices?: unknown[];
+    purchaseInvoiceDetails?: Record<number, unknown>;
   } = {},
 ) {
   const server = { registerTool: vi.fn() } as any;
@@ -25,6 +26,11 @@ function setupReceiptTool(
     },
     purchaseInvoices: {
       listAll: vi.fn().mockResolvedValue(options.purchaseInvoices ?? []),
+      get: vi.fn().mockImplementation(async (id: number) => {
+        const detail = options.purchaseInvoiceDetails?.[id];
+        if (!detail) throw new Error(`Missing purchase invoice ${id}`);
+        return detail;
+      }),
       createAndSetTotals: vi.fn().mockResolvedValue({ id: 9001 }),
       confirmWithTotals: vi.fn().mockResolvedValue({}),
       invalidate: vi.fn().mockResolvedValue({}),
@@ -337,6 +343,31 @@ describe("receipt inbox tool status handling", () => {
         },
       ],
       getImpl,
+      purchaseInvoices: [{
+        id: 88,
+        status: "CONFIRMED",
+        payment_status: "PAID",
+        clients_id: 7,
+        client_name: "OpenAI Ireland Limited",
+        create_date: "2026-02-22",
+      }],
+      purchaseInvoiceDetails: {
+        88: {
+          id: 88,
+          number: "OST-88",
+          liability_accounts_id: 2310,
+          items: [{
+            custom_title: "ChatGPT subscription",
+            cl_purchase_articles_id: 501,
+            purchase_accounts_id: 5230,
+            purchase_accounts_dimensions_id: null,
+            vat_rate_dropdown: "24",
+            vat_accounts_id: 1510,
+            cl_vat_articles_id: 1,
+            reversed_vat_id: 1,
+          }],
+        },
+      },
       purchaseArticles: [{
         id: 501,
         name_est: "Software",

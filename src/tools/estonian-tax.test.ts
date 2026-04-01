@@ -463,6 +463,7 @@ describe("create_owner_expense_reimbursement", () => {
       description: "Office supplies",
       net_amount: 100,
       vat_rate: 0.24,
+      vat_deduction_mode: "full",
       expense_account: 5000,
     });
 
@@ -602,6 +603,7 @@ describe("create_owner_expense_reimbursement", () => {
       description: "Test",
       net_amount: 100,
       vat_rate: 0.24,
+      vat_deduction_mode: "full",
       expense_account: 5000,
       vat_account: 1511,
       payable_account: 2111,
@@ -613,6 +615,53 @@ describe("create_owner_expense_reimbursement", () => {
     };
     expect(createCall.postings.map(p => p.accounts_id)).toContain(1511);
     expect(createCall.postings.map(p => p.accounts_id)).toContain(2111);
+  });
+
+  it("defaults VAT to deductible for ordinary VAT-registered expenses", async () => {
+    setup(true);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+
+    const result = await cb({
+      owner_client_id: 1,
+      effective_date: "2024-06-01",
+      description: "Office supplies",
+      net_amount: 100,
+      vat_rate: 0.24,
+      expense_account: 5000,
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const expense = data.expense as {
+      vat_deduction_mode: string;
+      deductible_vat: number;
+      non_deductible_vat: number;
+      expense_debited: number;
+    };
+    expect(expense.vat_deduction_mode).toBe("full");
+    expect(expense.deductible_vat).toBe(24);
+    expect(expense.non_deductible_vat).toBe(0);
+    expect(expense.expense_debited).toBe(100);
+    expect((data.suggestions as string[])[0]).toContain("fully deducted");
+  });
+
+  it("asks for clarification on likely restricted VAT categories when no deduction mode is provided", async () => {
+    setup(true);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+
+    const result = await cb({
+      owner_client_id: 1,
+      effective_date: "2024-06-01",
+      description: "Fuel for passenger car",
+      net_amount: 100,
+      vat_rate: 0.24,
+      expense_account: 5000,
+    });
+
+    expect(isError(result)).toBe(true);
+    const payload = result as { content: Array<{ text: string }> };
+    expect(payload.content[0]!.text).toContain("VAT deduction needs confirmation");
+    expect(payload.content[0]!.text).toContain("vat_deduction_mode='full'");
   });
 
   // -------------------------------------------------------------------------

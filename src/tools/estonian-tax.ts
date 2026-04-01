@@ -11,6 +11,15 @@ import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
 import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
+import {
+  getDefaultOwnerExpenseVatDeductionMode,
+  getOwnerExpenseVatDeductionModeForAccount,
+} from "../accounting-rules.js";
+
+function requiresOwnerExpenseVatReview(accountName: string | undefined, description: string): boolean {
+  const text = `${accountName ?? ""} ${description}`.toLowerCase();
+  return /\b(sõiduauto|auto|vehicle|fuel|kütus|parking|parkim|liising|leasing|representation|esindus|entertainment)\b/.test(text);
+}
 
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
 
@@ -193,7 +202,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "create_owner_expense_reimbursement",
-    "Create a journal for a business expense paid personally by the owner. Splits input VAT for VAT-registered companies.",
+    "Create a journal for a business expense paid personally by the owner. VAT deduction is conservative by default and should be stated explicitly.",
     {
       owner_client_id: coerceId.describe("Owner/shareholder client ID"),
       effective_date: z.string().describe("Expense date (YYYY-MM-DD)"),
@@ -201,13 +210,28 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       net_amount: z.number().describe("Net amount (without VAT)"),
       vat_rate: z.number().describe("VAT rate as decimal (e.g. 0.24 for 24%, 0.13, 0.09, 0.05, or 0 for no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),
       vat_amount: z.number().optional().describe("Exact VAT amount (overrides vat_rate if provided)"),
+      vat_deduction_mode: z.enum(["none", "full", "partial"]).optional().describe("How much of the receipt VAT is deductible. Defaults conservatively to none unless overridden by local accounting rules."),
+      deductible_vat_amount: z.number().optional().describe("Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default."),
       expense_account: z.number().describe("Expense account number (e.g. 5000, 6000)"),
       vat_account: z.number().optional().describe("Input VAT account (default 1510)"),
       payable_account: z.number().optional().describe("Payable to owner account (default 2110)"),
       document_number: z.string().optional().describe("Receipt/document number"),
     },
     { ...create, title: "Book Owner-Paid Expense" },
-    async ({ owner_client_id, effective_date, description, net_amount, vat_rate, vat_amount, expense_account, vat_account, payable_account, document_number }) => {
+    async ({
+      owner_client_id,
+      effective_date,
+      description,
+      net_amount,
+      vat_rate,
+      vat_amount,
+      vat_deduction_mode,
+      deductible_vat_amount,
+      expense_account,
+      vat_account,
+      payable_account,
+      document_number,
+    }) => {
       if (vat_rate > 1) {
         return toolError({
           error: `vat_rate=${vat_rate} looks like a percentage. Pass a decimal fraction instead (e.g. 0.24 for 24%).`,
@@ -216,16 +240,55 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const vatRegistered = await isCompanyVatRegistered(api);
       const vatAcc = vat_account ?? DEFAULT_VAT_ACCOUNT;
       const payAcc = payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT;
+      const grossVat = vat_amount ?? roundMoney(net_amount * vat_rate);
+      const accounts = await api.readonly.getAccounts();
+      const expenseAccountRecord = accounts.find(account => account.id === expense_account);
+      const requiresReview = requiresOwnerExpenseVatReview(expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng, description);
+      const configuredMode = getOwnerExpenseVatDeductionModeForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionMode();
+      const deductionMode = !vatRegistered || grossVat <= 0
+        ? "none"
+        : deductible_vat_amount !== undefined
+          ? (Math.abs(deductible_vat_amount - grossVat) < 0.01 ? "full" : "partial")
+          : vat_deduction_mode ?? configuredMode ?? "full";
+
+      if (vatRegistered && grossVat > 0 && requiresReview && vat_deduction_mode === undefined && deductible_vat_amount === undefined && configuredMode === undefined) {
+        return toolError({
+          error: "VAT deduction needs confirmation for this expense category",
+          hint: "Suggested default: use vat_deduction_mode='full' for clearly business-only deductible VAT, 'partial' with deductible_vat_amount for restricted claims, or 'none' when VAT is not deductible.",
+          suggestions: [
+            "If this is a standard business receipt with fully deductible VAT, rerun with vat_deduction_mode='full'.",
+            "If this is passenger-car or mixed-use cost, rerun with vat_deduction_mode='partial' and deductible_vat_amount.",
+            "If this is non-deductible VAT, rerun with vat_deduction_mode='none'.",
+          ],
+        });
+      }
+
+      if (deductionMode === "partial" && deductible_vat_amount === undefined) {
+        return toolError({
+          error: "deductible_vat_amount is required when vat_deduction_mode=partial",
+          hint: "Suggested default: use vat_deduction_mode='none' unless you have checked the receipt and deduction support.",
+        });
+      }
+
+      const deductibleVat = !vatRegistered || grossVat <= 0
+        ? 0
+        : deductionMode === "full"
+          ? grossVat
+          : deductionMode === "partial"
+            ? deductible_vat_amount ?? 0
+            : 0;
+
+      if (deductibleVat < 0 || deductibleVat - grossVat > 0.01) {
+        return toolError({
+          error: `deductible_vat_amount must be between 0 and total VAT ${grossVat}`,
+          hint: "Suggested default: keep the VAT non-deductible unless the source document and business-use analysis support deduction.",
+        });
+      }
 
       // Validate all accounts exist
-      const accountsToCheck = [expense_account, payAcc];
-      const vat = vat_amount ?? roundMoney(net_amount * vat_rate);
-      if (vat > 0 && vatRegistered) accountsToCheck.push(vatAcc);
-
-      const accounts = await api.readonly.getAccounts();
       const accountErrors = validateAccounts(accounts, [
         { id: expense_account, label: "Expense account" },
-        ...(vat > 0 && vatRegistered ? [{ id: vatAcc, label: "VAT account" }] : []),
+        ...(deductibleVat > 0 && vatRegistered ? [{ id: vatAcc, label: "VAT account" }] : []),
         { id: payAcc, label: "Payable account" },
       ]);
       if (accountErrors.length > 0) {
@@ -236,15 +299,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         });
       }
 
-      const total = roundMoney(net_amount + vat);
-      const expenseDebit = vatRegistered ? roundMoney(net_amount) : total;
+      const total = roundMoney(net_amount + grossVat);
+      const nonDeductibleVat = roundMoney(grossVat - deductibleVat);
+      const expenseDebit = roundMoney(net_amount + nonDeductibleVat);
 
       const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [
         { accounts_id: expense_account, type: "D", amount: expenseDebit },
       ];
 
-      if (vat > 0 && vatRegistered) {
-        postings.push({ accounts_id: vatAcc, type: "D", amount: vat });
+      if (deductibleVat > 0 && vatRegistered) {
+        postings.push({ accounts_id: vatAcc, type: "D", amount: deductibleVat });
       }
 
       postings.push({ accounts_id: payAcc, type: "C", amount: total });
@@ -262,10 +326,17 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         entity_id: result.created_object_id,
         summary: `Owner expense: ${description}, total ${total} EUR`,
         details: {
-          effective_date, description, total_net: net_amount, total_vat: vat, total_gross: total,
+          effective_date, description, total_net: net_amount, total_vat: grossVat, deductible_vat: deductibleVat, total_gross: total,
           postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
         },
       });
+
+      const suggestions: string[] = [];
+      if (vatRegistered && grossVat > 0 && deductibleVat === grossVat) {
+        suggestions.push("VAT was fully deducted by default. If this expense falls under passenger-car, representation, or mixed-use restrictions, rerun with vat_deduction_mode='partial' or 'none'.");
+      } else if (vatRegistered && grossVat > 0 && deductibleVat === 0) {
+        suggestions.push("VAT was treated as non-deductible. If the receipt supports deduction, rerun with vat_deduction_mode='full' or 'partial' and deductible_vat_amount.");
+      }
 
       return {
         content: [{
@@ -275,9 +346,12 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               description,
               net: net_amount,
               vat_rate: vat_amount !== undefined ? "custom" : `${vat_rate * 100}%`,
-              vat,
+              vat: grossVat,
+              deductible_vat: deductibleVat,
+              non_deductible_vat: nonDeductibleVat,
               total,
               vat_registered_company: vatRegistered,
+              vat_deduction_mode: deductionMode,
               expense_debited: expenseDebit,
             },
             journal_entry: {
@@ -291,6 +365,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             note: vatRegistered
               ? `Expense booked. Owner debt increased by ${total} EUR on account ${payAcc}.`
               : `Expense booked. Company is not VAT-registered, so the full gross amount was debited to expense account ${expense_account}. Owner debt increased by ${total} EUR on account ${payAcc}.`,
+            ...(suggestions.length > 0 ? { suggestions } : {}),
           }),
         }],
       };

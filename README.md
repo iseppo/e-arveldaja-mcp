@@ -87,6 +87,21 @@ You can also import manually at any time by asking your AI assistant:
 
 For multiple companies, place multiple files (`apikey.txt`, `apikey-company2.txt`, etc.) and use `list_connections` / `switch_connection` to switch between them.
 
+### 3. Optional: define company-specific accounting rules
+
+If your company has stable booking conventions that cannot always be derived from the ledger alone, create an optional local file:
+
+`accounting-rules.md`
+
+This file is human-editable Markdown, not JSON. It is meant for:
+- counterparty-specific auto-booking defaults when supplier history is missing
+- owner-expense VAT deduction defaults or account-specific overrides
+- annual-report overrides for liability maturity and cash-flow category classification
+
+The server reads this file from the project root by default. You can point to another location with `EARVELDAJA_RULES_FILE=/path/to/accounting-rules.md`.
+
+Confirmed supplier history still wins over local rules for purchase booking defaults.
+
 <details>
 <summary>Alternative: environment variables</summary>
 
@@ -138,13 +153,13 @@ Once the MCP server is connected, just talk to your AI assistant in natural lang
 
 > "Book this invoice PDF into e-arveldaja and match it to the bank payment"
 
-The assistant will extract invoice data from the PDF, create a purchase invoice with the correct accounts and VAT rates, and match it to existing bank transactions.
+The assistant will extract invoice data from the PDF, reuse booking treatment from similar confirmed invoices by the same supplier when available, and otherwise fall back to purchase articles / local accounting rules before creating the invoice and matching it to bank transactions.
 
 ### Batch-process a folder of invoices and receipts
 
 > "Process all the invoices in the arved/ folder and book them into e-arveldaja"
 
-The assistant will scan the folder, OCR-parse each PDF/JPG/PNG, extract invoice data, resolve suppliers, detect duplicates, create purchase invoices with correct VAT treatment, upload source documents, confirm, and match to bank transactions — all in one pass. Dry run by default so you can review before committing.
+The assistant will scan the folder, OCR-parse each PDF/JPG/PNG, extract invoice data, resolve suppliers, detect duplicates, create purchase invoices, upload source documents, confirm, and match to bank transactions — all in one pass. Purchase booking defaults come from confirmed supplier history first, then from `accounting-rules.md` if present. Dry run by default so you can review before committing.
 If invoice creation succeeds but a later step like document upload or confirmation fails, the tool now auto-invalidates the created purchase invoice and reports that file as failed instead of leaving a stray draft behind.
 
 ### Book Lightyear investment trades and income
@@ -195,6 +210,11 @@ The assistant will compute the 22/78 corporate income tax, check retained earnin
 
 > "Reimburse my business expense of 45.50 EUR from Bolt"
 
+For owner-paid expenses, the server now tries to give sensible defaults:
+- ordinary VAT-registered business receipts default to full input-VAT deduction
+- likely restricted or mixed-use categories such as passenger-car / fuel / representation-like costs ask for clarification instead of guessing
+- if you have a stable internal policy, you can encode it in `accounting-rules.md`
+
 
 ## Updating
 
@@ -242,12 +262,14 @@ EARVELDAJA_INTEGRATION_TEST=true npm run test:integration
 ## Good to know
 
 - **Dry run by default.** Batch operations (bank import, Wise import, Lightyear booking, receipt processing, auto-confirm) preview results first. You must explicitly confirm or pass `execute=true` to create records.
+- **Accounting choices prefer evidence.** For purchase booking, the server prefers treatment from similar confirmed supplier invoices. If that history is missing, it can use `accounting-rules.md`. For unmatched bank-transaction auto-booking, it no longer invents VAT treatment from weak heuristics alone.
 - **Large datasets need date filters.** The server loads up to 200 pages of data per query. Companies with thousands of invoices or transactions should narrow reporting and reconciliation tools with date ranges — otherwise the tool will ask you to.
 - **Caching.** API responses are cached for 2–5 minutes and automatically invalidated when you create, update, or delete records through the server. Changes made directly in the e-arveldaja web UI may take a few minutes to appear.
 - **EUR by default.** All amounts are EUR unless a different currency is specified.
 - **Multi-company.** Place multiple `apikey*.txt` files and use `list_connections` / `switch_connection`. Switching clears all cached data to prevent cross-company leaks.
 - **Node.js 18+** required.
 - **File access scope.** By default, file-reading tools can access supported files under the working directory and `/tmp`. Set `EARVELDAJA_ALLOWED_PATHS` (colon-separated) to allow additional directories, or `EARVELDAJA_ALLOW_HOME=true` to allow the entire home directory.
+- **Human-editable local accounting rules.** `accounting-rules.md` lets you store company-specific booking defaults and annual-report overrides in Markdown instead of code or JSON.
 - **Session audit log.** Every mutating operation (create, update, delete, confirm, import) is logged to a human-readable Markdown file at `logs/{connection}.audit.md` in the working directory. Each entry includes timestamps, tool name, entity details, account postings, and financial amounts. Use `get_session_log` to view, `list_audit_logs` to browse all companies, and `clear_session_log` to reset. The log persists across sessions and is company-specific. Set `EARVELDAJA_AUDIT_LANG=en` for English labels (default: Estonian).
 - **Tag MCP-created invoices.** Set `EARVELDAJA_TAG_NOTES=true` to append `(e-arveldaja-mcp)` to the notes field of all invoices created by the server. Off by default.
 

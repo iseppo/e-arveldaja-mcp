@@ -37,6 +37,7 @@ import {
   extractReceiptFieldsFromText,
   findAccountByKeywords,
   findPurchaseArticleByKeywords,
+  getBookingSuggestionVatConfig,
   getAutoBookedVatConfig,
   hasAutoBookableReceiptFields,
   inferSupplierCountry,
@@ -51,6 +52,7 @@ import {
   resolveSupplierInternal,
 } from "./supplier-resolution.js";
 import { getInvoiceMatchEligibility } from "./bank-reconciliation.js";
+import { type AccountingAutoBookingRule, findAutoBookingRule } from "../accounting-rules.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const FILE_TYPE_EXTENSIONS = {
@@ -150,7 +152,13 @@ interface ClassifiedTransactionSuggestion {
   purchase_article_name?: string;
   purchase_account_id?: number;
   purchase_account_name?: string;
+  purchase_account_dimensions_id?: number;
   liability_account_id?: number;
+  vat_rate_dropdown?: string;
+  reversed_vat_id?: number;
+  source?: "supplier_history" | "keyword_match" | "fallback" | "local_rules";
+  matched_invoice_id?: number;
+  matched_invoice_number?: string;
   reason: string;
 }
 
@@ -307,12 +315,74 @@ function groupTransactionsByCounterparty(transactions: Transaction[]): Transacti
 }
 
 
+function buildSuggestionFromBookingHistory(bookingSuggestion: BookingSuggestion): ClassifiedTransactionSuggestion {
+  return {
+    purchase_article_id: bookingSuggestion.item.cl_purchase_articles_id,
+    purchase_article_name: bookingSuggestion.suggested_purchase_article?.name,
+    purchase_account_id: bookingSuggestion.item.purchase_accounts_id ?? bookingSuggestion.suggested_account?.id,
+    purchase_account_name: bookingSuggestion.suggested_account
+      ? `${bookingSuggestion.suggested_account.id} ${bookingSuggestion.suggested_account.name_est}`
+      : undefined,
+    purchase_account_dimensions_id: bookingSuggestion.item.purchase_accounts_dimensions_id ?? undefined,
+    liability_account_id: bookingSuggestion.suggested_liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+    vat_rate_dropdown: bookingSuggestion.item.vat_rate_dropdown ?? undefined,
+    reversed_vat_id: bookingSuggestion.item.reversed_vat_id ?? undefined,
+    source: bookingSuggestion.source,
+    matched_invoice_id: bookingSuggestion.matched_invoice_id,
+    matched_invoice_number: bookingSuggestion.matched_invoice_number,
+    reason: bookingSuggestion.matched_invoice_number
+      ? `Defaulted from confirmed supplier invoice ${bookingSuggestion.matched_invoice_number}.`
+      : "Defaulted from the most recent confirmed supplier invoice.",
+  };
+}
+
+function buildSuggestionFromRule(
+  purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
+  accounts: Account[],
+  rule: AccountingAutoBookingRule,
+): ClassifiedTransactionSuggestion {
+  const article = rule.purchase_article_id !== undefined
+    ? purchaseArticlesWithVat.find(candidate => candidate.id === rule.purchase_article_id)
+    : undefined;
+  const account = rule.purchase_account_id !== undefined
+    ? accounts.find(candidate => candidate.id === rule.purchase_account_id)
+    : article?.accounts_id !== undefined
+      ? accounts.find(candidate => candidate.id === article.accounts_id)
+      : undefined;
+
+  return {
+    purchase_article_id: article?.id ?? rule.purchase_article_id,
+    purchase_article_name: article?.name_est ?? article?.name_eng,
+    purchase_account_id: account?.id ?? article?.accounts_id ?? rule.purchase_account_id,
+    purchase_account_name: account ? `${account.id} ${account.name_est}` : undefined,
+    purchase_account_dimensions_id: rule.purchase_account_dimensions_id,
+    liability_account_id: rule.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+    vat_rate_dropdown: rule.vat_rate_dropdown,
+    reversed_vat_id: rule.reversed_vat_id,
+    source: "local_rules",
+    reason: rule.reason ?? "Defaulted from local accounting-rules.json counterparty rule.",
+  };
+}
+
 function buildClassificationSuggestion(
   purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
   accounts: Account[],
   category: TransactionClassificationCategory,
   normalizedCounterparty: string,
+  options?: {
+    bookingSuggestion?: BookingSuggestion;
+    autoBookingRule?: AccountingAutoBookingRule;
+    manualReviewReason?: string;
+  },
 ): ClassifiedTransactionSuggestion {
+  if (options?.bookingSuggestion?.source === "supplier_history") {
+    return buildSuggestionFromBookingHistory(options.bookingSuggestion);
+  }
+
+  if (options?.autoBookingRule) {
+    return buildSuggestionFromRule(purchaseArticlesWithVat, accounts, options.autoBookingRule);
+  }
+
   let articleKeywords = ["muu", "other", "general"];
   let accountKeywords = ["muu", "general", "kulud"];
   let reason = "Fallback booking suggestion from generic expense keywords.";
@@ -369,8 +439,88 @@ function buildClassificationSuggestion(
     purchase_account_id: account?.id ?? article?.accounts_id,
     purchase_account_name: account ? `${account.id} ${account.name_est}` : undefined,
     liability_account_id: DEFAULT_LIABILITY_ACCOUNT,
-    reason,
+    source: article ? "keyword_match" : "fallback",
+    reason: options?.manualReviewReason ? `${reason} ${options.manualReviewReason}` : reason,
   };
+}
+
+async function resolveClassificationSuggestion(
+  api: ApiContext,
+  context: Pick<ReceiptProcessingContext, "purchaseInvoices" | "purchaseArticlesWithVat" | "accounts">,
+  clients: Client[],
+  group: TransactionGroup,
+  classification: TransactionGroupClassification,
+): Promise<{
+  applyMode: ClassificationApplyMode;
+  suggestion: ClassifiedTransactionSuggestion;
+}> {
+  const sample = group.transactions[0];
+  const defaultSuggestion = buildClassificationSuggestion(
+    context.purchaseArticlesWithVat,
+    context.accounts,
+    classification.category,
+    group.normalized_counterparty,
+  );
+  if (!sample) {
+    return { applyMode: classification.apply_mode, suggestion: defaultSuggestion };
+  }
+
+  const supplierResolution = await resolveSupplierFromTransaction(api, clients, sample, false, classification.category);
+  const supplierId = supplierResolution.client?.id;
+  if (supplierId) {
+    const bookingSuggestion = await suggestBookingInternal(
+      api,
+      context,
+      supplierId,
+      sample.description ?? group.display_counterparty,
+    );
+    if (bookingSuggestion?.source === "supplier_history") {
+      return {
+        applyMode: classification.apply_mode,
+        suggestion: buildClassificationSuggestion(
+          context.purchaseArticlesWithVat,
+          context.accounts,
+          classification.category,
+          group.normalized_counterparty,
+          { bookingSuggestion },
+        ),
+      };
+    }
+  }
+
+  const autoBookingRule = findAutoBookingRule(group.normalized_counterparty, classification.category);
+  if (autoBookingRule) {
+    return {
+      applyMode: classification.apply_mode,
+      suggestion: buildClassificationSuggestion(
+        context.purchaseArticlesWithVat,
+        context.accounts,
+        classification.category,
+        group.normalized_counterparty,
+        { autoBookingRule },
+      ),
+    };
+  }
+
+  if (
+    classification.apply_mode === "purchase_invoice" &&
+    classification.category !== "bank_fees"
+  ) {
+    return {
+      applyMode: "review_only",
+      suggestion: buildClassificationSuggestion(
+        context.purchaseArticlesWithVat,
+        context.accounts,
+        classification.category,
+        group.normalized_counterparty,
+        {
+          manualReviewReason: "No confirmed supplier-history invoice or local rule was found, so VAT and account treatment should be reviewed manually.",
+        },
+      ),
+    };
+  }
+
+  return { applyMode: classification.apply_mode, suggestion: defaultSuggestion };
 }
 
 async function scanReceiptFolderInternal(folderPath: string, fileTypes?: FileType[], dateFrom?: string, dateTo?: string): Promise<ReceiptScanResult> {
@@ -597,7 +747,7 @@ async function createAndMaybeMatchPurchaseInvoice(
         journal_date: extracted.invoice_date!,
         term_days: computeTermDays(extracted.invoice_date, extracted.due_date),
         cl_currencies_id: invoiceCurrency,
-        liability_accounts_id: DEFAULT_LIABILITY_ACCOUNT,
+        liability_accounts_id: bookingSuggestion.suggested_liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
         bank_ref_number: extracted.ref_number,
         bank_account_no: extracted.supplier_iban,
         notes: tagNotes(invoiceNotes),
@@ -1160,21 +1310,26 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
       const unmatched = unconfirmed.filter(transaction => !existingInvoiceMatch(transaction, openSales, openPurchases));
       const groups = groupTransactionsByCounterparty(unmatched);
-      const classifiedGroups = groups.map(group => {
+      const context = {
+        purchaseInvoices,
+        purchaseArticlesWithVat,
+        accounts,
+      };
+      const classifiedGroups: ClassifiedTransactionGroupResult[] = [];
+
+      for (const group of groups) {
         const classification = categorizeTransactionGroup({
           normalized_counterparty: group.normalized_counterparty,
           display_counterparty: group.display_counterparty,
           transactions: group.transactions,
           owner_counterparties: ownerCounterparties,
         });
-        const suggestion = buildClassificationSuggestion(
-          purchaseArticlesWithVat,
-          accounts,
-          classification.category,
-          group.normalized_counterparty,
-        );
-        return toClassifiedResult(group, classification, suggestion);
-      });
+        const resolved = await resolveClassificationSuggestion(api, context, clients, group, classification);
+        classifiedGroups.push(toClassifiedResult(group, {
+          ...classification,
+          apply_mode: resolved.applyMode,
+        }, resolved.suggestion));
+      }
 
       const categoryCounts = classifiedGroups.reduce<Record<string, number>>((counts, group) => {
         counts[group.category] = (counts[group.category] ?? 0) + group.transactions.length;
@@ -1214,9 +1369,11 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       const parsed = safeJsonParse(classifications_json, "classifications_json");
       const groups = extractClassificationGroups(parsed);
 
-      const [clients, purchaseArticlesWithVat] = await Promise.all([
+      const [clients, purchaseArticlesWithVat, purchaseInvoices, accounts] = await Promise.all([
         api.clients.listAll(),
         getPurchaseArticlesWithVat(api),
+        api.purchaseInvoices.listAll(),
+        api.readonly.getAccounts(),
       ]);
       const isVatRegistered = await isCompanyVatRegistered(api);
       const results: Array<{
@@ -1301,6 +1458,8 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
           const createdInvoiceIds: number[] = [];
           const linkedTransactionIds: number[] = [];
+          let wouldCreateCount = 0;
+          let attemptedCreateCount = 0;
 
           for (const transaction of freshTransactions) {
             const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun, group.category);
@@ -1308,6 +1467,22 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             const supplierId = supplier?.id;
             const supplierMetadata = supplierResolution.client ?? supplierResolution.preview_client;
             const grossAmount = roundMoney(Math.abs(transaction.amount));
+            const transactionGroup: TransactionGroup = {
+              normalized_counterparty: group.normalized_counterparty,
+              display_counterparty: group.display_counterparty,
+              transactions: [transaction],
+            };
+            const resolved = await resolveClassificationSuggestion(api, {
+              purchaseInvoices,
+              purchaseArticlesWithVat,
+              accounts,
+            }, clients, transactionGroup, {
+              category: group.category,
+              apply_mode: group.apply_mode,
+              recurring: group.recurring,
+              similar_amounts: group.similar_amounts,
+              reasons: group.reasons,
+            });
             if (!supplier?.id && dryRun) {
               notes.push(`Dry run: transaction ${transaction.id} would require creating a supplier for ${group.display_counterparty}.`);
             }
@@ -1316,14 +1491,25 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               continue;
             }
 
-            const article = purchaseArticlesWithVat.find(item => item.id === group.suggested_booking.purchase_article_id);
-            const vatConfig = getAutoBookedVatConfig(group.category, supplierMetadata?.cl_code_country);
+            if (resolved.applyMode !== "purchase_invoice") {
+              notes.push(`Transaction ${transaction.id} requires manual review before booking. ${resolved.suggestion.reason}`);
+              continue;
+            }
+
+            const article = purchaseArticlesWithVat.find(item => item.id === resolved.suggestion.purchase_article_id);
+            const vatConfig = getBookingSuggestionVatConfig({
+              item: {
+                vat_rate_dropdown: resolved.suggestion.vat_rate_dropdown,
+                reversed_vat_id: resolved.suggestion.reversed_vat_id,
+              } as PurchaseInvoiceItem,
+            }) ?? getAutoBookedVatConfig(group.category, supplierMetadata?.cl_code_country);
             const netAmount = deriveAutoBookedNetAmount(grossAmount, vatConfig);
             const purchaseItem = applyPurchaseVatDefaults(
               purchaseArticlesWithVat,
               {
-                cl_purchase_articles_id: group.suggested_booking.purchase_article_id,
-                purchase_accounts_id: group.suggested_booking.purchase_account_id ?? article?.accounts_id,
+                cl_purchase_articles_id: resolved.suggestion.purchase_article_id,
+                purchase_accounts_id: resolved.suggestion.purchase_account_id ?? article?.accounts_id,
+                purchase_accounts_dimensions_id: resolved.suggestion.purchase_account_dimensions_id,
                 custom_title: transaction.description ?? `Auto-booked ${group.category}`,
                 unit_net_price: netAmount,
                 total_net_price: netAmount,
@@ -1334,6 +1520,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             );
 
             if (dryRun) {
+              wouldCreateCount += 1;
               notes.push(`Dry run: would create purchase invoice for transaction ${transaction.id}.`);
               continue;
             }
@@ -1352,7 +1539,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
                 journal_date: transaction.date,
                 term_days: 0,
                 cl_currencies_id: transaction.cl_currencies_id ?? "EUR",
-                liability_accounts_id: group.suggested_booking.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+                liability_accounts_id: resolved.suggestion.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
                 notes: tagNotes(`Auto-created from classified bank transaction ${transaction.id}`),
                 items: [purchaseItem],
               },
@@ -1360,6 +1547,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               grossAmount,
               isVatRegistered,
             );
+            attemptedCreateCount += 1;
             logAudit({
               tool: "apply_transaction_classifications", action: "CREATED", entity_type: "purchase_invoice",
               entity_id: invoice.id,
@@ -1416,10 +1604,14 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             }
           }
 
+          const status = dryRun
+            ? (wouldCreateCount > 0 ? "dry_run_preview" : "skipped")
+            : (createdInvoiceIds.length > 0 || attemptedCreateCount > 0 ? "applied" : "skipped");
+
           results.push({
             category: group.category,
             counterparty: group.display_counterparty,
-            status: dryRun ? "dry_run_preview" : "applied",
+            status,
             notes,
             transactions: transactionIds,
             created_invoice_ids: dryRun ? undefined : createdInvoiceIds,
