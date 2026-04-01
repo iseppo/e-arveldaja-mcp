@@ -13,12 +13,14 @@ export const toolExtraStorage = new AsyncLocalStorage<ToolExtra>();
  */
 export async function reportProgress(progress: number, total?: number): Promise<void> {
   const extra = toolExtraStorage.getStore();
-  if (!extra?._meta?.progressToken) return;
+  if (!extra) return;
+  const progressToken = extra?._meta?.progressToken;
+  if (progressToken === undefined) return;
   try {
     await extra.sendNotification({
       method: "notifications/progress",
       params: {
-        progressToken: extra._meta.progressToken,
+        progressToken,
         progress,
         ...(total !== undefined && { total }),
       },

@@ -20,9 +20,9 @@ describe("annotations", () => {
     expect(mutate.idempotentHint).toBe(true);
   });
 
-  it("destructive is destructive and idempotent", () => {
+  it("destructive is destructive and not idempotent", () => {
     expect(destructive.destructiveHint).toBe(true);
-    expect(destructive.idempotentHint).toBe(true);
+    expect(destructive.idempotentHint).toBe(false);
   });
 
   it("send is destructive and not idempotent", () => {

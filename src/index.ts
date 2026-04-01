@@ -694,7 +694,7 @@ Reporting:
     "New tool calls use the new connection immediately. Interrupted in-flight tools are blocked from making further API requests, " +
     "but a request already in flight may still finish, so inspect mutating tools before retrying.",
     {
-      index: z.number().describe("Connection index from list_connections"),
+      index: z.number().int().describe("Connection index from list_connections"),
     },
     { ...mutate, title: "Switch Connection" },
     async ({ index }) => {

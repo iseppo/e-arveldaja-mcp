@@ -436,7 +436,7 @@ function normalizeCredentialServer(server: string | undefined): CredentialServer
 
 function readStoredCredentialBlocks(
   env: Record<string, string>,
-  options: { includePrimary?: boolean; extraNamePrefix?: string } = {},
+  options: { includePrimary?: boolean; extraNamePrefix?: string; primaryName?: string } = {},
 ): StoredCredentialBlock[] {
   const blocks: StoredCredentialBlock[] = [];
 
@@ -445,7 +445,7 @@ function readStoredCredentialBlocks(
     if (server) {
       blocks.push({
         target: "primary",
-        name: "env",
+        name: options.primaryName ?? "env",
         server,
         apiKeyId: env.EARVELDAJA_API_KEY_ID!,
         apiPublicValue: env.EARVELDAJA_API_PUBLIC_VALUE!,
@@ -906,7 +906,7 @@ export function loadAllConfigs(): NamedConfig[] {
   }
 
   const addConfig = (entry: NamedConfig): void => {
-    const connectionKey = `${entry.config.baseUrl}\n${entry.config.apiKeyId}\n${entry.config.apiPublicValue}`;
+    const connectionKey = `${entry.config.baseUrl}\n${entry.config.apiKeyId}\n${entry.config.apiPublicValue}\n${entry.config.apiPassword}`;
     if (seenConnections.has(connectionKey)) return;
     seenConnections.add(connectionKey);
     configs.push(entry);
@@ -965,8 +965,9 @@ export function loadAllConfigs(): NamedConfig[] {
     if (Object.keys(parsedEnv).length === 0) continue;
 
     const storedConnections = readStoredCredentialBlocks(parsedEnv, {
-      includePrimary: false,
+      includePrimary: !explicitApiKeyFile,
       extraNamePrefix: candidate.extraNamePrefix,
+      primaryName: candidate.extraNamePrefix,
     });
 
     for (const stored of storedConnections) {

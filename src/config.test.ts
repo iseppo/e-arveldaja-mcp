@@ -291,6 +291,100 @@ describe("loadAllConfigs", () => {
     }
   });
 
+  it("loads distinct local and shared primary .env credential blocks as separate connections", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-dual-primary-env-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+
+    mkdirSync(workDir, { recursive: true });
+    mkdirSync(globalDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    writeFileSync(join(workDir, ".env"), [
+      "EARVELDAJA_SERVER=live",
+      "EARVELDAJA_API_KEY_ID=local-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=local-public",
+      "EARVELDAJA_API_PASSWORD=local-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    writeFileSync(join(globalDir, ".env"), [
+      "EARVELDAJA_SERVER=demo",
+      "EARVELDAJA_API_KEY_ID=global-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=global-public",
+      "EARVELDAJA_API_PASSWORD=global-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(configs).toHaveLength(2);
+      expect(configs[0]!.name).toBe("env");
+      expect(configs[0]!.config.apiKeyId).toBe("local-id");
+      expect(configs[0]!.config.baseUrl).toBe("https://rmp-api.rik.ee/v1");
+      expect(configs[1]!.name).toBe("env-global");
+      expect(configs[1]!.config.apiKeyId).toBe("global-id");
+      expect(configs[1]!.config.baseUrl).toBe("https://demo-rmp-api.rik.ee/v1");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps connections that only differ by password", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-password-distinct-env-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+
+    mkdirSync(workDir, { recursive: true });
+    mkdirSync(globalDir, { recursive: true });
+
+    for (const key of CONFIG_ENV_KEYS) {
+      delete process.env[key];
+    }
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+
+    writeFileSync(join(workDir, ".env"), [
+      "EARVELDAJA_SERVER=live",
+      "EARVELDAJA_API_KEY_ID=shared-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=shared-public",
+      "EARVELDAJA_API_PASSWORD=local-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    writeFileSync(join(globalDir, ".env"), [
+      "EARVELDAJA_SERVER=live",
+      "EARVELDAJA_API_KEY_ID=shared-id",
+      "EARVELDAJA_API_PUBLIC_VALUE=shared-public",
+      "EARVELDAJA_API_PASSWORD=global-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    process.chdir(workDir);
+
+    try {
+      const { loadDotenvFiles, loadAllConfigs } = await importFreshConfig(workDir);
+      loadDotenvFiles();
+      const configs = loadAllConfigs();
+
+      expect(configs).toHaveLength(2);
+      expect(configs[0]!.name).toBe("env");
+      expect(configs[0]!.config.apiPassword).toBe("local-secret");
+      expect(configs[1]!.name).toBe("env-global");
+      expect(configs[1]!.config.apiPassword).toBe("global-secret");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not let a partial shell credential block a complete env file", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-partial-shell-env-"));
     const workDir = join(tempDir, "work");

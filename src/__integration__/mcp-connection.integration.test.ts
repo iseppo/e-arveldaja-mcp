@@ -180,6 +180,29 @@ describe("MCP Server Integration", () => {
     expect(afterData.active).toBe(beforeData.active);
   });
 
+  it("switch_connection rejects non-integer indices before the handler runs", async () => {
+    const before = await client.callTool({ name: "list_connections", arguments: {} });
+    const beforeData = parseMcpResponse((before.content as any)[0].text);
+
+    let sawValidationFailure = false;
+    try {
+      const result = await client.callTool({ name: "switch_connection", arguments: { index: 0.5 } });
+      const resultData = parseMcpResponse((result.content as any)[0].text);
+      expect(result.isError).toBe(true);
+      expect(String((resultData as { error?: unknown }).error ?? JSON.stringify(resultData))).toMatch(/integer/i);
+      sawValidationFailure = true;
+    } catch (error) {
+      expect(String(error)).toMatch(/integer/i);
+      sawValidationFailure = true;
+    }
+
+    const after = await client.callTool({ name: "list_connections", arguments: {} });
+    const afterData = parseMcpResponse((after.content as any)[0].text);
+
+    expect(sawValidationFailure).toBe(true);
+    expect(afterData.active).toBe(beforeData.active);
+  });
+
   it("get_session_log applies ISO date filters end-to-end", async () => {
     await seedAuditLog([
       { timestamp: "2026-03-25T22:30:00Z", entityId: 101, summary: "Included entry" },
