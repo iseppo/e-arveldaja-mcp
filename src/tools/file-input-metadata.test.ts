@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { registerAccountingInboxTools } from "./accounting-inbox.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerLightyearTools } from "./lightyear-investments.js";
 import { registerPdfWorkflowTools } from "./pdf-workflow.js";
@@ -19,6 +20,7 @@ function getToolConfig(
 describe("file input tool metadata", () => {
   it("marks file and folder based tools as open-world", () => {
     const toolConfigs = [
+      getToolConfig(registerAccountingInboxTools, "prepare_accounting_inbox"),
       getToolConfig(registerPdfWorkflowTools, "extract_pdf_invoice"),
       getToolConfig(registerPdfWorkflowTools, "create_purchase_invoice_from_pdf"),
       getToolConfig(registerPdfWorkflowTools, "upload_invoice_document"),

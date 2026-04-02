@@ -44,6 +44,7 @@ import { registerReceiptInboxTools } from "./tools/receipt-inbox.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
 import { registerCamtImportTools } from "./tools/camt-import.js";
+import { registerAccountingInboxTools } from "./tools/accounting-inbox.js";
 import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
@@ -466,7 +467,7 @@ async function main() {
   }, {
     instructions: setupMode ? `Setup mode:
 - No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.
-- Local file-analysis tools such as extract_pdf_invoice, validate_invoice_data, scan_receipt_folder, parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
+- Local file-analysis tools such as prepare_accounting_inbox, extract_pdf_invoice, validate_invoice_data, scan_receipt_folder, parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
 - Call get_setup_instructions for the exact credential setup steps.
 - list_connections returns the currently configured connections (0 until credentials are added).
 - Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.
@@ -927,6 +928,7 @@ Reporting:
   registerLightyearTools(scopedServer, api);
   registerWiseImportTools(scopedServer, api);
   registerCamtImportTools(scopedServer, api);
+  registerAccountingInboxTools(scopedServer, api);
   registerAnalyzeUnconfirmedTools(scopedServer, api);
 
   // Register resources via scopedServer so reads stay pinned to the selected connection

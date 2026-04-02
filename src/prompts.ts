@@ -154,6 +154,69 @@ Follow these steps in order:
     })
   );
 
+  registerPrompt(server,
+    "accounting-inbox",
+    "Scan a workspace for likely accounting inputs, propose the next safe dry-run steps, and ask only the smallest necessary follow-up questions.",
+    {
+      workspace_path: z.string().optional().describe("Optional folder to scan for CAMT statements, Wise CSV files, and receipt folders"),
+    },
+    async ({ workspace_path }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Prepare the accounting inbox${workspace_path ? ` for: ${workspace_path}` : ""}.
+
+Follow these steps in order:
+
+1. Call \`prepare_accounting_inbox\`${workspace_path ? ` with workspace_path: "${workspace_path}"` : ""}.
+
+2. Treat the tool response as the planning source of truth:
+   - start from \`user_summary\`
+   - inspect \`detected_inputs\`
+   - inspect \`defaults\`
+   - inspect \`recommended_steps\`
+   - inspect \`questions\`
+   - inspect \`assistant_guidance\`
+
+3. Present the result in plain language first:
+   - what inputs were found
+   - what can be done immediately with safe dry runs
+   - what still needs one small decision
+   - whether anything already looks like accountant-review territory
+   Avoid raw internal field names unless they help the user make a concrete choice.
+
+4. If \`questions\` is non-empty:
+   - ask only the listed questions
+   - ask them one at a time
+   - always start with the recommended default
+   - if the user answers, re-run \`prepare_accounting_inbox\` with the selected override values before continuing
+
+5. If \`questions\` is empty or resolved:
+   - run the recommended dry-run steps in order
+   - prefer read-only previews such as \`parse_camt053\` before import dry runs
+   - do not use any \`execute: true\` mutation without explicit approval
+
+6. Keep the interaction decision-light:
+   - default to the suggested bank dimensions when the tool marks them as ready
+   - use the existing workflow prompts or tool descriptions for the detailed dry-run steps that follow
+   - only interrupt the user when a missing input or a genuine accounting judgment is still unresolved
+
+7. After each pass, summarize the state using these buckets:
+   - done automatically
+   - needs one decision
+   - needs accountant review
+
+8. If the tool says live defaults are unavailable because credentials are not configured:
+   - explain that workspace scanning still worked
+   - explain that bank-account defaults may need manual confirmation until credentials are configured
+   - keep the questions practical and recommendation-first
+`,
+        },
+      }],
+    })
+  );
+
   registerPrompt(server, 
     "book-invoice",
     "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, previews the booking, and creates + confirms the invoice after approval.",

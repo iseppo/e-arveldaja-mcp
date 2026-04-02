@@ -67,6 +67,7 @@ describe("registerPrompts", () => {
     const names = server.registerPrompt.mock.calls.map(([name]) => name);
     expect(names).toEqual([
       "setup-credentials",
+      "accounting-inbox",
       "book-invoice",
       "receipt-batch",
       "import-camt",
@@ -113,6 +114,25 @@ describe("registerPrompts", () => {
     expect(overviewText).toContain("get_setup_instructions");
     expect(overviewText).not.toContain("get_vat_info");
     expect(overviewText).not.toContain("compute_balance_sheet");
+  });
+
+  it("keeps accounting-inbox focused on recommendation-first discovery and dry runs", async () => {
+    const server = setupPromptServer({ setupInfo: buildSetupInfo() });
+    const text = await getPromptText(server, "accounting-inbox", {
+      workspace_path: "/tmp/accounting",
+    });
+
+    expect(text).toContain("prepare_accounting_inbox");
+    expect(text).toContain('workspace_path: "/tmp/accounting"');
+    expect(text).toContain("ask only the listed questions");
+    expect(text).toContain("always start with the recommended default");
+    expect(text).toContain("re-run `prepare_accounting_inbox`");
+    expect(text).toContain("run the recommended dry-run steps in order");
+    expect(text).toContain("do not use any `execute: true` mutation without explicit approval");
+    expect(text).toContain("done automatically");
+    expect(text).toContain("needs one decision");
+    expect(text).toContain("needs accountant review");
+    expect(text).not.toContain("get_setup_instructions");
   });
 
   it("keeps the book-invoice prompt aligned with real tool parameters and output fields", async () => {
