@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "fs";
 import { isAbsolute, resolve } from "path";
 import { z } from "zod";
 import { getProjectRoot } from "./paths.js";
+import { normalizeCompanyName } from "./company-name.js";
 
 const liabilityClassificationSchema = z.enum(["current", "non_current"]);
 const cashFlowCategorySchema = z.enum(["operating", "investing", "financing"]);
@@ -289,10 +290,18 @@ export function findAutoBookingRule(
   category?: z.infer<typeof transactionCategorySchema>,
 ): AccountingAutoBookingRule | undefined {
   const rules = loadAccountingRules();
-  return rules.auto_booking?.counterparties?.find((rule) =>
-    normalizedCounterparty.includes(rule.match.toLowerCase()) &&
-    (rule.category === undefined || rule.category === category),
+  const matches = rules.auto_booking?.counterparties?.filter((rule) =>
+    normalizedCounterparty.includes(
+      normalizeCompanyName(rule.match, { stripNonAlphanumeric: true }) || rule.match.trim().toLowerCase()
+    )
   );
+  if (!matches || matches.length === 0) {
+    return undefined;
+  }
+  if (category !== undefined) {
+    return matches.find(rule => rule.category === category) ?? matches.find(rule => rule.category === undefined);
+  }
+  return matches.find(rule => rule.category === undefined) ?? matches[0];
 }
 
 export function getLiabilityClassificationRule(accountId: number): LiabilityClassificationRule | undefined {

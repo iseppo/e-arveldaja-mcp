@@ -248,11 +248,35 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const requiresReview = requiresOwnerExpenseVatReview(expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng, description);
       const configuredMode = getOwnerExpenseVatDeductionModeForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionMode();
       const configuredRatio = getOwnerExpenseVatDeductionRatioForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionRatio();
+
+      if (vatRegistered && grossVat > 0 && vat_deduction_mode !== undefined && deductible_vat_amount !== undefined) {
+        const differenceFromFull = Math.abs(deductible_vat_amount - grossVat);
+        if (vat_deduction_mode === "none" && deductible_vat_amount > 0.01) {
+          return toolError({
+            error: "deductible_vat_amount conflicts with vat_deduction_mode='none'",
+            hint: "Suggested default: remove deductible_vat_amount or set it to 0 when VAT should be non-deductible.",
+          });
+        }
+        if (vat_deduction_mode === "full" && differenceFromFull >= 0.01) {
+          return toolError({
+            error: "deductible_vat_amount conflicts with vat_deduction_mode='full'",
+            hint: "Suggested default: omit deductible_vat_amount for full deduction, or pass the full VAT amount explicitly.",
+          });
+        }
+        if (vat_deduction_mode === "partial" && (deductible_vat_amount <= 0.01 || differenceFromFull < 0.01)) {
+          return toolError({
+            error: "deductible_vat_amount conflicts with vat_deduction_mode='partial'",
+            hint: "Suggested default: pass only the deductible VAT portion when vat_deduction_mode='partial'.",
+          });
+        }
+      }
+
       const deductionMode = !vatRegistered || grossVat <= 0
         ? "none"
-        : deductible_vat_amount !== undefined
-          ? (Math.abs(deductible_vat_amount - grossVat) < 0.01 ? "full" : "partial")
-          : vat_deduction_mode ?? configuredMode ?? "full";
+        : vat_deduction_mode
+          ?? (deductible_vat_amount !== undefined
+            ? (Math.abs(deductible_vat_amount - grossVat) < 0.01 ? "full" : "partial")
+            : configuredMode ?? "full");
 
       if (vatRegistered && grossVat > 0 && requiresReview && vat_deduction_mode === undefined && deductible_vat_amount === undefined && configuredMode === undefined) {
         return toolError({

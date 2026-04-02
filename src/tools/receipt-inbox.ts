@@ -364,6 +364,158 @@ function buildSuggestionFromRule(
   };
 }
 
+function inferReceiptAutoBookingCategory(
+  extracted: Pick<ExtractedReceiptFields, "supplier_name" | "description">,
+): TransactionClassificationCategory | undefined {
+  const text = `${extracted.supplier_name ?? ""} ${extracted.description ?? ""}`.toLowerCase();
+
+  if (/(bank|pank|fee|teenustasu|commission|service charge|haldustasu)/i.test(text)) {
+    return "bank_fees";
+  }
+  if (/(software|subscription|hosting|cloud|openai|google|zoom|slack|github|microsoft|internet|sideteenus)/i.test(text)) {
+    return "saas_subscriptions";
+  }
+  if (/(bolt|uber|taxi|parking|transport|wolt|restaurant|cafe|food|toit)/i.test(text)) {
+    return "card_purchases";
+  }
+  if (/(tax|emta|maks)/i.test(text)) {
+    return "tax_payments";
+  }
+
+  return undefined;
+}
+
+function resolveReceiptRuleTargets(
+  purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
+  accounts: Account[],
+  rule: AccountingAutoBookingRule,
+): {
+  article?: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>[number];
+  account?: Account;
+} {
+  const article = rule.purchase_article_id !== undefined
+    ? purchaseArticlesWithVat.find(candidate => candidate.id === rule.purchase_article_id)
+    : undefined;
+  const account = rule.purchase_account_id !== undefined
+    ? accounts.find(candidate => candidate.id === rule.purchase_account_id)
+    : article?.accounts_id !== undefined
+      ? accounts.find(candidate => candidate.id === article.accounts_id)
+      : undefined;
+
+  return { article, account };
+}
+
+function mergeReceiptAutoBookingRule(
+  bookingSuggestion: BookingSuggestion | undefined,
+  purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
+  accounts: Account[],
+  rule: AccountingAutoBookingRule,
+  description: string,
+): BookingSuggestion | undefined {
+  const { article, account } = resolveReceiptRuleTargets(purchaseArticlesWithVat, accounts, rule);
+  const baseItem = bookingSuggestion?.item;
+  let changed = false;
+
+  const mergedItem: PurchaseInvoiceItem = {
+    ...(baseItem ?? {}),
+    custom_title: baseItem?.custom_title ?? description,
+    amount: baseItem?.amount ?? 1,
+  };
+
+  const resolvedArticleId = article?.id ?? rule.purchase_article_id;
+  if (resolvedArticleId !== undefined && mergedItem.cl_purchase_articles_id !== resolvedArticleId) {
+    mergedItem.cl_purchase_articles_id = resolvedArticleId;
+    changed = true;
+  }
+
+  const resolvedAccountId = account?.id ?? article?.accounts_id ?? rule.purchase_account_id;
+  if (resolvedAccountId !== undefined && mergedItem.purchase_accounts_id !== resolvedAccountId) {
+    mergedItem.purchase_accounts_id = resolvedAccountId;
+    changed = true;
+  }
+
+  if (
+    rule.purchase_account_dimensions_id !== undefined &&
+    mergedItem.purchase_accounts_dimensions_id !== rule.purchase_account_dimensions_id
+  ) {
+    mergedItem.purchase_accounts_dimensions_id = rule.purchase_account_dimensions_id;
+    changed = true;
+  }
+
+  if (rule.vat_rate_dropdown !== undefined && mergedItem.vat_rate_dropdown !== rule.vat_rate_dropdown) {
+    mergedItem.vat_rate_dropdown = rule.vat_rate_dropdown;
+    changed = true;
+  }
+
+  if (rule.reversed_vat_id !== undefined && mergedItem.reversed_vat_id !== rule.reversed_vat_id) {
+    mergedItem.reversed_vat_id = rule.reversed_vat_id;
+    changed = true;
+  }
+
+  const mergedSuggestedAccount = account ?? bookingSuggestion?.suggested_account;
+  const mergedSuggestedArticle = article
+    ? { id: article.id, name: article.name_est || article.name_eng }
+    : bookingSuggestion?.suggested_purchase_article;
+  const mergedLiabilityAccountId = rule.liability_account_id ?? bookingSuggestion?.suggested_liability_account_id;
+
+  if (
+    rule.liability_account_id !== undefined &&
+    bookingSuggestion?.suggested_liability_account_id !== rule.liability_account_id
+  ) {
+    changed = true;
+  }
+
+  const hasBookingTarget = mergedItem.cl_purchase_articles_id !== undefined || mergedItem.purchase_accounts_id !== undefined;
+  if (!hasBookingTarget) {
+    return bookingSuggestion;
+  }
+
+  if (!changed && bookingSuggestion) {
+    return bookingSuggestion;
+  }
+
+  return {
+    source: "local_rules",
+    matched_invoice_id: bookingSuggestion?.matched_invoice_id,
+    matched_invoice_number: bookingSuggestion?.matched_invoice_number,
+    suggested_account: mergedSuggestedAccount,
+    suggested_purchase_article: mergedSuggestedArticle,
+    suggested_liability_account_id: mergedLiabilityAccountId,
+    item: mergedItem,
+  };
+}
+
+function applyReceiptAutoBookingRule(
+  bookingSuggestion: BookingSuggestion | undefined,
+  extracted: Pick<ExtractedReceiptFields, "supplier_name" | "description">,
+  context: Pick<ReceiptProcessingContext, "purchaseArticlesWithVat" | "accounts">,
+): BookingSuggestion | undefined {
+  if (bookingSuggestion?.source === "supplier_history") {
+    return bookingSuggestion;
+  }
+
+  const normalizedSupplier = normalizeCounterpartyName(extracted.supplier_name);
+  if (!normalizedSupplier) {
+    return bookingSuggestion;
+  }
+
+  const inferredCategory = inferReceiptAutoBookingCategory(extracted);
+  const rule = (inferredCategory
+    ? findAutoBookingRule(normalizedSupplier, inferredCategory)
+    : undefined) ?? findAutoBookingRule(normalizedSupplier);
+  if (!rule) {
+    return bookingSuggestion;
+  }
+
+  return mergeReceiptAutoBookingRule(
+    bookingSuggestion,
+    context.purchaseArticlesWithVat,
+    context.accounts,
+    rule,
+    extracted.description ?? extracted.supplier_name ?? "Receipt expense",
+  );
+}
+
 function buildClassificationSuggestion(
   purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
   accounts: Account[],
@@ -1150,13 +1302,17 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             notes.push("Dry run: supplier would need to be created before invoice creation.");
           }
 
-          const bookingSuggestion = resolvedClientId
+          const bookingSuggestion = applyReceiptAutoBookingRule(
+            resolvedClientId
             ? await suggestBookingInternal(api, context, resolvedClientId, extracted.description ?? extracted.supplier_name ?? "Receipt expense")
             : buildKeywordSuggestion(
               context.purchaseArticlesWithVat,
               context.accounts,
               `${extracted.description ?? ""} ${extracted.supplier_name ?? ""}`,
-            );
+            ),
+            extracted,
+            context,
+          );
 
           if (!bookingSuggestion) {
             notes.push("Could not find a purchase article / account suggestion for this receipt.");

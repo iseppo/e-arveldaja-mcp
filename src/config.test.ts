@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -11,13 +11,27 @@ const CONFIG_ENV_KEYS = [
   "EARVELDAJA_API_KEY_FILE",
   "EARVELDAJA_CONFIG_DIR",
 ] as const;
+const CONNECTION_ENV_KEY_RE = /^EARVELDAJA_CONNECTION_\d+_(?:SERVER|API_KEY_ID|API_PUBLIC_VALUE|API_PASSWORD)$/;
 
 const ORIGINAL_CWD = process.cwd();
 const ORIGINAL_ENV = Object.fromEntries(CONFIG_ENV_KEYS.map(key => [key, process.env[key]]));
+const ORIGINAL_CONNECTION_ENV = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => CONNECTION_ENV_KEY_RE.test(key)),
+);
+let isolatedConfigDir: string | undefined;
 
 function restoreConfigEnv(): void {
   for (const key of CONFIG_ENV_KEYS) {
     const value = ORIGINAL_ENV[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  for (const key of Object.keys(process.env)) {
+    if (CONNECTION_ENV_KEY_RE.test(key) && !(key in ORIGINAL_CONNECTION_ENV)) {
+      delete process.env[key];
+    }
+  }
+  for (const [key, value] of Object.entries(ORIGINAL_CONNECTION_ENV)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
@@ -26,6 +40,9 @@ function restoreConfigEnv(): void {
 async function importFreshConfig(packageRoot?: string) {
   vi.resetModules();
   vi.doUnmock("./paths.js");
+  if (isolatedConfigDir && !process.env.EARVELDAJA_CONFIG_DIR) {
+    process.env.EARVELDAJA_CONFIG_DIR = isolatedConfigDir;
+  }
   if (packageRoot) {
     vi.doMock("./paths.js", () => ({
       getProjectRoot: () => packageRoot,
@@ -34,9 +51,23 @@ async function importFreshConfig(packageRoot?: string) {
   return import("./config.js");
 }
 
+beforeEach(() => {
+  for (const key of Object.keys(process.env)) {
+    if (CONNECTION_ENV_KEY_RE.test(key)) {
+      delete process.env[key];
+    }
+  }
+  isolatedConfigDir = mkdtempSync(join(tmpdir(), "earveldaja-config-test-global-"));
+  process.env.EARVELDAJA_CONFIG_DIR = isolatedConfigDir;
+});
+
 afterEach(() => {
   process.chdir(ORIGINAL_CWD);
   restoreConfigEnv();
+  if (isolatedConfigDir) {
+    rmSync(isolatedConfigDir, { recursive: true, force: true });
+    isolatedConfigDir = undefined;
+  }
   vi.doUnmock("./paths.js");
   vi.resetModules();
 });

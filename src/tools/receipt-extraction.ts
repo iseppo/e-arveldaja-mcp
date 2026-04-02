@@ -194,7 +194,7 @@ export interface TransactionGroupClassification {
 
 export interface BookingSuggestion {
   item: PurchaseInvoiceItem;
-  source: "supplier_history" | "keyword_match" | "fallback";
+  source: "supplier_history" | "keyword_match" | "fallback" | "local_rules";
   matched_invoice_id?: number;
   matched_invoice_number?: string;
   suggested_liability_account_id?: number;

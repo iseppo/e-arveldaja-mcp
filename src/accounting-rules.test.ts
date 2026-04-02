@@ -71,6 +71,52 @@ Default VAT deduction mode: partial ratio 0.5
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("matches counterparty rules against normalized company names", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "accounting-rules.md");
+    writeFileSync(filePath, `# Accounting Rules
+
+## Auto Booking
+| match | purchase_article_id |
+| --- | --- |
+| Fraqmented OÜ | 501 |
+`, "utf-8");
+
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    expect(findAutoBookingRule("fraqmented", undefined)).toMatchObject({
+      purchase_article_id: 501,
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("prefers category-specific counterparty rules over generic supplier rules", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "accounting-rules.md");
+    writeFileSync(filePath, `# Accounting Rules
+
+## Auto Booking
+| match | category | purchase_article_id |
+| --- | --- | --- |
+| openai |  | 100 |
+| openai | saas_subscriptions | 501 |
+`, "utf-8");
+
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    expect(findAutoBookingRule("openai ireland limited", "saas_subscriptions")).toMatchObject({
+      purchase_article_id: 501,
+    });
+    expect(findAutoBookingRule("openai ireland limited", "unknown")).toMatchObject({
+      purchase_article_id: 100,
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("reloads rules after the markdown file changes", () => {
     const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
     const filePath = join(dir, "accounting-rules.md");

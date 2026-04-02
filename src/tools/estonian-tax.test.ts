@@ -493,6 +493,48 @@ describe("create_owner_expense_reimbursement", () => {
     expect(createCall.postings).toContainEqual({ accounts_id: 2110, type: "C", amount: 124 });
   });
 
+  it("rejects conflicting deductible_vat_amount when vat_deduction_mode='none'", async () => {
+    setup(true);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+
+    const result = await cb({
+      owner_client_id: 1,
+      effective_date: "2024-06-01",
+      description: "Office supplies",
+      net_amount: 100,
+      vat_rate: 0.24,
+      vat_deduction_mode: "none",
+      deductible_vat_amount: 24,
+      expense_account: 5000,
+    });
+
+    expect(isError(result)).toBe(true);
+    const payload = (result as { content: Array<{ text: string }> }).content[0]!.text;
+    expect(payload).toContain("conflicts with vat_deduction_mode='none'");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("rejects conflicting deductible_vat_amount when vat_deduction_mode='full'", async () => {
+    setup(true);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+
+    const result = await cb({
+      owner_client_id: 1,
+      effective_date: "2024-06-01",
+      description: "Office supplies",
+      net_amount: 100,
+      vat_rate: 0.24,
+      vat_deduction_mode: "full",
+      deductible_vat_amount: 10,
+      expense_account: 5000,
+    });
+
+    expect(isError(result)).toBe(true);
+    const payload = (result as { content: Array<{ text: string }> }).content[0]!.text;
+    expect(payload).toContain("conflicts with vat_deduction_mode='full'");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
   // -------------------------------------------------------------------------
   // Non-VAT company: full gross to expense account
   // -------------------------------------------------------------------------
