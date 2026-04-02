@@ -27,6 +27,7 @@ interface InboxFileCandidate {
   name: string;
   modified_at: string;
   size_bytes: number;
+  detected_iban?: string;
 }
 
 interface ReceiptFolderCandidate {
@@ -70,6 +71,16 @@ interface ScannedFileInfo {
 
 function dateIso(value: Date): string {
   return value.toISOString();
+}
+
+function normalizeIban(value: string | undefined | null): string | undefined {
+  const normalized = (value ?? "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  return normalized || undefined;
+}
+
+function extractFirstIban(text: string): string | undefined {
+  const match = text.match(/\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b/);
+  return normalizeIban(match?.[0]);
 }
 
 function isSetupModeApiError(error: unknown): boolean {
@@ -166,8 +177,8 @@ function looksLikeCamtFileName(name: string): boolean {
 async function detectCamtFiles(files: ScannedFileInfo[]): Promise<InboxFileCandidate[]> {
   const candidates: InboxFileCandidate[] = [];
   for (const file of files.filter(candidate => candidate.extension === ".xml")) {
+    const snippet = await readFileSnippet(file.path);
     const nameLooksRight = looksLikeCamtFileName(file.name);
-    const snippet = nameLooksRight ? "" : await readFileSnippet(file.path);
     if (
       nameLooksRight ||
       /BkToCstmrStmt|urn:iso:std:iso:20022:tech:xsd:camt\.053|<Document/i.test(snippet)
@@ -177,6 +188,7 @@ async function detectCamtFiles(files: ScannedFileInfo[]): Promise<InboxFileCandi
         name: file.name,
         modified_at: file.modified_at,
         size_bytes: file.size_bytes,
+        detected_iban: extractFirstIban(snippet),
       });
     }
   }
@@ -282,6 +294,16 @@ function pickSingleCandidateByPattern(
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+function pickSingleCandidateByIban(
+  candidates: BankDimensionCandidate[],
+  iban: string | undefined,
+): BankDimensionCandidate | undefined {
+  const normalizedIban = normalizeIban(iban);
+  if (!normalizedIban) return undefined;
+  const matches = candidates.filter(candidate => normalizeIban(candidate.iban) === normalizedIban);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 function buildBankDefaults(
   bankAccounts: BankAccount[],
   accountDimensions: AccountDimension[],
@@ -316,7 +338,41 @@ function buildBankDefaults(
     suggested_receipt_dimension_id: suggestedReceiptDimensionId,
     suggested_wise_dimension_id: wiseCandidate?.accounts_dimensions_id,
     suggested_wise_fee_dimension_id: suggestedWiseFeeDimensionId,
+    bank_dimension_from_override: overrides.bank_account_dimension_id !== undefined,
   };
+}
+
+function resolveSuggestedCamtDimensionId(
+  file: InboxFileCandidate,
+  defaults: ReturnType<typeof buildBankDefaults>,
+): number | undefined {
+  if (defaults.bank_dimension_from_override) {
+    return defaults.suggested_bank_dimension_id;
+  }
+
+  return pickSingleCandidateByIban(defaults.local_bank_candidates, file.detected_iban)?.accounts_dimensions_id ??
+    defaults.suggested_bank_dimension_id;
+}
+
+function buildCamtImportReason(
+  file: InboxFileCandidate,
+  dimensionId: number | undefined,
+  defaults: ReturnType<typeof buildBankDefaults>,
+): string {
+  if (dimensionId === undefined) {
+    return "A bank account dimension is still needed before the statement can be imported safely.";
+  }
+
+  if (defaults.bank_dimension_from_override) {
+    return `Using the explicit bank dimension override ${dimensionId}. Run dry first, then ask for approval before execute=true.`;
+  }
+
+  const ibanMatch = pickSingleCandidateByIban(defaults.local_bank_candidates, file.detected_iban);
+  if (ibanMatch) {
+    return `Matched CAMT statement IBAN ${file.detected_iban} to ${ibanMatch.label} (${dimensionId}). Run dry first, then ask for approval before execute=true.`;
+  }
+
+  return `Recommended default bank dimension: ${dimensionId}. Run dry first, then ask for approval before execute=true.`;
 }
 
 function buildMissingDimensionQuestion(
@@ -358,7 +414,7 @@ function buildRecommendedSteps(params: {
       reason: `Detected CAMT statement ${file.name}. Start with a read-only parse so the user sees what will be imported.`,
     });
 
-    const dimensionId = defaults.suggested_bank_dimension_id;
+    const dimensionId = resolveSuggestedCamtDimensionId(file, defaults);
     const missingInputs = dimensionId === undefined ? ["accounts_dimensions_id"] : [];
     steps.push({
       step: stepNumber++,
@@ -371,13 +427,11 @@ function buildRecommendedSteps(params: {
         execute: false,
       },
       missing_inputs: missingInputs,
-      reason: dimensionId !== undefined
-        ? `Recommended default bank dimension: ${dimensionId}. Run dry first, then ask for approval before execute=true.`
-        : "A bank account dimension is still needed before the statement can be imported safely.",
+      reason: buildCamtImportReason(file, dimensionId, defaults),
     });
   }
 
-  if (camtFiles.length > 0 && defaults.suggested_bank_dimension_id === undefined) {
+  if (camtFiles.some(file => resolveSuggestedCamtDimensionId(file, defaults) === undefined)) {
     questions.push(buildMissingDimensionQuestion(
       "camt_accounts_dimensions_id",
       "Which bank account dimension should be used for the detected CAMT statement(s)?",
@@ -520,6 +574,10 @@ function buildUserSummary(params: {
   return parts.join(" ");
 }
 
+function pickNextRecommendedAction(steps: RecommendedStep[]): RecommendedStep | undefined {
+  return steps.find(step => step.recommended && step.missing_inputs.length === 0);
+}
+
 export function registerAccountingInboxTools(server: McpServer, api: ApiContext): void {
   registerTool(server,
     "prepare_accounting_inbox",
@@ -589,6 +647,8 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
         },
         recommended_steps: steps,
         questions,
+        next_question: questions[0],
+        next_recommended_action: pickNextRecommendedAction(steps),
         assistant_guidance: [
           "Ask only the questions listed under questions, and always start with the recommendation.",
           "Run dry-run steps before any execute=true mutation.",

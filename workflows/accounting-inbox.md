@@ -17,6 +17,8 @@ Treat the tool response as the planning source of truth:
 - `user_summary`
 - `detected_inputs`
 - `defaults`
+- `next_recommended_action`
+- `next_question`
 - `recommended_steps`
 - `questions`
 - `assistant_guidance`
@@ -40,6 +42,9 @@ If `questions` is non-empty:
 - if the user answers, re-run `prepare_accounting_inbox` with the chosen override values before continuing
 
 If `questions` is empty, continue immediately.
+
+If `next_recommended_action` is present, treat it as the default next safe step.
+If `next_question` is present, use it as the first follow-up question when no safer dry-run step should happen first.
 
 ### Step 4: Run the recommended dry-run steps
 

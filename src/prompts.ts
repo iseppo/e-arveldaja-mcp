@@ -175,6 +175,8 @@ Follow these steps in order:
    - start from \`user_summary\`
    - inspect \`detected_inputs\`
    - inspect \`defaults\`
+   - inspect \`next_recommended_action\`
+   - inspect \`next_question\`
    - inspect \`recommended_steps\`
    - inspect \`questions\`
    - inspect \`assistant_guidance\`
@@ -192,22 +194,26 @@ Follow these steps in order:
    - always start with the recommended default
    - if the user answers, re-run \`prepare_accounting_inbox\` with the selected override values before continuing
 
-5. If \`questions\` is empty or resolved:
+5. Prefer the tool's first-action hints when present:
+   - if \`next_recommended_action\` is present, treat it as the default next safe step
+   - if \`next_question\` is present, use it as the first follow-up question when no safer dry-run step should happen first
+
+6. If \`questions\` is empty or resolved:
    - run the recommended dry-run steps in order
    - prefer read-only previews such as \`parse_camt053\` before import dry runs
    - do not use any \`execute: true\` mutation without explicit approval
 
-6. Keep the interaction decision-light:
+7. Keep the interaction decision-light:
    - default to the suggested bank dimensions when the tool marks them as ready
    - use the existing workflow prompts or tool descriptions for the detailed dry-run steps that follow
    - only interrupt the user when a missing input or a genuine accounting judgment is still unresolved
 
-7. After each pass, summarize the state using these buckets:
+8. After each pass, summarize the state using these buckets:
    - done automatically
    - needs one decision
    - needs accountant review
 
-8. If the tool says live defaults are unavailable because credentials are not configured:
+9. If the tool says live defaults are unavailable because credentials are not configured:
    - explain that workspace scanning still worked
    - explain that bank-account defaults may need manual confirmation until credentials are configured
    - keep the questions practical and recommendation-first

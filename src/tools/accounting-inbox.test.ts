@@ -29,6 +29,7 @@ async function createWorkspace(options: {
   includeCamt?: boolean;
   includeWise?: boolean;
   includeReceipts?: boolean;
+  camtIban?: string;
 } = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "accounting-inbox-"));
 
@@ -37,7 +38,13 @@ async function createWorkspace(options: {
       join(root, "statement.xml"),
       `<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
-  <BkToCstmrStmt />
+  <BkToCstmrStmt>
+    <Stmt>
+      <Acct>
+        <Id><IBAN>${options.camtIban ?? "EE637700771011212909"}</IBAN></Id>
+      </Acct>
+    </Stmt>
+  </BkToCstmrStmt>
 </Document>`,
     );
   }
@@ -81,14 +88,14 @@ describe("prepare_accounting_inbox", () => {
           {
             accounts_dimensions_id: 101,
             account_name_est: "LHV arvelduskonto",
-            account_no: "EE111",
-            iban_code: "EE111",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
           },
           {
             accounts_dimensions_id: 202,
             account_name_est: "Wise konto",
-            account_no: "BE222",
-            iban_code: "BE222",
+            account_no: "BE62510007547061",
+            iban_code: "BE62510007547061",
           },
         ]),
         getAccountDimensions: vi.fn().mockResolvedValue([
@@ -125,12 +132,16 @@ describe("prepare_accounting_inbox", () => {
       "reconcile_inter_account_transfers",
     ]);
     expect(payload.questions).toEqual([]);
+    expect(payload.next_question).toBeUndefined();
+    expect(payload.next_recommended_action).toEqual(expect.objectContaining({
+      tool: "parse_camt053",
+    }));
     expect(payload.assistant_guidance).toContain(
       "Ask only the questions listed under questions, and always start with the recommendation.",
     );
   });
 
-  it("asks for the smallest missing bank-dimension decisions when local accounts are ambiguous", async () => {
+  it("uses CAMT statement IBAN to avoid unnecessary bank-dimension questions", async () => {
     const workspace = await createWorkspace({ includeWise: false });
     workspacesToClean.push(workspace);
 
@@ -140,14 +151,14 @@ describe("prepare_accounting_inbox", () => {
           {
             accounts_dimensions_id: 101,
             account_name_est: "LHV põhikonto",
-            account_no: "EE111",
-            iban_code: "EE111",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
           },
           {
             accounts_dimensions_id: 102,
             account_name_est: "SEB põhikonto",
-            account_no: "EE222",
-            iban_code: "EE222",
+            account_no: "EE381010220123456789",
+            iban_code: "EE381010220123456789",
           },
         ]),
         getAccountDimensions: vi.fn().mockResolvedValue([]),
@@ -160,6 +171,60 @@ describe("prepare_accounting_inbox", () => {
     expect(payload.defaults.suggested_bank_dimension_id).toBeUndefined();
     expect(payload.defaults.suggested_receipt_matching_dimension_id).toBeUndefined();
     expect(payload.questions.map((question: any) => question.id)).toEqual([
+      "receipt_accounts_dimensions_id",
+    ]);
+    expect(payload.recommended_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "import_camt053",
+        recommended: true,
+        suggested_args: expect.objectContaining({
+          accounts_dimensions_id: 101,
+        }),
+        missing_inputs: [],
+      }),
+      expect.objectContaining({
+        tool: "process_receipt_batch",
+        recommended: false,
+        missing_inputs: ["accounts_dimensions_id"],
+      }),
+    ]));
+    expect(payload.next_question).toEqual(expect.objectContaining({
+      id: "receipt_accounts_dimensions_id",
+    }));
+    expect(payload.next_recommended_action).toEqual(expect.objectContaining({
+      tool: "parse_camt053",
+    }));
+    expect(payload.user_summary).toContain("small decision");
+  });
+
+  it("still asks for CAMT bank dimension when ambiguous accounts cannot be matched by IBAN", async () => {
+    const workspace = await createWorkspace({ includeWise: false, camtIban: "EE001234567890123456" });
+    workspacesToClean.push(workspace);
+
+    const { handler } = setupAccountingInboxTool({
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          {
+            accounts_dimensions_id: 101,
+            account_name_est: "LHV põhikonto",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
+          },
+          {
+            accounts_dimensions_id: 102,
+            account_name_est: "SEB põhikonto",
+            account_no: "EE381010220123456789",
+            iban_code: "EE381010220123456789",
+          },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+    });
+
+    const result = await handler({ workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.questions.map((question: any) => question.id)).toEqual([
       "camt_accounts_dimensions_id",
       "receipt_accounts_dimensions_id",
     ]);
@@ -169,13 +234,7 @@ describe("prepare_accounting_inbox", () => {
         recommended: false,
         missing_inputs: ["accounts_dimensions_id"],
       }),
-      expect.objectContaining({
-        tool: "process_receipt_batch",
-        recommended: false,
-        missing_inputs: ["accounts_dimensions_id"],
-      }),
     ]));
-    expect(payload.user_summary).toContain("small decision");
   });
 
   it("still provides a usable scan plan when live defaults are unavailable in setup mode", async () => {
@@ -200,6 +259,12 @@ describe("prepare_accounting_inbox", () => {
       "camt_accounts_dimensions_id",
       "wise_accounts_dimensions_id",
     ]);
+    expect(payload.next_question).toEqual(expect.objectContaining({
+      id: "camt_accounts_dimensions_id",
+    }));
+    expect(payload.next_recommended_action).toEqual(expect.objectContaining({
+      tool: "parse_camt053",
+    }));
     expect(payload.assistant_guidance).toContain(
       "Live bank-account defaults were unavailable because credentials are not configured yet. File scanning still works, but bank dimension defaults may need manual confirmation.",
     );

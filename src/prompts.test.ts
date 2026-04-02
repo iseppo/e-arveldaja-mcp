@@ -124,9 +124,12 @@ describe("registerPrompts", () => {
 
     expect(text).toContain("prepare_accounting_inbox");
     expect(text).toContain('workspace_path: "/tmp/accounting"');
+    expect(text).toContain("next_recommended_action");
+    expect(text).toContain("next_question");
     expect(text).toContain("ask only the listed questions");
     expect(text).toContain("always start with the recommended default");
     expect(text).toContain("re-run `prepare_accounting_inbox`");
+    expect(text).toContain("treat it as the default next safe step");
     expect(text).toContain("run the recommended dry-run steps in order");
     expect(text).toContain("do not use any `execute: true` mutation without explicit approval");
     expect(text).toContain("done automatically");
@@ -351,6 +354,8 @@ describe("registerPrompts", () => {
     for (const relativePath of ["workflows/accounting-inbox.md", ".claude/commands/accounting-inbox.md"]) {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("prepare_accounting_inbox");
+      expect(text).toContain("next_recommended_action");
+      expect(text).toContain("next_question");
       expect(text).toContain("recommended default");
       expect(text).toContain("ask only the listed questions");
       expect(text).toContain("re-run `prepare_accounting_inbox`");
