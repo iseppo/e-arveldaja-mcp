@@ -122,15 +122,17 @@ describe("registerPrompts", () => {
       workspace_path: "/tmp/accounting",
     });
 
-    expect(text).toContain("prepare_accounting_inbox");
+    expect(text).toContain("run_accounting_inbox_dry_runs");
     expect(text).toContain('workspace_path: "/tmp/accounting"');
-    expect(text).toContain("next_recommended_action");
-    expect(text).toContain("next_question");
-    expect(text).toContain("ask only the listed questions");
+    expect(text).toContain("prepared_inbox");
+    expect(text).toContain("autopilot.executed_steps");
+    expect(text).toContain("autopilot.needs_one_decision");
+    expect(text).toContain("autopilot.next_question");
+    expect(text).toContain("ask only those listed questions");
     expect(text).toContain("always start with the recommended default");
-    expect(text).toContain("re-run `prepare_accounting_inbox`");
+    expect(text).toContain("re-run `run_accounting_inbox_dry_runs`");
     expect(text).toContain("treat it as the default next safe step");
-    expect(text).toContain("run the recommended dry-run steps in order");
+    expect(text).toContain("dry runs were already completed automatically");
     expect(text).toContain("do not use any `execute: true` mutation without explicit approval");
     expect(text).toContain("done automatically");
     expect(text).toContain("needs one decision");
@@ -353,14 +355,13 @@ describe("registerPrompts", () => {
   it("keeps shipped accounting-inbox markdown prompts aligned with recommendation-first triage", () => {
     for (const relativePath of ["workflows/accounting-inbox.md", ".claude/commands/accounting-inbox.md"]) {
       const text = readPromptSurface(relativePath);
-      expect(text).toContain("prepare_accounting_inbox");
-      expect(text).toContain("next_recommended_action");
-      expect(text).toContain("next_question");
+      expect(text).toContain("run_accounting_inbox_dry_runs");
+      expect(text).toContain("autopilot.executed_steps");
+      expect(text).toContain("autopilot.next_recommended_action");
+      expect(text).toContain("autopilot.next_question");
       expect(text).toContain("recommended default");
-      expect(text).toContain("ask only the listed questions");
-      expect(text).toContain("re-run `prepare_accounting_inbox`");
-      expect(text).toContain("execute: false");
-      expect(text).toContain("execute: true");
+      expect(text).toContain("ask only those listed questions");
+      expect(text).toContain("re-run `run_accounting_inbox_dry_runs`");
       expect(text).toContain("done automatically");
       expect(text).toContain("needs one decision");
       expect(text).toContain("needs accountant review");

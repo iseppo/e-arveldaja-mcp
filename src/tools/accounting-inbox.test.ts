@@ -8,9 +8,31 @@ import { registerAccountingInboxTools } from "./accounting-inbox.js";
 function setupAccountingInboxTool(apiOverrides: Record<string, unknown> = {}) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
+    clients: {
+      findByCode: vi.fn().mockResolvedValue(undefined),
+      findByName: vi.fn().mockResolvedValue([]),
+      listAll: vi.fn().mockResolvedValue([]),
+    },
+    journals: {
+      listAllWithPostings: vi.fn().mockResolvedValue([]),
+    },
+    products: {},
+    saleInvoices: {
+      listAll: vi.fn().mockResolvedValue([]),
+    },
+    purchaseInvoices: {
+      listAll: vi.fn().mockResolvedValue([]),
+    },
+    transactions: {
+      listAll: vi.fn().mockResolvedValue([]),
+    },
     readonly: {
       getBankAccounts: vi.fn().mockResolvedValue([]),
       getAccountDimensions: vi.fn().mockResolvedValue([]),
+      getAccounts: vi.fn().mockResolvedValue([]),
+      getPurchaseArticles: vi.fn().mockResolvedValue([]),
+      getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+      getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
     },
     ...apiOverrides,
   } as any;
@@ -269,5 +291,134 @@ describe("prepare_accounting_inbox", () => {
       "Live bank-account defaults were unavailable because credentials are not configured yet. File scanning still works, but bank dimension defaults may need manual confirmation.",
     );
     expect(payload.user_summary).toContain("credentials are not configured yet");
+  });
+
+  it("runs the safe automatic dry-run first pass and returns one consolidated preview", async () => {
+    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(undefined),
+        findByName: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      journals: {
+        listAllWithPostings: vi.fn().mockResolvedValue([]),
+      },
+      products: {},
+      saleInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          {
+            accounts_dimensions_id: 101,
+            account_name_est: "LHV põhikonto",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
+          },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          {
+            id: 101,
+            accounts_id: 1020,
+            title_est: "LHV põhikonto",
+            is_deleted: false,
+          },
+        ]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Autopilot tool was not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({ workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.prepared_inbox.detected_inputs.camt_files).toHaveLength(1);
+    expect(payload.autopilot.executed_step_count).toBe(3);
+    expect(payload.autopilot.executed_steps.map((step: any) => step.tool)).toEqual([
+      "parse_camt053",
+      "import_camt053",
+      "classify_unmatched_transactions",
+    ]);
+    expect(payload.autopilot.done_automatically).toEqual(expect.arrayContaining([
+      expect.stringContaining("Parsed CAMT preview"),
+      expect.stringContaining("CAMT dry run would create"),
+      expect.stringContaining("Classified 0 unmatched transaction"),
+    ]));
+    expect(payload.autopilot.needs_one_decision).toEqual([]);
+    expect(payload.autopilot.next_question).toBeUndefined();
+  });
+
+  it("keeps autopilot useful in setup mode by running only the local preview step", async () => {
+    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    const setupError = Object.assign(new Error("setup"), { mode: "setup" });
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(undefined),
+        findByName: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      journals: {
+        listAllWithPostings: vi.fn().mockResolvedValue([]),
+      },
+      products: {},
+      saleInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      readonly: {
+        getBankAccounts: vi.fn().mockRejectedValue(setupError),
+        getAccountDimensions: vi.fn().mockRejectedValue(setupError),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({}),
+        getInvoiceInfo: vi.fn().mockResolvedValue({}),
+      },
+    } as any);
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Autopilot tool was not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({ workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.autopilot.executed_step_count).toBe(1);
+    expect(payload.autopilot.executed_steps[0]).toEqual(expect.objectContaining({
+      tool: "parse_camt053",
+      status: "completed",
+    }));
+    expect(payload.autopilot.skipped_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "import_camt053",
+        status: "skipped",
+      }),
+    ]));
+    expect(payload.autopilot.needs_one_decision).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: "camt_accounts_dimensions_id",
+      }),
+    ]));
   });
 });

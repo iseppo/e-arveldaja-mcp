@@ -3,12 +3,16 @@ import { open, readdir, realpath, stat } from "fs/promises";
 import { basename, extname, resolve } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { parseMcpResponse, toMcpJson } from "../mcp-json.js";
 import { readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
 import type { AccountDimension, BankAccount } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
+import { registerCamtImportTools } from "./camt-import.js";
+import { registerWiseImportTools } from "./wise-import.js";
+import { registerReceiptInboxTools } from "./receipt-inbox.js";
+import { registerBankReconciliationTools } from "./bank-reconciliation.js";
 
 const RECEIPT_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
 const DEFAULT_SCAN_DEPTH = 2;
@@ -68,6 +72,41 @@ interface ScannedFileInfo {
   modified_at: string;
   size_bytes: number;
 }
+
+interface PreparedInboxData {
+  workspacePath: string;
+  scan: {
+    max_depth: number;
+    scanned_directories: number;
+    scanned_candidate_files: number;
+    truncated: boolean;
+  };
+  camtFiles: InboxFileCandidate[];
+  wiseFiles: InboxFileCandidate[];
+  receiptFolders: ReceiptFolderCandidate[];
+  defaults: ReturnType<typeof buildBankDefaults>;
+  steps: RecommendedStep[];
+  questions: InboxQuestion[];
+  liveApiDefaultsAvailable: boolean;
+}
+
+interface AutopilotStepResult {
+  step: number;
+  tool: string;
+  status: "completed" | "skipped" | "failed";
+  purpose: string;
+  summary: string;
+  suggested_args: Record<string, unknown>;
+  preview?: Record<string, unknown>;
+}
+
+interface AutopilotFollowUp {
+  source: string;
+  summary: string;
+  recommendation?: string;
+}
+
+type InternalToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text?: string }> }>;
 
 function dateIso(value: Date): string {
   return value.toISOString();
@@ -578,6 +617,311 @@ function pickNextRecommendedAction(steps: RecommendedStep[]): RecommendedStep | 
   return steps.find(step => step.recommended && step.missing_inputs.length === 0);
 }
 
+function buildPreparedInboxPayload(prepared: PreparedInboxData): Record<string, unknown> {
+  return {
+    workspace_path: prepared.workspacePath,
+    scan: prepared.scan,
+    detected_inputs: {
+      camt_files: prepared.camtFiles,
+      wise_csv_files: prepared.wiseFiles,
+      receipt_folders: prepared.receiptFolders,
+    },
+    defaults: {
+      live_api_defaults_available: prepared.liveApiDefaultsAvailable,
+      suggested_bank_dimension_id: prepared.defaults.suggested_bank_dimension_id,
+      suggested_receipt_matching_dimension_id: prepared.defaults.suggested_receipt_dimension_id,
+      suggested_wise_account_dimension_id: prepared.defaults.suggested_wise_dimension_id,
+      suggested_wise_fee_dimension_id: prepared.defaults.suggested_wise_fee_dimension_id,
+      bank_dimension_candidates: prepared.defaults.candidates,
+    },
+    recommended_steps: prepared.steps,
+    questions: prepared.questions,
+    next_question: prepared.questions[0],
+    next_recommended_action: pickNextRecommendedAction(prepared.steps),
+    assistant_guidance: [
+      "Ask only the questions listed under questions, and always start with the recommendation.",
+      "Run dry-run steps before any execute=true mutation.",
+      "Summarize work as: done automatically, needs one decision, and needs accountant review.",
+      ...(prepared.liveApiDefaultsAvailable
+        ? []
+        : ["Live bank-account defaults were unavailable because credentials are not configured yet. File scanning still works, but bank dimension defaults may need manual confirmation."]),
+    ],
+    user_summary: buildUserSummary({
+      camtFiles: prepared.camtFiles,
+      wiseFiles: prepared.wiseFiles,
+      receiptFolders: prepared.receiptFolders,
+      questions: prepared.questions,
+      steps: prepared.steps,
+      liveApiDefaultsAvailable: prepared.liveApiDefaultsAvailable,
+    }),
+  };
+}
+
+async function prepareAccountingInbox(
+  api: ApiContext,
+  params: {
+    workspace_path?: string;
+    max_depth?: number;
+    bank_account_dimension_id?: number;
+    receipt_matching_dimension_id?: number;
+    wise_account_dimension_id?: number;
+  },
+): Promise<PreparedInboxData> {
+  const root = await validateWorkspacePath(params.workspace_path);
+  const depth = params.max_depth ?? DEFAULT_SCAN_DEPTH;
+  const { files, scanned_directories, truncated } = await scanWorkspaceFiles(root, depth);
+  let bankAccounts: BankAccount[] = [];
+  let accountDimensions: AccountDimension[] = [];
+  let liveApiDefaultsAvailable = true;
+  try {
+    [bankAccounts, accountDimensions] = await Promise.all([
+      api.readonly.getBankAccounts(),
+      api.readonly.getAccountDimensions(),
+    ]);
+  } catch (error) {
+    if (!isSetupModeApiError(error)) throw error;
+    liveApiDefaultsAvailable = false;
+  }
+
+  const [camtFiles, wiseFiles] = await Promise.all([
+    detectCamtFiles(files),
+    detectWiseCsvFiles(files),
+  ]);
+  const receiptFolders = detectReceiptFolders(files);
+  const defaults = buildBankDefaults(bankAccounts, accountDimensions, {
+    bank_account_dimension_id: params.bank_account_dimension_id,
+    receipt_matching_dimension_id: params.receipt_matching_dimension_id,
+    wise_account_dimension_id: params.wise_account_dimension_id,
+  });
+  const { steps, questions } = buildRecommendedSteps({
+    camtFiles,
+    wiseFiles,
+    receiptFolders,
+    defaults,
+  });
+
+  return {
+    workspacePath: root,
+    scan: {
+      max_depth: depth,
+      scanned_directories,
+      scanned_candidate_files: files.length,
+      truncated,
+    },
+    camtFiles,
+    wiseFiles,
+    receiptFolders,
+    defaults,
+    steps,
+    questions,
+    liveApiDefaultsAvailable,
+  };
+}
+
+function captureInternalToolHandlers(api: ApiContext): Map<string, InternalToolHandler> {
+  const handlers = new Map<string, InternalToolHandler>();
+  const server = {
+    registerTool(name: string, _config: unknown, handler: InternalToolHandler) {
+      handlers.set(name, handler);
+    },
+  } as unknown as McpServer;
+
+  registerCamtImportTools(server, api);
+  registerWiseImportTools(server, api);
+  registerReceiptInboxTools(server, api);
+  registerBankReconciliationTools(server, api);
+
+  return handlers;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function numberAt(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  return typeof value === "number" ? value : undefined;
+}
+
+function stringAt(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function arrayAt(record: Record<string, unknown>, key: string): unknown[] {
+  const value = record[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function recordAt(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = record[key];
+  return isRecord(value) ? value : undefined;
+}
+
+async function invokeInternalTool(
+  handlers: Map<string, InternalToolHandler>,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const handler = handlers.get(tool);
+  if (!handler) {
+    throw new Error(`Internal inbox autopilot could not find tool handler for ${tool}`);
+  }
+
+  const result = await handler(args);
+  const text = result.content[0]?.text;
+  if (!text) {
+    throw new Error(`Internal inbox autopilot received no text payload from ${tool}`);
+  }
+
+  const parsed = parseMcpResponse(text);
+  if (!isRecord(parsed)) {
+    throw new Error(`Internal inbox autopilot expected an object payload from ${tool}`);
+  }
+  return parsed;
+}
+
+function summarizeAutopilotToolResult(
+  tool: string,
+  payload: Record<string, unknown>,
+): { summary: string; preview?: Record<string, unknown>; followUps: AutopilotFollowUp[] } {
+  switch (tool) {
+    case "parse_camt053": {
+      const summary = recordAt(payload, "summary") ?? {};
+      return {
+        summary: `Parsed CAMT preview with ${numberAt(summary, "entry_count") ?? 0} entries and ${numberAt(summary, "duplicate_count") ?? 0} duplicate hint(s) inside the statement.`,
+        preview: {
+          entry_count: numberAt(summary, "entry_count") ?? 0,
+          duplicate_count: numberAt(summary, "duplicate_count") ?? 0,
+          iban: recordAt(payload, "statement_metadata") ? stringAt(recordAt(payload, "statement_metadata")!, "iban") : undefined,
+        },
+        followUps: [],
+      };
+    }
+    case "import_camt053": {
+      const execution = recordAt(payload, "execution") ?? {};
+      const summary = recordAt(execution, "summary") ?? {};
+      const reviewCount = arrayAt(execution, "needs_review").length;
+      return {
+        summary: `CAMT dry run would create ${numberAt(summary, "created_count") ?? 0} transaction(s), skip ${numberAt(summary, "skipped_count") ?? 0}, raise ${reviewCount} possible duplicate review item(s), and report ${numberAt(summary, "error_count") ?? 0} error(s).`,
+        preview: {
+          created_count: numberAt(summary, "created_count") ?? 0,
+          skipped_count: numberAt(summary, "skipped_count") ?? 0,
+          possible_duplicate_count: reviewCount,
+          error_count: numberAt(summary, "error_count") ?? 0,
+        },
+        followUps: reviewCount > 0
+          ? [{
+              source: tool,
+              summary: `${reviewCount} CAMT row(s) look like possible duplicates against older manual transactions.`,
+              recommendation: "Review those duplicate candidates before executing the import.",
+            }]
+          : [],
+      };
+    }
+    case "import_wise_transactions": {
+      const execution = recordAt(payload, "execution") ?? {};
+      const summary = recordAt(execution, "summary") ?? {};
+      const errorCount = numberAt(summary, "error_count") ?? 0;
+      return {
+        summary: `Wise dry run would create ${numberAt(summary, "created") ?? 0} transaction(s), skip ${numberAt(summary, "skipped") ?? 0}, and report ${errorCount} error(s).`,
+        preview: {
+          created: numberAt(summary, "created") ?? 0,
+          skipped: numberAt(summary, "skipped") ?? 0,
+          error_count: errorCount,
+        },
+        followUps: errorCount > 0
+          ? [{
+              source: tool,
+              summary: `${errorCount} Wise CSV row(s) still failed preview.`,
+              recommendation: "Review the Wise import errors before execute=true.",
+            }]
+          : [],
+      };
+    }
+    case "process_receipt_batch": {
+      const execution = recordAt(payload, "execution") ?? {};
+      const summary = recordAt(execution, "summary") ?? {};
+      const reviewCount = numberAt(summary, "needs_review") ?? 0;
+      const failedCount = numberAt(summary, "failed") ?? 0;
+      const followUps: AutopilotFollowUp[] = [];
+      if (reviewCount > 0) {
+        followUps.push({
+          source: tool,
+          summary: `${reviewCount} receipt(s) still need manual review after dry run.`,
+          recommendation: "Review only the flagged receipts instead of the whole folder.",
+        });
+      }
+      if (failedCount > 0) {
+        followUps.push({
+          source: tool,
+          summary: `${failedCount} receipt(s) failed the dry run completely.`,
+          recommendation: "Inspect the exact extraction or booking errors before retrying.",
+        });
+      }
+      return {
+        summary: `Receipt dry run would create ${numberAt(summary, "created") ?? 0} invoice(s), match ${numberAt(summary, "matched") ?? 0}, skip ${numberAt(summary, "skipped_duplicate") ?? 0} duplicate(s), leave ${reviewCount} in review, and fail ${failedCount}.`,
+        preview: {
+          created: numberAt(summary, "created") ?? 0,
+          matched: numberAt(summary, "matched") ?? 0,
+          skipped_duplicate: numberAt(summary, "skipped_duplicate") ?? 0,
+          needs_review: reviewCount,
+          failed: failedCount,
+        },
+        followUps,
+      };
+    }
+    case "classify_unmatched_transactions": {
+      const groups = arrayAt(payload, "groups");
+      return {
+        summary: `Classified ${numberAt(payload, "total_unmatched") ?? 0} unmatched transaction(s) into ${groups.length} group(s).`,
+        preview: {
+          total_unmatched: numberAt(payload, "total_unmatched") ?? 0,
+          group_count: groups.length,
+          category_counts: recordAt(payload, "category_counts") ?? {},
+        },
+        followUps: [],
+      };
+    }
+    case "reconcile_inter_account_transfers": {
+      const execution = recordAt(payload, "execution") ?? {};
+      const summary = recordAt(execution, "summary") ?? {};
+      const ambiguous = numberAt(summary, "skipped_ambiguous") ?? 0;
+      const followUps = ambiguous > 0
+        ? [{
+            source: tool,
+            summary: `${ambiguous} inter-account transfer candidate(s) were ambiguous.`,
+            recommendation: "Review only the ambiguous transfer pairs before confirming anything.",
+          }]
+        : [];
+      return {
+        summary: `Inter-account transfer dry run found ${numberAt(summary, "matched_pairs") ?? 0} matched pair(s), ${numberAt(summary, "matched_one_sided") ?? 0} one-sided match(es), ${ambiguous} ambiguous case(s), and ${numberAt(summary, "error_count") ?? 0} error(s).`,
+        preview: {
+          matched_pairs: numberAt(summary, "matched_pairs") ?? 0,
+          matched_one_sided: numberAt(summary, "matched_one_sided") ?? 0,
+          skipped_ambiguous: ambiguous,
+          skipped_already_handled: numberAt(summary, "skipped_already_handled") ?? 0,
+          error_count: numberAt(summary, "error_count") ?? 0,
+        },
+        followUps,
+      };
+    }
+    default:
+      return {
+        summary: `${tool} completed successfully.`,
+        preview: undefined,
+        followUps: [],
+      };
+  }
+}
+
+function isAutopilotRunnableStep(step: RecommendedStep, liveApiDefaultsAvailable: boolean): boolean {
+  if (step.missing_inputs.length > 0) return false;
+  if (!step.recommended) return false;
+  if (liveApiDefaultsAvailable) return true;
+  return step.tool === "parse_camt053";
+}
+
 export function registerAccountingInboxTools(server: McpServer, api: ApiContext): void {
   registerTool(server,
     "prepare_accounting_inbox",
@@ -591,80 +935,124 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
     },
     { ...readOnly, openWorldHint: true, title: "Prepare Accounting Inbox" },
     async ({ workspace_path, max_depth, bank_account_dimension_id, receipt_matching_dimension_id, wise_account_dimension_id }) => {
-      const root = await validateWorkspacePath(workspace_path);
-      const depth = max_depth ?? DEFAULT_SCAN_DEPTH;
-      const { files, scanned_directories, truncated } = await scanWorkspaceFiles(root, depth);
-      let bankAccounts: BankAccount[] = [];
-      let accountDimensions: AccountDimension[] = [];
-      let liveApiDefaultsAvailable = true;
-      try {
-        [bankAccounts, accountDimensions] = await Promise.all([
-          api.readonly.getBankAccounts(),
-          api.readonly.getAccountDimensions(),
-        ]);
-      } catch (error) {
-        if (!isSetupModeApiError(error)) throw error;
-        liveApiDefaultsAvailable = false;
-      }
-
-      const [camtFiles, wiseFiles] = await Promise.all([
-        detectCamtFiles(files),
-        detectWiseCsvFiles(files),
-      ]);
-      const receiptFolders = detectReceiptFolders(files);
-      const defaults = buildBankDefaults(bankAccounts, accountDimensions, {
+      const prepared = await prepareAccountingInbox(api, {
+        workspace_path,
+        max_depth,
         bank_account_dimension_id,
         receipt_matching_dimension_id,
         wise_account_dimension_id,
       });
-      const { steps, questions } = buildRecommendedSteps({
-        camtFiles,
-        wiseFiles,
-        receiptFolders,
-        defaults,
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson(buildPreparedInboxPayload(prepared)),
+        }],
+      };
+    },
+  );
+
+  registerTool(server,
+    "run_accounting_inbox_dry_runs",
+    "Scan a workspace, then automatically run the safe recommended dry-run accounting steps and return one consolidated preview for a non-accountant-friendly first pass.",
+    {
+      workspace_path: z.string().optional().describe("Optional folder to scan. Defaults to the current workspace."),
+      max_depth: z.number().int().min(0).max(MAX_SCAN_DEPTH).optional().describe("Optional scan depth (default 2, max 4)."),
+      bank_account_dimension_id: z.number().optional().describe("Optional default bank account dimension to reuse for CAMT and receipt suggestions."),
+      receipt_matching_dimension_id: z.number().optional().describe("Optional bank account dimension to use specifically for receipt matching suggestions."),
+      wise_account_dimension_id: z.number().optional().describe("Optional bank account dimension to use specifically for Wise suggestions."),
+    },
+    { ...readOnly, openWorldHint: true, title: "Run Accounting Inbox Dry Runs" },
+    async ({ workspace_path, max_depth, bank_account_dimension_id, receipt_matching_dimension_id, wise_account_dimension_id }) => {
+      const prepared = await prepareAccountingInbox(api, {
+        workspace_path,
+        max_depth,
+        bank_account_dimension_id,
+        receipt_matching_dimension_id,
+        wise_account_dimension_id,
       });
+      const handlers = captureInternalToolHandlers(api);
+
+      const executedSteps: AutopilotStepResult[] = [];
+      const skippedSteps: AutopilotStepResult[] = [];
+      const doneAutomatically: string[] = [];
+      const needsOneDecision: AutopilotFollowUp[] = prepared.questions.map(question => ({
+        source: question.id,
+        summary: question.question,
+        recommendation: question.recommendation,
+      }));
+      const needsAccountantReview: AutopilotFollowUp[] = [];
+
+      for (const step of prepared.steps) {
+        if (!isAutopilotRunnableStep(step, prepared.liveApiDefaultsAvailable)) {
+          skippedSteps.push({
+            step: step.step,
+            tool: step.tool,
+            status: "skipped",
+            purpose: step.purpose,
+            summary: step.missing_inputs.length > 0
+              ? `Skipped because ${step.missing_inputs.join(", ")} is still missing.`
+              : (!prepared.liveApiDefaultsAvailable && step.tool !== "parse_camt053")
+                ? "Skipped because live API-backed dry runs are unavailable until credentials are configured."
+                : "Skipped because this step is not currently marked as a safe default.",
+            suggested_args: step.suggested_args,
+          });
+          continue;
+        }
+
+        try {
+          const payload = await invokeInternalTool(handlers, step.tool, step.suggested_args);
+          const summarized = summarizeAutopilotToolResult(step.tool, payload);
+          executedSteps.push({
+            step: step.step,
+            tool: step.tool,
+            status: "completed",
+            purpose: step.purpose,
+            summary: summarized.summary,
+            suggested_args: step.suggested_args,
+            preview: summarized.preview,
+          });
+          doneAutomatically.push(summarized.summary);
+          needsAccountantReview.push(...summarized.followUps);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          executedSteps.push({
+            step: step.step,
+            tool: step.tool,
+            status: "failed",
+            purpose: step.purpose,
+            summary: message,
+            suggested_args: step.suggested_args,
+          });
+          needsAccountantReview.push({
+            source: step.tool,
+            summary: `${step.tool} failed during autopilot dry run: ${message}`,
+            recommendation: "Inspect this specific step before relying on the automatic first pass.",
+          });
+        }
+      }
+
+      const nextQuestion = needsOneDecision[0];
+      const nextRecommendedAction = needsOneDecision.length === 0 && needsAccountantReview.length === 0
+        ? skippedSteps.find(step => !step.summary.startsWith("Skipped because"))
+        : undefined;
 
       const payload = {
-        workspace_path: root,
-        scan: {
-          max_depth: depth,
-          scanned_directories,
-          scanned_candidate_files: files.length,
-          truncated,
+        prepared_inbox: buildPreparedInboxPayload(prepared),
+        autopilot: {
+          executed_step_count: executedSteps.length,
+          skipped_step_count: skippedSteps.length,
+          executed_steps: executedSteps,
+          skipped_steps: skippedSteps,
+          done_automatically: doneAutomatically,
+          needs_one_decision: needsOneDecision,
+          needs_accountant_review: needsAccountantReview,
+          next_question: nextQuestion,
+          next_recommended_action: nextRecommendedAction,
+          user_summary: doneAutomatically.length > 0
+            ? `Ran ${executedSteps.length} safe dry-run step(s) automatically. ${needsOneDecision.length} small decision(s) and ${needsAccountantReview.length} review item(s) remain.`
+            : `No safe dry-run steps could be completed automatically yet. ${needsOneDecision.length} small decision(s) and ${needsAccountantReview.length} review item(s) remain.`,
         },
-        detected_inputs: {
-          camt_files: camtFiles,
-          wise_csv_files: wiseFiles,
-          receipt_folders: receiptFolders,
-        },
-        defaults: {
-          live_api_defaults_available: liveApiDefaultsAvailable,
-          suggested_bank_dimension_id: defaults.suggested_bank_dimension_id,
-          suggested_receipt_matching_dimension_id: defaults.suggested_receipt_dimension_id,
-          suggested_wise_account_dimension_id: defaults.suggested_wise_dimension_id,
-          suggested_wise_fee_dimension_id: defaults.suggested_wise_fee_dimension_id,
-          bank_dimension_candidates: defaults.candidates,
-        },
-        recommended_steps: steps,
-        questions,
-        next_question: questions[0],
-        next_recommended_action: pickNextRecommendedAction(steps),
-        assistant_guidance: [
-          "Ask only the questions listed under questions, and always start with the recommendation.",
-          "Run dry-run steps before any execute=true mutation.",
-          "Summarize work as: done automatically, needs one decision, and needs accountant review.",
-          ...(liveApiDefaultsAvailable
-            ? []
-            : ["Live bank-account defaults were unavailable because credentials are not configured yet. File scanning still works, but bank dimension defaults may need manual confirmation."]),
-        ],
-        user_summary: buildUserSummary({
-          camtFiles,
-          wiseFiles,
-          receiptFolders,
-          questions,
-          steps,
-          liveApiDefaultsAvailable,
-        }),
       };
 
       return {

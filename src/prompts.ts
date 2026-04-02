@@ -169,43 +169,44 @@ Follow these steps in order:
 
 Follow these steps in order:
 
-1. Call \`prepare_accounting_inbox\`${workspace_path ? ` with workspace_path: "${workspace_path}"` : ""}.
+1. Call \`run_accounting_inbox_dry_runs\`${workspace_path ? ` with workspace_path: "${workspace_path}"` : ""}.
 
-2. Treat the tool response as the planning source of truth:
-   - start from \`user_summary\`
-   - inspect \`detected_inputs\`
-   - inspect \`defaults\`
-   - inspect \`next_recommended_action\`
-   - inspect \`next_question\`
-   - inspect \`recommended_steps\`
-   - inspect \`questions\`
-   - inspect \`assistant_guidance\`
+2. Treat the tool response as the source of truth for the first pass:
+   - inspect \`prepared_inbox\`
+   - inspect \`autopilot.executed_steps\`
+   - inspect \`autopilot.skipped_steps\`
+   - inspect \`autopilot.done_automatically\`
+   - inspect \`autopilot.needs_one_decision\`
+   - inspect \`autopilot.needs_accountant_review\`
+   - inspect \`autopilot.next_recommended_action\`
+   - inspect \`autopilot.next_question\`
+   - inspect \`autopilot.user_summary\`
 
 3. Present the result in plain language first:
    - what inputs were found
-   - what can be done immediately with safe dry runs
+   - what dry runs were already completed automatically
    - what still needs one small decision
    - whether anything already looks like accountant-review territory
    Avoid raw internal field names unless they help the user make a concrete choice.
 
-4. If \`questions\` is non-empty:
-   - ask only the listed questions
+4. If \`autopilot.needs_one_decision\` is non-empty:
+   - ask only those listed questions
    - ask them one at a time
    - always start with the recommended default
-   - if the user answers, re-run \`prepare_accounting_inbox\` with the selected override values before continuing
+   - if the user answers, re-run \`run_accounting_inbox_dry_runs\` with the selected override values before continuing
 
 5. Prefer the tool's first-action hints when present:
-   - if \`next_recommended_action\` is present, treat it as the default next safe step
-   - if \`next_question\` is present, use it as the first follow-up question when no safer dry-run step should happen first
+   - if \`autopilot.next_recommended_action\` is present, treat it as the default next safe step
+   - if \`autopilot.next_question\` is present, use it as the first follow-up question when no safer dry-run step should happen first
 
-6. If \`questions\` is empty or resolved:
-   - run the recommended dry-run steps in order
-   - prefer read-only previews such as \`parse_camt053\` before import dry runs
+6. After the automatic first pass:
+   - continue from the next unresolved item instead of repeating the whole workflow manually
+   - prefer the existing specific workflows only for the steps that still need focused follow-up
    - do not use any \`execute: true\` mutation without explicit approval
 
 7. Keep the interaction decision-light:
    - default to the suggested bank dimensions when the tool marks them as ready
-   - use the existing workflow prompts or tool descriptions for the detailed dry-run steps that follow
+   - do not repeat dry-run results the autopilot already completed unless the user asks
    - only interrupt the user when a missing input or a genuine accounting judgment is still unresolved
 
 8. After each pass, summarize the state using these buckets:

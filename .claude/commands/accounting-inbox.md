@@ -10,24 +10,25 @@ Start from one workspace-level scan, propose only the next safe dry-run steps, a
 
 ### Step 1: Scan the workspace
 
-Call `prepare_accounting_inbox`:
+Call `run_accounting_inbox_dry_runs`:
 - include `workspace_path` when the user provided one
 
-Treat the tool response as the planning source of truth:
-- `user_summary`
-- `detected_inputs`
-- `defaults`
-- `next_recommended_action`
-- `next_question`
-- `recommended_steps`
-- `questions`
-- `assistant_guidance`
+Treat the tool response as the first-pass source of truth:
+- `prepared_inbox`
+- `autopilot.executed_steps`
+- `autopilot.skipped_steps`
+- `autopilot.done_automatically`
+- `autopilot.needs_one_decision`
+- `autopilot.needs_accountant_review`
+- `autopilot.next_recommended_action`
+- `autopilot.next_question`
+- `autopilot.user_summary`
 
 ### Step 2: Explain the plan in plain language
 
 Present:
 - what likely inputs were found
-- what can be done immediately with safe dry runs
+- what dry runs were already completed automatically
 - what still needs one small decision
 - whether anything already looks like accountant-review territory
 
@@ -35,25 +36,24 @@ Avoid raw internal field names unless they help the user make a concrete choice.
 
 ### Step 3: Ask only the listed questions
 
-If `questions` is non-empty:
-- ask only the listed questions
+If `autopilot.needs_one_decision` is non-empty:
+- ask only those listed questions
 - ask them one at a time
 - always start with the recommended default
-- if the user answers, re-run `prepare_accounting_inbox` with the chosen override values before continuing
+- if the user answers, re-run `run_accounting_inbox_dry_runs` with the chosen override values before continuing
 
-If `questions` is empty, continue immediately.
+If there are no unresolved questions, continue immediately.
 
-If `next_recommended_action` is present, treat it as the default next safe step.
-If `next_question` is present, use it as the first follow-up question when no safer dry-run step should happen first.
+If `autopilot.next_recommended_action` is present, treat it as the default next safe step.
+If `autopilot.next_question` is present, use it as the first follow-up question when no safer dry-run step should happen first.
 
 ### Step 4: Run the recommended dry-run steps
 
-Use `recommended_steps` in order:
-- prefer read-only previews such as `parse_camt053` before import dry runs
-- use `execute: false` dry runs before any mutation
+The autopilot already ran the safe default dry-run steps.
+- do not repeat them unless the user asks
+- continue from the next unresolved item
+- use more specific workflows only for focused follow-up
 - do not use any `execute: true` mutation without explicit approval
-
-If a step points to a more specific workflow such as CAMT import, Wise import, or receipt batch processing, follow that workflow's dry-run logic next.
 
 ### Step 5: Keep the interaction decision-light
 
