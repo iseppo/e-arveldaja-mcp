@@ -336,11 +336,14 @@ function buildSuggestionFromBookingHistory(bookingSuggestion: BookingSuggestion)
   };
 }
 
-function buildSuggestionFromRule(
+function resolveAutoBookingRuleTargets(
   purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
   accounts: Account[],
   rule: AccountingAutoBookingRule,
-): ClassifiedTransactionSuggestion {
+): {
+  article?: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>[number];
+  account?: Account;
+} {
   const article = rule.purchase_article_id !== undefined
     ? purchaseArticlesWithVat.find(candidate => candidate.id === rule.purchase_article_id)
     : undefined;
@@ -350,18 +353,7 @@ function buildSuggestionFromRule(
       ? accounts.find(candidate => candidate.id === article.accounts_id)
       : undefined;
 
-  return {
-    purchase_article_id: article?.id ?? rule.purchase_article_id,
-    purchase_article_name: article?.name_est ?? article?.name_eng,
-    purchase_account_id: account?.id ?? article?.accounts_id ?? rule.purchase_account_id,
-    purchase_account_name: account ? `${account.id} ${account.name_est}` : undefined,
-    purchase_account_dimensions_id: rule.purchase_account_dimensions_id,
-    liability_account_id: rule.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
-    vat_rate_dropdown: rule.vat_rate_dropdown,
-    reversed_vat_id: rule.reversed_vat_id,
-    source: "local_rules",
-    reason: rule.reason ?? "Defaulted from local accounting-rules.md counterparty rule.",
-  };
+  return { article, account };
 }
 
 function inferReceiptAutoBookingCategory(
@@ -385,24 +377,64 @@ function inferReceiptAutoBookingCategory(
   return undefined;
 }
 
-function resolveReceiptRuleTargets(
+function resolveMergedPurchaseAccountDimension(
+  baseDimensionId: number | null | undefined,
+  baseAccountId: number | undefined,
+  resolvedAccountId: number | undefined,
+  explicitDimensionId: number | undefined,
+): number | undefined {
+  if (explicitDimensionId !== undefined) {
+    return explicitDimensionId;
+  }
+
+  const normalizedBaseDimensionId = baseDimensionId ?? undefined;
+  if (normalizedBaseDimensionId === undefined) {
+    return undefined;
+  }
+
+  if (resolvedAccountId === undefined) {
+    return normalizedBaseDimensionId;
+  }
+
+  if (baseAccountId === undefined || resolvedAccountId !== baseAccountId) {
+    return undefined;
+  }
+
+  return normalizedBaseDimensionId;
+}
+
+function buildSuggestionFromRule(
   purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
   accounts: Account[],
   rule: AccountingAutoBookingRule,
-): {
-  article?: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>[number];
-  account?: Account;
-} {
-  const article = rule.purchase_article_id !== undefined
-    ? purchaseArticlesWithVat.find(candidate => candidate.id === rule.purchase_article_id)
-    : undefined;
-  const account = rule.purchase_account_id !== undefined
-    ? accounts.find(candidate => candidate.id === rule.purchase_account_id)
-    : article?.accounts_id !== undefined
-      ? accounts.find(candidate => candidate.id === article.accounts_id)
-      : undefined;
+  baseSuggestion?: ClassifiedTransactionSuggestion,
+): ClassifiedTransactionSuggestion {
+  const { article, account } = resolveAutoBookingRuleTargets(purchaseArticlesWithVat, accounts, rule);
+  const purchaseArticleId = article?.id ?? rule.purchase_article_id ?? baseSuggestion?.purchase_article_id;
+  const purchaseAccountId = account?.id ?? article?.accounts_id ?? rule.purchase_account_id ?? baseSuggestion?.purchase_account_id;
+  const purchaseAccountDimensionsId = resolveMergedPurchaseAccountDimension(
+    baseSuggestion?.purchase_account_dimensions_id,
+    baseSuggestion?.purchase_account_id,
+    purchaseAccountId,
+    rule.purchase_account_dimensions_id,
+  );
 
-  return { article, account };
+  return {
+    purchase_article_id: purchaseArticleId,
+    purchase_article_name: article?.name_est ?? article?.name_eng ?? baseSuggestion?.purchase_article_name,
+    purchase_account_id: purchaseAccountId,
+    purchase_account_name: account
+      ? `${account.id} ${account.name_est}`
+      : baseSuggestion?.purchase_account_name,
+    purchase_account_dimensions_id: purchaseAccountDimensionsId,
+    liability_account_id: rule.liability_account_id ?? baseSuggestion?.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+    vat_rate_dropdown: rule.vat_rate_dropdown ?? baseSuggestion?.vat_rate_dropdown,
+    reversed_vat_id: rule.reversed_vat_id ?? baseSuggestion?.reversed_vat_id,
+    source: "local_rules",
+    matched_invoice_id: baseSuggestion?.matched_invoice_id,
+    matched_invoice_number: baseSuggestion?.matched_invoice_number,
+    reason: rule.reason ?? baseSuggestion?.reason ?? "Defaulted from local accounting-rules.md counterparty rule.",
+  };
 }
 
 function mergeReceiptAutoBookingRule(
@@ -412,7 +444,7 @@ function mergeReceiptAutoBookingRule(
   rule: AccountingAutoBookingRule,
   description: string,
 ): BookingSuggestion | undefined {
-  const { article, account } = resolveReceiptRuleTargets(purchaseArticlesWithVat, accounts, rule);
+  const { article, account } = resolveAutoBookingRuleTargets(purchaseArticlesWithVat, accounts, rule);
   const baseItem = bookingSuggestion?.item;
   let changed = false;
 
@@ -434,11 +466,18 @@ function mergeReceiptAutoBookingRule(
     changed = true;
   }
 
-  if (
-    rule.purchase_account_dimensions_id !== undefined &&
-    mergedItem.purchase_accounts_dimensions_id !== rule.purchase_account_dimensions_id
-  ) {
-    mergedItem.purchase_accounts_dimensions_id = rule.purchase_account_dimensions_id;
+  const mergedPurchaseAccountDimensionsId = resolveMergedPurchaseAccountDimension(
+    baseItem?.purchase_accounts_dimensions_id,
+    baseItem?.purchase_accounts_id,
+    resolvedAccountId,
+    rule.purchase_account_dimensions_id,
+  );
+  if ((mergedItem.purchase_accounts_dimensions_id ?? undefined) !== mergedPurchaseAccountDimensionsId) {
+    if (mergedPurchaseAccountDimensionsId === undefined) {
+      delete mergedItem.purchase_accounts_dimensions_id;
+    } else {
+      mergedItem.purchase_accounts_dimensions_id = mergedPurchaseAccountDimensionsId;
+    }
     changed = true;
   }
 
@@ -500,9 +539,9 @@ function applyReceiptAutoBookingRule(
   }
 
   const inferredCategory = inferReceiptAutoBookingCategory(extracted);
-  const rule = (inferredCategory
+  const rule = inferredCategory !== undefined
     ? findAutoBookingRule(normalizedSupplier, inferredCategory)
-    : undefined) ?? findAutoBookingRule(normalizedSupplier);
+    : findAutoBookingRule(normalizedSupplier);
   if (!rule) {
     return bookingSuggestion;
   }
@@ -529,10 +568,6 @@ function buildClassificationSuggestion(
 ): ClassifiedTransactionSuggestion {
   if (options?.bookingSuggestion?.source === "supplier_history") {
     return buildSuggestionFromBookingHistory(options.bookingSuggestion);
-  }
-
-  if (options?.autoBookingRule) {
-    return buildSuggestionFromRule(purchaseArticlesWithVat, accounts, options.autoBookingRule);
   }
 
   let articleKeywords = ["muu", "other", "general"];
@@ -585,7 +620,7 @@ function buildClassificationSuggestion(
     ? accounts.find(candidate => candidate.id === article.accounts_id)
     : findAccountByKeywords(accounts, accountKeywords);
 
-  return {
+  const defaultSuggestion: ClassifiedTransactionSuggestion = {
     purchase_article_id: article?.id,
     purchase_article_name: article?.name_est ?? article?.name_eng,
     purchase_account_id: account?.id ?? article?.accounts_id,
@@ -594,6 +629,12 @@ function buildClassificationSuggestion(
     source: article ? "keyword_match" : "fallback",
     reason: options?.manualReviewReason ? `${reason} ${options.manualReviewReason}` : reason,
   };
+
+  if (options?.autoBookingRule) {
+    return buildSuggestionFromRule(purchaseArticlesWithVat, accounts, options.autoBookingRule, defaultSuggestion);
+  }
+
+  return defaultSuggestion;
 }
 
 async function resolveClassificationSuggestion(

@@ -301,7 +301,7 @@ export function findAutoBookingRule(
   if (category !== undefined) {
     return matches.find(rule => rule.category === category) ?? matches.find(rule => rule.category === undefined);
   }
-  return matches.find(rule => rule.category === undefined) ?? matches[0];
+  return matches.find(rule => rule.category === undefined);
 }
 
 export function getLiabilityClassificationRule(accountId: number): LiabilityClassificationRule | undefined {

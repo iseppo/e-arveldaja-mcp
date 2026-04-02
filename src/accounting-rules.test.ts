@@ -117,6 +117,28 @@ Default VAT deduction mode: partial ratio 0.5
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not return category-scoped rules from supplier-only lookups", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "accounting-rules.md");
+    writeFileSync(filePath, `# Accounting Rules
+
+## Auto Booking
+| match | category | purchase_article_id |
+| --- | --- | --- |
+| wise | bank_fees | 8610 |
+`, "utf-8");
+
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    expect(findAutoBookingRule("wise europe sa", undefined)).toBeUndefined();
+    expect(findAutoBookingRule("wise europe sa", "bank_fees")).toMatchObject({
+      purchase_article_id: 8610,
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("reloads rules after the markdown file changes", () => {
     const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
     const filePath = join(dir, "accounting-rules.md");
