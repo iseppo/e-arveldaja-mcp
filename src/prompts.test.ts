@@ -347,6 +347,21 @@ describe("registerPrompts", () => {
     }
   });
 
+  it("keeps shipped accounting-inbox markdown prompts aligned with recommendation-first triage", () => {
+    for (const relativePath of ["workflows/accounting-inbox.md", ".claude/commands/accounting-inbox.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("prepare_accounting_inbox");
+      expect(text).toContain("recommended default");
+      expect(text).toContain("ask only the listed questions");
+      expect(text).toContain("re-run `prepare_accounting_inbox`");
+      expect(text).toContain("execute: false");
+      expect(text).toContain("execute: true");
+      expect(text).toContain("done automatically");
+      expect(text).toContain("needs one decision");
+      expect(text).toContain("needs accountant review");
+    }
+  });
+
   it("keeps shipped import markdown prompts aligned with approval-first execution", () => {
     for (const relativePath of [
       "workflows/import-camt.md",
