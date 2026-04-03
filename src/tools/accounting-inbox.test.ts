@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import { registerAccountingInboxTools } from "./accounting-inbox.js";
 
-function setupAccountingInboxTool(apiOverrides: Record<string, unknown> = {}) {
+function setupAccountingInboxTool(apiOverrides: Record<string, unknown> = {}, toolName = "prepare_accounting_inbox") {
   const server = { registerTool: vi.fn() } as any;
   const api = {
     clients: {
@@ -38,7 +38,7 @@ function setupAccountingInboxTool(apiOverrides: Record<string, unknown> = {}) {
   } as any;
 
   registerAccountingInboxTools(server, api);
-  const registration = server.registerTool.mock.calls.find(([name]) => name === "prepare_accounting_inbox");
+  const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
   if (!registration) throw new Error("Tool was not registered");
 
   return {
@@ -508,7 +508,42 @@ describe("prepare_accounting_inbox", () => {
         follow_up_questions: expect.arrayContaining([
           expect.stringContaining("laen"),
         ]),
+        resolver_input: expect.objectContaining({
+          review_type: "classification_group",
+        }),
       }),
     ]));
+  });
+
+  it("resolve_accounting_review_item turns one review item into a concrete next-step plan", async () => {
+    const { handler } = setupAccountingInboxTool({}, "resolve_accounting_review_item");
+
+    const result = await handler({
+      review_item_json: JSON.stringify({
+        review_type: "classification_group",
+        group: {
+          category: "owner_transfers",
+          display_counterparty: "Seppo Sepp",
+          review_guidance: {
+            recommendation: "Soovitus: ära tee sellest ostuarvet.",
+            compliance_basis: ["RPS § 6–7"],
+            follow_up_questions: ["Kas see on laen või dividend?"],
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload).toMatchObject({
+      review_type: "classification_group",
+      status: "needs_answers",
+      recommendation: expect.stringContaining("ära tee sellest ostuarvet"),
+      compliance_basis: ["RPS § 6–7"],
+      unresolved_questions: ["Kas see on laen või dividend?"],
+      suggested_workflow: "classify-unmatched",
+    });
+    expect(payload.assistant_guidance).toContain(
+      "Ask only unresolved_questions, and only if the payload itself does not already answer them.",
+    );
   });
 });

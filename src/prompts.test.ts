@@ -68,6 +68,7 @@ describe("registerPrompts", () => {
     expect(names).toEqual([
       "setup-credentials",
       "accounting-inbox",
+      "resolve-accounting-review",
       "book-invoice",
       "receipt-batch",
       "import-camt",
@@ -133,6 +134,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("re-run `run_accounting_inbox_dry_runs`");
     expect(text).toContain("compliance_basis");
     expect(text).toContain("follow_up_questions");
+    expect(text).toContain("resolver_input");
+    expect(text).toContain("resolve_accounting_review_item");
     expect(text).toContain("treat it as the default next safe step");
     expect(text).toContain("dry runs were already completed automatically");
     expect(text).toContain("do not use any `execute: true` mutation without explicit approval");
@@ -140,6 +143,21 @@ describe("registerPrompts", () => {
     expect(text).toContain("needs one decision");
     expect(text).toContain("needs accountant review");
     expect(text).not.toContain("get_setup_instructions");
+  });
+
+  it("keeps resolve-accounting-review aligned with the resolver payload", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "resolve-accounting-review", {
+      review_item_json: "{\"review_type\":\"classification_group\"}",
+    });
+
+    expect(text).toContain("resolve_accounting_review_item");
+    expect(text).toContain("recommendation");
+    expect(text).toContain("compliance_basis");
+    expect(text).toContain("unresolved_questions");
+    expect(text).toContain("suggested_workflow");
+    expect(text).toContain("suggested_rule_markdown");
+    expect(text).toContain("do not invent extra questions");
   });
 
   it("keeps the book-invoice prompt aligned with real tool parameters and output fields", async () => {
@@ -368,10 +386,24 @@ describe("registerPrompts", () => {
       expect(text).toContain("ask only those listed questions");
       expect(text).toContain("compliance_basis");
       expect(text).toContain("follow_up_questions");
+      expect(text).toContain("resolver_input");
+      expect(text).toContain("resolve_accounting_review_item");
       expect(text).toContain("re-run `run_accounting_inbox_dry_runs`");
       expect(text).toContain("done automatically");
       expect(text).toContain("needs one decision");
       expect(text).toContain("needs accountant review");
+    }
+  });
+
+  it("keeps shipped resolve-accounting-review markdown prompts aligned with the resolver flow", () => {
+    for (const relativePath of ["workflows/resolve-accounting-review.md", ".claude/commands/resolve-accounting-review.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("resolve_accounting_review_item");
+      expect(text).toContain("recommendation");
+      expect(text).toContain("compliance_basis");
+      expect(text).toContain("unresolved_questions");
+      expect(text).toContain("suggested_workflow");
+      expect(text).toContain("suggested_rule_markdown");
     }
   });
 

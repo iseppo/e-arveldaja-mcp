@@ -46,6 +46,7 @@ If an item under `autopilot.needs_accountant_review` includes:
 - `recommendation`: present that first as the default compliant handling
 - `compliance_basis`: summarize it briefly in plain language
 - `follow_up_questions`: ask only those questions that the payload itself did not already answer
+- `resolver_input`: pass that object to `resolve_accounting_review_item` before inventing your own follow-up plan
 
 If there are no unresolved questions, continue immediately.
 

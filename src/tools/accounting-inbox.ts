@@ -111,6 +111,20 @@ interface AutopilotFollowUp {
   compliance_basis?: string[];
   follow_up_questions?: string[];
   policy_hint?: string;
+  resolver_input?: Record<string, unknown>;
+}
+
+interface ReviewResolutionResult {
+  review_type: "receipt_review" | "classification_group" | "camt_possible_duplicate" | "unknown";
+  status: "ready_for_action" | "needs_answers";
+  recommendation: string;
+  compliance_basis: string[];
+  unresolved_questions: string[];
+  policy_hint?: string;
+  suggested_workflow?: string;
+  suggested_tools?: string[];
+  suggested_rule_markdown?: string;
+  next_step_summary: string;
 }
 
 type InternalToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text?: string }> }>;
@@ -773,6 +787,7 @@ function toAutopilotFollowUp(
   source: string,
   summary: string,
   guidance?: Partial<ReviewGuidance> & { recommendation?: string },
+  resolverInput?: Record<string, unknown>,
 ): AutopilotFollowUp {
   return {
     source,
@@ -781,6 +796,7 @@ function toAutopilotFollowUp(
     compliance_basis: guidance?.compliance_basis,
     follow_up_questions: guidance?.follow_up_questions,
     policy_hint: guidance?.policy_hint,
+    resolver_input: resolverInput,
   };
 }
 
@@ -796,6 +812,114 @@ function reviewGuidanceFromRecord(record: Record<string, unknown>): ReviewGuidan
     compliance_basis: stringArrayAt(guidance, "compliance_basis"),
     follow_up_questions: stringArrayAt(guidance, "follow_up_questions"),
     policy_hint: stringAt(guidance, "policy_hint"),
+  };
+}
+
+function parseJsonObject(input: string, fieldName: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch (error) {
+    throw new Error(`${fieldName} must be valid JSON`);
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`${fieldName} must decode to a JSON object`);
+  }
+  return parsed;
+}
+
+function buildAutoBookingRuleMarkdown(match: string, category?: string): string {
+  return [
+    "## Auto Booking",
+    "| match | category | purchase_article_id | purchase_account_id | purchase_account_dimensions_id | liability_account_id | vat_rate_dropdown | reversed_vat_id | reason |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    `| ${match} | ${category ?? ""} |  |  |  |  |  |  | Stable default confirmed by user |`,
+  ].join("\n");
+}
+
+function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResolutionResult {
+  const reviewType = stringAt(reviewItem, "review_type");
+  const item = recordAt(reviewItem, "item");
+  const group = recordAt(reviewItem, "group");
+
+  if (reviewType === "receipt_review" && item) {
+    const guidance = reviewGuidanceFromRecord(item);
+    const file = recordAt(item, "file");
+    const extracted = recordAt(item, "extracted");
+    const classification = stringAt(item, "classification") ?? "needs_review";
+    const supplierName = stringAt(extracted ?? {}, "supplier_name");
+    const filePath = stringAt(file ?? {}, "path");
+    return {
+      review_type: "receipt_review",
+      status: (guidance?.follow_up_questions.length ?? 0) > 0 ? "needs_answers" : "ready_for_action",
+      recommendation: guidance?.recommendation ?? "Review the receipt manually before booking.",
+      compliance_basis: guidance?.compliance_basis ?? [],
+      unresolved_questions: guidance?.follow_up_questions ?? [],
+      policy_hint: guidance?.policy_hint,
+      suggested_workflow: classification === "owner_paid_expense_reimbursement" ? "owner-expense" : "book-invoice",
+      suggested_tools: classification === "owner_paid_expense_reimbursement"
+        ? ["create_owner_expense_reimbursement"]
+        : ["book-invoice", "process_receipt_batch"],
+      suggested_rule_markdown: supplierName
+        ? buildAutoBookingRuleMarkdown(supplierName)
+        : undefined,
+      next_step_summary: classification === "owner_paid_expense_reimbursement"
+        ? "After the missing VAT/business-use answers are known, continue with create_owner_expense_reimbursement instead of forcing this through purchase-invoice booking."
+        : `Resolve the missing receipt facts first${filePath ? ` for ${filePath}` : ""}, then either book it via book-invoice for one document or rerun process_receipt_batch for the folder.`,
+    };
+  }
+
+  if (reviewType === "classification_group" && group) {
+    const guidance = reviewGuidanceFromRecord(group);
+    const category = stringAt(group, "category") ?? "review_only";
+    const counterparty = stringAt(group, "display_counterparty") ?? "counterparty";
+    return {
+      review_type: "classification_group",
+      status: (guidance?.follow_up_questions.length ?? 0) > 0 ? "needs_answers" : "ready_for_action",
+      recommendation: guidance?.recommendation ?? "Do not auto-book this group until its real accounting treatment is clear.",
+      compliance_basis: guidance?.compliance_basis ?? [],
+      unresolved_questions: guidance?.follow_up_questions ?? [],
+      policy_hint: guidance?.policy_hint,
+      suggested_workflow: "classify-unmatched",
+      suggested_tools: ["classify_unmatched_transactions", "apply_transaction_classifications"],
+      suggested_rule_markdown: ["saas_subscriptions", "bank_fees", "card_purchases"].includes(category)
+        ? buildAutoBookingRuleMarkdown(counterparty, category)
+        : undefined,
+      next_step_summary: "Decide the real treatment of this transaction group first. Only after that should you either book it manually, save a stable rule, or rerun the classification/apply flow.",
+    };
+  }
+
+  if (reviewType === "camt_possible_duplicate" && item) {
+    const guidance = reviewGuidanceFromRecord(item);
+    const existingTransactions = arrayAt(item, "existing_transactions").filter(isRecord);
+    const newTransactionId = numberAt(item, "new_transaction_api_id");
+    const confirmedMatch = existingTransactions.find(candidate => stringAt(candidate, "status") === "CONFIRMED");
+    return {
+      review_type: "camt_possible_duplicate",
+      status: "ready_for_action",
+      recommendation: guidance?.recommendation ?? "Prefer the better-documented row and avoid keeping both as duplicates.",
+      compliance_basis: guidance?.compliance_basis ?? [],
+      unresolved_questions: [],
+      policy_hint: guidance?.policy_hint,
+      suggested_workflow: "import-camt",
+      suggested_tools: newTransactionId !== undefined ? ["delete_transaction"] : ["import_camt053"],
+      next_step_summary: confirmedMatch && newTransactionId !== undefined
+        ? `Default cleanup: keep confirmed transaction ${numberAt(confirmedMatch, "id")}, use its suggested missing-field patch as reference, and delete new PROJECT transaction ${newTransactionId}.`
+        : confirmedMatch
+          ? `Default cleanup: keep confirmed transaction ${numberAt(confirmedMatch, "id")} and do not let the CAMT import create a duplicate row for the same bank movement.`
+          : "No automatic cleanup should happen yet; compare the old row and the CAMT row, keep the one with stronger bank-reference/source-document traceability, and delete the weaker duplicate only after that choice is clear.",
+    };
+  }
+
+  return {
+    review_type: "unknown",
+    status: "needs_answers",
+    recommendation: "This review item is not yet recognized by the resolver. Inspect the source payload directly before continuing.",
+    compliance_basis: [],
+    unresolved_questions: [],
+    suggested_workflow: undefined,
+    suggested_tools: [],
+    next_step_summary: "Use the original tool output as the source of truth for this item.",
   };
 }
 
@@ -865,6 +989,13 @@ function summarizeAutopilotToolResult(
               tool,
               `${reviewCount} CAMT row(s) look like possible duplicates against older manual transactions.`,
               duplicateGuidance,
+              reviewItems[0]
+                ? {
+                    review_type: "camt_possible_duplicate",
+                    source_tool: tool,
+                    item: reviewItems[0],
+                  }
+                : undefined,
             )]
           : [],
       };
@@ -906,6 +1037,11 @@ function summarizeAutopilotToolResult(
             `${fileName} jäi dry-runis ülevaatuseks (${classification}).`,
             reviewGuidanceFromRecord(item) ?? {
               recommendation: "Vaata üle ainult see märgitud kviitung ning kinnita puudu olevad andmed või korrektne maksukäsitlus enne teostust.",
+            },
+            {
+              review_type: "receipt_review",
+              source_tool: tool,
+              item,
             },
           );
         });
@@ -951,6 +1087,11 @@ function summarizeAutopilotToolResult(
             `${displayCounterparty} jäi ülevaatuseks kategoorias ${category}.`,
             reviewGuidanceFromRecord(record) ?? {
               recommendation: "Ära auto-booki seda gruppi ostuarvena enne, kui tehingu sisu ja alusdokumendid on kinnitatud.",
+            },
+            {
+              review_type: "classification_group",
+              source_tool: tool,
+              group: record,
             },
           );
         }),
@@ -1132,6 +1273,33 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
         content: [{
           type: "text",
           text: toMcpJson(payload),
+        }],
+      };
+    },
+  );
+
+  registerTool(server,
+    "resolve_accounting_review_item",
+    "Turn one accounting review item into a concrete next-step plan: default handling, unresolved questions, and the safest follow-up workflow or tool.",
+    {
+      review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or from a direct execution.needs_review / groups review item"),
+    },
+    { ...readOnly, title: "Resolve Accounting Review Item" },
+    async ({ review_item_json }) => {
+      const reviewItem = parseJsonObject(review_item_json, "review_item_json");
+      const resolution = resolveReviewItemPlan(reviewItem);
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            ...resolution,
+            assistant_guidance: [
+              "Start with the recommendation and keep the conversation recommendation-first.",
+              "Ask only unresolved_questions, and only if the payload itself does not already answer them.",
+              "Do not execute any mutating follow-up without explicit approval.",
+            ],
+          }),
         }],
       };
     },

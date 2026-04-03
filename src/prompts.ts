@@ -182,6 +182,7 @@ Follow these steps in order:
    - inspect \`autopilot.next_question\`
    - inspect \`autopilot.user_summary\`
    - when a review item includes \`compliance_basis\` or \`follow_up_questions\`, use them as the primary explanation and the only follow-up questions unless the user asks for more detail
+   - when a review item includes \`resolver_input\`, pass that object to \`resolve_accounting_review_item\` before improvising your own follow-up plan
 
 3. Present the result in plain language first:
    - what inputs were found
@@ -210,6 +211,7 @@ Follow these steps in order:
    - do not repeat dry-run results the autopilot already completed unless the user asks
    - only interrupt the user when a missing input or a genuine accounting judgment is still unresolved
    - for \`needs_accountant_review\` items, present the recommendation first, then summarize the compliance basis in plain language, and ask only the listed follow-up questions when they are genuinely unresolved from the payload
+   - when a review item has \`resolver_input\`, prefer \`resolve_accounting_review_item\` to turn it into the next concrete workflow or tool step
 
 8. After each pass, summarize the state using these buckets:
    - done automatically
@@ -226,7 +228,52 @@ Follow these steps in order:
     })
   );
 
-  registerPrompt(server, 
+  registerPrompt(server,
+    "resolve-accounting-review",
+    "Take one accounting review item and turn it into the next concrete step with the fewest possible user questions.",
+    {
+      review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload"),
+    },
+    async ({ review_item_json }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Resolve this accounting review item:
+
+${review_item_json}
+
+Follow these steps in order:
+
+1. Call \`resolve_accounting_review_item\` with:
+   - review_item_json: the exact JSON above
+
+2. Treat the tool response as the source of truth:
+   - \`recommendation\`
+   - \`compliance_basis\`
+   - \`unresolved_questions\`
+   - \`suggested_workflow\`
+   - \`suggested_tools\`
+   - \`suggested_rule_markdown\`
+   - \`next_step_summary\`
+
+3. Present the result in this order:
+   - recommendation first
+   - short plain-language explanation of the compliance basis
+   - only the unresolved questions, if any
+   - the next concrete workflow or tool step
+
+4. Keep the interaction minimal:
+   - if \`unresolved_questions\` is empty, do not invent extra questions
+   - if \`suggested_rule_markdown\` is present, offer it only as an optional time-saving default for future repeats
+   - do not execute any mutating follow-up without explicit approval
+`,
+        },
+      }],
+    })
+  );
+
+  registerPrompt(server,
     "book-invoice",
     "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, previews the booking, and creates + confirms the invoice after approval.",
     { file_path: z.string().describe("Absolute path to the invoice document file (PDF/JPG/PNG)") },
