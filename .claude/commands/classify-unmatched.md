@@ -27,12 +27,14 @@ For each group, show:
 - `apply_mode`
 - reasons
 - `suggested_booking`
+- `review_guidance`, when present
 - transaction IDs, dates, amounts, and descriptions
 
 ### Step 2: Explain what can be applied
 
 - `apply_mode="purchase_invoice"` groups are auto-bookable
 - review-only categories are reported back as skipped
+- for review-only categories, start with `review_guidance.recommendation`, explain the compliance basis briefly, and ask only the listed follow-up questions that are still unresolved
 
 ### Step 3: Dry-run the application
 

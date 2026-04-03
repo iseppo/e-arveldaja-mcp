@@ -13,6 +13,10 @@ import { registerCamtImportTools } from "./camt-import.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { registerBankReconciliationTools } from "./bank-reconciliation.js";
+import {
+  buildCamtDuplicateReviewGuidance,
+  type ReviewGuidance,
+} from "../estonian-accounting-guidance.js";
 
 const RECEIPT_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
 const DEFAULT_SCAN_DEPTH = 2;
@@ -104,6 +108,9 @@ interface AutopilotFollowUp {
   source: string;
   summary: string;
   recommendation?: string;
+  compliance_basis?: string[];
+  follow_up_questions?: string[];
+  policy_hint?: string;
 }
 
 type InternalToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text?: string }> }>;
@@ -758,6 +765,40 @@ function recordAt(record: Record<string, unknown>, key: string): Record<string, 
   return isRecord(value) ? value : undefined;
 }
 
+function stringArrayAt(record: Record<string, unknown>, key: string): string[] {
+  return arrayAt(record, key).filter((value): value is string => typeof value === "string");
+}
+
+function toAutopilotFollowUp(
+  source: string,
+  summary: string,
+  guidance?: Partial<ReviewGuidance> & { recommendation?: string },
+): AutopilotFollowUp {
+  return {
+    source,
+    summary,
+    recommendation: guidance?.recommendation,
+    compliance_basis: guidance?.compliance_basis,
+    follow_up_questions: guidance?.follow_up_questions,
+    policy_hint: guidance?.policy_hint,
+  };
+}
+
+function reviewGuidanceFromRecord(record: Record<string, unknown>): ReviewGuidance | undefined {
+  const guidance = recordAt(record, "review_guidance");
+  if (!guidance) return undefined;
+
+  const recommendation = stringAt(guidance, "recommendation");
+  if (!recommendation) return undefined;
+
+  return {
+    recommendation,
+    compliance_basis: stringArrayAt(guidance, "compliance_basis"),
+    follow_up_questions: stringArrayAt(guidance, "follow_up_questions"),
+    policy_hint: stringAt(guidance, "policy_hint"),
+  };
+}
+
 async function invokeInternalTool(
   handlers: Map<string, InternalToolHandler>,
   tool: string,
@@ -801,7 +842,16 @@ function summarizeAutopilotToolResult(
     case "import_camt053": {
       const execution = recordAt(payload, "execution") ?? {};
       const summary = recordAt(execution, "summary") ?? {};
-      const reviewCount = arrayAt(execution, "needs_review").length;
+      const reviewItems = arrayAt(execution, "needs_review").filter(isRecord);
+      const reviewCount = reviewItems.length;
+      const hasConfirmedMatch = reviewItems.some((item) =>
+        arrayAt(item, "existing_transactions").some((candidate) =>
+          isRecord(candidate) && stringAt(candidate, "status") === "CONFIRMED"
+        )
+      );
+      const duplicateGuidance = reviewCount > 0
+        ? buildCamtDuplicateReviewGuidance({ hasConfirmedMatch })
+        : undefined;
       return {
         summary: `CAMT dry run would create ${numberAt(summary, "created_count") ?? 0} transaction(s), skip ${numberAt(summary, "skipped_count") ?? 0}, raise ${reviewCount} possible duplicate review item(s), and report ${numberAt(summary, "error_count") ?? 0} error(s).`,
         preview: {
@@ -811,11 +861,11 @@ function summarizeAutopilotToolResult(
           error_count: numberAt(summary, "error_count") ?? 0,
         },
         followUps: reviewCount > 0
-          ? [{
-              source: tool,
-              summary: `${reviewCount} CAMT row(s) look like possible duplicates against older manual transactions.`,
-              recommendation: "Review those duplicate candidates before executing the import.",
-            }]
+          ? [toAutopilotFollowUp(
+              tool,
+              `${reviewCount} CAMT row(s) look like possible duplicates against older manual transactions.`,
+              duplicateGuidance,
+            )]
           : [],
       };
     }
@@ -844,20 +894,29 @@ function summarizeAutopilotToolResult(
       const summary = recordAt(execution, "summary") ?? {};
       const reviewCount = numberAt(summary, "needs_review") ?? 0;
       const failedCount = numberAt(summary, "failed") ?? 0;
-      const followUps: AutopilotFollowUp[] = [];
-      if (reviewCount > 0) {
-        followUps.push({
-          source: tool,
-          summary: `${reviewCount} receipt(s) still need manual review after dry run.`,
-          recommendation: "Review only the flagged receipts instead of the whole folder.",
+      const followUps: AutopilotFollowUp[] = arrayAt(execution, "needs_review")
+        .filter(isRecord)
+        .slice(0, 5)
+        .map((item) => {
+          const file = recordAt(item, "file");
+          const fileName = stringAt(file ?? {}, "name") ?? "receipt";
+          const classification = stringAt(item, "classification") ?? "needs review";
+          return toAutopilotFollowUp(
+            tool,
+            `${fileName} jäi dry-runis ülevaatuseks (${classification}).`,
+            reviewGuidanceFromRecord(item) ?? {
+              recommendation: "Vaata üle ainult see märgitud kviitung ning kinnita puudu olevad andmed või korrektne maksukäsitlus enne teostust.",
+            },
+          );
         });
-      }
       if (failedCount > 0) {
-        followUps.push({
-          source: tool,
-          summary: `${failedCount} receipt(s) failed the dry run completely.`,
-          recommendation: "Inspect the exact extraction or booking errors before retrying.",
-        });
+        followUps.push(toAutopilotFollowUp(
+          tool,
+          `${failedCount} receipt(s) failed the dry run completely.`,
+          {
+            recommendation: "Kontrolli esmalt täpset extraction- või booking-viga; ilma piisava alusdokumendi või korrektse käsitluseta ei tohiks neid automaatselt läbi lasta.",
+          },
+        ));
       }
       return {
         summary: `Receipt dry run would create ${numberAt(summary, "created") ?? 0} invoice(s), match ${numberAt(summary, "matched") ?? 0}, skip ${numberAt(summary, "skipped_duplicate") ?? 0} duplicate(s), leave ${reviewCount} in review, and fail ${failedCount}.`,
@@ -873,14 +932,28 @@ function summarizeAutopilotToolResult(
     }
     case "classify_unmatched_transactions": {
       const groups = arrayAt(payload, "groups");
+      const reviewGroups = groups.filter((group) =>
+        isRecord(group) && stringAt(group, "apply_mode") !== "purchase_invoice"
+      );
       return {
-        summary: `Classified ${numberAt(payload, "total_unmatched") ?? 0} unmatched transaction(s) into ${groups.length} group(s).`,
+        summary: `Classified ${numberAt(payload, "total_unmatched") ?? 0} unmatched transaction(s) into ${groups.length} group(s), of which ${reviewGroups.length} still need accounting judgement instead of auto-booking.`,
         preview: {
           total_unmatched: numberAt(payload, "total_unmatched") ?? 0,
           group_count: groups.length,
           category_counts: recordAt(payload, "category_counts") ?? {},
         },
-        followUps: [],
+        followUps: reviewGroups.slice(0, 5).map((group) => {
+          const record = group as Record<string, unknown>;
+          const displayCounterparty = stringAt(record, "display_counterparty") ?? "transaction group";
+          const category = stringAt(record, "category") ?? "review_only";
+          return toAutopilotFollowUp(
+            tool,
+            `${displayCounterparty} jäi ülevaatuseks kategoorias ${category}.`,
+            reviewGuidanceFromRecord(record) ?? {
+              recommendation: "Ära auto-booki seda gruppi ostuarvena enne, kui tehingu sisu ja alusdokumendid on kinnitatud.",
+            },
+          );
+        }),
       };
     }
     case "reconcile_inter_account_transfers": {

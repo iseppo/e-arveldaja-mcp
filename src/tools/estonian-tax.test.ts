@@ -493,6 +493,35 @@ describe("create_owner_expense_reimbursement", () => {
     expect(createCall.postings).toContainEqual({ accounts_id: 2110, type: "C", amount: 124 });
   });
 
+  it("returns standards-aware follow-up guidance for ambiguous vehicle VAT costs", async () => {
+    setup(true);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+
+    const result = await cb({
+      owner_client_id: 1,
+      effective_date: "2024-06-01",
+      description: "Fuel for company car",
+      net_amount: 100,
+      vat_rate: 0.24,
+      expense_account: 5000,
+    });
+
+    expect(isError(result)).toBe(true);
+    const payload = parseResult(result);
+    expect(payload.error).toBe("VAT deduction needs confirmation for this expense category");
+    expect(payload.hint).toContain("50%");
+    expect(payload.compliance_basis).toEqual(expect.arrayContaining([
+      expect.stringContaining("KMS § 29"),
+      expect.stringContaining("KMS § 32"),
+    ]));
+    expect(payload.follow_up_questions).toEqual(expect.arrayContaining([
+      expect.stringContaining("M1-kategooria"),
+      expect.stringContaining("erasõidud"),
+    ]));
+    expect(payload.policy_hint).toContain("accounting-rules.md");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
   it("rejects conflicting deductible_vat_amount when vat_deduction_mode='none'", async () => {
     setup(true);
     const cb = tools.get("create_owner_expense_reimbursement")!;

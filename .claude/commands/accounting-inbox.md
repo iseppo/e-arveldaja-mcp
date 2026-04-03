@@ -42,6 +42,11 @@ If `autopilot.needs_one_decision` is non-empty:
 - always start with the recommended default
 - if the user answers, re-run `run_accounting_inbox_dry_runs` with the chosen override values before continuing
 
+If an item under `autopilot.needs_accountant_review` includes:
+- `recommendation`: present that first as the default compliant handling
+- `compliance_basis`: summarize it briefly in plain language
+- `follow_up_questions`: ask only those questions that the payload itself did not already answer
+
 If there are no unresolved questions, continue immediately.
 
 If `autopilot.next_recommended_action` is present, treat it as the default next safe step.

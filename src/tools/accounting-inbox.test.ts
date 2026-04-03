@@ -421,4 +421,94 @@ describe("prepare_accounting_inbox", () => {
       }),
     ]));
   });
+
+  it("surfaces standards-aware review guidance for unmatched groups that still need judgement", async () => {
+    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(undefined),
+        findByName: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([
+          {
+            id: 9,
+            name: "Seppo Sepp",
+            is_physical_entity: true,
+            is_related_party: true,
+            is_deleted: false,
+          },
+        ]),
+      },
+      journals: {
+        listAllWithPostings: vi.fn().mockResolvedValue([]),
+      },
+      products: {},
+      saleInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([
+          {
+            id: 5,
+            status: "PROJECT",
+            is_deleted: false,
+            type: "C",
+            amount: 150,
+            date: "2026-03-21",
+            accounts_dimensions_id: 101,
+            bank_account_name: "Seppo Sepp",
+            description: "Transfer",
+            cl_currencies_id: "EUR",
+          },
+        ]),
+      },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          {
+            accounts_dimensions_id: 101,
+            account_name_est: "LHV põhikonto",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
+          },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          {
+            id: 101,
+            accounts_id: 1020,
+            title_est: "LHV põhikonto",
+            is_deleted: false,
+          },
+        ]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Autopilot tool was not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({ workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.autopilot.needs_accountant_review).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: "classify_unmatched_transactions",
+        recommendation: expect.stringContaining("ära tee sellest ostuarvet"),
+        compliance_basis: expect.arrayContaining([
+          expect.stringContaining("RPS § 6–7"),
+        ]),
+        follow_up_questions: expect.arrayContaining([
+          expect.stringContaining("laen"),
+        ]),
+      }),
+    ]));
+  });
 });

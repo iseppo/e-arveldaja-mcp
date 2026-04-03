@@ -53,6 +53,11 @@ import {
 } from "./supplier-resolution.js";
 import { getInvoiceMatchEligibility } from "./bank-reconciliation.js";
 import { type AccountingAutoBookingRule, findAutoBookingRule } from "../accounting-rules.js";
+import {
+  type ReviewGuidance,
+  buildClassificationReviewGuidance,
+  buildReceiptReviewGuidance,
+} from "../estonian-accounting-guidance.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const FILE_TYPE_EXTENSIONS = {
@@ -113,6 +118,7 @@ interface ReceiptBatchFileResult {
   };
   notes: string[];
   error?: string;
+  review_guidance?: ReviewGuidance;
 }
 
 interface TransactionMatchCandidate {
@@ -172,6 +178,7 @@ interface ClassifiedTransactionGroupResult {
   total_amount: number;
   suggested_booking: ClassifiedTransactionSuggestion;
   reasons: string[];
+  review_guidance?: ReviewGuidance;
   transactions: Array<{
     id?: number;
     type: string;
@@ -1140,6 +1147,7 @@ function toClassifiedResult(
   group: TransactionGroup,
   classification: TransactionGroupClassification,
   suggestion: ClassifiedTransactionSuggestion,
+  reviewGuidance?: ReviewGuidance,
 ): ClassifiedTransactionGroupResult {
   return {
     category: classification.category,
@@ -1151,6 +1159,7 @@ function toClassifiedResult(
     total_amount: roundMoney(group.transactions.reduce((sum, transaction) => sum + transaction.amount, 0)),
     suggested_booking: suggestion,
     reasons: classification.reasons,
+    review_guidance: reviewGuidance,
     transactions: group.transactions.map(transaction => ({
       id: transaction.id,
       type: transaction.type,
@@ -1303,6 +1312,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               status: "needs_review",
               extracted,
               llm_fallback: llmFallback,
+              review_guidance: buildReceiptReviewGuidance({
+                classification,
+                notes,
+                extracted,
+                llmFallback,
+              }),
               notes,
             });
             continue;
@@ -1317,6 +1332,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               status: "needs_review",
               extracted,
               llm_fallback: llmFallback,
+              review_guidance: buildReceiptReviewGuidance({
+                classification,
+                notes,
+                extracted,
+                llmFallback,
+              }),
               notes,
             });
             continue;
@@ -1333,6 +1354,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               extracted,
               llm_fallback: llmFallback,
               supplier_resolution: supplierResolution,
+              review_guidance: buildReceiptReviewGuidance({
+                classification,
+                notes,
+                extracted,
+                llmFallback,
+              }),
               notes,
             });
             continue;
@@ -1365,6 +1392,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               extracted,
               llm_fallback: llmFallback,
               supplier_resolution: supplierResolution,
+              review_guidance: buildReceiptReviewGuidance({
+                classification,
+                notes,
+                extracted,
+                llmFallback,
+              }),
               notes,
             });
             continue;
@@ -1522,10 +1555,16 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           owner_counterparties: ownerCounterparties,
         });
         const resolved = await resolveClassificationSuggestion(api, context, clients, group, classification);
+        const applyMode = resolved.applyMode;
         classifiedGroups.push(toClassifiedResult(group, {
           ...classification,
-          apply_mode: resolved.applyMode,
-        }, resolved.suggestion));
+          apply_mode: applyMode,
+        }, resolved.suggestion, applyMode !== "purchase_invoice"
+          ? buildClassificationReviewGuidance({
+              category: classification.category,
+              displayCounterparty: group.display_counterparty,
+            })
+          : undefined));
       }
 
       const categoryCounts = classifiedGroups.reduce<Record<string, number>>((counts, group) => {

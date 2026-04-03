@@ -17,6 +17,7 @@ import {
   getOwnerExpenseVatDeductionModeForAccount,
   getOwnerExpenseVatDeductionRatioForAccount,
 } from "../accounting-rules.js";
+import { buildOwnerExpenseVatReviewGuidance } from "../estonian-accounting-guidance.js";
 
 function requiresOwnerExpenseVatReview(accountName: string | undefined, description: string): boolean {
   const text = `${accountName ?? ""} ${description}`.toLowerCase();
@@ -279,9 +280,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             : configuredMode ?? "full");
 
       if (vatRegistered && grossVat > 0 && requiresReview && vat_deduction_mode === undefined && deductible_vat_amount === undefined && configuredMode === undefined) {
+        const reviewGuidance = buildOwnerExpenseVatReviewGuidance({
+          description,
+          accountName: expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng,
+        });
         return toolError({
           error: "VAT deduction needs confirmation for this expense category",
-          hint: "Suggested default: use vat_deduction_mode='full' for clearly business-only deductible VAT, 'partial' with deductible_vat_amount for restricted claims, or 'none' when VAT is not deductible.",
+          hint: reviewGuidance.recommendation,
+          compliance_basis: reviewGuidance.compliance_basis,
+          follow_up_questions: reviewGuidance.follow_up_questions,
+          policy_hint: reviewGuidance.policy_hint,
           suggestions: [
             "If this is a standard business receipt with fully deductible VAT, rerun with vat_deduction_mode='full'.",
             "If this is passenger-car or mixed-use cost, rerun with vat_deduction_mode='partial' and deductible_vat_amount.",

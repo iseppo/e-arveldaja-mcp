@@ -204,6 +204,54 @@ describe("receipt inbox tool status handling", () => {
     expect(payload.groups[0]!.transactions[0]!.id).toBe(4);
   });
 
+  it("classify_unmatched_transactions adds review guidance for owner-transfer groups", async () => {
+    const { handler } = setupReceiptTool("classify_unmatched_transactions", {
+      clients: [
+        {
+          id: 9,
+          name: "Seppo Sepp",
+          is_supplier: false,
+          is_client: false,
+          is_physical_entity: true,
+          is_related_party: true,
+          is_deleted: false,
+        },
+      ],
+      transactions: [
+        {
+          id: 5,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 150,
+          date: "2026-03-21",
+          accounts_dimensions_id: 100,
+          bank_account_name: "Seppo Sepp",
+          description: "Transfer",
+          cl_currencies_id: "EUR",
+        },
+      ],
+      purchaseArticles: [],
+      accounts: [],
+    });
+
+    const result = await handler({ accounts_dimensions_id: 100 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.groups).toHaveLength(1);
+    expect(payload.groups[0]).toMatchObject({
+      category: "owner_transfers",
+      apply_mode: "review_only",
+      review_guidance: {
+        recommendation: expect.stringContaining("ära tee sellest ostuarvet"),
+        follow_up_questions: expect.arrayContaining([
+          expect.stringContaining("laen"),
+          expect.stringContaining("dividend"),
+        ]),
+      },
+    });
+  });
+
   it("classify_unmatched_transactions merges partial local rules into the generic suggestion", async () => {
     const rulesDir = mkdtempSync(join(tmpdir(), "earv-rules-"));
     const rulesFile = join(rulesDir, "accounting-rules.md");
