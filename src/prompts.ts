@@ -274,6 +274,56 @@ Follow these steps in order:
   );
 
   registerPrompt(server,
+    "prepare-accounting-review-action",
+    "Turn a resolved accounting review item into the next concrete action, such as deleting a duplicate transaction or saving a stable auto-booking rule.",
+    {
+      review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload"),
+      save_as_rule: z.boolean().optional().describe("Optional hint to prepare a save_auto_booking_rule action when the treatment is stable"),
+      rule_override_json: z.string().optional().describe("Optional JSON object with explicit rule fields such as purchase_article_id, purchase_account_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason, match, or category"),
+    },
+    async ({ review_item_json, save_as_rule, rule_override_json }) => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Prepare the concrete next action for this accounting review item:
+
+${review_item_json}
+
+${save_as_rule !== undefined ? `save_as_rule: ${save_as_rule}\n` : ""}${rule_override_json ? `rule_override_json: ${rule_override_json}\n` : ""}
+Follow these steps in order:
+
+1. Call \`prepare_accounting_review_action\` with:
+   - review_item_json: the exact JSON above
+   ${save_as_rule !== undefined ? `- save_as_rule: ${save_as_rule}` : ""}
+   ${rule_override_json ? `- rule_override_json: ${rule_override_json}` : ""}
+
+2. Treat the tool response as the source of truth:
+   - \`status\`
+   - \`recommendation\`
+   - \`unresolved_questions\`
+   - \`proposed_action\`
+   - \`suggested_workflow\`
+   - \`suggested_tools\`
+   - \`next_step_summary\`
+
+3. Present the result in this order:
+   - recommendation first
+   - only unresolved questions, if any
+   - the concrete proposed action, if present
+   - the next step summary
+
+4. Keep the interaction minimal:
+   - if \`status="needs_answers"\`, ask only \`unresolved_questions\`
+   - if \`proposed_action\` is present, ask for explicit approval before executing it
+   - if \`proposed_action.tool="save_auto_booking_rule"\`, explain briefly that this updates the local \`accounting-rules.md\` file for future repeats
+`,
+        },
+      }],
+    })
+  );
+
+  registerPrompt(server,
     "book-invoice",
     "Book a purchase invoice from a source document. Extracts invoice data, validates it, resolves the supplier, suggests booking accounts, previews the booking, and creates + confirms the invoice after approval.",
     { file_path: z.string().describe("Absolute path to the invoice document file (PDF/JPG/PNG)") },

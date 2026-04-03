@@ -35,3 +35,7 @@ Always present:
 - if `unresolved_questions` is empty, do not invent extra questions
 - if `suggested_rule_markdown` is present, offer it only as an optional future default
 - do not execute any mutating follow-up without explicit approval
+
+### Step 4: When the review item is already understood
+
+If the next step is clear, continue with `prepare_accounting_review_action` instead of inventing your own action plan.

@@ -69,6 +69,7 @@ describe("registerPrompts", () => {
       "setup-credentials",
       "accounting-inbox",
       "resolve-accounting-review",
+      "prepare-accounting-review-action",
       "book-invoice",
       "receipt-batch",
       "import-camt",
@@ -158,6 +159,20 @@ describe("registerPrompts", () => {
     expect(text).toContain("suggested_workflow");
     expect(text).toContain("suggested_rule_markdown");
     expect(text).toContain("do not invent extra questions");
+  });
+
+  it("keeps prepare-accounting-review-action aligned with the action-preparation payload", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "prepare-accounting-review-action", {
+      review_item_json: "{\"review_type\":\"camt_possible_duplicate\"}",
+      save_as_rule: true,
+    });
+
+    expect(text).toContain("prepare_accounting_review_action");
+    expect(text).toContain("proposed_action");
+    expect(text).toContain("save_as_rule");
+    expect(text).toContain("suggested_workflow");
+    expect(text).toContain("ask for explicit approval");
   });
 
   it("keeps the book-invoice prompt aligned with real tool parameters and output fields", async () => {
@@ -404,6 +419,16 @@ describe("registerPrompts", () => {
       expect(text).toContain("unresolved_questions");
       expect(text).toContain("suggested_workflow");
       expect(text).toContain("suggested_rule_markdown");
+    }
+  });
+
+  it("keeps shipped prepare-accounting-review-action markdown prompts aligned with the action flow", () => {
+    for (const relativePath of ["workflows/prepare-accounting-review-action.md", ".claude/commands/prepare-accounting-review-action.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("prepare_accounting_review_action");
+      expect(text).toContain("proposed_action");
+      expect(text).toContain("save_auto_booking_rule");
+      expect(text).toContain("explicit approval");
     }
   });
 

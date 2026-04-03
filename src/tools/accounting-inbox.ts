@@ -4,7 +4,7 @@ import { basename, extname, resolve } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { parseMcpResponse, toMcpJson } from "../mcp-json.js";
-import { readOnly } from "../annotations.js";
+import { mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
 import type { AccountDimension, BankAccount } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
@@ -17,6 +17,7 @@ import {
   buildCamtDuplicateReviewGuidance,
   type ReviewGuidance,
 } from "../estonian-accounting-guidance.js";
+import { getAccountingRulesPath, saveAutoBookingRule } from "../accounting-rules.js";
 
 const RECEIPT_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
 const DEFAULT_SCAN_DEPTH = 2;
@@ -29,6 +30,16 @@ const IGNORED_DIRECTORY_NAMES = new Set([
   "coverage",
   ".turbo",
 ]);
+const AUTO_BOOKING_CATEGORIES = [
+  "saas_subscriptions",
+  "bank_fees",
+  "tax_payments",
+  "salary_payroll",
+  "owner_transfers",
+  "card_purchases",
+  "revenue_without_invoice",
+  "unknown",
+] as const;
 
 interface InboxFileCandidate {
   path: string;
@@ -124,6 +135,21 @@ interface ReviewResolutionResult {
   suggested_workflow?: string;
   suggested_tools?: string[];
   suggested_rule_markdown?: string;
+  next_step_summary: string;
+}
+
+interface ReviewActionPreparationResult {
+  status: "needs_answers" | "ready_for_approval" | "no_direct_action";
+  recommendation: string;
+  unresolved_questions: string[];
+  proposed_action?: {
+    type: "tool_call" | "rule_save";
+    tool: string;
+    args: Record<string, unknown>;
+    approval_required: boolean;
+  };
+  suggested_workflow?: string;
+  suggested_tools?: string[];
   next_step_summary: string;
 }
 
@@ -923,6 +949,111 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
   };
 }
 
+function prepareReviewAction(
+  reviewItem: Record<string, unknown>,
+  options: {
+    saveAsRule?: boolean;
+    ruleOverride?: Record<string, unknown>;
+  } = {},
+): ReviewActionPreparationResult {
+  const resolution = resolveReviewItemPlan(reviewItem);
+  if (resolution.unresolved_questions.length > 0) {
+    return {
+      status: "needs_answers",
+      recommendation: resolution.recommendation,
+      unresolved_questions: resolution.unresolved_questions,
+      suggested_workflow: resolution.suggested_workflow,
+      suggested_tools: resolution.suggested_tools,
+      next_step_summary: resolution.next_step_summary,
+    };
+  }
+
+  const reviewType = resolution.review_type;
+  const item = recordAt(reviewItem, "item");
+  const group = recordAt(reviewItem, "group");
+
+  if (reviewType === "camt_possible_duplicate" && item) {
+    const newTransactionId = numberAt(item, "new_transaction_api_id");
+    const hasConfirmedMatch = arrayAt(item, "existing_transactions").some((candidate) =>
+      isRecord(candidate) && stringAt(candidate, "status") === "CONFIRMED"
+    );
+    if (newTransactionId !== undefined && hasConfirmedMatch) {
+      return {
+        status: "ready_for_approval",
+        recommendation: resolution.recommendation,
+        unresolved_questions: [],
+        proposed_action: {
+          type: "tool_call",
+          tool: "delete_transaction",
+          args: { id: newTransactionId },
+          approval_required: true,
+        },
+        suggested_workflow: resolution.suggested_workflow,
+        suggested_tools: ["delete_transaction"],
+        next_step_summary: `With approval, delete duplicate PROJECT transaction ${newTransactionId} and keep the older confirmed bank row as the authoritative entry.`,
+      };
+    }
+  }
+
+  if (options.saveAsRule) {
+    const match = stringAt(options.ruleOverride ?? {}, "match") ??
+      stringAt(recordAt(item ?? group ?? {}, "extracted") ?? {}, "supplier_name") ??
+      stringAt(item ?? {}, "display_counterparty") ??
+      stringAt(group ?? {}, "display_counterparty");
+    const category = stringAt(options.ruleOverride ?? {}, "category") ??
+      stringAt(group ?? {}, "category");
+    if (match) {
+      const ruleArgs: Record<string, unknown> = {
+        match,
+        ...(category ? { category } : {}),
+      };
+      let hasConcreteRuleField = false;
+      for (const key of [
+        "purchase_article_id",
+        "purchase_account_id",
+        "purchase_account_dimensions_id",
+        "liability_account_id",
+        "vat_rate_dropdown",
+        "reversed_vat_id",
+        "reason",
+      ]) {
+        const value = (options.ruleOverride ?? {})[key];
+        if (value !== undefined) {
+          ruleArgs[key] = value;
+          hasConcreteRuleField = true;
+        }
+      }
+      return {
+        status: hasConcreteRuleField ? "ready_for_approval" : "no_direct_action",
+        recommendation: resolution.recommendation,
+        unresolved_questions: [],
+        proposed_action: hasConcreteRuleField
+          ? {
+              type: "rule_save",
+              tool: "save_auto_booking_rule",
+              args: ruleArgs,
+              approval_required: true,
+            }
+          : undefined,
+        suggested_workflow: resolution.suggested_workflow,
+        suggested_tools: ["save_auto_booking_rule"],
+        next_step_summary: Object.keys(ruleArgs).length > 1
+          ? `With approval, save this stable treatment into ${getAccountingRulesPath()} so the same counterparty needs fewer questions next time.`
+          : "A rule could be saved here, but at least one concrete booking field still needs to be chosen first.",
+      };
+    }
+  }
+
+  return {
+    status: "no_direct_action",
+    recommendation: resolution.recommendation,
+    unresolved_questions: [],
+    suggested_workflow: resolution.suggested_workflow,
+    suggested_tools: resolution.suggested_tools,
+    next_step_summary: resolution.next_step_summary,
+  };
+}
+
 async function invokeInternalTool(
   handlers: Map<string, InternalToolHandler>,
   tool: string,
@@ -1299,6 +1430,85 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
               "Ask only unresolved_questions, and only if the payload itself does not already answer them.",
               "Do not execute any mutating follow-up without explicit approval.",
             ],
+          }),
+        }],
+      };
+    },
+  );
+
+  registerTool(server,
+    "prepare_accounting_review_action",
+    "Prepare the concrete next action for one resolved accounting review item, such as deleting a duplicate transaction or saving a stable auto-booking rule.",
+    {
+      review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload"),
+      save_as_rule: z.boolean().optional().describe("When true, prefer preparing a save_auto_booking_rule action when the review item represents a stable recurring treatment."),
+      rule_override_json: z.string().optional().describe("Optional JSON object with explicit rule fields such as purchase_article_id, purchase_account_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason, match, or category."),
+    },
+    { ...readOnly, title: "Prepare Accounting Review Action" },
+    async ({ review_item_json, save_as_rule, rule_override_json }) => {
+      const reviewItem = parseJsonObject(review_item_json, "review_item_json");
+      const ruleOverride = rule_override_json
+        ? parseJsonObject(rule_override_json, "rule_override_json")
+        : undefined;
+      const prepared = prepareReviewAction(reviewItem, {
+        saveAsRule: save_as_rule,
+        ruleOverride,
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            ...prepared,
+            assistant_guidance: [
+              "If proposed_action is present, ask for explicit approval before executing it.",
+              "If status is needs_answers, gather only unresolved_questions before preparing the action again.",
+              "Prefer saving a rule only after the treatment has been confirmed as stable and repeatable.",
+            ],
+          }),
+        }],
+      };
+    },
+  );
+
+  registerTool(server,
+    "save_auto_booking_rule",
+    "Save or update one stable counterparty auto-booking default in accounting-rules.md. Use only after the treatment has been confirmed and approved.",
+    {
+      match: z.string().min(1).describe("Counterparty match text, usually the supplier or counterparty name stem"),
+      category: z.enum(AUTO_BOOKING_CATEGORIES).optional().describe("Optional classification category such as saas_subscriptions or bank_fees"),
+      purchase_article_id: z.number().int().optional().describe("Optional purchase article ID"),
+      purchase_account_id: z.number().int().optional().describe("Optional purchase account ID"),
+      purchase_account_dimensions_id: z.number().int().optional().describe("Optional purchase account dimension ID"),
+      liability_account_id: z.number().int().optional().describe("Optional liability account ID"),
+      vat_rate_dropdown: z.string().optional().describe("Optional VAT rate dropdown value"),
+      reversed_vat_id: z.number().int().optional().describe("Optional reverse-charge VAT flag"),
+      reason: z.string().optional().describe("Optional short explanation for the rule"),
+    },
+    { ...mutate, title: "Save Auto-Booking Rule" },
+    async ({ match, category, purchase_article_id, purchase_account_id, purchase_account_dimensions_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason }) => {
+      const result = saveAutoBookingRule({
+        match,
+        category,
+        purchase_article_id,
+        purchase_account_id,
+        purchase_account_dimensions_id,
+        liability_account_id,
+        vat_rate_dropdown,
+        reversed_vat_id,
+        reason,
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            saved: true,
+            path: result.path,
+            action: result.action,
+            match: result.match,
+            category: result.category,
+            note: "The local accounting-rules.md file was updated. Review the diff if you want to fine-tune the wording or IDs.",
           }),
         }],
       };

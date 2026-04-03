@@ -5,12 +5,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   findAutoBookingRule,
   getCashFlowCategoryRule,
+  getAccountingRulesPath,
   getDefaultOwnerExpenseVatDeductionMode,
   getDefaultOwnerExpenseVatDeductionRatio,
   getLiabilityClassificationRule,
   getOwnerExpenseVatDeductionModeForAccount,
   getOwnerExpenseVatDeductionRatioForAccount,
   resetAccountingRulesCache,
+  saveAutoBookingRule,
 } from "./accounting-rules.js";
 
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
@@ -191,6 +193,69 @@ Default VAT deduction mode: partial ratio 0.5
 
     expect(getDefaultOwnerExpenseVatDeductionMode()).toBeUndefined();
     expect(getDefaultOwnerExpenseVatDeductionRatio()).toBeUndefined();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("upserts an auto-booking rule into accounting-rules.md", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "accounting-rules.md");
+    writeFileSync(filePath, `# Accounting Rules
+
+## Auto Booking
+
+| match | category | purchase_article_id | purchase_account_id | purchase_account_dimensions_id | liability_account_id | vat_rate_dropdown | reversed_vat_id | reason |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| openai | saas_subscriptions | 1 | 2 |  | 2310 | - | 1 | old |
+`, "utf-8");
+
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    const result = saveAutoBookingRule({
+      match: "openai",
+      category: "saas_subscriptions",
+      purchase_article_id: 501,
+      purchase_account_id: 5230,
+      liability_account_id: 2315,
+      vat_rate_dropdown: "-",
+      reversed_vat_id: 1,
+      reason: "Updated default",
+    });
+
+    expect(result).toMatchObject({
+      path: filePath,
+      action: "updated",
+      match: "openai",
+      category: "saas_subscriptions",
+    });
+    expect(findAutoBookingRule("openai ireland limited", "saas_subscriptions")).toMatchObject({
+      purchase_article_id: 501,
+      purchase_account_id: 5230,
+      liability_account_id: 2315,
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("creates the default rules file when saving a rule into a missing path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "missing-rules.md");
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    const result = saveAutoBookingRule({
+      match: "wise",
+      category: "bank_fees",
+      purchase_account_id: 8610,
+      reason: "Wise bank fee default",
+    });
+
+    expect(result.action).toBe("inserted");
+    expect(getAccountingRulesPath()).toBe(filePath);
+    expect(findAutoBookingRule("wise europe sa", "bank_fees")).toMatchObject({
+      purchase_account_id: 8610,
+    });
 
     rmSync(dir, { recursive: true, force: true });
   });

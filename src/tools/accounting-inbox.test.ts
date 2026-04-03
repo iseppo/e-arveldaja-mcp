@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -545,5 +545,74 @@ describe("prepare_accounting_inbox", () => {
     expect(payload.assistant_guidance).toContain(
       "Ask only unresolved_questions, and only if the payload itself does not already answer them.",
     );
+  });
+
+  it("prepare_accounting_review_action proposes deleting a new duplicate CAMT project transaction", async () => {
+    const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
+
+    const result = await handler({
+      review_item_json: JSON.stringify({
+        review_type: "camt_possible_duplicate",
+        item: {
+          new_transaction_api_id: 9001,
+          existing_transactions: [
+            { id: 77, status: "CONFIRMED" },
+          ],
+          review_guidance: {
+            recommendation: "Keep the confirmed transaction and remove the new duplicate.",
+            compliance_basis: ["RPS § 6–7"],
+            follow_up_questions: [],
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload).toMatchObject({
+      status: "ready_for_approval",
+      proposed_action: {
+        type: "tool_call",
+        tool: "delete_transaction",
+        args: { id: 9001 },
+        approval_required: true,
+      },
+    });
+  });
+
+  it("save_auto_booking_rule upserts a local rule into the configured markdown file", async () => {
+    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const rulesPath = join(workspace, "accounting-rules.md");
+    await writeFile(rulesPath, "# Accounting Rules\n\n## Auto Booking\n", "utf8");
+    const originalRulesFile = process.env.EARVELDAJA_RULES_FILE;
+    process.env.EARVELDAJA_RULES_FILE = rulesPath;
+
+    const { handler } = setupAccountingInboxTool({}, "save_auto_booking_rule");
+    const result = await handler({
+      match: "openai",
+      category: "saas_subscriptions",
+      purchase_article_id: 501,
+      purchase_account_id: 5230,
+      liability_account_id: 2315,
+      vat_rate_dropdown: "-",
+      reversed_vat_id: 1,
+      reason: "OpenAI default",
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const saved = await readFile(rulesPath, "utf8");
+
+    expect(payload).toMatchObject({
+      saved: true,
+      action: "inserted",
+      match: "openai",
+      category: "saas_subscriptions",
+    });
+    expect(saved).toContain("| openai | saas_subscriptions | 501 | 5230 |  | 2315 | - | 1 | OpenAI default |");
+
+    if (originalRulesFile === undefined) {
+      delete process.env.EARVELDAJA_RULES_FILE;
+    } else {
+      process.env.EARVELDAJA_RULES_FILE = originalRulesFile;
+    }
   });
 });
