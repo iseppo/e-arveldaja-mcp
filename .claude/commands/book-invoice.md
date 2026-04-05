@@ -84,8 +84,10 @@ If there is no suitable history, call `list_purchase_articles` or ask the user i
 ## Step 7: Determine VAT treatment
 
 - For normal domestic invoices, keep the VAT treatment shown on the document.
-- Reverse charge applies when the supplier is foreign (non-Estonian VAT number or no Estonian registry code) AND the invoice is for services (not goods).
-- If reverse charge applies, set `reversed_vat_id: 1` on the affected service lines.
+- Do not infer reverse charge from supplier country alone.
+- Reuse a confirmed prior VAT treatment from `suggest_booking` when it clearly fits the same supplier and service.
+- Only set `reversed_vat_id: 1` when the evidence supports that this is a foreign service with place of supply in Estonia and the reverse-charge treatment is actually applicable.
+- If the foreign-service VAT treatment is still unclear from the document and prior confirmed history, stop and ask the user instead of guessing.
 
 ## Step 8: Derive the remaining invoice fields
 

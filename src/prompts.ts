@@ -254,7 +254,6 @@ Follow these steps in order:
    - \`unresolved_questions\`
    - \`suggested_workflow\`
    - \`suggested_tools\`
-   - \`suggested_rule_markdown\`
    - \`next_step_summary\`
 
 3. Present the result in this order:
@@ -265,7 +264,6 @@ Follow these steps in order:
 
 4. Keep the interaction minimal:
    - if \`unresolved_questions\` is empty, do not invent extra questions
-   - if \`suggested_rule_markdown\` is present, offer it only as an optional time-saving default for future repeats
    - do not execute any mutating follow-up without explicit approval
 `,
         },
@@ -275,7 +273,7 @@ Follow these steps in order:
 
   registerPrompt(server,
     "prepare-accounting-review-action",
-    "Turn a resolved accounting review item into the next concrete action, such as deleting a duplicate transaction or saving a stable auto-booking rule.",
+    "Turn a resolved accounting review item into the next concrete action, such as cleaning up a duplicate transaction or saving a stable auto-booking rule.",
     {
       review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload"),
       save_as_rule: z.boolean().optional().describe("Optional hint to prepare a save_auto_booking_rule action when the treatment is stable"),
@@ -316,6 +314,7 @@ Follow these steps in order:
 4. Keep the interaction minimal:
    - if \`status="needs_answers"\`, ask only \`unresolved_questions\`
    - if \`proposed_action\` is present, ask for explicit approval before executing it
+   - if \`proposed_action.tool="cleanup_camt_possible_duplicate"\`, explain briefly that it first fills any missing CAMT metadata onto the kept older transaction and only then deletes the duplicate PROJECT row
    - if \`proposed_action.tool="save_auto_booking_rule"\`, explain briefly that this updates the local \`accounting-rules.md\` file for future repeats
 `,
         },
@@ -398,8 +397,10 @@ Follow these steps in order:
 
 9. Determine VAT treatment per line:
    - For normal domestic invoices, keep the VAT treatment shown on the document.
-   - Reverse charge applies when the supplier is foreign (non-Estonian VAT number or no Estonian registry code) AND the invoice is for services (not goods).
-   - If reverse charge applies, set \`reversed_vat_id: 1\` on the affected service lines.
+   - Do not infer reverse charge from supplier country alone.
+   - Reuse a confirmed prior VAT treatment from \`suggest_booking\` when it clearly fits the same supplier and service.
+   - Only set \`reversed_vat_id: 1\` when the evidence supports that this is a foreign service with place of supply in Estonia and the reverse-charge treatment is actually applicable.
+   - If the foreign-service VAT treatment is still unclear from the document and prior confirmed history, stop and ask the user instead of guessing.
 
 10. Derive the remaining invoice fields:
    - journal_date: normally invoice_date unless a different turnover date is clearly stated on the invoice.
@@ -586,9 +587,10 @@ Follow these steps in order:
    - any import errors that would block execution from \`execution.errors\`
 
    For possible duplicates, default recommendation:
-   - keep the older matched transaction
-   - update it with the CAMT \`bank_ref_number\` and other missing metadata
-   - avoid creating, or if already created, delete the new \`PROJECT\` transaction
+   - if the older matched transaction is already confirmed, keep it by default
+   - update that confirmed transaction only with missing CAMT metadata such as \`bank_ref_number\`
+   - then avoid creating, or if already created, delete the new \`PROJECT\` transaction
+   - if the older match is not confirmed, review statuses before deciding which row to keep
 
 6. Ask for approval before creating anything.
    If the user does not explicitly approve, stop here.

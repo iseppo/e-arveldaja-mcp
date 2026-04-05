@@ -157,8 +157,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("compliance_basis");
     expect(text).toContain("unresolved_questions");
     expect(text).toContain("suggested_workflow");
-    expect(text).toContain("suggested_rule_markdown");
     expect(text).toContain("do not invent extra questions");
+    expect(text).not.toContain("suggested_rule_markdown");
   });
 
   it("keeps prepare-accounting-review-action aligned with the action-preparation payload", async () => {
@@ -173,6 +173,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("save_as_rule");
     expect(text).toContain("suggested_workflow");
     expect(text).toContain("ask for explicit approval");
+    expect(text).toContain("cleanup_camt_possible_duplicate");
   });
 
   it("keeps the book-invoice prompt aligned with real tool parameters and output fields", async () => {
@@ -194,6 +195,9 @@ describe("registerPrompts", () => {
     expect(text).toContain("vat_accounts_id");
     expect(text).toContain("cl_vat_articles_id");
     expect(text).toContain("auto-uploads the source document");
+    expect(text).toContain("Do not infer reverse charge from supplier country alone.");
+    expect(text).toContain("place of supply in Estonia");
+    expect(text).toContain("stop and ask the user instead of guessing");
     expect(text).not.toContain("upload_invoice_document");
     expect(text).not.toContain("client_id: the supplier's client_id");
   });
@@ -249,6 +253,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("skipped_summary");
     expect(text).toContain("created_count");
     expect(text).toContain("error_count");
+    expect(text).toContain("if the older matched transaction is already confirmed, keep it by default");
+    expect(text).toContain("if the older match is not confirmed, review statuses before deciding which row to keep");
   });
 
   it("keeps import-wise aligned with fee account handling and dry-run fields", async () => {
@@ -352,6 +358,9 @@ describe("registerPrompts", () => {
       expect(text).toContain("auto_create: true");
       expect(text).toContain("calendar-day difference between `invoice_date` and `due_date`");
       expect(text).toContain("If `due_date` is missing");
+      expect(text).toContain("Do not infer reverse charge from supplier country alone.");
+      expect(text).toContain("place of supply in Estonia");
+      expect(text).toContain("stop and ask the user instead of guessing");
       expect(text).toContain("ask for approval");
       expect(text).toContain("If the user has not explicitly approved the preview, stop here and wait.");
       expect(text).not.toMatch(/Read tool|visually/i);
@@ -418,7 +427,7 @@ describe("registerPrompts", () => {
       expect(text).toContain("compliance_basis");
       expect(text).toContain("unresolved_questions");
       expect(text).toContain("suggested_workflow");
-      expect(text).toContain("suggested_rule_markdown");
+      expect(text).not.toContain("suggested_rule_markdown");
     }
   });
 
@@ -446,6 +455,20 @@ describe("registerPrompts", () => {
       expect(text).toContain("execution.audit_reference");
       expect(text.toLowerCase()).toContain("approval");
     }
+  });
+
+  it("keeps shipped import prompts aligned with status-aware CAMT cleanup and Wise fee autodetection", () => {
+    const camtWorkflow = readPromptSurface("workflows/import-camt.md");
+    const camtCommand = readPromptSurface(".claude/commands/import-camt.md");
+    const wiseCommand = readPromptSurface(".claude/commands/import-wise.md");
+
+    expect(camtWorkflow).toContain("if the older matched transaction is already confirmed, keep it by default");
+    expect(camtWorkflow).toContain("if the older match is not confirmed, review statuses before deciding which row to keep");
+    expect(camtCommand).toContain("if the older matched transaction is already confirmed, keep it by default");
+    expect(camtCommand).toContain("if the older match is not confirmed, review statuses before deciding which row to keep");
+
+    expect(wiseCommand).toContain("auto-detects a unique active `8610` fee dimension when possible");
+    expect(wiseCommand).toContain("only when auto-detection was not possible");
   });
 
   it("keeps shipped classify-unmatched markdown prompts aligned with review guidance", () => {
