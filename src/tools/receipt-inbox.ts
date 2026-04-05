@@ -52,7 +52,11 @@ import {
   resolveSupplierInternal,
 } from "./supplier-resolution.js";
 import { getInvoiceMatchEligibility } from "./bank-reconciliation.js";
-import { type AccountingAutoBookingRule, findAutoBookingRule } from "../accounting-rules.js";
+import {
+  type AccountingAutoBookingRule,
+  findAutoBookingRule,
+  hasConcreteAutoBookingRuleBookingTarget,
+} from "../accounting-rules.js";
 import {
   type ReviewGuidance,
   buildClassificationReviewGuidance,
@@ -689,7 +693,10 @@ async function resolveClassificationSuggestion(
   }
 
   const autoBookingRule = findAutoBookingRule(group.normalized_counterparty, classification.category);
-  if (autoBookingRule) {
+  if (autoBookingRule && (
+    classification.category === "bank_fees" ||
+    hasConcreteAutoBookingRuleBookingTarget(autoBookingRule)
+  )) {
     return {
       applyMode: classification.apply_mode,
       suggestion: buildClassificationSuggestion(
@@ -714,7 +721,9 @@ async function resolveClassificationSuggestion(
         classification.category,
         group.normalized_counterparty,
         {
-          manualReviewReason: "No confirmed supplier-history invoice or local rule was found, so VAT and account treatment should be reviewed manually.",
+          manualReviewReason: autoBookingRule
+            ? "A local rule exists, but it does not choose a stable expense article or account, so VAT and account treatment should still be reviewed manually."
+            : "No confirmed supplier-history invoice or local rule was found, so VAT and account treatment should be reviewed manually.",
         },
       ),
     };

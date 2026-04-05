@@ -252,7 +252,7 @@ describe("receipt inbox tool status handling", () => {
     });
   });
 
-  it("classify_unmatched_transactions merges partial local rules into the generic suggestion", async () => {
+  it("classify_unmatched_transactions keeps metadata-only local rules in manual review for unmatched expenses", async () => {
     const rulesDir = mkdtempSync(join(tmpdir(), "earv-rules-"));
     const rulesFile = join(rulesDir, "accounting-rules.md");
     writeFileSync(rulesFile, `# Accounting Rules
@@ -332,12 +332,104 @@ describe("receipt inbox tool status handling", () => {
     expect(payload.groups).toHaveLength(1);
     expect(payload.groups[0]).toMatchObject({
       category: "saas_subscriptions",
+      apply_mode: "review_only",
       suggested_booking: {
         purchase_article_id: 501,
         purchase_account_id: 5230,
+        source: "keyword_match",
+      },
+    });
+
+    rmSync(rulesDir, { recursive: true, force: true });
+  });
+
+  it("classify_unmatched_transactions auto-books from a concrete local rule that chooses the expense target", async () => {
+    const rulesDir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const rulesFile = join(rulesDir, "accounting-rules.md");
+    writeFileSync(rulesFile, `# Accounting Rules
+
+## Auto Booking
+| match | category | purchase_article_id | purchase_account_id | liability_account_id | vat_rate_dropdown | reversed_vat_id | reason |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| openai | saas_subscriptions | 501 | 5230 | 2315 | - | 1 | OpenAI reverse-charge rule |
+`, "utf-8");
+    process.env.EARVELDAJA_RULES_FILE = rulesFile;
+    resetAccountingRulesCache();
+
+    const { handler } = setupReceiptTool("classify_unmatched_transactions", {
+      clients: [
+        {
+          id: 7,
+          name: "OpenAI Ireland Limited",
+          is_supplier: true,
+          is_client: false,
+          cl_code_country: "IE",
+          is_member: false,
+          send_invoice_to_email: false,
+          send_invoice_to_accounting_email: false,
+          is_deleted: false,
+        },
+      ],
+      transactions: [
+        {
+          id: 47,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 25,
+          date: "2026-03-22",
+          accounts_dimensions_id: 100,
+          bank_account_name: "OpenAI",
+          description: "ChatGPT subscription",
+          cl_currencies_id: "EUR",
+          clients_id: 7,
+        },
+        {
+          id: 48,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 25.2,
+          date: "2026-02-22",
+          accounts_dimensions_id: 100,
+          bank_account_name: "OpenAI",
+          description: "ChatGPT subscription",
+          cl_currencies_id: "EUR",
+          clients_id: 7,
+        },
+      ],
+      purchaseArticles: [{
+        id: 501,
+        name_est: "Software",
+        name_eng: "Software",
+        accounts_id: 5230,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        is_disabled: false,
+        priority: 1,
+      }],
+      accounts: [{
+        id: 5230,
+        name_est: "Software expense",
+        name_eng: "Software expense",
+        account_type_est: "Kulud",
+        account_type_eng: "Expenses",
+      }],
+    });
+
+    const result = await handler({ accounts_dimensions_id: 100 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.groups).toHaveLength(1);
+    expect(payload.groups[0]).toMatchObject({
+      category: "saas_subscriptions",
+      apply_mode: "purchase_invoice",
+      suggested_booking: {
+        purchase_article_id: 501,
+        purchase_account_id: 5230,
+        liability_account_id: 2315,
         vat_rate_dropdown: "-",
         reversed_vat_id: 1,
-        liability_account_id: 2315,
         source: "local_rules",
       },
     });

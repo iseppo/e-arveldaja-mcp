@@ -19,7 +19,7 @@ const transactionCategorySchema = z.enum([
   "unknown",
 ]);
 
-const autoBookingRuleSchema = z.object({
+const autoBookingRuleSchemaBase = z.object({
   match: z.string().min(1),
   category: transactionCategorySchema.optional(),
   purchase_article_id: z.number().int().optional(),
@@ -29,6 +29,16 @@ const autoBookingRuleSchema = z.object({
   vat_rate_dropdown: z.string().optional(),
   reversed_vat_id: z.number().int().optional(),
   reason: z.string().optional(),
+});
+
+const autoBookingRuleSchema = autoBookingRuleSchemaBase.superRefine((value, ctx) => {
+  if (!hasAnyAutoBookingRuleActionField(value)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "auto-booking rules require at least one concrete booking field besides match/category/reason",
+      path: ["match"],
+    });
+  }
 });
 
 const ownerExpenseVatRuleSchema = z.object({
@@ -81,6 +91,15 @@ export interface SaveAutoBookingRuleInput {
 let cachedRules: AccountingRules | undefined;
 let cachedRulesPath: string | undefined;
 let cachedRulesSignature: string | undefined;
+
+const AUTO_BOOKING_RULE_ACTION_FIELDS = [
+  "purchase_article_id",
+  "purchase_account_id",
+  "purchase_account_dimensions_id",
+  "liability_account_id",
+  "vat_rate_dropdown",
+  "reversed_vat_id",
+] as const;
 
 function getRulesPath(): string {
   const configured = process.env.EARVELDAJA_RULES_FILE?.trim();
@@ -143,6 +162,25 @@ Columns:
 
 function normalizeHeader(header: string): string {
   return header.trim().toLowerCase().replace(/\s+/g, "_");
+}
+
+export function normalizeAutoBookingRuleMatch(match: string): string {
+  return normalizeCompanyName(match, { stripNonAlphanumeric: true }) || match.trim().toLowerCase();
+}
+
+export function hasAnyAutoBookingRuleActionField(
+  value: Partial<Pick<
+    AccountingAutoBookingRule,
+    typeof AUTO_BOOKING_RULE_ACTION_FIELDS[number]
+  >>,
+): boolean {
+  return AUTO_BOOKING_RULE_ACTION_FIELDS.some((field) => value[field] !== undefined);
+}
+
+export function hasConcreteAutoBookingRuleBookingTarget(
+  value: Partial<Pick<AccountingAutoBookingRule, "purchase_article_id" | "purchase_account_id">>,
+): boolean {
+  return value.purchase_article_id !== undefined || value.purchase_account_id !== undefined;
 }
 
 function getRulesSignature(filePath: string): string {
@@ -409,6 +447,12 @@ export function saveAutoBookingRule(input: SaveAutoBookingRuleInput): {
   match: string;
   category?: string;
 } {
+  const parsed = autoBookingRuleSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new Error(parsed.error.issues.map(issue => issue.message).join("; "));
+  }
+
+  const validatedInput = parsed.data;
   const path = getRulesPath();
   if (!existsSync(path)) {
     writeFileSync(path, DEFAULT_RULES_TEMPLATE, "utf8");
@@ -431,10 +475,10 @@ export function saveAutoBookingRule(input: SaveAutoBookingRuleInput): {
   sectionEnd = mutableLines.findIndex((line, index) => index > sectionStart && /^##\s+/.test(line.trim()));
   if (sectionEnd === -1) sectionEnd = mutableLines.length;
 
-  const matchKey = input.match.trim().toLowerCase();
-  const categoryKey = (input.category ?? "").trim().toLowerCase();
+  const matchKey = normalizeAutoBookingRuleMatch(validatedInput.match);
+  const categoryKey = (validatedInput.category ?? "").trim().toLowerCase();
   let action: "inserted" | "updated" = "inserted";
-  const rowText = `| ${buildAutoBookingRuleRow(input)} |`;
+  const rowText = `| ${buildAutoBookingRuleRow(validatedInput)} |`;
 
   for (let index = table.headerIndex + 2; index < sectionEnd; index++) {
     const line = mutableLines[index]?.trim();
@@ -443,7 +487,7 @@ export function saveAutoBookingRule(input: SaveAutoBookingRuleInput): {
       .split("|")
       .map(cell => cell.trim())
       .filter((_, cellIndex, all) => cellIndex > 0 && cellIndex < all.length - 1);
-    const existingMatch = (cells[0] ?? "").toLowerCase();
+    const existingMatch = normalizeAutoBookingRuleMatch(cells[0] ?? "");
     const existingCategory = (cells[1] ?? "").toLowerCase();
     if (existingMatch === matchKey && existingCategory === categoryKey) {
       mutableLines[index] = rowText;
@@ -453,8 +497,8 @@ export function saveAutoBookingRule(input: SaveAutoBookingRuleInput): {
       return {
         path,
         action,
-        match: input.match,
-        category: input.category,
+        match: validatedInput.match,
+        category: validatedInput.category,
       };
     }
   }
@@ -465,8 +509,8 @@ export function saveAutoBookingRule(input: SaveAutoBookingRuleInput): {
   return {
     path,
     action,
-    match: input.match,
-    category: input.category,
+    match: validatedInput.match,
+    category: validatedInput.category,
   };
 }
 
@@ -477,7 +521,7 @@ export function findAutoBookingRule(
   const rules = loadAccountingRules();
   const matches = rules.auto_booking?.counterparties?.filter((rule) =>
     normalizedCounterparty.includes(
-      normalizeCompanyName(rule.match, { stripNonAlphanumeric: true }) || rule.match.trim().toLowerCase()
+      normalizeAutoBookingRuleMatch(rule.match)
     )
   );
   if (!matches || matches.length === 0) {

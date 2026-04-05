@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -234,6 +234,82 @@ Default VAT deduction mode: partial ratio 0.5
       purchase_account_id: 5230,
       liability_account_id: 2315,
     });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("updates an existing rule when the saved match normalizes to the same counterparty stem", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "accounting-rules.md");
+    writeFileSync(filePath, `# Accounting Rules
+
+## Auto Booking
+
+| match | category | purchase_article_id | purchase_account_id | purchase_account_dimensions_id | liability_account_id | vat_rate_dropdown | reversed_vat_id | reason |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Fraqmented | saas_subscriptions | 1 | 2 |  | 2310 | - | 1 | old |
+`, "utf-8");
+
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    const result = saveAutoBookingRule({
+      match: "Fraqmented OÜ",
+      category: "saas_subscriptions",
+      purchase_article_id: 501,
+      purchase_account_id: 5230,
+      liability_account_id: 2315,
+      vat_rate_dropdown: "-",
+      reversed_vat_id: 1,
+      reason: "Normalized update",
+    });
+
+    const saved = readFileSync(filePath, "utf8");
+
+    expect(result.action).toBe("updated");
+    expect(saved).toContain("| Fraqmented OÜ | saas_subscriptions | 501 | 5230 |  | 2315 | - | 1 | Normalized update |");
+    expect(saved).not.toContain("| Fraqmented | saas_subscriptions | 1 | 2 |  | 2310 | - | 1 | old |");
+    expect(findAutoBookingRule("fraqmented ou", "saas_subscriptions")).toMatchObject({
+      purchase_article_id: 501,
+      purchase_account_id: 5230,
+      liability_account_id: 2315,
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("ignores reason-only auto-booking rows because they do not encode a booking decision", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "accounting-rules.md");
+    writeFileSync(filePath, `# Accounting Rules
+
+## Auto Booking
+| match | category | reason |
+| --- | --- | --- |
+| openai | saas_subscriptions | informational note only |
+`, "utf-8");
+
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    expect(findAutoBookingRule("openai ireland limited", "saas_subscriptions")).toBeUndefined();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("rejects saving an auto-booking rule without any booking fields", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "accounting-rules.md");
+    writeFileSync(filePath, "# Accounting Rules\n\n## Auto Booking\n", "utf-8");
+
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    expect(() => saveAutoBookingRule({
+      match: "openai",
+      category: "saas_subscriptions",
+      reason: "note only",
+    })).toThrow(/at least one concrete booking field/i);
 
     rmSync(dir, { recursive: true, force: true });
   });

@@ -25,6 +25,9 @@ function setupAccountingInboxTool(apiOverrides: Record<string, unknown> = {}, to
     },
     transactions: {
       listAll: vi.fn().mockResolvedValue([]),
+      get: vi.fn().mockImplementation(async (id: number) => ({ id, status: "CONFIRMED", is_deleted: false })),
+      update: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
     },
     readonly: {
       getBankAccounts: vi.fn().mockResolvedValue([]),
@@ -547,7 +550,36 @@ describe("prepare_accounting_inbox", () => {
     );
   });
 
-  it("prepare_accounting_review_action proposes deleting a new duplicate CAMT project transaction", async () => {
+  it("resolve_accounting_review_item does not suggest an auto-booking rule for owner expense reimbursement receipts", async () => {
+    const { handler } = setupAccountingInboxTool({}, "resolve_accounting_review_item");
+
+    const result = await handler({
+      review_item_json: JSON.stringify({
+        review_type: "receipt_review",
+        item: {
+          classification: "owner_paid_expense_reimbursement",
+          extracted: {
+            supplier_name: "Circle K Eesti AS",
+          },
+          review_guidance: {
+            recommendation: "Soovitus: käsitle seda omaniku poolt tasutud kuluna ja kontrolli sisendkäibemaksu mahaarvatavust.",
+            compliance_basis: ["KMS § 30", "RPS § 6–7"],
+            follow_up_questions: ["Kas kulu oli 100% ettevõtluseks?"],
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload).toMatchObject({
+      review_type: "receipt_review",
+      suggested_workflow: "owner-expense",
+      suggested_tools: ["create_owner_expense_reimbursement"],
+      unresolved_questions: ["Kas kulu oli 100% ettevõtluseks?"],
+    });
+  });
+
+  it("prepare_accounting_review_action proposes a persistent CAMT duplicate cleanup action", async () => {
     const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
 
     const result = await handler({
@@ -556,7 +588,14 @@ describe("prepare_accounting_inbox", () => {
         item: {
           new_transaction_api_id: 9001,
           existing_transactions: [
-            { id: 77, status: "CONFIRMED" },
+            {
+              id: 77,
+              status: "CONFIRMED",
+              suggested_patch_missing_fields: {
+                bank_ref_number: "CAMT-REF-1",
+                ref_number: "RF123",
+              },
+            },
           ],
           review_guidance: {
             recommendation: "Keep the confirmed transaction and remove the new duplicate.",
@@ -572,11 +611,141 @@ describe("prepare_accounting_inbox", () => {
       status: "ready_for_approval",
       proposed_action: {
         type: "tool_call",
-        tool: "delete_transaction",
-        args: { id: 9001 },
+        tool: "cleanup_camt_possible_duplicate",
+        args: {
+          keep_transaction_id: 77,
+          delete_transaction_id: 9001,
+          patch_missing_fields: {
+            bank_ref_number: "CAMT-REF-1",
+            ref_number: "RF123",
+          },
+        },
         approval_required: true,
       },
     });
+  });
+
+  it("cleanup_camt_possible_duplicate enriches missing metadata before deleting the duplicate row", async () => {
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          if (id === 77) {
+            return {
+              id: 77,
+              status: "CONFIRMED",
+              is_deleted: false,
+              bank_ref_number: null,
+              ref_number: "",
+              bank_account_name: "Curated supplier",
+            };
+          }
+          return {
+            id,
+            status: "PROJECT",
+            is_deleted: false,
+          };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    const result = await handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+      patch_missing_fields: {
+        bank_ref_number: "CAMT-REF-1",
+        ref_number: "RF123",
+        bank_account_name: "Bank text that should not overwrite",
+      },
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(api.transactions.update).toHaveBeenCalledWith(77, {
+      bank_ref_number: "CAMT-REF-1",
+      ref_number: "RF123",
+    });
+    expect(api.transactions.delete).toHaveBeenCalledWith(9001);
+    expect(payload).toMatchObject({
+      cleaned: true,
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+      updated_keep_transaction: true,
+      applied_patch: {
+        bank_ref_number: "CAMT-REF-1",
+        ref_number: "RF123",
+      },
+    });
+  });
+
+  it("cleanup_camt_possible_duplicate refuses to delete a row that is no longer PROJECT", async () => {
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          if (id === 77) {
+            return {
+              id: 77,
+              status: "CONFIRMED",
+              is_deleted: false,
+            };
+          }
+          return {
+            id,
+            status: "CONFIRMED",
+            is_deleted: false,
+          };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await expect(handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+      patch_missing_fields: {
+        bank_ref_number: "CAMT-REF-1",
+      },
+    })).rejects.toThrow(/instead of PROJECT/i);
+
+    expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
+
+  it("cleanup_camt_possible_duplicate refuses to keep a row that is no longer CONFIRMED", async () => {
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          if (id === 77) {
+            return {
+              id: 77,
+              status: "PROJECT",
+              is_deleted: false,
+            };
+          }
+          return {
+            id,
+            status: "PROJECT",
+            is_deleted: false,
+          };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await expect(handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+      patch_missing_fields: {
+        bank_ref_number: "CAMT-REF-1",
+      },
+    })).rejects.toThrow(/instead of CONFIRMED/i);
+
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.delete).not.toHaveBeenCalled();
   });
 
   it("save_auto_booking_rule upserts a local rule into the configured markdown file", async () => {
@@ -614,5 +783,15 @@ describe("prepare_accounting_inbox", () => {
     } else {
       process.env.EARVELDAJA_RULES_FILE = originalRulesFile;
     }
+  });
+
+  it("save_auto_booking_rule rejects reason-only rules", async () => {
+    const { handler } = setupAccountingInboxTool({}, "save_auto_booking_rule");
+
+    await expect(handler({
+      match: "openai",
+      category: "saas_subscriptions",
+      reason: "This alone should not become an auto-booking rule",
+    })).rejects.toThrow(/requires at least one concrete booking field/i);
   });
 });

@@ -1,6 +1,6 @@
 # Prepare Accounting Review Action
 
-Turn a resolved accounting review item into the next concrete action, such as deleting a duplicate transaction or saving a stable auto-booking rule.
+Turn a resolved accounting review item into the next concrete action, such as cleaning up a duplicate transaction or saving a stable auto-booking rule.
 
 ## Arguments
 
@@ -31,4 +31,5 @@ Treat the tool response as the source of truth:
 - if `status="needs_answers"`, ask only `unresolved_questions`
 - if `proposed_action` is present, present it as the default next step
 - ask for explicit approval before executing any `proposed_action`
+- if the action is `cleanup_camt_possible_duplicate`, explain briefly that it fills missing CAMT metadata onto the kept older transaction before deleting the duplicate PROJECT row
 - if the action is `save_auto_booking_rule`, explain briefly that it updates the local `accounting-rules.md` file

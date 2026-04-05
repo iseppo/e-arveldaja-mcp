@@ -19,7 +19,6 @@ Treat the tool response as the source of truth:
 - `unresolved_questions`
 - `suggested_workflow`
 - `suggested_tools`
-- `suggested_rule_markdown`
 - `next_step_summary`
 
 ### Step 2: Present the result in the right order
@@ -33,7 +32,6 @@ Always present:
 ### Step 3: Keep the interaction minimal
 
 - if `unresolved_questions` is empty, do not invent extra questions
-- if `suggested_rule_markdown` is present, offer it only as an optional future default
 - do not execute any mutating follow-up without explicit approval
 
 ### Step 4: When the review item is already understood

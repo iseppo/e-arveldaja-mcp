@@ -4,9 +4,10 @@ import { basename, extname, resolve } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { parseMcpResponse, toMcpJson } from "../mcp-json.js";
-import { mutate, readOnly } from "../annotations.js";
+import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
-import type { AccountDimension, BankAccount } from "../types/api.js";
+import { logAudit } from "../audit-log.js";
+import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { registerCamtImportTools } from "./camt-import.js";
@@ -17,7 +18,11 @@ import {
   buildCamtDuplicateReviewGuidance,
   type ReviewGuidance,
 } from "../estonian-accounting-guidance.js";
-import { getAccountingRulesPath, saveAutoBookingRule } from "../accounting-rules.js";
+import {
+  getAccountingRulesPath,
+  hasAnyAutoBookingRuleActionField,
+  saveAutoBookingRule,
+} from "../accounting-rules.js";
 
 const RECEIPT_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
 const DEFAULT_SCAN_DEPTH = 2;
@@ -134,7 +139,6 @@ interface ReviewResolutionResult {
   policy_hint?: string;
   suggested_workflow?: string;
   suggested_tools?: string[];
-  suggested_rule_markdown?: string;
   next_step_summary: string;
 }
 
@@ -854,13 +858,43 @@ function parseJsonObject(input: string, fieldName: string): Record<string, unkno
   return parsed;
 }
 
-function buildAutoBookingRuleMarkdown(match: string, category?: string): string {
-  return [
-    "## Auto Booking",
-    "| match | category | purchase_article_id | purchase_account_id | purchase_account_dimensions_id | liability_account_id | vat_rate_dropdown | reversed_vat_id | reason |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    `| ${match} | ${category ?? ""} |  |  |  |  |  |  | Stable default confirmed by user |`,
-  ].join("\n");
+const CAMT_DUPLICATE_PATCH_FIELDS = [
+  "bank_ref_number",
+  "ref_number",
+  "bank_account_no",
+  "bank_account_name",
+  "description",
+] as const;
+
+function hasConcreteRuleOverrideField(ruleOverride: Record<string, unknown> | undefined): boolean {
+  if (!ruleOverride) return false;
+  return hasAnyAutoBookingRuleActionField({
+    purchase_article_id: numberAt(ruleOverride, "purchase_article_id"),
+    purchase_account_id: numberAt(ruleOverride, "purchase_account_id"),
+    purchase_account_dimensions_id: numberAt(ruleOverride, "purchase_account_dimensions_id"),
+    liability_account_id: numberAt(ruleOverride, "liability_account_id"),
+    vat_rate_dropdown: stringAt(ruleOverride, "vat_rate_dropdown"),
+    reversed_vat_id: numberAt(ruleOverride, "reversed_vat_id"),
+  });
+}
+
+function extractTransactionPatchFields(record: Record<string, unknown> | undefined): Partial<Transaction> {
+  if (!record) return {};
+
+  const patch: Partial<Transaction> = {};
+  for (const field of CAMT_DUPLICATE_PATCH_FIELDS) {
+    const value = record[field];
+    if (typeof value === "string" && value.trim()) {
+      patch[field] = value;
+    }
+  }
+  return patch;
+}
+
+function findConfirmedPossibleDuplicateMatch(item: Record<string, unknown>): Record<string, unknown> | undefined {
+  return arrayAt(item, "existing_transactions")
+    .filter(isRecord)
+    .find(candidate => stringAt(candidate, "status") === "CONFIRMED");
 }
 
 function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResolutionResult {
@@ -873,7 +907,6 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
     const file = recordAt(item, "file");
     const extracted = recordAt(item, "extracted");
     const classification = stringAt(item, "classification") ?? "needs_review";
-    const supplierName = stringAt(extracted ?? {}, "supplier_name");
     const filePath = stringAt(file ?? {}, "path");
     return {
       review_type: "receipt_review",
@@ -886,9 +919,6 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
       suggested_tools: classification === "owner_paid_expense_reimbursement"
         ? ["create_owner_expense_reimbursement"]
         : ["book-invoice", "process_receipt_batch"],
-      suggested_rule_markdown: supplierName
-        ? buildAutoBookingRuleMarkdown(supplierName)
-        : undefined,
       next_step_summary: classification === "owner_paid_expense_reimbursement"
         ? "After the missing VAT/business-use answers are known, continue with create_owner_expense_reimbursement instead of forcing this through purchase-invoice booking."
         : `Resolve the missing receipt facts first${filePath ? ` for ${filePath}` : ""}, then either book it via book-invoice for one document or rerun process_receipt_batch for the folder.`,
@@ -908,18 +938,14 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
       policy_hint: guidance?.policy_hint,
       suggested_workflow: "classify-unmatched",
       suggested_tools: ["classify_unmatched_transactions", "apply_transaction_classifications"],
-      suggested_rule_markdown: ["saas_subscriptions", "bank_fees", "card_purchases"].includes(category)
-        ? buildAutoBookingRuleMarkdown(counterparty, category)
-        : undefined,
       next_step_summary: "Decide the real treatment of this transaction group first. Only after that should you either book it manually, save a stable rule, or rerun the classification/apply flow.",
     };
   }
 
   if (reviewType === "camt_possible_duplicate" && item) {
     const guidance = reviewGuidanceFromRecord(item);
-    const existingTransactions = arrayAt(item, "existing_transactions").filter(isRecord);
     const newTransactionId = numberAt(item, "new_transaction_api_id");
-    const confirmedMatch = existingTransactions.find(candidate => stringAt(candidate, "status") === "CONFIRMED");
+    const confirmedMatch = findConfirmedPossibleDuplicateMatch(item);
     return {
       review_type: "camt_possible_duplicate",
       status: "ready_for_action",
@@ -928,7 +954,11 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
       unresolved_questions: [],
       policy_hint: guidance?.policy_hint,
       suggested_workflow: "import-camt",
-      suggested_tools: newTransactionId !== undefined ? ["delete_transaction"] : ["import_camt053"],
+      suggested_tools: confirmedMatch && newTransactionId !== undefined
+        ? ["cleanup_camt_possible_duplicate"]
+        : newTransactionId !== undefined
+          ? ["delete_transaction"]
+          : ["import_camt053"],
       next_step_summary: confirmedMatch && newTransactionId !== undefined
         ? `Default cleanup: keep confirmed transaction ${numberAt(confirmedMatch, "id")}, use its suggested missing-field patch as reference, and delete new PROJECT transaction ${newTransactionId}.`
         : confirmedMatch
@@ -974,23 +1004,28 @@ function prepareReviewAction(
 
   if (reviewType === "camt_possible_duplicate" && item) {
     const newTransactionId = numberAt(item, "new_transaction_api_id");
-    const hasConfirmedMatch = arrayAt(item, "existing_transactions").some((candidate) =>
-      isRecord(candidate) && stringAt(candidate, "status") === "CONFIRMED"
-    );
-    if (newTransactionId !== undefined && hasConfirmedMatch) {
+    const confirmedMatch = findConfirmedPossibleDuplicateMatch(item);
+    const keepTransactionId = confirmedMatch ? numberAt(confirmedMatch, "id") : undefined;
+    if (newTransactionId !== undefined && keepTransactionId !== undefined) {
       return {
         status: "ready_for_approval",
         recommendation: resolution.recommendation,
         unresolved_questions: [],
         proposed_action: {
           type: "tool_call",
-          tool: "delete_transaction",
-          args: { id: newTransactionId },
+          tool: "cleanup_camt_possible_duplicate",
+          args: {
+            keep_transaction_id: keepTransactionId,
+            delete_transaction_id: newTransactionId,
+            patch_missing_fields: extractTransactionPatchFields(
+              confirmedMatch ? recordAt(confirmedMatch, "suggested_patch_missing_fields") : undefined,
+            ),
+          },
           approval_required: true,
         },
         suggested_workflow: resolution.suggested_workflow,
-        suggested_tools: ["delete_transaction"],
-        next_step_summary: `With approval, delete duplicate PROJECT transaction ${newTransactionId} and keep the older confirmed bank row as the authoritative entry.`,
+        suggested_tools: ["cleanup_camt_possible_duplicate"],
+        next_step_summary: `With approval, fill the missing CAMT metadata onto confirmed transaction ${keepTransactionId} where needed and then delete duplicate PROJECT transaction ${newTransactionId}.`,
       };
     }
   }
@@ -1007,7 +1042,6 @@ function prepareReviewAction(
         match,
         ...(category ? { category } : {}),
       };
-      let hasConcreteRuleField = false;
       for (const key of [
         "purchase_article_id",
         "purchase_account_id",
@@ -1020,9 +1054,9 @@ function prepareReviewAction(
         const value = (options.ruleOverride ?? {})[key];
         if (value !== undefined) {
           ruleArgs[key] = value;
-          hasConcreteRuleField = true;
         }
       }
+      const hasConcreteRuleField = hasConcreteRuleOverrideField(options.ruleOverride);
       return {
         status: hasConcreteRuleField ? "ready_for_approval" : "no_direct_action",
         recommendation: resolution.recommendation,
@@ -1037,7 +1071,7 @@ function prepareReviewAction(
           : undefined,
         suggested_workflow: resolution.suggested_workflow,
         suggested_tools: ["save_auto_booking_rule"],
-        next_step_summary: Object.keys(ruleArgs).length > 1
+        next_step_summary: hasConcreteRuleField
           ? `With approval, save this stable treatment into ${getAccountingRulesPath()} so the same counterparty needs fewer questions next time.`
           : "A rule could be saved here, but at least one concrete booking field still needs to be chosen first.",
       };
@@ -1472,6 +1506,100 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
   );
 
   registerTool(server,
+    "cleanup_camt_possible_duplicate",
+    "Apply any missing CAMT metadata onto the kept older transaction and then delete the newly imported duplicate PROJECT transaction.",
+    {
+      keep_transaction_id: z.number().int().describe("Existing authoritative transaction ID to keep"),
+      delete_transaction_id: z.number().int().describe("New duplicate PROJECT transaction ID to delete"),
+      patch_missing_fields: z.object({
+        bank_ref_number: z.string().optional(),
+        ref_number: z.string().optional(),
+        bank_account_no: z.string().optional(),
+        bank_account_name: z.string().optional(),
+        description: z.string().optional(),
+      }).optional().describe("Optional CAMT metadata to fill only if the kept transaction still lacks those values"),
+    },
+    { ...batch, title: "Cleanup CAMT Possible Duplicate" },
+    async ({ keep_transaction_id, delete_transaction_id, patch_missing_fields }) => {
+      if (keep_transaction_id === delete_transaction_id) {
+        throw new Error("keep_transaction_id and delete_transaction_id must be different transactions");
+      }
+
+      const keptTransaction = await api.transactions.get(keep_transaction_id);
+      if (keptTransaction.is_deleted) {
+        throw new Error(`Cannot keep transaction ${keep_transaction_id} because it is already deleted`);
+      }
+      if (keptTransaction.status !== "CONFIRMED") {
+        throw new Error(
+          `Refusing to keep transaction ${keep_transaction_id} because its status is ${keptTransaction.status ?? "UNKNOWN"} instead of CONFIRMED`,
+        );
+      }
+
+      const duplicateTransaction = await api.transactions.get(delete_transaction_id);
+      if (duplicateTransaction.is_deleted) {
+        throw new Error(`Cannot delete transaction ${delete_transaction_id} because it is already deleted`);
+      }
+      if ((duplicateTransaction.status ?? "PROJECT") !== "PROJECT") {
+        throw new Error(
+          `Refusing to delete transaction ${delete_transaction_id} because its status is ${duplicateTransaction.status ?? "UNKNOWN"} instead of PROJECT`,
+        );
+      }
+
+      const appliedPatch: Partial<Transaction> = {};
+      const requestedPatch = patch_missing_fields ?? {};
+      for (const field of CAMT_DUPLICATE_PATCH_FIELDS) {
+        const candidateValue = requestedPatch[field];
+        if (typeof candidateValue !== "string" || !candidateValue.trim()) continue;
+
+        const currentValue = keptTransaction[field];
+        if (typeof currentValue === "string" && currentValue.trim()) continue;
+        if (currentValue !== undefined && currentValue !== null && currentValue !== "") continue;
+
+        appliedPatch[field] = candidateValue;
+      }
+
+      if (Object.keys(appliedPatch).length > 0) {
+        await api.transactions.update(keep_transaction_id, appliedPatch);
+        logAudit({
+          tool: "cleanup_camt_possible_duplicate",
+          action: "UPDATED",
+          entity_type: "transaction",
+          entity_id: keep_transaction_id,
+          summary: `Enriched transaction ${keep_transaction_id} with missing CAMT metadata before duplicate cleanup`,
+          details: appliedPatch,
+        });
+      }
+
+      const deleteResult = await api.transactions.delete(delete_transaction_id);
+      logAudit({
+        tool: "cleanup_camt_possible_duplicate",
+        action: "DELETED",
+        entity_type: "transaction",
+        entity_id: delete_transaction_id,
+        summary: `Deleted duplicate CAMT transaction ${delete_transaction_id} after preserving transaction ${keep_transaction_id}`,
+        details: { kept_transaction_id: keep_transaction_id },
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            cleaned: true,
+            keep_transaction_id,
+            delete_transaction_id,
+            updated_keep_transaction: Object.keys(appliedPatch).length > 0,
+            applied_patch: appliedPatch,
+            delete_result: deleteResult,
+            note: Object.keys(appliedPatch).length > 0
+              ? "The older transaction was enriched with missing CAMT metadata before deleting the duplicate PROJECT row."
+              : "No missing CAMT metadata had to be added; the duplicate PROJECT row was deleted.",
+          }),
+        }],
+      };
+    },
+  );
+
+  registerTool(server,
     "save_auto_booking_rule",
     "Save or update one stable counterparty auto-booking default in accounting-rules.md. Use only after the treatment has been confirmed and approved.",
     {
@@ -1487,6 +1615,17 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
     },
     { ...mutate, title: "Save Auto-Booking Rule" },
     async ({ match, category, purchase_article_id, purchase_account_id, purchase_account_dimensions_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason }) => {
+      if (!hasConcreteRuleOverrideField({
+        purchase_article_id,
+        purchase_account_id,
+        purchase_account_dimensions_id,
+        liability_account_id,
+        vat_rate_dropdown,
+        reversed_vat_id,
+      })) {
+        throw new Error("save_auto_booking_rule requires at least one concrete booking field besides match/category/reason");
+      }
+
       const result = saveAutoBookingRule({
         match,
         category,
