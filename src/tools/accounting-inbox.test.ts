@@ -156,6 +156,12 @@ describe("prepare_accounting_inbox", () => {
       "classify_unmatched_transactions",
       "reconcile_inter_account_transfers",
     ]);
+    expect(payload.recommended_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "classify_unmatched_transactions",
+        recommended: true,
+      }),
+    ]));
     expect(payload.questions).toEqual([]);
     expect(payload.next_question).toBeUndefined();
     expect(payload.next_recommended_action).toEqual(expect.objectContaining({
@@ -262,6 +268,106 @@ describe("prepare_accounting_inbox", () => {
     ]));
   });
 
+  it("does not classify unmatched transactions while a prior CAMT import step is still unresolved", async () => {
+    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false, camtIban: "EE001234567890123456" });
+    workspacesToClean.push(workspace);
+
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(undefined),
+        findByName: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([
+          {
+            id: 9,
+            name: "Seppo Sepp",
+            is_physical_entity: true,
+            is_related_party: true,
+            is_deleted: false,
+          },
+        ]),
+      },
+      journals: {
+        listAllWithPostings: vi.fn().mockResolvedValue([]),
+      },
+      products: {},
+      saleInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([
+          {
+            id: 5,
+            status: "PROJECT",
+            is_deleted: false,
+            type: "C",
+            amount: 150,
+            date: "2026-03-21",
+            accounts_dimensions_id: 101,
+            bank_account_name: "Seppo Sepp",
+            description: "Transfer",
+            cl_currencies_id: "EUR",
+          },
+        ]),
+      },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          {
+            accounts_dimensions_id: 101,
+            account_name_est: "LHV põhikonto",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
+          },
+          {
+            accounts_dimensions_id: 102,
+            account_name_est: "SEB põhikonto",
+            account_no: "EE381010220123456789",
+            iban_code: "EE381010220123456789",
+          },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Autopilot tool was not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({
+      workspace_path: workspace,
+      receipt_matching_dimension_id: 101,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.autopilot.executed_steps.map((step: any) => step.tool)).toEqual([
+      "parse_camt053",
+      "reconcile_inter_account_transfers",
+    ]);
+    expect(payload.autopilot.skipped_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "import_camt053",
+        summary: expect.stringContaining("accounts_dimensions_id"),
+      }),
+      expect.objectContaining({
+        tool: "classify_unmatched_transactions",
+        summary: expect.stringContaining("old live ledger"),
+      }),
+    ]));
+    expect(payload.autopilot.needs_accountant_review).toEqual([]);
+    expect(payload.autopilot.needs_one_decision).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: "camt_accounts_dimensions_id",
+      }),
+    ]));
+  });
+
   it("still provides a usable scan plan when live defaults are unavailable in setup mode", async () => {
     const workspace = await createWorkspace({ includeReceipts: false });
     workspacesToClean.push(workspace);
@@ -362,8 +468,288 @@ describe("prepare_accounting_inbox", () => {
       expect.stringContaining("CAMT dry run would create"),
       expect.stringContaining("Classified 0 unmatched transaction"),
     ]));
+    expect(payload.prepared_inbox.recommended_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "classify_unmatched_transactions",
+        recommended: true,
+      }),
+    ]));
     expect(payload.autopilot.needs_one_decision).toEqual([]);
     expect(payload.autopilot.next_question).toBeUndefined();
+    expect(payload.prepared_inbox.next_recommended_action).toBeUndefined();
+  });
+
+  it("keeps each CAMT possible duplicate as a separate review follow-up with its own resolver payload", async () => {
+    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    await writeFile(
+      join(workspace, "statement.xml"),
+      `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-1</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">10.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <AcctSvcrRef>REF-1</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-1</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Vendor OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Test payment one</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+      <Ntry>
+        <Amt Ccy="EUR">20.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-02</Dt></BookgDt>
+        <AcctSvcrRef>REF-2</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-2</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">20.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Other Vendor OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Test payment two</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`,
+      "utf8",
+    );
+
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(undefined),
+        findByName: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      journals: {
+        listAllWithPostings: vi.fn().mockResolvedValue([]),
+      },
+      products: {},
+      saleInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([
+          {
+            id: 77,
+            status: "CONFIRMED",
+            accounts_dimensions_id: 101,
+            date: "2026-02-01",
+            type: "C",
+            amount: 10,
+            cl_currencies_id: "EUR",
+            bank_ref_number: null,
+            bank_account_name: "Vendor OÜ",
+            ref_number: null,
+            description: "Test payment one",
+            is_deleted: false,
+          },
+          {
+            id: 88,
+            status: "PROJECT",
+            accounts_dimensions_id: 101,
+            date: "2026-02-02",
+            type: "C",
+            amount: 20,
+            cl_currencies_id: "EUR",
+            bank_ref_number: null,
+            bank_account_name: "Other Vendor OÜ",
+            ref_number: null,
+            description: "Test payment two",
+            is_deleted: false,
+          },
+        ]),
+      },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          {
+            accounts_dimensions_id: 101,
+            account_name_est: "LHV põhikonto",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
+          },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          {
+            id: 101,
+            accounts_id: 1020,
+            title_est: "LHV põhikonto",
+            is_deleted: false,
+          },
+        ]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Autopilot tool was not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({ workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.autopilot.skipped_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "classify_unmatched_transactions",
+        summary: expect.stringContaining("old live ledger"),
+      }),
+    ]));
+    const duplicateFollowUps = payload.autopilot.needs_accountant_review.filter((item: any) => item.source === "import_camt053");
+    expect(duplicateFollowUps).toHaveLength(2);
+    expect(duplicateFollowUps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        resolver_input: expect.objectContaining({
+          review_type: "camt_possible_duplicate",
+          item: expect.objectContaining({
+            date: "2026-02-01",
+            amount: 10,
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        resolver_input: expect.objectContaining({
+          review_type: "camt_possible_duplicate",
+          item: expect.objectContaining({
+            date: "2026-02-02",
+            amount: 20,
+          }),
+        }),
+      }),
+    ]));
+  });
+
+  it("does not truncate CAMT possible duplicate review items when there are more than five", async () => {
+    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    const entryXml = Array.from({ length: 6 }, (_, index) => {
+      const entryNo = index + 1;
+      const amount = entryNo * 10;
+      const date = `2026-02-0${entryNo}`;
+      return `      <Ntry>
+        <Amt Ccy="EUR">${amount.toFixed(2)}</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>${date}</Dt></BookgDt>
+        <AcctSvcrRef>REF-${entryNo}</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-${entryNo}</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">${amount.toFixed(2)}</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Vendor ${entryNo} OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Test payment ${entryNo}</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>`;
+    }).join("\n");
+
+    await writeFile(
+      join(workspace, "statement.xml"),
+      `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-many</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+${entryXml}
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`,
+      "utf8",
+    );
+
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(undefined),
+        findByName: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      journals: {
+        listAllWithPostings: vi.fn().mockResolvedValue([]),
+      },
+      products: {},
+      saleInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue(Array.from({ length: 6 }, (_, index) => {
+          const entryNo = index + 1;
+          return {
+            id: 200 + entryNo,
+            status: "CONFIRMED",
+            accounts_dimensions_id: 101,
+            date: `2026-02-0${entryNo}`,
+            type: "C",
+            amount: entryNo * 10,
+            cl_currencies_id: "EUR",
+            bank_ref_number: null,
+            bank_account_name: `Vendor ${entryNo} OÜ`,
+            ref_number: null,
+            description: `Test payment ${entryNo}`,
+            is_deleted: false,
+          };
+        })),
+      },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          {
+            accounts_dimensions_id: 101,
+            account_name_est: "LHV põhikonto",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
+          },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          {
+            id: 101,
+            accounts_id: 1020,
+            title_est: "LHV põhikonto",
+            is_deleted: false,
+          },
+        ]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Autopilot tool was not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({ workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    const duplicateFollowUps = payload.autopilot.needs_accountant_review.filter((item: any) => item.source === "import_camt053");
+    expect(duplicateFollowUps).toHaveLength(6);
+    expect(payload.autopilot.user_summary).toContain("6 review item(s) remain");
   });
 
   it("keeps autopilot useful in setup mode by running only the local preview step", async () => {
@@ -426,7 +812,7 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("surfaces standards-aware review guidance for unmatched groups that still need judgement", async () => {
-    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
 
     const server = { registerTool: vi.fn() } as any;
@@ -573,9 +959,37 @@ describe("prepare_accounting_inbox", () => {
 
     expect(payload).toMatchObject({
       review_type: "receipt_review",
-      suggested_workflow: "owner-expense",
       suggested_tools: ["create_owner_expense_reimbursement"],
       unresolved_questions: ["Kas kulu oli 100% ettevõtluseks?"],
+    });
+    expect(payload.suggested_workflow).toBeUndefined();
+  });
+
+  it("resolve_accounting_review_item keeps receipt-review workflow names separate from actual tools", async () => {
+    const { handler } = setupAccountingInboxTool({}, "resolve_accounting_review_item");
+
+    const result = await handler({
+      review_item_json: JSON.stringify({
+        review_type: "receipt_review",
+        item: {
+          classification: "purchase_invoice",
+          file: {
+            path: "/tmp/receipt.pdf",
+          },
+          review_guidance: {
+            recommendation: "Soovitus: kinnita puudu olevad arveandmed enne automaatset broneerimist.",
+            compliance_basis: ["RPS § 6–7"],
+            follow_up_questions: [],
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload).toMatchObject({
+      review_type: "receipt_review",
+      suggested_workflow: "book-invoice",
+      suggested_tools: ["process_receipt_batch"],
     });
   });
 

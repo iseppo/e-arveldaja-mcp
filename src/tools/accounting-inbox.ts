@@ -605,7 +605,7 @@ function buildRecommendedSteps(params: {
         accounts_dimensions_id: defaults.suggested_receipt_dimension_id,
       },
       missing_inputs: [],
-      reason: "After imports and receipt processing, this is the next low-friction step to surface only the remaining exceptions.",
+      reason: "Use this after bank imports and receipt processing are materially clear. The autopilot will defer it automatically if current dry runs still show pending imports, receipt matches, or review-only receipt work.",
     });
   }
 
@@ -908,6 +908,7 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
     const extracted = recordAt(item, "extracted");
     const classification = stringAt(item, "classification") ?? "needs_review";
     const filePath = stringAt(file ?? {}, "path");
+    const isOwnerExpense = classification === "owner_paid_expense_reimbursement";
     return {
       review_type: "receipt_review",
       status: (guidance?.follow_up_questions.length ?? 0) > 0 ? "needs_answers" : "ready_for_action",
@@ -915,11 +916,11 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
       compliance_basis: guidance?.compliance_basis ?? [],
       unresolved_questions: guidance?.follow_up_questions ?? [],
       policy_hint: guidance?.policy_hint,
-      suggested_workflow: classification === "owner_paid_expense_reimbursement" ? "owner-expense" : "book-invoice",
-      suggested_tools: classification === "owner_paid_expense_reimbursement"
+      suggested_workflow: isOwnerExpense ? undefined : "book-invoice",
+      suggested_tools: isOwnerExpense
         ? ["create_owner_expense_reimbursement"]
-        : ["book-invoice", "process_receipt_batch"],
-      next_step_summary: classification === "owner_paid_expense_reimbursement"
+        : ["process_receipt_batch"],
+      next_step_summary: isOwnerExpense
         ? "After the missing VAT/business-use answers are known, continue with create_owner_expense_reimbursement instead of forcing this through purchase-invoice booking."
         : `Resolve the missing receipt facts first${filePath ? ` for ${filePath}` : ""}, then either book it via book-invoice for one document or rerun process_receipt_batch for the folder.`,
     };
@@ -1133,14 +1134,6 @@ function summarizeAutopilotToolResult(
       const summary = recordAt(execution, "summary") ?? {};
       const reviewItems = arrayAt(execution, "needs_review").filter(isRecord);
       const reviewCount = reviewItems.length;
-      const hasConfirmedMatch = reviewItems.some((item) =>
-        arrayAt(item, "existing_transactions").some((candidate) =>
-          isRecord(candidate) && stringAt(candidate, "status") === "CONFIRMED"
-        )
-      );
-      const duplicateGuidance = reviewCount > 0
-        ? buildCamtDuplicateReviewGuidance({ hasConfirmedMatch })
-        : undefined;
       return {
         summary: `CAMT dry run would create ${numberAt(summary, "created_count") ?? 0} transaction(s), skip ${numberAt(summary, "skipped_count") ?? 0}, raise ${reviewCount} possible duplicate review item(s), and report ${numberAt(summary, "error_count") ?? 0} error(s).`,
         preview: {
@@ -1149,20 +1142,36 @@ function summarizeAutopilotToolResult(
           possible_duplicate_count: reviewCount,
           error_count: numberAt(summary, "error_count") ?? 0,
         },
-        followUps: reviewCount > 0
-          ? [toAutopilotFollowUp(
-              tool,
-              `${reviewCount} CAMT row(s) look like possible duplicates against older manual transactions.`,
-              duplicateGuidance,
-              reviewItems[0]
-                ? {
-                    review_type: "camt_possible_duplicate",
-                    source_tool: tool,
-                    item: reviewItems[0],
-                  }
-                : undefined,
-            )]
-          : [],
+        followUps: reviewItems.map((item) => {
+          const hasConfirmedMatch = arrayAt(item, "existing_transactions").some((candidate) =>
+            isRecord(candidate) && stringAt(candidate, "status") === "CONFIRMED"
+          );
+          const duplicateGuidance = buildCamtDuplicateReviewGuidance({ hasConfirmedMatch });
+          const date = stringAt(item, "date");
+          const amount = numberAt(item, "amount");
+          const currency = stringAt(item, "currency");
+          const counterparty = stringAt(item, "counterparty");
+          const existingIds = arrayAt(item, "existing_transactions")
+            .filter(isRecord)
+            .map((candidate) => numberAt(candidate, "id"))
+            .filter((id): id is number => id !== undefined);
+          const dateLabel = date ?? "unknown date";
+          const amountLabel = amount !== undefined ? `${amount}${currency ? ` ${currency}` : ""}` : "unknown amount";
+          const counterpartyLabel = counterparty ? ` for ${counterparty}` : "";
+          const existingLabel = existingIds.length > 0
+            ? ` against existing transaction${existingIds.length === 1 ? "" : "s"} ${existingIds.join(", ")}`
+            : "";
+          return toAutopilotFollowUp(
+            tool,
+            `CAMT row ${dateLabel} ${amountLabel}${counterpartyLabel} looks like a possible duplicate${existingLabel}.`,
+            duplicateGuidance,
+            {
+              review_type: "camt_possible_duplicate",
+              source_tool: tool,
+              item,
+            },
+          );
+        }),
       };
     }
     case "import_wise_transactions": {
@@ -1301,6 +1310,36 @@ function isAutopilotRunnableStep(step: RecommendedStep, liveApiDefaultsAvailable
   return step.tool === "parse_camt053";
 }
 
+function isMaterializationStep(tool: string): boolean {
+  return tool === "import_camt053" ||
+    tool === "import_wise_transactions" ||
+    tool === "process_receipt_batch";
+}
+
+function leavesPendingMaterializationAfterDryRun(
+  tool: string,
+  preview: Record<string, unknown> | undefined,
+): boolean {
+  if (!preview) return false;
+
+  switch (tool) {
+    case "import_camt053":
+      return (numberAt(preview, "created_count") ?? 0) > 0 ||
+        (numberAt(preview, "possible_duplicate_count") ?? 0) > 0 ||
+        (numberAt(preview, "error_count") ?? 0) > 0;
+    case "import_wise_transactions":
+      return (numberAt(preview, "created") ?? 0) > 0 ||
+        (numberAt(preview, "error_count") ?? 0) > 0;
+    case "process_receipt_batch":
+      return (numberAt(preview, "created") ?? 0) > 0 ||
+        (numberAt(preview, "matched") ?? 0) > 0 ||
+        (numberAt(preview, "needs_review") ?? 0) > 0 ||
+        (numberAt(preview, "failed") ?? 0) > 0;
+    default:
+      return false;
+  }
+}
+
 export function registerAccountingInboxTools(server: McpServer, api: ApiContext): void {
   registerTool(server,
     "prepare_accounting_inbox",
@@ -1361,21 +1400,29 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
         recommendation: question.recommendation,
       }));
       const needsAccountantReview: AutopilotFollowUp[] = [];
+      let hasUnresolvedMaterializationBeforeClassification = false;
 
       for (const step of prepared.steps) {
-        if (!isAutopilotRunnableStep(step, prepared.liveApiDefaultsAvailable)) {
+        const blockedByPendingMaterialization = step.tool === "classify_unmatched_transactions" &&
+          hasUnresolvedMaterializationBeforeClassification;
+        if (!isAutopilotRunnableStep(step, prepared.liveApiDefaultsAvailable) || blockedByPendingMaterialization) {
           skippedSteps.push({
             step: step.step,
             tool: step.tool,
             status: "skipped",
             purpose: step.purpose,
-            summary: step.missing_inputs.length > 0
+            summary: blockedByPendingMaterialization
+              ? "Skipped because earlier import or receipt steps are still unresolved or still show pending changes; classification would otherwise reflect the old live ledger."
+              : step.missing_inputs.length > 0
               ? `Skipped because ${step.missing_inputs.join(", ")} is still missing.`
               : (!prepared.liveApiDefaultsAvailable && step.tool !== "parse_camt053")
                 ? "Skipped because live API-backed dry runs are unavailable until credentials are configured."
                 : "Skipped because this step is not currently marked as a safe default.",
             suggested_args: step.suggested_args,
           });
+          if (isMaterializationStep(step.tool)) {
+            hasUnresolvedMaterializationBeforeClassification = true;
+          }
           continue;
         }
 
@@ -1393,6 +1440,9 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
           });
           doneAutomatically.push(summarized.summary);
           needsAccountantReview.push(...summarized.followUps);
+          if (leavesPendingMaterializationAfterDryRun(step.tool, summarized.preview)) {
+            hasUnresolvedMaterializationBeforeClassification = true;
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           executedSteps.push({
@@ -1408,6 +1458,9 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
             summary: `${step.tool} failed during autopilot dry run: ${message}`,
             recommendation: "Inspect this specific step before relying on the automatic first pass.",
           });
+          if (isMaterializationStep(step.tool)) {
+            hasUnresolvedMaterializationBeforeClassification = true;
+          }
         }
       }
 
@@ -1415,9 +1468,12 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
       const nextRecommendedAction = needsOneDecision.length === 0 && needsAccountantReview.length === 0
         ? skippedSteps.find(step => !step.summary.startsWith("Skipped because"))
         : undefined;
+      const preparedPayload = buildPreparedInboxPayload(prepared);
+      preparedPayload.next_question = nextQuestion;
+      preparedPayload.next_recommended_action = nextRecommendedAction;
 
       const payload = {
-        prepared_inbox: buildPreparedInboxPayload(prepared),
+        prepared_inbox: preparedPayload,
         autopilot: {
           executed_step_count: executedSteps.length,
           skipped_step_count: skippedSteps.length,
