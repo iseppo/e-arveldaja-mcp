@@ -135,11 +135,11 @@ Follow these steps in order:
    - retry with the chosen \`storage_scope\`
 
 6. If import succeeds, report:
-   - envFile
-   - storageScope
-   - companyName
-   - verifiedAt
-   - sourceFile
+   - env_file
+   - storage_scope
+   - company_name
+   - verified_at
+   - source_file
 
 7. Make the restart requirement explicit:
    - tell the user that the MCP server must be restarted before the stored credentials become active
@@ -898,7 +898,7 @@ Follow these steps in order:
 3. Call \`find_missing_documents\` with:
    - date_from: "${startDate}"
    - date_to: "${endDate}"
-   List any purchase invoices or journal entries that are missing supporting documents.
+   List any purchase invoices, journal entries, or transactions that are missing supporting documents.
 
 4. Call \`detect_duplicate_purchase_invoice\` with:
    - date_from: "${startDate}"
