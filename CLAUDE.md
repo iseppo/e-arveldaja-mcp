@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-106 tools, 15 workflow prompts, 12 resources across 11 modules. Supports multiple companies/accounts.
+109 tools, 15 workflow prompts, 12 resources across 11 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -200,5 +200,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 85 tools
+const { tools } = await client.listTools(); // 109 tools
 ```

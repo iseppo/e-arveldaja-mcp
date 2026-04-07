@@ -18,7 +18,7 @@
 - **Wise prompt guidance** — tightened CAMT duplicate and Wise import prompt wording to reduce false-positive duplicate warnings.
 
 ### Changed
-- **106 tools** (was 97), **15 workflow prompts** (was 12), **12 resources**.
+- **109 tools** (was 103), **15 workflow prompts** (was 12), **12 resources**.
 - **Accounting inbox** now supports an autopilot mode that chains dry-run steps automatically, review items that need accountant decisions, and one-click resolution of common patterns (duplicate cleanup, rule saving).
 
 ## [0.10.3] - 2026-04-01
