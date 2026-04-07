@@ -761,7 +761,19 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "list_accounts", "Get chart of accounts (kontoplaani kontod)", {}, { ...readOnly, title: "List Accounts" }, async () => {
     const result = await api.readonly.getAccounts();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    const compact = result.map(a => ({
+      id: a.id,
+      balance_type: a.balance_type,
+      account_type_est: a.account_type_est,
+      name_est: a.name_est,
+      is_valid: a.is_valid,
+      allows_dimensions: a.allows_dimensions,
+      is_vat_account: a.is_vat_account,
+      transaction_in_bindable: a.transaction_in_bindable,
+      transaction_out_bindable: a.transaction_out_bindable,
+      cl_account_groups: a.cl_account_groups,
+    }));
+    return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "list_account_dimensions", "Get account dimensions (alamkontod)", {}, { ...readOnly, title: "List Account Dimensions" }, async () => {
