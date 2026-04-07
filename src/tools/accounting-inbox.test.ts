@@ -1039,6 +1039,49 @@ ${entryXml}
     });
   });
 
+  it("prepare_accounting_review_action refuses CAMT duplicate cleanup when multiple confirmed matches exist", async () => {
+    const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
+
+    const result = await handler({
+      review_item_json: JSON.stringify({
+        review_type: "camt_possible_duplicate",
+        item: {
+          new_transaction_api_id: 9001,
+          existing_transactions: [
+            {
+              id: 77,
+              status: "CONFIRMED",
+              suggested_patch_missing_fields: {
+                bank_ref_number: "CAMT-REF-1",
+              },
+            },
+            {
+              id: 88,
+              status: "CONFIRMED",
+              suggested_patch_missing_fields: {
+                bank_ref_number: "CAMT-REF-1",
+              },
+            },
+          ],
+          review_guidance: {
+            recommendation: "Keep the authoritative confirmed transaction and remove the duplicate only after that choice is explicit.",
+            compliance_basis: ["RPS § 6–7"],
+            follow_up_questions: [],
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload).toMatchObject({
+      status: "needs_answers",
+      unresolved_questions: [
+        "Which confirmed transaction is the authoritative older row to keep before any duplicate cleanup is executed?",
+      ],
+    });
+    expect(payload.proposed_action).toBeUndefined();
+  });
+
   it("cleanup_camt_possible_duplicate enriches missing metadata before deleting the duplicate row", async () => {
     const { handler, api } = setupAccountingInboxTool({
       transactions: {
@@ -1207,5 +1250,53 @@ ${entryXml}
       category: "saas_subscriptions",
       reason: "This alone should not become an auto-booking rule",
     })).rejects.toThrow(/requires at least one concrete booking field/i);
+  });
+
+  it("prepare_accounting_review_action can prepare save_auto_booking_rule directly from suggested_booking", async () => {
+    const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
+
+    const result = await handler({
+      save_as_rule: true,
+      review_item_json: JSON.stringify({
+        review_type: "classification_group",
+        group: {
+          category: "saas_subscriptions",
+          display_counterparty: "OpenAI",
+          suggested_booking: {
+            purchase_article_id: 501,
+            purchase_account_id: 5230,
+            liability_account_id: 2315,
+            vat_rate_dropdown: "-",
+            reversed_vat_id: 1,
+            reason: "Defaulted from the most recent confirmed supplier invoice.",
+          },
+          review_guidance: {
+            recommendation: "Use the established SaaS treatment for this counterparty.",
+            compliance_basis: ["RPS § 4"],
+            follow_up_questions: [],
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload).toMatchObject({
+      status: "ready_for_approval",
+      proposed_action: {
+        type: "rule_save",
+        tool: "save_auto_booking_rule",
+        args: {
+          match: "OpenAI",
+          category: "saas_subscriptions",
+          purchase_article_id: 501,
+          purchase_account_id: 5230,
+          liability_account_id: 2315,
+          vat_rate_dropdown: "-",
+          reversed_vat_id: 1,
+          reason: "Defaulted from the most recent confirmed supplier invoice.",
+        },
+        approval_required: true,
+      },
+    });
   });
 });

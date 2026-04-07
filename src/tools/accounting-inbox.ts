@@ -891,10 +891,71 @@ function extractTransactionPatchFields(record: Record<string, unknown> | undefin
   return patch;
 }
 
-function findConfirmedPossibleDuplicateMatch(item: Record<string, unknown>): Record<string, unknown> | undefined {
+function findConfirmedPossibleDuplicateMatches(item: Record<string, unknown>): Record<string, unknown>[] {
   return arrayAt(item, "existing_transactions")
     .filter(isRecord)
-    .find(candidate => stringAt(candidate, "status") === "CONFIRMED");
+    .filter(candidate => stringAt(candidate, "status") === "CONFIRMED");
+}
+
+function extractSuggestedRuleFields(reviewItem: Record<string, unknown>): Record<string, unknown> | undefined {
+  const item = recordAt(reviewItem, "item");
+  const group = recordAt(reviewItem, "group");
+  const suggestion = recordAt(group ?? item ?? {}, "suggested_booking");
+  if (!suggestion) return undefined;
+
+  const fields: Record<string, unknown> = {};
+  for (const key of [
+    "purchase_article_id",
+    "purchase_account_id",
+    "purchase_account_dimensions_id",
+    "liability_account_id",
+    "vat_rate_dropdown",
+    "reversed_vat_id",
+    "reason",
+  ]) {
+    const value = suggestion[key];
+    if (value !== undefined) {
+      fields[key] = value;
+    }
+  }
+
+  return Object.keys(fields).length > 0 ? fields : undefined;
+}
+
+function mergeRuleOverrides(
+  reviewItem: Record<string, unknown>,
+  explicitOverride?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const merged = {
+    ...(extractSuggestedRuleFields(reviewItem) ?? {}),
+    ...(explicitOverride ?? {}),
+  };
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function pickNextAutopilotRecommendedAction(
+  prepared: PreparedInboxData,
+  executedSteps: AutopilotStepResult[],
+  options: {
+    hasPendingDecision: boolean;
+    hasReviewFollowUp: boolean;
+  },
+): RecommendedStep | undefined {
+  if (options.hasPendingDecision || options.hasReviewFollowUp) {
+    return undefined;
+  }
+
+  const executedStepNumbers = new Set(
+    executedSteps
+      .filter(step => step.status === "completed")
+      .map(step => step.step),
+  );
+
+  return prepared.steps.find((step) =>
+    step.recommended &&
+    step.missing_inputs.length === 0 &&
+    !executedStepNumbers.has(step.step)
+  );
 }
 
 function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResolutionResult {
@@ -946,13 +1007,17 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
   if (reviewType === "camt_possible_duplicate" && item) {
     const guidance = reviewGuidanceFromRecord(item);
     const newTransactionId = numberAt(item, "new_transaction_api_id");
-    const confirmedMatch = findConfirmedPossibleDuplicateMatch(item);
+    const confirmedMatches = findConfirmedPossibleDuplicateMatches(item);
+    const confirmedMatch = confirmedMatches.length === 1 ? confirmedMatches[0] : undefined;
+    const unresolvedQuestions = confirmedMatches.length > 1
+      ? ["Which confirmed transaction is the authoritative older row to keep before any duplicate cleanup is executed?"]
+      : [];
     return {
       review_type: "camt_possible_duplicate",
-      status: "ready_for_action",
+      status: unresolvedQuestions.length > 0 ? "needs_answers" : "ready_for_action",
       recommendation: guidance?.recommendation ?? "Prefer the better-documented row and avoid keeping both as duplicates.",
       compliance_basis: guidance?.compliance_basis ?? [],
-      unresolved_questions: [],
+      unresolved_questions: unresolvedQuestions,
       policy_hint: guidance?.policy_hint,
       suggested_workflow: "import-camt",
       suggested_tools: confirmedMatch && newTransactionId !== undefined
@@ -960,7 +1025,9 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
         : newTransactionId !== undefined
           ? ["delete_transaction"]
           : ["import_camt053"],
-      next_step_summary: confirmedMatch && newTransactionId !== undefined
+      next_step_summary: confirmedMatches.length > 1
+        ? `Multiple confirmed transactions match this CAMT row${newTransactionId !== undefined ? ` alongside new PROJECT transaction ${newTransactionId}` : ""}. Choose the authoritative older row first; only then should any metadata patching or deletion happen.`
+        : confirmedMatch && newTransactionId !== undefined
         ? `Default cleanup: keep confirmed transaction ${numberAt(confirmedMatch, "id")}, use its suggested missing-field patch as reference, and delete new PROJECT transaction ${newTransactionId}.`
         : confirmedMatch
           ? `Default cleanup: keep confirmed transaction ${numberAt(confirmedMatch, "id")} and do not let the CAMT import create a duplicate row for the same bank movement.`
@@ -1005,7 +1072,8 @@ function prepareReviewAction(
 
   if (reviewType === "camt_possible_duplicate" && item) {
     const newTransactionId = numberAt(item, "new_transaction_api_id");
-    const confirmedMatch = findConfirmedPossibleDuplicateMatch(item);
+    const confirmedMatches = findConfirmedPossibleDuplicateMatches(item);
+    const confirmedMatch = confirmedMatches.length === 1 ? confirmedMatches[0] : undefined;
     const keepTransactionId = confirmedMatch ? numberAt(confirmedMatch, "id") : undefined;
     if (newTransactionId !== undefined && keepTransactionId !== undefined) {
       return {
@@ -1032,11 +1100,12 @@ function prepareReviewAction(
   }
 
   if (options.saveAsRule) {
-    const match = stringAt(options.ruleOverride ?? {}, "match") ??
+    const mergedRuleOverride = mergeRuleOverrides(reviewItem, options.ruleOverride);
+    const match = stringAt(mergedRuleOverride ?? {}, "match") ??
       stringAt(recordAt(item ?? group ?? {}, "extracted") ?? {}, "supplier_name") ??
       stringAt(item ?? {}, "display_counterparty") ??
       stringAt(group ?? {}, "display_counterparty");
-    const category = stringAt(options.ruleOverride ?? {}, "category") ??
+    const category = stringAt(mergedRuleOverride ?? {}, "category") ??
       stringAt(group ?? {}, "category");
     if (match) {
       const ruleArgs: Record<string, unknown> = {
@@ -1052,12 +1121,12 @@ function prepareReviewAction(
         "reversed_vat_id",
         "reason",
       ]) {
-        const value = (options.ruleOverride ?? {})[key];
+        const value = (mergedRuleOverride ?? {})[key];
         if (value !== undefined) {
           ruleArgs[key] = value;
         }
       }
-      const hasConcreteRuleField = hasConcreteRuleOverrideField(options.ruleOverride);
+      const hasConcreteRuleField = hasConcreteRuleOverrideField(mergedRuleOverride);
       return {
         status: hasConcreteRuleField ? "ready_for_approval" : "no_direct_action",
         recommendation: resolution.recommendation,
@@ -1465,9 +1534,10 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
       }
 
       const nextQuestion = needsOneDecision[0];
-      const nextRecommendedAction = needsOneDecision.length === 0 && needsAccountantReview.length === 0
-        ? skippedSteps.find(step => !step.summary.startsWith("Skipped because"))
-        : undefined;
+      const nextRecommendedAction = pickNextAutopilotRecommendedAction(prepared, executedSteps, {
+        hasPendingDecision: needsOneDecision.length > 0,
+        hasReviewFollowUp: needsAccountantReview.length > 0,
+      });
       const preparedPayload = buildPreparedInboxPayload(prepared);
       preparedPayload.next_question = nextQuestion;
       preparedPayload.next_recommended_action = nextRecommendedAction;
