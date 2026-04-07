@@ -16,6 +16,9 @@
 - **list_accounts token overflow** — response now returns only essential fields (id, balance_type, name_est, account_type_est, etc.), roughly halving the response size so it stays within Claude Code's context limit.
 - **Accounting inbox defaults** — improved default bank account dimension selection and receipt matching suggestions.
 - **Wise prompt guidance** — tightened CAMT duplicate and Wise import prompt wording to reduce false-positive duplicate warnings.
+- **Prompt field name drift** — `setup-credentials` prompt referenced camelCase fields (`envFile`, `storageScope`) but `import_apikey_credentials` returns snake_case (`env_file`, `storage_scope`). All field names now match the tool response.
+- **Month-end missing documents** — prompt now mentions transactions alongside purchase invoices and journal entries, matching what `find_missing_documents` actually returns.
+- **Credential precedence in CLAUDE.md** — corrected to match actual `config.ts` load order: `EARVELDAJA_API_KEY_FILE` first, then env vars, `.env` files, `apikey*.txt` last.
 
 ### Changed
 - **109 tools** (was 103), **15 workflow prompts** (was 12), **12 resources**.
