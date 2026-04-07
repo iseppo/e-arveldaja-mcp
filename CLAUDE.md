@@ -17,9 +17,10 @@ All `apikey*.txt` files are scanned from the working directory (where the server
 
 Credentials are loaded in this priority order (see `src/config.ts`):
 
-1. **Environment variables**: `EARVELDAJA_API_KEY_ID`, `EARVELDAJA_API_PUBLIC_VALUE`, `EARVELDAJA_API_PASSWORD`
-2. **`EARVELDAJA_API_KEY_FILE`** env var pointing to a specific file
-3. **`apikey*.txt` files** — scanned from the working directory.
+1. **`EARVELDAJA_API_KEY_FILE`** env var pointing to a specific file
+2. **Environment variables**: `EARVELDAJA_API_KEY_ID`, `EARVELDAJA_API_PUBLIC_VALUE`, `EARVELDAJA_API_PASSWORD`
+3. **`.env` files** — local working directory first, then global config directory (`~/.config/e-arveldaja-mcp`)
+4. **`apikey*.txt` files** — scanned from the working directory (import source, not long-term store)
 
 The `apikey.txt` format:
 ```

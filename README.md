@@ -145,6 +145,7 @@ The server includes 15 built-in workflow prompts that any MCP client can discove
 | `company-overview` | Financial dashboard: balance sheet, P&L, receivables, payables |
 | `lightyear-booking` | Book Lightyear investment trades and distributions from CSV |
 | `setup-credentials` | Verify and import API credentials from `apikey.txt` into `.env` storage |
+| `setup-e-arveldaja` | Explain how to configure API credentials when running in setup mode |
 
 **Claude Code** also has these as slash commands: `/accounting-inbox`, `/resolve-accounting-review`, `/prepare-accounting-review-action`, `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`, `/setup-credentials`.
 
