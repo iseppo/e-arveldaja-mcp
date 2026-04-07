@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.0] - 2026-04-07
+
+### Added
+- **Accounting inbox autopilot** — new `run_accounting_inbox_dry_runs` tool scans a workspace, automatically executes safe dry-run steps (CAMT parse, Wise preview, receipt scan), and returns one consolidated preview. Designed as a non-accountant-friendly first pass that requires no manual tool sequencing.
+- **Accounting review resolver** — new `resolve_accounting_review_item` tool turns review items (CAMT duplicates, classification groups, unmatched transactions) into concrete next-step plans with default handling, unresolved questions, compliance basis (RPS/RTJ references), and the safest follow-up tool.
+- **Accounting review action preparation** — new `prepare_accounting_review_action` tool converts resolved review items into ready-to-approve tool calls (e.g. delete duplicate, save booking rule, confirm transaction).
+- **CAMT duplicate cleanup** — new `cleanup_camt_possible_duplicate` tool enriches missing CAMT metadata onto the kept older transaction and deletes the newly imported duplicate.
+- **Auto-booking rules** — new `save_auto_booking_rule` tool saves stable counterparty booking defaults to `accounting-rules.md` after approval, so repeat transactions from the same supplier are booked consistently.
+- **Review workflow prompts** — new `resolve-accounting-review` and `prepare-accounting-review-action` prompts guide multi-step review resolution with standards-aware compliance references.
+
+### Fixed
+- **Accounting rule merge** — fixed edge cases where rule overrides from `accounting-rules.md` could clobber confirmed supplier history or produce incomplete booking defaults.
+- **CAMT duplicate handling** — when multiple confirmed transactions match a CAMT row, the resolver now asks which is authoritative instead of silently picking the first match.
+- **list_accounts token overflow** — response now returns only essential fields (id, balance_type, name_est, account_type_est, etc.), roughly halving the response size so it stays within Claude Code's context limit.
+- **Accounting inbox defaults** — improved default bank account dimension selection and receipt matching suggestions.
+- **Wise prompt guidance** — tightened CAMT duplicate and Wise import prompt wording to reduce false-positive duplicate warnings.
+
+### Changed
+- **107 tools** (was 97), **15 workflow prompts** (was 12), **12 resources**.
+- **Accounting inbox** now supports an autopilot mode that chains dry-run steps automatically, review items that need accountant decisions, and one-click resolution of common patterns (duplicate cleanup, rule saving).
+
 ## [0.10.3] - 2026-04-01
 
 ### Fixed

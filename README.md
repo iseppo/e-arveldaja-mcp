@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 97 tools, 12 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 107 tools, 15 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 > **v0.10.0 is a major update.** Large parts of the codebase have been rewritten — credential management, bank reconciliation, audit logging, and batch workflows all received significant changes. **You may need to re-add your API credentials** after updating, as the credential storage has moved from reading `apikey*.txt` directly to `.env` files. Your existing `apikey*.txt` files will be detected automatically and the server will offer to import them on first start. See the [changelog](CHANGELOG.md) for full details.
 
@@ -127,11 +127,13 @@ npm install && npm run build
 
 ## Workflows (MCP Prompts)
 
-The server includes 12 built-in workflow prompts that any MCP client can discover and use. These guide the AI through multi-step accounting tasks:
+The server includes 15 built-in workflow prompts that any MCP client can discover and use. These guide the AI through multi-step accounting tasks:
 
 | Prompt | Description |
 |---|---|
 | `accounting-inbox` | Start here: scan a workspace, detect likely inputs, suggest the next safe dry-run steps, and ask only the smallest necessary follow-up questions |
+| `resolve-accounting-review` | Turn one accounting review item into a concrete next-step plan with compliance references |
+| `prepare-accounting-review-action` | Prepare the concrete next action for a resolved review item (delete duplicate, save rule, etc.) |
 | `book-invoice` | Book a purchase invoice from PDF: extract, validate, resolve supplier, preview, create, upload, confirm |
 | `receipt-batch` | Scan a receipt folder, preview auto-bookable items, then batch-create after approval |
 | `import-camt` | Parse CAMT.053 XML, preview imported bank transactions, then create after approval |
@@ -144,7 +146,7 @@ The server includes 12 built-in workflow prompts that any MCP client can discove
 | `lightyear-booking` | Book Lightyear investment trades and distributions from CSV |
 | `setup-credentials` | Verify and import API credentials from `apikey.txt` into `.env` storage |
 
-**Claude Code** also has these as slash commands: `/accounting-inbox`, `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`, `/setup-credentials`.
+**Claude Code** also has these as slash commands: `/accounting-inbox`, `/resolve-accounting-review`, `/prepare-accounting-review-action`, `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`, `/setup-credentials`.
 
 ## Usage Examples
 
