@@ -1696,7 +1696,41 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
         });
       }
 
-      const deleteResult = await api.transactions.delete(delete_transaction_id);
+      let deleteResult: unknown;
+      let deleteError: string | undefined;
+      try {
+        deleteResult = await api.transactions.delete(delete_transaction_id);
+      } catch (err) {
+        deleteError = err instanceof Error ? err.message : String(err);
+        logAudit({
+          tool: "cleanup_camt_possible_duplicate",
+          action: "DELETE_FAILED",
+          entity_type: "transaction",
+          entity_id: delete_transaction_id,
+          summary: `Failed to delete duplicate CAMT transaction ${delete_transaction_id}; kept transaction ${keep_transaction_id} was already updated`,
+          details: { kept_transaction_id: keep_transaction_id, error: deleteError },
+        });
+      }
+
+      if (deleteError !== undefined) {
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson({
+              cleaned: false,
+              keep_transaction_id,
+              delete_transaction_id,
+              updated_keep_transaction: Object.keys(appliedPatch).length > 0,
+              applied_patch: appliedPatch,
+              deleted: false,
+              partial: true,
+              error: deleteError,
+              note: "The kept transaction was updated but deleting the duplicate failed. Retry delete_transaction_id manually.",
+            }),
+          }],
+        };
+      }
+
       logAudit({
         tool: "cleanup_camt_possible_duplicate",
         action: "DELETED",
@@ -1715,6 +1749,8 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
             delete_transaction_id,
             updated_keep_transaction: Object.keys(appliedPatch).length > 0,
             applied_patch: appliedPatch,
+            deleted: true,
+            partial: false,
             delete_result: deleteResult,
             note: Object.keys(appliedPatch).length > 0
               ? "The older transaction was enriched with missing CAMT metadata before deleting the duplicate PROJECT row."

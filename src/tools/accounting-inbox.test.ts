@@ -4,6 +4,9 @@ import { tmpdir } from "os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import { registerAccountingInboxTools } from "./accounting-inbox.js";
+import * as auditLogModule from "../audit-log.js";
+
+vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
 function setupAccountingInboxTool(apiOverrides: Record<string, unknown> = {}, toolName = "prepare_accounting_inbox") {
   const server = { registerTool: vi.fn() } as any;
@@ -1298,5 +1301,48 @@ ${entryXml}
         approval_required: true,
       },
     });
+  });
+
+  it("cleanup_camt_possible_duplicate surfaces partial state when delete throws", async () => {
+    const logAuditSpy = vi.mocked(auditLogModule.logAudit);
+    logAuditSpy.mockClear();
+
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          if (id === 77) {
+            return { id: 77, status: "CONFIRMED", is_deleted: false, bank_ref_number: null };
+          }
+          return { id, status: "PROJECT", is_deleted: false };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockRejectedValue(new Error("Network timeout deleting 9001")),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    const result = await handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+      patch_missing_fields: { bank_ref_number: "CAMT-REF-99" },
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    // patch was applied before delete was attempted
+    expect(api.transactions.update).toHaveBeenCalledWith(77, { bank_ref_number: "CAMT-REF-99" });
+
+    // response carries partial state
+    expect(payload).toMatchObject({
+      cleaned: false,
+      updated_keep_transaction: true,
+      deleted: false,
+      partial: true,
+      error: expect.stringContaining("Network timeout"),
+    });
+
+    // audit log has UPDATED entry and DELETE_FAILED entry
+    const actions = logAuditSpy.mock.calls.map(([entry]) => entry.action);
+    expect(actions).toContain("UPDATED");
+    expect(actions).toContain("DELETE_FAILED");
   });
 });
