@@ -4,7 +4,9 @@
 
 MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 109 tools, 15 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
-> **v0.10.0 is a major update.** Large parts of the codebase have been rewritten — credential management, bank reconciliation, audit logging, and batch workflows all received significant changes. **You may need to re-add your API credentials** after updating, as the credential storage has moved from reading `apikey*.txt` directly to `.env` files. Your existing `apikey*.txt` files will be detected automatically and the server will offer to import them on first start. See the [changelog](CHANGELOG.md) for full details.
+> **v0.11 adds accounting inbox autopilot and review resolution.** `run_accounting_inbox_dry_runs` scans a workspace and chains safe dry-run steps into one preview, `resolve_accounting_review_item` + `prepare_accounting_review_action` turn review items into ready-to-approve tool calls, and `save_auto_booking_rule` persists stable supplier booking defaults to `accounting-rules.md`. See the [changelog](CHANGELOG.md) for full details.
+>
+> **v0.10.0 is a major update.** Large parts of the codebase have been rewritten — credential management, bank reconciliation, audit logging, and batch workflows all received significant changes. **You may need to re-add your API credentials** after updating, as the credential storage has moved from reading `apikey*.txt` directly to `.env` files. Your existing `apikey*.txt` files will be detected automatically and the server will offer to import them on first start.
 
 > **Active development.** This package is under active development and has not seen extensive real-world testing yet. If you encounter a bug or unexpected behaviour, please let me know via [GitHub Issues](https://github.com/iseppo/e-arveldaja-mcp/issues) or email at indrek.seppo@gmail.com.
 

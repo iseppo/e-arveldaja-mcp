@@ -1,11 +1,13 @@
 # Changelog
 
-## [Unreleased] - code-review fixes
+## [0.11.1] - 2026-04-14
 
 ### Fixed
 - **CAMT duplicate cleanup partial failure** — if the delete step throws after the keep-transaction was already patched, the response now returns `partial: true` with an error message and a `DELETE_FAILED` audit entry so the trail is complete and the gap is actionable.
 - **Autopilot re-recommends failed steps** — `next_recommended_action` no longer suggests a step that already ran and failed; the exclusion set now covers all executed steps regardless of status.
-- **Patch field coercion** — `extractTransactionPatchFields` now coerces non-string but non-null patch values (e.g. numbers from older imported rows) to strings instead of silently dropping them.
+- **Autopilot re-recommends skipped steps** — `next_recommended_action` now also treats skipped steps as handled, so `classify_unmatched_transactions` is no longer re-suggested while materialization is still pending.
+- **Patch field structured values** — `extractTransactionPatchFields` now keeps numeric and bigint values (coerced to strings) but drops objects/arrays instead of turning them into `"[object Object]"` junk.
+- **Rule prefill from heuristic suggestions** — `save_auto_booking_rule` is no longer pre-filled from generic keyword-match suggestions; only `supplier_history` and `local_rules` sources (where the booking target was already trusted) seed the rule fields. Heuristic suggestions still surface `save_auto_booking_rule` in the suggested tools list without a prefilled `proposed_action`.
 - **Rule booking field whitelist clarity** — `extractSuggestedRuleFields` renamed to `extractRuleBookingFields`; comment documents why `match`/`category` are intentionally absent from the whitelist. Type guards added for all fields (number vs string) so malformed values are dropped cleanly.
 - **Uncapped existing-IDs label** — CAMT duplicate follow-up summary now shows at most 5 existing transaction IDs, appending `, +N more` when over 5.
 - **Ambiguous materialization skip reason** — `classify_unmatched_transactions` skip summary now distinguishes `pending_materialization` (import ran and has work to apply) from `earlier_step_failed` (import was skipped or threw), giving a more actionable message in each case.
