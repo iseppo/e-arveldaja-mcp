@@ -713,19 +713,27 @@ async function resolveClassificationSuggestion(
     classification.apply_mode === "purchase_invoice" &&
     classification.category !== "bank_fees"
   ) {
+    const reviewSuggestion = buildClassificationSuggestion(
+      context.purchaseArticlesWithVat,
+      context.accounts,
+      classification.category,
+      group.normalized_counterparty,
+      {
+        manualReviewReason: autoBookingRule
+          ? "A local rule exists, but it does not choose a stable expense article or account, so VAT and account treatment should still be reviewed manually."
+          : "No confirmed supplier-history invoice or local rule was found, so VAT and account treatment should be reviewed manually.",
+      },
+    );
+    // Thread VAT hint fields from the rule so reviewers still see the reverse-charge
+    // hint even when the rule lacks a stable article/account booking target.
+    if (autoBookingRule) {
+      if (autoBookingRule.vat_rate_dropdown !== undefined) reviewSuggestion.vat_rate_dropdown = autoBookingRule.vat_rate_dropdown;
+      if (autoBookingRule.reversed_vat_id !== undefined) reviewSuggestion.reversed_vat_id = autoBookingRule.reversed_vat_id;
+      if (autoBookingRule.liability_account_id !== undefined) reviewSuggestion.liability_account_id = autoBookingRule.liability_account_id;
+    }
     return {
       applyMode: "review_only",
-      suggestion: buildClassificationSuggestion(
-        context.purchaseArticlesWithVat,
-        context.accounts,
-        classification.category,
-        group.normalized_counterparty,
-        {
-          manualReviewReason: autoBookingRule
-            ? "A local rule exists, but it does not choose a stable expense article or account, so VAT and account treatment should still be reviewed manually."
-            : "No confirmed supplier-history invoice or local rule was found, so VAT and account treatment should be reviewed manually.",
-        },
-      ),
+      suggestion: reviewSuggestion,
     };
   }
 

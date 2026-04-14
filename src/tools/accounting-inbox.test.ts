@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import { registerAccountingInboxTools } from "./accounting-inbox.js";
+import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import * as auditLogModule from "../audit-log.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -1301,6 +1302,98 @@ ${entryXml}
         approval_required: true,
       },
     });
+  });
+
+  it("buildClassificationSuggestion keyword_match review-only path preserves VAT hint from metadata-only rule", async () => {
+    // Set up a rules file with a metadata-only rule: vat_rate_dropdown + reversed_vat_id
+    // but no purchase_article_id / purchase_account_id, so hasConcreteAutoBookingRuleBookingTarget = false.
+    // classify_unmatched_transactions should thread the VAT fields into suggested_booking
+    // even in review-only mode so reviewers see the reverse-charge hint.
+    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const rulesPath = join(workspace, "accounting-rules.md");
+    await writeFile(
+      rulesPath,
+      [
+        "# Accounting Rules",
+        "",
+        "## Auto Booking",
+        "",
+        "| match | category | purchase_article_id | purchase_account_id | purchase_account_dimensions_id | liability_account_id | vat_rate_dropdown | reversed_vat_id | reason |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| eu reverse charge softwareco | saas_subscriptions |  |  |  | 2315 | - | 1 | EU SaaS reverse charge |",
+      ].join("\n"),
+      "utf8",
+    );
+    const originalRulesFile = process.env.EARVELDAJA_RULES_FILE;
+    process.env.EARVELDAJA_RULES_FILE = rulesPath;
+
+    try {
+      const server = { registerTool: vi.fn() } as any;
+      // Two transactions with similar amounts to trigger recurring+similar_amounts → saas_subscriptions
+      // apply_mode:purchase_invoice, which is the code path that hits the manualReviewReason branch.
+      const api = {
+        clients: { listAll: vi.fn().mockResolvedValue([]) },
+        saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+        purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+        transactions: {
+          listAll: vi.fn().mockResolvedValue([
+            {
+              id: 42,
+              status: "PROJECT",
+              accounts_dimensions_id: 101,
+              date: "2026-03-01",
+              type: "C",
+              amount: 50,
+              cl_currencies_id: "EUR",
+              bank_account_name: "EU Reverse Charge Softwareco",
+              description: "SaaS invoice",
+              is_deleted: false,
+            },
+            {
+              id: 43,
+              status: "PROJECT",
+              accounts_dimensions_id: 101,
+              date: "2026-04-01",
+              type: "C",
+              amount: 50,
+              cl_currencies_id: "EUR",
+              bank_account_name: "EU Reverse Charge Softwareco",
+              description: "SaaS invoice",
+              is_deleted: false,
+            },
+          ]),
+        },
+        readonly: {
+          getAccounts: vi.fn().mockResolvedValue([]),
+          getPurchaseArticles: vi.fn().mockResolvedValue([]),
+          getVatInfo: vi.fn().mockResolvedValue({}),
+        },
+      } as any;
+
+      registerReceiptInboxTools(server, api);
+      const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "classify_unmatched_transactions");
+      if (!registration) throw new Error("classify_unmatched_transactions not registered");
+      const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+      const result = await handler({ accounts_dimensions_id: 101 });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      const group = payload.groups?.[0];
+      expect(group).toBeDefined();
+      // source is keyword_match when articles are available, fallback otherwise; either is fine here
+      expect(["keyword_match", "fallback"]).toContain(group.suggested_booking.source);
+      // VAT hint fields must be present even in review-only mode (threaded from the metadata-only rule)
+      expect(group.suggested_booking.vat_rate_dropdown).toBe("-");
+      expect(group.suggested_booking.reversed_vat_id).toBe(1);
+      expect(group.suggested_booking.liability_account_id).toBe(2315);
+    } finally {
+      if (originalRulesFile === undefined) {
+        delete process.env.EARVELDAJA_RULES_FILE;
+      } else {
+        process.env.EARVELDAJA_RULES_FILE = originalRulesFile;
+      }
+    }
   });
 
   it("extractRuleBookingFields drops malformed type fields and keeps well-typed ones", async () => {
