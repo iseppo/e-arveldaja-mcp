@@ -884,10 +884,17 @@ function extractTransactionPatchFields(record: Record<string, unknown> | undefin
   const patch: Partial<Transaction> = {};
   for (const field of CAMT_DUPLICATE_PATCH_FIELDS) {
     const value = record[field];
-    // CAMT rows are normally strings, but older imported rows may carry numbers or
-    // other primitive types — coerce to string so we never silently discard the value.
+    // CAMT metadata is textual; allow legacy numeric references but drop structured
+    // values instead of turning them into junk like "[object Object]".
     if (value === undefined || value === null) continue;
-    const coerced = typeof value === "string" ? value : String(value);
+    const coerced = typeof value === "string"
+      ? value
+      : (typeof value === "number" && Number.isFinite(value))
+        ? String(value)
+        : typeof value === "bigint"
+          ? value.toString()
+          : undefined;
+    if (coerced === undefined) continue;
     if (coerced.trim()) {
       patch[field] = coerced.trim();
     }
@@ -906,6 +913,10 @@ function extractRuleBookingFields(reviewItem: Record<string, unknown>): Record<s
   const group = recordAt(reviewItem, "group");
   const suggestion = recordAt(group ?? item ?? {}, "suggested_booking");
   if (!suggestion) return undefined;
+  const source = stringAt(suggestion, "source");
+  if (source !== "supplier_history" && source !== "local_rules") {
+    return undefined;
+  }
 
   const fields: Record<string, unknown> = {};
   // `match` and `category` are intentionally absent from this whitelist — they are
@@ -944,7 +955,7 @@ function mergeRuleOverrides(
 
 function pickNextAutopilotRecommendedAction(
   prepared: PreparedInboxData,
-  executedSteps: AutopilotStepResult[],
+  handledSteps: AutopilotStepResult[],
   options: {
     hasPendingDecision: boolean;
     hasReviewFollowUp: boolean;
@@ -954,12 +965,12 @@ function pickNextAutopilotRecommendedAction(
     return undefined;
   }
 
-  const executedStepNumbers = new Set(executedSteps.map(step => step.step));
+  const handledStepNumbers = new Set(handledSteps.map(step => step.step));
 
   return prepared.steps.find((step) =>
     step.recommended &&
     step.missing_inputs.length === 0 &&
-    !executedStepNumbers.has(step.step)
+    !handledStepNumbers.has(step.step)
   );
 }
 
@@ -1552,7 +1563,7 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
       }
 
       const nextQuestion = needsOneDecision[0];
-      const nextRecommendedAction = pickNextAutopilotRecommendedAction(prepared, executedSteps, {
+      const nextRecommendedAction = pickNextAutopilotRecommendedAction(prepared, [...executedSteps, ...skippedSteps], {
         hasPendingDecision: needsOneDecision.length > 0,
         hasReviewFollowUp: needsAccountantReview.length > 0,
       });

@@ -1267,6 +1267,7 @@ ${entryXml}
           category: "saas_subscriptions",
           display_counterparty: "OpenAI",
           suggested_booking: {
+            source: "supplier_history",
             purchase_article_id: 501,
             purchase_account_id: 5230,
             liability_account_id: 2315,
@@ -1302,6 +1303,37 @@ ${entryXml}
         approval_required: true,
       },
     });
+  });
+
+  it("prepare_accounting_review_action does not prefill save_auto_booking_rule from heuristic suggested_booking", async () => {
+    const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
+
+    const result = await handler({
+      save_as_rule: true,
+      review_item_json: JSON.stringify({
+        review_type: "classification_group",
+        group: {
+          category: "saas_subscriptions",
+          display_counterparty: "OpenAI",
+          suggested_booking: {
+            source: "keyword_match",
+            purchase_article_id: 501,
+            purchase_account_id: 5230,
+            liability_account_id: 2315,
+            vat_rate_dropdown: "-",
+            reversed_vat_id: 1,
+            reason: "Fallback booking suggestion from generic expense keywords.",
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload).toMatchObject({
+      status: "no_direct_action",
+      suggested_tools: ["save_auto_booking_rule"],
+    });
+    expect(payload.proposed_action).toBeUndefined();
   });
 
   it("buildClassificationSuggestion keyword_match review-only path preserves VAT hint from metadata-only rule", async () => {
@@ -1407,6 +1439,7 @@ ${entryXml}
           category: "saas_subscriptions",
           display_counterparty: "OpenAI",
           suggested_booking: {
+            source: "supplier_history",
             purchase_article_id: 501,          // good number
             purchase_account_id: "bad-string", // bad: should be number → dropped
             liability_account_id: 2315,        // good number
@@ -1603,6 +1636,7 @@ ${entryXml}
           category: "saas_subscriptions",
           display_counterparty: "OpenAI Ireland Ltd",
           suggested_booking: {
+            source: "supplier_history",
             purchase_article_id: 501,
             purchase_account_id: 5230,
             reason: "SaaS default.",
@@ -1619,7 +1653,7 @@ ${entryXml}
     expect(payload.proposed_action.args.purchase_article_id).toBe(501);
   });
 
-  it("extractTransactionPatchFields coerces numeric patch field values to strings", async () => {
+  it("extractTransactionPatchFields keeps numeric patch field values but drops malformed structured ones", async () => {
     const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
 
     const result = await handler({
@@ -1634,6 +1668,7 @@ ${entryXml}
               suggested_patch_missing_fields: {
                 bank_ref_number: 12345,   // numeric — should be coerced to "12345"
                 ref_number: "RF99",       // normal string — should pass through
+                description: { nested: true }, // malformed structured value — should be dropped
               },
             },
           ],
@@ -1701,6 +1736,76 @@ ${entryXml}
 
     const nextAction = payload.autopilot.next_recommended_action;
     expect(nextAction?.tool).not.toBe("parse_camt053");
+  });
+
+  it("run_accounting_inbox_dry_runs does not recommend classify_unmatched_transactions while materialization is still pending", async () => {
+    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    await writeFile(
+      join(workspace, "statement.xml"),
+      `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-pending</Id>
+      <Acct><Id><IBAN>EE637700771011212909</IBAN></Id><Ccy>EUR</Ccy></Acct>
+      <Ntry>
+        <Amt Ccy="EUR">42.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-03-01</Dt></BookgDt>
+        <AcctSvcrRef>REF-PENDING</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-PENDING</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">42.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Pending Vendor OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Pending import</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`,
+      "utf8",
+    );
+
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: { findByCode: vi.fn().mockResolvedValue(undefined), findByName: vi.fn().mockResolvedValue([]), listAll: vi.fn().mockResolvedValue([]) },
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      products: {},
+      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          { accounts_dimensions_id: 101, account_name_est: "LHV", account_no: "EE637700771011212909", iban_code: "EE637700771011212909" },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          { id: 101, accounts_id: 1020, title_est: "LHV", is_deleted: false },
+          { id: 202, accounts_id: 1020, title_est: "Wise", is_deleted: false },
+        ]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Tool not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({ workspace_path: workspace, bank_account_dimension_id: 101 });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.autopilot.skipped_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "classify_unmatched_transactions",
+        summary: expect.stringContaining("pending changes"),
+      }),
+    ]));
+    expect(payload.autopilot.next_recommended_action).toBeUndefined();
   });
 
   it("cleanup_camt_possible_duplicate surfaces partial state when delete throws", async () => {
