@@ -1230,8 +1230,13 @@ function summarizeAutopilotToolResult(
           const dateLabel = date ?? "unknown date";
           const amountLabel = amount !== undefined ? `${amount}${currency ? ` ${currency}` : ""}` : "unknown amount";
           const counterpartyLabel = counterparty ? ` for ${counterparty}` : "";
+          const shownIds = existingIds.slice(0, 5);
+          const hiddenCount = existingIds.length - shownIds.length;
+          const existingIdsSummary = hiddenCount > 0
+            ? `${shownIds.join(", ")}, +${hiddenCount} more`
+            : shownIds.join(", ");
           const existingLabel = existingIds.length > 0
-            ? ` against existing transaction${existingIds.length === 1 ? "" : "s"} ${existingIds.join(", ")}`
+            ? ` against existing transaction${existingIds.length === 1 ? "" : "s"} ${existingIdsSummary}`
             : "";
           return toAutopilotFollowUp(
             tool,

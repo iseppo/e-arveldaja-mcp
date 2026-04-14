@@ -1303,6 +1303,97 @@ ${entryXml}
     });
   });
 
+  it("CAMT followup summary truncates more than 5 existing IDs with +N more suffix", async () => {
+    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    await writeFile(
+      join(workspace, "statement.xml"),
+      `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-trunc</Id>
+      <Acct><Id><IBAN>EE637700771011212909</IBAN></Id><Ccy>EUR</Ccy></Acct>
+      <Ntry>
+        <Amt Ccy="EUR">99.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-03-01</Dt></BookgDt>
+        <AcctSvcrRef>REF-TRUNC</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-TRUNC</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">99.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Big Vendor OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Bulk payment</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`,
+      "utf8",
+    );
+
+    // 8 matching confirmed transactions so existingIds has 8 elements
+    const existingTransactions = Array.from({ length: 8 }, (_, i) => ({
+      id: 100 + i,
+      status: "CONFIRMED",
+      accounts_dimensions_id: 101,
+      date: "2026-03-01",
+      type: "C",
+      amount: 99,
+      cl_currencies_id: "EUR",
+      bank_ref_number: null,
+      bank_account_name: "Big Vendor OÜ",
+      ref_number: null,
+      description: "Bulk payment",
+      is_deleted: false,
+    }));
+
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(undefined),
+        findByName: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      products: {},
+      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      transactions: { listAll: vi.fn().mockResolvedValue(existingTransactions) },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          { accounts_dimensions_id: 101, account_name_est: "LHV", account_no: "EE637700771011212909", iban_code: "EE637700771011212909" },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          { id: 101, accounts_id: 1020, title_est: "LHV", is_deleted: false },
+        ]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Tool not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({ workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    const duplicateFollowUps = (payload.autopilot.needs_accountant_review as any[])
+      .filter((item: any) => item.source === "import_camt053");
+    expect(duplicateFollowUps.length).toBeGreaterThan(0);
+    const summary: string = duplicateFollowUps[0].summary;
+    // Should show first 5 IDs and "+3 more" for the 8-item list
+    expect(summary).toMatch(/\+3 more/);
+    // Should not contain all 8 IDs spelled out
+    expect(summary).not.toMatch(/100, 101, 102, 103, 104, 105/);
+  });
+
   it("mergeRuleOverrides: explicit rule_override_json match takes precedence over derived counterparty", async () => {
     const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
 
