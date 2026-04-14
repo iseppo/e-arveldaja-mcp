@@ -911,19 +911,21 @@ function extractRuleBookingFields(reviewItem: Record<string, unknown>): Record<s
   // `match` and `category` are intentionally absent from this whitelist — they are
   // derived from the counterparty label and group category at the call site, not
   // from the suggested_booking payload.
-  for (const key of [
-    "purchase_article_id",
-    "purchase_account_id",
-    "purchase_account_dimensions_id",
-    "liability_account_id",
-    "vat_rate_dropdown",
-    "reversed_vat_id",
-    "reason",
-  ]) {
+
+  // Number fields — silently drop if the value is present but not a finite number.
+  for (const key of ["purchase_article_id", "purchase_account_id", "purchase_account_dimensions_id", "liability_account_id", "reversed_vat_id"] as const) {
     const value = suggestion[key];
-    if (value !== undefined) {
-      fields[key] = value;
-    }
+    if (value === undefined) continue;
+    if (typeof value === "number" && Number.isFinite(value)) fields[key] = value;
+    // malformed (non-number, non-undefined) → silently dropped so the save flow runs with well-typed ones
+  }
+
+  // String fields — silently drop if the value is present but not a string.
+  for (const key of ["vat_rate_dropdown", "reason"] as const) {
+    const value = suggestion[key];
+    if (value === undefined) continue;
+    if (typeof value === "string") fields[key] = value;
+    // malformed → silently dropped
   }
 
   return Object.keys(fields).length > 0 ? fields : undefined;

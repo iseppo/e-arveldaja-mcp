@@ -1303,6 +1303,39 @@ ${entryXml}
     });
   });
 
+  it("extractRuleBookingFields drops malformed type fields and keeps well-typed ones", async () => {
+    const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
+
+    const result = await handler({
+      save_as_rule: true,
+      review_item_json: JSON.stringify({
+        review_type: "classification_group",
+        group: {
+          category: "saas_subscriptions",
+          display_counterparty: "OpenAI",
+          suggested_booking: {
+            purchase_article_id: 501,          // good number
+            purchase_account_id: "bad-string", // bad: should be number → dropped
+            liability_account_id: 2315,        // good number
+            vat_rate_dropdown: "-",            // good string
+            reversed_vat_id: 1,               // good number
+            reason: 99,                        // bad: should be string → dropped
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const args = payload.proposed_action.args;
+
+    expect(args.purchase_article_id).toBe(501);
+    expect(args.liability_account_id).toBe(2315);
+    expect(args.vat_rate_dropdown).toBe("-");
+    expect(args.reversed_vat_id).toBe(1);
+    // malformed fields are silently dropped
+    expect(args.purchase_account_id).toBeUndefined();
+    expect(args.reason).toBeUndefined();
+  });
+
   it("classify_unmatched_transactions skip reason distinguishes pending_materialization from earlier_step_failed", async () => {
     // Branch 1: import_camt053 ran but has pending changes → "pending changes" wording
     const workspace1 = await createWorkspace({ includeWise: false, includeReceipts: false });
