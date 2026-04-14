@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased] - code-review fixes
+
+### Fixed
+- **CAMT duplicate cleanup partial failure** — if the delete step throws after the keep-transaction was already patched, the response now returns `partial: true` with an error message and a `DELETE_FAILED` audit entry so the trail is complete and the gap is actionable.
+- **Autopilot re-recommends failed steps** — `next_recommended_action` no longer suggests a step that already ran and failed; the exclusion set now covers all executed steps regardless of status.
+- **Patch field coercion** — `extractTransactionPatchFields` now coerces non-string but non-null patch values (e.g. numbers from older imported rows) to strings instead of silently dropping them.
+- **Rule booking field whitelist clarity** — `extractSuggestedRuleFields` renamed to `extractRuleBookingFields`; comment documents why `match`/`category` are intentionally absent from the whitelist. Type guards added for all fields (number vs string) so malformed values are dropped cleanly.
+- **Uncapped existing-IDs label** — CAMT duplicate follow-up summary now shows at most 5 existing transaction IDs, appending `, +N more` when over 5.
+- **Ambiguous materialization skip reason** — `classify_unmatched_transactions` skip summary now distinguishes `pending_materialization` (import ran and has work to apply) from `earlier_step_failed` (import was skipped or threw), giving a more actionable message in each case.
+- **VAT hint missing in review-only suggestion** — when a metadata-only auto-booking rule exists (has `vat_rate_dropdown`/`reversed_vat_id` but no article/account), those fields are now threaded through to the keyword-match suggestion so reviewers see the reverse-charge hint even in review-only mode.
+
 ## [0.11.0] - 2026-04-07
 
 ### Added
