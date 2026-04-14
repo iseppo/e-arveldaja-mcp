@@ -1303,6 +1303,56 @@ ${entryXml}
     });
   });
 
+  it("pickNextAutopilotRecommendedAction never re-recommends a step that already failed", async () => {
+    // parse_camt053 fails (bad XML) → its step number goes into executedSteps with status=failed
+    // → next_recommended_action must not be parse_camt053
+    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const { join: pathJoin } = await import("path");
+    await writeFile(pathJoin(workspace, "statement.xml"), "NOT VALID XML AT ALL");
+
+    const setupError = Object.assign(new Error("setup"), { mode: "setup" });
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(undefined),
+        findByName: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      products: {},
+      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockResolvedValue({ id: 1, status: "CONFIRMED", is_deleted: false }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({}),
+      },
+      readonly: {
+        getBankAccounts: vi.fn().mockRejectedValue(setupError),
+        getAccountDimensions: vi.fn().mockRejectedValue(setupError),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({}),
+        getInvoiceInfo: vi.fn().mockResolvedValue({}),
+      },
+    } as any);
+
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Tool not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({ workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    const failedStep = payload.autopilot.executed_steps.find((s: any) => s.tool === "parse_camt053");
+    expect(failedStep?.status).toBe("failed");
+
+    const nextAction = payload.autopilot.next_recommended_action;
+    expect(nextAction?.tool).not.toBe("parse_camt053");
+  });
+
   it("cleanup_camt_possible_duplicate surfaces partial state when delete throws", async () => {
     const logAuditSpy = vi.mocked(auditLogModule.logAudit);
     logAuditSpy.mockClear();

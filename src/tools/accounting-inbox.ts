@@ -945,11 +945,7 @@ function pickNextAutopilotRecommendedAction(
     return undefined;
   }
 
-  const executedStepNumbers = new Set(
-    executedSteps
-      .filter(step => step.status === "completed")
-      .map(step => step.step),
-  );
+  const executedStepNumbers = new Set(executedSteps.map(step => step.step));
 
   return prepared.steps.find((step) =>
     step.recommended &&
