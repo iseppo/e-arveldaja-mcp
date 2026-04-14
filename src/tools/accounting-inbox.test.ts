@@ -360,7 +360,7 @@ describe("prepare_accounting_inbox", () => {
       }),
       expect.objectContaining({
         tool: "classify_unmatched_transactions",
-        summary: expect.stringContaining("old live ledger"),
+        summary: expect.stringContaining("failed"),
       }),
     ]));
     expect(payload.autopilot.needs_accountant_review).toEqual([]);
@@ -614,7 +614,7 @@ describe("prepare_accounting_inbox", () => {
     expect(payload.autopilot.skipped_steps).toEqual(expect.arrayContaining([
       expect.objectContaining({
         tool: "classify_unmatched_transactions",
-        summary: expect.stringContaining("old live ledger"),
+        summary: expect.stringContaining("pending changes"),
       }),
     ]));
     const duplicateFollowUps = payload.autopilot.needs_accountant_review.filter((item: any) => item.source === "import_camt053");
@@ -1301,6 +1301,77 @@ ${entryXml}
         approval_required: true,
       },
     });
+  });
+
+  it("classify_unmatched_transactions skip reason distinguishes pending_materialization from earlier_step_failed", async () => {
+    // Branch 1: import_camt053 ran but has pending changes → "pending changes" wording
+    const workspace1 = await createWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace1);
+
+    const server1 = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server1, {
+      clients: { findByCode: vi.fn().mockResolvedValue(undefined), findByName: vi.fn().mockResolvedValue([]), listAll: vi.fn().mockResolvedValue([]) },
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      products: {},
+      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          { accounts_dimensions_id: 101, account_name_est: "LHV", account_no: "EE637700771011212909", iban_code: "EE637700771011212909" },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          { id: 101, accounts_id: 1020, title_est: "LHV", is_deleted: false },
+        ]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+    const reg1 = server1.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    const handler1 = reg1![2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const result1 = await handler1({ workspace_path: workspace1, bank_account_dimension_id: 101 });
+    const payload1 = parseMcpResponse(result1.content[0]!.text) as any;
+    const classifySkip1 = payload1.autopilot.skipped_steps?.find((s: any) => s.tool === "classify_unmatched_transactions");
+    // import_camt053 ran and would create transactions → pending_materialization
+    if (classifySkip1) {
+      expect(classifySkip1.summary).toContain("pending changes");
+      expect(classifySkip1.summary).not.toContain("failed");
+    }
+
+    // Branch 2: setup mode → import_camt053 is skipped → classify gets "failed" wording
+    const workspace2 = await createWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace2);
+
+    const setupError = Object.assign(new Error("setup"), { mode: "setup" });
+    const server2 = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server2, {
+      clients: { findByCode: vi.fn().mockResolvedValue(undefined), findByName: vi.fn().mockResolvedValue([]), listAll: vi.fn().mockResolvedValue([]) },
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      products: {},
+      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: {
+        getBankAccounts: vi.fn().mockRejectedValue(setupError),
+        getAccountDimensions: vi.fn().mockRejectedValue(setupError),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({}),
+        getInvoiceInfo: vi.fn().mockResolvedValue({}),
+      },
+    } as any);
+    const reg2 = server2.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    const handler2 = reg2![2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const result2 = await handler2({ workspace_path: workspace2 });
+    const payload2 = parseMcpResponse(result2.content[0]!.text) as any;
+    const classifySkip2 = payload2.autopilot.skipped_steps?.find((s: any) => s.tool === "classify_unmatched_transactions");
+    if (classifySkip2) {
+      // import_camt053 was skipped (not runnable in setup mode) → earlier_step_failed wording
+      expect(classifySkip2.summary).toContain("failed");
+      expect(classifySkip2.summary).not.toContain("pending changes");
+    }
   });
 
   it("CAMT followup summary truncates more than 5 existing IDs with +N more suffix", async () => {

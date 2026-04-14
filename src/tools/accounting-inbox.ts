@@ -1477,28 +1477,36 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
         recommendation: question.recommendation,
       }));
       const needsAccountantReview: AutopilotFollowUp[] = [];
-      let hasUnresolvedMaterializationBeforeClassification = false;
+      // "pending_materialization" = step ran and dry-run showed work to apply.
+      // "earlier_step_failed"     = step errored or was skipped before it could run.
+      let materializationBlockReason: "pending_materialization" | "earlier_step_failed" | undefined;
 
       for (const step of prepared.steps) {
         const blockedByPendingMaterialization = step.tool === "classify_unmatched_transactions" &&
-          hasUnresolvedMaterializationBeforeClassification;
+          materializationBlockReason !== undefined;
         if (!isAutopilotRunnableStep(step, prepared.liveApiDefaultsAvailable) || blockedByPendingMaterialization) {
+          let skipSummary: string;
+          if (blockedByPendingMaterialization) {
+            skipSummary = materializationBlockReason === "earlier_step_failed"
+              ? "Skipped because an earlier import or receipt step failed; classification would otherwise reflect an incomplete ledger."
+              : "Skipped because earlier import or receipt steps are still unresolved or still show pending changes; classification would otherwise reflect the old live ledger.";
+          } else if (step.missing_inputs.length > 0) {
+            skipSummary = `Skipped because ${step.missing_inputs.join(", ")} is still missing.`;
+          } else if (!prepared.liveApiDefaultsAvailable && step.tool !== "parse_camt053") {
+            skipSummary = "Skipped because live API-backed dry runs are unavailable until credentials are configured.";
+          } else {
+            skipSummary = "Skipped because this step is not currently marked as a safe default.";
+          }
           skippedSteps.push({
             step: step.step,
             tool: step.tool,
             status: "skipped",
             purpose: step.purpose,
-            summary: blockedByPendingMaterialization
-              ? "Skipped because earlier import or receipt steps are still unresolved or still show pending changes; classification would otherwise reflect the old live ledger."
-              : step.missing_inputs.length > 0
-              ? `Skipped because ${step.missing_inputs.join(", ")} is still missing.`
-              : (!prepared.liveApiDefaultsAvailable && step.tool !== "parse_camt053")
-                ? "Skipped because live API-backed dry runs are unavailable until credentials are configured."
-                : "Skipped because this step is not currently marked as a safe default.",
+            summary: skipSummary,
             suggested_args: step.suggested_args,
           });
-          if (isMaterializationStep(step.tool)) {
-            hasUnresolvedMaterializationBeforeClassification = true;
+          if (isMaterializationStep(step.tool) && materializationBlockReason === undefined) {
+            materializationBlockReason = "earlier_step_failed";
           }
           continue;
         }
@@ -1518,7 +1526,7 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
           doneAutomatically.push(summarized.summary);
           needsAccountantReview.push(...summarized.followUps);
           if (leavesPendingMaterializationAfterDryRun(step.tool, summarized.preview)) {
-            hasUnresolvedMaterializationBeforeClassification = true;
+            materializationBlockReason = "pending_materialization";
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1535,8 +1543,8 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
             summary: `${step.tool} failed during autopilot dry run: ${message}`,
             recommendation: "Inspect this specific step before relying on the automatic first pass.",
           });
-          if (isMaterializationStep(step.tool)) {
-            hasUnresolvedMaterializationBeforeClassification = true;
+          if (isMaterializationStep(step.tool) && materializationBlockReason === undefined) {
+            materializationBlockReason = "earlier_step_failed";
           }
         }
       }
