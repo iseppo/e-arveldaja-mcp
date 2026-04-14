@@ -901,13 +901,16 @@ function findConfirmedPossibleDuplicateMatches(item: Record<string, unknown>): R
     .filter(candidate => stringAt(candidate, "status") === "CONFIRMED");
 }
 
-function extractSuggestedRuleFields(reviewItem: Record<string, unknown>): Record<string, unknown> | undefined {
+function extractRuleBookingFields(reviewItem: Record<string, unknown>): Record<string, unknown> | undefined {
   const item = recordAt(reviewItem, "item");
   const group = recordAt(reviewItem, "group");
   const suggestion = recordAt(group ?? item ?? {}, "suggested_booking");
   if (!suggestion) return undefined;
 
   const fields: Record<string, unknown> = {};
+  // `match` and `category` are intentionally absent from this whitelist — they are
+  // derived from the counterparty label and group category at the call site, not
+  // from the suggested_booking payload.
   for (const key of [
     "purchase_article_id",
     "purchase_account_id",
@@ -931,7 +934,7 @@ function mergeRuleOverrides(
   explicitOverride?: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
   const merged = {
-    ...(extractSuggestedRuleFields(reviewItem) ?? {}),
+    ...(extractRuleBookingFields(reviewItem) ?? {}),
     ...(explicitOverride ?? {}),
   };
   return Object.keys(merged).length > 0 ? merged : undefined;

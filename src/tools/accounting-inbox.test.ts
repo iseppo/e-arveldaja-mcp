@@ -1303,6 +1303,34 @@ ${entryXml}
     });
   });
 
+  it("mergeRuleOverrides: explicit rule_override_json match takes precedence over derived counterparty", async () => {
+    const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
+
+    const result = await handler({
+      save_as_rule: true,
+      rule_override_json: JSON.stringify({ match: "custom-match-stem", purchase_account_id: 5200 }),
+      review_item_json: JSON.stringify({
+        review_type: "classification_group",
+        group: {
+          category: "saas_subscriptions",
+          display_counterparty: "OpenAI Ireland Ltd",
+          suggested_booking: {
+            purchase_article_id: 501,
+            purchase_account_id: 5230,
+            reason: "SaaS default.",
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.proposed_action.args.match).toBe("custom-match-stem");
+    // explicit purchase_account_id from override wins over suggested_booking value
+    expect(payload.proposed_action.args.purchase_account_id).toBe(5200);
+    // non-overridden fields from suggested_booking are still present
+    expect(payload.proposed_action.args.purchase_article_id).toBe(501);
+  });
+
   it("extractTransactionPatchFields coerces numeric patch field values to strings", async () => {
     const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
 
