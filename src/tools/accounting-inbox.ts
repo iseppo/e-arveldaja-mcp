@@ -884,8 +884,12 @@ function extractTransactionPatchFields(record: Record<string, unknown> | undefin
   const patch: Partial<Transaction> = {};
   for (const field of CAMT_DUPLICATE_PATCH_FIELDS) {
     const value = record[field];
-    if (typeof value === "string" && value.trim()) {
-      patch[field] = value;
+    // CAMT rows are normally strings, but older imported rows may carry numbers or
+    // other primitive types — coerce to string so we never silently discard the value.
+    if (value === undefined || value === null) continue;
+    const coerced = typeof value === "string" ? value : String(value);
+    if (coerced.trim()) {
+      patch[field] = coerced.trim();
     }
   }
   return patch;

@@ -1303,6 +1303,40 @@ ${entryXml}
     });
   });
 
+  it("extractTransactionPatchFields coerces numeric patch field values to strings", async () => {
+    const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
+
+    const result = await handler({
+      review_item_json: JSON.stringify({
+        review_type: "camt_possible_duplicate",
+        item: {
+          new_transaction_api_id: 9001,
+          existing_transactions: [
+            {
+              id: 77,
+              status: "CONFIRMED",
+              suggested_patch_missing_fields: {
+                bank_ref_number: 12345,   // numeric — should be coerced to "12345"
+                ref_number: "RF99",       // normal string — should pass through
+              },
+            },
+          ],
+          review_guidance: {
+            recommendation: "Keep confirmed.",
+            compliance_basis: [],
+            follow_up_questions: [],
+          },
+        },
+      }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.proposed_action.args.patch_missing_fields).toEqual({
+      bank_ref_number: "12345",
+      ref_number: "RF99",
+    });
+  });
+
   it("pickNextAutopilotRecommendedAction never re-recommends a step that already failed", async () => {
     // parse_camt053 fails (bad XML) → its step number goes into executedSteps with status=failed
     // → next_recommended_action must not be parse_camt053
