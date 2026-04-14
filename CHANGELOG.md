@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.2] - 2026-04-14
+
+### Fixed
+- **Prompt and workflow alignment** — synced prompt surfaces, shipped workflow markdown, and command docs with the current tool behavior for CAMT duplicate handling, setup credentials, month-end input requirements, reconcile-bank wording, and purchase-invoice VAT dimension fields.
+- **Account validation coverage** — account preflight checks now validate account existence and active status alongside dimension requirements across journal creation, transaction confirmation, sale invoice creation, purchase invoice creation, and purchase-invoice-from-PDF flows.
+- **Transaction confirm safety** — `confirm_transaction` now completes distribution parsing and account validation before applying a temporary `clients_id`, preventing partial mutation on pre-confirm validation failures.
+- **Transaction metadata update scope** — `update_transaction` is now restricted to safe CAMT-enrichment metadata fields (`bank_ref_number`, counterparty name/account details, description, reference) instead of accepting arbitrary transaction patches.
+
 ## [0.11.1] - 2026-04-14
 
 ### Fixed
