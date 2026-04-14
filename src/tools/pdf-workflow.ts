@@ -394,7 +394,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       invoice_date: z.string().describe("Invoice date (YYYY-MM-DD)"),
       journal_date: z.string().describe("Turnover/booking date (YYYY-MM-DD)"),
       term_days: z.number().describe("Payment term days"),
-      items: z.string().describe("JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts)."),
+      items: z.string().describe(
+        "JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. " +
+        "purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts). Same rule applies to vat_accounts_dimensions_id when the VAT account has dimensions. Use list_account_dimensions to look up dimension IDs."
+      ),
       vat_price: z.number().optional().describe("EXACT total VAT from the original invoice"),
       gross_price: z.number().optional().describe("EXACT total gross from the original invoice"),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
@@ -421,7 +424,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       ]);
       const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
       if (dimErrors.length > 0) {
-        return toolError({ error: "Account dimension validation failed", details: dimErrors });
+        return toolError({ error: "Account validation failed", details: dimErrors });
       }
 
       const invoiceData: CreatePurchaseInvoiceData = {

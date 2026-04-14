@@ -24,7 +24,8 @@ If `total_unconfirmed` is 0, everything is reconciled — stop here.
 Show a summary grouped by confidence level:
 
 **HIGH (>=80):** Safe to auto-confirm.
-- Transaction: date, amount, type (`D`=incoming, `C`=outgoing), description
+- Transaction: date, amount, description, and raw `type` if helpful
+- Do not infer incoming vs outgoing direction from `type` alone; bank transactions are commonly stored as `C` regardless of direction in e-arveldaja
 - Matched invoice: number, client, gross amount, confidence, match reasons
 
 **MEDIUM (50-79):** Review recommended.

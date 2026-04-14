@@ -11,7 +11,12 @@ import type { PurchaseInvoicesApi } from "../api/purchase-invoices.api.js";
 import type { ReferenceDataApi } from "../api/readonly.api.js";
 import type { Posting, Transaction, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem, CreatePurchaseInvoiceData } from "../types/api.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
-import { validateItemDimensions } from "../account-validation.js";
+import {
+  validateItemDimensions,
+  validatePostingDimensions,
+  validateSaleInvoiceItemDimensions,
+  validateTransactionDistributionDimensions,
+} from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { readOnly, create, mutate, destructive, send } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
@@ -113,7 +118,11 @@ export function requireNumericFields(items: Record<string, unknown>[], label: st
 function parsePostings(input: string): Posting[] {
   const postings = parseJsonObjectArray(input, "postings");
   requireFields(postings, "postings", ["accounts_id", "type", "amount"]);
-  requireNumericFields(postings, "postings", ["accounts_id", "amount", "accounts_dimensions_id", "projects_project_id", "base_amount"]);
+  requireNumericFields(postings, "postings", [
+    "accounts_id", "amount", "accounts_dimensions_id",
+    "projects_project_id", "projects_location_id", "projects_person_id",
+    "base_amount",
+  ]);
 
   postings.forEach((posting, index) => {
     if (posting.type !== "D" && posting.type !== "C") {
@@ -128,13 +137,39 @@ function parseTransactionDistributions(input: string): TransactionDistribution[]
   const distributions = parseJsonObjectArray(input, "distributions");
   requireFields(distributions, "distributions", ["related_table", "amount"]);
   requireNumericFields(distributions, "distributions", ["amount", "related_id", "related_sub_id"]);
+
+  const allowedRelatedTables = new Set(["accounts", "purchase_invoices", "sale_invoices"]);
+  distributions.forEach((distribution, index) => {
+    const relatedTable = distribution.related_table;
+    if (typeof relatedTable !== "string" || !allowedRelatedTables.has(relatedTable)) {
+      throw new Error(
+        `"distributions" item ${index + 1} field "related_table" must be one of: accounts, purchase_invoices, sale_invoices`
+      );
+    }
+
+    if (
+      (relatedTable === "accounts" || relatedTable === "purchase_invoices" || relatedTable === "sale_invoices") &&
+      (!Number.isInteger(distribution.related_id) || (distribution.related_id as number) <= 0)
+    ) {
+      throw new Error(
+        `"distributions" item ${index + 1} field "related_id" must be a positive number when related_table="${relatedTable}"`
+      );
+    }
+  });
+
   return distributions as unknown as TransactionDistribution[];
 }
 
 export function parseSaleInvoiceItems(input: string): SaleInvoiceItem[] {
   const items = parseJsonObjectArray(input, "items");
   requireFields(items, "items", ["products_id", "custom_title", "amount"]);
-  requireNumericFields(items, "items", ["products_id", "amount", "unit_net_price", "vat_accounts_id", "discount_percent"]);
+  requireNumericFields(items, "items", [
+    "products_id", "amount", "unit_net_price", "discount_percent",
+    "vat_accounts_id",
+    "sale_accounts_id", "sale_accounts_dimensions_id",
+    "cl_sale_articles_id",
+    "projects_project_id", "projects_location_id", "projects_person_id",
+  ]);
   return items as unknown as SaleInvoiceItem[];
 }
 
@@ -143,7 +178,8 @@ export function parsePurchaseInvoiceItems(input: string): PurchaseInvoiceItem[] 
   requireFields(items, "items", ["cl_purchase_articles_id", "custom_title"]);
   requireNumericFields(items, "items", [
     "cl_purchase_articles_id", "total_net_price", "unit_net_price", "amount",
-    "vat_accounts_id", "purchase_accounts_id", "purchase_accounts_dimensions_id",
+    "vat_accounts_id", "vat_accounts_dimensions_id",
+    "purchase_accounts_id", "purchase_accounts_dimensions_id",
     "cl_vat_articles_id", "project_no_vat_gross_price", "cl_fringe_benefits_id",
   ]);
   return items as unknown as PurchaseInvoiceItem[];
@@ -167,6 +203,40 @@ export function tagNotes(notes?: string): string | undefined {
 const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const isoDateString = (description: string) =>
   z.string().regex(isoDateRegex, "Expected YYYY-MM-DD").describe(description);
+
+const TRANSACTION_METADATA_FIELDS = new Set([
+  "bank_ref_number",
+  "bank_account_name",
+  "bank_account_no",
+  "description",
+  "ref_number",
+]);
+
+function validateTransactionUpdateData(data: Record<string, unknown>): string[] {
+  const fields = Object.keys(data);
+  const allowedFields = Array.from(TRANSACTION_METADATA_FIELDS).join(", ");
+  const errors: string[] = [];
+
+  if (fields.length === 0) {
+    return [`Provide at least one transaction metadata field to update. Allowed fields: ${allowedFields}.`];
+  }
+
+  for (const field of fields) {
+    if (!TRANSACTION_METADATA_FIELDS.has(field)) {
+      errors.push(
+        `Field "${field}" is not supported by update_transaction. Allowed fields: ${allowedFields}.`
+      );
+      continue;
+    }
+
+    const value = data[field];
+    if (value !== null && typeof value !== "string") {
+      errors.push(`Field "${field}" must be a string or null.`);
+    }
+  }
+
+  return errors;
+}
 
 export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -352,9 +422,22 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     clients_id: z.number().optional().describe("Related client ID"),
     document_number: z.string().optional().describe("Document number"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
-    postings: z.string().describe("JSON array of postings: [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, ...}]"),
+    postings: z.string().describe(
+      "JSON array of postings: [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, base_amount?, projects_project_id?, projects_location_id?, projects_person_id?}]. " +
+      "accounts_dimensions_id is REQUIRED when accounts_id refers to an account with sub-accounts (use list_account_dimensions to look it up). " +
+      "base_amount is the EUR equivalent for multi-currency entries (when cl_currencies_id is not EUR). " +
+      "projects_project_id / projects_location_id / projects_person_id link the posting to project tracking dimensions."
+    ),
   }, { ...create, title: "Create Journal" }, async (params) => {
     const postings = parsePostings(params.postings);
+    const [accounts, accountDimensions] = await Promise.all([
+      api.readonly.getAccounts(),
+      api.readonly.getAccountDimensions(),
+    ]);
+    const postingErrors = validatePostingDimensions(postings, accounts, accountDimensions);
+    if (postingErrors.length > 0) {
+      return toolError({ error: "Account validation failed", details: postingErrors });
+    }
     const result = await api.journals.create({
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
@@ -367,7 +450,16 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       details: {
         effective_date: params.effective_date, title: params.title,
         document_number: params.document_number,
-        postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount, accounts_dimensions_id: p.accounts_dimensions_id })),
+        postings: postings.map(p => ({
+          accounts_id: p.accounts_id,
+          type: p.type,
+          amount: p.amount,
+          accounts_dimensions_id: p.accounts_dimensions_id,
+          base_amount: p.base_amount,
+          projects_project_id: p.projects_project_id,
+          projects_location_id: p.projects_location_id,
+          projects_person_id: p.projects_person_id,
+        })),
       },
     });
     return { content: [{ type: "text", text: toMcpJson(result) }] };
@@ -464,9 +556,28 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     "For invoice distributions, clients_id is auto-resolved from the invoice.",
     {
     id: coerceId.describe("Transaction ID"),
-    distributions: z.string().optional().describe("JSON array of distribution rows: [{related_table, related_id?, amount}]"),
+    distributions: z.string().optional().describe(
+      "JSON array of distribution rows: [{related_table, related_id?, related_sub_id?, amount}]. " +
+      "related_table values: 'accounts' (book to a GL account), 'purchase_invoices', 'sale_invoices'. " +
+      "related_sub_id is REQUIRED when related_table='accounts' and the account has dimensions — " +
+      "pass the dimension ID there (e.g. 1360 'Arveldused aruandvate isikutega' with sub-account per person). " +
+      "Without related_sub_id the API rejects with 'Entry cannot be made directly to the account ... since it has dimensions'. " +
+      "Use list_account_dimensions to look up dimension IDs for an account."
+    ),
     clients_id: coerceId.optional().describe("Client ID to set on the transaction before confirming (required when transaction has no clients_id and distribution is against accounts, not invoices)"),
   }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions, clients_id }) => {
+    const dist = distributions ? parseTransactionDistributions(distributions) : undefined;
+    if (dist && dist.some(d => d.related_table === "accounts")) {
+      const [accounts, accountDimensions] = await Promise.all([
+        api.readonly.getAccounts(),
+        api.readonly.getAccountDimensions(),
+      ]);
+      const dimensionErrors = validateTransactionDistributionDimensions(dist, accounts, accountDimensions);
+      if (dimensionErrors.length > 0) {
+        return toolError({ error: "Account validation failed", details: dimensionErrors });
+      }
+    }
+
     let clientsIdWasSet = false;
     if (clients_id) {
       const tx = await api.transactions.get(id);
@@ -475,7 +586,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         clientsIdWasSet = true;
       }
     }
-    const dist = distributions ? parseTransactionDistributions(distributions) : undefined;
+
     let result: Awaited<ReturnType<typeof api.transactions.confirm>>;
     try {
       result = await api.transactions.confirm(id, dist);
@@ -490,7 +601,25 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     logAudit({
       tool: "confirm_transaction", action: "CONFIRMED", entity_type: "transaction", entity_id: id,
       summary: `Confirmed transaction ${id}`,
-      details: { distributions: dist?.map(d => ({ related_table: d.related_table, related_id: d.related_id, amount: d.amount })) },
+      details: { distributions: dist?.map(d => ({ related_table: d.related_table, related_id: d.related_id, related_sub_id: d.related_sub_id, amount: d.amount })) },
+    });
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
+  registerTool(server, "update_transaction", "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference.", {
+    id: coerceId.describe("Transaction ID"),
+    data: z.string().describe("JSON object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description, ref_number"),
+  }, { ...mutate, title: "Update Transaction" }, async ({ id, data }) => {
+    const parsed = parseJsonObject(data, "data");
+    const validationErrors = validateTransactionUpdateData(parsed);
+    if (validationErrors.length > 0) {
+      return toolError({ error: "Transaction metadata validation failed", details: validationErrors });
+    }
+    const result = await api.transactions.update(id, parsed as Partial<Transaction>);
+    logAudit({
+      tool: "update_transaction", action: "UPDATED", entity_type: "transaction", entity_id: id,
+      summary: `Updated transaction ${id}`,
+      details: { fields_changed: Object.keys(parsed) },
     });
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
@@ -542,10 +671,22 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     cl_countries_id: z.string().optional().describe("Country (default EST)"),
     sale_invoice_type: z.string().optional().describe("Type: INVOICE or CREDIT_INVOICE"),
     show_client_balance: z.boolean().optional().describe("Show client balance on invoice"),
-    items: z.string().describe("JSON array of invoice items: [{products_id, custom_title, amount, unit_net_price, ...}]"),
+    items: z.string().describe(
+      "JSON array of invoice items: [{products_id, custom_title, amount, unit_net_price, sale_accounts_id?, sale_accounts_dimensions_id?, vat_accounts_id?, cl_sale_articles_id?, discount_percent?, projects_project_id?, projects_location_id?, projects_person_id?}]. " +
+      "sale_accounts_dimensions_id is REQUIRED when the revenue account has dimensions (sub-accounts). Use list_account_dimensions to look up dimension IDs. " +
+      "Note: SaleInvoicesItems schema has no vat_accounts_dimensions_id field — only the purchase side does."
+    ),
     notes: z.string().optional().describe("Internal notes"),
   }, { ...create, title: "Create Sale Invoice" }, async (params) => {
     const items = parseSaleInvoiceItems(params.items);
+    const [accounts, accountDimensions] = await Promise.all([
+      api.readonly.getAccounts(),
+      api.readonly.getAccountDimensions(),
+    ]);
+    const dimErrors = validateSaleInvoiceItemDimensions(items, accounts, accountDimensions);
+    if (dimErrors.length > 0) {
+      return toolError({ error: "Account validation failed", details: dimErrors });
+    }
     const result = await api.saleInvoices.create({
       ...params,
       number_suffix: params.number_suffix ?? "",
@@ -653,7 +794,10 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       gross_price: z.number().optional().describe("Total gross amount from original invoice (EXACT, for payment matching)"),
       cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
-      items: z.string().describe("JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, ...}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts)."),
+      items: z.string().describe(
+        "JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. " +
+        "purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts). Same rule applies to vat_accounts_dimensions_id when the VAT account has dimensions. Use list_account_dimensions to look up dimension IDs."
+      ),
       notes: z.string().optional().describe("Notes"),
       bank_ref_number: z.string().optional().describe("Payment reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
@@ -670,7 +814,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       ]);
       const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
       if (dimErrors.length > 0) {
-        return toolError({ error: "Account dimension validation failed", details: dimErrors });
+        return toolError({ error: "Account validation failed", details: dimErrors });
       }
 
       const invoiceData: CreatePurchaseInvoiceData = {

@@ -110,6 +110,13 @@ function setupPdfWorkflowTool(
           account_type_est: "Kulud",
           account_type_eng: "Expenses",
         },
+        {
+          id: 1510,
+          name_est: "Sisendkäibemaks",
+          name_eng: "Input VAT",
+          account_type_est: "Maksud",
+          account_type_eng: "Taxes",
+        },
       ]),
       getAccountDimensions: vi.fn().mockResolvedValue([]),
       getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),

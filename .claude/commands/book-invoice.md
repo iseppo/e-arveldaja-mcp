@@ -77,7 +77,7 @@ Review `past_invoices` and reuse the most relevant:
 - `cl_purchase_articles_id`
 - `purchase_accounts_id`
 - `purchase_accounts_dimensions_id` (required when the account has sub-accounts)
-- VAT fields such as `vat_rate_dropdown`, `vat_accounts_id`, `cl_vat_articles_id`, `reversed_vat_id`
+- VAT fields such as `vat_rate_dropdown`, `vat_accounts_id`, `vat_accounts_dimensions_id`, `cl_vat_articles_id`, `reversed_vat_id`
 
 If there is no suitable history, call `list_purchase_articles` or ask the user instead of inventing IDs.
 
@@ -101,7 +101,7 @@ Before creating anything, present:
 - Supplier name and supplier client ID
 - Invoice number, invoice date, due date, journal date, and term days
 - Net / VAT / gross amounts
-- The exact item-level booking you intend to send, including article IDs, account IDs, VAT fields, and any `reversed_vat_id`
+- The exact item-level booking you intend to send, including article IDs, account IDs, `purchase_accounts_dimensions_id`, VAT fields, `vat_accounts_dimensions_id`, and any `reversed_vat_id`
 - The booking basis used and any assumptions
 
 If the user has not explicitly approved the preview, stop here and wait.
@@ -114,7 +114,7 @@ Call `create_purchase_invoice_from_pdf`:
 - `invoice_date`
 - `journal_date`
 - `term_days`
-- `items`: JSON array with `cl_purchase_articles_id`, `purchase_accounts_id`, `purchase_accounts_dimensions_id` (when the account has dimensions), quantities, totals, VAT fields, `vat_accounts_id`, `cl_vat_articles_id`, and `reversed_vat_id` when applicable
+- `items`: JSON array with `cl_purchase_articles_id`, `purchase_accounts_id`, `purchase_accounts_dimensions_id` (when the account has dimensions), quantities, totals, VAT fields, `vat_accounts_id`, `vat_accounts_dimensions_id` (when the VAT account has dimensions), `cl_vat_articles_id`, and `reversed_vat_id` when applicable
 - `vat_price`: exact value from the invoice
 - `gross_price`: exact value from the invoice
 - `ref_number`

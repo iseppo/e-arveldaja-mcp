@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   safeJsonParse,
   parseSaleInvoiceItems,
@@ -8,7 +8,39 @@ import {
   requireFields,
   coerceNumericFields,
   MAX_JSON_INPUT_SIZE,
+  registerCrudTools,
 } from "./crud-tools.js";
+import { parseMcpResponse } from "../mcp-json.js";
+
+function getCrudToolHarness(toolName: string, overrides?: {
+  transactions?: Record<string, unknown>;
+  readonly?: Record<string, unknown>;
+}) {
+  const api = {
+    transactions: {
+      get: vi.fn(),
+      update: vi.fn(),
+      confirm: vi.fn(),
+      ...overrides?.transactions,
+    },
+    readonly: {
+      getAccounts: vi.fn(),
+      getAccountDimensions: vi.fn(),
+      ...overrides?.readonly,
+    },
+  };
+  const server = { registerTool: vi.fn() };
+
+  registerCrudTools(server as never, api as never);
+
+  const call = server.registerTool.mock.calls.find(([name]) => name === toolName);
+  if (!call) throw new Error(`${toolName} tool was not registered`);
+
+  return {
+    api,
+    handler: call[2] as (args: Record<string, unknown>, extra?: unknown) => Promise<unknown>,
+  };
+}
 
 describe("safeJsonParse", () => {
   it("parses valid JSON", () => {
@@ -92,6 +124,13 @@ describe("parsePurchaseInvoiceItems", () => {
     expect(items[0]!.custom_title).toBe("Internet");
   });
 
+  it("coerces VAT dimension ids to numbers", () => {
+    const items = parsePurchaseInvoiceItems(
+      '[{"cl_purchase_articles_id":45,"custom_title":"Internet","vat_accounts_dimensions_id":"12"}]'
+    );
+    expect(items[0]!.vat_accounts_dimensions_id).toBe(12);
+  });
+
   it("throws when cl_purchase_articles_id missing", () => {
     expect(() => parsePurchaseInvoiceItems('[{"custom_title":"test"}]')).toThrow("cl_purchase_articles_id");
   });
@@ -105,6 +144,15 @@ describe("parseSaleInvoiceItems", () => {
   it("coerces string-typed discount_percent to number", () => {
     const items = parseSaleInvoiceItems('[{"products_id":1,"custom_title":"Service","amount":1,"discount_percent":"10"}]');
     expect(items[0]!.discount_percent).toBe(10);
+  });
+
+  it("coerces sale account dimensions and project ids to numbers", () => {
+    const items = parseSaleInvoiceItems(
+      '[{"products_id":1,"custom_title":"Service","amount":1,"sale_accounts_dimensions_id":"22","projects_location_id":"33","projects_person_id":"44"}]'
+    );
+    expect(items[0]!.sale_accounts_dimensions_id).toBe(22);
+    expect(items[0]!.projects_location_id).toBe(33);
+    expect(items[0]!.projects_person_id).toBe(44);
   });
 
   it("rejects non-numeric discount_percent values", () => {
@@ -179,5 +227,126 @@ describe("coerceNumericFields", () => {
     const items = [{ price: 42 }];
     coerceNumericFields(items, ["price"]);
     expect(items[0]!.price).toBe(42);
+  });
+});
+
+describe("confirm_transaction", () => {
+  it("rejects account distributions without related_id before mutating the transaction", async () => {
+    const { api, handler } = getCrudToolHarness("confirm_transaction");
+
+    await expect(handler({
+      id: 1,
+      clients_id: 99,
+      distributions: '[{"related_table":"accounts","amount":12}]',
+    })).rejects.toThrow('field "related_id" must be a positive number');
+
+    expect(api.transactions.get).not.toHaveBeenCalled();
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("returns dimension validation errors before setting temporary clients_id", async () => {
+    const { api, handler } = getCrudToolHarness("confirm_transaction", {
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([
+          { id: 1360, name_est: "Arveldused aruandvate isikutega", allows_dimensions: true, is_valid: true },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          { id: 10, accounts_id: 1360, title_est: "Mari", is_deleted: false },
+          { id: 11, accounts_id: 1360, title_est: "Jaan", is_deleted: false },
+        ]),
+      },
+    });
+
+    const result = await handler({
+      id: 1,
+      clients_id: 99,
+      distributions: '[{"related_table":"accounts","related_id":1360,"amount":12}]',
+    }) as { isError?: boolean; content: Array<{ text: string }> };
+
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      error: "Account validation failed",
+    });
+    expect(api.transactions.get).not.toHaveBeenCalled();
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("rolls back a temporary clients_id if confirm fails", async () => {
+    const { api, handler } = getCrudToolHarness("confirm_transaction", {
+      transactions: {
+        get: vi.fn().mockResolvedValue({ id: 1, clients_id: null }),
+        update: vi.fn().mockResolvedValue({}),
+        confirm: vi.fn().mockRejectedValue(new Error("confirm failed")),
+      },
+    });
+
+    await expect(handler({
+      id: 1,
+      clients_id: 99,
+      distributions: '[{"related_table":"sale_invoices","related_id":321,"amount":12}]',
+    })).rejects.toThrow("confirm failed");
+
+    expect(api.transactions.get).toHaveBeenCalledWith(1);
+    expect(api.transactions.update).toHaveBeenNthCalledWith(1, 1, { clients_id: 99 });
+    expect(api.transactions.confirm).toHaveBeenCalledWith(1, [
+      { related_table: "sale_invoices", related_id: 321, amount: 12 },
+    ]);
+    expect(api.transactions.update).toHaveBeenNthCalledWith(2, 1, { clients_id: null });
+  });
+});
+
+describe("update_transaction", () => {
+  it("rejects non-metadata fields", async () => {
+    const { api, handler } = getCrudToolHarness("update_transaction");
+
+    const result = await handler({
+      id: 1,
+      data: '{"bank_ref_number":"RF123","amount":99.5}',
+    }) as { isError?: boolean; content: Array<{ text: string }> };
+
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      error: "Transaction metadata validation failed",
+    });
+    expect(api.transactions.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-string metadata values", async () => {
+    const { api, handler } = getCrudToolHarness("update_transaction");
+
+    const result = await handler({
+      id: 1,
+      data: '{"bank_ref_number":123}',
+    }) as { isError?: boolean; content: Array<{ text: string }> };
+
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      error: "Transaction metadata validation failed",
+    });
+    expect(api.transactions.update).not.toHaveBeenCalled();
+  });
+
+  it("allows safe metadata enrichment fields", async () => {
+    const { api, handler } = getCrudToolHarness("update_transaction", {
+      transactions: {
+        update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }),
+      },
+    });
+
+    const result = await handler({
+      id: 1,
+      data: '{"bank_ref_number":"RF123","description":"CAMT import metadata"}',
+    }) as { content: Array<{ text: string }> };
+
+    expect(api.transactions.update).toHaveBeenCalledWith(1, {
+      bank_ref_number: "RF123",
+      description: "CAMT import metadata",
+    });
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      code: 1,
+      messages: ["ok"],
+    });
   });
 });

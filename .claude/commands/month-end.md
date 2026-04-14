@@ -2,7 +2,7 @@
 
 Run the month-end close checklist, compute financial statements, and flag issues.
 
-**Input:** Month in YYYY-MM format (e.g. `2026-02`). If not provided, use the previous calendar month.
+**Input:** Month in YYYY-MM format (e.g. `2026-02`).
 
 ## Step 1: Run the checklist
 

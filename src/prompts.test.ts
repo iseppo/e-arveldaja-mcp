@@ -193,6 +193,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("ask for approval before creating anything");
     expect(text).toContain("If the user has not explicitly approved the preview, stop here and wait.");
     expect(text).toContain("vat_accounts_id");
+    expect(text).toContain("vat_accounts_dimensions_id");
     expect(text).toContain("cl_vat_articles_id");
     expect(text).toContain("auto-uploads the source document");
     expect(text).toContain("Do not infer reverse charge from supplier country alone.");
@@ -254,7 +255,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("created_count");
     expect(text).toContain("error_count");
     expect(text).toContain("if the older matched transaction is already confirmed, keep it by default");
-    expect(text).toContain("if the older match is not confirmed, review statuses before deciding which row to keep");
+    expect(text).toContain("offer to confirm it inline using `confirm_transaction`");
+    expect(text).toContain("enrich `bank_ref_number` via `update_transaction`");
   });
 
   it("keeps import-wise aligned with fee account handling and dry-run fields", async () => {
@@ -360,6 +362,7 @@ describe("registerPrompts", () => {
       expect(text).toContain("If `due_date` is missing");
       expect(text).toContain("Do not infer reverse charge from supplier country alone.");
       expect(text).toContain("place of supply in Estonia");
+      expect(text).toContain("vat_accounts_dimensions_id");
       expect(text).toContain("stop and ask the user instead of guessing");
       expect(text).toContain("ask for approval");
       expect(text).toContain("If the user has not explicitly approved the preview, stop here and wait.");
@@ -377,7 +380,35 @@ describe("registerPrompts", () => {
       expect(text).toContain("reconcile_inter_account_transfers");
       expect(text).toContain("already_handled");
       expect(text).toContain("Wise-side transfers");
+      expect(text).toContain("Do not infer incoming vs outgoing direction from `type` alone");
+      expect(text).not.toContain("`D`=incoming, `C`=outgoing");
       expect(text).not.toContain("Call `get_transaction`");
+    }
+  });
+
+  it("keeps shipped setup-credentials markdown prompts aligned with snake_case tool fields", () => {
+    for (const relativePath of ["workflows/setup-credentials.md", ".claude/commands/setup-credentials.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("get_setup_instructions");
+      expect(text).toContain("import_apikey_credentials");
+      expect(text).toContain("env_file");
+      expect(text).toContain("storage_scope");
+      expect(text).toContain("company_name");
+      expect(text).toContain("verified_at");
+      expect(text).toContain("source_file");
+      expect(text).not.toContain("envFile");
+      expect(text).not.toContain("storageScope");
+      expect(text).not.toContain("companyName");
+      expect(text).not.toContain("verifiedAt");
+      expect(text).not.toContain("sourceFile");
+    }
+  });
+
+  it("keeps shipped month-end markdown prompts aligned with the required month argument", () => {
+    for (const relativePath of ["workflows/month-end.md", ".claude/commands/month-end.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("Month in YYYY-MM format");
+      expect(text).not.toContain("If not provided, use the previous calendar month");
     }
   });
 
@@ -463,9 +494,11 @@ describe("registerPrompts", () => {
     const wiseCommand = readPromptSurface(".claude/commands/import-wise.md");
 
     expect(camtWorkflow).toContain("if the older matched transaction is already confirmed, keep it by default");
-    expect(camtWorkflow).toContain("if the older match is not confirmed, review statuses before deciding which row to keep");
+    expect(camtWorkflow).toContain("offer to confirm it inline using `confirm_transaction`");
+    expect(camtWorkflow).toContain("enrich `bank_ref_number` via `update_transaction`");
     expect(camtCommand).toContain("if the older matched transaction is already confirmed, keep it by default");
-    expect(camtCommand).toContain("if the older match is not confirmed, review statuses before deciding which row to keep");
+    expect(camtCommand).toContain("offer to confirm it inline using `confirm_transaction`");
+    expect(camtCommand).toContain("enrich `bank_ref_number` via `update_transaction`");
 
     expect(wiseCommand).toContain("auto-detects a unique active `8610` fee dimension when possible");
     expect(wiseCommand).toContain("only when auto-detection was not possible");

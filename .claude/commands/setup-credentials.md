@@ -71,11 +71,11 @@ If `import_apikey_credentials` reports that the client does not support interact
 ## Step 6: Report a successful import
 
 If import succeeds, report:
-- `envFile`
-- `storageScope`
-- `companyName`
-- `verifiedAt`
-- `sourceFile`
+- `env_file`
+- `storage_scope`
+- `company_name`
+- `verified_at`
+- `source_file`
 
 ## Step 7: Restart requirement
 

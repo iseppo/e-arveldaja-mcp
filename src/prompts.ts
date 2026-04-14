@@ -391,8 +391,8 @@ Follow these steps in order:
    - clients_id: supplier_client_id
    - description: the first line item description
    Review \`past_invoices\` and reuse the most relevant \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, \`purchase_accounts_dimensions_id\`, and VAT fields
-   (\`vat_rate_dropdown\`, \`vat_accounts_id\`, \`cl_vat_articles_id\`, \`reversed_vat_id\`) from a similar line.
-   If \`purchase_accounts_dimensions_id\` is present in the history, include it — it is required for accounts with sub-accounts.
+   (\`vat_rate_dropdown\`, \`vat_accounts_id\`, \`vat_accounts_dimensions_id\`, \`cl_vat_articles_id\`, \`reversed_vat_id\`) from a similar line.
+   If \`purchase_accounts_dimensions_id\` or \`vat_accounts_dimensions_id\` is present in the history, include it — those fields are required when the expense account or VAT account has sub-accounts.
    If there is no suitable history, call \`list_purchase_articles\` or ask the user instead of inventing purchase article IDs.
 
 9. Determine VAT treatment per line:
@@ -411,7 +411,7 @@ Follow these steps in order:
    - Supplier name and supplier_client_id
    - Invoice number, invoice_date, due_date, journal_date, and term_days
    - Net / VAT / Gross amounts
-   - The exact item-level booking you intend to send, including \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, VAT fields, and any \`reversed_vat_id\`
+   - The exact item-level booking you intend to send, including \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, \`purchase_accounts_dimensions_id\`, VAT fields, \`vat_accounts_dimensions_id\`, and any \`reversed_vat_id\`
    - Booking basis used (which past invoice/article/account/VAT config was reused, or that it was chosen manually)
    - Any validation warnings or assumptions
    If the user has not explicitly approved the preview, stop here and wait.
@@ -423,7 +423,7 @@ Follow these steps in order:
    - journal_date
    - term_days
    - items: JSON array with \`cl_purchase_articles_id\`, \`purchase_accounts_id\`, \`purchase_accounts_dimensions_id\` (when the account has dimensions),
-     quantities, totals, VAT fields, \`vat_accounts_id\`, \`cl_vat_articles_id\`, and \`reversed_vat_id\` when applicable
+     quantities, totals, VAT fields, \`vat_accounts_id\`, \`vat_accounts_dimensions_id\` (when the VAT account has dimensions), \`cl_vat_articles_id\`, and \`reversed_vat_id\` when applicable
    - vat_price: EXACT value from invoice
    - gross_price: EXACT value from invoice
    - ref_number
@@ -590,7 +590,7 @@ Follow these steps in order:
    - if the older matched transaction is already confirmed, keep it by default
    - update that confirmed transaction only with missing CAMT metadata such as \`bank_ref_number\`
    - then avoid creating, or if already created, delete the new \`PROJECT\` transaction
-   - if the older match is not confirmed, review statuses before deciding which row to keep
+   - if the older match is PROJECT (unconfirmed), present its current state and offer to confirm it inline using \`confirm_transaction\` (or \`reconcile_inter_account_transfers\` for transfers). Do NOT defer it to manual UI work — you have the IDs and amounts loaded, the natural next step is to ask the user yes/no for inline confirmation, not to send them to the e-arveldaja web UI.
 
 6. Ask for approval before creating anything.
    If the user does not explicitly approve, stop here.
@@ -607,7 +607,7 @@ Follow these steps in order:
    - \`execution.summary.skipped_count\`
    - \`execution.summary.error_count\`
    - sample of created entries from \`execution.results\`
-   - any possible duplicates from \`execution.needs_review\` that should be resolved
+   - any possible duplicates from \`execution.needs_review\` — for each one, propose an inline action (confirm via \`confirm_transaction\`, reconcile via \`reconcile_inter_account_transfers\`, enrich \`bank_ref_number\` via \`update_transaction\`, or delete the duplicate \`PROJECT\` row) and ask the user to approve. Do not tell the user to "do this manually in e-arveldaja" — that is a last resort only when no MCP tool can perform the action.
    - any errors from \`execution.errors\` that need attention
    - remind the user that mutating side effects can be reviewed via \`execution.audit_reference\`
 

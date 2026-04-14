@@ -65,8 +65,18 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 ### Transaction registration
 - Body is a **top-level JSON array** of `TransactionsDistribution` objects (not wrapped in `{items: [...]}`)
 - Each distribution: `{related_table, amount, related_id?, related_sub_id?}`
-- Example: `PATCH /transactions/{id}/register` with body `[{"related_table":"purchase_invoices","related_id":123,"amount":59.94}]`
+- `related_table` values: `"accounts"` (book to a GL account), `"purchase_invoices"`, `"sale_invoices"`
+- Example (purchase invoice): `PATCH /transactions/{id}/register` with body `[{"related_table":"purchase_invoices","related_id":123,"amount":59.94}]`
+- Example (account with dimensions): `[{"related_table":"accounts","related_id":1360,"related_sub_id":12637323,"amount":1620.70}]`
+- **`related_sub_id` is REQUIRED when `related_table="accounts"` and the account has dimensions.** Pass the dimension ID there. Without it, the API rejects with `"Entry cannot be made directly to the account <code> since it has dimensions"`. Common case: account 1360 "Arveldused aruandvate isikutega" with one sub-account per reporting person.
+- **Do NOT pass the dimension ID into `related_id`.** That makes the API try to interpret it as an account ID and produces confusing errors like `"Dimension ID=<truncated> not found"`.
+- The dimension ID is the integer `id` value returned by `list_account_dimensions` (NOT a sub-account code or label). `related_id` is the integer account ID, `related_sub_id` is the integer dimension ID — both are the database IDs, not the human-readable account/dimension codes.
 - **Card payments often have `clients_id: null`** — confirmation fails with "buyer or supplier is missing". `TransactionsApi.confirm()` auto-fixes this by looking up the client from the linked invoice.
+
+### Inline confirmation policy
+- When a workflow leaves behind `PROJECT` (unconfirmed) transactions, journals, or `needs_review` items and the agent has the IDs/amounts/counterparties loaded, **always offer inline confirmation** via `confirm_transaction` / `reconcile_inter_account_transfers` / `update_transaction` (for `bank_ref_number` enrichment) / `delete_transaction`. Ask the user yes/no for each item.
+- **Never** close a workflow with "these need your manual confirmation in e-arveldaja" / "tee see e-arveldaja UI-s käsitsi" as the default. That is a last-resort fallback only when (a) no MCP tool can perform the action, AND (b) the exact API error has already been shown to the user with what was tried.
+- If the API rejects an inline attempt, show the raw API error and the exact body that was sent before suggesting manual UI fallback.
 
 ### Transaction type field
 - **All bank transactions are `type: "C"`** regardless of direction (both CAMT-imported and API-created)

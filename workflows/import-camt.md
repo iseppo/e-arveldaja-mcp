@@ -46,7 +46,7 @@ For possible duplicates, the default recommendation is:
 - if the older matched transaction is already confirmed, keep it by default
 - update that confirmed transaction only with missing CAMT metadata such as `bank_ref_number`
 - then avoid creating, or if already created, delete the new `PROJECT` transaction
-- if the older match is not confirmed, review statuses before deciding which row to keep
+- if the older match is PROJECT (unconfirmed), present its current state and offer to confirm it inline using `confirm_transaction` (or `reconcile_inter_account_transfers` for inter-account transfers). Do NOT defer it to manual UI work in e-arveldaja — the agent has the IDs and amounts loaded, so the natural next step is to ask the user yes/no for inline confirmation.
 
 Do not suggest overwriting curated manual fields like description or reference when they are already filled.
 
@@ -68,7 +68,7 @@ Report:
 - `execution.summary.created_count`
 - `execution.summary.skipped_count`
 - `execution.summary.error_count`
-- any `execution.needs_review` possible duplicates that should be resolved
+- any `execution.needs_review` possible duplicates — for each one propose an inline action (confirm via `confirm_transaction`, reconcile via `reconcile_inter_account_transfers`, enrich `bank_ref_number` via `update_transaction`, or delete the duplicate `PROJECT` row) and ask the user yes/no. Do not tell the user to "do this manually in e-arveldaja" — that is a last resort only when no MCP tool can perform the action and the API error has been shown to the user.
 - any transactions still needing attention
 - mention that side effects can be reviewed via `execution.audit_reference`
 

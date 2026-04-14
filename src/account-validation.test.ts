@@ -1,10 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { validateAccounts } from "./account-validation.js";
-import type { Account } from "./types/api.js";
+import {
+  validateAccounts,
+  validateItemDimensions,
+  validatePostingDimensions,
+  validateSaleInvoiceItemDimensions,
+  validateTransactionDistributionDimensions,
+} from "./account-validation.js";
+import type { Account, AccountDimension, Posting, PurchaseInvoiceItem, SaleInvoiceItem, TransactionDistribution } from "./types/api.js";
 
 // Minimal Account stub — only the fields validateAccounts reads
 function account(id: number, name_est: string, is_valid = true): Account {
   return { id, name_est, is_valid } as Account;
+}
+
+function dimensionalAccount(id: number, name_est: string): Account {
+  return { id, name_est, is_valid: true, allows_dimensions: true } as Account;
+}
+
+function dimension(id: number, accounts_id: number, title_est: string): AccountDimension {
+  return { id, accounts_id, title_est } as AccountDimension;
 }
 
 describe("validateAccounts", () => {
@@ -110,5 +124,197 @@ describe("validateAccounts", () => {
     ]);
     expect(errors[0]).toMatch(/not found/);
     expect(errors[1]).toMatch(/inactive/);
+  });
+});
+
+describe("dimension validators", () => {
+  it("reports missing purchase accounts before dimension checks", () => {
+    const items: PurchaseInvoiceItem[] = [{
+      custom_title: "Internet",
+      purchase_accounts_id: 5000,
+      vat_accounts_id: 1510,
+    }];
+
+    const errors = validateItemDimensions(
+      items,
+      [account(1510, "Sisendkäibemaks")],
+      [],
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('Item 1 "Internet" purchase account 5000');
+    expect(errors[0]).toContain("not found");
+  });
+
+  it("auto-fills unique purchase and VAT dimensions", () => {
+    const items: PurchaseInvoiceItem[] = [{
+      custom_title: "Internet",
+      purchase_accounts_id: 5000,
+      vat_accounts_id: 1510,
+    }];
+
+    const errors = validateItemDimensions(
+      items,
+      [dimensionalAccount(5000, "Internetikulu"), dimensionalAccount(1510, "Sisendkäibemaks")],
+      [dimension(10, 5000, "Main"), dimension(20, 1510, "VAT Main")],
+    );
+
+    expect(errors).toEqual([]);
+    expect(items[0]!.purchase_accounts_dimensions_id).toBe(10);
+    expect(items[0]!.vat_accounts_dimensions_id).toBe(20);
+  });
+
+  it("rejects invalid provided purchase dimension ids", () => {
+    const items: PurchaseInvoiceItem[] = [{
+      custom_title: "Internet",
+      purchase_accounts_id: 5000,
+      purchase_accounts_dimensions_id: 999,
+    }];
+
+    const errors = validateItemDimensions(
+      items,
+      [dimensionalAccount(5000, "Internetikulu")],
+      [dimension(10, 5000, "Main")],
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("purchase_accounts_dimensions_id 999 is not a valid dimension");
+  });
+
+  it("requires VAT dimensions when multiple VAT account dimensions exist", () => {
+    const items: PurchaseInvoiceItem[] = [{
+      custom_title: "Internet",
+      vat_accounts_id: 1510,
+    }];
+
+    const errors = validateItemDimensions(
+      items,
+      [dimensionalAccount(1510, "Sisendkäibemaks")],
+      [dimension(20, 1510, "VAT Main"), dimension(21, 1510, "VAT Backup")],
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("vat_accounts_dimensions_id is required");
+  });
+
+  it("auto-fills unique sale account dimensions", () => {
+    const items: SaleInvoiceItem[] = [{
+      products_id: 1,
+      custom_title: "Service",
+      amount: 1,
+      sale_accounts_id: 3000,
+    }];
+
+    const errors = validateSaleInvoiceItemDimensions(
+      items,
+      [dimensionalAccount(3000, "Müügitulu")],
+      [dimension(30, 3000, "Revenue Main")],
+    );
+
+    expect(errors).toEqual([]);
+    expect(items[0]!.sale_accounts_dimensions_id).toBe(30);
+  });
+
+  it("reports inactive sale accounts before dimension checks", () => {
+    const items: SaleInvoiceItem[] = [{
+      products_id: 1,
+      custom_title: "Service",
+      amount: 1,
+      sale_accounts_id: 3000,
+    }];
+
+    const errors = validateSaleInvoiceItemDimensions(
+      items,
+      [account(3000, "Müügitulu", false)],
+      [],
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('Item 1 "Service" sale account 3000');
+    expect(errors[0]).toContain("inactive");
+  });
+
+  it("rejects sale VAT accounts that require unsupported dimensions", () => {
+    const items: SaleInvoiceItem[] = [{
+      products_id: 1,
+      custom_title: "Service",
+      amount: 1,
+      vat_accounts_id: 1510,
+    }];
+
+    const errors = validateSaleInvoiceItemDimensions(
+      items,
+      [dimensionalAccount(1510, "Käibemaks")],
+      [dimension(40, 1510, "VAT Main")],
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("does not support vat_accounts_dimensions_id");
+  });
+
+  it("auto-fills unique posting dimensions", () => {
+    const postings: Posting[] = [{
+      accounts_id: 1000,
+      amount: 10,
+      type: "D",
+    }];
+
+    const errors = validatePostingDimensions(
+      postings,
+      [dimensionalAccount(1000, "Kassa")],
+      [dimension(50, 1000, "Cash desk")],
+    );
+
+    expect(errors).toEqual([]);
+    expect(postings[0]!.accounts_dimensions_id).toBe(50);
+  });
+
+  it("reports missing posting accounts", () => {
+    const postings: Posting[] = [{
+      accounts_id: 1000,
+      amount: 10,
+      type: "D",
+    }];
+
+    const errors = validatePostingDimensions(postings, [], []);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Posting 1 account 1000");
+    expect(errors[0]).toContain("not found");
+  });
+
+  it("auto-fills unique transaction distribution dimensions", () => {
+    const distributions: TransactionDistribution[] = [{
+      related_table: "accounts",
+      related_id: 1360,
+      amount: 1620.7,
+    }];
+
+    const errors = validateTransactionDistributionDimensions(
+      distributions,
+      [dimensionalAccount(1360, "Arveldused aruandvate isikutega")],
+      [dimension(60, 1360, "Employee A")],
+    );
+
+    expect(errors).toEqual([]);
+    expect(distributions[0]!.related_sub_id).toBe(60);
+  });
+
+  it("reports inactive transaction distribution accounts", () => {
+    const distributions: TransactionDistribution[] = [{
+      related_table: "accounts",
+      related_id: 1360,
+      amount: 1620.7,
+    }];
+
+    const errors = validateTransactionDistributionDimensions(
+      distributions,
+      [account(1360, "Arveldused aruandvate isikutega", false)],
+      [],
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Distribution 1 account 1360");
+    expect(errors[0]).toContain("inactive");
   });
 });
