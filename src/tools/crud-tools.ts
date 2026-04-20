@@ -402,14 +402,66 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // JOURNALS
   // =====================
 
-  registerTool(server, "list_journals", "List journal entries. Paginated. Postings omitted — use get_journal for full details.", pageParam.shape, { ...readOnly, title: "List Journals" }, async (params) => {
-    const result = await api.journals.list(params);
-    const compact = {
-      ...result,
-      items: result.items.map(({ postings: _postings, ...rest }) => rest),
-    };
-    return { content: [{ type: "text", text: toMcpJson(compact) }] };
-  });
+  registerTool(server, "list_journals",
+    "List journal entries. Paginated. Postings omitted — use get_journal for full details. " +
+    "Optional filters are applied client-side after listAll() when any filter is provided, which avoids repeated page-by-page walks.",
+    {
+      ...pageParam.shape,
+      effective_date_from: z.string().optional().describe("Only journals with effective_date >= this (YYYY-MM-DD)"),
+      effective_date_to: z.string().optional().describe("Only journals with effective_date <= this (YYYY-MM-DD)"),
+      registered: z.boolean().optional().describe("Only registered (true) or unregistered (false) journals"),
+      operation_type: z.string().optional().describe("Filter by operation_type (e.g. ENTRY, TRANSACTION, SALE_INVOICE, PURCHASE_INVOICE)"),
+      document_number_contains: z.string().optional().describe("Case-insensitive substring match on document_number"),
+      clients_id: z.number().optional().describe("Filter by clients_id"),
+      per_page: z.number().optional().describe("Items per page when filtering (default 100, max 500)"),
+    },
+    { ...readOnly, title: "List Journals" },
+    async (params) => {
+      const hasFilter = params.effective_date_from !== undefined
+        || params.effective_date_to !== undefined
+        || params.registered !== undefined
+        || params.operation_type !== undefined
+        || params.document_number_contains !== undefined
+        || params.clients_id !== undefined;
+      if (!hasFilter) {
+        const result = await api.journals.list(params);
+        const compact = {
+          ...result,
+          items: result.items.map(({ postings: _postings, ...rest }) => rest),
+        };
+        return { content: [{ type: "text", text: toMcpJson(compact) }] };
+      }
+      const all = await api.journals.listAll();
+      const docContains = params.document_number_contains?.toLowerCase();
+      const filtered = all.filter((j) => {
+        if (params.effective_date_from && (!j.effective_date || j.effective_date < params.effective_date_from)) return false;
+        if (params.effective_date_to && (!j.effective_date || j.effective_date > params.effective_date_to)) return false;
+        if (params.registered !== undefined && j.registered !== params.registered) return false;
+        if (params.operation_type && j.operation_type !== params.operation_type) return false;
+        if (params.clients_id && j.clients_id !== params.clients_id) return false;
+        if (docContains && !(j.document_number ?? "").toLowerCase().includes(docContains)) return false;
+        return true;
+      });
+      const perPage = Math.min(Math.max(params.per_page ?? 100, 1), 500);
+      const page = Math.max(params.page ?? 1, 1);
+      const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
+      const start = (page - 1) * perPage;
+      const items = filtered.slice(start, start + perPage)
+        .map(({ postings: _postings, ...rest }) => rest);
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            current_page: page,
+            total_pages: totalPages,
+            total_items: filtered.length,
+            per_page: perPage,
+            filtered_client_side: true,
+            items,
+          }),
+        }],
+      };
+    });
 
   registerTool(server, "get_journal", "Get a journal entry by ID (includes postings)", idParam.shape, { ...readOnly, title: "Get Journal" }, async ({ id }) => {
     const result = await api.journals.get(id);
@@ -499,6 +551,53 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
+  registerTool(server, "batch_confirm_journals",
+    "Confirm/register multiple journal entries in one call. IRREVERSIBLE for each success. " +
+    "Runs sequentially; continues past individual failures and returns per-ID results so partial progress is visible.",
+    {
+      ids: z.string().describe("JSON array of journal IDs (numbers)"),
+      reason: z.string().optional().describe("Short audit note explaining why this batch is being confirmed"),
+    },
+    { ...destructive, title: "Batch Confirm Journals" },
+    async ({ ids, reason }) => {
+      const parsed = safeJsonParse(ids, "ids");
+      if (!Array.isArray(parsed)) throw new Error('"ids" must be a JSON array of journal IDs');
+      const journalIds = parsed.map((value, idx) => {
+        if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+          throw new Error(`"ids" item ${idx + 1} must be a positive integer journal ID`);
+        }
+        return value;
+      });
+      const unique = [...new Set(journalIds)];
+      const results: Array<{ id: number; status: "confirmed" | "failed"; error?: string }> = [];
+      for (const id of unique) {
+        try {
+          await api.journals.confirm(id);
+          logAudit({
+            tool: "batch_confirm_journals", action: "CONFIRMED", entity_type: "journal", entity_id: id,
+            summary: `Confirmed journal ${id}`,
+            details: reason ? { reason } : {},
+          });
+          results.push({ id, status: "confirmed" });
+        } catch (error: unknown) {
+          results.push({ id, status: "failed", error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      const confirmed = results.filter(r => r.status === "confirmed").length;
+      const failed = results.length - confirmed;
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            requested: unique.length,
+            confirmed_count: confirmed,
+            failed_count: failed,
+            results,
+          }),
+        }],
+      };
+    });
+
   registerTool(server, "invalidate_journal",
     "Invalidate (reverse) a confirmed journal entry. Returns it to unconfirmed status for editing or deletion.",
     idParam.shape, { ...mutate, title: "Invalidate Journal" }, async ({ id }) => {
@@ -515,10 +614,71 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // TRANSACTIONS
   // =====================
 
-  registerTool(server, "list_transactions", "List bank transactions. Paginated.", pageParam.shape, { ...readOnly, title: "List Transactions" }, async (params) => {
-    const result = await api.transactions.list(params);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
+  registerTool(server, "list_transactions",
+    "List bank transactions. Paginated. " +
+    "Optional filters are applied client-side after listAll() when any filter is provided, so callers don't need to paginate through dozens of pages to find matching rows.",
+    {
+      ...pageParam.shape,
+      date_from: z.string().optional().describe("Only transactions with date >= this (YYYY-MM-DD)"),
+      date_to: z.string().optional().describe("Only transactions with date <= this (YYYY-MM-DD)"),
+      status: z.string().optional().describe("Filter by status: PROJECT, CONFIRMED, or VOID"),
+      accounts_dimensions_id: z.number().optional().describe("Filter by bank account dimension ID"),
+      amount_min: z.number().optional().describe("Only transactions with amount >= this"),
+      amount_max: z.number().optional().describe("Only transactions with amount <= this"),
+      has_bank_ref: z.boolean().optional().describe("true = only transactions with a bank_ref_number; false = only without"),
+      bank_ref_contains: z.string().optional().describe("Case-insensitive substring match on bank_ref_number"),
+      clients_id: z.number().optional().describe("Filter by clients_id"),
+      per_page: z.number().optional().describe("Items per page when filtering (default 100, max 500)"),
+    },
+    { ...readOnly, title: "List Transactions" },
+    async (params) => {
+      const hasFilter = params.date_from !== undefined
+        || params.date_to !== undefined
+        || params.status !== undefined
+        || params.accounts_dimensions_id !== undefined
+        || params.amount_min !== undefined
+        || params.amount_max !== undefined
+        || params.has_bank_ref !== undefined
+        || params.bank_ref_contains !== undefined
+        || params.clients_id !== undefined;
+      if (!hasFilter) {
+        const result = await api.transactions.list(params);
+        return { content: [{ type: "text", text: toMcpJson(result) }] };
+      }
+      const all = await api.transactions.listAll();
+      const bankRefContains = params.bank_ref_contains?.toLowerCase();
+      const filtered = all.filter((tx) => {
+        if (params.date_from && (!tx.date || tx.date < params.date_from)) return false;
+        if (params.date_to && (!tx.date || tx.date > params.date_to)) return false;
+        if (params.status && tx.status !== params.status) return false;
+        if (params.accounts_dimensions_id && tx.accounts_dimensions_id !== params.accounts_dimensions_id) return false;
+        if (params.amount_min !== undefined && tx.amount < params.amount_min) return false;
+        if (params.amount_max !== undefined && tx.amount > params.amount_max) return false;
+        if (params.clients_id && tx.clients_id !== params.clients_id) return false;
+        if (params.has_bank_ref === true && !tx.bank_ref_number) return false;
+        if (params.has_bank_ref === false && tx.bank_ref_number) return false;
+        if (bankRefContains && !(tx.bank_ref_number ?? "").toLowerCase().includes(bankRefContains)) return false;
+        return true;
+      });
+      const perPage = Math.min(Math.max(params.per_page ?? 100, 1), 500);
+      const page = Math.max(params.page ?? 1, 1);
+      const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
+      const start = (page - 1) * perPage;
+      const items = filtered.slice(start, start + perPage);
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            current_page: page,
+            total_pages: totalPages,
+            total_items: filtered.length,
+            per_page: perPage,
+            filtered_client_side: true,
+            items,
+          }),
+        }],
+      };
+    });
 
   registerTool(server, "get_transaction", "Get a transaction by ID", idParam.shape, { ...readOnly, title: "Get Transaction" }, async ({ id }) => {
     const result = await api.transactions.get(id);
@@ -645,6 +805,76 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     });
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
+
+  registerTool(server, "batch_delete_transactions",
+    "Delete multiple unconfirmed (PROJECT) transactions in one call. IRREVERSIBLE. " +
+    "Runs sequentially; CONFIRMED transactions are skipped with a clear reason (they must be invalidated first). " +
+    "Returns per-ID results so partial progress is visible.",
+    {
+      ids: z.string().describe("JSON array of transaction IDs (numbers)"),
+      reason: z.string().describe("Short audit note explaining why this batch is being deleted (e.g. 're-import duplicates of confirmed journals')"),
+    },
+    { ...destructive, title: "Batch Delete Transactions" },
+    async ({ ids, reason }) => {
+      const parsed = safeJsonParse(ids, "ids");
+      if (!Array.isArray(parsed)) throw new Error('"ids" must be a JSON array of transaction IDs');
+      const txIds = parsed.map((value, idx) => {
+        if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+          throw new Error(`"ids" item ${idx + 1} must be a positive integer transaction ID`);
+        }
+        return value;
+      });
+      const unique = [...new Set(txIds)];
+      const results: Array<{
+        id: number;
+        status: "deleted" | "skipped_confirmed" | "skipped_missing" | "failed";
+        error?: string;
+      }> = [];
+      for (const id of unique) {
+        let existing: Transaction | undefined;
+        try {
+          existing = await api.transactions.get(id);
+        } catch (error: unknown) {
+          results.push({ id, status: "skipped_missing", error: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
+        if (existing.status === "CONFIRMED") {
+          results.push({
+            id,
+            status: "skipped_confirmed",
+            error: "Transaction is CONFIRMED — call invalidate_transaction first, then batch_delete_transactions.",
+          });
+          continue;
+        }
+        try {
+          await api.transactions.delete(id);
+          logAudit({
+            tool: "batch_delete_transactions", action: "DELETED", entity_type: "transaction", entity_id: id,
+            summary: `Deleted transaction ${id}: ${reason}`,
+            details: { reason, amount: existing.amount, date: existing.date },
+          });
+          results.push({ id, status: "deleted" });
+        } catch (error: unknown) {
+          results.push({ id, status: "failed", error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      const deleted = results.filter(r => r.status === "deleted").length;
+      const skipped = results.filter(r => r.status === "skipped_confirmed" || r.status === "skipped_missing").length;
+      const failed = results.filter(r => r.status === "failed").length;
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            requested: unique.length,
+            deleted_count: deleted,
+            skipped_count: skipped,
+            failed_count: failed,
+            reason,
+            results,
+          }),
+        }],
+      };
+    });
 
   // =====================
   // SALE INVOICES

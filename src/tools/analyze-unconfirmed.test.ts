@@ -75,7 +75,7 @@ const defaultBankAccounts = [
 
 describe("analyze_unconfirmed_transactions", () => {
   describe("duplicate detection", () => {
-    it("flags likely_duplicate with confidence 80 when exactly one matching journal exists", async () => {
+    it("flags likely_duplicate with confidence 70 when exactly one matching journal exists but bank_ref doesn't match", async () => {
       const handler = setupTool({
         transactions: [{
           id: 1,
@@ -111,11 +111,14 @@ describe("analyze_unconfirmed_transactions", () => {
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
-      expect(payload.suggestions[0]!.confidence).toBe(80);
+      // Without a matching bank_ref_number we cannot distinguish a re-import from a
+      // legitimate same-day movement, so the confidence stays below the 80+ band
+      // reserved for the reimport_duplicate path (which requires a bank-ref match).
+      expect(payload.suggestions[0]!.confidence).toBe(70);
       expect(payload.suggestions[0]!.duplicate_journal_id).toBe(42);
     });
 
-    it("lowers confidence to 60 and notes ambiguity when multiple journals match", async () => {
+    it("lowers confidence to 55 and notes ambiguity when multiple journals match without bank_ref shortcut", async () => {
       const handler = setupTool({
         transactions: [{
           id: 2,
@@ -165,9 +168,56 @@ describe("analyze_unconfirmed_transactions", () => {
       const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
-      expect(payload.suggestions[0]!.confidence).toBe(60);
+      // Ambiguous multi-journal match without a bank-ref shortcut: confidence
+      // drops below the single-match value to highlight the verification gap.
+      expect(payload.suggestions[0]!.confidence).toBe(55);
       expect(payload.suggestions[0]!.reason).toContain("ambiguous");
       expect(payload.suggestions[0]!.reason).toContain("2 matching journals");
+    });
+
+    it("promotes to reimport_duplicate with confidence 95 when bank_ref_number matches journal document_number", async () => {
+      const handler = setupTool({
+        transactions: [{
+          id: 3,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 75,
+          date: "2026-03-22",
+          accounts_dimensions_id: 100,
+          cl_currencies_id: "EUR",
+          description: "Re-imported payment",
+          bank_account_name: "Supplier OÜ",
+          bank_account_no: null,
+          bank_ref_number: "REF-XYZ-123",
+        }],
+        bankAccounts: defaultBankAccounts,
+        journals: [{
+          id: 99,
+          effective_date: "2026-03-22",
+          document_number: "REF-XYZ-123",
+          operation_type: "TRANSACTION",
+          is_deleted: false,
+          registered: true,
+          postings: [{
+            accounts_dimensions_id: 100,
+            type: "C",
+            amount: 75,
+            base_amount: null,
+            is_deleted: false,
+          }],
+        }],
+      });
+
+      const result = await handler({});
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.suggestions).toHaveLength(1);
+      expect(payload.suggestions[0]!.suggested_action).toBe("reimport_duplicate");
+      expect(payload.suggestions[0]!.confidence).toBe(95);
+      expect(payload.suggestions[0]!.duplicate_journal_id).toBe(99);
+      expect(payload.suggestions[0]!.reason).toContain("REF-XYZ-123");
+      expect(payload.suggestions[0]!.reason).toContain("safe to delete");
     });
 
     it("does not flag opposite-direction bank postings as duplicates", async () => {

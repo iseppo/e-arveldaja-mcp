@@ -31,11 +31,18 @@ interface Suggestion {
   currency: string;
   description: string | null | undefined;
   bank_account_name: string | null | undefined;
-  suggested_action: "likely_duplicate" | "confirm_invoice" | "confirm_inter_account" | "confirm_expense" | "manual_review";
+  suggested_action:
+    | "reimport_duplicate"
+    | "likely_duplicate"
+    | "confirm_invoice"
+    | "confirm_inter_account"
+    | "confirm_expense"
+    | "manual_review";
   reason: string;
   confidence?: number;
   distribution?: { related_table: string; related_id?: number; related_sub_id?: number; amount: number };
   duplicate_journal_id?: number;
+  duplicate_journal_ids?: number[];
   match_confidence?: number;
 }
 
@@ -94,10 +101,18 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         buildBankAccountLookups(bankAccounts, accountDimensions);
       const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
 
-      // Build a broader index: journals with any posting touching a bank account dimension
-      // Key: "dimensionId|type|amount|date" -> journal_ids[]
-      // Storing all matching journal IDs to detect ambiguous duplicates.
-      const bankJournalIndex = new Map<string, number[]>();
+      // Build a broader index: journals with any posting touching a bank account dimension.
+      // Key: "dimensionId|type|amount|date" -> Array of { journal_id, document_number }.
+      // Storing document_number (which for TRANSACTION-type journals equals the source
+      // transaction's bank_ref_number) lets us distinguish a re-import duplicate from a
+      // legitimate same-day same-amount movement: the former shares the bank reference,
+      // the latter doesn't.
+      interface JournalMatch {
+        journal_id: number;
+        document_number?: string;
+        operation_type?: string;
+      }
+      const bankJournalIndex = new Map<string, JournalMatch[]>();
       for (const j of allJournals) {
         if (j.is_deleted || !j.registered || !j.postings) continue;
         for (const p of j.postings) {
@@ -106,11 +121,16 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           if (p.type !== "D" && p.type !== "C") continue;
           const amount = Math.round(((p.base_amount ?? p.amount) as number) * 100) / 100;
           const key = buildBankJournalDuplicateKey(p.accounts_dimensions_id, p.type, amount, j.effective_date);
+          const entry: JournalMatch = {
+            journal_id: j.id!,
+            document_number: j.document_number ?? undefined,
+            operation_type: j.operation_type ?? undefined,
+          };
           const existing = bankJournalIndex.get(key);
           if (existing) {
-            existing.push(j.id!);
+            existing.push(entry);
           } else {
-            bankJournalIndex.set(key, [j.id!]);
+            bankJournalIndex.set(key, [entry]);
           }
         }
       }
@@ -128,17 +148,48 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         const bankTitle = dimensionToTitle.get(txDim) ?? `dim:${txDim}`;
 
         // --- 1. Duplicate detection: journal already exists for this amount/date/bank account ---
-        const dupJournalIds =
+        const dupMatches =
           txType === "D" || txType === "C"
             ? bankJournalIndex.get(buildBankJournalDuplicateKey(txDim, txType, txDuplicateAmount, tx.date))
             : undefined;
-        if (dupJournalIds) {
-          const isAmbiguous = dupJournalIds.length > 1;
-          const confidence = isAmbiguous ? 60 : 80;
-          const dupJournalId = dupJournalIds[0]!;
-          const reasonSuffix = isAmbiguous
-            ? ` (${dupJournalIds.length} matching journals — ambiguous, verify manually)`
+        if (dupMatches && dupMatches.length > 0) {
+          // A shared bank reference promotes the suggestion from "possibly a duplicate"
+          // to "this is clearly a re-import of the transaction that produced this journal".
+          // Without the shared reference, two same-day same-amount movements can be
+          // legitimate (e.g. two separate owner loan repayments on the same day).
+          const txBankRef = (tx.bank_ref_number ?? "").trim().toUpperCase();
+          const bankRefMatches = txBankRef
+            ? dupMatches.filter(m => (m.document_number ?? "").trim().toUpperCase() === txBankRef)
+            : [];
+          const dupJournalIds = dupMatches.map(m => m.journal_id);
+
+          if (bankRefMatches.length > 0) {
+            const match = bankRefMatches[0]!;
+            suggestions.push({
+              transaction_id: tx.id!,
+              date: tx.date,
+              amount: tx.amount,
+              currency: tx.cl_currencies_id,
+              description: tx.description,
+              bank_account_name: tx.bank_account_name,
+              suggested_action: "reimport_duplicate",
+              confidence: 95,
+              reason: `Bank reference "${tx.bank_ref_number}" already booked as journal #${match.journal_id} on ${tx.date} in ${bankTitle} — safe to delete this PROJECT row.`,
+              duplicate_journal_id: match.journal_id,
+              duplicate_journal_ids: dupJournalIds,
+            });
+            continue;
+          }
+
+          const isAmbiguous = dupMatches.length > 1;
+          const confidence = isAmbiguous ? 55 : 70;
+          const dupJournalId = dupMatches[0]!.journal_id;
+          const ambiguitySuffix = isAmbiguous
+            ? ` (${dupMatches.length} matching journals — ambiguous, verify manually)`
             : "";
+          const refSuffix = txBankRef
+            ? ` Existing bank reference differs — could be a legitimate same-day movement rather than a re-import.`
+            : ` Current transaction has no bank_ref_number, so re-import vs legitimate duplicate cannot be distinguished automatically.`;
           suggestions.push({
             transaction_id: tx.id!,
             date: tx.date,
@@ -148,8 +199,9 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             bank_account_name: tx.bank_account_name,
             suggested_action: "likely_duplicate",
             confidence,
-            reason: `Journal #${dupJournalId} already exists with amount ${txDuplicateAmount} on ${tx.date} in ${bankTitle}${reasonSuffix}`,
+            reason: `Journal #${dupJournalId} already exists with amount ${txDuplicateAmount} on ${tx.date} in ${bankTitle}${ambiguitySuffix}.${refSuffix}`,
             duplicate_journal_id: dupJournalId,
+            duplicate_journal_ids: dupJournalIds,
           });
           continue;
         }
