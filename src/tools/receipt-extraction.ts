@@ -118,6 +118,7 @@ const IBAN_COUNTRY_TO_CLIENT_COUNTRY: Record<string, string> = {
   DE: "DEU",
   DK: "DNK",
   EE: "EST",
+  EL: "GRC", // VAT prefix for Greece (ISO is GR)
   ES: "ESP",
   FI: "FIN",
   FR: "FRA",
@@ -139,6 +140,7 @@ const IBAN_COUNTRY_TO_CLIENT_COUNTRY: Record<string, string> = {
   SE: "SWE",
   SI: "SVN",
   SK: "SVK",
+  XI: "GBR", // Northern Ireland VAT prefix (post-Brexit)
 };
 
 const MAX_RECEIPT_FALLBACK_AMOUNT = 50_000;

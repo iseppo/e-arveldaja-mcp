@@ -204,6 +204,20 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       if (invoice_date) {
         if (!isValidCalendarDate(invoice_date)) {
           errors.push(`Invalid invoice_date: "${invoice_date}" (expected valid YYYY-MM-DD)`);
+        } else {
+          // Guardrail against OCR date misreads (e.g. 2042-01-24) that would
+          // otherwise silently book into an impossible period.
+          const today = new Date();
+          const todayIso = today.toISOString().slice(0, 10);
+          const fiveYearsAgo = new Date(today.getTime());
+          fiveYearsAgo.setUTCFullYear(today.getUTCFullYear() - 5);
+          const fiveYearsAgoIso = fiveYearsAgo.toISOString().slice(0, 10);
+          const cutoffFuture = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          if (invoice_date > cutoffFuture) {
+            warnings.push(`invoice_date (${invoice_date}) is more than 30 days in the future — possible OCR misread, verify before booking`);
+          } else if (invoice_date < fiveYearsAgoIso) {
+            warnings.push(`invoice_date (${invoice_date}) is more than 5 years before today (${todayIso}) — possible OCR misread, verify before booking`);
+          }
         }
       }
       if (due_date) {

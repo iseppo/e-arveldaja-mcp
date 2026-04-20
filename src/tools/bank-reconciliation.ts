@@ -434,8 +434,11 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           const match = candidates[0]!;
           const invoiceKey = `${match.type.replace("_invoice", "")}:${match.id}`;
           const table = match.type === "sale_invoice" ? "sale_invoices" : "purchase_invoices";
+          // Always claim the invoice on attempt so dry-run preview matches execute
+          // behaviour and a single invoice is never auto-matched against more than
+          // one transaction within one call (even if confirm later fails).
+          consumedInvoiceKeys.add(invoiceKey);
           if (dryRun) {
-            consumedInvoiceKeys.add(invoiceKey);
             confirmed.push({
               transaction_id: tx.id,
               amount: tx.amount,
@@ -456,7 +459,6 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
                 summary: `Confirmed transaction ${tx.id} against ${match.type} #${match.id} (${match.number})`,
                 details: { amount: tx.amount, distributions: [{ related_table: table, related_id: match.id, amount: tx.amount }] },
               });
-              consumedInvoiceKeys.add(invoiceKey);
               confirmed.push({
                 transaction_id: tx.id,
                 amount: tx.amount,

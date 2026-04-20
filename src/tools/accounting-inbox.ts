@@ -21,8 +21,11 @@ import {
 import {
   getAccountingRulesPath,
   hasAnyAutoBookingRuleActionField,
+  normalizeAutoBookingRuleMatch,
   saveAutoBookingRule,
 } from "../accounting-rules.js";
+
+const MIN_AUTO_BOOKING_RULE_MATCH_LENGTH = 3;
 
 const RECEIPT_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
 const DEFAULT_SCAN_DEPTH = 2;
@@ -1101,8 +1104,10 @@ function prepareReviewAction(
 
   if (options.saveAsRule) {
     const mergedRuleOverride = mergeRuleOverrides(reviewItem, options.ruleOverride);
+    // Prefer the resolved/normalized counterparty label over the raw OCR
+    // `extracted.supplier_name` so a prompt-injected supplier name can't land
+    // in `accounting-rules.md` as a rule match key unless the user types it in.
     const match = stringAt(mergedRuleOverride ?? {}, "match") ??
-      stringAt(recordAt(item ?? group ?? {}, "extracted") ?? {}, "supplier_name") ??
       stringAt(item ?? {}, "display_counterparty") ??
       stringAt(group ?? {}, "display_counterparty");
     const category = stringAt(mergedRuleOverride ?? {}, "category") ??
@@ -1799,6 +1804,15 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
         reversed_vat_id,
       })) {
         throw new Error("save_auto_booking_rule requires at least one concrete booking field besides match/category/reason");
+      }
+
+      // Guard against 1–2 char stems (e.g. "AS", "OÜ") that would substring-match
+      // every Estonian company. findAutoBookingRule uses String.includes, so a
+      // short normalized stem silently hijacks unrelated counterparties.
+      if (normalizeAutoBookingRuleMatch(match).length < MIN_AUTO_BOOKING_RULE_MATCH_LENGTH) {
+        throw new Error(
+          `save_auto_booking_rule match "${match}" is too short after normalization (need at least ${MIN_AUTO_BOOKING_RULE_MATCH_LENGTH} characters) — use a more specific counterparty stem to avoid accidental matches.`,
+        );
       }
 
       const result = saveAutoBookingRule({

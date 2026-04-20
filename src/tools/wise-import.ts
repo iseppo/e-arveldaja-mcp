@@ -395,6 +395,14 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
           c.name?.toUpperCase() === "WISE" || c.name?.toUpperCase() === "TRANSFERWISE"
         );
         wiseClientId = wiseClient?.id;
+        // Without a Wise client the fee rows can be created but never confirmed;
+        // refuse the whole import up-front instead of leaving stray PROJECT rows.
+        if (!wiseClientId) {
+          throw new Error(
+            "Wise client not found — create a client named 'Wise' (or 'TransferWise') before importing with fee rows, " +
+            "otherwise every fee transaction is left unconfirmed and must be cleaned up manually.",
+          );
+        }
       }
 
       // Get existing transactions for duplicate detection
