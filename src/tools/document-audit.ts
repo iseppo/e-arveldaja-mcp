@@ -173,6 +173,22 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
         ? filtered.filter(inv => inv.gross_price !== undefined && Math.abs(inv.gross_price - gross_price) <= 0.02)
         : [];
 
+      // Also look at invalidated/deleted invoices for the candidate so the caller
+      // sees "we tried to book this before and voided it" instead of assuming new.
+      const voidedCandidates = allPurchases.filter((inv) => {
+        if (inv.status !== "DELETED" && inv.status !== "INVALIDATED") return false;
+        if (clients_id && inv.clients_id !== clients_id) return false;
+        if (date_from && inv.create_date < date_from) return false;
+        if (date_to && inv.create_date > date_to) return false;
+        const numberMatch = normalizedInvoiceNumber
+          ? inv.number.trim().toLowerCase() === normalizedInvoiceNumber
+          : false;
+        const amountMatch = gross_price !== undefined &&
+          inv.gross_price !== undefined &&
+          Math.abs(inv.gross_price - gross_price) <= 0.02;
+        return numberMatch || amountMatch;
+      });
+
       return {
         content: [{
           type: "text",
@@ -200,6 +216,21 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
             candidate_same_amount_date_matches: {
               count: candidateSameAmountDateMatches.length,
               items: candidateSameAmountDateMatches.map(inv => ({
+                id: inv.id,
+                supplier: inv.client_name,
+                supplier_id: inv.clients_id,
+                invoice_number: inv.number,
+                date: inv.create_date,
+                gross: inv.gross_price,
+                status: inv.status,
+              })),
+            },
+            candidate_invalidated_matches: {
+              count: voidedCandidates.length,
+              note: voidedCandidates.length > 0
+                ? "A previous booking of this same supplier+number or supplier+amount+date was invalidated or deleted — verify this isn't a re-attempt before creating."
+                : undefined,
+              items: voidedCandidates.map(inv => ({
                 id: inv.id,
                 supplier: inv.client_name,
                 supplier_id: inv.clients_id,

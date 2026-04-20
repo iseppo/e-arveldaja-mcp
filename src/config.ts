@@ -741,8 +741,15 @@ export function loadDotenvFiles(): void {
             process.env.EARVELDAJA_SERVER = parsed.EARVELDAJA_SERVER;
             serverLoadedFromStandaloneFile = false;
           } else if (serverLoadedFromStandaloneFile) {
+            const clearedValue = process.env.EARVELDAJA_SERVER;
             delete process.env.EARVELDAJA_SERVER;
             serverLoadedFromStandaloneFile = false;
+            process.stderr.write(
+              `WARNING: A standalone EARVELDAJA_SERVER=${clearedValue} loaded from an earlier .env was cleared ` +
+              `because ${envPath} supplies a complete credential set without EARVELDAJA_SERVER. ` +
+              `Falling back to the default server — re-add EARVELDAJA_SERVER=${clearedValue} to ${envPath} ` +
+              "if you meant to pin that server.\n"
+            );
           }
         }
         credentialKeysAlreadyProvided = true;

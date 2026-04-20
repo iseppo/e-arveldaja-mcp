@@ -5,6 +5,7 @@ import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
+import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { validateFilePath } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { validateItemDimensions } from "../account-validation.js";
@@ -456,12 +457,24 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         items,
       };
 
-      const result = await api.purchaseInvoices.createAndSetTotals(
-        invoiceData,
-        params.vat_price,
-        params.gross_price,
-        isVatReg,
-      );
+      let result;
+      try {
+        result = await api.purchaseInvoices.createAndSetTotals(
+          invoiceData,
+          params.vat_price,
+          params.gross_price,
+          isVatReg,
+        );
+      } catch (error: unknown) {
+        // createAndSetTotals invalidates the draft internally on PATCH failure but
+        // throws InvoiceCreationError with the invoice_id so the caller can see
+        // which draft was cleaned up. Surface both pieces instead of bubbling an
+        // opaque MCP error.
+        if (error instanceof InvoiceCreationError) {
+          return toolError({ error: error.message, invoice_id: error.invoiceId });
+        }
+        throw error;
+      }
       if (!result.id) {
         return toolError({ error: "Purchase invoice was created but no invoice ID was returned." });
       }

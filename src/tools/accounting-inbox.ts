@@ -943,6 +943,10 @@ function mergeRuleOverrides(
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
+const PREREQ_TOOL_BY_DOWNSTREAM: Record<string, string> = {
+  import_camt053: "parse_camt053",
+};
+
 function pickNextAutopilotRecommendedAction(
   prepared: PreparedInboxData,
   handledSteps: AutopilotStepResult[],
@@ -957,11 +961,28 @@ function pickNextAutopilotRecommendedAction(
 
   const handledStepNumbers = new Set(handledSteps.map(step => step.step));
 
-  return prepared.steps.find((step) =>
-    step.recommended &&
-    step.missing_inputs.length === 0 &&
-    !handledStepNumbers.has(step.step)
-  );
+  return prepared.steps.find((step) => {
+    if (!step.recommended) return false;
+    if (step.missing_inputs.length > 0) return false;
+    if (handledStepNumbers.has(step.step)) return false;
+    // Do not recommend a step whose prerequisite tool already failed for the
+    // same input path — e.g. don't suggest `import_camt053 file=X.xml` after
+    // `parse_camt053 file=X.xml` failed, because the import will hit the same
+    // parsing error.
+    const prereqTool = PREREQ_TOOL_BY_DOWNSTREAM[step.tool];
+    if (prereqTool) {
+      const filePath = step.suggested_args.file_path;
+      if (typeof filePath === "string") {
+        const failedPrereq = handledSteps.find(prior =>
+          prior.tool === prereqTool &&
+          prior.status === "failed" &&
+          prior.suggested_args.file_path === filePath
+        );
+        if (failedPrereq) return false;
+      }
+    }
+    return true;
+  });
 }
 
 function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResolutionResult {
