@@ -412,8 +412,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       registered: z.boolean().optional().describe("Only registered (true) or unregistered (false) journals"),
       operation_type: z.string().optional().describe("Filter by operation_type (e.g. ENTRY, TRANSACTION, SALE_INVOICE, PURCHASE_INVOICE)"),
       document_number_contains: z.string().optional().describe("Case-insensitive substring match on document_number"),
-      clients_id: z.number().optional().describe("Filter by clients_id"),
-      per_page: z.number().optional().describe("Items per page when filtering (default 100, max 500)"),
+      clients_id: z.number().int().positive().optional().describe("Filter by clients_id"),
+      per_page: z.number().int().min(1).max(500).optional().describe("Items per page when filtering (default 100, max 500)"),
     },
     { ...readOnly, title: "List Journals" },
     async (params) => {
@@ -431,19 +431,22 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         };
         return { content: [{ type: "text", text: toMcpJson(compact) }] };
       }
-      const all = await api.journals.listAll();
+      const all = await api.journals.listAllCached();
       const docContains = params.document_number_contains?.toLowerCase();
       const filtered = all.filter((j) => {
         if (params.effective_date_from && (!j.effective_date || j.effective_date < params.effective_date_from)) return false;
         if (params.effective_date_to && (!j.effective_date || j.effective_date > params.effective_date_to)) return false;
         if (params.registered !== undefined && j.registered !== params.registered) return false;
         if (params.operation_type && j.operation_type !== params.operation_type) return false;
-        if (params.clients_id && j.clients_id !== params.clients_id) return false;
+        if (params.clients_id !== undefined && j.clients_id !== params.clients_id) return false;
         if (docContains && !(j.document_number ?? "").toLowerCase().includes(docContains)) return false;
         return true;
       });
-      const perPage = Math.min(Math.max(params.per_page ?? 100, 1), 500);
-      const page = Math.max(params.page ?? 1, 1);
+      const perPage = params.per_page ?? 100;
+      // pageParam doesn't constrain `page` to positive integers, so defensively
+      // clamp here — the filter branch is the only place where a bad page index
+      // would break slice math (out-of-range values silently yield empty).
+      const page = Math.max(1, Math.floor(params.page ?? 1));
       const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
       const start = (page - 1) * perPage;
       const items = filtered.slice(start, start + perPage)
@@ -555,8 +558,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     "Confirm/register multiple journal entries in one call. IRREVERSIBLE for each success. " +
     "Runs sequentially; continues past individual failures and returns per-ID results so partial progress is visible.",
     {
-      ids: z.string().describe("JSON array of journal IDs (numbers)"),
-      reason: z.string().optional().describe("Short audit note explaining why this batch is being confirmed"),
+      ids: z.string().describe("JSON array of journal IDs (positive integers)"),
+      reason: z.string().max(500).optional().describe("Short audit note explaining why this batch is being confirmed (max 500 chars)"),
     },
     { ...destructive, title: "Batch Confirm Journals" },
     async ({ ids, reason }) => {
@@ -569,6 +572,9 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         return value;
       });
       const unique = [...new Set(journalIds)];
+      if (unique.length === 0) {
+        throw new Error('"ids" must contain at least one journal ID');
+      }
       const results: Array<{ id: number; status: "confirmed" | "failed"; error?: string }> = [];
       for (const id of unique) {
         try {
@@ -591,7 +597,9 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
           text: toMcpJson({
             requested: unique.length,
             confirmed_count: confirmed,
+            skipped_count: 0,
             failed_count: failed,
+            ...(reason ? { reason } : {}),
             results,
           }),
         }],
@@ -622,13 +630,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       date_from: z.string().optional().describe("Only transactions with date >= this (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only transactions with date <= this (YYYY-MM-DD)"),
       status: z.string().optional().describe("Filter by status: PROJECT, CONFIRMED, or VOID"),
-      accounts_dimensions_id: z.number().optional().describe("Filter by bank account dimension ID"),
-      amount_min: z.number().optional().describe("Only transactions with amount >= this"),
-      amount_max: z.number().optional().describe("Only transactions with amount <= this"),
+      accounts_dimensions_id: z.number().int().positive().optional().describe("Filter by bank account dimension ID"),
+      amount_min: z.number().optional().describe("Only transactions whose EUR-equivalent amount (base_amount ?? amount) >= this"),
+      amount_max: z.number().optional().describe("Only transactions whose EUR-equivalent amount (base_amount ?? amount) <= this"),
       has_bank_ref: z.boolean().optional().describe("true = only transactions with a bank_ref_number; false = only without"),
       bank_ref_contains: z.string().optional().describe("Case-insensitive substring match on bank_ref_number"),
-      clients_id: z.number().optional().describe("Filter by clients_id"),
-      per_page: z.number().optional().describe("Items per page when filtering (default 100, max 500)"),
+      clients_id: z.number().int().positive().optional().describe("Filter by clients_id"),
+      per_page: z.number().int().min(1).max(500).optional().describe("Items per page when filtering (default 100, max 500)"),
     },
     { ...readOnly, title: "List Transactions" },
     async (params) => {
@@ -645,23 +653,28 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         const result = await api.transactions.list(params);
         return { content: [{ type: "text", text: toMcpJson(result) }] };
       }
-      const all = await api.transactions.listAll();
+      const all = await api.transactions.listAllCached();
       const bankRefContains = params.bank_ref_contains?.toLowerCase();
       const filtered = all.filter((tx) => {
         if (params.date_from && (!tx.date || tx.date < params.date_from)) return false;
         if (params.date_to && (!tx.date || tx.date > params.date_to)) return false;
         if (params.status && tx.status !== params.status) return false;
-        if (params.accounts_dimensions_id && tx.accounts_dimensions_id !== params.accounts_dimensions_id) return false;
-        if (params.amount_min !== undefined && tx.amount < params.amount_min) return false;
-        if (params.amount_max !== undefined && tx.amount > params.amount_max) return false;
-        if (params.clients_id && tx.clients_id !== params.clients_id) return false;
-        if (params.has_bank_ref === true && !tx.bank_ref_number) return false;
-        if (params.has_bank_ref === false && tx.bank_ref_number) return false;
-        if (bankRefContains && !(tx.bank_ref_number ?? "").toLowerCase().includes(bankRefContains)) return false;
+        if (params.accounts_dimensions_id !== undefined && tx.accounts_dimensions_id !== params.accounts_dimensions_id) return false;
+        // Mirror the rest of the codebase (analyze-unconfirmed, reconciliation):
+        // EUR-equivalent comparison, not nominal — otherwise a USD 1000 / 920-EUR
+        // tx would match amount_min=950 inconsistently with the rest of the tools.
+        const comparableAmount = (tx.base_amount ?? tx.amount) as number;
+        if (params.amount_min !== undefined && comparableAmount < params.amount_min) return false;
+        if (params.amount_max !== undefined && comparableAmount > params.amount_max) return false;
+        if (params.clients_id !== undefined && tx.clients_id !== params.clients_id) return false;
+        const normalizedRef = (tx.bank_ref_number ?? "").trim();
+        if (params.has_bank_ref === true && !normalizedRef) return false;
+        if (params.has_bank_ref === false && normalizedRef) return false;
+        if (bankRefContains && !normalizedRef.toLowerCase().includes(bankRefContains)) return false;
         return true;
       });
-      const perPage = Math.min(Math.max(params.per_page ?? 100, 1), 500);
-      const page = Math.max(params.page ?? 1, 1);
+      const perPage = params.per_page ?? 100;
+      const page = Math.max(1, Math.floor(params.page ?? 1));
       const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
       const start = (page - 1) * perPage;
       const items = filtered.slice(start, start + perPage);
@@ -809,10 +822,11 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "batch_delete_transactions",
     "Delete multiple unconfirmed (PROJECT) transactions in one call. IRREVERSIBLE. " +
     "Runs sequentially; CONFIRMED transactions are skipped with a clear reason (they must be invalidated first). " +
-    "Returns per-ID results so partial progress is visible.",
+    "Transient API errors on the pre-delete lookup are surfaced as `lookup_failed` so they can be retried, " +
+    "distinct from `skipped_missing` (the transaction no longer exists).",
     {
-      ids: z.string().describe("JSON array of transaction IDs (numbers)"),
-      reason: z.string().describe("Short audit note explaining why this batch is being deleted (e.g. 're-import duplicates of confirmed journals')"),
+      ids: z.string().describe("JSON array of transaction IDs (positive integers)"),
+      reason: z.string().min(1).max(500).describe("Short audit note explaining why this batch is being deleted (e.g. 're-import duplicates of confirmed journals'). Required — max 500 chars."),
     },
     { ...destructive, title: "Batch Delete Transactions" },
     async ({ ids, reason }) => {
@@ -825,9 +839,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         return value;
       });
       const unique = [...new Set(txIds)];
+      if (unique.length === 0) {
+        throw new Error('"ids" must contain at least one transaction ID');
+      }
       const results: Array<{
         id: number;
-        status: "deleted" | "skipped_confirmed" | "skipped_missing" | "failed";
+        status: "deleted" | "skipped_confirmed" | "skipped_missing" | "lookup_failed" | "failed";
         error?: string;
       }> = [];
       for (const id of unique) {
@@ -835,7 +852,17 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         try {
           existing = await api.transactions.get(id);
         } catch (error: unknown) {
-          results.push({ id, status: "skipped_missing", error: error instanceof Error ? error.message : String(error) });
+          const message = error instanceof Error ? error.message : String(error);
+          // Split 404-from-API vs anything else: 404 genuinely means the row is
+          // gone (skip and move on); transient errors (500/timeout/auth drop)
+          // shouldn't be treated as "gone" because the caller may drop the ID
+          // from reconciliation decisions.
+          const isNotFound = /→\s*404\b/.test(message);
+          results.push({
+            id,
+            status: isNotFound ? "skipped_missing" : "lookup_failed",
+            error: message,
+          });
           continue;
         }
         if (existing.status === "CONFIRMED") {
@@ -848,10 +875,30 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         }
         try {
           await api.transactions.delete(id);
+          // Capture a full snapshot so the audit log alone is enough to
+          // reconstruct the transaction if the deletion turns out to be wrong.
           logAudit({
             tool: "batch_delete_transactions", action: "DELETED", entity_type: "transaction", entity_id: id,
             summary: `Deleted transaction ${id}: ${reason}`,
-            details: { reason, amount: existing.amount, date: existing.date },
+            details: {
+              reason,
+              snapshot: {
+                accounts_dimensions_id: existing.accounts_dimensions_id,
+                accounts_id: existing.accounts_id,
+                type: existing.type,
+                amount: existing.amount,
+                base_amount: existing.base_amount,
+                cl_currencies_id: existing.cl_currencies_id,
+                date: existing.date,
+                description: existing.description,
+                bank_ref_number: existing.bank_ref_number,
+                bank_account_no: existing.bank_account_no,
+                bank_account_name: existing.bank_account_name,
+                clients_id: existing.clients_id,
+                ref_number: existing.ref_number,
+                status: existing.status,
+              },
+            },
           });
           results.push({ id, status: "deleted" });
         } catch (error: unknown) {
@@ -860,6 +907,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       }
       const deleted = results.filter(r => r.status === "deleted").length;
       const skipped = results.filter(r => r.status === "skipped_confirmed" || r.status === "skipped_missing").length;
+      const lookupFailed = results.filter(r => r.status === "lookup_failed").length;
       const failed = results.filter(r => r.status === "failed").length;
       return {
         content: [{
@@ -868,6 +916,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
             requested: unique.length,
             deleted_count: deleted,
             skipped_count: skipped,
+            lookup_failed_count: lookupFailed,
             failed_count: failed,
             reason,
             results,

@@ -220,6 +220,52 @@ describe("analyze_unconfirmed_transactions", () => {
       expect(payload.suggestions[0]!.reason).toContain("safe to delete");
     });
 
+    it("does NOT promote to reimport_duplicate when the matching journal is a PURCHASE_INVOICE (document_number is the invoice number, not a bank ref)", async () => {
+      // Regression guard: bank_ref_number "123" must not be treated as identical
+      // to a purchase-invoice journal whose document_number happens to be "123".
+      // Otherwise a legitimate payment against invoice #123 would be suggested
+      // for deletion at 95 confidence.
+      const handler = setupTool({
+        transactions: [{
+          id: 4,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 200,
+          date: "2026-03-23",
+          accounts_dimensions_id: 100,
+          cl_currencies_id: "EUR",
+          description: "Payment against invoice 123",
+          bank_account_name: "Supplier OÜ",
+          bank_account_no: null,
+          bank_ref_number: "123",
+        }],
+        bankAccounts: defaultBankAccounts,
+        journals: [{
+          id: 123,
+          effective_date: "2026-03-23",
+          document_number: "123",
+          operation_type: "PURCHASE_INVOICE",
+          is_deleted: false,
+          registered: true,
+          postings: [{
+            accounts_dimensions_id: 100,
+            type: "C",
+            amount: 200,
+            base_amount: null,
+            is_deleted: false,
+          }],
+        }],
+      });
+
+      const result = await handler({});
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.suggestions).toHaveLength(1);
+      expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
+      expect(payload.suggestions[0]!.confidence).toBe(70);
+    });
+
     it("does not flag opposite-direction bank postings as duplicates", async () => {
       const handler = setupTool({
         transactions: [{

@@ -37,6 +37,23 @@ export class BaseResource<T> {
     return result;
   }
 
+  /**
+   * Cached aggregate `listAll()` — reads from memory for up to `ttlSeconds`
+   * before walking pages again. Invalidated together with per-page entries
+   * on any mutation via `invalidateCache()`. Use this from tools that do
+   * client-side filtering / pagination to avoid re-walking the whole dataset
+   * on every filtered call.
+   */
+  async listAllCached(ttlSeconds = 60): Promise<T[]> {
+    const cacheKey = this.cacheKey(`${this.basePath}:listAll`);
+    const cached = cache.get<T[]>(cacheKey);
+    if (cached) return cached;
+    const gen = cache.generation;
+    const result = await this.listAll();
+    cache.setIfSameGeneration(cacheKey, result, gen, ttlSeconds);
+    return result;
+  }
+
   async listAll(params?: Omit<ListParams, "page">, maxPages = 200, maxItems = 50_000): Promise<T[]> {
     const allItems: T[] = [];
     let page = 1;

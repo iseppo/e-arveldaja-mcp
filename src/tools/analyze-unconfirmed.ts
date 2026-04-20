@@ -157,14 +157,26 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           // to "this is clearly a re-import of the transaction that produced this journal".
           // Without the shared reference, two same-day same-amount movements can be
           // legitimate (e.g. two separate owner loan repayments on the same day).
+          //
+          // Only TRANSACTION-typed journals carry `document_number = bank_ref_number`.
+          // For PURCHASE_INVOICE / SALE_INVOICE journals, `document_number` is the
+          // invoice number — treating a coincidental "123" match as a re-import
+          // would silently drop a real invoice payment.
           const txBankRef = (tx.bank_ref_number ?? "").trim().toUpperCase();
           const bankRefMatches = txBankRef
-            ? dupMatches.filter(m => (m.document_number ?? "").trim().toUpperCase() === txBankRef)
+            ? dupMatches.filter(m =>
+                m.operation_type === "TRANSACTION" &&
+                (m.document_number ?? "").trim().toUpperCase() === txBankRef,
+              )
             : [];
           const dupJournalIds = dupMatches.map(m => m.journal_id);
 
           if (bankRefMatches.length > 0) {
             const match = bankRefMatches[0]!;
+            // Escape the untrusted bank_ref_number before inlining into the reason
+            // string so a crafted CAMT reference can't smuggle prompt-injection text
+            // into the LLM-visible output.
+            const safeRef = JSON.stringify((tx.bank_ref_number ?? "").slice(0, 100));
             suggestions.push({
               transaction_id: tx.id!,
               date: tx.date,
@@ -174,7 +186,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               bank_account_name: tx.bank_account_name,
               suggested_action: "reimport_duplicate",
               confidence: 95,
-              reason: `Bank reference "${tx.bank_ref_number}" already booked as journal #${match.journal_id} on ${tx.date} in ${bankTitle} — safe to delete this PROJECT row.`,
+              reason: `Bank reference ${safeRef} already booked as journal #${match.journal_id} on ${tx.date} in ${bankTitle} — safe to delete this PROJECT row.`,
               duplicate_journal_id: match.journal_id,
               duplicate_journal_ids: dupJournalIds,
             });
