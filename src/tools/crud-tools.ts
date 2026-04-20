@@ -556,27 +556,45 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "batch_confirm_journals",
     "Confirm/register multiple journal entries in one call. IRREVERSIBLE for each success. " +
-    "Runs sequentially; continues past individual failures and returns per-ID results so partial progress is visible.",
+    "Runs sequentially; already-registered journals are skipped (checked up-front via /journals/:id); " +
+    "continues past individual failures and returns per-ID results so partial progress is visible.",
     {
-      ids: z.string().describe("JSON array of journal IDs (positive integers)"),
+      ids: z.array(z.number().int().positive()).min(1).max(500).describe("Journal IDs (positive integers, 1-500 entries)"),
       reason: z.string().max(500).optional().describe("Short audit note explaining why this batch is being confirmed (max 500 chars)"),
     },
     { ...destructive, title: "Batch Confirm Journals" },
     async ({ ids, reason }) => {
-      const parsed = safeJsonParse(ids, "ids");
-      if (!Array.isArray(parsed)) throw new Error('"ids" must be a JSON array of journal IDs');
-      const journalIds = parsed.map((value, idx) => {
-        if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-          throw new Error(`"ids" item ${idx + 1} must be a positive integer journal ID`);
-        }
-        return value;
-      });
-      const unique = [...new Set(journalIds)];
-      if (unique.length === 0) {
-        throw new Error('"ids" must contain at least one journal ID');
-      }
-      const results: Array<{ id: number; status: "confirmed" | "failed"; error?: string }> = [];
+      const unique = [...new Set(ids)];
+      const results: Array<{
+        id: number;
+        status: "confirmed" | "skipped_already_confirmed" | "skipped_missing" | "lookup_failed" | "failed";
+        error?: string;
+      }> = [];
       for (const id of unique) {
+        // Pre-check lets us categorize already-registered journals (which the API
+        // rejects) separately from real failures, matching the delete-batch shape.
+        let alreadyRegistered = false;
+        try {
+          const existing = await api.journals.get(id);
+          alreadyRegistered = existing.registered === true;
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          const isNotFound = /→\s*404\b/.test(message);
+          results.push({
+            id,
+            status: isNotFound ? "skipped_missing" : "lookup_failed",
+            error: message,
+          });
+          continue;
+        }
+        if (alreadyRegistered) {
+          results.push({
+            id,
+            status: "skipped_already_confirmed",
+            error: "Journal is already registered — nothing to confirm.",
+          });
+          continue;
+        }
         try {
           await api.journals.confirm(id);
           logAudit({
@@ -590,14 +608,19 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         }
       }
       const confirmed = results.filter(r => r.status === "confirmed").length;
-      const failed = results.length - confirmed;
+      const skipped = results.filter(r =>
+        r.status === "skipped_already_confirmed" || r.status === "skipped_missing",
+      ).length;
+      const lookupFailed = results.filter(r => r.status === "lookup_failed").length;
+      const failed = results.filter(r => r.status === "failed").length;
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             requested: unique.length,
             confirmed_count: confirmed,
-            skipped_count: 0,
+            skipped_count: skipped,
+            lookup_failed_count: lookupFailed,
             failed_count: failed,
             ...(reason ? { reason } : {}),
             results,
@@ -825,23 +848,12 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     "Transient API errors on the pre-delete lookup are surfaced as `lookup_failed` so they can be retried, " +
     "distinct from `skipped_missing` (the transaction no longer exists).",
     {
-      ids: z.string().describe("JSON array of transaction IDs (positive integers)"),
+      ids: z.array(z.number().int().positive()).min(1).max(500).describe("Transaction IDs (positive integers, 1-500 entries)"),
       reason: z.string().min(1).max(500).describe("Short audit note explaining why this batch is being deleted (e.g. 're-import duplicates of confirmed journals'). Required — max 500 chars."),
     },
     { ...destructive, title: "Batch Delete Transactions" },
     async ({ ids, reason }) => {
-      const parsed = safeJsonParse(ids, "ids");
-      if (!Array.isArray(parsed)) throw new Error('"ids" must be a JSON array of transaction IDs');
-      const txIds = parsed.map((value, idx) => {
-        if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-          throw new Error(`"ids" item ${idx + 1} must be a positive integer transaction ID`);
-        }
-        return value;
-      });
-      const unique = [...new Set(txIds)];
-      if (unique.length === 0) {
-        throw new Error('"ids" must contain at least one transaction ID');
-      }
+      const unique = [...new Set(ids)];
       const results: Array<{
         id: number;
         status: "deleted" | "skipped_confirmed" | "skipped_missing" | "lookup_failed" | "failed";
