@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
-import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -124,7 +124,6 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
 
         const txDim = tx.accounts_dimensions_id;
         const txType = tx.type;
-        const txAmount = Math.round(tx.amount * 100) / 100;
         const txDuplicateAmount = Math.round(((tx.base_amount ?? tx.amount) as number) * 100) / 100;
         const bankTitle = dimensionToTitle.get(txDim) ?? `dim:${txDim}`;
 

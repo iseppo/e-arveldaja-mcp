@@ -17,7 +17,7 @@ import { parseDocument } from "../document-parser.js";
 import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { extractReceiptFieldsFromText } from "./receipt-extraction.js";
-import { fetchRegistryData, resolveSupplierInternal } from "./supplier-resolution.js";
+import { resolveSupplierInternal } from "./supplier-resolution.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];

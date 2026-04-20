@@ -808,7 +808,6 @@ export async function importApiKeyCredentials(
   const verifiedAt = verification.verifiedAt ?? new Date().toISOString();
 
   const targetEnvFile = getTargetEnvFile(options.storageScope, options);
-  const targetEnvFileExists = existsSync(targetEnvFile);
 
   const existingEnv = parseEnvFile(targetEnvFile);
   const existingMetadata = parseEnvMetadata(targetEnvFile);

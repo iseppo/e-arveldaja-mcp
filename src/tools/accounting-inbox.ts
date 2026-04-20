@@ -8,7 +8,7 @@ import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
 import { logAudit } from "../audit-log.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
-import type { ApiContext } from "./crud-tools.js";
+import { parseJsonObject, type ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerWiseImportTools } from "./wise-import.js";
@@ -845,19 +845,6 @@ function reviewGuidanceFromRecord(record: Record<string, unknown>): ReviewGuidan
   };
 }
 
-function parseJsonObject(input: string, fieldName: string): Record<string, unknown> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(input);
-  } catch (error) {
-    throw new Error(`${fieldName} must be valid JSON`);
-  }
-  if (!isRecord(parsed)) {
-    throw new Error(`${fieldName} must decode to a JSON object`);
-  }
-  return parsed;
-}
-
 const CAMT_DUPLICATE_PATCH_FIELDS = [
   "bank_ref_number",
   "ref_number",
@@ -982,7 +969,6 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
   if (reviewType === "receipt_review" && item) {
     const guidance = reviewGuidanceFromRecord(item);
     const file = recordAt(item, "file");
-    const extracted = recordAt(item, "extracted");
     const classification = stringAt(item, "classification") ?? "needs_review";
     const filePath = stringAt(file ?? {}, "path");
     const isOwnerExpense = classification === "owner_paid_expense_reimbursement";
@@ -1005,8 +991,6 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
 
   if (reviewType === "classification_group" && group) {
     const guidance = reviewGuidanceFromRecord(group);
-    const category = stringAt(group, "category") ?? "review_only";
-    const counterparty = stringAt(group, "display_counterparty") ?? "counterparty";
     return {
       review_type: "classification_group",
       status: (guidance?.follow_up_questions.length ?? 0) > 0 ? "needs_answers" : "ready_for_action",

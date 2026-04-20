@@ -2,7 +2,6 @@ import type { HttpClient } from "../http-client.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse, ApiFile } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
 import { roundMoney, parseVatRateDropdown } from "../money.js";
-import { log } from "../logger.js";
 
 export class InvoiceCreationError extends Error {
   constructor(message: string, public readonly invoiceId: number, options?: ErrorOptions) {

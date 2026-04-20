@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
-import type { Transaction, SaleInvoice, PurchaseInvoice, BankAccount } from "../types/api.js";
+import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
@@ -630,7 +630,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
 
       // Helper: ensure clients_id is set (API requires it for confirmation)
       let resolvedClientsId: number | undefined;
-      async function ensureClientsId(txId: number, counterpartyName: string | null | undefined): Promise<void> {
+      async function ensureClientsId(txId: number): Promise<void> {
         const tx = await api.transactions.get(txId);
         if (tx.clients_id) return;
 
@@ -939,7 +939,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           });
         } else {
           try {
-            await ensureClientsId(txOut.id, txOut.bank_account_name);
+            await ensureClientsId(txOut.id);
             await api.transactions.confirm(txOut.id, [buildAccountDistribution(txIn.accounts_dimensions_id, txOut.amount)]);
             logAudit({
               tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
@@ -948,7 +948,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               details: { amount: txOut.amount, date: txOut.date },
             });
             try {
-              await ensureClientsId(txIn.id!, txIn.bank_account_name);
+              await ensureClientsId(txIn.id!);
               await api.transactions.confirm(txIn.id!, [buildAccountDistribution(txOut.accounts_dimensions_id, txIn.amount)]);
               logAudit({
                 tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
@@ -1121,7 +1121,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           });
         } else {
           try {
-            await ensureClientsId(tx.id, tx.bank_account_name);
+            await ensureClientsId(tx.id);
             await api.transactions.confirm(tx.id, [buildAccountDistribution(counterpart.accounts_dimensions_id, tx.amount)]);
             logAudit({
               tool: "reconcile_inter_account_transfers",
@@ -1132,7 +1132,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               details: { amount: tx.amount, date: tx.date },
             });
             try {
-              await ensureClientsId(counterpart.id, counterpart.bank_account_name);
+              await ensureClientsId(counterpart.id);
               await api.transactions.confirm(counterpart.id, [buildAccountDistribution(tx.accounts_dimensions_id, counterpart.amount)]);
               logAudit({
                 tool: "reconcile_inter_account_transfers",
@@ -1225,7 +1225,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           });
         } else {
           try {
-            await ensureClientsId(tx.id, tx.bank_account_name);
+            await ensureClientsId(tx.id);
             await api.transactions.confirm(tx.id, [buildAccountDistribution(targetDimension, tx.amount)]);
             logAudit({
               tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",

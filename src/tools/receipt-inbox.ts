@@ -26,7 +26,6 @@ import {
   type InvoiceSummaryForMatching,
   type ReceiptClassification,
   type TransactionClassificationCategory,
-  type TransactionGroupClassificationInput,
   type TransactionGroupClassification,
   buildKeywordSuggestion,
   categorizeTransactionGroup,
@@ -40,15 +39,12 @@ import {
   getBookingSuggestionVatConfig,
   getAutoBookedVatConfig,
   hasAutoBookableReceiptFields,
-  inferSupplierCountry,
-  looksLikePersonCounterparty,
   normalizeCounterpartyName,
   scoreTransactionToInvoice,
   suggestBookingInternal,
 } from "./receipt-extraction.js";
 import {
   type SupplierResolution,
-  type SupplierResolutionOptions,
   resolveSupplierInternal,
 } from "./supplier-resolution.js";
 import { getInvoiceMatchEligibility } from "./bank-reconciliation.js";

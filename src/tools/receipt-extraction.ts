@@ -354,12 +354,6 @@ function getClientCountryFromText(text?: string): string | undefined {
   return undefined;
 }
 
-export function isDomesticClientCountry(country?: string | null): boolean {
-  if (!country) return true;
-  const normalized = country.trim().toUpperCase();
-  return normalized === "EST" || normalized === "EE";
-}
-
 function scoreReceiptAmountFallbackCandidate(candidate: ReceiptAmountCandidate): number {
   return (candidate.has_total_like_label ? 4 : 0) +
     (candidate.has_currency_keyword ? 2 : 0) -
@@ -583,7 +577,7 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
   const componentAmounts: number[] = [];
   let bestExplicitGrossCandidate: { amount: number; score: number } | undefined;
-  const hasExplicitVatLine = lines.some((line, index) =>
+  const hasExplicitVatLine = lines.some((_line, index) =>
     isVatAmountLine(buildAmountInspectionLine(lines, index)) &&
     !RECEIPT_REFERENCE_LINE_RE.test(buildAmountInspectionLine(lines, index)) &&
     !RECEIPT_NET_LABEL_RE.test(buildAmountInspectionLine(lines, index)),

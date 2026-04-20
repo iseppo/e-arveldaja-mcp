@@ -87,7 +87,3 @@ export async function parseDocument(filePath: string): Promise<ParsedDocument> {
     result,
   };
 }
-
-export function resetDocumentParserForTests(): void {
-  parser = undefined;
-}
