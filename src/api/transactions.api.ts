@@ -45,6 +45,10 @@ export class TransactionsApi extends BaseResource<Transaction> {
     try {
       const result = await this.client.patch<ApiResponse>(`/transactions/${id}/register`, body);
       this.invalidateCache();
+      // Registering a transaction creates a journal server-side — bust the
+      // journal aggregate cache too so list_journals / analyze_unconfirmed
+      // don't serve stale data (missing the new registration journal).
+      this.invalidateCache("/journals");
       return result;
     } catch (error) {
       if (clientsIdWasSet) {
@@ -69,6 +73,9 @@ export class TransactionsApi extends BaseResource<Transaction> {
   async invalidate(id: number): Promise<ApiResponse> {
     const result = await this.client.patch<ApiResponse>(`/transactions/${id}/invalidate`, {});
     this.invalidateCache();
+    // Invalidating a confirmed transaction reverses its journal — same
+    // cross-namespace flush as confirm().
+    this.invalidateCache("/journals");
     return result;
   }
 

@@ -3,6 +3,27 @@ import { createAuthHeaders } from "./auth.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
+/**
+ * Thrown for HTTP-level failures (any non-2xx response or retries-exhausted
+ * network error). The structured `status` lets callers distinguish 404
+ * ("row is gone — safe to drop from reconciliation") from 5xx/network
+ * ("transient — retry or surface as unknown") without parsing error.message.
+ *
+ * `status === "network"` means the request never got an HTTP status code
+ * (connection refused, DNS failure, retries exhausted).
+ */
+export class HttpError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number | "network",
+    public readonly method: HttpMethod,
+    public readonly path: string,
+  ) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
 export interface RequestOptions {
   method?: HttpMethod;
   body?: unknown;
@@ -57,9 +78,14 @@ export class HttpClient {
     );
   }
 
-  private static formatNetworkError(method: HttpMethod, path: string, error: unknown): Error {
+  private static formatNetworkError(method: HttpMethod, path: string, error: unknown): HttpError {
     const suffix = error instanceof Error && error.message ? `: ${error.message}` : "";
-    return new Error(`API request failed: ${method} ${path} → network error${suffix}`);
+    return new HttpError(
+      `API request failed: ${method} ${path} → network error${suffix}`,
+      "network",
+      method,
+      path,
+    );
   }
 
   async request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -146,7 +172,7 @@ export class HttpClient {
               `     Multiple IP addresses can be added, separated by ;`;
           }
 
-          throw new Error(errorMessage);
+          throw new HttpError(errorMessage, response.status, method, path);
         }
 
         if (response.status === 204) {
@@ -170,7 +196,12 @@ export class HttpClient {
       }
     }
 
-    throw new Error(`API request failed: ${method} ${path} → retries exhausted`);
+    throw new HttpError(
+      `API request failed: ${method} ${path} → retries exhausted`,
+      "network",
+      method,
+      path,
+    );
   }
   async get<T = unknown>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
     return this.request<T>(path, { params });

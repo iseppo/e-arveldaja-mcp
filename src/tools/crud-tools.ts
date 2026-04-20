@@ -19,6 +19,7 @@ import {
 } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { readOnly, create, mutate, destructive, send } from "../annotations.js";
+import { HttpError } from "../http-client.js";
 import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 
@@ -444,22 +445,25 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       });
       const perPage = params.per_page ?? 100;
       // pageParam doesn't constrain `page` to positive integers, so defensively
-      // clamp here — the filter branch is the only place where a bad page index
-      // would break slice math (out-of-range values silently yield empty).
-      const page = Math.max(1, Math.floor(params.page ?? 1));
+      // floor + clamp here.
+      const requestedPage = Math.max(1, Math.floor(params.page ?? 1));
       const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
-      const start = (page - 1) * perPage;
+      // out_of_range is surfaced so an LLM caller that over-paginates doesn't
+      // mistake "past the end" for "legitimately empty page" silently.
+      const outOfRange = requestedPage > totalPages;
+      const start = (requestedPage - 1) * perPage;
       const items = filtered.slice(start, start + perPage)
         .map(({ postings: _postings, ...rest }) => rest);
       return {
         content: [{
           type: "text",
           text: toMcpJson({
-            current_page: page,
+            current_page: requestedPage,
             total_pages: totalPages,
             total_items: filtered.length,
             per_page: perPage,
             filtered_client_side: true,
+            out_of_range: outOfRange,
             items,
           }),
         }],
@@ -560,11 +564,17 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     "continues past individual failures and returns per-ID results so partial progress is visible.",
     {
       ids: z.array(z.number().int().positive()).min(1).max(500).describe("Journal IDs (positive integers, 1-500 entries)"),
-      reason: z.string().max(500).optional().describe("Short audit note explaining why this batch is being confirmed (max 500 chars)"),
+      reason: z.string().min(1).max(500).describe("Short audit note explaining why this batch is being confirmed (e.g. 'Lightyear trades batch — Q1 2026'). Required — max 500 chars."),
     },
     { ...destructive, title: "Batch Confirm Journals" },
     async ({ ids, reason }) => {
       const unique = [...new Set(ids)];
+      // Bulk pre-fetch via listAllCached so a 500-ID batch doesn't make 500 serial
+      // GET calls (~50s at 10 req/sec). Falls back to per-ID lookup for IDs not
+      // present in the aggregate (e.g. brand-new journals created after the
+      // cache was populated).
+      const allJournals = await api.journals.listAllCached();
+      const byId = new Map(allJournals.filter(j => j.id != null).map(j => [j.id!, j]));
       const results: Array<{
         id: number;
         status: "confirmed" | "skipped_already_confirmed" | "skipped_missing" | "lookup_failed" | "failed";
@@ -574,18 +584,23 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         // Pre-check lets us categorize already-registered journals (which the API
         // rejects) separately from real failures, matching the delete-batch shape.
         let alreadyRegistered = false;
-        try {
-          const existing = await api.journals.get(id);
-          alreadyRegistered = existing.registered === true;
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
-          const isNotFound = /→\s*404\b/.test(message);
-          results.push({
-            id,
-            status: isNotFound ? "skipped_missing" : "lookup_failed",
-            error: message,
-          });
-          continue;
+        const cachedJournal = byId.get(id);
+        if (cachedJournal) {
+          alreadyRegistered = cachedJournal.registered === true;
+        } else {
+          try {
+            const existing = await api.journals.get(id);
+            alreadyRegistered = existing.registered === true;
+          } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            const isNotFound = error instanceof HttpError && error.status === 404;
+            results.push({
+              id,
+              status: isNotFound ? "skipped_missing" : "lookup_failed",
+              error: message,
+            });
+            continue;
+          }
         }
         if (alreadyRegistered) {
           results.push({
@@ -599,8 +614,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
           await api.journals.confirm(id);
           logAudit({
             tool: "batch_confirm_journals", action: "CONFIRMED", entity_type: "journal", entity_id: id,
-            summary: `Confirmed journal ${id}`,
-            details: reason ? { reason } : {},
+            summary: `Confirmed journal ${id}: ${reason}`,
+            details: { reason },
           });
           results.push({ id, status: "confirmed" });
         } catch (error: unknown) {
@@ -622,7 +637,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
             skipped_count: skipped,
             lookup_failed_count: lookupFailed,
             failed_count: failed,
-            ...(reason ? { reason } : {}),
+            reason,
             results,
           }),
         }],
@@ -697,19 +712,21 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         return true;
       });
       const perPage = params.per_page ?? 100;
-      const page = Math.max(1, Math.floor(params.page ?? 1));
+      const requestedPage = Math.max(1, Math.floor(params.page ?? 1));
       const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
-      const start = (page - 1) * perPage;
+      const outOfRange = requestedPage > totalPages;
+      const start = (requestedPage - 1) * perPage;
       const items = filtered.slice(start, start + perPage);
       return {
         content: [{
           type: "text",
           text: toMcpJson({
-            current_page: page,
+            current_page: requestedPage,
             total_pages: totalPages,
             total_items: filtered.length,
             per_page: perPage,
             filtered_client_side: true,
+            out_of_range: outOfRange,
             items,
           }),
         }],
@@ -869,7 +886,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
           // gone (skip and move on); transient errors (500/timeout/auth drop)
           // shouldn't be treated as "gone" because the caller may drop the ID
           // from reconciliation decisions.
-          const isNotFound = /→\s*404\b/.test(message);
+          const isNotFound = error instanceof HttpError && error.status === 404;
           results.push({
             id,
             status: isNotFound ? "skipped_missing" : "lookup_failed",

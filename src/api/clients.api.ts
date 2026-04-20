@@ -19,6 +19,9 @@ export class ClientsApi extends BaseResource<Client> {
     return result;
   }
 
+  // 120s TTL: supplier/customer lookups happen in tight loops during receipt
+  // and reconciliation workflows; the default 60s would churn the aggregate
+  // too often on a typical batch pass.
   async findByName(name: string): Promise<Client[]> {
     const all = await this.listAllCached(120);
     const lower = name.toLowerCase();

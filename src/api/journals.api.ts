@@ -46,12 +46,17 @@ export class JournalsApi extends BaseResource<Journal> {
   async confirm(id: number): Promise<ApiResponse> {
     const result = await this.client.patch<ApiResponse>(`/journals/${id}/register`, {});
     this.invalidateCache();
+    // If this journal is linked to a transaction (operation_type=TRANSACTION),
+    // the transaction's displayed status changes too — bust the transaction
+    // cache so list_transactions doesn't serve stale status.
+    this.invalidateCache("/transactions");
     return result;
   }
 
   async invalidate(id: number): Promise<ApiResponse> {
     const result = await this.client.patch<ApiResponse>(`/journals/${id}/invalidate`, {});
     this.invalidateCache();
+    this.invalidateCache("/transactions");
     return result;
   }
 

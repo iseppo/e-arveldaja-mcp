@@ -8,6 +8,21 @@ interface SetupPromptOptions {
   note?: string;
 }
 
+/**
+ * Shared language + inline-confirmation rail appended to high-stakes destructive
+ * prompts (book-invoice, reconcile-bank, receipt/CAMT/Wise imports).
+ *
+ * The MCP server talks to Estonian-speaking bookkeepers. If the agent falls back
+ * to Estonian in its replies it sometimes produces the forbidden phrase
+ * "tee see e-arveldaja UI-s käsitsi" / "do this manually in e-arveldaja" as a
+ * default deferral — which contradicts the inline-confirmation policy in
+ * CLAUDE.md. English-only prompts don't pre-empt that failure mode, so restate
+ * it here.
+ */
+const INLINE_CONFIRMATION_RAIL = `- Language: respond in the same language the user used (Estonian or English).
+- Never close a workflow by telling the user to "do this manually in e-arveldaja" or "tee see e-arveldaja UI-s käsitsi" as a first resort. That is a last-resort fallback only when (a) no MCP tool can perform the action, AND (b) the exact API error has already been shown to the user with the exact body that was sent.
+- When PROJECT transactions, unregistered journals, or needs_review items remain with known IDs, offer inline confirmation via the appropriate tool (confirm_transaction / batch_confirm_journals / reconcile_inter_account_transfers / batch_delete_transactions) and ask the user yes/no per item or per batch.`;
+
 interface PromptResult {
   messages: Array<{
     role: "user";
@@ -169,7 +184,7 @@ Follow these steps in order:
 
 Follow these steps in order:
 
-1. Call \`run_accounting_inbox_dry_runs\`${workspace_path ? ` with workspace_path: "${workspace_path}"` : ""}.
+1. Call \`run_accounting_inbox_dry_runs\`${workspace_path ? ` with workspace_path: "${workspace_path}"` : " with no workspace_path — the tool will default to the current working directory. If the user intended a different folder, stop and ask before proceeding"}.
 
 2. Treat the tool response as the source of truth for the first pass:
    - inspect \`prepared_inbox\`
@@ -230,7 +245,7 @@ Follow these steps in order:
 
   registerPrompt(server,
     "resolve-accounting-review",
-    "Take one accounting review item and turn it into the next concrete step with the fewest possible user questions.",
+    "FIRST PASS of a two-step review flow. Calls `resolve_accounting_review_item` to surface the recommendation, compliance basis, unresolved questions, and suggested workflow — without proposing any concrete mutating tool call. Use this when you first encounter a review item. Once any `unresolved_questions` are answered (or there were none), move on to `prepare-accounting-review-action` to get an executable proposed action.",
     {
       review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload"),
     },
@@ -273,7 +288,7 @@ Follow these steps in order:
 
   registerPrompt(server,
     "prepare-accounting-review-action",
-    "Turn a resolved accounting review item into the next concrete action, such as cleaning up a duplicate transaction or saving a stable auto-booking rule.",
+    "SECOND PASS of the review flow (use after `resolve-accounting-review`, once any unresolved questions are answered). Calls `prepare_accounting_review_action` to emit a concrete `proposed_action` (e.g. `cleanup_camt_possible_duplicate` or `save_auto_booking_rule`) that the agent must ask approval for before executing.",
     {
       review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload"),
       save_as_rule: z.boolean().optional().describe("Optional hint to prepare a save_auto_booking_rule action when the treatment is stable"),
@@ -397,10 +412,10 @@ Follow these steps in order:
 
 9. Determine VAT treatment per line:
    - For normal domestic invoices, keep the VAT treatment shown on the document.
-   - Do not infer reverse charge from supplier country alone.
-   - Reuse a confirmed prior VAT treatment from \`suggest_booking\` when it clearly fits the same supplier and service.
-   - Only set \`reversed_vat_id: 1\` when the evidence supports that this is a foreign service with place of supply in Estonia and the reverse-charge treatment is actually applicable.
-   - If the foreign-service VAT treatment is still unclear from the document and prior confirmed history, stop and ask the user instead of guessing.
+   - Reuse a confirmed prior VAT treatment from \`suggest_booking\` when it clearly fits the same supplier and service — the code layer's per-supplier history is the most reliable signal.
+   - Do NOT infer reverse charge from supplier country alone. Estonian reverse-charge rules cover several distinct cases (EU B2B services with place of supply in Estonia, non-EU services with place of supply in Estonia, intra-community acquisitions of goods, and certain domestic construction/scrap schemes) and the correct code differs per case.
+   - Only carry over \`reversed_vat_id: 1\` from a past confirmed invoice for the same supplier when the current invoice is the same kind of transaction (same service vs goods, same country-of-supply pattern).
+   - If the VAT treatment is unclear from the document and there is no matching prior confirmed history, stop and ask the user — do NOT guess from partial rules.
 
 10. Derive the remaining invoice fields:
    - journal_date: normally invoice_date unless a different turnover date is clearly stated on the invoice.
@@ -443,6 +458,8 @@ Follow these steps in order:
     - Whether reverse charge was applied
     - Any validation warnings or assumptions
     - Invoice ID and confirmation status
+
+${INLINE_CONFIRMATION_RAIL}
 `,
         },
       }],
@@ -859,6 +876,8 @@ Follow these steps:
    - Number unmatched
    - Total amount reconciled
    - If mutating tools were executed, remind the user that side effects can be reviewed via the returned \`execution.audit_reference\`
+
+${INLINE_CONFIRMATION_RAIL}
 `,
           },
         }],

@@ -173,10 +173,11 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
 
           if (bankRefMatches.length > 0) {
             const match = bankRefMatches[0]!;
-            // Escape the untrusted bank_ref_number before inlining into the reason
-            // string so a crafted CAMT reference can't smuggle prompt-injection text
-            // into the LLM-visible output.
-            const safeRef = JSON.stringify((tx.bank_ref_number ?? "").slice(0, 100));
+            // Use the journal's document_number (already trimmed+uppercased in the
+            // match comparison) rather than tx.bank_ref_number to avoid rendering
+            // whitespace-only raw values. Still JSON.stringify to escape any hostile
+            // characters in CAMT-imported references before LLM surfaces them.
+            const safeRef = JSON.stringify((match.document_number ?? "").slice(0, 100));
             suggestions.push({
               transaction_id: tx.id!,
               date: tx.date,

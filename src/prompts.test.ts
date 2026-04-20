@@ -196,9 +196,10 @@ describe("registerPrompts", () => {
     expect(text).toContain("vat_accounts_dimensions_id");
     expect(text).toContain("cl_vat_articles_id");
     expect(text).toContain("auto-uploads the source document");
-    expect(text).toContain("Do not infer reverse charge from supplier country alone.");
-    expect(text).toContain("place of supply in Estonia");
-    expect(text).toContain("stop and ask the user instead of guessing");
+    expect(text).toContain("Do NOT infer reverse charge from supplier country alone");
+    expect(text).toContain("EU B2B services");
+    expect(text).toContain("intra-community acquisitions of goods");
+    expect(text).toContain("stop and ask the user");
     expect(text).not.toContain("upload_invoice_document");
     expect(text).not.toContain("client_id: the supplier's client_id");
   });

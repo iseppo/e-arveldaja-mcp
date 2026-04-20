@@ -39,10 +39,20 @@ export class BaseResource<T> {
 
   /**
    * Cached aggregate `listAll()` — reads from memory for up to `ttlSeconds`
-   * before walking pages again. Invalidated together with per-page entries
-   * on any mutation via `invalidateCache()`. Use this from tools that do
-   * client-side filtering / pagination to avoid re-walking the whole dataset
-   * on every filtered call.
+   * before walking pages again. Use this from tools that do client-side
+   * filtering / pagination to avoid re-walking the whole dataset on every
+   * filtered call.
+   *
+   * **Cache key is keyed only on `basePath` — it does NOT vary with filter
+   * params.** Do not use this for filtered queries; pass the full list through
+   * your own filter layer.
+   *
+   * **Invalidation**: the key (`${basePath}:listAll`) starts with `basePath`,
+   * so `invalidateCache()` (which does a prefix-delete on `basePath`) clears
+   * it together with the per-page cache on any mutation, and a connection
+   * switch clears everything via `cache.invalidate()` with no pattern. Any
+   * cross-namespace mutation (e.g. `TransactionsApi.confirm` creating a
+   * journal) must call `this.invalidateCache("/journals")` explicitly.
    */
   async listAllCached(ttlSeconds = 60): Promise<T[]> {
     const cacheKey = this.cacheKey(`${this.basePath}:listAll`);
