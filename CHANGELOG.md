@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.11.3] - 2026-04-21
+
+### Added
+- **OCR trust boundary on tool output** — new `wrapUntrustedOcr` helper applies per-call nonce delimiters (`<<UNTRUSTED_OCR_START:{nonce}>>` / `<<UNTRUSTED_OCR_END:{nonce}>>`) to `raw_text` returned by `extract_pdf_invoice` and `process_receipt_batch`, plus `description` in receipt-batch results. Prevents a malicious scanned receipt from smuggling instructions into the downstream LLM via a fixed, guessable delimiter.
+- **`vat_explicit` flag on extracted receipt fields** — `extractAmounts` now reports whether `total_vat` came from an explicit OCR VAT / net label or a structural fallback, so downstream auto-booking can tell "real zero" apart from "derived zero".
+- **Regression tests** — `extractAmounts("Kokku 100 EUR KM 20%")` no longer collapses the gross total to `total_vat`; `resolveSupplierFromTransaction` returns `found: false` without creating a placeholder supplier when the transaction has no counterparty signal; `wrapUntrustedOcr` delimiter spoofing cannot escape the sandbox.
+
+### Fixed
+- **Lightyear FX drift on non-EUR cash-equivalent sells** — `book_lightyear_trades` used to book USD-denominated cash-sweep sells (e.g. `ICSUSSDP`) at 1:1 EUR proceeds against cost basis, leaving permanent FX drift on the investment account. Non-EUR cash-equivalent sells without capital gains data are now skipped with a clear reason; EUR sweeps (e.g. `BRICEKSP`) still book 1:1 as before.
+- **VAT mis-extraction from embedded percent rates** — a line like `"Kokku 100 EUR KM 20%"` previously assigned the gross total (100) as VAT because the percent-rate filter left only the gross as the last VAT candidate. The pickedVat path now drops that fallback so `total_vat` stays undefined for the later gross − net reconciliation.
+- **Silent VAT stripping on derived zero** — auto-booking used to set `vat_rate_dropdown = "-"` whenever `total_vat === 0`, including structurally derived zeros. It now requires `vat_explicit` so only OCR-stated zero invoices strip VAT.
+- **Bogus `"Transaction <id>"` suppliers** — `resolveSupplierFromTransaction` now early-returns when both `bank_account_name` and `description` are null, instead of creating a placeholder client name.
+- **Lightyear legacy duplicate detection** — journals with raw `OR-`/`CN-`/`DT-`/etc. document numbers (pre `LY:` prefix) are now recognised as duplicates alongside the current `LY:{ref}` format.
+- **Lightyear FX fee fallback** — when the EUR side of a conversion reports zero fee, the FX fee is now derived from the foreign side using the available rate instead of silently rounding to 0.
+- **Dead inter-trade fields removed** — `TradeExtractionResult` no longer returns `tradeRowIndexes` / `consumedConversionRowIndexes`; the caller uses `trade.conversion_row_indexes` directly, collapsing an O(trades × rows) lookup to O(trades).
+
+### Changed
+- **`book-invoice` workflow prompt** — `get_vat_info` is now the first step so VAT treatment decisions reflect the current VAT-registration status. Subsequent steps renumbered and the VAT-treatment step references step 1.
+- **Inline-confirmation rail coverage** — `receipt-batch`, `import-camt`, `import-wise`, and `classify-unmatched` prompts now append `INLINE_CONFIRMATION_RAIL`, and the rail itself is split into explicit PROJECT/unregistered-journal inline handling vs `needs_review` (accountant judgment) handling via `resolve_accounting_review_item` / `prepare_accounting_review_action`.
+- **`reconcile-bank` prompt** — `min_confidence` tiers (0 include-all, 30 noise floor, 80 high-confidence) documented at both call sites instead of left as magic numbers.
+- **`new-supplier` prompt** — former steps 3 and 5 merged so `resolve_supplier` is not called twice; downstream steps renumbered.
+- **`lightyear-booking` prompt** — first parse step no longer sets `include_rows: true`; the summary view is enough for the overview and row-level inspection is only done on demand.
+- **`skip_tickers` semantics in `book_lightyear_trades`** — empty string is now treated as the default skip list; the literal value `"none"` disables the filter. `describe` text updated accordingly.
+
 ## [0.11.2] - 2026-04-14
 
 ### Fixed
