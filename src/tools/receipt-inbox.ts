@@ -121,17 +121,21 @@ interface ReceiptBatchFileResult {
   review_guidance?: ReviewGuidance;
 }
 
-/**
- * Wrap `extracted.raw_text` with untrusted-OCR delimiters for MCP output so a
- * downstream LLM cannot be tricked into executing instructions embedded in a
- * scanned receipt. Internal consumers keep using the raw text directly; this
- * transform runs only at tool-output boundaries.
- */
+// Wrap free-form OCR fields with untrusted-OCR delimiters at MCP output time so a
+// downstream LLM cannot be tricked into executing instructions embedded in a
+// scanned receipt. Short structured fields (supplier_name, invoice_number, dates)
+// are left as-is — their length and format limit the realistic attack surface.
 function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): ReceiptBatchFileResult {
-  if (!result.extracted?.raw_text) return result;
+  if (!result.extracted) return result;
+  const { raw_text, description } = result.extracted;
+  if (raw_text === undefined && description === undefined) return result;
   return {
     ...result,
-    extracted: { ...result.extracted, raw_text: wrapUntrustedOcr(result.extracted.raw_text) },
+    extracted: {
+      ...result.extracted,
+      ...(raw_text !== undefined && { raw_text: wrapUntrustedOcr(raw_text) }),
+      ...(description !== undefined && { description: wrapUntrustedOcr(description) }),
+    },
   };
 }
 
@@ -1208,7 +1212,7 @@ function toClassifiedResult(
   };
 }
 
-async function resolveSupplierFromTransaction(
+export async function resolveSupplierFromTransaction(
   api: ApiContext,
   clients: Client[],
   transaction: Transaction,

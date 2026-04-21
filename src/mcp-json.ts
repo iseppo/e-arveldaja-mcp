@@ -1,19 +1,18 @@
 import { encode, decode } from "@toon-format/toon";
+import { randomBytes } from "crypto";
 
-/**
- * Wrap untrusted OCR / external text with explicit delimiters so that downstream
- * LLMs reading the MCP tool output treat the content as data rather than
- * instructions. Any tool that surfaces raw OCR output, supplier-entered fields,
- * or free-form bank descriptions to the caller should wrap the value with this
- * helper before serialization.
- */
-export const UNTRUSTED_OCR_START = "<<UNTRUSTED_OCR_START>>";
-export const UNTRUSTED_OCR_END = "<<UNTRUSTED_OCR_END>>";
+// Wrap untrusted OCR / external text with per-call nonce delimiters so a
+// downstream LLM treats the content as data, not instructions. A fixed
+// delimiter could be spoofed by text that includes the closing marker; the
+// nonce makes the sandbox boundary unguessable per call.
+export const UNTRUSTED_OCR_START_PREFIX = "<<UNTRUSTED_OCR_START:";
+export const UNTRUSTED_OCR_END_PREFIX = "<<UNTRUSTED_OCR_END:";
 
 export function wrapUntrustedOcr(text: string | undefined | null): string | undefined {
   if (text === undefined || text === null) return undefined;
   if (text === "") return text;
-  return `${UNTRUSTED_OCR_START}\n${text}\n${UNTRUSTED_OCR_END}`;
+  const nonce = randomBytes(8).toString("hex");
+  return `${UNTRUSTED_OCR_START_PREFIX}${nonce}>>\n${text}\n${UNTRUSTED_OCR_END_PREFIX}${nonce}>>`;
 }
 
 /** Strip null/undefined fields recursively, then encode as TOON for minimal token usage. */

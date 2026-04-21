@@ -27,6 +27,7 @@ import {
 import {
   buildDryRunCreatedInvoicePreview,
   readValidatedReceiptFile,
+  resolveSupplierFromTransaction,
   revalidateReceiptFilePath,
 } from "./receipt-inbox.js";
 
@@ -189,6 +190,15 @@ describe("extractAmounts", () => {
       total_gross: 10.99,
     });
     expect(result.vat_explicit).toBe(true);
+  });
+
+  it("does not assign the gross total as VAT when only the percent rate was the non-gross amount", () => {
+    // Regression guard for "Kokku 100 EUR KM 20%" — before the pickedVat guard was introduced
+    // the %-rate filter removed 20 (matches 20%), leaving only 100, which then got assigned as
+    // totalVat and collapsed totalNet to 0. The fix is to drop that candidate instead of
+    // falling back to filteredAmounts[last].
+    const result = extractAmounts("Kokku 100 EUR KM 20%");
+    expect(result.total_vat).not.toBe(100);
   });
 
   it("does not treat price lines with embedded KM percentages as VAT rows", () => {
@@ -713,5 +723,27 @@ describe("categorizeTransactionGroup", () => {
 
     expect(result.category).toBe("card_purchases");
     expect(result.apply_mode).toBe("purchase_invoice");
+  });
+});
+
+describe("resolveSupplierFromTransaction", () => {
+  it("returns found=false without creating a placeholder supplier when the transaction has no counterparty signal", async () => {
+    const api = { clients: { create: vi.fn() } } as any;
+    const transaction = {
+      id: 42,
+      type: "C",
+      amount: 10,
+      date: "2026-03-01",
+      bank_account_name: null,
+      description: null,
+      bank_account_no: null,
+      accounts_dimensions_id: 1,
+      clients_id: null,
+    } as any;
+
+    const result = await resolveSupplierFromTransaction(api, [], transaction, false);
+
+    expect(result).toEqual({ found: false, created: false });
+    expect(api.clients.create).not.toHaveBeenCalled();
   });
 });
