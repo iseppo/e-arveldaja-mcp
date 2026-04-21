@@ -15,13 +15,17 @@ import { toolError } from "../tool-error.js";
 
 const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 
-// BRICEKSP is Lightyear's money market cash fund - not a real investment
-const CASH_FUND_TICKER = "BRICEKSP";
+// Known Lightyear cash-sweep / cash-equivalent instruments. Lightyear's capital
+// gains report does not cover these, so we book buy/sell only for EUR-denominated
+// sweeps where proceeds equal cost basis 1:1. Non-EUR sweeps (e.g. ICSUSSDP in USD)
+// would need a proper cost-basis source to avoid FX drift on the investment account.
+const KNOWN_CASH_EQUIVALENT_TICKERS = new Set(["BRICEKSP", "ICSUSSDP"]);
 
 const EXPECTED_STATEMENT_HEADERS = ["Date", "Reference", "Ticker", "ISIN", "Type", "Quantity", "CCY", "Price/share", "Gross Amount", "FX Rate", "Fee", "Net Amt.", "Tax Amt."];
 const EXPECTED_GAINS_HEADERS = ["Date", "Ticker", "Name", "ISIN", "Country", "Fees (EUR)", "Quantity", "Cost Basis (EUR)", "Proceeds (EUR)", "Capital Gains (EUR)"];
 
 interface AccountStatementRow {
+  row_index: number;
   date: string;           // DD/MM/YYYY HH:MM:SS
   reference: string;      // OR-xxx, CN-xxx, DT-xxx, WL-xxx, IN-xxx, RW-xxx
   ticker: string;
@@ -51,6 +55,7 @@ interface CapitalGainsRow {
 }
 
 interface InvestmentTrade {
+  row_index: number;
   date: string;           // YYYY-MM-DD
   datetime: string;       // original DD/MM/YYYY HH:MM:SS for matching
   reference: string;
@@ -66,6 +71,8 @@ interface InvestmentTrade {
   fx_rate: number | null;
   fx_fee_eur: number;     // FX conversion fee
   conversion_ref: string | null;
+  conversion_row_indexes: number[];
+  cash_equivalent: boolean;
 }
 
 function parseNumber(s: string): number {
@@ -132,6 +139,7 @@ function parseAccountStatement(csv: string): AccountStatementRow[] {
     }
 
     rows.push({
+      row_index: i - 1,
       date: fields[0]!,
       reference: fields[1]!,
       ticker: fields[2]!,
@@ -148,6 +156,90 @@ function parseAccountStatement(csv: string): AccountStatementRow[] {
     });
   }
   return rows;
+}
+
+function isCashEquivalentTicker(ticker: string): boolean {
+  return KNOWN_CASH_EQUIVALENT_TICKERS.has(ticker);
+}
+
+function fxFeeToEur(eurConv: AccountStatementRow, fgnConv: AccountStatementRow): number {
+  const eurSideFee = Math.abs(eurConv.fee);
+  if (eurSideFee > 0) return eurSideFee;
+
+  const foreignSideFee = Math.abs(fgnConv.fee);
+  if (foreignSideFee <= 0) return 0;
+
+  if (fgnConv.fx_rate > 0) return roundMoney(foreignSideFee * fgnConv.fx_rate);
+  if (eurConv.fx_rate > 0) return roundMoney(foreignSideFee / eurConv.fx_rate);
+  return 0;
+}
+
+function getStatementRowCashDelta(row: AccountStatementRow): { currency: string; amount: number } | null {
+  if (!row.ccy) return null;
+
+  switch (row.type) {
+    case "Buy":
+      return { currency: row.ccy, amount: -Math.abs(row.net_amount || row.gross_amount) };
+    case "Sell":
+      return { currency: row.ccy, amount: Math.abs(row.net_amount || row.gross_amount) };
+    default:
+      return { currency: row.ccy, amount: row.net_amount };
+  }
+}
+
+function addCashDelta(target: Map<string, number>, currency: string, amount: number): void {
+  if (!currency || Math.abs(amount) < 0.000001) return;
+  target.set(currency, roundMoney((target.get(currency) ?? 0) + amount));
+}
+
+function cashMapToObject(map: Map<string, number>): Record<string, number> {
+  // Sub-cent residuals are treated as balanced — is_balanced uses the same 0.01 threshold.
+  return Object.fromEntries(
+    [...map.entries()]
+      .map(([currency, amount]) => [currency, roundMoney(amount)])
+      .filter(([, amount]) => Math.abs(amount) >= 0.01)
+      .sort(([a], [b]) => a.localeCompare(b))
+  );
+}
+
+function reconcileHandledStatementCash(
+  rows: AccountStatementRow[],
+  handledRowIndexes: Set<number>,
+  ignoredRowIndexes: Set<number> = new Set(),
+) {
+  const totalByCurrency = new Map<string, number>();
+  const handledByCurrency = new Map<string, number>();
+  const gapByCurrency = new Map<string, number>();
+
+  for (const row of rows) {
+    if (ignoredRowIndexes.has(row.row_index)) continue;
+    const delta = getStatementRowCashDelta(row);
+    if (!delta) continue;
+    addCashDelta(totalByCurrency, delta.currency, delta.amount);
+    if (handledRowIndexes.has(row.row_index)) {
+      addCashDelta(handledByCurrency, delta.currency, delta.amount);
+    }
+  }
+
+  const currencies = new Set([
+    ...totalByCurrency.keys(),
+    ...handledByCurrency.keys(),
+  ]);
+  for (const currency of currencies) {
+    addCashDelta(
+      gapByCurrency,
+      currency,
+      (totalByCurrency.get(currency) ?? 0) - (handledByCurrency.get(currency) ?? 0),
+    );
+  }
+
+  return {
+    total_by_currency: cashMapToObject(totalByCurrency),
+    handled_by_currency: cashMapToObject(handledByCurrency),
+    gap_by_currency: cashMapToObject(gapByCurrency),
+    ignored_rows: ignoredRowIndexes.size,
+    is_balanced: [...gapByCurrency.values()].every((amount) => Math.abs(amount) < 0.01),
+  };
 }
 
 function parseCapitalGains(csv: string): CapitalGainsRow[] {
@@ -182,9 +274,8 @@ function parseCapitalGains(csv: string): CapitalGainsRow[] {
 }
 
 /**
- * Extract real investment trades from the account statement.
+ * Extract investment and cash-equivalent trades from the account statement.
  * Pairs Buy/Sell orders with their FX Conversion entries (for USD trades).
- * Excludes BRICEKSP (money market cash fund) trades.
  * Consumed conversions are tracked to prevent double-matching.
  */
 interface TradeExtractionResult {
@@ -212,9 +303,9 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
 
   for (const row of rows) {
     if (row.type !== "Buy" && row.type !== "Sell") continue;
-    if (row.ticker === CASH_FUND_TICKER) continue;
 
     const trade: InvestmentTrade = {
+      row_index: row.row_index,
       date: parseLightyearDate(row.date),
       datetime: row.date,
       reference: row.reference,
@@ -230,6 +321,8 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
       fx_rate: null,
       fx_fee_eur: 0,
       conversion_ref: null,
+      conversion_row_indexes: [],
+      cash_equivalent: isCashEquivalentTicker(row.ticker),
     };
 
     if (row.ccy === "EUR") {
@@ -273,8 +366,9 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
         // gross_amount is the EUR equivalent before FX fee deduction.
         trade.eur_amount = Math.abs(best.eurConv.net_amount);
         trade.fx_rate = best.eurConv.fx_rate || best.fgnConv.fx_rate || null;
-        trade.fx_fee_eur = Math.abs(best.eurConv.fee);
+        trade.fx_fee_eur = fxFeeToEur(best.eurConv, best.fgnConv);
         trade.conversion_ref = best.ref;
+        trade.conversion_row_indexes = [best.eurConv.row_index, best.fgnConv.row_index];
         consumedConversions.add(best.ref);
         fxMatched = true;
       }
@@ -294,9 +388,9 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
 
 /**
  * Extract distribution (dividend/interest) entries.
- * Excludes BRICEKSP distributions.
  */
 function extractDistributions(rows: AccountStatementRow[]): Array<{
+  row_index: number;
   date: string;
   reference: string;
   type: AccountStatementRow["type"];
@@ -308,8 +402,9 @@ function extractDistributions(rows: AccountStatementRow[]): Array<{
   tax_amount: number;
 }> {
   return rows
-    .filter(r => (r.type === "Distribution" || r.type === "Dividend" || r.type === "Interest" || r.type === "Reward") && r.ticker !== CASH_FUND_TICKER)
+    .filter(r => r.type === "Distribution" || r.type === "Dividend" || r.type === "Interest" || r.type === "Reward")
     .map(r => ({
+      row_index: r.row_index,
       date: parseLightyearDate(r.date),
       reference: r.reference,
       type: r.type,
@@ -328,15 +423,19 @@ async function findExistingJournalsByRef(api: ApiContext, references: string[]):
   const allJournals = await api.journals.listAll();
   const existing = new Set<string>();
 
-  // Build a set of target prefixed refs for O(1) lookup
-  const targetRefs = new Set(references.map(r => `LY:${r}`));
+  // Support both current LY:{ref} and legacy raw {ref} document numbers.
+  // Collision risk with hand-entered journals is low because Lightyear references
+  // use fixed prefixes (OR-, CN-, DT-, WL-, IN-, RW-) that are unlikely to appear
+  // as manual document numbers. If a false positive is observed, add cross-checks
+  // on journal title/date here.
+  const targetRefs = new Set(references.flatMap(r => [r, `LY:${r}`]));
 
   for (const journal of allJournals) {
     if (journal.is_deleted) continue;
     if (!journal.document_number) continue;
-    if (targetRefs.has(journal.document_number)) {
-      // Extract the reference from LY:{ref}
-      existing.add(journal.document_number.substring(3));
+    const documentNumber = String(journal.document_number).trim();
+    if (targetRefs.has(documentNumber)) {
+      existing.add(documentNumber.startsWith("LY:") ? documentNumber.substring(3) : documentNumber);
     }
   }
 
@@ -403,7 +502,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
   registerTool(server, "parse_lightyear_statement",
     "Parse a Lightyear account statement CSV. Extracts investment trades (Buy/Sell), " +
-    "distributions, deposits, withdrawals. Filters out BRICEKSP money market fund trades. " +
+    "distributions, deposits, withdrawals, and cash reconciliation gaps. " +
     "Pairs foreign currency trades with their FX conversion entries. " +
     "Returns summary by default — set include_rows=true for individual trade/distribution details.",
     {
@@ -426,44 +525,43 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           return true;
         });
       }
-      const { trades, warnings: fxWarnings, consumedConversionRefs } = extractTrades(rows);
+      const {
+        trades,
+        warnings: fxWarnings,
+      } = extractTrades(rows);
       const distributions = extractDistributions(rows);
+      const bookableTrades = trades.filter(t => !t.cash_equivalent);
+      const cashEquivalentTrades = trades.filter(t => t.cash_equivalent);
 
       // Summarize deposits/withdrawals
       const deposits = rows.filter(r => r.type === "Deposit");
       const withdrawals = rows.filter(r => r.type === "Withdrawal");
 
       // Find rows not handled by any extraction
-      const handledRefs = new Set<string>();
-      for (const t of trades) {
-        handledRefs.add(t.reference);
-        if (t.conversion_ref) handledRefs.add(t.conversion_ref);
-      }
-      for (const d of distributions) handledRefs.add(d.reference);
-      for (const r of deposits) handledRefs.add(r.reference);
-      for (const r of withdrawals) handledRefs.add(r.reference);
-      for (const ref of consumedConversionRefs) handledRefs.add(ref);
-      // BRICEKSP trades and their conversions are intentionally excluded
-      for (const r of rows) {
-        if (r.ticker === CASH_FUND_TICKER && (r.type === "Buy" || r.type === "Sell")) {
-          handledRefs.add(r.reference);
-        }
-        // BRICEKSP conversions share the same reference as the trade
-        if (r.type === "Conversion" && !handledRefs.has(r.reference)) {
-          // Check if this conversion's ref matches a BRICEKSP trade
-          const isBricekspConv = rows.some(t => t.ticker === CASH_FUND_TICKER && (t.type === "Buy" || t.type === "Sell") && t.reference === r.reference);
-          if (isBricekspConv) handledRefs.add(r.reference);
-        }
-      }
+      const handledRowIndexes = new Set<number>([
+        ...bookableTrades.map(t => t.row_index),
+        ...bookableTrades.flatMap(t => t.conversion_row_indexes),
+        ...distributions.map(d => d.row_index),
+        ...deposits.map(r => r.row_index),
+        ...withdrawals.map(r => r.row_index),
+      ]);
 
-      const unhandled = rows.filter(r => !handledRefs.has(r.reference));
+      const ignoredRowIndexes = new Set<number>([
+        ...cashEquivalentTrades.map(t => t.row_index),
+        ...cashEquivalentTrades.flatMap(t => t.conversion_row_indexes),
+      ]);
+
+      // When cash-equivalent trades are intentionally excluded from booking, their
+      // internal sweep activity should not trigger a false reconciliation error.
+      const cashReconciliation = reconcileHandledStatementCash(rows, handledRowIndexes, ignoredRowIndexes);
+      const unhandled = rows.filter(r => !handledRowIndexes.has(r.row_index) && !ignoredRowIndexes.has(r.row_index));
       const unhandledSuggestions = unhandled.map(r => {
         let suggestion = "Review manually";
-        if (r.type === "Conversion") suggestion = "Standalone FX conversion — may be paired with a reward, deposit, or manual trade. Book as FX gain/loss if material.";
+        if (r.type === "Conversion") suggestion = "Unpaired FX conversion — likely matches a reward, deposit, withdrawal, or manual trade. Review before booking so broker cash stays reconciled; book FX gain/loss if material.";
         else if (r.type === "Reward") suggestion = "Platform reward — book via book_lightyear_distributions (defaults to 8600 Muud äritulud).";
         else if (r.type === "Interest") suggestion = "Interest income — book via book_lightyear_distributions.";
         else if (r.type === "Dividend" || r.type === "Distribution") suggestion = "Distribution — book via book_lightyear_distributions.";
-        else if (r.type === "Buy" || r.type === "Sell") suggestion = `${r.type} of ${r.ticker} — likely BRICEKSP or missing FX conversion. Check if intentional.`;
+        else if (r.type === "Buy" || r.type === "Sell") suggestion = `${r.type} of ${r.ticker} — missing FX pairing or unsupported trade flow. Check if intentional.`;
         return {
           date: parseLightyearDate(r.date),
           reference: r.reference,
@@ -477,14 +575,20 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       });
 
       // Check for unmatched FX trades
-      const unmatchedFx = trades.filter(t => t.ccy !== "EUR" && t.eur_amount === 0);
+      const unmatchedFx = bookableTrades.filter(t => t.ccy !== "EUR" && t.eur_amount === 0);
 
       // Group trades by ticker
       const byTicker = new Map<string, InvestmentTrade[]>();
-      for (const t of trades) {
+      for (const t of bookableTrades) {
         const list = byTicker.get(t.ticker) ?? [];
         list.push(t);
         byTicker.set(t.ticker, list);
+      }
+      const skippedCashEquivalentByTicker = new Map<string, InvestmentTrade[]>();
+      for (const t of cashEquivalentTrades) {
+        const list = skippedCashEquivalentByTicker.get(t.ticker) ?? [];
+        list.push(t);
+        skippedCashEquivalentByTicker.set(t.ticker, list);
       }
 
       const summary: Record<string, { buys: number; sells: number; total_invested_eur: number; total_sold_eur: number }> = {};
@@ -501,6 +605,13 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           total_sold_eur: roundMoney(sells.reduce((s, t) => s + t.eur_amount, 0)),
         };
       }
+      const skippedCashEquivalentSummary: Record<string, { buys: number; sells: number }> = {};
+      for (const [ticker, tickerTrades] of skippedCashEquivalentByTicker) {
+        skippedCashEquivalentSummary[ticker] = {
+          buys: tickerTrades.filter(t => t.type === "Buy").length,
+          sells: tickerTrades.filter(t => t.type === "Sell").length,
+        };
+      }
 
       const warnings: string[] = [...fxWarnings];
       if (unmatchedFx.length > 0) {
@@ -509,12 +620,27 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           unmatchedFx.map(t => `${t.reference} (${t.ticker} ${t.ccy})`).join(", ")
         );
       }
+      if (!cashReconciliation.is_balanced) {
+        warnings.push(
+          `Statement cash reconciliation is not balanced. Unhandled cash impact remains in: ` +
+          Object.entries(cashReconciliation.gap_by_currency)
+            .map(([currency, amount]) => `${currency} ${amount}`)
+            .join(", ")
+        );
+      }
 
       const summaryJson = {
         total_rows: rows.length,
         ...(date_from && { date_from }),
         ...(date_to && { date_to }),
-        trades: { count: trades.length, by_ticker: summary },
+        trades: { count: bookableTrades.length, by_ticker: summary },
+        ...(cashEquivalentTrades.length > 0 && {
+          cash_equivalent_skipped: {
+            count: cashEquivalentTrades.length,
+            by_ticker: skippedCashEquivalentSummary,
+            note: "Cash-equivalent buy/sell rows are intentionally excluded from booking and cash reconciliation by default.",
+          },
+        }),
         distributions: {
           count: distributions.length,
           total_eur: roundMoney(distributions.reduce((s, d) => s + d.gross_amount, 0)),
@@ -527,11 +653,15 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           count: withdrawals.length,
           total_eur: roundMoney(withdrawals.reduce((s, r) => s + Math.abs(r.gross_amount), 0)),
         },
+        cash_reconciliation: cashReconciliation,
         ...(unhandledSuggestions.length > 0 && {
           unhandled: {
             count: unhandledSuggestions.length,
             rows: unhandledSuggestions,
           },
+        }),
+        ...((!cashReconciliation.is_balanced || unhandledSuggestions.length > 0) && {
+          needs_review: true,
         }),
         ...(warnings.length > 0 && { warnings }),
       };
@@ -549,11 +679,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       }
 
       // Compact markdown tables for LLM-friendly output
-      const tradeRows = trades.map(t =>
-        `| ${t.date} | ${t.reference} | ${t.ticker} | ${t.type} | ${t.quantity} | ${t.ccy} | ${t.eur_amount.toFixed(2)} | ${t.fee_eur.toFixed(2)} |`
-      );
-      const tradesTable = trades.length > 0
-        ? `## Trades (${trades.length})\n\n| Date | Ref | Ticker | Type | Qty | CCY | EUR | Fee |\n|------|-----|--------|------|-----|-----|-----|-----|\n${tradeRows.join("\n")}`
+      const tradesTable = bookableTrades.length > 0
+        ? `## Trades (${bookableTrades.length})\n\n| Date | Ref | Ticker | Type | Qty | CCY | EUR | Fee |\n|------|-----|--------|------|-----|-----|-----|-----|\n${bookableTrades.map(t => `| ${t.date} | ${t.reference} | ${t.ticker} | ${t.type} | ${t.quantity} | ${t.ccy} | ${t.eur_amount.toFixed(2)} | ${t.fee_eur.toFixed(2)} |`).join("\n")}`
         : "";
 
       const distRows = distributions.map(d =>
@@ -567,7 +694,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         "```json\n" + JSON.stringify(summaryJson, null, 2) + "\n```",
         tradesTable,
         distTable,
-        "BRICEKSP trades (money market cash fund) are excluded.",
       ].filter(Boolean);
 
       return {
@@ -635,15 +761,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       gain_loss_account: z.number().optional().describe("Realized gain account (credit for gains; also used for losses if loss_account not set)"),
       loss_account: z.number().optional().describe("Realized loss account (debit for losses). If omitted, losses go to gain_loss_account."),
       fee_account: z.number().optional().describe("Fee expense account (default: fees included in investment cost)"),
-      skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP)"),
+      skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP, ICSUSSDP). Pass \"none\" to disable; the empty string is treated as the default."),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
     { ...batch, openWorldHint: true, title: "Book Lightyear Trades" },
     async ({ file_path, capital_gains_file, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
       const isDryRun = dry_run !== false;
-      const skipSet = new Set(
-        (skip_tickers ?? CASH_FUND_TICKER).split(",").map(t => t.trim())
-      );
+      const skipInput = skip_tickers?.trim() || [...KNOWN_CASH_EQUIVALENT_TICKERS].join(",");
+      const skipSet = skipInput.toLowerCase() === "none"
+        ? new Set<string>()
+        : new Set(skipInput.split(",").map(t => t.trim()).filter(Boolean));
 
       // Validate accounts exist and are active
       const accounts = await api.readonly.getAccounts();
@@ -751,6 +878,79 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         } else {
           // Sell: need cost basis from capital gains file
           const gainEntry = gainsMap.get(trade.reference);
+
+          if (!gainEntry && trade.cash_equivalent) {
+            // Capital gains CSV does not cover cash-equivalent sweeps. For EUR-denominated
+            // sweeps (e.g. BRICEKSP) proceeds equal cost basis 1:1 so we can book them
+            // directly as break-even. For non-EUR sweeps (e.g. ICSUSSDP in USD) the FX
+            // rate on buy vs sell differs, so booking proceeds as the investment credit
+            // would leave permanent FX drift on the investment account. Skip those.
+            if (trade.ccy !== "EUR") {
+              results.push({
+                reference: trade.reference,
+                ticker: trade.ticker,
+                type: trade.type,
+                date: trade.date,
+                eur_amount: trade.eur_amount,
+                status: "skipped",
+                skip_reason: `Non-EUR cash-equivalent sell (${trade.ccy}) needs a cost-basis source to avoid FX drift. Provide capital_gains_file entry for ${trade.reference} or remove ${trade.ticker} from skip_tickers only when cost basis is known.`,
+              });
+              continue;
+            }
+
+            const proceeds = roundMoney(trade.eur_amount);
+
+            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "D", amount: proceeds });
+            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "C", amount: proceeds });
+
+            const sellTradeFees = tradeFeeEur;
+            if (sellTradeFees > 0) {
+              const feeAcct = fee_account ?? 8610;
+              postings.push({ accounts_id: feeAcct, type: "D", amount: sellTradeFees });
+              postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: sellTradeFees });
+            }
+
+            const resultEntry: typeof results[number] = {
+              reference: trade.reference,
+              ticker: trade.ticker,
+              type: trade.type,
+              date: trade.date,
+              eur_amount: proceeds,
+              status: isDryRun ? "would_create" : "created",
+              cost_basis: proceeds,
+              gain_loss: 0,
+            };
+
+            if (isDryRun) {
+              results.push(resultEntry);
+              continue;
+            }
+
+            const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
+            const title = `Lightyear Cash-Equivalent Sell: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo}`;
+
+            const journal = await api.journals.create({
+              title,
+              effective_date: trade.date,
+              cl_currencies_id: "EUR",
+              document_number: `LY:${trade.reference}`,
+              postings,
+            });
+            logAudit({
+              tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
+              entity_id: journal.created_object_id,
+              summary: `Lightyear cash-equivalent sell: ${trade.ticker} ${trade.quantity} @ ${proceeds} EUR`,
+              details: {
+                effective_date: trade.date, ticker: trade.ticker, type: "Sell",
+                amount: proceeds, gain_loss: 0,
+                postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+              },
+            });
+
+            resultEntry.journal_id = journal.created_object_id;
+            results.push(resultEntry);
+            continue;
+          }
 
           if (!gainEntry) {
             // No capital gains data — skip this sell
@@ -899,7 +1099,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const skippedSells = results.filter(r => r.status === "skipped" && r.type === "Sell");
       if (skippedSells.length > 0 && !capital_gains_file) {
         warnings.push(
-          `${skippedSells.length} sell trade(s) skipped — provide capital_gains_file and gain_loss_account to book them with correct cost basis.`
+          `${skippedSells.length} sell trade(s) skipped — provide capital_gains_file and gain_loss_account to book non-cash-equivalent sells with correct cost basis.`
         );
       }
 
