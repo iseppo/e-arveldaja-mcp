@@ -174,6 +174,8 @@ export interface ExtractedReceiptFields {
   total_net?: number;
   total_vat?: number;
   total_gross?: number;
+  /** True when total_vat is backed by an explicit OCR VAT / net label rather than a structural fallback. */
+  vat_explicit?: boolean;
   currency?: string;
   description?: string;
   raw_text?: string;
@@ -567,7 +569,7 @@ export function normalizeDate(raw: string): string | undefined {
   return undefined;
 }
 
-export function extractAmounts(text: string): { total_net?: number; total_vat?: number; total_gross?: number } {
+export function extractAmounts(text: string): { total_net?: number; total_vat?: number; total_gross?: number; vat_explicit?: boolean } {
   const lines = text
     .split(/\r?\n/)
     .map(clampTextLine)
@@ -576,6 +578,8 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
   let totalGross: number | undefined;
   let totalVat: number | undefined;
   let totalNet: number | undefined;
+  let vatFromExplicitLine = false;
+  let netFromExplicitLine = false;
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
   const componentAmounts: number[] = [];
   let bestExplicitGrossCandidate: { amount: number; score: number } | undefined;
@@ -612,7 +616,17 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     const vatCandidates = filteredAmounts.filter(amount => ![...inspectionLine.matchAll(/(\d{1,2}(?:[.,]\d+)?)\s*%/g)]
       .map(match => parseAmount(match[1] ?? ""))
       .some(rate => rate !== undefined && Math.abs(rate - amount) < 0.001));
-    const pickedVat = vatCandidates[vatCandidates.length - 1] ?? filteredAmounts[filteredAmounts.length - 1];
+    // Guard against a narrow VAT misread: when the %-rate filter above discards every candidate
+    // except one, and that survivor equals the largest amount on the line, the "VAT" is almost
+    // certainly the gross total (e.g. "Kokku 100 EUR KM 20%" → 20 excluded as rate, leaving 100).
+    // Keep lastVatCandidate in that case so totalVat falls through to the later gross − net
+    // reconciliation. Lines without a %-rate exclusion (e.g. "Tax 1 €3.96 €3.96") are unaffected.
+    const lastVatCandidate = vatCandidates[vatCandidates.length - 1];
+    const filteredByPercentRate = vatCandidates.length < filteredAmounts.length;
+    const pickedVat = lastVatCandidate !== undefined &&
+      (!filteredByPercentRate || filteredAmounts.length <= 1 || lastVatCandidate < Math.max(...filteredAmounts))
+      ? lastVatCandidate
+      : undefined;
 
     fallbackCandidates.push(...filteredAmounts.map(amount => ({
       amount,
@@ -634,11 +648,13 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
 
     if (
       totalVat === undefined &&
+      pickedVat !== undefined &&
       !blockedAsReference &&
       hasVatAmountLabel &&
       !hasNetLikeLabel
     ) {
       totalVat = pickedVat;
+      vatFromExplicitLine = true;
     }
 
     if (
@@ -647,6 +663,7 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
       hasNetLikeLabel
     ) {
       totalNet = Math.max(...filteredAmounts);
+      netFromExplicitLine = true;
     }
 
     if (
@@ -693,6 +710,10 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     if (Math.abs(componentSum - totalGross) < 0.02 && !hasExplicitVatLine) {
       totalNet = totalGross;
       totalVat = 0;
+      // Inferred "no VAT" from component-sum reconciliation; this is structural,
+      // not an explicit OCR statement that VAT is 0.
+      vatFromExplicitLine = false;
+      netFromExplicitLine = false;
     }
   }
 
@@ -700,6 +721,7 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     total_net: totalNet,
     total_vat: totalVat,
     total_gross: totalGross,
+    vat_explicit: totalVat !== undefined && (vatFromExplicitLine || netFromExplicitLine),
   };
 }
 

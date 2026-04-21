@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
@@ -104,8 +104,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         content: [{
           type: "text",
           text: toMcpJson({
-            hints,
-            extracted,
+            hints: { ...hints, raw_text: wrapUntrustedOcr(hints.raw_text) ?? "" },
+            extracted: { ...extracted, raw_text: wrapUntrustedOcr(extracted.raw_text) },
             llm_fallback: llmFallback,
             page_count: parsedDocument.pageCount,
           }),

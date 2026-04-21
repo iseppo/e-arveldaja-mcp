@@ -3,7 +3,7 @@ import { extname, join } from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { validateFilePath, getAllowedRoots, resolveFilePath } from "../file-validation.js";
 import { roundMoney } from "../money.js";
@@ -119,6 +119,20 @@ interface ReceiptBatchFileResult {
   notes: string[];
   error?: string;
   review_guidance?: ReviewGuidance;
+}
+
+/**
+ * Wrap `extracted.raw_text` with untrusted-OCR delimiters for MCP output so a
+ * downstream LLM cannot be tricked into executing instructions embedded in a
+ * scanned receipt. Internal consumers keep using the raw text directly; this
+ * transform runs only at tool-output boundaries.
+ */
+function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): ReceiptBatchFileResult {
+  if (!result.extracted?.raw_text) return result;
+  return {
+    ...result,
+    extracted: { ...result.extracted, raw_text: wrapUntrustedOcr(result.extracted.raw_text) },
+  };
 }
 
 interface TransactionMatchCandidate {
@@ -908,7 +922,14 @@ async function createAndMaybeMatchPurchaseInvoice(
     itemNetAmount,
     context.purchaseArticlesWithVat,
     context.isVatRegistered,
-    extracted.total_vat === 0 ? "-" : extracted.total_vat !== undefined ? bookingSuggestion.item.vat_rate_dropdown : undefined,
+    // Only treat total_vat === 0 as "no VAT" when the OCR explicitly said so; a structurally-
+    // derived zero (e.g. extractAmounts fallback when the VAT line could not be read) should
+    // fall through to the booking suggestion's default VAT rate instead of silently stripping VAT.
+    extracted.total_vat === 0 && extracted.vat_explicit
+      ? "-"
+      : extracted.total_vat !== undefined
+        ? bookingSuggestion.item.vat_rate_dropdown
+        : undefined,
   );
 
   const invoiceDraft: InvoiceSummaryForMatching = {
@@ -1206,9 +1227,18 @@ async function resolveSupplierFromTransaction(
     }
   }
 
+  // Without any counterparty signal we would feed resolveSupplierInternal a
+  // placeholder like "Transaction 123" and potentially create a bogus client.
+  // Treat that as unresolved supplier instead.
+  const supplierName = transaction.bank_account_name ?? transaction.description;
+  const supplierIban = transaction.bank_account_no ?? undefined;
+  if (!supplierName && !supplierIban) {
+    return { found: false, created: false };
+  }
+
   return resolveSupplierInternal(api, clients, {
-    supplier_name: transaction.bank_account_name ?? transaction.description ?? `Transaction ${transaction.id ?? ""}`.trim(),
-    supplier_iban: transaction.bank_account_no ?? undefined,
+    supplier_name: supplierName ?? "",
+    supplier_iban: supplierIban,
   }, execute, {
     classification_category: classificationCategory,
   });
@@ -1291,6 +1321,9 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       const bankTransactions = allTransactions.filter(transaction =>
         transaction.accounts_dimensions_id === accounts_dimensions_id &&
         isProjectTransaction(transaction) &&
+        // All API-created and CAMT-imported bank transactions are type "C" regardless of
+        // debit/credit direction (see CLAUDE.md). This filter is a defensive guard — any
+        // legacy type="D" rows are intentionally excluded from auto-match.
         transaction.type === "C" &&
         (!date_from || transaction.date >= date_from) &&
         (!date_to || transaction.date <= date_to),
@@ -1488,6 +1521,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         dry_run_preview: results.filter(result => result.status === "dry_run_preview").length,
       };
       const mode = dryRun ? "DRY_RUN" : "EXECUTED";
+      const sanitizedResults = results.map(sanitizeReceiptResultForOutput);
 
       return {
         content: [{
@@ -1498,18 +1532,18 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             accounts_dimensions_id,
             summary,
             skipped: scan.skipped,
-            results,
+            results: sanitizedResults,
             execution: buildBatchExecutionContract({
               mode,
               summary,
-              results: results.filter(result =>
+              results: sanitizedResults.filter(result =>
                 result.status === "created" ||
                 result.status === "matched" ||
                 result.status === "dry_run_preview"
               ),
-              skipped: results.filter(result => result.status === "skipped_duplicate"),
-              errors: results.filter(result => result.status === "failed"),
-              needs_review: results.filter(result => result.status === "needs_review"),
+              skipped: sanitizedResults.filter(result => result.status === "skipped_duplicate"),
+              errors: sanitizedResults.filter(result => result.status === "failed"),
+              needs_review: sanitizedResults.filter(result => result.status === "needs_review"),
             }),
           }),
         }],

@@ -196,7 +196,7 @@ function cashMapToObject(map: Map<string, number>): Record<string, number> {
   // Sub-cent residuals are treated as balanced — is_balanced uses the same 0.01 threshold.
   return Object.fromEntries(
     [...map.entries()]
-      .map(([currency, amount]) => [currency, roundMoney(amount)])
+      .map(([currency, amount]): [string, number] => [currency, roundMoney(amount)])
       .filter(([, amount]) => Math.abs(amount) >= 0.01)
       .sort(([a], [b]) => a.localeCompare(b))
   );

@@ -138,11 +138,12 @@ describe("extractAmounts", () => {
   it("prefers the gross amount on VAT-inclusive total lines", () => {
     const result = extractAmounts("Kokku €22.87 (sisaldab €4.12 käibemaksu)");
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       total_net: 18.75,
       total_vat: 4.12,
       total_gross: 22.87,
     });
+    expect(result.vat_explicit).toBe(true);
   });
 
   it("treats component sums without VAT lines as zero-vat totals", () => {
@@ -152,11 +153,12 @@ describe("extractAmounts", () => {
       "Kokku €15.64",
     ].join("\n"));
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       total_net: 15.64,
       total_vat: 0,
       total_gross: 15.64,
     });
+    expect(result.vat_explicit).toBe(false);
   });
 
   it("recomputes net amounts when OCR subtotal and gross collapse onto the same value", () => {
@@ -166,11 +168,12 @@ describe("extractAmounts", () => {
       "Total €21.96",
     ].join("\n"));
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       total_net: 18,
       total_vat: 3.96,
       total_gross: 21.96,
     });
+    expect(result.vat_explicit).toBe(true);
   });
 
   it("does not treat käibemaksuta lines as VAT amounts", () => {
@@ -180,11 +183,12 @@ describe("extractAmounts", () => {
       "Summa kokku 10,99 €",
     ].join("\n"));
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       total_net: 10.47,
       total_vat: 0.52,
       total_gross: 10.99,
     });
+    expect(result.vat_explicit).toBe(true);
   });
 
   it("does not treat price lines with embedded KM percentages as VAT rows", () => {
@@ -194,11 +198,12 @@ describe("extractAmounts", () => {
       "Kokku 18,60 EUR",
     ].join("\n"));
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       total_net: 15.25,
       total_vat: 3.35,
       total_gross: 18.6,
     });
+    expect(result.vat_explicit).toBe(true);
   });
 
   it("extracts KM-ta and KM-ga summary rows used by IKEA-style invoices", () => {
@@ -207,11 +212,12 @@ describe("extractAmounts", () => {
       "Summa eurodes (KM-ga) 181,69",
     ].join("\n"));
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       total_net: 151.41,
       total_vat: 30.28,
       total_gross: 181.69,
     });
+    expect(result.vat_explicit).toBe(true);
   });
 
   it("ignores years and ZIP codes as fallback gross amounts", () => {
@@ -236,11 +242,12 @@ describe("extractAmounts", () => {
       "Total including VAT (EUR): 15.10",
     ].join("\n"));
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       total_net: 13.73,
       total_vat: 1.37,
       total_gross: 15.1,
     });
+    expect(result.vat_explicit).toBe(true);
   });
 
   it("does not treat years on paid-amount lines as the gross total", () => {
@@ -257,11 +264,12 @@ describe("extractAmounts", () => {
       "käibemaksu)",
     ].join("\n"));
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       total_net: 18.75,
       total_vat: 4.12,
       total_gross: 22.87,
     });
+    expect(result.vat_explicit).toBe(true);
   });
 });
 
