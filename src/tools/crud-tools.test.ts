@@ -43,14 +43,17 @@ function getCrudToolHarness(toolName: string, overrides?: {
     },
     journals: {
       update: vi.fn(),
+      get: vi.fn().mockResolvedValue({ id: 7, registered: false }),
       ...overrides?.journals,
     },
     saleInvoices: {
       update: vi.fn(),
+      get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
       ...overrides?.saleInvoices,
     },
     purchaseInvoices: {
       update: vi.fn(),
+      get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
       ...overrides?.purchaseInvoices,
     },
   };
@@ -440,5 +443,68 @@ describe("update_* allowlists", () => {
     });
     await handler({ id: 7, data: '{"email":"new@example.com"}' });
     expect(api.clients.update).toHaveBeenCalledWith(7, { email: "new@example.com" });
+  });
+});
+
+describe("update_* post-confirmation audit lock", () => {
+  it("update_journal rejects effective_date on a registered journal", async () => {
+    const { api, handler } = getCrudToolHarness("update_journal", {
+      journals: {
+        get: vi.fn().mockResolvedValue({ id: 7, registered: true }),
+        update: vi.fn(),
+      },
+    });
+    const result = await handler({ id: 7, data: '{"effective_date":"2026-05-01"}' }) as { content: Array<{ text: string }> };
+    expect(api.journals.update).not.toHaveBeenCalled();
+    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(body.details[0]).toMatch(/"effective_date".*CONFIRMED journal.*invalidate_journal/);
+  });
+
+  it("update_journal allows effective_date on an unregistered (draft) journal", async () => {
+    const { api, handler } = getCrudToolHarness("update_journal", {
+      journals: {
+        get: vi.fn().mockResolvedValue({ id: 7, registered: false }),
+        update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }),
+      },
+    });
+    await handler({ id: 7, data: '{"effective_date":"2026-05-01"}' });
+    expect(api.journals.update).toHaveBeenCalledWith(7, { effective_date: "2026-05-01" });
+  });
+
+  it("update_sale_invoice rejects create_date on a CONFIRMED invoice", async () => {
+    const { api, handler } = getCrudToolHarness("update_sale_invoice", {
+      saleInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "CONFIRMED" }),
+        update: vi.fn(),
+      },
+    });
+    const result = await handler({ id: 7, data: '{"create_date":"2026-05-01"}' }) as { content: Array<{ text: string }> };
+    expect(api.saleInvoices.update).not.toHaveBeenCalled();
+    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(body.details[0]).toMatch(/"create_date".*CONFIRMED sale_invoice.*invalidate_sale_invoice/);
+  });
+
+  it("update_sale_invoice allows create_date on a PROJECT invoice", async () => {
+    const { api, handler } = getCrudToolHarness("update_sale_invoice", {
+      saleInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
+        update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }),
+      },
+    });
+    await handler({ id: 7, data: '{"create_date":"2026-05-01"}' });
+    expect(api.saleInvoices.update).toHaveBeenCalledWith(7, { create_date: "2026-05-01" });
+  });
+
+  it("update_purchase_invoice rejects journal_date on a CONFIRMED invoice", async () => {
+    const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "CONFIRMED" }),
+        update: vi.fn(),
+      },
+    });
+    const result = await handler({ id: 7, data: '{"journal_date":"2026-05-01"}' }) as { content: Array<{ text: string }> };
+    expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
+    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(body.details[0]).toMatch(/"journal_date".*CONFIRMED purchase_invoice.*invalidate_purchase_invoice/);
   });
 });

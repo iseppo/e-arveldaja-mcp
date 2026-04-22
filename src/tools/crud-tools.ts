@@ -259,29 +259,50 @@ function validateTransactionUpdateData(data: Record<string, unknown>): string[] 
  * but denylist-style so we don't have to track every legitimately-updatable
  * field as the API surface grows.
  */
-const UPDATE_BLOCKED_FIELDS: Record<string, { fields: string[]; alt: string }> = {
+const UPDATE_BLOCKED_FIELDS: Record<string, { fields: string[]; alt: string; post_confirm_fields?: string[] }> = {
   client:           { fields: ["id", "is_active", "deactivated_date"],
                        alt: "use deactivate_client / restore_client to change activation state" },
   product:          { fields: ["id", "is_active", "deactivated_date"],
                        alt: "use deactivate_product / restore_product to change activation state" },
   journal:          { fields: ["id", "registered", "register_date", "status"],
-                       alt: "use confirm_journal / invalidate_journal to change registration state" },
+                       alt: "use confirm_journal / invalidate_journal to change registration state",
+                       post_confirm_fields: ["effective_date"] },
   sale_invoice:     { fields: ["id", "status", "registered", "register_date"],
-                       alt: "use confirm_sale_invoice / invalidate_sale_invoice to change registration state" },
+                       alt: "use confirm_sale_invoice / invalidate_sale_invoice to change registration state",
+                       post_confirm_fields: ["create_date", "journal_date"] },
   purchase_invoice: { fields: ["id", "status", "registered", "register_date", "payment_status"],
-                       alt: "use confirm_purchase_invoice / invalidate_purchase_invoice to change registration state" },
+                       alt: "use confirm_purchase_invoice / invalidate_purchase_invoice to change registration state",
+                       post_confirm_fields: ["create_date", "journal_date"] },
 };
 
-function validateUpdateFields(data: Record<string, unknown>, entity: keyof typeof UPDATE_BLOCKED_FIELDS): string[] {
+function validateUpdateFields(
+  data: Record<string, unknown>,
+  entity: keyof typeof UPDATE_BLOCKED_FIELDS,
+  opts?: { isConfirmed?: boolean },
+): string[] {
   const errors: string[] = [];
   if (Object.keys(data).length === 0) {
     errors.push(`update_${entity}: provide at least one field to update.`);
     return errors;
   }
-  const { fields: blocked, alt } = UPDATE_BLOCKED_FIELDS[entity]!;
-  for (const field of blocked) {
+  const entry = UPDATE_BLOCKED_FIELDS[entity]!;
+  for (const field of entry.fields) {
     if (field in data) {
-      errors.push(`Field "${field}" cannot be set via update_${entity} — ${alt}.`);
+      errors.push(`Field "${field}" cannot be set via update_${entity} — ${entry.alt}.`);
+    }
+  }
+  // Post-confirmation audit-trail protection: once a journal is registered or
+  // an invoice is CONFIRMED, certain fields (dates) are audit-locked. Edits
+  // must go through invalidate → edit → re-confirm so the audit trail
+  // records the reversal explicitly.
+  if (opts?.isConfirmed && entry.post_confirm_fields) {
+    for (const field of entry.post_confirm_fields) {
+      if (field in data) {
+        errors.push(
+          `Field "${field}" cannot be edited on a CONFIRMED ${entity} — ` +
+          `invalidate_${entity} first, then edit, then re-confirm. Preserves the audit trail.`
+        );
+      }
     }
   }
   return errors;
@@ -580,12 +601,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "update_journal", "Update a journal entry. Server-managed fields (id, registered, register_date, status) are rejected — use the dedicated confirm/invalidate tools.", {
+  registerTool(server, "update_journal", "Update a journal entry. Server-managed fields (id, registered, register_date, status) are rejected — use the dedicated confirm/invalidate tools. Once the journal is registered, effective_date is audit-locked; invalidate_journal first to edit it.", {
     id: coerceId.describe("Journal ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
-    const updateErrors = validateUpdateFields(parsed, "journal");
+    const current = await api.journals.get(id);
+    const updateErrors = validateUpdateFields(parsed, "journal", { isConfirmed: current.registered === true });
     if (updateErrors.length > 0) {
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
@@ -1075,12 +1097,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "update_sale_invoice", "Update a sales invoice. Server-managed fields (id, status, registered, register_date) are rejected — use the dedicated confirm/invalidate tools.", {
+  registerTool(server, "update_sale_invoice", "Update a sales invoice. Server-managed fields (id, status, registered, register_date) are rejected — use the dedicated confirm/invalidate tools. Once CONFIRMED, create_date and journal_date are audit-locked; invalidate_sale_invoice first to edit them.", {
     id: coerceId.describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
-    const updateErrors = validateUpdateFields(parsed, "sale_invoice");
+    const current = await api.saleInvoices.get(id);
+    const updateErrors = validateUpdateFields(parsed, "sale_invoice", { isConfirmed: current.status === "CONFIRMED" });
     if (updateErrors.length > 0) {
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
@@ -1235,12 +1258,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       return { content: [{ type: "text", text: toMcpJson(result) }] };
     });
 
-  registerTool(server, "update_purchase_invoice", "Update a purchase invoice. Server-managed fields (id, status, registered, register_date, payment_status) are rejected — use the dedicated confirm/invalidate tools.", {
+  registerTool(server, "update_purchase_invoice", "Update a purchase invoice. Server-managed fields (id, status, registered, register_date, payment_status) are rejected — use the dedicated confirm/invalidate tools. Once CONFIRMED, create_date and journal_date are audit-locked; invalidate_purchase_invoice first to edit them.", {
     id: coerceId.describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
-    const updateErrors = validateUpdateFields(parsed, "purchase_invoice");
+    const current = await api.purchaseInvoices.get(id);
+    const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed: current.status === "CONFIRMED" });
     if (updateErrors.length > 0) {
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
