@@ -11,3 +11,4 @@ dist/
 eng.traineddata
 est.traineddata
 logs/
+.mcpregistry_*_token

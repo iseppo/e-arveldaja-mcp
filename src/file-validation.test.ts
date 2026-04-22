@@ -205,4 +205,72 @@ describe("resolveFileInput (base64 payload support)", () => {
       resolveFileInput(`base64:xml:${pdfPayload.toString("base64")}`, [".pdf", ".xml"], 1024),
     ).rejects.toThrow("conflicts with detected content type");
   });
+
+  it("accepts JPEG magic bytes when the caller only listed .jpeg (not .jpg)", async () => {
+    const jpegPayload = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("fake jpeg body")]);
+    const result = await resolveFileInput(
+      `base64:${jpegPayload.toString("base64")}`,
+      [".jpeg"],
+      10 * 1024 * 1024,
+    );
+    try {
+      expect(extname(result.path)).toBe(".jpeg");
+      expect(readFileSync(result.path).equals(jpegPayload)).toBe(true);
+    } finally {
+      await result.cleanup?.();
+    }
+  });
+
+  it("does not flag .jpg hint vs .jpeg magic as a spoofing conflict", async () => {
+    const jpegPayload = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.from("body")]);
+    const result = await resolveFileInput(
+      `base64:jpeg:${jpegPayload.toString("base64")}`,
+      [".jpg"],
+      10 * 1024 * 1024,
+    );
+    try {
+      expect(extname(result.path)).toBe(".jpg");
+    } finally {
+      await result.cleanup?.();
+    }
+  });
+
+  it("detects XML magic bytes even when the content starts with a UTF-8 BOM", async () => {
+    const bom = Buffer.from([0xEF, 0xBB, 0xBF]);
+    const xmlPayload = Buffer.concat([bom, Buffer.from("<?xml version=\"1.0\"?><Doc/>")]);
+    const result = await resolveFileInput(
+      `base64:${xmlPayload.toString("base64")}`,
+      [".xml"],
+      10 * 1024 * 1024,
+    );
+    try {
+      expect(extname(result.path)).toBe(".xml");
+      expect(readFileSync(result.path).equals(xmlPayload)).toBe(true);
+    } finally {
+      await result.cleanup?.();
+    }
+  });
+
+  it("rejects obviously-oversized base64 before allocating the full buffer", async () => {
+    // 10 MB of base64 characters decodes to ~7.5 MB; maxSize 1 MB should trigger the
+    // approximate pre-decode guard instead of pulling the whole buffer into memory.
+    const huge = "A".repeat(10 * 1024 * 1024);
+    await expect(
+      resolveFileInput(`base64:pdf:${huge}`, [".pdf"], 1 * 1024 * 1024),
+    ).rejects.toThrow(/base64 payload too large/);
+  });
+
+  it("cleanup is idempotent so a caller's try/finally cannot accidentally throw on second invocation", async () => {
+    const pdfPayload = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.from("body")]);
+    const result = await resolveFileInput(
+      `base64:${pdfPayload.toString("base64")}`,
+      [".pdf"],
+      10 * 1024 * 1024,
+    );
+    expect(existsSync(result.path)).toBe(true);
+    await result.cleanup?.();
+    expect(existsSync(result.path)).toBe(false);
+    // Second cleanup must swallow the "file not found" from rm and not throw.
+    await expect(result.cleanup?.()).resolves.toBeUndefined();
+  });
 });

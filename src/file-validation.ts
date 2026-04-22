@@ -150,22 +150,45 @@ export async function validateFilePath(
 // invoke the returned `cleanup` once the file is no longer needed.
 const BASE64_PREFIX = "base64:";
 
-interface MagicSignature { extension: string; prefix: Uint8Array }
+interface MagicSignature {
+  // All extensions that this signature is considered equivalent to. The first one is the
+  // canonical form used for the tmp file suffix when none of the caller's allowedExtensions
+  // match any variant.
+  extensions: [string, ...string[]];
+  prefix: Uint8Array;
+  // If true, the prefix is text and may sit after a UTF-8 BOM (0xEF 0xBB 0xBF).
+  allowsUtf8Bom?: boolean;
+}
 const MAGIC_SIGNATURES: MagicSignature[] = [
-  { extension: ".pdf", prefix: Buffer.from("%PDF-") },
-  { extension: ".png", prefix: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
-  { extension: ".jpg", prefix: Buffer.from([0xff, 0xd8, 0xff]) },
-  { extension: ".xml", prefix: Buffer.from("<?xml") },
+  { extensions: [".pdf"], prefix: Buffer.from("%PDF-") },
+  { extensions: [".png"], prefix: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
+  { extensions: [".jpg", ".jpeg"], prefix: Buffer.from([0xff, 0xd8, 0xff]) },
+  { extensions: [".xml"], prefix: Buffer.from("<?xml"), allowsUtf8Bom: true },
 ];
 
-function sniffExtensionFromBytes(content: Buffer): string | undefined {
+function hasUtf8Bom(content: Buffer): boolean {
+  return content.length >= 3 && content[0] === 0xEF && content[1] === 0xBB && content[2] === 0xBF;
+}
+
+function sniffExtensionFromBytes(content: Buffer, allowedExtensions: string[]): string | undefined {
+  const bomPresent = hasUtf8Bom(content);
   for (const sig of MAGIC_SIGNATURES) {
-    if (content.length >= sig.prefix.length &&
-        sig.prefix.every((byte, i) => content[i] === byte)) {
-      return sig.extension;
+    const offset = sig.allowsUtf8Bom && bomPresent ? 3 : 0;
+    if (content.length - offset >= sig.prefix.length &&
+        sig.prefix.every((byte, i) => content[offset + i] === byte)) {
+      // Return the variant the caller declared, so `.jpg` magic can satisfy an allow-list
+      // that only spelled `.jpeg`. Falls back to the canonical form otherwise.
+      return sig.extensions.find(ext => allowedExtensions.includes(ext)) ?? sig.extensions[0];
     }
   }
   return undefined;
+}
+
+function canonicalExtension(ext: string): string {
+  for (const sig of MAGIC_SIGNATURES) {
+    if (sig.extensions.includes(ext)) return sig.extensions[0];
+  }
+  return ext;
 }
 
 function normalizeExtensionHint(hint: string): string {
@@ -174,9 +197,17 @@ function normalizeExtensionHint(hint: string): string {
   return trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
 }
 
-function decodeBase64Strict(encoded: string): Buffer {
+function decodeBase64Strict(encoded: string, maxSize?: number): Buffer {
   const cleaned = encoded.replace(/\s+/g, "");
   if (cleaned.length === 0) throw new Error("base64 payload is empty");
+  // Base64 expands to ~75% of its input size. Bail out before Buffer.from allocates
+  // hundreds of MB for an obviously-oversized payload.
+  if (maxSize !== undefined) {
+    const approxDecoded = Math.floor(cleaned.length * 3 / 4);
+    if (approxDecoded > maxSize) {
+      throw new Error(`base64 payload too large: ~${(approxDecoded / 1024 / 1024).toFixed(1)} MB (max ${maxSize / 1024 / 1024} MB)`);
+    }
+  }
   // Node's Buffer.from tolerates partial garbage; re-encode and compare to catch corruption.
   const buf = Buffer.from(cleaned, "base64");
   if (buf.length === 0 || buf.toString("base64").replace(/=+$/, "") !== cleaned.replace(/=+$/, "")) {
@@ -196,8 +227,10 @@ async function materializeBase64Input(
   let explicitExt: string | undefined;
   let b64Data: string;
   const firstColon = body.indexOf(":");
-  // An explicit extension hint is a short token (<= 5 chars, alphanumeric) preceding the colon.
-  // Longer or non-alphanumeric prefixes would collide with raw base64 data that happens to contain ":".
+  // A short alphanumeric prefix ending in ":" is an extension hint (e.g. "csv:"/"xml:").
+  // Base64's alphabet never contains ":", so the only way to see one here is a hint boundary;
+  // the length/alphanumeric guards just keep obviously-bogus prefixes (like urls) from being
+  // interpreted as file extensions.
   if (firstColon > 0 && firstColon <= 5 && /^[A-Za-z0-9]+$/.test(body.slice(0, firstColon))) {
     explicitExt = normalizeExtensionHint(body.slice(0, firstColon));
     b64Data = body.slice(firstColon + 1);
@@ -205,24 +238,32 @@ async function materializeBase64Input(
     b64Data = body;
   }
 
-  // Decode and size-check before writing anything to disk.
-  const decoded = decodeBase64Strict(b64Data);
+  // Decode and size-check before writing anything to disk. decodeBase64Strict does an
+  // approximate pre-decode check to avoid allocating huge buffers for garbage input;
+  // after decode we re-validate the exact size.
+  const decoded = decodeBase64Strict(b64Data, maxSize);
   if (decoded.length > maxSize) {
     throw new Error(`base64 payload too large: ${(decoded.length / 1024 / 1024).toFixed(1)} MB (max ${maxSize / 1024 / 1024} MB)`);
   }
 
-  const detectedExt = sniffExtensionFromBytes(decoded);
-  const extension = explicitExt ?? detectedExt;
+  const detectedExt = sniffExtensionFromBytes(decoded, allowedExtensions);
+  // Prefer the sniffed extension when both are available — sniffExtensionFromBytes already
+  // picks the variant the caller declared (`.jpg` vs `.jpeg`), so the tmp file suffix matches
+  // the caller's allow-list exactly. The explicit hint only kicks in for formats that have
+  // no magic signature (CSV, TXT, etc.).
+  const extension = detectedExt ?? explicitExt;
   if (!extension) {
     throw new Error(
       "Could not determine file type for base64 input. " +
       "Prefix the payload with an extension hint, e.g. \"base64:csv:<data>\" or \"base64:xml:<data>\".",
     );
   }
-  if (!allowedExtensions.includes(extension)) {
+  // Allow `.jpg` magic to satisfy `.jpeg` in allowedExtensions and vice versa via canonicalization.
+  const canonicalAllowed = new Set(allowedExtensions.map(canonicalExtension));
+  if (!canonicalAllowed.has(canonicalExtension(extension))) {
     throw new Error(`base64 payload has disallowed extension ${extension}. Expected one of ${allowedExtensions.join("/")}.`);
   }
-  if (explicitExt && detectedExt && explicitExt !== detectedExt) {
+  if (explicitExt && detectedExt && canonicalExtension(explicitExt) !== canonicalExtension(detectedExt)) {
     throw new Error(`base64 extension hint ${explicitExt} conflicts with detected content type ${detectedExt}.`);
   }
 

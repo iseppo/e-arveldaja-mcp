@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.6] - 2026-04-22
+
+### Added
+- **Base64 payload defence-in-depth** — `decodeBase64Strict` now rejects obviously-oversized inputs (~75% of the encoded length) before allocating the decoded buffer, so a multi-hundred-MB base64 payload can no longer force a full-size `Buffer.from` allocation before the post-decode size check would have caught it.
+- **UTF-8 BOM tolerance for XML magic-byte sniff** — CAMT files that start with `0xEF 0xBB 0xBF<?xml` (some bank exports do) are now detected as `.xml` instead of requiring an explicit `base64:xml:<data>` hint.
+- **`.jpg` / `.jpeg` variant matching** — the JPEG magic signature is marked as equivalent to both extensions. A caller who lists only `.jpeg` (or only `.jpg`) in its allow-list accepts base64 JPEG payloads either way, and the tmp file suffix matches the caller's vocabulary. Explicit `base64:jpeg:<data>` and `base64:jpg:<data>` hints are canonicalised before the spoof-conflict check.
+- **Tests covering the new edges** — oversize pre-decode guard, UTF-8 BOM XML, `.jpeg`-only allow-list, `.jpg`/`.jpeg` hint-vs-magic canonicalisation, and idempotent cleanup.
+
+### Changed
+- **`server.json`** description tightened to 85 characters (was 81) to fit the registry's 100-character limit with more room for useful context: "Estonian e-arveldaja (RIK e-Financials) accounting — invoices, bank import, reports."
+- **README** now has a short "Releasing to the MCP Registry" section pointing maintainers at the official `mcp-publisher` GitHub release (the snap package shipped by `habedi` ships an old CLI that rejects the current schema as "deprecated").
+
 ## [0.11.5] - 2026-04-22
 
 ### Added

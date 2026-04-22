@@ -270,6 +270,15 @@ This now runs self-contained MCP surface checks by default against a locally spa
 EARVELDAJA_INTEGRATION_TEST=true npm run test:integration
 ```
 
+### Releasing to the MCP Registry
+
+Submissions to the [MCP Registry](https://registry.modelcontextprotocol.io) are driven by `server.json`. Use the official `mcp-publisher` binary from the [`modelcontextprotocol/registry` GitHub releases](https://github.com/modelcontextprotocol/registry/releases) rather than third-party snap/brew packages — unofficial channels can lag behind the current schema and reject the `$schema` version as "deprecated". A one-liner to install the latest version into `~/.local/bin` (make sure that directory is on your `PATH` before any system-wide install):
+
+```bash
+mkdir -p ~/.local/bin && curl -sSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz -C /tmp mcp-publisher && install -m 0755 /tmp/mcp-publisher ~/.local/bin/mcp-publisher && rm -f /tmp/mcp-publisher
+```
+
+Then: `npm publish` (so the registry can cross-reference `mcpName`) → `mcp-publisher login github` → `mcp-publisher publish`.
 
 ## Good to know
 

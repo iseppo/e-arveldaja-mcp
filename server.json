@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.iseppo/e-arveldaja-mcp",
-  "description": "MCP server for the Estonian e-arveldaja (RIK e-Financials) accounting API. Import bank statements, book purchase invoices from PDFs, reconcile transactions, and produce financial reports.",
+  "description": "Estonian e-arveldaja (RIK e-Financials) accounting — invoices, bank import, reports.",
   "repository": {
     "url": "https://github.com/iseppo/e-arveldaja-mcp",
     "source": "github"
   },
-  "version": "0.11.5",
+  "version": "0.11.6",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "e-arveldaja-mcp",
-      "version": "0.11.5",
+      "version": "0.11.6",
       "transport": {
         "type": "stdio"
       },
