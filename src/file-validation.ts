@@ -200,10 +200,13 @@ function normalizeExtensionHint(hint: string): string {
 function decodeBase64Strict(encoded: string, maxSize?: number): Buffer {
   const cleaned = encoded.replace(/\s+/g, "");
   if (cleaned.length === 0) throw new Error("base64 payload is empty");
-  // Base64 expands to ~75% of its input size. Bail out before Buffer.from allocates
-  // hundreds of MB for an obviously-oversized payload.
+  // Bail out before Buffer.from allocates hundreds of MB for an obviously-oversized
+  // payload. The exact decoded size is floor(length / 4) * 3 minus the number of `=`
+  // padding chars — a naive "* 3 / 4" over-counts by up to 2 bytes and would falsely
+  // reject uploads that sit exactly at maxSize when the byte count isn't divisible by 3.
   if (maxSize !== undefined) {
-    const approxDecoded = Math.floor(cleaned.length * 3 / 4);
+    const padCount = cleaned.endsWith("==") ? 2 : cleaned.endsWith("=") ? 1 : 0;
+    const approxDecoded = Math.floor(cleaned.length / 4) * 3 - padCount;
     if (approxDecoded > maxSize) {
       throw new Error(`base64 payload too large: ~${(approxDecoded / 1024 / 1024).toFixed(1)} MB (max ${maxSize / 1024 / 1024} MB)`);
     }

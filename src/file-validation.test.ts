@@ -260,6 +260,25 @@ describe("resolveFileInput (base64 payload support)", () => {
     ).rejects.toThrow(/base64 payload too large/);
   });
 
+  it("accepts a payload whose exact decoded size equals maxSize (regression — pre-decode guard must not over-estimate)", async () => {
+    // 52428799 bytes = 50 MiB - 1. Byte count NOT divisible by 3, so the encoded form
+    // carries a trailing `=` pad. A naive `cleaned.length * 3 / 4` over-estimate would
+    // reject this even though the actual decoded size is exactly at the limit.
+    const exactSize = 50 * 1024 * 1024 - 1;
+    const body = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(exactSize - 9, 0x20)]);
+    expect(body.length).toBe(exactSize);
+    const result = await resolveFileInput(
+      `base64:${body.toString("base64")}`,
+      [".pdf"],
+      exactSize,
+    );
+    try {
+      expect(existsSync(result.path)).toBe(true);
+    } finally {
+      await result.cleanup?.();
+    }
+  });
+
   it("cleanup is idempotent so a caller's try/finally cannot accidentally throw on second invocation", async () => {
     const pdfPayload = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.from("body")]);
     const result = await resolveFileInput(
