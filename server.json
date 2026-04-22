@@ -1,0 +1,58 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.iseppo/e-arveldaja-mcp",
+  "description": "MCP server for the Estonian e-arveldaja (RIK e-Financials) accounting API. Import bank statements, book purchase invoices from PDFs, reconcile transactions, and produce financial reports.",
+  "repository": {
+    "url": "https://github.com/iseppo/e-arveldaja-mcp",
+    "source": "github"
+  },
+  "version": "0.11.5",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "e-arveldaja-mcp",
+      "version": "0.11.5",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "EARVELDAJA_API_KEY_ID",
+          "description": "RIK e-arveldaja API key ID. Can alternatively be supplied via a .env file or an apikey*.txt file in the working directory.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "EARVELDAJA_API_PUBLIC_VALUE",
+          "description": "RIK e-arveldaja API public value. Can alternatively be supplied via a .env file or an apikey*.txt file in the working directory.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "EARVELDAJA_API_PASSWORD",
+          "description": "RIK e-arveldaja API password (HMAC signing secret). Can alternatively be supplied via a .env file or an apikey*.txt file in the working directory.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "EARVELDAJA_SERVER",
+          "description": "Which RIK server to target. \"live\" (default) or \"demo\".",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "default": "live"
+        },
+        {
+          "name": "EARVELDAJA_ALLOWED_PATHS",
+          "description": "Platform-separated (colon on Linux/macOS, semicolon on Windows) list of directories that file-reading tools are allowed to read from. Defaults to the working directory and the OS temp dir.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

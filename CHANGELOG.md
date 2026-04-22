@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.11.5] - 2026-04-22
+
+### Added
+- **MCP Registry publication metadata** (towards #8) — `package.json` now exposes an `mcpName` property (`io.github.iseppo/e-arveldaja-mcp`) and a new top-level `server.json` describes the server for the Model Context Protocol Registry (repository, transport, environment variables). Once this version is published to npm and `mcp-publisher publish` is run against the project, the server becomes discoverable in the registry so clients like Claude Cowork (which only loads registry-listed servers) can connect without the `claude mcp add` CLI step. Registry submission itself still requires a maintainer to run `mcp-publisher login github` + `mcp-publisher publish`.
+
 ## [0.11.4] - 2026-04-22
 
 ### Added
