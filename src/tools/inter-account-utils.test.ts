@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildBankAccountLookups, buildInterAccountJournalIndex } from "./inter-account-utils.js";
+import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal } from "./inter-account-utils.js";
 import type { BankAccount, AccountDimension, Journal, Posting } from "../types/api.js";
 
 // --- Helpers ---
@@ -191,10 +191,10 @@ describe("buildInterAccountJournalIndex", () => {
     ];
     const result = buildInterAccountJournalIndex(journals, ownDims);
 
-    // key1: credit|debit|amount|date
-    expect(result.get("10|20|500|2024-03-15")).toBe(1001);
+    // key1: credit|debit|amount|date → [{ journal_id, document_number }]
+    expect(result.get("10|20|500|2024-03-15")?.[0]?.journal_id).toBe(1001);
     // key2: debit|credit|amount|date
-    expect(result.get("20|10|500|2024-03-15")).toBe(1001);
+    expect(result.get("20|10|500|2024-03-15")?.[0]?.journal_id).toBe(1001);
     expect(result.size).toBe(2);
   });
 
@@ -207,8 +207,8 @@ describe("buildInterAccountJournalIndex", () => {
     ];
     const result = buildInterAccountJournalIndex(journals, ownDims);
 
-    expect(result.get("10|20|500|2024-04-01")).toBe(2001);
-    expect(result.get("20|10|500|2024-04-01")).toBe(2001);
+    expect(result.get("10|20|500|2024-04-01")?.[0]?.journal_id).toBe(2001);
+    expect(result.get("20|10|500|2024-04-01")?.[0]?.journal_id).toBe(2001);
   });
 
   it("skips deleted journals", () => {
@@ -326,11 +326,33 @@ describe("buildInterAccountJournalIndex", () => {
     ];
     const result = buildInterAccountJournalIndex(journals, ownDims);
 
-    expect(result.get("10|20|1000|2024-01-10")).toBe(101);
-    expect(result.get("20|10|1000|2024-01-10")).toBe(101);
-    expect(result.get("20|30|750|2024-01-11")).toBe(102);
-    expect(result.get("30|20|750|2024-01-11")).toBe(102);
+    expect(result.get("10|20|1000|2024-01-10")?.[0]?.journal_id).toBe(101);
+    expect(result.get("20|10|1000|2024-01-10")?.[0]?.journal_id).toBe(101);
+    expect(result.get("20|30|750|2024-01-11")?.[0]?.journal_id).toBe(102);
+    expect(result.get("30|20|750|2024-01-11")?.[0]?.journal_id).toBe(102);
     expect(result.size).toBe(4);
+  });
+
+  it("collects multiple journals sharing (sourceDim, targetDim, amount, date) into the same key", () => {
+    // Two unrelated €500 LHV↔SEB transfers on the same day with different
+    // reference numbers — now stored together so reference-based
+    // disambiguation in findMatchingJournal can tell them apart.
+    const journals: Journal[] = [
+      makeJournal(401, "2024-11-01", [
+        makePosting(10, "C", 500),
+        makePosting(20, "D", 500),
+      ], { document_number: "WISE-A" }),
+      makeJournal(402, "2024-11-01", [
+        makePosting(10, "C", 500),
+        makePosting(20, "D", 500),
+      ], { document_number: "WISE-B" }),
+    ];
+    const result = buildInterAccountJournalIndex(journals, ownDims);
+
+    const entries = result.get("10|20|500|2024-11-01");
+    expect(entries).toHaveLength(2);
+    expect(entries?.map(e => e.journal_id).sort()).toEqual([401, 402]);
+    expect(entries?.map(e => e.document_number).sort()).toEqual(["WISE-A", "WISE-B"]);
   });
 
   it("rounds amount to 2 decimal places in the key", () => {
@@ -357,5 +379,52 @@ describe("buildInterAccountJournalIndex", () => {
     const result = buildInterAccountJournalIndex(journals, ownDims);
 
     expect(result.size).toBe(0);
+  });
+});
+
+describe("findMatchingJournal", () => {
+  it("returns undefined for empty/undefined candidate list", () => {
+    expect(findMatchingJournal(undefined, "anything")).toBeUndefined();
+    expect(findMatchingJournal([], "anything")).toBeUndefined();
+  });
+
+  it("returns the single candidate when no reference disambiguation is requested", () => {
+    expect(findMatchingJournal([{ journal_id: 42 }])).toBe(42);
+    expect(findMatchingJournal([{ journal_id: 42, document_number: "REF-1" }])).toBe(42);
+  });
+
+  it("prefers an exact reference match over a ref-less candidate", () => {
+    const candidates = [
+      { journal_id: 100, document_number: null },
+      { journal_id: 200, document_number: "WISE-X" },
+    ];
+    expect(findMatchingJournal(candidates, "WISE-X")).toBe(200);
+  });
+
+  it("returns undefined when every candidate has a reference and none match the input", () => {
+    // Two unrelated €500 same-day transfers with different refs — the new
+    // import should NOT be suppressed by either existing journal.
+    const candidates = [
+      { journal_id: 100, document_number: "WISE-A" },
+      { journal_id: 200, document_number: "WISE-B" },
+    ];
+    expect(findMatchingJournal(candidates, "WISE-C")).toBeUndefined();
+  });
+
+  it("falls back to a ref-less candidate when some have refs and none match", () => {
+    const candidates = [
+      { journal_id: 100, document_number: null },
+      { journal_id: 200, document_number: "WISE-B" },
+    ];
+    expect(findMatchingJournal(candidates, "WISE-C")).toBe(100);
+  });
+
+  it("returns the first candidate when no reference is provided (loose match)", () => {
+    const candidates = [
+      { journal_id: 100, document_number: "WISE-A" },
+      { journal_id: 200, document_number: "WISE-B" },
+    ];
+    expect(findMatchingJournal(candidates)).toBe(100);
+    expect(findMatchingJournal(candidates, "")).toBe(100);
   });
 });

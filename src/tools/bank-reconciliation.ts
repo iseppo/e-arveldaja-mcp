@@ -10,7 +10,7 @@ import { buildBatchExecutionContract } from "../batch-execution.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
-import { buildBankAccountLookups, buildInterAccountJournalIndex } from "./inter-account-utils.js";
+import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal } from "./inter-account-utils.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -623,13 +623,22 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       const allJournals = await api.journals.listAllWithPostings();
       const existingInterAccountKeys = buildInterAccountJournalIndex(allJournals, ownDimensionIds);
 
-      /** Check if an inter-account transfer is already journalized */
-      function findExistingJournal(sourceDim: number, targetDim: number, amount: number, date: string, maxGapDays: number): number | undefined {
-        // Round to avoid floating point mismatches
+      /**
+       * Check if an inter-account transfer is already journalized. When the
+       * transaction carries a `bank_ref_number` / `ref_number`, the reference
+       * is used to disambiguate multiple journals sharing amount+date+dims —
+       * only a same-reference or ref-less existing journal counts as a
+       * duplicate. Unrelated transfers with different references no longer
+       * suppress each other.
+       */
+      function findExistingJournal(
+        sourceDim: number, targetDim: number, amount: number, date: string, maxGapDays: number,
+        referenceNumber?: string | null,
+      ): number | undefined {
         const roundedAmount = roundMoney(amount);
         const exactKey = `${sourceDim}|${targetDim}|${roundedAmount}|${date}`;
-        if (existingInterAccountKeys.has(exactKey)) return existingInterAccountKeys.get(exactKey);
-        // Check nearby dates
+        const exact = findMatchingJournal(existingInterAccountKeys.get(exactKey), referenceNumber);
+        if (exact !== undefined) return exact;
         if (maxGapDays > 0) {
           const d = new Date(date);
           for (let offset = -maxGapDays; offset <= maxGapDays; offset++) {
@@ -637,7 +646,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             const nearby = new Date(d.getTime() + offset * 86_400_000);
             const nearbyStr = nearby.toISOString().split("T")[0]!;
             const nearbyKey = `${sourceDim}|${targetDim}|${roundedAmount}|${nearbyStr}`;
-            if (existingInterAccountKeys.has(nearbyKey)) return existingInterAccountKeys.get(nearbyKey);
+            const nearbyMatch = findMatchingJournal(existingInterAccountKeys.get(nearbyKey), referenceNumber);
+            if (nearbyMatch !== undefined) return nearbyMatch;
           }
         }
         return undefined;
@@ -925,6 +935,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               txOutComparableAmount,
               txOut.date,
               maxGap,
+              txOut.bank_ref_number ?? txOut.ref_number,
             ),
           });
         }
@@ -1084,6 +1095,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               compatibility.txAComparableAmount,
               tx.date,
               maxGap,
+              tx.bank_ref_number ?? tx.ref_number,
             ),
           });
         }
@@ -1247,6 +1259,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           comparableTransactionAmount(tx),
           tx.date,
           maxGap,
+          tx.bank_ref_number ?? tx.ref_number,
         );
         if (existingJournalId) {
           consumedTxIds.add(tx.id);

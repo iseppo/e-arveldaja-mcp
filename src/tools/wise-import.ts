@@ -14,7 +14,7 @@ import { isNonVoidTransaction } from "../transaction-status.js";
 import { parseCSV } from "../csv.js";
 import { roundMoney } from "../money.js";
 import { normalizeCompanyName } from "../company-name.js";
-import { buildInterAccountJournalIndex } from "./inter-account-utils.js";
+import { buildInterAccountJournalIndex, findMatchingJournal } from "./inter-account-utils.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 
 interface WiseRow {
@@ -374,11 +374,24 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
 
       // Filter rows
       let skippedJarCount = 0;
+      // Jar-filtered rows used to be counted but invisible in the response.
+      // Surface them as full skip records so a user auditing why a known
+      // transfer wasn't imported can see it landed in the Jar branch.
+      const skippedJarRows: Array<{ wise_id: string; reason: string; amount: number; date: string }> = [];
       const eligible = rows.filter(r => {
         if (r.status !== "COMPLETED") return false;
         if (normalizeWiseDirection(r.direction) === "NEUTRAL") return false;
         if (r.sourceAmount === 0 && r.targetAmount === 0) return false;
-        if (skipJars && isJarTransfer(r)) { skippedJarCount++; return false; }
+        if (skipJars && isJarTransfer(r)) {
+          skippedJarCount++;
+          skippedJarRows.push({
+            wise_id: r.id,
+            reason: "Jar / self-transfer detected (pass skip_jar_transfers=false to include)",
+            amount: r.sourceAmount !== 0 ? r.sourceAmount : r.targetAmount,
+            date: wiseDate(r.finishedOn || r.createdOn),
+          });
+          return false;
+        }
         const date = wiseDate(r.finishedOn || r.createdOn);
         if (date_from && date < date_from) return false;
         if (date_to && date > date_to) return false;
@@ -660,6 +673,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         amount: number;
         status: string;
         journal_id?: number;
+        orphan_project_transaction_id?: number;
+        orphan_action_hint?: string;
       }> = [];
 
       // Identify created transfer transactions (not fees, not card payments)
@@ -724,10 +739,17 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
 
             for (const entry of transferEntries) {
               const roundedAmount = roundMoney(entry.amount);
-              // Check both directions for existing journal
+              // Check both directions for existing journal. The Wise ID acts
+              // as a per-transfer reference — findMatchingJournal will only
+              // suppress the confirmation when an existing journal's
+              // document_number carries the same reference (or no reference
+              // at all, preserving pre-disambiguation behaviour).
               const key1 = `${accounts_dimensions_id}|${targetDimensionId}|${roundedAmount}|${entry.date}`;
               const key2 = `${targetDimensionId}|${accounts_dimensions_id}|${roundedAmount}|${entry.date}`;
-              const existingJournal = existingInterAccountKeys.get(key1) ?? existingInterAccountKeys.get(key2);
+              const existingJournal = findMatchingJournal(
+                existingInterAccountKeys.get(key1) ?? existingInterAccountKeys.get(key2),
+                entry.wise_id,
+              );
 
               if (existingJournal) {
                 interAccountResults.push({
@@ -764,11 +786,20 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                   // Update the created entry status
                   entry.status = "created_and_confirmed_inter_account";
                 } catch (err: unknown) {
+                  // Orphan-PROJECT warning: the transaction was created in the
+                  // API (api_id assigned) but confirmation failed. A retry
+                  // would hit the wise-ID dedup and skip, leaving the row
+                  // permanently in PROJECT status. Surface api_id explicitly
+                  // as `orphan_project_transaction_id` so the user can
+                  // invalidate/retry manually.
+                  const errorMessage = err instanceof Error ? err.message : String(err);
                   interAccountResults.push({
                     api_id: entry.api_id!,
                     wise_id: entry.wise_id,
                     amount: entry.amount,
-                    status: "confirm_failed: " + (err instanceof Error ? err.message : String(err)),
+                    status: "confirm_failed: " + errorMessage,
+                    orphan_project_transaction_id: entry.api_id!,
+                    orphan_action_hint: `Transaction ${entry.api_id} was created but left in PROJECT status. Rerunning the import will skip it via wise_id dedup. To retry confirmation: invalidate_transaction(${entry.api_id}), then delete_transaction(${entry.api_id}) and rerun — or confirm_transaction(${entry.api_id}) manually against the target bank account.`,
                   });
                 }
               }
@@ -809,7 +840,10 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             total_csv_rows: summary.total_csv_rows,
             eligible: summary.eligible,
             filtered_out: summary.filtered_out,
-            ...(skippedJarCount > 0 ? { skipped_jar_transfers: skippedJarCount } : {}),
+            ...(skippedJarCount > 0 ? {
+              skipped_jar_transfers: skippedJarCount,
+              skipped_jar_transfer_details: skippedJarRows,
+            } : {}),
             created: summary.created,
             skipped: skipped.length,
             ...(autoDetectedInterAccountDimId && transferEntries.length > 0 && dryRun ? {
