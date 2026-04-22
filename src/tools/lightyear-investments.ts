@@ -77,7 +77,13 @@ interface InvestmentTrade {
 
 function parseNumber(s: string): number {
   if (!s || s.trim() === "") return 0;
-  return parseFloat(s.replace(/,/g, ""));
+  // Lightyear exports US-formatted numbers (thousands separator = comma,
+  // decimal = dot). Strip commas before parseFloat.
+  const parsed = parseFloat(s.replace(/,/g, ""));
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Unparseable numeric value: "${s}"`);
+  }
+  return parsed;
 }
 
 const KNOWN_LIGHTYEAR_TYPES = new Set<AccountStatementRow["type"]>([
@@ -421,25 +427,48 @@ function extractDistributions(rows: AccountStatementRow[]): Array<{
     }));
 }
 
-async function findExistingJournalsByRef(api: ApiContext, references: string[]): Promise<Set<string>> {
-  if (references.length === 0) return new Set();
+interface LightyearRefLookup {
+  reference: string;
+  date: string;
+}
+
+async function findExistingJournalsByRef(
+  api: ApiContext,
+  lookups: LightyearRefLookup[],
+): Promise<Set<string>> {
+  if (lookups.length === 0) return new Set();
 
   const allJournals = await api.journals.listAll();
   const existing = new Set<string>();
 
-  // Support both current LY:{ref} and legacy raw {ref} document numbers.
-  // Collision risk with hand-entered journals is low because Lightyear references
-  // use fixed prefixes (OR-, CN-, DT-, WL-, IN-, RW-) that are unlikely to appear
-  // as manual document numbers. If a false positive is observed, add cross-checks
-  // on journal title/date here.
-  const targetRefs = new Set(references.flatMap(r => [r, `LY:${r}`]));
+  // Two document_number forms:
+  // - `LY:{ref}` — our canonical prefix. Collision-free with hand-entered
+  //   journals (the `LY:` namespace is ours), so a match is authoritative.
+  // - Raw `{ref}` — legacy. Lightyear references use fixed prefixes (OR-, CN-,
+  //   DT-, WL-, IN-, RW-) but a hand-entered journal could accidentally use
+  //   the same string. Require the journal's effective_date to match the
+  //   trade date before treating a raw match as a duplicate. Without the
+  //   date cross-check, a pasted broker reference on an unrelated journal
+  //   would silently suppress a real import.
+  const prefixedTargets = new Set(lookups.map(l => `LY:${l.reference}`));
+  const rawRefToDate = new Map(lookups.map(l => [l.reference, l.date]));
 
   for (const journal of allJournals) {
     if (journal.is_deleted) continue;
     if (!journal.document_number) continue;
     const documentNumber = String(journal.document_number).trim();
-    if (targetRefs.has(documentNumber)) {
-      existing.add(documentNumber.startsWith("LY:") ? documentNumber.substring(3) : documentNumber);
+
+    if (prefixedTargets.has(documentNumber)) {
+      existing.add(documentNumber.substring(3));
+      continue;
+    }
+
+    const expectedDate = rawRefToDate.get(documentNumber);
+    if (expectedDate !== undefined) {
+      // Raw-ref match: require date alignment as a cross-check.
+      if (journal.effective_date === expectedDate) {
+        existing.add(documentNumber);
+      }
     }
   }
 
@@ -448,8 +477,16 @@ async function findExistingJournalsByRef(api: ApiContext, references: string[]):
 
 /**
  * Match sell trades to capital gains entries by date + ticker + quantity + proceeds.
- * Falls back to date + ticker + quantity if proceeds don't match (FX rounding).
- * Warns on ambiguous matches (multiple gains rows for same criteria).
+ *
+ * Disambiguation rules:
+ * - Exactly one exact match (date+ticker+qty+proceeds within 0.02 EUR) → pair.
+ * - Multiple exact matches → SKIP the sell with an ambiguity warning. Earlier
+ *   versions would `break` on the first exact proceeds match and silently
+ *   pick whichever came first in CSV order; two identical-proceeds lots
+ *   could collide without detection.
+ * - No exact match, exactly one inexact match (date+ticker+qty only, proceeds
+ *   differ) → pair with a warning so the user can cross-check cost basis.
+ * - Multiple inexact matches → SKIP with ambiguity warning.
  */
 function matchSellsToCapitalGains(
   sells: InvestmentTrade[],
@@ -460,42 +497,50 @@ function matchSellsToCapitalGains(
   const consumedGains = new Set<number>();
 
   for (const sell of sells) {
-    // Try strict match first: date + ticker + quantity + proceeds
-    let matchIdx = -1;
-    let ambiguousCount = 0;
+    const exactMatches: number[] = [];
+    const inexactMatches: number[] = [];
 
     for (let i = 0; i < gains.length; i++) {
       if (consumedGains.has(i)) continue;
       const gain = gains[i]!;
       const gainDate = parseLightyearDate(gain.date);
 
-      if (gainDate === sell.date &&
-          gain.ticker === sell.ticker &&
-          Math.abs(gain.quantity - sell.quantity) < 0.000001) {
-        // Proceeds tiebreaker (0.02 EUR tolerance for FX rounding)
-        if (Math.abs(gain.proceeds_eur - sell.eur_amount) < 0.02) {
-          if (matchIdx !== -1 && !consumedGains.has(matchIdx)) {
-            ambiguousCount++; // exact-duplicate gains row
-          }
-          matchIdx = i;
-          break; // Exact match on all four criteria
-        }
-        ambiguousCount++;
-        if (matchIdx === -1) matchIdx = i; // fallback to first date+ticker+qty match
+      if (gainDate !== sell.date) continue;
+      if (gain.ticker !== sell.ticker) continue;
+      if (Math.abs(gain.quantity - sell.quantity) >= 0.000001) continue;
+
+      if (Math.abs(gain.proceeds_eur - sell.eur_amount) < 0.02) {
+        exactMatches.push(i);
+      } else {
+        inexactMatches.push(i);
       }
     }
 
-    if (ambiguousCount > 1 && matchIdx !== -1) {
-      const gain = gains[matchIdx]!;
+    if (exactMatches.length === 1) {
+      const idx = exactMatches[0]!;
+      result.set(sell.reference, gains[idx]!);
+      consumedGains.add(idx);
+    } else if (exactMatches.length > 1) {
       warnings.push(
         `Ambiguous FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
-        `${ambiguousCount} gains rows match date+ticker+qty. Picked first match (proceeds ${gain.proceeds_eur} EUR); verify cost basis manually.`
+        `${exactMatches.length} gains rows match date+ticker+qty+proceeds exactly. Skipping — verify cost basis manually and book the journal by hand.`
       );
-    }
-
-    if (matchIdx !== -1) {
-      result.set(sell.reference, gains[matchIdx]!);
-      consumedGains.add(matchIdx);
+      // Don't book — ambiguous cost basis is worse than missing it.
+    } else if (inexactMatches.length === 1) {
+      const idx = inexactMatches[0]!;
+      const gain = gains[idx]!;
+      warnings.push(
+        `Inexact FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
+        `proceeds differ (sell ${sell.eur_amount} EUR vs gains ${gain.proceeds_eur} EUR, likely FX rounding). ` +
+        `Using date+ticker+qty match; verify cost basis.`
+      );
+      result.set(sell.reference, gains[idx]!);
+      consumedGains.add(idx);
+    } else if (inexactMatches.length > 1) {
+      warnings.push(
+        `Ambiguous FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
+        `${inexactMatches.length} gains rows match date+ticker+qty but none match proceeds within 0.02 EUR. Skipping — resolve manually.`
+      );
     }
   }
 
@@ -810,7 +855,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       }
 
       // Check for duplicates
-      const allRefs = trades.map(t => t.reference);
+      const allRefs = trades.map(t => ({ reference: t.reference, date: t.date }));
       const existingRefs = await findExistingJournalsByRef(api, allRefs);
 
       const newTrades = trades.filter(t => !existingRefs.has(t.reference));
@@ -1190,7 +1235,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       }
 
       // Check duplicates
-      const allRefs = distributions.map(d => d.reference);
+      const allRefs = distributions.map(d => ({ reference: d.reference, date: d.date }));
       const existingRefs = await findExistingJournalsByRef(api, allRefs);
 
       const newDist = distributions.filter(d => !existingRefs.has(d.reference));

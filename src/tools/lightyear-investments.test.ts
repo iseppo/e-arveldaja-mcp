@@ -241,7 +241,7 @@ describe("lightyear investments tools", () => {
     expect(payload.created).toBe(0);
   });
 
-  it("recognizes legacy raw OR document numbers as duplicates", async () => {
+  it("recognizes legacy raw OR document numbers as duplicates when the date matches", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv([
       ["21/06/2024 13:41:19", "OR-VUAA-BUY", "VUAA", "IE00BFMXXD54", "Buy", "4.000000000", "EUR", "96.656000000", "386.62", "", "0.00", "386.62", ""],
     ]));
@@ -250,6 +250,7 @@ describe("lightyear investments tools", () => {
       journals: [{
         is_deleted: false,
         document_number: "OR-VUAA-BUY",
+        effective_date: "2024-06-21",
       }],
     });
     const result = await handler({
@@ -266,5 +267,34 @@ describe("lightyear investments tools", () => {
     expect(payload.duplicate_refs).toEqual([
       { reference: "OR-VUAA-BUY", ticker: "VUAA", date: "2024-06-21" },
     ]);
+  });
+
+  it("does NOT treat a hand-entered journal sharing a raw OR reference as a duplicate when the date differs", async () => {
+    // Scenario: user previously pasted "OR-VUAA-BUY" as the document_number
+    // on an unrelated journal dated 2023-01-01. Importing the real Lightyear
+    // trade for 2024-06-21 must NOT skip that trade just because the
+    // references collide. The date cross-check disambiguates.
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["21/06/2024 13:41:19", "OR-VUAA-BUY", "VUAA", "IE00BFMXXD54", "Buy", "4.000000000", "EUR", "96.656000000", "386.62", "", "0.00", "386.62", ""],
+    ]));
+
+    const { api, handler } = setupLightyearTool("book_lightyear_trades", {
+      journals: [{
+        is_deleted: false,
+        document_number: "OR-VUAA-BUY",
+        effective_date: "2023-01-01",  // different date — not the same trade
+      }],
+    });
+    const result = await handler({
+      file_path: "/tmp/lightyear.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      dry_run: false,
+    });
+
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.duplicates_skipped).toBe(0);
+    expect(api.journals.create).toHaveBeenCalled();
   });
 });
