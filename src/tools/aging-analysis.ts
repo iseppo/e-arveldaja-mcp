@@ -57,6 +57,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
       const buckets = new Map<string, AgingBucket>();
       const byClient = new Map<number, { name: string; total: number; oldest_days: number }>();
+      const unmatched = { count: 0, total: 0, oldest_days: 0 };
 
       for (const inv of unpaid) {
         const dueDateStr = addDaysToDate(inv.create_date, inv.term_days);
@@ -77,10 +78,20 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
         });
         buckets.set(label, bucket);
 
-        const clientEntry = byClient.get(inv.clients_id) ?? { name: inv.client_name ?? "", total: 0, oldest_days: 0 };
-        clientEntry.total = roundMoney(clientEntry.total + amount);
-        clientEntry.oldest_days = Math.max(clientEntry.oldest_days, daysOverdue);
-        byClient.set(inv.clients_id, clientEntry);
+        // Null clients_id (e.g. card-payment-linked invoices) would collapse
+        // into a single nameless by-client entry if keyed on `null`. Route
+        // them into a dedicated unmatched counter so the top-debtors list
+        // stays meaningful.
+        if (inv.clients_id == null) {
+          unmatched.count++;
+          unmatched.total = roundMoney(unmatched.total + amount);
+          unmatched.oldest_days = Math.max(unmatched.oldest_days, daysOverdue);
+        } else {
+          const clientEntry = byClient.get(inv.clients_id) ?? { name: inv.client_name ?? "", total: 0, oldest_days: 0 };
+          clientEntry.total = roundMoney(clientEntry.total + amount);
+          clientEntry.oldest_days = Math.max(clientEntry.oldest_days, daysOverdue);
+          byClient.set(inv.clients_id, clientEntry);
+        }
       }
 
       const r = roundMoney;
@@ -99,6 +110,9 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
       if (partiallyPaidCount > 0) {
         warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
       }
+      if (unmatched.count > 0) {
+        warnings.push(`${unmatched.count} invoice(s) have no clients_id (totaling ${roundMoney(unmatched.total)} EUR). Reported under unmatched_client_invoices; investigate and link to a client for accurate debtor reports.`);
+      }
       return {
         content: [{
           type: "text",
@@ -109,6 +123,9 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sortedBuckets,
             top_debtors: topDebtors,
+            ...(unmatched.count > 0 && {
+              unmatched_client_invoices: { count: unmatched.count, total: r(unmatched.total), oldest_days: unmatched.oldest_days },
+            }),
             ...(warnings.length > 0 && { warnings }),
           }),
         }],
@@ -136,6 +153,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
       const buckets = new Map<string, AgingBucket>();
       const bySupplier = new Map<number, { name: string; total: number; oldest_days: number }>();
+      const unmatched = { count: 0, total: 0, oldest_days: 0 };
 
       for (const inv of unpaid) {
         const dueDateStr = addDaysToDate(inv.create_date, inv.term_days);
@@ -156,10 +174,18 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
         });
         buckets.set(label, bucket);
 
-        const supplierEntry = bySupplier.get(inv.clients_id) ?? { name: inv.client_name, total: 0, oldest_days: 0 };
-        supplierEntry.total = roundMoney(supplierEntry.total + amount);
-        supplierEntry.oldest_days = Math.max(supplierEntry.oldest_days, daysOverdue);
-        bySupplier.set(inv.clients_id, supplierEntry);
+        // Same null-supplier handling as the receivables side — route null
+        // clients_id to a dedicated unmatched counter.
+        if (inv.clients_id == null) {
+          unmatched.count++;
+          unmatched.total = roundMoney(unmatched.total + amount);
+          unmatched.oldest_days = Math.max(unmatched.oldest_days, daysOverdue);
+        } else {
+          const supplierEntry = bySupplier.get(inv.clients_id) ?? { name: inv.client_name, total: 0, oldest_days: 0 };
+          supplierEntry.total = roundMoney(supplierEntry.total + amount);
+          supplierEntry.oldest_days = Math.max(supplierEntry.oldest_days, daysOverdue);
+          bySupplier.set(inv.clients_id, supplierEntry);
+        }
       }
 
       const r = roundMoney;
@@ -178,6 +204,9 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
       if (partiallyPaidCount > 0) {
         warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
       }
+      if (unmatched.count > 0) {
+        warnings.push(`${unmatched.count} invoice(s) have no clients_id (totaling ${roundMoney(unmatched.total)} EUR). Reported under unmatched_supplier_invoices; investigate and link to a supplier for accurate creditor reports.`);
+      }
       return {
         content: [{
           type: "text",
@@ -188,6 +217,9 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sortedBuckets,
             top_creditors: topCreditors,
+            ...(unmatched.count > 0 && {
+              unmatched_supplier_invoices: { count: unmatched.count, total: r(unmatched.total), oldest_days: unmatched.oldest_days },
+            }),
             ...(warnings.length > 0 && { warnings }),
           }),
         }],

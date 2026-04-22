@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import { type ApiContext, isCompanyVatRegistered, coerceId } from "./crud-tools.js";
-import { computeAllBalances } from "./financial-statements.js";
+import { computeAllBalances, sumCategory, type AccountBalance } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { create } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
@@ -22,6 +22,18 @@ import { buildOwnerExpenseVatReviewGuidance } from "../estonian-accounting-guida
 function requiresOwnerExpenseVatReview(accountName: string | undefined, description: string): boolean {
   const text = `${accountName ?? ""} ${description}`.toLowerCase();
   return /\b(sõiduauto|auto|vehicle|fuel|kütus|parking|parkim|liising|leasing|representation|esindus|entertainment)\b/.test(text);
+}
+
+/**
+ * Estonian corporate income tax rate on distributed profits (KMS § 50).
+ * Rate changed from 20/80 to 22/78 on 2025-01-01. The ISO-date string compare
+ * is safe: YYYY-MM-DD sorts lexically as a real date.
+ */
+export function getCitRateForDate(effective_date: string): { num: number; den: number; formatted: string } {
+  if (effective_date < "2025-01-01") {
+    return { num: 20, den: 80, formatted: "20/80" };
+  }
+  return { num: 22, den: 78, formatted: "22/78" };
 }
 
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
@@ -62,8 +74,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         });
       }
 
-      // Estonian CIT rate on dividends: 22/78 of net dividend
-      const taxRate = 22 / 78;
+      // Estonian CIT rate on dividends: date-keyed per KMS § 50
+      // (20/80 pre-2025, 22/78 from 2025-01-01).
+      const citRate = getCitRateForDate(effective_date);
+      const taxRate = citRate.num / citRate.den;
       const cit = roundMoney(net_dividend * taxRate);
       const grossDividend = roundMoney(net_dividend + cit);
 
@@ -81,7 +95,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             retained_earnings_balance: retainedBalance,
             gross_dividend_required: roundMoney(grossDividend),
             shortfall: roundMoney(grossDividend - retainedBalance),
-            calculation: { net_dividend, cit_rate: "22/78", cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
+            calculation: { net_dividend, cit_rate: citRate.formatted, cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
             hint: "Distribution may be unlawful per ÄS § 157. Set force=true to create the journal anyway.",
           });
         }
@@ -95,16 +109,37 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         preloadedAccounts: accounts,
         preloadedJournals: allJournals,
       });
-      const totalAssets = balances
-        .filter(balance => balance.account_type_est === "Varad")
-        .reduce((sum, balance) => sum + (balance.balance_type === "D" ? balance.balance : -balance.balance), 0);
-      const totalLiabilities = balances
-        .filter(balance => balance.account_type_est === "Kohustused")
-        .reduce((sum, balance) => sum + (balance.balance_type === "C" ? balance.balance : -balance.balance), 0);
+      // Net assets = equity + current-year P&L. Revenue/expense accounts
+      // (Tulud/Kulud) are not closed into Omakapital until year-end, so the
+      // equity total alone understates net assets mid-year. Fold current-year
+      // P&L in explicitly — shares `sumCategory` with `compute_balance_sheet`
+      // so both tools agree bit-identically on the same ledger.
+      const byCategory = (cat: string): AccountBalance[] =>
+        balances.filter(b => b.account_type_est === cat);
+      const totalAssets = sumCategory(byCategory("Varad"), "D");
+      const totalLiabilities = sumCategory(byCategory("Kohustused"), "C");
+      const totalEquity = sumCategory(byCategory("Omakapital"), "C");
+      const totalRevenue = sumCategory(byCategory("Tulud"), "C");
+      const totalExpenses = sumCategory(byCategory("Kulud"), "D");
+      const currentYearPL = roundMoney(totalRevenue - totalExpenses);
       const shareCapital = balances.find(balance => balance.account_id === shareCapitalAccount)?.balance ?? 0;
-      const netAssetsBeforeDistribution = roundMoney(totalAssets - totalLiabilities);
+      const netAssetsBeforeDistribution = roundMoney(totalEquity + currentYearPL);
       const netAssetsAfterDistribution = roundMoney(netAssetsBeforeDistribution - grossDividend);
       const roundedShareCapital = roundMoney(shareCapital);
+
+      // Cross-check: on a balanced ledger, Assets − Liabilities must equal
+      // Equity + P&L. A mismatch indicates unbalanced or partially-deleted
+      // journals — warn so the user can investigate before distributing.
+      // Tolerance 0.05 accounts for rounding drift across the 5 sub-totals
+      // (each rounded independently at up to 0.005 EUR).
+      const assetsMinusLiabilities = roundMoney(totalAssets - totalLiabilities);
+      if (Math.abs(assetsMinusLiabilities - netAssetsBeforeDistribution) > 0.05) {
+        warnings.push(
+          `Ledger imbalance: Assets − Liabilities (${assetsMinusLiabilities} EUR) ` +
+          `does not equal Equity + current-year P&L (${netAssetsBeforeDistribution} EUR). ` +
+          `Investigate unregistered/deleted journals before distributing.`
+        );
+      }
 
       if (netAssetsAfterDistribution < roundedShareCapital - 0.01) {
         warnings.push(
@@ -115,9 +150,14 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
 
       const shareholder = await api.clients.get(shareholder_client_id);
 
-      // Journal entry: Debit retained earnings, Credit dividend payable + tax payable
+      // Journal entry: two D lines to retained earnings (net + CIT separately),
+      // so audit trail can distinguish payment-to-shareholder from the
+      // distribution-tax component. Economically the full gross drains
+      // retained earnings (KMS § 50). Credits go to dividend payable and
+      // tax payable.
       const postings = [
-        { accounts_id: retainedAccount, type: "D" as const, amount: grossDividend },
+        { accounts_id: retainedAccount, type: "D" as const, amount: net_dividend },
+        { accounts_id: retainedAccount, type: "D" as const, amount: cit },
         { accounts_id: payableAccount, type: "C" as const, amount: net_dividend },
         { accounts_id: taxAccount, type: "C" as const, amount: cit },
       ];
@@ -127,7 +167,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         effective_date,
         clients_id: shareholder_client_id,
         cl_currencies_id: "EUR",
-        document_number: `DIV-${effective_date}`,
+        // Include shareholder ID so same-day distributions to different
+        // shareholders don't collide on document_number.
+        document_number: `DIV-${effective_date}-${shareholder_client_id}`,
         postings,
       };
 
@@ -139,7 +181,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               dry_run: true,
               calculation: {
                 net_dividend,
-                cit_rate: "22/78",
+                cit_rate: citRate.formatted,
                 cit_amount: cit,
                 gross_dividend: grossDividend,
               },
@@ -171,7 +213,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           text: toMcpJson({
             calculation: {
               net_dividend,
-              cit_rate: "22/78",
+              cit_rate: citRate.formatted,
               cit_amount: cit,
               gross_dividend: roundMoney(grossDividend),
             },
@@ -192,7 +234,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             journal_entry: {
               api_response: result,
               postings: [
-                { account: retainedAccount, type: "D", amount: grossDividend, description: "Jaotamata kasum" },
+                { account: retainedAccount, type: "D", amount: net_dividend, description: `Dividend to ${shareholder.name} (net)` },
+                { account: retainedAccount, type: "D", amount: cit, description: `Tulumaks ${citRate.formatted}, dividend to ${shareholder.name}` },
                 { account: payableAccount, type: "C", amount: net_dividend, description: "Dividendide võlgnevus" },
                 { account: taxAccount, type: "C", amount: cit, description: "Tulumaksu kohustus" },
               ],
@@ -338,6 +381,25 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const nonDeductibleVat = roundMoney(grossVat - deductibleVat);
       const expenseDebit = roundMoney(net_amount + nonDeductibleVat);
 
+      // Defensive: the three postings below must balance to `total`. Rounding
+      // at intermediate steps can drift by 1 cent in pathological VAT-deduction
+      // combinations; refuse to create an unbalanced journal.
+      const totalDebits = roundMoney(expenseDebit + (deductibleVat > 0 && vatRegistered ? deductibleVat : 0));
+      if (totalDebits !== total) {
+        return toolError({
+          error: `Internal imbalance: sum of debits (${totalDebits}) would not equal credits (${total}).`,
+          hint: "This is a rounding edge case in owner-expense reimbursement. Report with net_amount, vat_rate, vat_amount, vat_deduction_mode, deductible_vat_amount values.",
+          details: [
+            `net_amount=${net_amount}`,
+            `grossVat=${grossVat}`,
+            `deductibleVat=${deductibleVat}`,
+            `nonDeductibleVat=${nonDeductibleVat}`,
+            `expenseDebit=${expenseDebit}`,
+            `total=${total}`,
+          ],
+        });
+      }
+
       const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [
         { accounts_id: expense_account, type: "D", amount: expenseDebit },
       ];
@@ -380,7 +442,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             expense: {
               description,
               net: net_amount,
-              vat_rate: vat_amount !== undefined ? "custom" : `${vat_rate * 100}%`,
+              vat_rate: vat_amount !== undefined ? "custom" : `${roundMoney(vat_rate * 100)}%`,
               vat: grossVat,
               deductible_vat: deductibleVat,
               non_deductible_vat: nonDeductibleVat,

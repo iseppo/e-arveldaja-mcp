@@ -51,8 +51,11 @@ export async function computeAllBalances(
       const amount = posting.base_amount ?? posting.amount;
       const entry = balances.get(posting.accounts_id) ?? { debit: 0, credit: 0 };
 
-      if (posting.type === "D") entry.debit = roundMoney(entry.debit + amount);
-      else entry.credit = roundMoney(entry.credit + amount);
+      // Accumulate unrounded; the output mapping below rounds once. Rounding
+      // on every posting drifts 0.005 EUR per entry, producing false trial-
+      // balance mismatches on high-volume accounts.
+      if (posting.type === "D") entry.debit += amount;
+      else entry.credit += amount;
 
       balances.set(posting.accounts_id, entry);
     }
@@ -89,17 +92,22 @@ export async function computeAllBalances(
  * Sum balances for a category, accounting for contra-accounts.
  * "D" categories (Varad, Kulud): D-type adds, C-type subtracts (contra-accounts).
  * "C" categories (Kohustused, Omakapital, Tulud): C-type adds, D-type subtracts.
+ *
+ * Accumulates unrounded and rounds once at the end — matches the pattern used
+ * by `computeAllBalances` / `computeAccountBalance`, so tools that share this
+ * helper (balance sheet, P&L, §157 net-assets check) agree bit-identically on
+ * the same ledger.
  */
-function sumCategory(accounts: AccountBalance[], normalType: "D" | "C"): number {
+export function sumCategory(accounts: AccountBalance[], normalType: "D" | "C"): number {
   let total = 0;
   for (const a of accounts) {
     if (a.balance_type === normalType) {
-      total = roundMoney(total + a.balance);
+      total += a.balance;
     } else {
-      total = roundMoney(total - a.balance); // contra-account
+      total -= a.balance; // contra-account
     }
   }
-  return total;
+  return roundMoney(total);
 }
 
 function getMonthLastDay(month: string): number {

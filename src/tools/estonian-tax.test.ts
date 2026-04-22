@@ -130,7 +130,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 10000,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
     });
 
     expect(isError(result)).toBe(false);
@@ -150,7 +150,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 78,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
     });
 
     expect(isError(result)).toBe(false);
@@ -166,7 +166,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 100,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
     });
 
     expect(isError(result)).toBe(false);
@@ -184,16 +184,22 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 10000,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
     });
 
     expect(isError(result)).toBe(false);
     const data = parseResult(result);
     const je = data.journal_entry as { postings: Array<{ account: number; type: string; amount: number }> };
-    // Retained earnings debited for gross dividend
-    const debitPosting = je.postings.find(p => p.type === "D");
-    expect(debitPosting?.account).toBe(3020);
-    expect(debitPosting?.amount).toBeCloseTo(10000 + 2820.51, 2);
+    // Retained earnings debited on two lines: one for net-to-shareholder, one for CIT.
+    // Both hit 3020 so audit trail can distinguish the two components.
+    const debitPostings = je.postings.filter(p => p.type === "D");
+    expect(debitPostings).toHaveLength(2);
+    expect(debitPostings.every(p => p.account === 3020)).toBe(true);
+    const totalDebit = debitPostings.reduce((s, p) => s + p.amount, 0);
+    expect(totalDebit).toBeCloseTo(10000 + 2820.51, 2);
+    // One debit line should match net, the other should match CIT.
+    expect(debitPostings.some(p => Math.abs(p.amount - 10000) < 0.01)).toBe(true);
+    expect(debitPostings.some(p => Math.abs(p.amount - 2820.51) < 0.01)).toBe(true);
     // Net dividend credited to payable
     const creditDividend = je.postings.find(p => p.account === 2370);
     expect(creditDividend?.type).toBe("C");
@@ -202,6 +208,53 @@ describe("prepare_dividend_package", () => {
     const creditTax = je.postings.find(p => p.account === 2540);
     expect(creditTax?.type).toBe("C");
     expect(creditTax?.amount).toBe(2820.51);
+  });
+
+  // -------------------------------------------------------------------------
+  // CIT rate date-gating (20/80 pre-2025, 22/78 from 2025-01-01)
+  // -------------------------------------------------------------------------
+
+  it("applies 20/80 CIT rate for pre-2025 effective_date", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    const result = await cb({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2024-12-31",
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const calc = data.calculation as { cit_rate: string; cit_amount: number; gross_dividend: number };
+    expect(calc.cit_rate).toBe("20/80");
+    // 10000 * 20/80 = 2500
+    expect(calc.cit_amount).toBe(2500);
+    expect(calc.gross_dividend).toBe(12500);
+  });
+
+  it("applies 22/78 CIT rate for 2025-01-01 boundary", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    const result = await cb({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2025-01-01",
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const calc = data.calculation as { cit_rate: string };
+    expect(calc.cit_rate).toBe("22/78");
+  });
+
+  it("includes shareholder_client_id in document_number to avoid same-day collisions", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    await cb({
+      net_dividend: 1000,
+      shareholder_client_id: 42,
+      effective_date: "2026-06-01",
+    });
+
+    const createCall = vi.mocked(api.journals.create).mock.calls[0]?.[0] as { document_number: string };
+    expect(createCall.document_number).toBe("DIV-2026-06-01-42");
   });
 
   // -------------------------------------------------------------------------
@@ -228,7 +281,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 10000,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
     });
 
     expect(isError(result)).toBe(true);
@@ -257,7 +310,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 10000,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       force: true,
     });
 
@@ -291,7 +344,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 78,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
     });
 
     expect(isError(result)).toBe(false);
@@ -334,7 +387,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 20000,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       force: true,
     });
 
@@ -352,7 +405,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 10000,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
     });
 
     expect(isError(result)).toBe(false);
@@ -378,7 +431,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 10000,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
     });
 
     expect(isError(result)).toBe(true);
@@ -418,7 +471,7 @@ describe("prepare_dividend_package", () => {
     const result = await cb({
       net_dividend: 1000,
       shareholder_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       retained_earnings_account: 3099,
       dividend_payable_account: 2380,
       tax_payable_account: 2541,
@@ -431,6 +484,48 @@ describe("prepare_dividend_package", () => {
     expect(check.account).toBe(3099);
     const netCheck = data.net_assets_check as { share_capital_account: number };
     expect(netCheck.share_capital_account).toBe(3001);
+  });
+
+  // -------------------------------------------------------------------------
+  // Ledger-imbalance cross-check (A - L must equal E + P&L)
+  // -------------------------------------------------------------------------
+
+  it("emits ledger-imbalance warning when a partially-deleted journal breaks the A − L = E + P&L identity", async () => {
+    // Construct: one posting side marked is_deleted so the other side drives
+    // assets up without a matching equity movement. This is the exact class
+    // of defect the cross-check exists to surface.
+    const journals = [
+      makeJournal("2024-01-01", [
+        makePosting(1000, "D", 30000),
+        makePosting(3020, "C", 30000),
+      ]),
+      makeJournal("2023-01-01", [
+        makePosting(1000, "D", 5000),
+        makePosting(3000, "C", 5000),
+      ]),
+      // Partially-deleted journal: D side of cash stays, C side of equity is deleted.
+      // Result: assets = 30000 + 5000 + 100 = 35100; equity + P&L = 30000 + 5000 = 35000.
+      makeJournal("2024-06-01", [
+        makePosting(1000, "D", 100),
+        makePosting(3020, "C", 100, undefined, { is_deleted: true }),
+      ]),
+    ];
+    const api2 = makeApi(journals, makeStandardAccounts());
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api2);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 1000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const warnings = (data.warnings ?? []) as string[];
+    expect(warnings.some(w => w.includes("Ledger imbalance"))).toBe(true);
+    expect(warnings.some(w => w.includes("unregistered/deleted journals"))).toBe(true);
   });
 });
 
@@ -459,7 +554,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Office supplies",
       net_amount: 100,
       vat_rate: 0.24,
@@ -499,7 +594,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Fuel for company car",
       net_amount: 100,
       vat_rate: 0.24,
@@ -528,7 +623,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Office supplies",
       net_amount: 100,
       vat_rate: 0.24,
@@ -549,7 +644,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Office supplies",
       net_amount: 100,
       vat_rate: 0.24,
@@ -574,7 +669,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Office supplies",
       net_amount: 100,
       vat_rate: 0.24,
@@ -612,7 +707,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Bank fee",
       net_amount: 50,
       vat_rate: 0,
@@ -637,7 +732,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Receipt with exact VAT",
       net_amount: 100,
       vat_rate: 0.24,
@@ -670,7 +765,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Test",
       net_amount: 100,
       vat_rate: 0.24,
@@ -694,7 +789,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Office supplies",
       net_amount: 100,
       vat_rate: 0.24,
@@ -722,7 +817,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Fuel for passenger car",
       net_amount: 100,
       vat_rate: 0.24,
@@ -745,7 +840,7 @@ describe("create_owner_expense_reimbursement", () => {
 
     const result = await cb({
       owner_client_id: 1,
-      effective_date: "2024-06-01",
+      effective_date: "2026-06-01",
       description: "Test",
       net_amount: 100,
       vat_rate: 0,

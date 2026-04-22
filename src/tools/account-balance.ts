@@ -62,8 +62,11 @@ export async function computeAccountBalance(
 
       const amount = posting.base_amount ?? posting.amount;
 
-      if (type === "D") debitTotal = roundMoney(debitTotal + amount);
-      else creditTotal = roundMoney(creditTotal + amount);
+      // Accumulate unrounded; round once at the end. Rounding per-posting
+      // drifts up to 0.005 EUR × N postings, so a busy account can show a
+      // trial-balance mismatch for no real reason.
+      if (type === "D") debitTotal += amount;
+      else creditTotal += amount;
 
       entries.push({
         journal_id: journal.id!,
@@ -75,6 +78,9 @@ export async function computeAccountBalance(
       });
     }
   }
+
+  debitTotal = roundMoney(debitTotal);
+  creditTotal = roundMoney(creditTotal);
 
   const balanceType = account?.balance_type ?? "D";
 

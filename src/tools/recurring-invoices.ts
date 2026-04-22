@@ -136,9 +136,20 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
             cl_currencies_id: full.cl_currencies_id,
             show_client_balance: full.show_client_balance,
             receivable_accounts_id: full.receivable_accounts_id,
-            // Clone tax-critical invoice-level fields
+            // Clone tax-critical invoice-level fields. Anything affecting VAT
+            // treatment, legal narrative, or cross-border classification must
+            // survive the clone — a stale value on a recurring invoice can
+            // silently change how it's reported on KMD INF / VD.
             intra_community_supply: full.intra_community_supply,
             client_vat_no: full.client_vat_no,
+            triangulation: full.triangulation,
+            assembled_in_member_state: full.assembled_in_member_state,
+            contract_number: full.contract_number,
+            invoice_content_code: full.invoice_content_code,
+            invoice_content_text: full.invoice_content_text,
+            trade_secret: full.trade_secret,
+            use_per_item_rounding: full.use_per_item_rounding,
+            overdue_charge: full.overdue_charge,
             notes: tagNotes(appendRecurringCloneMarker(full.notes, recurringMarker)),
             items: full.items.map(item => ({
               products_id: item.products_id,
