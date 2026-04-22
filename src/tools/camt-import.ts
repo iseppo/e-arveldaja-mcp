@@ -6,7 +6,7 @@ import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import type { Client, Transaction } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
-import { validateFilePath } from "../file-validation.js";
+import { resolveFileInput } from "../file-validation.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
@@ -693,9 +693,13 @@ export function parseCamt053Xml(xml: string): CamtParseResult {
 }
 
 async function loadParsedCamt053(filePath: string): Promise<CamtParseResult> {
-  const resolved = await validateFilePath(filePath, [".xml"], CAMT_MAX_FILE_SIZE);
-  const xml = await readFile(resolved, "utf-8");
-  return parseCamt053Xml(xml);
+  const { path, cleanup } = await resolveFileInput(filePath, [".xml"], CAMT_MAX_FILE_SIZE);
+  try {
+    const xml = await readFile(path, "utf-8");
+    return parseCamt053Xml(xml);
+  } finally {
+    if (cleanup) await cleanup();
+  }
 }
 
 async function enrichWithDuplicates(parsed: CamtParseResult, api: ApiContext): Promise<CamtParseResult> {
@@ -795,7 +799,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     "parse_camt053",
     "Parse a CAMT.053 bank statement XML file and preview statement metadata, entries, summary, and duplicate matches against existing transactions.",
     {
-      file_path: z.string().describe("Absolute path to the CAMT.053 XML file"),
+      file_path: z.string().describe("Absolute path to the CAMT.053 XML file. Also accepts a base64 payload (\"base64:<data>\" or \"base64:xml:<data>\") for cross-system file transfer from remote MCP clients."),
     },
     { ...readOnly, openWorldHint: true, title: "Parse CAMT.053" },
     async ({ file_path }) => {
@@ -820,7 +824,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     "import_camt053",
     "Parse a CAMT.053 bank statement XML file and create bank transactions in e-arveldaja. Skips existing duplicates by AcctSvcrRef bank reference and exact duplicate rows within the same file. DRY RUN by default.",
     {
-      file_path: z.string().describe("Absolute path to the CAMT.053 XML file"),
+      file_path: z.string().describe("Absolute path to the CAMT.053 XML file. Also accepts a base64 payload (\"base64:<data>\" or \"base64:xml:<data>\") for cross-system file transfer from remote MCP clients."),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID in e-arveldaja. Use list_account_dimensions to find it."),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),

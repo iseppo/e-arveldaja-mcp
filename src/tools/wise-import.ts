@@ -5,7 +5,7 @@ import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import type { AccountDimension } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
-import { validateFilePath } from "../file-validation.js";
+import { resolveFileInput } from "../file-validation.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
@@ -336,7 +336,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
     "unconfirmed to avoid double-counting. Otherwise it is confirmed against the other bank account. " +
     "DRY RUN by default — set execute=true to actually create transactions.",
     {
-      file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions"),
+      file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID for the Wise account in e-arveldaja"),
       fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account. Use list_account_dimensions to find it."),
       fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),
@@ -362,8 +362,13 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       skip_jar_transfers,
     }) => {
       const skipJars = skip_jar_transfers !== false;
-      const resolved = await validateFilePath(file_path, [".csv"], 10 * 1024 * 1024);
-      const csv = await readFile(resolved, "utf-8");
+      const { path: resolved, cleanup } = await resolveFileInput(file_path, [".csv"], 10 * 1024 * 1024);
+      let csv: string;
+      try {
+        csv = await readFile(resolved, "utf-8");
+      } finally {
+        if (cleanup) await cleanup();
+      }
       const rows = parseWiseCSV(csv);
       const dryRun = execute !== true;
 

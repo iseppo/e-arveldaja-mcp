@@ -4,7 +4,7 @@ import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import { readFile } from "fs/promises";
 import type { ApiContext } from "./crud-tools.js";
-import { validateFilePath } from "../file-validation.js";
+import { resolveFileInput } from "../file-validation.js";
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
@@ -119,8 +119,12 @@ function validateHeaders(actual: string[], expected: string[], label: string): v
 }
 
 async function readCsvFile(filePath: string): Promise<string> {
-  const real = await validateFilePath(filePath, [".csv"], MAX_CSV_SIZE);
-  return readFile(real, "utf-8");
+  const { path, cleanup } = await resolveFileInput(filePath, [".csv"], MAX_CSV_SIZE);
+  try {
+    return await readFile(path, "utf-8");
+  } finally {
+    if (cleanup) await cleanup();
+  }
 }
 
 function parseAccountStatement(csv: string): AccountStatementRow[] {
@@ -506,7 +510,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     "Pairs foreign currency trades with their FX conversion entries. " +
     "Returns summary by default — set include_rows=true for individual trade/distribution details.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
+      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
       date_from: z.string().optional().describe("Only include entries from this date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only include entries up to this date (YYYY-MM-DD)"),
       include_rows: z.boolean().optional().describe("Include individual trade/distribution rows (default false — summary only)"),
@@ -752,7 +756,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     "For sells: requires capital_gains_file to determine cost basis and recognized gain/loss. " +
     "Without it, sells are skipped with a warning.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
+      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
       capital_gains_file: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sell entries)"),
       investment_account: z.number().describe("Investment/securities account (e.g. 1550 Finantsinvesteeringud)"),
       investment_dimension_id: z.number().optional().describe("Dimension ID for investment account (accounts_dimensions_id)"),
@@ -1142,7 +1146,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   registerTool(server, "book_lightyear_distributions",
     "Create journal entries for Lightyear dividend, interest, and reward distributions, including withheld tax. DRY RUN by default.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
+      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
       broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
       income_account: z.number().describe("Investment income account (e.g. 8320 Tulu fondiosakutelt, 8400 Intressitulu)"),
@@ -1296,7 +1300,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   registerTool(server, "lightyear_portfolio_summary",
     "Compute current holdings and cost basis from a Lightyear account statement. Useful for verifying investment account balance.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
+      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
     },
     { ...readOnly, openWorldHint: true, title: "Lightyear Portfolio Summary" },
     async ({ file_path }) => {

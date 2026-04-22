@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { getAllowedRootsStartupWarning, isPathWithinRoot, splitAllowedPaths, validateFilePath } from "./file-validation.js";
-import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync } from "fs";
-import { join, win32 } from "path";
+import { getAllowedRootsStartupWarning, isPathWithinRoot, resolveFileInput, splitAllowedPaths, validateFilePath } from "./file-validation.js";
+import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, existsSync, readFileSync } from "fs";
+import { join, win32, extname } from "path";
 import { tmpdir } from "os";
 
 describe("validateFilePath", () => {
@@ -120,5 +120,89 @@ describe("validateFilePath", () => {
       "C:\\Users\\Seppo",
       win32,
     )).toBe(true);
+  });
+});
+
+describe("resolveFileInput (base64 payload support)", () => {
+  it("passes through a normal file path without materialising a tmp file", async () => {
+    const dir = join(tmpdir(), "earveldaja-resolve-plain-" + Date.now());
+    const file = join(dir, "invoice.pdf");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, "plain pdf content");
+    try {
+      const result = await resolveFileInput(file, [".pdf"], 10 * 1024 * 1024);
+      expect(result.path).toContain("invoice.pdf");
+      expect(result.cleanup).toBeUndefined();
+    } finally {
+      try { unlinkSync(file); } catch {}
+      try { rmdirSync(dir); } catch {}
+    }
+  });
+
+  it("materialises a base64 PDF to a tmp file with the correct magic-byte extension", async () => {
+    const pdfPayload = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.from("fake pdf body")]);
+    const result = await resolveFileInput(
+      `base64:${pdfPayload.toString("base64")}`,
+      [".pdf"],
+      10 * 1024 * 1024,
+    );
+    try {
+      expect(extname(result.path)).toBe(".pdf");
+      expect(existsSync(result.path)).toBe(true);
+      expect(readFileSync(result.path).equals(pdfPayload)).toBe(true);
+    } finally {
+      await result.cleanup?.();
+    }
+    expect(existsSync(result.path)).toBe(false);
+  });
+
+  it("materialises base64 with explicit extension hint for content without magic bytes (CSV)", async () => {
+    const csvPayload = Buffer.from("date,amount\n2026-03-01,12.50\n");
+    const result = await resolveFileInput(
+      `base64:csv:${csvPayload.toString("base64")}`,
+      [".csv"],
+      10 * 1024 * 1024,
+    );
+    try {
+      expect(extname(result.path)).toBe(".csv");
+      expect(readFileSync(result.path, "utf-8")).toContain("date,amount");
+    } finally {
+      await result.cleanup?.();
+    }
+  });
+
+  it("rejects base64 payload without detectable extension and no hint", async () => {
+    const opaquePayload = Buffer.from("just some bytes with no magic");
+    await expect(
+      resolveFileInput(`base64:${opaquePayload.toString("base64")}`, [".csv"], 1024),
+    ).rejects.toThrow("Could not determine file type");
+  });
+
+  it("rejects base64 payload whose extension is not in the allowed list", async () => {
+    const pdfPayload = Buffer.from("%PDF-1.7 body");
+    await expect(
+      resolveFileInput(`base64:${pdfPayload.toString("base64")}`, [".csv"], 1024),
+    ).rejects.toThrow("disallowed extension");
+  });
+
+  it("rejects base64 payloads larger than maxSize before writing to disk", async () => {
+    const big = Buffer.alloc(2048, 0x20);
+    const bigPdf = Buffer.concat([Buffer.from("%PDF-1.7\n"), big]);
+    await expect(
+      resolveFileInput(`base64:${bigPdf.toString("base64")}`, [".pdf"], 1024),
+    ).rejects.toThrow("base64 payload too large");
+  });
+
+  it("rejects malformed base64 input", async () => {
+    await expect(
+      resolveFileInput("base64:pdf:%%%not-base64%%%", [".pdf"], 1024),
+    ).rejects.toThrow("base64 payload could not be decoded");
+  });
+
+  it("rejects hint/content mismatch to prevent extension spoofing", async () => {
+    const pdfPayload = Buffer.from("%PDF-1.7 body");
+    await expect(
+      resolveFileInput(`base64:xml:${pdfPayload.toString("base64")}`, [".pdf", ".xml"], 1024),
+    ).rejects.toThrow("conflicts with detected content type");
   });
 });

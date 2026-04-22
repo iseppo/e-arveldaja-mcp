@@ -1,6 +1,13 @@
 # Changelog
 
-## [0.11.3] - 2026-04-21
+## [0.11.4] - 2026-04-22
+
+### Added
+- **Cross-system file transfer via base64** (closes #9) — every file-reading tool now accepts an inline base64 payload as its `file_path` parameter in addition to a regular local path. Remote MCP clients (Claude desktop, Cowork, Cursor on another host, etc.) that cannot expose their local filesystem to the server can now pass the file contents directly, unblocking `extract_pdf_invoice`, `create_purchase_invoice_from_pdf`, `upload_invoice_document`, `import_camt053`, `parse_camt053`, `import_wise_transactions`, `parse_lightyear_statement`, `parse_lightyear_capital_gains`, `book_lightyear_trades`, `book_lightyear_distributions`, and `lightyear_portfolio_summary`. Syntax:
+  - `base64:<b64data>` — magic-byte detection for PDF / PNG / JPEG / CAMT XML
+  - `base64:<ext>:<b64data>` — explicit extension hint (required for CSV and any format without a reliable magic-byte signature). Example: `base64:csv:QSxCLEMK...`.
+- **`resolveFileInput` helper in `file-validation.ts`** — single entry point that validates either a local path (delegating to `validateFilePath`) or decodes a base64 payload, materialises it to a per-call tmp file (mode `0600`), and returns `{ path, cleanup }`. Size limit is enforced before writing to disk and hint/magic-byte conflicts are rejected to block extension spoofing. Callers run the existing logic against `path` and invoke `cleanup()` in a `finally` block so the tmp file is removed after use.
+- **Tests** — 8 new cases in `src/file-validation.test.ts` cover path pass-through, magic-byte detection for PDF, explicit-extension CSV, missing extension rejection, disallowed extension rejection, oversize rejection, malformed base64 rejection, and hint/content mismatch rejection.
 
 ### Added
 - **OCR trust boundary on tool output** — new `wrapUntrustedOcr` helper applies per-call nonce delimiters (`<<UNTRUSTED_OCR_START:{nonce}>>` / `<<UNTRUSTED_OCR_END:{nonce}>>`) to `raw_text` returned by `extract_pdf_invoice` and `process_receipt_batch`, plus `description` in receipt-batch results. Prevents a malicious scanned receipt from smuggling instructions into the downstream LLM via a fixed, guessable delimiter.

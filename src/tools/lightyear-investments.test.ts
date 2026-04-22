@@ -1,6 +1,6 @@
 import { readFile } from "fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { validateFilePath } from "../file-validation.js";
+import { resolveFileInput } from "../file-validation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { registerLightyearTools } from "./lightyear-investments.js";
 
@@ -9,7 +9,7 @@ vi.mock("fs/promises", () => ({
 }));
 
 vi.mock("../file-validation.js", () => ({
-  validateFilePath: vi.fn(),
+  resolveFileInput: vi.fn(),
 }));
 
 vi.mock("../progress.js", () => ({
@@ -21,7 +21,7 @@ vi.mock("../audit-log.js", () => ({
 }));
 
 const mockedReadFile = vi.mocked(readFile);
-const mockedValidateFilePath = vi.mocked(validateFilePath);
+const mockedResolveFileInput = vi.mocked(resolveFileInput);
 
 const STATEMENT_HEADER = [
   "Date", "Reference", "Ticker", "ISIN", "Type", "Quantity", "CCY",
@@ -73,7 +73,7 @@ function setupLightyearTool(
 
 describe("lightyear investments tools", () => {
   beforeEach(() => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/lightyear.csv");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/lightyear.csv" });
     mockedReadFile.mockReset();
   });
 

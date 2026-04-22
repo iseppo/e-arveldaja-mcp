@@ -285,6 +285,7 @@ EARVELDAJA_INTEGRATION_TEST=true npm run test:integration
 - **Session audit log.** Every mutating operation (create, update, delete, confirm, import) is logged to a human-readable Markdown file at `logs/{connection}.audit.md` in the working directory. Each entry includes timestamps, tool name, entity details, account postings, and financial amounts. Use `get_session_log` to view, `list_audit_logs` to browse all companies, and `clear_session_log` to reset. The log persists across sessions and is company-specific. Set `EARVELDAJA_AUDIT_LANG=en` for English labels (default: Estonian).
 - **Tag MCP-created invoices.** Set `EARVELDAJA_TAG_NOTES=true` to append `(e-arveldaja-mcp)` to the notes field of all invoices created by the server. Off by default.
 - **OCR text is sandboxed.** Raw OCR output from PDFs and images (`raw_text`, receipt-line `description`) is wrapped in per-call nonce delimiters (`<<UNTRUSTED_OCR_START:{nonce}>>` / `<<UNTRUSTED_OCR_END:{nonce}>>`) before being returned to the LLM, so a scanned receipt cannot smuggle tool-call instructions into your agent's context.
+- **Cross-system file input.** When the MCP server runs on a different host from your client (e.g. Claude desktop, Cowork, Cursor, or a remote container), file-reading tools also accept a `file_path` of the form `base64:<b64data>` (for PDF / PNG / JPEG / CAMT XML) or `base64:<ext>:<b64data>` (e.g. `base64:csv:QSxCLEMK...`) so files on the client side no longer need to exist on the server's filesystem.
 
 ## Privacy
 

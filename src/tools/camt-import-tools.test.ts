@@ -1,6 +1,6 @@
 import { readFile } from "fs/promises";
 import { describe, expect, it, vi } from "vitest";
-import { validateFilePath } from "../file-validation.js";
+import { resolveFileInput } from "../file-validation.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
@@ -9,7 +9,7 @@ vi.mock("fs/promises", () => ({
 }));
 
 vi.mock("../file-validation.js", () => ({
-  validateFilePath: vi.fn(),
+  resolveFileInput: vi.fn(),
 }));
 
 vi.mock("../progress.js", () => ({
@@ -17,7 +17,7 @@ vi.mock("../progress.js", () => ({
 }));
 
 const mockedReadFile = vi.mocked(readFile);
-const mockedValidateFilePath = vi.mocked(validateFilePath);
+const mockedResolveFileInput = vi.mocked(resolveFileInput);
 
 const singleEntryXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
@@ -92,7 +92,7 @@ function setupCamtTool(options: {
 
 describe("camt import tool", () => {
   it("does not treat VOID transactions as duplicates", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
     const { api, handler } = setupCamtTool({
@@ -153,7 +153,7 @@ describe("camt import tool", () => {
   });
 
   it("matches clients by normalized company name when findByName returns multiple variants", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml.replace("Vendor OÜ", "OpenAI, Inc."));
 
     const { handler } = setupCamtTool({
@@ -186,7 +186,7 @@ describe("camt import tool", () => {
   });
 
   it("flags likely duplicates against older manual transactions in dry run", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
     const { handler } = setupCamtTool({
@@ -238,7 +238,7 @@ describe("camt import tool", () => {
   });
 
   it("keeps likely duplicates in needs_review after execute and includes the new transaction id", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
     const { handler } = setupCamtTool({
@@ -284,7 +284,7 @@ describe("camt import tool", () => {
   });
 
   it("requires status review when the older likely duplicate is still a PROJECT row", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
     const { handler } = setupCamtTool({
@@ -326,7 +326,7 @@ describe("camt import tool", () => {
   });
 
   it("keeps separate cache entries for different legal-entity variants with the same normalized stem", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
   <BkToCstmrStmt>
@@ -400,7 +400,7 @@ describe("camt import tool", () => {
   });
 
   it("does not skip split CAMT rows that only share a statement-level bank reference", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
   <BkToCstmrStmt>
@@ -478,7 +478,7 @@ describe("camt import tool", () => {
   });
 
   it("only skips the already imported split row when a prior import used the same shared bank reference", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
   <BkToCstmrStmt>
@@ -573,7 +573,7 @@ describe("camt import tool", () => {
   });
 
   it("skips exact duplicate rows within the same file even when AcctSvcrRef is missing", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/camt.xml");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
   <BkToCstmrStmt>

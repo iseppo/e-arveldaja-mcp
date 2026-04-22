@@ -3,13 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { readFile } from "fs/promises";
-import { validateFilePath } from "../file-validation.js";
+import { resolveFileInput } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import { registerPdfWorkflowTools } from "./pdf-workflow.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
 vi.mock("../file-validation.js", () => ({
-  validateFilePath: vi.fn(),
+  resolveFileInput: vi.fn(),
 }));
 
 vi.mock("../document-parser.js", () => ({
@@ -24,7 +24,7 @@ vi.mock("fs/promises", async () => {
   };
 });
 
-const mockedValidateFilePath = vi.mocked(validateFilePath);
+const mockedResolveFileInput = vi.mocked(resolveFileInput);
 const mockedParseDocument = vi.mocked(parseDocument);
 const mockedReadFile = vi.mocked(readFile);
 
@@ -138,7 +138,7 @@ function setupPdfWorkflowTool(
 }
 
 afterEach(() => {
-  mockedValidateFilePath.mockReset();
+  mockedResolveFileInput.mockReset();
   mockedParseDocument.mockReset();
   mockedReadFile.mockClear();
   for (const dir of tempDirs.splice(0)) {
@@ -148,7 +148,7 @@ afterEach(() => {
 
 describe("pdf workflow tools", () => {
   it("extract_pdf_invoice uses LiteParse output for raw text and page count", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/invoice.pdf");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/invoice.pdf" });
     mockedParseDocument.mockResolvedValue({
       text: "Registrikood 12345678\nKM-number: IE3668997OH\nEE47 1000 0010 2014 5685\nViitenumber 12345",
       pageCount: 2,
@@ -160,7 +160,7 @@ describe("pdf workflow tools", () => {
     const response = await handler({ file_path: "/tmp/invoice.pdf" });
     const payload = parseMcpResponse(response.content[0]!.text);
 
-    expect(mockedValidateFilePath).toHaveBeenCalledWith("/tmp/invoice.pdf", [".pdf", ".jpg", ".jpeg", ".png"], 50 * 1024 * 1024);
+    expect(mockedResolveFileInput).toHaveBeenCalledWith("/tmp/invoice.pdf", [".pdf", ".jpg", ".jpeg", ".png"], 50 * 1024 * 1024);
     expect(mockedParseDocument).toHaveBeenCalledWith("/tmp/invoice.pdf");
     expect(payload.page_count).toBe(2);
     expect(payload.hints).toEqual(expect.objectContaining({
@@ -183,7 +183,7 @@ describe("pdf workflow tools", () => {
   });
 
   it("prefers supplier-side tax id before the bill-to block", async () => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/invoice.pdf");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/invoice.pdf" });
     mockedParseDocument.mockResolvedValue({
       text: "Anthropic Bill to\nTax ID: EE102814482\nBill to\nSeppo AI OÜ\nTax ID: EE102809963\nInvoice number 60E2BBAF0002\nDate of issue June 14, 2024\nSubtotal €18.00\nTax 1 €3.96 €3.96\nTotal €21.96",
       pageCount: 1,
@@ -233,7 +233,7 @@ describe("pdf workflow tools", () => {
 
   it("uploads the source document when creating a purchase invoice from a file", async () => {
     const filePath = createTempInvoiceFile("invoice-upload.pdf", "pdf-bytes");
-    mockedValidateFilePath.mockResolvedValue(filePath);
+    mockedResolveFileInput.mockResolvedValue({ path: filePath });
 
     const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
 
@@ -271,7 +271,7 @@ describe("pdf workflow tools", () => {
 
   it("invalidates the draft invoice and returns an error when document upload fails", async () => {
     const filePath = createTempInvoiceFile("invoice-fail.pdf", "pdf-bytes");
-    mockedValidateFilePath.mockResolvedValue(filePath);
+    mockedResolveFileInput.mockResolvedValue({ path: filePath });
 
     const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
       purchaseInvoices: {
@@ -309,7 +309,7 @@ describe("pdf workflow tools", () => {
   });
 
   it("sanitizes Windows-style source paths down to the base file name", async () => {
-    mockedValidateFilePath.mockResolvedValue("C:\\Users\\Seppo\\Documents\\invoice-upload.pdf");
+    mockedResolveFileInput.mockResolvedValue({ path: "C:\\Users\\Seppo\\Documents\\invoice-upload.pdf" });
     mockedReadFile.mockResolvedValue(Buffer.from("pdf-bytes"));
 
     const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");

@@ -1,6 +1,6 @@
 import { readFile } from "fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { validateFilePath } from "../file-validation.js";
+import { resolveFileInput } from "../file-validation.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
@@ -9,7 +9,7 @@ vi.mock("fs/promises", () => ({
 }));
 
 vi.mock("../file-validation.js", () => ({
-  validateFilePath: vi.fn(),
+  resolveFileInput: vi.fn(),
 }));
 
 vi.mock("../progress.js", () => ({
@@ -17,7 +17,7 @@ vi.mock("../progress.js", () => ({
 }));
 
 const mockedReadFile = vi.mocked(readFile);
-const mockedValidateFilePath = vi.mocked(validateFilePath);
+const mockedResolveFileInput = vi.mocked(resolveFileInput);
 
 const CSV_HEADER = [
   "ID", "Status", "Direction", "Created on", "Finished on",
@@ -83,7 +83,7 @@ function setupWiseTool(
 
 describe("wise import tool", () => {
   beforeEach(() => {
-    mockedValidateFilePath.mockResolvedValue("/tmp/wise.csv");
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
     mockedReadFile.mockReset();
   });
 
