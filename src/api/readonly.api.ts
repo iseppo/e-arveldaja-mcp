@@ -6,7 +6,9 @@ import type {
 } from "../types/api.js";
 import { Cache } from "../cache.js";
 
-export const readonlyCache = new Cache(600); // 10 min cache for reference data
+const REFERENCE_TTL_SECONDS = 600; // 10 min cache for reference data
+
+export const readonlyCache = new Cache(REFERENCE_TTL_SECONDS);
 
 function readonlyCacheKey(client: HttpClient, key: string): string {
   return `${client.cacheNamespace}:${key}`;
@@ -19,16 +21,16 @@ function invalidateReadonlyCache(client: HttpClient, pattern: string): void {
 async function readonlyCachedGet<T>(client: HttpClient, path: string): Promise<T> {
   const cacheKey = readonlyCacheKey(client, path);
   const readonlyCached = readonlyCache.get<T>(cacheKey);
-  if (readonlyCached) return readonlyCached;
+  if (readonlyCached !== undefined) return readonlyCached;
   const result = await client.get<T>(path);
-  readonlyCache.set(cacheKey, result, 600);
+  readonlyCache.set(cacheKey, result, REFERENCE_TTL_SECONDS);
   return result;
 }
 
 async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promise<T[]> {
   const cacheKey = readonlyCacheKey(client, `${path}:all`);
   const readonlyCached = readonlyCache.get<T[]>(cacheKey);
-  if (readonlyCached) return readonlyCached;
+  if (readonlyCached !== undefined) return readonlyCached;
 
   // First request - detect if paginated or plain array
   const first = await client.get<T[] | PaginatedResponse<T>>(path);
@@ -57,7 +59,7 @@ async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promis
     throw new Error(`Unexpected response shape from ${path}`);
   }
 
-  readonlyCache.set(cacheKey, allItems, 600);
+  readonlyCache.set(cacheKey, allItems, REFERENCE_TTL_SECONDS);
   return allItems;
 }
 

@@ -10,6 +10,17 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   async confirm(id: number): Promise<ApiResponse> {
     const result = await this.client.patch<ApiResponse>(`/sale_invoices/${id}/register`, {});
     this.invalidateCache();
+    // Registering a sale invoice creates a journal server-side — bust the
+    // journals cache so trial balance / aging / list_journals don't serve
+    // stale data missing the new registration journal.
+    this.invalidateCache("/journals");
+    return result;
+  }
+
+  async invalidate(id: number): Promise<ApiResponse> {
+    const result = await this.client.patch<ApiResponse>(`/sale_invoices/${id}/invalidate`, {});
+    this.invalidateCache();
+    this.invalidateCache("/journals");
     return result;
   }
 

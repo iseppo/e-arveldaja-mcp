@@ -1,5 +1,56 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PurchaseInvoicesApi } from "./purchase-invoices.api.js";
+import { cache } from "./base-resource.js";
+import type { HttpClient } from "../http-client.js";
+
+vi.mock("../logger.js", () => ({ log: vi.fn() }));
+vi.mock("../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(undefined) }));
+
+function makeClient(namespace = "connection:0"): HttpClient {
+  return {
+    cacheNamespace: namespace,
+    get: vi.fn(),
+    post: vi.fn(),
+    patch: vi.fn().mockResolvedValue({ code: 200, messages: [] }),
+    delete: vi.fn(),
+  } as unknown as HttpClient;
+}
+
+describe("PurchaseInvoicesApi.confirm (cross-cache invalidation)", () => {
+  beforeEach(() => cache.invalidate());
+
+  it("busts /journals and /transactions caches when confirming", async () => {
+    const client = makeClient();
+    const api = new PurchaseInvoicesApi(client);
+    cache.set("connection:0:/journals:list:page=1", { stale: true });
+    cache.set("connection:0:/transactions:list:page=1", { stale: true });
+    cache.set("connection:0:/purchase_invoices:list:page=1", { stale: true });
+
+    await api.confirm(99);
+
+    expect(cache.get("connection:0:/journals:list:page=1")).toBeUndefined();
+    expect(cache.get("connection:0:/transactions:list:page=1")).toBeUndefined();
+    expect(cache.get("connection:0:/purchase_invoices:list:page=1")).toBeUndefined();
+  });
+});
+
+describe("PurchaseInvoicesApi.invalidate (cross-cache invalidation)", () => {
+  beforeEach(() => cache.invalidate());
+
+  it("busts /journals and /transactions caches when invalidating", async () => {
+    const client = makeClient();
+    const api = new PurchaseInvoicesApi(client);
+    cache.set("connection:0:/journals:list:page=1", { stale: true });
+    cache.set("connection:0:/transactions:list:page=1", { stale: true });
+    cache.set("connection:0:/purchase_invoices:99", { stale: true });
+
+    await api.invalidate(99);
+
+    expect(cache.get("connection:0:/journals:list:page=1")).toBeUndefined();
+    expect(cache.get("connection:0:/transactions:list:page=1")).toBeUndefined();
+    expect(cache.get("connection:0:/purchase_invoices:99")).toBeUndefined();
+  });
+});
 
 describe("PurchaseInvoicesApi.confirmWithTotals", () => {
   it("preserves explicit invoice totals when requested", async () => {

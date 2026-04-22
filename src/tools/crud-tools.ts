@@ -89,18 +89,29 @@ export function requireFields(items: Record<string, unknown>[], label: string, f
   });
 }
 
-/** Coerce string-typed numbers to actual numbers (LLMs often quote numbers in JSON). */
+/**
+ * Coerce string-typed numbers to actual numbers (LLMs often quote numbers in JSON).
+ * Rejects empty/whitespace strings: `Number("") === 0` would silently turn a
+ * pasted empty CSV cell into a 0-EUR line, which is a bug factory. Callers who
+ * want "absent" must omit the field or pass null.
+ */
 export function coerceNumericFields(items: Record<string, unknown>[], fields: string[]): void {
-  for (const item of items) {
+  items.forEach((item, index) => {
     for (const field of fields) {
       if (field in item && typeof item[field] === "string") {
-        const parsed = Number(item[field]);
+        const raw = item[field] as string;
+        if (raw.trim() === "") {
+          throw new Error(
+            `Numeric field "${field}" at item ${index + 1} cannot be an empty string. Omit the field or pass null to leave it unset.`
+          );
+        }
+        const parsed = Number(raw);
         if (Number.isFinite(parsed)) {
           item[field] = parsed;
         }
       }
     }
-  }
+  });
 }
 
 export function requireNumericFields(items: Record<string, unknown>[], label: string, fields: string[]): void {
@@ -239,6 +250,43 @@ function validateTransactionUpdateData(data: Record<string, unknown>): string[] 
   return errors;
 }
 
+/**
+ * Per-entity denylist of fields that must never be set via the generic
+ * `update_*` tools because they are either server-managed, state-flipping,
+ * or have dedicated action tools (confirm/invalidate/deactivate/restore).
+ *
+ * Mirrors the pattern `update_transaction` uses with `TRANSACTION_METADATA_FIELDS`,
+ * but denylist-style so we don't have to track every legitimately-updatable
+ * field as the API surface grows.
+ */
+const UPDATE_BLOCKED_FIELDS: Record<string, { fields: string[]; alt: string }> = {
+  client:           { fields: ["id", "is_active", "deactivated_date"],
+                       alt: "use deactivate_client / restore_client to change activation state" },
+  product:          { fields: ["id", "is_active", "deactivated_date"],
+                       alt: "use deactivate_product / restore_product to change activation state" },
+  journal:          { fields: ["id", "registered", "register_date", "status"],
+                       alt: "use confirm_journal / invalidate_journal to change registration state" },
+  sale_invoice:     { fields: ["id", "status", "registered", "register_date"],
+                       alt: "use confirm_sale_invoice / invalidate_sale_invoice to change registration state" },
+  purchase_invoice: { fields: ["id", "status", "registered", "register_date", "payment_status"],
+                       alt: "use confirm_purchase_invoice / invalidate_purchase_invoice to change registration state" },
+};
+
+function validateUpdateFields(data: Record<string, unknown>, entity: keyof typeof UPDATE_BLOCKED_FIELDS): string[] {
+  const errors: string[] = [];
+  if (Object.keys(data).length === 0) {
+    errors.push(`update_${entity}: provide at least one field to update.`);
+    return errors;
+  }
+  const { fields: blocked, alt } = UPDATE_BLOCKED_FIELDS[entity]!;
+  for (const field of blocked) {
+    if (field in data) {
+      errors.push(`Field "${field}" cannot be set via update_${entity} — ${alt}.`);
+    }
+  }
+  return errors;
+}
+
 export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // =====================
   // CLIENTS
@@ -285,11 +333,15 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "update_client", "Update an existing client", {
+  registerTool(server, "update_client", "Update an existing client. Server-managed fields (id, is_active, deactivated_date) are rejected — use the dedicated deactivate/restore tools.", {
     id: coerceId.describe("Client ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, { ...mutate, title: "Update Client" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
+    const updateErrors = validateUpdateFields(parsed, "client");
+    if (updateErrors.length > 0) {
+      return toolError({ error: "Invalid update fields", details: updateErrors });
+    }
     const result = await api.clients.update(id, parsed);
     logAudit({
       tool: "update_client", action: "UPDATED", entity_type: "client", entity_id: id,
@@ -365,11 +417,15 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "update_product", "Update a product", {
+  registerTool(server, "update_product", "Update a product. Server-managed fields (id, is_active, deactivated_date) are rejected — use the dedicated deactivate/restore tools.", {
     id: coerceId.describe("Product ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, { ...mutate, title: "Update Product" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
+    const updateErrors = validateUpdateFields(parsed, "product");
+    if (updateErrors.length > 0) {
+      return toolError({ error: "Invalid update fields", details: updateErrors });
+    }
     const result = await api.products.update(id, parsed);
     logAudit({
       tool: "update_product", action: "UPDATED", entity_type: "product", entity_id: id,
@@ -524,11 +580,15 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "update_journal", "Update a journal entry", {
+  registerTool(server, "update_journal", "Update a journal entry. Server-managed fields (id, registered, register_date, status) are rejected — use the dedicated confirm/invalidate tools.", {
     id: coerceId.describe("Journal ID"),
     data: z.string().describe("JSON object with fields to update"),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
+    const updateErrors = validateUpdateFields(parsed, "journal");
+    if (updateErrors.length > 0) {
+      return toolError({ error: "Invalid update fields", details: updateErrors });
+    }
     const result = await api.journals.update(id, parsed);
     logAudit({
       tool: "update_journal", action: "UPDATED", entity_type: "journal", entity_id: id,
@@ -770,8 +830,9 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     {
     id: coerceId.describe("Transaction ID"),
     distributions: z.string().optional().describe(
-      "JSON array of distribution rows: [{related_table, related_id?, related_sub_id?, amount}]. " +
+      "JSON array of distribution rows: [{related_table, related_id, related_sub_id?, amount}]. " +
       "related_table values: 'accounts' (book to a GL account), 'purchase_invoices', 'sale_invoices'. " +
+      "related_id is REQUIRED for all three related_table values (the account ID, purchase-invoice ID, or sale-invoice ID). " +
       "related_sub_id is REQUIRED when related_table='accounts' and the account has dimensions — " +
       "pass the dimension ID there (e.g. 1360 'Arveldused aruandvate isikutega' with sub-account per person). " +
       "Without related_sub_id the API rejects with 'Entry cannot be made directly to the account ... since it has dimensions'. " +
@@ -1014,11 +1075,15 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "update_sale_invoice", "Update a sales invoice", {
+  registerTool(server, "update_sale_invoice", "Update a sales invoice. Server-managed fields (id, status, registered, register_date) are rejected — use the dedicated confirm/invalidate tools.", {
     id: coerceId.describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
+    const updateErrors = validateUpdateFields(parsed, "sale_invoice");
+    if (updateErrors.length > 0) {
+      return toolError({ error: "Invalid update fields", details: updateErrors });
+    }
     const result = await api.saleInvoices.update(id, parsed);
     logAudit({
       tool: "update_sale_invoice", action: "UPDATED", entity_type: "sale_invoice", entity_id: id,
@@ -1038,7 +1103,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "confirm_sale_invoice", "Confirm a sales invoice. IRREVERSIBLE — locks the invoice for editing.", idParam.shape, { ...destructive, title: "Confirm Sale Invoice" }, async ({ id }) => {
+  registerTool(server, "confirm_sale_invoice", "Confirm a sales invoice. Locks the invoice for editing. Reversible via invalidate_sale_invoice.", idParam.shape, { ...destructive, title: "Confirm Sale Invoice" }, async ({ id }) => {
     const result = await api.saleInvoices.confirm(id);
     logAudit({
       tool: "confirm_sale_invoice", action: "CONFIRMED", entity_type: "sale_invoice", entity_id: id,
@@ -1047,6 +1112,18 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     });
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
+
+  registerTool(server, "invalidate_sale_invoice",
+    "Return a confirmed sale invoice to draft status for editing. Required before delete_sale_invoice against a CONFIRMED invoice.",
+    idParam.shape, { ...mutate, title: "Invalidate Sale Invoice" }, async ({ id }) => {
+      const result = await api.saleInvoices.invalidate(id);
+      logAudit({
+        tool: "invalidate_sale_invoice", action: "INVALIDATED", entity_type: "sale_invoice", entity_id: id,
+        summary: `Invalidated sale invoice ${id}`,
+        details: {},
+      });
+      return { content: [{ type: "text", text: toMcpJson(result) }] };
+    });
 
   registerTool(server, "get_sale_invoice_delivery_options", "Get available delivery methods for a sales invoice (e-invoice or email)", idParam.shape, { ...readOnly, title: "Get Sale Invoice Delivery Options" }, async ({ id }) => {
     const result = await api.saleInvoices.getDeliveryOptions(id);
@@ -1098,8 +1175,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       create_date: isoDateString("Invoice date (YYYY-MM-DD)"),
       journal_date: isoDateString("Turnover date (YYYY-MM-DD)"),
       term_days: z.number().describe("Payment term in days"),
-      vat_price: z.number().optional().describe("Total VAT amount from original invoice (EXACT, for payment matching)"),
-      gross_price: z.number().optional().describe("Total gross amount from original invoice (EXACT, for payment matching)"),
+      vat_price: z.number().describe("Total VAT amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
+      gross_price: z.number().describe("Total gross amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
       items: z.string().describe(
@@ -1158,11 +1235,15 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       return { content: [{ type: "text", text: toMcpJson(result) }] };
     });
 
-  registerTool(server, "update_purchase_invoice", "Update a purchase invoice", {
+  registerTool(server, "update_purchase_invoice", "Update a purchase invoice. Server-managed fields (id, status, registered, register_date, payment_status) are rejected — use the dedicated confirm/invalidate tools.", {
     id: coerceId.describe("Invoice ID"),
     data: z.string().describe("JSON with fields to update"),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
+    const updateErrors = validateUpdateFields(parsed, "purchase_invoice");
+    if (updateErrors.length > 0) {
+      return toolError({ error: "Invalid update fields", details: updateErrors });
+    }
     const result = await api.purchaseInvoices.update(id, parsed);
     logAudit({
       tool: "update_purchase_invoice", action: "UPDATED", entity_type: "purchase_invoice", entity_id: id,

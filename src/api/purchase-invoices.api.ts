@@ -186,12 +186,18 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   async confirm(id: number): Promise<ApiResponse> {
     const result = await this.client.patch<ApiResponse>(`/purchase_invoices/${id}/register`, {});
     this.invalidateCache();
+    // Registering a purchase invoice creates a journal server-side and can
+    // flip payment_status on any linked transaction — bust both caches.
+    this.invalidateCache("/journals");
+    this.invalidateCache("/transactions");
     return result;
   }
 
   async invalidate(id: number): Promise<ApiResponse> {
     const result = await this.client.patch<ApiResponse>(`/purchase_invoices/${id}/invalidate`, {});
     this.invalidateCache();
+    this.invalidateCache("/journals");
+    this.invalidateCache("/transactions");
     return result;
   }
 

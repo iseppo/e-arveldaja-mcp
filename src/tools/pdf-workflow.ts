@@ -408,7 +408,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
   registerTool(server, "create_purchase_invoice_from_pdf",
     "Create a draft purchase invoice from extracted and validated PDF/JPG/PNG data and attach the source document to it. " +
     "The source file is required and upload is mandatory; if upload fails after invoice creation, the draft invoice is invalidated. " +
-    "Pass EXACT vat_price and gross_price from the original invoice for payment matching.",
+    "Pass EXACT vat_price and gross_price from the original invoice for payment matching. " +
+    "These are OPTIONAL here (unlike create_purchase_invoice which requires them) because OCR may not reliably extract invoice-level totals; " +
+    "confirm_purchase_invoice / confirmWithTotals will self-heal from item-level figures at confirmation time when invoice-level values are missing.",
     {
       supplier_client_id: coerceId.describe("Supplier client ID (from resolve_supplier)"),
       invoice_number: z.string().describe("Invoice number"),
@@ -419,8 +421,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         "JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. " +
         "purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts). Same rule applies to vat_accounts_dimensions_id when the VAT account has dimensions. Use list_account_dimensions to look up dimension IDs."
       ),
-      vat_price: z.number().optional().describe("EXACT total VAT from the original invoice"),
-      gross_price: z.number().optional().describe("EXACT total gross from the original invoice"),
+      vat_price: z.number().optional().describe("EXACT total VAT from the original invoice. Optional because OCR may not extract reliably; pass when known."),
+      gross_price: z.number().optional().describe("EXACT total gross from the original invoice. Optional because OCR may not extract reliably; pass when known."),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
       notes: z.string().optional().describe("Notes (e.g. PDF filename)"),
       ref_number: z.string().optional().describe("Reference number"),

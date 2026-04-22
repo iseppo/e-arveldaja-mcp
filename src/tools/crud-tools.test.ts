@@ -15,6 +15,11 @@ import { parseMcpResponse } from "../mcp-json.js";
 function getCrudToolHarness(toolName: string, overrides?: {
   transactions?: Record<string, unknown>;
   readonly?: Record<string, unknown>;
+  clients?: Record<string, unknown>;
+  products?: Record<string, unknown>;
+  journals?: Record<string, unknown>;
+  saleInvoices?: Record<string, unknown>;
+  purchaseInvoices?: Record<string, unknown>;
 }) {
   const api = {
     transactions: {
@@ -27,6 +32,26 @@ function getCrudToolHarness(toolName: string, overrides?: {
       getAccounts: vi.fn(),
       getAccountDimensions: vi.fn(),
       ...overrides?.readonly,
+    },
+    clients: {
+      update: vi.fn(),
+      ...overrides?.clients,
+    },
+    products: {
+      update: vi.fn(),
+      ...overrides?.products,
+    },
+    journals: {
+      update: vi.fn(),
+      ...overrides?.journals,
+    },
+    saleInvoices: {
+      update: vi.fn(),
+      ...overrides?.saleInvoices,
+    },
+    purchaseInvoices: {
+      update: vi.fn(),
+      ...overrides?.purchaseInvoices,
     },
   };
   const server = { registerTool: vi.fn() };
@@ -181,10 +206,18 @@ describe("coerceNumericFields", () => {
     expect(items[0]!.name).toBe("bad");
   });
 
-  it("coerces empty string to 0 (Number('') is 0 which is finite)", () => {
+  it("rejects empty string explicitly with item index (Number('') would silently become 0)", () => {
     const items = [{ value: "" }];
-    coerceNumericFields(items, ["value"]);
-    expect(items[0]!.value).toBe(0);
+    expect(() => coerceNumericFields(items, ["value"])).toThrow(
+      'Numeric field "value" at item 1 cannot be an empty string'
+    );
+  });
+
+  it("rejects whitespace-only string the same way and reports the correct row", () => {
+    const items = [{ amount: 1 }, { amount: "   " }];
+    expect(() => coerceNumericFields(items, ["amount"])).toThrow(
+      'Numeric field "amount" at item 2 cannot be an empty string'
+    );
   });
 
   it("does not touch null or undefined values", () => {
@@ -348,5 +381,64 @@ describe("update_transaction", () => {
       code: 1,
       messages: ["ok"],
     });
+  });
+});
+
+describe("update_* allowlists", () => {
+  it("update_client rejects is_active without mutating", async () => {
+    const { api, handler } = getCrudToolHarness("update_client");
+    const result = await handler({ id: 7, data: '{"is_active":false}' }) as { content: Array<{ text: string }> };
+    expect(api.clients.update).not.toHaveBeenCalled();
+    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(body.error).toBe("Invalid update fields");
+    expect(body.details[0]).toMatch(/"is_active".*update_client/);
+  });
+
+  it("update_product rejects deactivated_date without mutating", async () => {
+    const { api, handler } = getCrudToolHarness("update_product");
+    const result = await handler({ id: 7, data: '{"deactivated_date":"2026-01-01"}' }) as { content: Array<{ text: string }> };
+    expect(api.products.update).not.toHaveBeenCalled();
+    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(body.error).toBe("Invalid update fields");
+  });
+
+  it("update_journal rejects status without mutating", async () => {
+    const { api, handler } = getCrudToolHarness("update_journal");
+    const result = await handler({ id: 7, data: '{"status":"CONFIRMED"}' }) as { content: Array<{ text: string }> };
+    expect(api.journals.update).not.toHaveBeenCalled();
+    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(body.details[0]).toMatch(/"status".*confirm_journal/);
+  });
+
+  it("update_sale_invoice rejects registered without mutating", async () => {
+    const { api, handler } = getCrudToolHarness("update_sale_invoice");
+    const result = await handler({ id: 7, data: '{"registered":true}' }) as { content: Array<{ text: string }> };
+    expect(api.saleInvoices.update).not.toHaveBeenCalled();
+    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(body.details[0]).toMatch(/"registered".*confirm_sale_invoice/);
+  });
+
+  it("update_purchase_invoice rejects payment_status without mutating", async () => {
+    const { api, handler } = getCrudToolHarness("update_purchase_invoice");
+    const result = await handler({ id: 7, data: '{"payment_status":"PAID"}' }) as { content: Array<{ text: string }> };
+    expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
+    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(body.details[0]).toMatch(/"payment_status"/);
+  });
+
+  it("update_client with empty object reports 'provide at least one field'", async () => {
+    const { api, handler } = getCrudToolHarness("update_client");
+    const result = await handler({ id: 7, data: "{}" }) as { content: Array<{ text: string }> };
+    expect(api.clients.update).not.toHaveBeenCalled();
+    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
+    expect(body.details[0]).toMatch(/at least one field/);
+  });
+
+  it("update_client passes through an allowed field", async () => {
+    const { api, handler } = getCrudToolHarness("update_client", {
+      clients: { update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }) },
+    });
+    await handler({ id: 7, data: '{"email":"new@example.com"}' });
+    expect(api.clients.update).toHaveBeenCalledWith(7, { email: "new@example.com" });
   });
 });
