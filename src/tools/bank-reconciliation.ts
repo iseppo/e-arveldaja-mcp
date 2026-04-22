@@ -307,12 +307,22 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         if (candidates.length > 0) {
           candidates.sort((a, b) => b.confidence - a.confidence);
           const bestMatch = candidates[0]!;
-          const distribution = buildSuggestedDistribution(
-            bestMatch.type,
-            bestMatch.id,
-            tx.amount,
-            bestMatch.partially_paid_warning,
-          );
+          // Cross-currency match: if the match survived only on base-currency
+          // evidence (exact_base_amount), tx.amount is in a different currency
+          // than the invoice gross and a naive distribution of tx.amount would
+          // book the wrong figure. Skip the auto-distribution and flag for
+          // manual review; the match is still surfaced so a human can decide.
+          const crossCurrency =
+            bestMatch.match_reasons.includes("exact_base_amount") &&
+            !bestMatch.match_reasons.includes("exact_amount");
+          const distribution = crossCurrency
+            ? undefined
+            : buildSuggestedDistribution(
+                bestMatch.type,
+                bestMatch.id,
+                tx.amount,
+                bestMatch.partially_paid_warning,
+              );
           results.push({
             transaction_id: tx.id,
             date: tx.date,
@@ -325,6 +335,9 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             ...(distribution ? { distribution } : {}),
             ...(bestMatch.partially_paid_warning
               ? { manual_review_required: "Invoice is PARTIALLY_PAID; verify the remaining open balance before confirming." }
+              : {}),
+            ...(crossCurrency
+              ? { manual_review_required: "Cross-currency match: tx amount is in a different currency than the invoice gross. Compute the correct distribution amount manually before confirming." }
               : {}),
           });
         }
@@ -747,9 +760,15 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           return undefined;
         }
 
-        const dA = new Date(txA.date);
-        const dB = new Date(txB.date);
-        const daysDiff = Math.abs((dA.getTime() - dB.getTime()) / 86_400_000);
+        // Pure-date UTC arithmetic. new Date("YYYY-MM-DD") parses as UTC
+        // midnight, but any input containing a time/offset is subject to
+        // local-time and DST drift; extracting the YYYY-MM-DD prefix first
+        // keeps the gap calculation stable regardless of input shape.
+        const toUtcDay = (s: string): number => {
+          const [y, m, d] = s.slice(0, 10).split("-").map(Number);
+          return Date.UTC(y!, (m ?? 1) - 1, d ?? 1);
+        };
+        const daysDiff = Math.abs((toUtcDay(txA.date) - toUtcDay(txB.date)) / 86_400_000);
         if (daysDiff === 0) {
           confidence += 20;
           reasons.push("same_date");
@@ -854,23 +873,45 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             continue;
           }
 
-          if (outCounterpartyIban && outCounterpartyIban === inAccountIban) {
+          // Counterparty-signal evidence. Hard gate (below) requires at least
+          // one of these to fire — amount+date alone is not enough to
+          // auto-pair two unconfirmed transactions. Without this gate, two
+          // unrelated same-day same-amount movements across different own
+          // accounts (e.g. salary payout on LHV + VAT remittance on Wise
+          // happening to share amount) would pair as a false "transfer."
+          const hasOutgoingIbanMatchesIncomingAccount =
+            Boolean(outCounterpartyIban && outCounterpartyIban === inAccountIban);
+          const hasIncomingIbanMatchesOutgoingAccount =
+            Boolean(inCounterpartyIban && inCounterpartyIban === outAccountIban);
+          const hasOutgoingCounterpartyIsOwnAccount =
+            Boolean(outCounterpartyIban && ownIbanToDimension.has(outCounterpartyIban));
+          const hasIncomingCounterpartyIsOwnAccount =
+            Boolean(inCounterpartyIban && ownIbanToDimension.has(inCounterpartyIban));
+
+          if (hasOutgoingIbanMatchesIncomingAccount) {
             confidence += 30;
             reasons.push("outgoing_iban_matches_incoming_account");
           }
-          if (inCounterpartyIban && inCounterpartyIban === outAccountIban) {
+          if (hasIncomingIbanMatchesOutgoingAccount) {
             confidence += 30;
             reasons.push("incoming_iban_matches_outgoing_account");
           }
 
-          if (outCounterpartyIban && ownIbanToDimension.has(outCounterpartyIban) && confidence <= 60) {
+          if (hasOutgoingCounterpartyIsOwnAccount && confidence <= 60) {
             confidence += 15;
             reasons.push("outgoing_counterparty_is_own_account");
           }
-          if (inCounterpartyIban && ownIbanToDimension.has(inCounterpartyIban) && confidence <= 60) {
+          if (hasIncomingCounterpartyIsOwnAccount && confidence <= 60) {
             confidence += 15;
             reasons.push("incoming_counterparty_is_own_account");
           }
+
+          const hasCounterpartySignal =
+            hasOutgoingIbanMatchesIncomingAccount ||
+            hasIncomingIbanMatchesOutgoingAccount ||
+            hasOutgoingCounterpartyIsOwnAccount ||
+            hasIncomingCounterpartyIsOwnAccount;
+          if (!hasCounterpartySignal) continue;
 
           if (confidence < 50) continue;
 
@@ -908,6 +949,11 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             confidence: topConfidence,
             reason: `Multiple incoming transactions matched outgoing transaction ${txOut.id} with the same confidence ${topConfidence}.`,
           });
+          // Prevent Phase 2 from silently auto-confirming any tx flagged as
+          // ambiguous here — humans need to decide. Phase 1b already does
+          // this for its own ambiguity branch; mirror the protection here.
+          blockedOneSidedTxIds.add(txOut.id);
+          for (const candidate of topCandidates) blockedOneSidedTxIds.add(candidate.txIn.id!);
           continue;
         }
 

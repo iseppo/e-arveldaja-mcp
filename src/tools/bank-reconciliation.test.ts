@@ -905,15 +905,23 @@ describe("reconcile_inter_account_transfers", () => {
   });
 
   it("skips ambiguous pair matches instead of picking the first incoming candidate", async () => {
+    // tx 25's counterparty IBAN points to a 4th own account (Savings),
+    // giving it the outgoing_counterparty_is_own_account signal. That
+    // satisfies the Phase-1 counterparty gate without biasing toward
+    // either candidate. tx 26 and tx 27 carry no counterparty IBAN,
+    // so Phase 2 (one-sided transfer) does not fire. Both pairs score
+    // 40 (amount) + 20 (date) + 15 (outgoing own) = 75 → tied →
+    // ambiguity path.
     const { handler, api } = setupInterAccountTool({
       transactions: [
-        { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_name: "Transfer" },
+        { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE88888888888888", bank_account_name: "Transfer" },
         { id: 26, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Transfer" },
         { id: 27, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 300, bank_account_name: "Transfer" },
       ],
       bankAccounts: [
         ...bankAccounts,
         { id: 3, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+        { id: 4, account_name_est: "Savings", account_no: "EE88888888888888", iban_code: "EE88888888888888", accounts_dimensions_id: 400 },
       ],
     });
 
@@ -926,9 +934,31 @@ describe("reconcile_inter_account_transfers", () => {
       expect.objectContaining({
         outgoing_transaction_id: 25,
         candidate_incoming_transaction_ids: [26, 27],
-        confidence: 60,
+        confidence: 75,
       }),
     ]);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("does not pair same-day same-amount transactions without a counterparty signal", async () => {
+    // The exact false-positive we're guarding against: two unrelated
+    // transactions on different own accounts happen to share amount and
+    // date (e.g. salary payout on LHV + VAT remittance on SEB, both
+    // €500 on 2026-03-20). No counterparty IBANs on either side → the
+    // hard gate rejects. Old code would have paired at confidence 60.
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 50, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_name: "Palk - John Smith" },
+        { id: 51, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Maksu- ja Tolliamet" },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.skipped_ambiguous).toBe(0);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
