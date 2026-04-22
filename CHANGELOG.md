@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.11.7] - 2026-04-22
+
+### Fixed
+- **Base64 oversize guard off-by-padding** — the pre-decode size check introduced in 0.11.6 over-counted decoded length by up to 2 bytes when the decoded byte count wasn't divisible by 3, because it ignored the trailing `=` padding characters. A remote client sending a valid payload of exactly `maxSize` got rejected before the post-decode check could approve it. The estimate now accounts for padding (`floor(length / 4) * 3 - padCount`) and is exact for well-formed base64. Caught by an independent Codex review pass; a regression test at the 50 MiB − 1 boundary locks the fix in.
+
 ## [0.11.6] - 2026-04-22
 
 ### Added
