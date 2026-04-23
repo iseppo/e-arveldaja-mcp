@@ -185,9 +185,17 @@ export class HttpClient {
         }
 
         // Binary response (e.g. PDF document download) — return as ApiFile-compatible object.
-        // Cap buffered size to prevent OOM if an upstream ever returns an
+        // Cap buffered size to prevent OOM if the upstream returns an
         // unexpectedly large payload. Invoice PDFs are tiny (<1MB); keep a
         // generous ceiling for occasional legitimate bulk downloads.
+        //
+        // Caveat: against a hostile/buggy upstream the post-buffer check is
+        // reached only AFTER `arrayBuffer()` has already allocated the full
+        // body, so it does not prevent memory pressure from a streamed
+        // 1 GB body lacking a truthful content-length. A real cap requires
+        // streaming the body and aborting once cumulative bytes exceed the
+        // limit. Defensible today because e-arveldaja is a trusted upstream
+        // under HTTPS; treat this as defense-in-depth, not attacker-proof.
         const BINARY_RESPONSE_MAX_BYTES = 50 * 1024 * 1024; // 50 MB
         const contentLengthHeader = response.headers.get("content-length");
         if (contentLengthHeader) {

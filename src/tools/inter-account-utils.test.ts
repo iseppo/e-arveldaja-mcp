@@ -479,7 +479,10 @@ describe("findMatchingJournal", () => {
     expect(findMatchingJournal(candidates, "NOTPROVIDED")).toBe(100);
     expect(findMatchingJournal(candidates, "NONE")).toBe(100);
     expect(findMatchingJournal(candidates, "N/A")).toBe(100);
-    expect(findMatchingJournal(candidates, "-")).toBe(100);
     expect(findMatchingJournal(candidates, "   ")).toBe(100);
+    // Bare "NA" and "-" are NOT sentinels — they can be legitimate short
+    // human-entered refs, so they remain a distinct reference class.
+    expect(findMatchingJournal(candidates, "NA")).toBeUndefined();
+    expect(findMatchingJournal(candidates, "-")).toBeUndefined();
   });
 });

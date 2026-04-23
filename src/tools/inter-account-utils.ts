@@ -58,13 +58,16 @@ export interface InterAccountJournalEntry {
 // Different clearing systems fill in different placeholders when the
 // originator omitted a reference; treating any of them as a real ref would
 // let a garbage-ref journal suppress a real-ref duplicate detection.
+//
+// Deliberately narrow: only placeholders specific to SEPA/ISO 20022 flows.
+// Bare "NA" and "-" are excluded because they can plausibly be short
+// human-entered document refs; stripping them would create false-positive
+// dedups.
 const GARBAGE_REF_SENTINELS = new Set([
   "NOTPROVIDED",
   "NOTFOURNI",
   "NONE",
   "N/A",
-  "NA",
-  "-",
 ]);
 
 function normalizeReference(ref?: string | null): string {

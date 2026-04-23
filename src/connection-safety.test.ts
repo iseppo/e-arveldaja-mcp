@@ -124,38 +124,7 @@ describe("buildSwitchBlockedPayload", () => {
     ]);
   });
 
-  it("reaps stale snapshots past the threshold (wedged handler does not block switch forever)", () => {
-    const now = 1_000_000;
-    const fresh: ConnectionSnapshot = {
-      index: 0, generation: 1, toolName: "confirm_transaction", isReadOnly: false,
-      capturedAtMs: now - 10_000, // 10s ago → not stale
-    };
-    const wedged: ConnectionSnapshot = {
-      index: 0, generation: 1, toolName: "create_journal", isReadOnly: false,
-      capturedAtMs: now - 300_000, // 5m ago → stale
-    };
-    const set = new Set<ConnectionSnapshot>([fresh, wedged]);
-    const payload = buildSwitchBlockedPayload(set, undefined, { now, staleThresholdMs: 120_000 });
-    expect(payload).not.toBeNull();
-    expect(payload!.in_flight_tools.map(t => t.tool_name)).toEqual(["confirm_transaction"]);
-    // Stale entries get pruned from the mutable set so they don't accumulate
-    expect(set.has(wedged)).toBe(false);
-    expect(set.has(fresh)).toBe(true);
-  });
-
-  it("returns null when every in-flight snapshot is stale", () => {
-    const now = 1_000_000;
-    const wedged: ConnectionSnapshot = {
-      index: 0, generation: 1, toolName: "create_journal", isReadOnly: false,
-      capturedAtMs: now - 300_000,
-    };
-    const set = new Set<ConnectionSnapshot>([wedged]);
-    const payload = buildSwitchBlockedPayload(set, undefined, { now, staleThresholdMs: 120_000 });
-    expect(payload).toBeNull();
-    expect(set.size).toBe(0);
-  });
-
-  it("reports age_ms for non-stale snapshots with capturedAtMs", () => {
+  it("reports age_ms for in-flight snapshots with capturedAtMs", () => {
     const now = 1_000_000;
     const snap: ConnectionSnapshot = {
       index: 0, generation: 1, toolName: "confirm_transaction", isReadOnly: false,
@@ -166,5 +135,38 @@ describe("buildSwitchBlockedPayload", () => {
       tool_name: "confirm_transaction",
       age_ms: 5_000,
     });
+  });
+
+  it("keeps blocking long-running snapshots rather than auto-releasing the gate", () => {
+    // A tool that has already performed one API write then spends a long
+    // time in local work (PDF parse, CAMT enrichment, etc.) must NOT have
+    // its snapshot reaped: letting switch_connection proceed would commit
+    // the first write on connection A while subsequent calls fail after
+    // the switch, producing partial state across the switch boundary.
+    const now = 1_000_000;
+    const longRunning: ConnectionSnapshot = {
+      index: 0, generation: 1, toolName: "create_purchase_invoice_from_pdf", isReadOnly: false,
+      capturedAtMs: now - 600_000, // 10 minutes
+    };
+    const set = new Set<ConnectionSnapshot>([longRunning]);
+    const payload = buildSwitchBlockedPayload(set, undefined, { now });
+    expect(payload).not.toBeNull();
+    expect(payload!.in_flight_tools).toHaveLength(1);
+    expect(payload!.in_flight_tools[0]!.age_ms).toBe(600_000);
+    expect(payload!.hint).toMatch(/over 2 minutes/);
+    // Set is NOT mutated — snapshot stays tracked until the handler finishes
+    // or the MCP client cancels the request.
+    expect(set.has(longRunning)).toBe(true);
+  });
+
+  it("uses the standard hint when no snapshot has been running long", () => {
+    const now = 1_000_000;
+    const snap: ConnectionSnapshot = {
+      index: 0, generation: 1, toolName: "confirm_transaction", isReadOnly: false,
+      capturedAtMs: now - 5_000,
+    };
+    const payload = buildSwitchBlockedPayload([snap], undefined, { now });
+    expect(payload!.hint).toMatch(/cancel the MCP client request/);
+    expect(payload!.hint).not.toMatch(/over 2 minutes/);
   });
 });

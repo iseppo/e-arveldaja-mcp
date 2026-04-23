@@ -1064,6 +1064,20 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
           ...m,
           counterparty: wrapUntrustedOcr(m.counterparty ?? undefined),
           description: wrapUntrustedOcr(m.description ?? undefined),
+          // suggested_patch_missing_fields carries CAMT-origin bytes
+          // (entry.counterparty_name, entry.description) forwarded as
+          // proposed patches — wrap those too, otherwise the LLM sees
+          // the nested copy unsandboxed even though the top-level fields
+          // are wrapped.
+          suggested_patch_missing_fields: {
+            ...m.suggested_patch_missing_fields,
+            ...(m.suggested_patch_missing_fields?.bank_account_name
+              ? { bank_account_name: wrapUntrustedOcr(m.suggested_patch_missing_fields.bank_account_name) }
+              : {}),
+            ...(m.suggested_patch_missing_fields?.description
+              ? { description: wrapUntrustedOcr(m.suggested_patch_missing_fields.description) }
+              : {}),
+          },
         })),
       }));
       return {
