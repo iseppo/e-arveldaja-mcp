@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
 import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
@@ -128,7 +128,12 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(client_id !== undefined && { client_id }),
         ...(date_from && { date_from }),
         ...(date_to && { date_to }),
-        ...(include_entries && { entries: result.entries }),
+        // Journal titles are operator-entered and may echo OCR-seeded
+        // supplier / client names — wrap at MCP output, keep internal
+        // entries[] plain for in-process computation.
+        ...(include_entries && {
+          entries: result.entries.map(e => ({ ...e, title: wrapUntrustedOcr(e.title) ?? e.title })),
+        }),
       };
 
       return { content: [{ type: "text", text: toMcpJson(summary) }] };

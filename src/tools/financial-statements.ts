@@ -329,7 +329,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             month,
             unconfirmed_journals: {
               count: unconfirmedJournals.length,
-              items: unconfirmedJournals.map(j => ({ id: j.id, date: j.effective_date, title: j.title })),
+              items: unconfirmedJournals.map(j => ({ id: j.id, date: j.effective_date, title: wrapUntrustedOcr(j.title) })),
             },
             unconfirmed_transactions: {
               count: unconfirmedTx.length,

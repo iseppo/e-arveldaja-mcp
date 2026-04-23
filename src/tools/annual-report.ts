@@ -293,7 +293,7 @@ function buildUnresolvedItems(
       items: unconfirmedJournals.slice(0, 20).map((journal) => ({
         id: journal.id!,
         date: journal.effective_date,
-        title: journal.title,
+        title: wrapUntrustedOcr(journal.title),
       })),
     },
     unconfirmed_transactions: {
@@ -554,7 +554,7 @@ async function analyzeYearEndClose(api: ApiContext, year: number): Promise<YearE
     existing_year_end_close_journals: existingYearEndCloseJournals.map((journal) => ({
       id: journal.id!,
       date: journal.effective_date,
-      title: journal.title,
+      title: wrapUntrustedOcr(journal.title),
       document_number: journal.document_number,
       registered: journal.registered === true,
     })),
