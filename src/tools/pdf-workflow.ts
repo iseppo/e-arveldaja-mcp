@@ -108,7 +108,17 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
             type: "text",
             text: toMcpJson({
               hints: { ...hints, raw_text: wrapUntrustedOcr(hints.raw_text) ?? "" },
-              extracted: { ...extracted, raw_text: wrapUntrustedOcr(extracted.raw_text) },
+              // Wrap every OCR-origin free-form field, not just raw_text.
+              // `description` (line 1 of the receipt body) and `supplier_name`
+              // are both derived from unsanitized OCR text and can carry
+              // attacker-crafted content; they must ship under the same
+              // per-call nonce boundary the raw_text gets.
+              extracted: {
+                ...extracted,
+                raw_text: wrapUntrustedOcr(extracted.raw_text),
+                description: wrapUntrustedOcr(extracted.description),
+                supplier_name: wrapUntrustedOcr(extracted.supplier_name),
+              },
               llm_fallback: llmFallback,
               page_count: parsedDocument.pageCount,
             }),

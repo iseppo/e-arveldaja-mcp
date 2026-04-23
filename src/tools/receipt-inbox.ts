@@ -121,22 +121,66 @@ interface ReceiptBatchFileResult {
   review_guidance?: ReviewGuidance;
 }
 
-// Wrap free-form OCR fields with untrusted-OCR delimiters at MCP output time so a
-// downstream LLM cannot be tricked into executing instructions embedded in a
-// scanned receipt. Short structured fields (supplier_name, invoice_number, dates)
-// are left as-is — their length and format limit the realistic attack surface.
-function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): ReceiptBatchFileResult {
-  if (!result.extracted) return result;
-  const { raw_text, description } = result.extracted;
-  if (raw_text === undefined && description === undefined) return result;
-  return {
-    ...result,
-    extracted: {
-      ...result.extracted,
-      ...(raw_text !== undefined && { raw_text: wrapUntrustedOcr(raw_text) }),
-      ...(description !== undefined && { description: wrapUntrustedOcr(description) }),
-    },
-  };
+// Wrap free-form OCR-derived fields with untrusted-OCR delimiters at MCP
+// output time so a downstream LLM cannot be tricked into executing
+// instructions embedded in a scanned receipt. Anything touched or seeded
+// by OCR text goes through the nonce boundary:
+//   - extracted.raw_text / .description / .supplier_name
+//   - supplier_resolution.preview_client.name (derived from OCR supplier)
+//   - booking_suggestion.item.custom_title (often = description)
+// Short structured fields (invoice_number, dates, amounts) are left
+// as-is — their length and format limit realistic attack surface.
+export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): ReceiptBatchFileResult {
+  let next = result;
+
+  if (next.extracted) {
+    const { raw_text, description, supplier_name } = next.extracted;
+    if (raw_text !== undefined || description !== undefined || supplier_name !== undefined) {
+      next = {
+        ...next,
+        extracted: {
+          ...next.extracted,
+          ...(raw_text !== undefined && { raw_text: wrapUntrustedOcr(raw_text) }),
+          ...(description !== undefined && { description: wrapUntrustedOcr(description) }),
+          ...(supplier_name !== undefined && { supplier_name: wrapUntrustedOcr(supplier_name) }),
+        },
+      };
+    }
+  }
+
+  // preview_client (client not yet persisted) was seeded from OCR supplier
+  // name; its `name` field is the vector. If an attacker-crafted OCR
+  // supplier line ever reaches here, the wrap ensures a downstream LLM
+  // can't mistake it for an instruction.
+  if (next.supplier_resolution?.preview_client?.name !== undefined) {
+    next = {
+      ...next,
+      supplier_resolution: {
+        ...next.supplier_resolution,
+        preview_client: {
+          ...next.supplier_resolution.preview_client,
+          name: wrapUntrustedOcr(next.supplier_resolution.preview_client.name),
+        },
+      },
+    };
+  }
+
+  // booking_suggestion.item.custom_title typically mirrors `description`
+  // (or an article name derived from one); treat as OCR-origin.
+  if (next.booking_suggestion?.item?.custom_title !== undefined) {
+    next = {
+      ...next,
+      booking_suggestion: {
+        ...next.booking_suggestion,
+        item: {
+          ...next.booking_suggestion.item,
+          custom_title: wrapUntrustedOcr(next.booking_suggestion.item.custom_title) ?? next.booking_suggestion.item.custom_title,
+        },
+      },
+    };
+  }
+
+  return next;
 }
 
 interface TransactionMatchCandidate {
