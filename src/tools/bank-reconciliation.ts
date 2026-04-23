@@ -10,7 +10,7 @@ import { buildBatchExecutionContract } from "../batch-execution.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
-import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal } from "./inter-account-utils.js";
+import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal, toUtcDay } from "./inter-account-utils.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -640,10 +640,14 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         const exact = findMatchingJournal(existingInterAccountKeys.get(exactKey), referenceNumber);
         if (exact !== undefined) return exact;
         if (maxGapDays > 0) {
-          const d = new Date(date);
+          // Pure-UTC arithmetic via toUtcDay matches the Phase-1 compatibility
+          // check. new Date(string) parses YYYY-MM-DD as UTC midnight today,
+          // but any timestamp/offset suffix would drift under DST — defense
+          // in depth against future inputs.
+          const anchor = toUtcDay(date);
           for (let offset = -maxGapDays; offset <= maxGapDays; offset++) {
             if (offset === 0) continue;
-            const nearby = new Date(d.getTime() + offset * 86_400_000);
+            const nearby = new Date(anchor + offset * 86_400_000);
             const nearbyStr = nearby.toISOString().split("T")[0]!;
             const nearbyKey = `${sourceDim}|${targetDim}|${roundedAmount}|${nearbyStr}`;
             const nearbyMatch = findMatchingJournal(existingInterAccountKeys.get(nearbyKey), referenceNumber);
@@ -770,14 +774,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
           return undefined;
         }
 
-        // Pure-date UTC arithmetic. new Date("YYYY-MM-DD") parses as UTC
-        // midnight, but any input containing a time/offset is subject to
-        // local-time and DST drift; extracting the YYYY-MM-DD prefix first
-        // keeps the gap calculation stable regardless of input shape.
-        const toUtcDay = (s: string): number => {
-          const [y, m, d] = s.slice(0, 10).split("-").map(Number);
-          return Date.UTC(y!, (m ?? 1) - 1, d ?? 1);
-        };
+        // Pure-date UTC arithmetic via shared toUtcDay helper — stable
+        // regardless of whether the input is YYYY-MM-DD or a full timestamp.
         const daysDiff = Math.abs((toUtcDay(txA.date) - toUtcDay(txB.date)) / 86_400_000);
         if (daysDiff === 0) {
           confidence += 20;

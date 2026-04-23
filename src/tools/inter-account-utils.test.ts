@@ -411,12 +411,40 @@ describe("findMatchingJournal", () => {
     expect(findMatchingJournal(candidates, "WISE-C")).toBeUndefined();
   });
 
-  it("falls back to a ref-less candidate when some have refs and none match", () => {
+  it("returns undefined when input ref mismatches and mixed ref-less + ref'd candidates are present", () => {
+    // The tightened policy: if ANY candidate has a ref and none match the
+    // input, the input is a distinct transfer — don't silently absorb it
+    // into a ref-less catch-all. Protects labelled imports (Wise, CAMT
+    // with document_number) from ref-less journals with coincident
+    // amount+date+dims.
     const candidates = [
       { journal_id: 100, document_number: null },
       { journal_id: 200, document_number: "WISE-B" },
     ];
+    expect(findMatchingJournal(candidates, "WISE-C")).toBeUndefined();
+  });
+
+  it("still absorbs into a ref-less catch-all when ALL candidates are ref-less (legacy migration)", () => {
+    // Legacy journals predating document_number labelling act as a pool.
+    // A new import with a reference can match one of them since we can't
+    // prove they're unrelated.
+    const candidates = [
+      { journal_id: 100, document_number: null },
+      { journal_id: 200, document_number: "" },
+    ];
     expect(findMatchingJournal(candidates, "WISE-C")).toBe(100);
+  });
+
+  it("returns undefined even against 9 ref-less + 1 mismatched-ref candidates", () => {
+    // Pathological case: a pool of unlabelled journals plus a single
+    // labelled journal with a DIFFERENT ref from the input. Absorbing
+    // into the unlabelled pool would silently suppress a distinct
+    // transfer; the tightened policy rejects.
+    const candidates = [
+      ...Array.from({ length: 9 }, (_, i) => ({ journal_id: 100 + i, document_number: null })),
+      { journal_id: 999, document_number: "OTHER" },
+    ];
+    expect(findMatchingJournal(candidates, "NEW")).toBeUndefined();
   });
 
   it("returns the first candidate when no reference is provided (loose match)", () => {

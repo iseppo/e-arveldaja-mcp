@@ -1,6 +1,16 @@
 import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
 
+/**
+ * Convert a date string (`YYYY-MM-DD` or any ISO prefix) to a UTC day
+ * timestamp. Slicing to the first 10 chars drops any time / timezone
+ * suffix, so arithmetic stays DST-free.
+ */
+export function toUtcDay(s: string): number {
+  const [y, m, d] = s.slice(0, 10).split("-").map(Number);
+  return Date.UTC(y!, (m ?? 1) - 1, d ?? 1);
+}
+
 export interface BankAccountLookups {
   ownIbanToDimension: Map<string, number>;
   dimensionToIban: Map<number, string>;
@@ -100,15 +110,21 @@ export function buildInterAccountJournalIndex(
  * reference-number disambiguation.
  *
  * Semantics:
- * - If `referenceNumber` is given and a candidate's `document_number` matches →
- *   return that journal (exact match).
- * - If `referenceNumber` is given and ALL candidates have refs but none match →
- *   return `undefined` (this is a different transfer, not a duplicate).
- * - If `referenceNumber` is empty/missing, or some candidates have no ref →
- *   return any candidate (loose match, preserving pre-disambiguation behaviour).
+ * - No reference given → loose match (return first candidate).
+ * - Reference matches some candidate's `document_number` → return that journal.
+ * - Reference given and no candidate matches:
+ *   - All candidates are ref-less → return first ref-less (legacy-migration:
+ *     old journals without document_numbers act as a catch-all for their
+ *     amount+date+dims bucket).
+ *   - Otherwise (at least one candidate has a ref that doesn't match) →
+ *     return `undefined`. This is the safer choice: if the existing pool
+ *     mixes labelled and unlabelled journals, a mismatched label is stronger
+ *     evidence that the input is a genuinely different transfer than
+ *     whatever ref-less journal happens to share amount+date+dims.
  *
  * Prevents the false-positive where two unrelated same-day-same-amount
- * inter-account transfers suppress each other purely on amount+date+dims.
+ * inter-account transfers suppress each other purely on amount+date+dims,
+ * and protects against ref-less journals silently absorbing labelled inputs.
  */
 export function findMatchingJournal(
   candidates: InterAccountJournalEntry[] | undefined,
@@ -121,13 +137,13 @@ export function findMatchingJournal(
   const exactMatch = candidates.find(c => normalizeReference(c.document_number) === ref);
   if (exactMatch) return exactMatch.journal_id;
 
-  // If every candidate carries a reference and none match, this input is a
-  // distinct transfer — do not dedup-suppress it.
-  const allHaveRefs = candidates.every(c => normalizeReference(c.document_number).length > 0);
-  if (allHaveRefs) return undefined;
+  // No candidate matches the supplied reference. Only fall back to a
+  // ref-less candidate when ALL candidates are ref-less (legacy-migration
+  // path: nothing in the pool has an identifier, so the ref-less journal is
+  // the only plausible duplicate). If any candidate carries a reference that
+  // differs from the input, treat the input as a distinct transfer.
+  const anyHasRef = candidates.some(c => normalizeReference(c.document_number).length > 0);
+  if (anyHasRef) return undefined;
 
-  // At least one candidate has no reference → fall back to it (we can't prove
-  // they're different, so preserve the old loose-match semantics).
-  const refless = candidates.find(c => normalizeReference(c.document_number).length === 0);
-  return refless?.journal_id;
+  return candidates[0]!.journal_id;
 }
