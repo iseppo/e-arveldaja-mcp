@@ -54,8 +54,24 @@ export interface InterAccountJournalEntry {
   document_number?: string | null;
 }
 
+// Bank-provided "I don't have a reference" sentinels (ISO 20022 / SEPA).
+// Different clearing systems fill in different placeholders when the
+// originator omitted a reference; treating any of them as a real ref would
+// let a garbage-ref journal suppress a real-ref duplicate detection.
+const GARBAGE_REF_SENTINELS = new Set([
+  "NOTPROVIDED",
+  "NOTFOURNI",
+  "NONE",
+  "N/A",
+  "NA",
+  "-",
+]);
+
 function normalizeReference(ref?: string | null): string {
-  return (ref ?? "").trim();
+  const trimmed = (ref ?? "").trim();
+  if (trimmed === "") return "";
+  if (GARBAGE_REF_SENTINELS.has(trimmed.toUpperCase())) return "";
+  return trimmed;
 }
 
 /**

@@ -184,8 +184,32 @@ export class HttpClient {
           return response.json() as Promise<T>;
         }
 
-        // Binary response (e.g. PDF document download) — return as ApiFile-compatible object
+        // Binary response (e.g. PDF document download) — return as ApiFile-compatible object.
+        // Cap buffered size to prevent OOM if an upstream ever returns an
+        // unexpectedly large payload. Invoice PDFs are tiny (<1MB); keep a
+        // generous ceiling for occasional legitimate bulk downloads.
+        const BINARY_RESPONSE_MAX_BYTES = 50 * 1024 * 1024; // 50 MB
+        const contentLengthHeader = response.headers.get("content-length");
+        if (contentLengthHeader) {
+          const declaredSize = Number(contentLengthHeader);
+          if (Number.isFinite(declaredSize) && declaredSize > BINARY_RESPONSE_MAX_BYTES) {
+            throw new HttpError(
+              `Binary response too large: ${declaredSize} bytes exceeds ${BINARY_RESPONSE_MAX_BYTES}-byte ceiling`,
+              response.status,
+              method,
+              path,
+            );
+          }
+        }
         const arrayBuf = await response.arrayBuffer();
+        if (arrayBuf.byteLength > BINARY_RESPONSE_MAX_BYTES) {
+          throw new HttpError(
+            `Binary response too large: ${arrayBuf.byteLength} bytes exceeds ${BINARY_RESPONSE_MAX_BYTES}-byte ceiling`,
+            response.status,
+            method,
+            path,
+          );
+        }
         const base64 = Buffer.from(arrayBuf).toString("base64");
         const disposition = response.headers.get("content-disposition") ?? "";
         const nameMatch = disposition.match(/filename="?([^";\n]+)"?/);

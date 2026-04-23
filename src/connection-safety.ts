@@ -19,7 +19,17 @@ export interface ConnectionSnapshot {
   toolName?: string;
   /** False means a mutation. Used to decide whether to track this snapshot as "interruptable in flight". */
   isReadOnly?: boolean;
+  /** Wall-clock ms at capture. Used to detect stale in-flight entries if a handler hangs. */
+  capturedAtMs?: number;
 }
+
+/**
+ * Snapshots older than this are treated as stale by buildSwitchBlockedPayload:
+ * a tool handler that has been "in flight" for more than this many ms is
+ * almost certainly wedged (crashed before finally, never-resolving promise,
+ * etc.) and should not indefinitely block switch_connection.
+ */
+export const STALE_SNAPSHOT_THRESHOLD_MS = 120_000;
 
 /**
  * Raised when a tool's API call sees a snapshot that no longer matches the
@@ -53,6 +63,7 @@ export function captureSnapshot(
     generation: state.generation,
     toolName: opts?.toolName,
     isReadOnly: opts?.isReadOnly,
+    capturedAtMs: Date.now(),
   };
 }
 
@@ -65,6 +76,7 @@ export function assertSnapshotCurrent(state: ConnectionState, snapshot: Connecti
 export interface InFlightMutationInfo {
   tool_name: string;
   source_connection_index: number;
+  age_ms?: number;
 }
 
 /**
@@ -73,20 +85,39 @@ export interface InFlightMutationInfo {
  * itself a mutation and will be in the set when this is called from its
  * handler).
  *
+ * Snapshots older than `STALE_SNAPSHOT_THRESHOLD_MS` are treated as stale and
+ * ignored — they represent handlers that crashed before `finally` or awaited
+ * a never-resolving promise, and must not block switching forever. Stale
+ * snapshots are also removed from `inFlightSnapshots` when it is a mutable
+ * `Set<ConnectionSnapshot>`, so a future call doesn't re-evaluate them.
+ *
  * Returns null when the switch is allowed, or a structured error payload
  * when in-flight mutations would be interrupted.
  */
 export function buildSwitchBlockedPayload(
   inFlightSnapshots: Iterable<ConnectionSnapshot>,
   currentSnapshot: ConnectionSnapshot | undefined,
+  options?: { now?: number; staleThresholdMs?: number },
 ): { error: string; in_flight_tools: InFlightMutationInfo[]; hint: string } | null {
+  const now = options?.now ?? Date.now();
+  const staleThreshold = options?.staleThresholdMs ?? STALE_SNAPSHOT_THRESHOLD_MS;
   const interruptable: InFlightMutationInfo[] = [];
+  const stale: ConnectionSnapshot[] = [];
   for (const snap of inFlightSnapshots) {
     if (snap === currentSnapshot) continue; // the switch_connection call itself
+    const age = snap.capturedAtMs ? now - snap.capturedAtMs : 0;
+    if (snap.capturedAtMs && age > staleThreshold) {
+      stale.push(snap);
+      continue;
+    }
     interruptable.push({
       tool_name: snap.toolName ?? "unknown",
       source_connection_index: snap.index,
+      ...(snap.capturedAtMs ? { age_ms: age } : {}),
     });
+  }
+  if (stale.length > 0 && typeof (inFlightSnapshots as Set<ConnectionSnapshot>).delete === "function") {
+    for (const s of stale) (inFlightSnapshots as Set<ConnectionSnapshot>).delete(s);
   }
   if (interruptable.length === 0) return null;
   return {

@@ -455,4 +455,31 @@ describe("findMatchingJournal", () => {
     expect(findMatchingJournal(candidates)).toBe(100);
     expect(findMatchingJournal(candidates, "")).toBe(100);
   });
+
+  it("treats ISO 20022 garbage-ref sentinels as ref-less (candidate side)", () => {
+    // LHV sometimes stamps 'NOTPROVIDED' when the originator omitted a reference.
+    // That candidate must not block dedup against a real-ref Wise import.
+    const candidates = [
+      { journal_id: 100, document_number: "NOTPROVIDED" },
+    ];
+    // From the caller's side the ref is real, candidate pool has only garbage → legacy-migration fallback applies
+    expect(findMatchingJournal(candidates, "WISE-REAL")).toBe(100);
+    // Mixed with a real-ref candidate → the real-ref mismatch still rejects
+    expect(findMatchingJournal(
+      [...candidates, { journal_id: 200, document_number: "WISE-OTHER" }],
+      "WISE-REAL",
+    )).toBeUndefined();
+  });
+
+  it("treats ISO 20022 garbage-ref sentinels as ref-less (caller side)", () => {
+    const candidates = [
+      { journal_id: 100, document_number: "WISE-REAL" },
+    ];
+    // Input ref is a sentinel → treated as missing → loose match
+    expect(findMatchingJournal(candidates, "NOTPROVIDED")).toBe(100);
+    expect(findMatchingJournal(candidates, "NONE")).toBe(100);
+    expect(findMatchingJournal(candidates, "N/A")).toBe(100);
+    expect(findMatchingJournal(candidates, "-")).toBe(100);
+    expect(findMatchingJournal(candidates, "   ")).toBe(100);
+  });
 });

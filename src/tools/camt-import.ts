@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { Client, Transaction } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
 import { resolveFileInput } from "../file-validation.js";
@@ -811,6 +811,11 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             ...parsed,
             entries: parsed.entries.map(entry => ({
               ...entry,
+              // CAMT free-form fields (RmtInf/Ustrd, Dbtr/Nm, Cdtr/Nm) carry
+              // attacker-controllable bytes from a bank statement sent by
+              // any counterparty. Treat them like OCR text at MCP output.
+              counterparty_name: wrapUntrustedOcr(entry.counterparty_name),
+              description: wrapUntrustedOcr(entry.description),
               ...(entry.duplicate ? { duplicate: true } : { duplicate: undefined }),
               ...(entry.duplicate_transaction_ids.length > 0 ? { duplicate_transaction_ids: entry.duplicate_transaction_ids } : { duplicate_transaction_ids: undefined }),
             })),
@@ -820,7 +825,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     }
   );
 
-  registerTool(server, 
+  registerTool(server,
     "import_camt053",
     "Parse a CAMT.053 bank statement XML file and create bank transactions in e-arveldaja. Skips existing duplicates by AcctSvcrRef bank reference and exact duplicate rows within the same file. DRY RUN by default.",
     {
@@ -1044,6 +1049,23 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         possible_duplicate_count: possibleDuplicates.length,
       };
 
+      // CAMT free-form fields are attacker-controllable at MCP output; wrap
+      // them with per-call nonce delimiters. Audit log and in-memory state
+      // keep the plain strings — only the LLM-facing payload is sandboxed.
+      const sanitizedResults = results.map(r => ({
+        ...r,
+        description: wrapUntrustedOcr(r.description),
+        counterparty: wrapUntrustedOcr(r.counterparty),
+      }));
+      const sanitizedPossibleDuplicates = possibleDuplicates.map(d => ({
+        ...d,
+        counterparty: wrapUntrustedOcr(d.counterparty),
+        existing_transactions: d.existing_transactions.map(m => ({
+          ...m,
+          counterparty: wrapUntrustedOcr(m.counterparty ?? undefined),
+          description: wrapUntrustedOcr(m.description ?? undefined),
+        })),
+      }));
       return {
         content: [{
           type: "text",
@@ -1057,14 +1079,14 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             created_count: summary.created_count,
             skipped_count: summary.skipped_count,
             error_count: summary.error_count,
-            sample: results.slice(0, 10),
+            sample: sanitizedResults.slice(0, 10),
             execution: buildBatchExecutionContract({
               mode,
               summary,
-              results,
+              results: sanitizedResults,
               skipped: skippedDuplicates,
               errors,
-              needs_review: possibleDuplicates,
+              needs_review: sanitizedPossibleDuplicates,
             }),
             ...(errors.length > 0 && { errors }),
             ...(skippedDuplicates.length > 0 && {

@@ -35,6 +35,10 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   async sendEinvoice(id: number, request: SaleInvoiceDeliveryRequest): Promise<ApiResponse> {
     const result = await this.client.patch<ApiResponse>(`/sale_invoices/${id}/deliver`, request);
     this.invalidateCache();
+    // Defensive: delivery currently updates only the invoice itself, but
+    // if the server ever posts an e-invoice-delivery journal we would
+    // otherwise serve stale journal lists. Keep parity with confirm/invalidate.
+    this.invalidateCache("/journals");
     return result;
   }
 }

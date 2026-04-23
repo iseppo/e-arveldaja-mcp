@@ -526,7 +526,18 @@ function renderEntry(entry: AuditEntry): string {
  * to direct the entry to a specific connection's log — needed when a tool
  * fails mid-switch and the audit record belongs on the ORIGINAL (interrupted)
  * connection, not the new active one.
+ *
+ * Concurrency guarantees:
+ * - Within a single Node process: writes are serialized by the event loop
+ *   (handlers can't interleave across `appendFileSync` calls).
+ * - Across processes on Linux/macOS: `O_APPEND` guarantees atomicity only
+ *   up to `PIPE_BUF` bytes (4096 on Linux). Entries larger than that may
+ *   interleave if two MCP server processes write to the same connection
+ *   log file simultaneously. We warn when an entry exceeds this bound so
+ *   operators can spot corrupted records.
  */
+const LINUX_PIPE_BUF_BYTES = 4096;
+
 export function logAudit(
   entry: Omit<AuditEntry, "timestamp">,
   opts?: { connectionName?: string },
@@ -540,6 +551,14 @@ export function logAudit(
       mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
     }
     const md = renderEntry(full) + ENTRY_SEPARATOR;
+    if (Buffer.byteLength(md, "utf-8") > LINUX_PIPE_BUF_BYTES) {
+      // Size-warn (not block) so operators notice when cross-process writers
+      // might interleave. Single-process audit logging stays atomic.
+      process.stderr.write(
+        `[audit] entry size ${Buffer.byteLength(md, "utf-8")}B exceeds PIPE_BUF (${LINUX_PIPE_BUF_BYTES}B); ` +
+        `across-process atomicity not guaranteed for tool="${entry.tool}" action="${entry.action}"\n`,
+      );
+    }
     appendPrivateTextFile(filePath, md);
   } catch {
     // Audit logging is best-effort — do not crash the server

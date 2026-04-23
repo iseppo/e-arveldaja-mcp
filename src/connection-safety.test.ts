@@ -20,12 +20,14 @@ describe("captureSnapshot", () => {
       { activeIndex: 0, generation: 7 },
       { toolName: "create_journal", isReadOnly: false },
     );
-    expect(snap).toEqual({
+    expect(snap).toMatchObject({
       index: 0,
       generation: 7,
       toolName: "create_journal",
       isReadOnly: false,
     });
+    expect(snap.capturedAtMs).toBeTypeOf("number");
+    expect(snap.capturedAtMs!).toBeGreaterThan(0);
   });
 });
 
@@ -120,5 +122,49 @@ describe("buildSwitchBlockedPayload", () => {
     expect(payload!.in_flight_tools).toEqual([
       { tool_name: "unknown", source_connection_index: 1 },
     ]);
+  });
+
+  it("reaps stale snapshots past the threshold (wedged handler does not block switch forever)", () => {
+    const now = 1_000_000;
+    const fresh: ConnectionSnapshot = {
+      index: 0, generation: 1, toolName: "confirm_transaction", isReadOnly: false,
+      capturedAtMs: now - 10_000, // 10s ago → not stale
+    };
+    const wedged: ConnectionSnapshot = {
+      index: 0, generation: 1, toolName: "create_journal", isReadOnly: false,
+      capturedAtMs: now - 300_000, // 5m ago → stale
+    };
+    const set = new Set<ConnectionSnapshot>([fresh, wedged]);
+    const payload = buildSwitchBlockedPayload(set, undefined, { now, staleThresholdMs: 120_000 });
+    expect(payload).not.toBeNull();
+    expect(payload!.in_flight_tools.map(t => t.tool_name)).toEqual(["confirm_transaction"]);
+    // Stale entries get pruned from the mutable set so they don't accumulate
+    expect(set.has(wedged)).toBe(false);
+    expect(set.has(fresh)).toBe(true);
+  });
+
+  it("returns null when every in-flight snapshot is stale", () => {
+    const now = 1_000_000;
+    const wedged: ConnectionSnapshot = {
+      index: 0, generation: 1, toolName: "create_journal", isReadOnly: false,
+      capturedAtMs: now - 300_000,
+    };
+    const set = new Set<ConnectionSnapshot>([wedged]);
+    const payload = buildSwitchBlockedPayload(set, undefined, { now, staleThresholdMs: 120_000 });
+    expect(payload).toBeNull();
+    expect(set.size).toBe(0);
+  });
+
+  it("reports age_ms for non-stale snapshots with capturedAtMs", () => {
+    const now = 1_000_000;
+    const snap: ConnectionSnapshot = {
+      index: 0, generation: 1, toolName: "confirm_transaction", isReadOnly: false,
+      capturedAtMs: now - 5_000,
+    };
+    const payload = buildSwitchBlockedPayload([snap], undefined, { now });
+    expect(payload!.in_flight_tools[0]).toMatchObject({
+      tool_name: "confirm_transaction",
+      age_ms: 5_000,
+    });
   });
 });

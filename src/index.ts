@@ -355,6 +355,22 @@ async function main() {
     setupMode = true;
   }
 
+  // Log every credential source visible at startup so operators can spot
+  // an unexpected apikey*.txt landing in the working directory (e.g. from a
+  // shared workspace) BEFORE it becomes a reachable connection via
+  // switch_connection. The name + source-path disclosure is already in
+  // list_connections output; surfacing it at startup makes drift visible
+  // without requiring the operator to probe.
+  if (allConfigs.length > 0) {
+    log(
+      "info",
+      `Loaded ${allConfigs.length} connection(s): ` +
+      allConfigs
+        .map((c, i) => `[${i}] ${c.name}${c.filePath ? ` (${c.filePath})` : ""}`)
+        .join("; "),
+    );
+  }
+
   const setupInfo = getCredentialSetupInfo();
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
   const connectionFingerprints = Object.fromEntries(
@@ -830,13 +846,16 @@ Reporting:
       const snapshot = captureSnapshot(connectionState, { toolName, isReadOnly });
       const extra = args.length >= 2 ? args[1] as any : undefined;
       const trackMutation = !isReadOnly && !setupMode;
+      // Register the in-flight mutation synchronously *before* any awaitable
+      // work. A microtask-scheduled switch_connection between snapshot
+      // capture and entering `try` would otherwise see an empty set and
+      // flip the generation, leaving the mutation's "switch is blocked"
+      // guarantee unmet. Keeping the add/delete balanced around the same
+      // snapshot: both are inside the synchronous prologue + finally.
+      if (trackMutation) {
+        inFlightMutations.add(snapshot);
+      }
       try {
-        // Move `add` inside the try so the paired `delete` in finally is
-        // always invoked for the same snapshot — defensive against future
-        // edits inserting throwing code between capture and try.
-        if (trackMutation) {
-          inFlightMutations.add(snapshot);
-        }
         return await invocationStorage.run(snapshot, async () => {
           if (!setupMode && !isReadOnly) {
             await ensureAuditLogLabelResolved(snapshot.index);

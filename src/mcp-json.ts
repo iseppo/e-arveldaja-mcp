@@ -11,7 +11,10 @@ export const UNTRUSTED_OCR_END_PREFIX = "<<UNTRUSTED_OCR_END:";
 export function wrapUntrustedOcr(text: string | undefined | null): string | undefined {
   if (text === undefined || text === null) return undefined;
   if (text === "") return text;
-  const nonce = randomBytes(8).toString("hex");
+  // 128-bit nonce: a fresh random per-call value that an attacker embedding
+  // text in the untrusted content cannot predict. Each call gets its own
+  // nonce so delimiters can never collide across fields in the same response.
+  const nonce = randomBytes(16).toString("hex");
   return `${UNTRUSTED_OCR_START_PREFIX}${nonce}>>\n${text}\n${UNTRUSTED_OCR_END_PREFIX}${nonce}>>`;
 }
 

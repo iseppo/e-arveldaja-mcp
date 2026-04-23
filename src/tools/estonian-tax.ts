@@ -162,8 +162,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         { accounts_id: taxAccount, type: "C" as const, amount: cit },
       ];
 
+      // Self-documenting title so an operator opening the journal in e-arveldaja
+      // can see the split (two D-lines on retained earnings) without cross-
+      // referencing the audit log. The API Posting type has no per-line
+      // description field, so the split rationale has to live on the journal
+      // itself.
       const journalData = {
-        title: `Dividendi väljamakse - ${shareholder.name}`,
+        title: `Dividendi väljamakse - ${shareholder.name} (neto ${net_dividend} EUR, TuMa ${citRate.formatted} ${cit} EUR)`,
         effective_date,
         clients_id: shareholder_client_id,
         cl_currencies_id: "EUR",

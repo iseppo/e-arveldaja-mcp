@@ -4,6 +4,11 @@ import { resolveFileInput } from "../file-validation.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
+// CAMT free-form text is wrapped with a per-call OCR-sandbox nonce when
+// returned to MCP. These helpers check the plain value inside the wrap.
+const wrapped = (text: string): RegExp =>
+  new RegExp(`^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\\n${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$`);
+
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
 }));
@@ -180,7 +185,7 @@ describe("camt import tool", () => {
         status: "would_create",
         clients_id: 81,
         client_match: "exact_name",
-        counterparty: "OpenAI, Inc.",
+        counterparty: expect.stringMatching(wrapped("OpenAI, Inc.")),
       }),
     ]));
   });
@@ -389,11 +394,11 @@ describe("camt import tool", () => {
     expect(api.clients.findByName).toHaveBeenCalledTimes(2);
     expect(payload.sample).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        counterparty: "Acme OÜ",
+        counterparty: expect.stringMatching(wrapped("Acme OÜ")),
         clients_id: 11,
       }),
       expect.objectContaining({
-        counterparty: "Acme AS",
+        counterparty: expect.stringMatching(wrapped("Acme AS")),
         clients_id: 22,
       }),
     ]));
@@ -466,13 +471,13 @@ describe("camt import tool", () => {
         status: "would_create",
         amount: 100,
         bank_reference: "REF-SPLIT-1",
-        description: "Split payment A",
+        description: expect.stringMatching(wrapped("Split payment A")),
       }),
       expect.objectContaining({
         status: "would_create",
         amount: 200,
         bank_reference: "REF-SPLIT-1",
-        description: "Split payment B",
+        description: expect.stringMatching(wrapped("Split payment B")),
       }),
     ]));
   });
@@ -559,7 +564,7 @@ describe("camt import tool", () => {
         status: "would_create",
         amount: 200,
         bank_reference: "REF-SPLIT-1",
-        description: "Split payment B",
+        description: expect.stringMatching(wrapped("Split payment B")),
       }),
     ]);
     expect(payload.execution.skipped).toEqual([
@@ -621,9 +626,9 @@ describe("camt import tool", () => {
       expect.objectContaining({
         status: "would_create",
         amount: 25,
-        counterparty: "Vendor OÜ",
+        counterparty: expect.stringMatching(wrapped("Vendor OÜ")),
         ref_number: "E2E-1",
-        description: "Repeated row",
+        description: expect.stringMatching(wrapped("Repeated row")),
       }),
     ]);
     expect(payload.execution.skipped).toEqual([
