@@ -360,11 +360,51 @@ describe("prepare_dividend_package", () => {
   // Net assets rule (ÄS §157)
   // -------------------------------------------------------------------------
 
-  it("adds net-assets warning when distribution would push net assets below share capital", async () => {
-    // Assets (bank): 30000 = 5000 (share capital) + 25000 (retained earnings)
-    // Share capital: 5000, Retained earnings: 25000
-    // net_dividend=20000 → gross ≈ 25641.03; retained 25000 < 25641.03 so we need force=true
-    // Net assets before = 30000, after = 30000 - 25641.03 ≈ 4358.97 < 5000 → warning
+  it("blocks distribution without force=true when it would push net assets below share capital (§ 157)", async () => {
+    // Fixture: healthy retained earnings but a big current-year loss so
+    // net_assets < share + retained. Retained check passes, §157 triggers.
+    // - share capital 5000, retained 20000 (D 1000 25000, C 3000 5000, C 3020 20000)
+    // - current-year loss 18000 (D 5000 18000, C 1000 18000)
+    // - net_assets_before = equity (5000+20000) + P&L (-18000) = 7000
+    // - net_dividend=2000 → gross ≈ 2564.10
+    //   retained 20000 >= 2564.10  ✓ (retained check passes)
+    //   net_assets_after = 7000 - 2564.10 = 4435.90 < 5000 → § 157 block
+    const accounts = makeStandardAccounts().map(a =>
+      a.id === 3000 ? makeAccount(3000, "C", "Omakapital", "Osakapital", "Share capital") : a
+    );
+    const journals = [
+      makeJournal("2023-01-01", [
+        makePosting(1000, "D", 5000),
+        makePosting(3000, "C", 5000),
+      ]),
+      makeJournal("2024-01-01", [
+        makePosting(1000, "D", 20000),
+        makePosting(3020, "C", 20000),
+      ]),
+      makeJournal("2026-03-01", [
+        makePosting(5000, "D", 18000),
+        makePosting(1000, "C", 18000),
+      ]),
+    ];
+    api = makeApi(journals, accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 2000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(data.error).toBe("ÄS § 157 net assets breach");
+  });
+
+  it("warns (still creates journal) when force=true and net assets would fall below share capital", async () => {
+    // Same fixture, but with force=true: the journal is created and the
+    // warning mentions both § 157 and "Net assets after distribution".
     const accounts = makeStandardAccounts().map(a =>
       a.id === 3000 ? makeAccount(3000, "C", "Omakapital", "Osakapital", "Share capital") : a
     );
@@ -383,7 +423,7 @@ describe("prepare_dividend_package", () => {
     registerEstonianTaxTools(mock.server, api);
     const cb = mock.tools.get("prepare_dividend_package")!;
 
-    // force=true bypasses retained-earnings check so we reach the net-assets check
+    // force=true bypasses both retained-earnings and net-assets hard blocks.
     const result = await cb({
       net_dividend: 20000,
       shareholder_client_id: 1,

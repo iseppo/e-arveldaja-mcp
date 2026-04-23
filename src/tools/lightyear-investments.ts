@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { readFile } from "fs/promises";
 import type { ApiContext } from "./crud-tools.js";
 import { resolveFileInput } from "../file-validation.js";
@@ -773,7 +773,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             sales: gains.map(g => ({
               date: parseLightyearDate(g.date),
               ticker: g.ticker,
-              name: g.name,
+              // Security `name` is the main free-text CSV field; ticker/isin/
+              // country are structurally bounded tokens and do not meaningfully
+              // expand prompt-injection surface.
+              name: wrapUntrustedOcr(g.name),
               isin: g.isin,
               country: g.country,
               quantity: g.quantity,

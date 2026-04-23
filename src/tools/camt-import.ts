@@ -809,6 +809,13 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
           type: "text",
           text: toMcpJson({
             ...parsed,
+            // statement_id and bank_name originate from the uploaded XML and
+            // are attacker-controllable at the same layer as the entries.
+            statement_metadata: {
+              ...parsed.statement_metadata,
+              statement_id: wrapUntrustedOcr(parsed.statement_metadata.statement_id),
+              bank_name: wrapUntrustedOcr(parsed.statement_metadata.bank_name),
+            },
             entries: parsed.entries.map(entry => ({
               ...entry,
               // CAMT free-form fields (RmtInf/Ustrd, Dbtr/Nm, Cdtr/Nm) carry
@@ -1052,6 +1059,17 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
       // CAMT free-form fields are attacker-controllable at MCP output; wrap
       // them with per-call nonce delimiters. Audit log and in-memory state
       // keep the plain strings — only the LLM-facing payload is sandboxed.
+      const sanitizedStatementMetadata = {
+        ...parsed.statement_metadata,
+        statement_id: wrapUntrustedOcr(parsed.statement_metadata.statement_id),
+        bank_name: wrapUntrustedOcr(parsed.statement_metadata.bank_name),
+      };
+      const sanitizedErrors = errors.map(e => ({
+        ...e,
+        // `message` can carry the upstream API's error text, which itself
+        // can echo CAMT-origin bytes we just sent as transaction fields.
+        message: wrapUntrustedOcr(e.message) ?? e.message,
+      }));
       const sanitizedResults = results.map(r => ({
         ...r,
         description: wrapUntrustedOcr(r.description),
@@ -1086,7 +1104,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
           text: toMcpJson({
             mode,
             summary,
-            statement_metadata: parsed.statement_metadata,
+            statement_metadata: sanitizedStatementMetadata,
             total_statement_entries: summary.total_statement_entries,
             eligible_entries: summary.eligible_entries,
             filtered_out: summary.filtered_out,
@@ -1099,10 +1117,10 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
               summary,
               results: sanitizedResults,
               skipped: skippedDuplicates,
-              errors,
+              errors: sanitizedErrors,
               needs_review: sanitizedPossibleDuplicates,
             }),
-            ...(errors.length > 0 && { errors }),
+            ...(errors.length > 0 && { errors: sanitizedErrors }),
             ...(skippedDuplicates.length > 0 && {
               skipped_summary: {
                 count: skippedDuplicates.length,

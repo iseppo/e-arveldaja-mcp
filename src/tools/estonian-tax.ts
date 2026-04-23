@@ -39,7 +39,7 @@ export function getCitRateForDate(effective_date: string): { num: number; den: n
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "prepare_dividend_package",
-    "Calculate dividend tax (22/78 CIT) and create draft journal entries for dividend payable and tax liability. Validates retained earnings balance and net assets.",
+    "Calculate dividend tax (22/78 CIT from 2025-01-01, 20/80 before) and create draft journal entries for dividend payable and tax liability. Hard-blocks distributions that lack retained earnings or would push net assets below share capital (ÄS § 157) unless force=true.",
     {
       net_dividend: z.number().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: coerceId.describe("Shareholder client ID"),
@@ -142,9 +142,27 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       }
 
       if (netAssetsAfterDistribution < roundedShareCapital - 0.01) {
+        if (!force) {
+          // ÄS § 157 prohibits distributions that push net assets below share
+          // capital. Treat this as a hard block by default — same policy as
+          // the retained-earnings check — because creating the journal is
+          // legally unsafe. Operators who have accepted the risk (e.g. a
+          // capital reduction is planned alongside) can still force it.
+          return toolError({
+            error: "ÄS § 157 net assets breach",
+            net_assets_before_distribution: netAssetsBeforeDistribution,
+            gross_dividend: roundMoney(grossDividend),
+            net_assets_after_distribution: netAssetsAfterDistribution,
+            share_capital: roundedShareCapital,
+            share_capital_account: shareCapitalAccount,
+            shortfall: roundMoney(roundedShareCapital - netAssetsAfterDistribution),
+            calculation: { net_dividend, cit_rate: citRate.formatted, cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
+            hint: "Distribution would push net assets below share capital, which ÄS § 157 prohibits. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).",
+          });
+        }
         warnings.push(
           `Net assets after distribution (${netAssetsAfterDistribution} EUR) would fall below share capital (${roundedShareCapital} EUR on account ${shareCapitalAccount}). ` +
-          `Verify compliance with ÄS § 157 before proceeding.`
+          `Journal created because force=true. Verify ÄS § 157 compliance through a separate legal action (e.g. capital reduction).`
         );
       }
 

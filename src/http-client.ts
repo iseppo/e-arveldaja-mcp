@@ -1,5 +1,6 @@
 import type { Config } from "./config.js";
 import { createAuthHeaders } from "./auth.js";
+import { wrapUntrustedOcr } from "./mcp-json.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -13,14 +14,27 @@ export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
  * (connection refused, DNS failure, retries exhausted).
  */
 export class HttpError extends Error {
+  /**
+   * Upstream body.messages joined text, already OCR-sandbox-wrapped so a
+   * downstream LLM treats it as untrusted data. Present only when the
+   * upstream returned a structured JSON body with `messages`. Kept off
+   * `Error.message` so audit logs / stderr remain clean; tool-error
+   * serialization forwards this property to the MCP response.
+   */
+  readonly upstream_detail?: string;
+
   constructor(
     message: string,
     public readonly status: number | "network",
     public readonly method: HttpMethod,
     public readonly path: string,
+    options?: { upstream_detail?: string },
   ) {
     super(message);
     this.name = "HttpError";
+    if (options?.upstream_detail !== undefined) {
+      this.upstream_detail = options.upstream_detail;
+    }
   }
 }
 
@@ -151,13 +165,19 @@ export class HttpClient {
             continue;
           }
 
-          // Parse structured error if available, but don't expose raw upstream details
+          // Parse structured error if available. Upstream API messages may
+          // echo user-supplied content (invoice notes, supplier names), so
+          // we keep `Error.message` free of raw upstream text and stash the
+          // sandbox-wrapped detail on a dedicated property for MCP output.
+          // Audit logs and stderr show only the clean top-line; the LLM sees
+          // the detail through tool-error serialization, sandboxed.
           let errorMessage = `API request failed: ${method} ${path} → ${response.status}`;
+          let upstreamDetail: string | undefined;
           try {
             const body = await response.json() as { code?: number; messages?: string[] };
             if (body.messages && Array.isArray(body.messages)) {
               const msgs = body.messages.join("; ").substring(0, 500);
-              errorMessage += `: ${msgs}`;
+              upstreamDetail = wrapUntrustedOcr(msgs);
             }
           } catch {
             // Non-JSON error body — don't expose raw text
@@ -172,7 +192,7 @@ export class HttpClient {
               `     Multiple IP addresses can be added, separated by ;`;
           }
 
-          throw new HttpError(errorMessage, response.status, method, path);
+          throw new HttpError(errorMessage, response.status, method, path, { upstream_detail: upstreamDetail });
         }
 
         if (response.status === 204) {

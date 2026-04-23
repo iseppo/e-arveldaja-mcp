@@ -95,9 +95,16 @@ describe("HttpClient", () => {
 
     const client = new HttpClient(config);
 
-    await expect(client.post("/transactions", { amount: 10 })).rejects.toThrow(
-      /API request failed: POST \/transactions → 502: temporary failure/,
-    );
+    // Error.message now carries only the clean top-line (audit-log-safe);
+    // upstream body text lives on HttpError.upstream_detail, sandbox-wrapped.
+    try {
+      await client.post("/transactions", { amount: 10 });
+      expect.fail("should have thrown");
+    } catch (err) {
+      const e = err as Error & { upstream_detail?: string };
+      expect(e.message).toBe("API request failed: POST /transactions → 502");
+      expect(e.upstream_detail).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\ntemporary failure\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/);
+    }
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
