@@ -60,6 +60,7 @@ import { readOnly, mutate, destructive } from "./annotations.js";
 import { getAllowedRootsStartupWarning } from "./file-validation.js";
 import {
   initAuditLog,
+  logAudit,
   getAuditLog,
   getAuditLogByLabel,
   getAuditLogByConnection,
@@ -73,15 +74,14 @@ import { buildAuditLogLabels } from "./audit-log-labels.js";
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
 
-interface ConnectionState {
-  activeIndex: number;
-  generation: number;
-}
-
-interface ConnectionSnapshot {
-  index: number;
-  generation: number;
-}
+import {
+  type ConnectionState,
+  type ConnectionSnapshot,
+  ConnectionSwitchInterruptedError,
+  captureSnapshot,
+  assertSnapshotCurrent,
+  buildSwitchBlockedPayload,
+} from "./connection-safety.js";
 
 function buildApiContext(httpClient: HttpClient): ApiContext {
   return {
@@ -166,22 +166,6 @@ function getResourceUri(args: unknown[]): string {
     if (typeof href === "string") return href;
   }
   return "earveldaja://setup";
-}
-
-function captureSnapshot(state: ConnectionState): ConnectionSnapshot {
-  return {
-    index: state.activeIndex,
-    generation: state.generation,
-  };
-}
-
-function assertSnapshotCurrent(state: ConnectionState, snapshot: ConnectionSnapshot): void {
-  if (snapshot.generation !== state.generation) {
-    throw new Error(
-      "Active connection changed during tool execution. Further API requests were blocked. " +
-      "Inspect any side effects before retrying the tool on the intended connection."
-    );
-  }
 }
 
 function clearAllCaches(connectionIndex: number): void {
@@ -381,6 +365,12 @@ async function main() {
     connectionFingerprints,
   );
   const invocationStorage = new AsyncLocalStorage<ConnectionSnapshot>();
+  /**
+   * Active non-readonly tool snapshots. switch_connection consults this to
+   * refuse mid-flight mutations. Tracked by object identity so the set
+   * survives the async boundary without needing a unique token.
+   */
+  const inFlightMutations = new Set<ConnectionSnapshot>();
   const requestGuard = () => {
     const snapshot = invocationStorage.getStore();
     if (snapshot) {
@@ -720,6 +710,20 @@ Reporting:
         };
       }
 
+      // Reject the switch while any non-readonly tool is mid-execution.
+      // Without this gate, a mutation in flight against the previous
+      // connection would either (a) silently land on the wrong company
+      // via `requestGuard` not-yet-triggered or (b) abort partway with
+      // side effects half-applied. Humans need to decide whether to
+      // wait or cancel the MCP client request.
+      const blockedPayload = buildSwitchBlockedPayload(
+        inFlightMutations,
+        invocationStorage.getStore(),
+      );
+      if (blockedPayload) {
+        return toolError(blockedPayload);
+      }
+
       const target = allConfigs[index]!;
       const previousIndex = connectionState.activeIndex;
 
@@ -823,8 +827,12 @@ Reporting:
 
   function wrapToolHandler<T extends (...args: any[]) => any>(toolName: string, isReadOnly: boolean, handler: T): T {
     return (async (...args: unknown[]) => {
-      const snapshot = captureSnapshot(connectionState);
+      const snapshot = captureSnapshot(connectionState, { toolName, isReadOnly });
       const extra = args.length >= 2 ? args[1] as any : undefined;
+      const trackMutation = !isReadOnly && !setupMode;
+      if (trackMutation) {
+        inFlightMutations.add(snapshot);
+      }
       try {
         return await invocationStorage.run(snapshot, async () => {
           if (!setupMode && !isReadOnly) {
@@ -836,6 +844,33 @@ Reporting:
           return runInExtra();
         });
       } catch (error) {
+        // When a mutation is interrupted by a connection switch, leave a
+        // dedicated audit entry so the orphan is visible in audit history.
+        // The request was blocked at requestGuard and never reached the API
+        // post-switch, but any pre-switch work is not rolled back by this
+        // code — the entry documents exactly which tool and which connection.
+        if (error instanceof ConnectionSwitchInterruptedError && trackMutation) {
+          try {
+            // Writes to whichever connection's log is active now (the new
+            // one, post-switch). `details.original_connection_index` points
+            // at the interrupted connection so a user auditing the new log
+            // and seeing this entry knows to cross-reference the old.
+            logAudit({
+              tool: toolName,
+              action: "CONNECTION_SWITCH_INTERRUPTED",
+              entity_type: "tool_execution",
+              summary: `Tool "${toolName}" was interrupted by a connection switch mid-execution. ` +
+                `Further API requests blocked; inspect for partial side effects on connection index ${error.originalIndex}.`,
+              details: {
+                tool_name: toolName,
+                original_connection_index: error.originalIndex,
+                was_read_only: Boolean(error.wasReadOnly),
+              },
+            });
+          } catch (auditErr) {
+            log("error", `Failed to write CONNECTION_SWITCH_INTERRUPTED audit entry: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`);
+          }
+        }
         log("error", `Tool handler error: ${error instanceof Error ? error.message : String(error)}`);
         if (process.env.EARVELDAJA_DEBUG === "true" && error instanceof Error && error.stack) {
           process.stderr.write(`[debug] ${error.stack}\n`);
@@ -848,6 +883,10 @@ Reporting:
           }));
         }
         return toolError(error);
+      } finally {
+        if (trackMutation) {
+          inFlightMutations.delete(snapshot);
+        }
       }
     }) as unknown as T;
   }
