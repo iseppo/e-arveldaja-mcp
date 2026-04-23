@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Account, Journal, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
@@ -333,7 +333,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
             },
             unconfirmed_transactions: {
               count: unconfirmedTx.length,
-              items: unconfirmedTx.map(tx => ({ id: tx.id, date: tx.date, amount: tx.amount, description: tx.description })),
+              items: unconfirmedTx.map(tx => ({ id: tx.id, date: tx.date, amount: tx.amount, description: wrapUntrustedOcr(tx.description ?? undefined) })),
             },
             unconfirmed_sale_invoices: {
               count: unconfirmedSales.length,

@@ -269,7 +269,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
                 description: tx.description,
                 bank_account_name: tx.bank_account_name,
                 suggested_action: "confirm_inter_account",
-                reason: `Counterparty name "${tx.bank_account_name}" matches company name, target: "${targetTitle}"`,
+                reason: `Counterparty name ${wrapUntrustedOcr(tx.bank_account_name ?? undefined)} matches company name, target: "${targetTitle}"`,
                 match_confidence: 80,
                 ...(accountsId ? {
                   distribution: {
@@ -290,7 +290,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
                 description: tx.description,
                 bank_account_name: tx.bank_account_name,
                 suggested_action: "confirm_inter_account",
-                reason: `Counterparty name "${tx.bank_account_name}" matches company name, but multiple target accounts exist — specify target manually`,
+                reason: `Counterparty name ${wrapUntrustedOcr(tx.bank_account_name ?? undefined)} matches company name, but multiple target accounts exist — specify target manually`,
                 match_confidence: 60,
               });
               isInterAccount = true;
@@ -381,7 +381,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               description: tx.description,
               bank_account_name: tx.bank_account_name,
               suggested_action: "confirm_expense",
-              reason: `Small ${matchedPattern.label} (${absAmount} ${tx.cl_currencies_id || "EUR"}): "${tx.description}"`,
+              reason: `Small ${matchedPattern.label} (${absAmount} ${tx.cl_currencies_id || "EUR"}): ${wrapUntrustedOcr(tx.description ?? undefined)}`,
               match_confidence: 70,
             });
             continue;

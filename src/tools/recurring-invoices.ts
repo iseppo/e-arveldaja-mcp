@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { type ApiContext, tagNotes } from "./crud-tools.js";
 import type { SaleInvoice } from "../types/api.js";
 import { batch } from "../annotations.js";
@@ -76,7 +76,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
         if (!source.id) {
           results.push({
             source_number: source.number,
-            client: source.client_name,
+            client: wrapUntrustedOcr(source.client_name ?? undefined),
             status: "error",
             error: "Source invoice is missing an ID",
           });
@@ -89,7 +89,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
           results.push({
             source_id: source.id,
             source_number: source.number,
-            client: source.client_name,
+            client: wrapUntrustedOcr(source.client_name ?? undefined),
             existing_id: existingClone.id,
             existing_number: existingClone.number,
             status: isDryRun ? "would_skip_existing" : "skipped_existing",
@@ -102,7 +102,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
           results.push({
             source_id: source.id,
             source_number: source.number,
-            client: full.client_name,
+            client: wrapUntrustedOcr(full.client_name ?? undefined),
             status: "error",
             error: "Source invoice has no items to clone",
           });
@@ -113,7 +113,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
           results.push({
             source_id: source.id,
             source_number: source.number,
-            client: full.client_name,
+            client: wrapUntrustedOcr(full.client_name ?? undefined),
             items_count: full.items.length,
             gross_price: full.gross_price,
             status: "would_create",
@@ -201,7 +201,7 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
           results.push({
             source_id: source.id,
             source_number: source.number,
-            client: full.client_name,
+            client: wrapUntrustedOcr(full.client_name ?? undefined),
             created_id: result.created_object_id,
             confirmed,
             ...(confirmError ? { confirm_error: confirmError } : {}),
@@ -211,9 +211,9 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
           results.push({
             source_id: source.id,
             source_number: source.number,
-            client: source.client_name,
+            client: wrapUntrustedOcr(source.client_name ?? undefined),
             status: "error",
-            error: err instanceof Error ? err.message : String(err),
+            error: wrapUntrustedOcr(err instanceof Error ? err.message : String(err)),
           });
         }
       }

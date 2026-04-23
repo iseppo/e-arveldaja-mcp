@@ -48,7 +48,7 @@ describe("detect_duplicate_purchase_invoice", () => {
       count: 1,
       items: [expect.objectContaining({
         id: 1,
-        supplier: "Acme Ltd",
+        supplier: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nAcme Ltd\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/),
         invoice_number: "INV-1",
         gross: 124,
       })],
@@ -57,7 +57,7 @@ describe("detect_duplicate_purchase_invoice", () => {
       count: 1,
       items: [expect.objectContaining({
         id: 1,
-        supplier: "Acme Ltd",
+        supplier: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nAcme Ltd\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/),
         invoice_number: "INV-1",
         gross: 124,
       })],
@@ -101,7 +101,7 @@ describe("detect_duplicate_purchase_invoice", () => {
     expect(payload.candidate_invoice_number_matches.items).toEqual([
       expect.objectContaining({
         id: 1,
-        supplier: "Acme Ltd",
+        supplier: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nAcme Ltd\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/),
         supplier_id: 10,
       }),
     ]);
@@ -109,7 +109,7 @@ describe("detect_duplicate_purchase_invoice", () => {
     expect(payload.candidate_same_amount_date_matches.items).toEqual([
       expect.objectContaining({
         id: 1,
-        supplier: "Acme Ltd",
+        supplier: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nAcme Ltd\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/),
         supplier_id: 10,
       }),
     ]);

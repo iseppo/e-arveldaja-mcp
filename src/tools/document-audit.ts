@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
@@ -60,25 +60,25 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
             manual_journals_without_documents: {
               count: journalsWithout.length,
               items: journalsWithout.slice(0, 20).map(j => ({
-                id: j.id, date: j.effective_date, title: j.title, number: j.number,
+                id: j.id, date: j.effective_date, title: wrapUntrustedOcr(j.title), number: j.number,
               })),
             },
             transactions_without_documents: {
               count: txWithout.length,
               items: txWithout.slice(0, 20).map(tx => ({
-                id: tx.id, date: tx.date, amount: tx.amount, description: tx.description,
+                id: tx.id, date: tx.date, amount: tx.amount, description: wrapUntrustedOcr(tx.description ?? undefined),
               })),
             },
             purchase_invoices_without_documents: {
               count: purchasesWithout.length,
               items: purchasesWithout.slice(0, 20).map((inv: PurchaseInvoice) => ({
-                id: inv.id, date: inv.create_date, number: inv.number, client: inv.client_name, gross: inv.gross_price,
+                id: inv.id, date: inv.create_date, number: inv.number, client: wrapUntrustedOcr(inv.client_name ?? undefined), gross: inv.gross_price,
               })),
             },
             sale_invoices_system_pdfs: {
               count: confirmedSalesWithSystemPdf.length,
               items: confirmedSalesWithSystemPdf.slice(0, 20).map((inv: SaleInvoice) => ({
-                id: inv.id, date: inv.create_date, number: inv.number, client: inv.client_name, gross: inv.gross_price,
+                id: inv.id, date: inv.create_date, number: inv.number, client: wrapUntrustedOcr(inv.client_name ?? undefined), gross: inv.gross_price,
               })),
               note: "Confirmed sale invoices have a system-generated PDF available via /pdf_system and are not flagged as missing documents.",
             },
@@ -125,7 +125,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       for (const [, invoices] of groups) {
         if (invoices.length > 1) {
           duplicates.push({
-            supplier: invoices[0]!.client_name,
+            supplier: wrapUntrustedOcr(invoices[0]!.client_name ?? undefined),
             invoice_number: invoices[0]!.number,
             count: invoices.length,
             invoices: invoices.map(inv => ({
@@ -153,7 +153,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
           const numbers = new Set(invoices.map(i => i.number));
           if (numbers.size > 1) { // Different invoice numbers but same amount+date
             amountDupes.push({
-              supplier: invoices[0]!.client_name,
+              supplier: wrapUntrustedOcr(invoices[0]!.client_name ?? undefined),
               amount: invoices[0]!.gross_price,
               date: invoices[0]!.create_date,
               invoices: invoices.map(inv => ({
@@ -205,7 +205,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
               count: candidateInvoiceNumberMatches.length,
               items: candidateInvoiceNumberMatches.map(inv => ({
                 id: inv.id,
-                supplier: inv.client_name,
+                supplier: wrapUntrustedOcr(inv.client_name ?? undefined),
                 supplier_id: inv.clients_id,
                 invoice_number: inv.number,
                 date: inv.create_date,
@@ -217,7 +217,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
               count: candidateSameAmountDateMatches.length,
               items: candidateSameAmountDateMatches.map(inv => ({
                 id: inv.id,
-                supplier: inv.client_name,
+                supplier: wrapUntrustedOcr(inv.client_name ?? undefined),
                 supplier_id: inv.clients_id,
                 invoice_number: inv.number,
                 date: inv.create_date,
@@ -232,7 +232,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
                 : undefined,
               items: voidedCandidates.map(inv => ({
                 id: inv.id,
-                supplier: inv.client_name,
+                supplier: wrapUntrustedOcr(inv.client_name ?? undefined),
                 supplier_id: inv.clients_id,
                 invoice_number: inv.number,
                 date: inv.create_date,

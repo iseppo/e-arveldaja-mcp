@@ -994,7 +994,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
             from_account: fromTitle, to_account: toTitle,
             from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
-            description_out: txOut.description, description_in: txIn.description,
+            description_out: wrapUntrustedOcr(txOut.description ?? undefined), description_in: wrapUntrustedOcr(txIn.description ?? undefined),
             confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons, status: "would_confirm",
           });
         } else {
@@ -1036,7 +1036,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
               from_account: fromTitle, to_account: toTitle,
               from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
-              description_out: txOut.description, description_in: txIn.description,
+              description_out: wrapUntrustedOcr(txOut.description ?? undefined), description_in: wrapUntrustedOcr(txIn.description ?? undefined),
               confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons, status: "confirmed",
             });
           } catch (err: unknown) {
@@ -1174,8 +1174,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             to_account: toTitle,
             from_dimension_id: tx.accounts_dimensions_id,
             to_dimension_id: counterpart.accounts_dimensions_id,
-            description_out: tx.description,
-            description_in: counterpart.description,
+            description_out: wrapUntrustedOcr(tx.description ?? undefined),
+            description_in: wrapUntrustedOcr(counterpart.description ?? undefined),
             confidence: bestCandidate.confidence,
             match_reasons: bestCandidate.reasons,
             status: "would_confirm",
@@ -1227,8 +1227,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               to_account: toTitle,
               from_dimension_id: tx.accounts_dimensions_id,
               to_dimension_id: counterpart.accounts_dimensions_id,
-              description_out: tx.description,
-              description_in: counterpart.description,
+              description_out: wrapUntrustedOcr(tx.description ?? undefined),
+              description_in: wrapUntrustedOcr(counterpart.description ?? undefined),
               confidence: bestCandidate.confidence,
               match_reasons: bestCandidate.reasons,
               status: "confirmed",

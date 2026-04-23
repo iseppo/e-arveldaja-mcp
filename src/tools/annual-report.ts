@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
 import type { Account, Client, Journal, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
@@ -302,7 +302,7 @@ function buildUnresolvedItems(
         id: transaction.id!,
         date: transaction.date,
         amount: transaction.base_amount ?? transaction.amount,
-        description: transaction.description,
+        description: wrapUntrustedOcr(transaction.description ?? undefined),
       })),
     },
     unconfirmed_sale_invoices: {

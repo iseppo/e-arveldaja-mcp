@@ -53,6 +53,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     },
     { ...create, title: "Prepare Dividend Distribution" },
     async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, share_capital_account, force, dry_run }) => {
+      // Reject non-positive dividends up front — a zero or negative net
+      // would otherwise compute gross=0 and book an empty journal with
+      // zero-amount postings, which is noise on the ledger and passes
+      // both legality checks vacuously.
+      if (!(net_dividend > 0)) {
+        return toolError({
+          error: "net_dividend must be > 0",
+          hint: "Pass a positive EUR amount to distribute.",
+        });
+      }
       const retainedAccount = retained_earnings_account ?? RETAINED_EARNINGS_ACCOUNT;
       const payableAccount = dividend_payable_account ?? DIVIDEND_PAYABLE_ACCOUNT;
       const taxAccount = tax_payable_account ?? CIT_PAYABLE_ACCOUNT;

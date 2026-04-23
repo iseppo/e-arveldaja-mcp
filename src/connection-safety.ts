@@ -109,7 +109,9 @@ export function buildSwitchBlockedPayload(
   const interruptable: InFlightMutationInfo[] = [];
   for (const snap of inFlightSnapshots) {
     if (snap === currentSnapshot) continue; // the switch_connection call itself
-    const age = snap.capturedAtMs ? now - snap.capturedAtMs : 0;
+    // Math.max guards against a backward clock step (NTP) producing a
+    // nonsensical negative age in the payload operators read.
+    const age = snap.capturedAtMs ? Math.max(0, now - snap.capturedAtMs) : 0;
     interruptable.push({
       tool_name: snap.toolName ?? "unknown",
       source_connection_index: snap.index,
