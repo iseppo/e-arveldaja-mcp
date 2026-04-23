@@ -135,31 +135,42 @@ export function getBaseUrlForServer(server = process.env.EARVELDAJA_SERVER || "l
   return SERVERS[server as keyof typeof SERVERS];
 }
 
+/**
+ * Strip/escape control characters before interpolating a filename into a
+ * log line. Filenames legally can contain \n, \r, ANSI escapes, etc.,
+ * which would corrupt terminal output or spoof extra log lines.
+ */
+function escapeForLog(text: string): string {
+  // Replace control chars (C0 + DEL + C1 + LINE/PARAGRAPH SEPARATORS) with
+  // hex escapes so the raw bytes never reach the terminal unescaped.
+  return text.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
 function validateCredentialFile(filePath: string): boolean {
   try {
     const fileInfo = lstatSync(filePath);
     if (fileInfo.isSymbolicLink()) {
-      process.stderr.write(`WARNING: Ignoring symlinked credential file: ${filePath}\n`);
+      process.stderr.write(`WARNING: Ignoring symlinked credential file: ${escapeForLog(filePath)}\n`);
       return false;
     }
 
     const stats = statSync(filePath);
     if (!stats.isFile()) {
-      process.stderr.write(`WARNING: Ignoring non-file credential path: ${filePath}\n`);
+      process.stderr.write(`WARNING: Ignoring non-file credential path: ${escapeForLog(filePath)}\n`);
       return false;
     }
 
     if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
       process.stderr.write(
-        `WARNING: Ignoring credential file not owned by the current user: ${filePath}\n`
+        `WARNING: Ignoring credential file not owned by the current user: ${escapeForLog(filePath)}\n`
       );
       return false;
     }
 
     if (stats.mode & 0o077) {
       process.stderr.write(
-        `WARNING: Ignoring ${filePath} because it is accessible by group/others ` +
-        `(mode ${(stats.mode & 0o777).toString(8)}). Run: chmod 600 ${filePath}\n`
+        `WARNING: Ignoring ${escapeForLog(filePath)} because it is accessible by group/others ` +
+        `(mode ${(stats.mode & 0o777).toString(8)}). Run: chmod 600 ${escapeForLog(filePath)}\n`
       );
       return false;
     }
@@ -277,14 +288,14 @@ function isSecureEnvFile(envPath: string): boolean {
   try {
     const info = lstatSync(envPath);
     if (info.isSymbolicLink()) {
-      process.stderr.write(`WARNING: .env file is a symlink, skipping: ${envPath}\n`);
+      process.stderr.write(`WARNING: .env file is a symlink, skipping: ${escapeForLog(envPath)}\n`);
       return false;
     }
     if (!info.isFile()) return false;
     if (info.mode & 0o077) {
       process.stderr.write(
-        `WARNING: ${envPath} is readable by group/others ` +
-        `(mode ${(info.mode & 0o777).toString(8)}). Skipping. Run: chmod 600 ${envPath}\n`
+        `WARNING: ${escapeForLog(envPath)} is readable by group/others ` +
+        `(mode ${(info.mode & 0o777).toString(8)}). Skipping. Run: chmod 600 ${escapeForLog(envPath)}\n`
       );
       return false;
     }
@@ -709,7 +720,7 @@ export function loadDotenvFiles(): void {
       const hasCompleteCredentialSet = hasCompleteApiCredentialEnv(parsed);
       if (hasAnyCredentialKeys && !hasCompleteCredentialSet) {
         process.stderr.write(
-          `WARNING: Ignoring incomplete e-arveldaja credential keys in ${envPath}. ` +
+          `WARNING: Ignoring incomplete e-arveldaja credential keys in ${escapeForLog(envPath)}. ` +
           "Provide all EARVELDAJA_API_KEY_* values in the same file.\n"
         );
       }
@@ -745,9 +756,9 @@ export function loadDotenvFiles(): void {
             delete process.env.EARVELDAJA_SERVER;
             serverLoadedFromStandaloneFile = false;
             process.stderr.write(
-              `WARNING: A standalone EARVELDAJA_SERVER=${clearedValue} loaded from an earlier .env was cleared ` +
-              `because ${envPath} supplies a complete credential set without EARVELDAJA_SERVER. ` +
-              `Falling back to the default server — re-add EARVELDAJA_SERVER=${clearedValue} to ${envPath} ` +
+              `WARNING: A standalone EARVELDAJA_SERVER=${escapeForLog(String(clearedValue))} loaded from an earlier .env was cleared ` +
+              `because ${escapeForLog(envPath)} supplies a complete credential set without EARVELDAJA_SERVER. ` +
+              `Falling back to the default server — re-add EARVELDAJA_SERVER=${escapeForLog(String(clearedValue))} to ${escapeForLog(envPath)} ` +
               "if you meant to pin that server.\n"
             );
           }

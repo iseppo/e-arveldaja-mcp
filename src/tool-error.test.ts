@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseMcpResponse } from "./mcp-json.js";
 import { toolError } from "./tool-error.js";
+import { HttpError } from "./http-client.js";
 
 describe("toolError", () => {
   it("returns MCP isError results for strings", () => {
@@ -87,5 +88,32 @@ describe("toolError", () => {
     expect(parseMcpResponse((result.content[0] as { type: string; text: string }).text)).toEqual({
       error: "Internal error",
     });
+  });
+
+  it("forwards HttpError.upstream_detail (sandbox-wrapped upstream body) into the MCP payload", () => {
+    // Regression guard: a refactor of toErrorPayload that introduces a
+    // property allowlist would silently strip upstream_detail, re-opening
+    // the raw-upstream-text leak PR closed. This test keeps the link
+    // between HttpClient and the LLM-facing response explicit.
+    const err = new HttpError(
+      "API request failed: POST /x → 400",
+      400,
+      "POST",
+      "/x",
+      { upstream_detail: "<<UNTRUSTED_OCR_START:deadbeef>>\ngross_sum mismatch\n<<UNTRUSTED_OCR_END:deadbeef>>" },
+    );
+    const result = toolError(err);
+    const payload = parseMcpResponse((result.content[0] as { type: string; text: string }).text) as {
+      error: string;
+      name: string;
+      upstream_detail: string;
+      status: number;
+    };
+    expect(payload.error).toBe("API request failed: POST /x → 400");
+    expect(payload.name).toBe("HttpError");
+    expect(payload.upstream_detail).toBe(
+      "<<UNTRUSTED_OCR_START:deadbeef>>\ngross_sum mismatch\n<<UNTRUSTED_OCR_END:deadbeef>>",
+    );
+    expect(payload.status).toBe(400);
   });
 });

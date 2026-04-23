@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { AccountDimension } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
 import { resolveFileInput } from "../file-validation.js";
@@ -831,6 +831,20 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         inter_account_total: interAccountResults.length,
       };
 
+      // `reason` is built from raw exception text (err.message) which can
+      // echo upstream API content. Wrap at MCP output so any CSV-origin
+      // bytes echoed through an error reach the LLM sandboxed.
+      const sanitizeReason = (entry: { wise_id: string; reason: string }) => ({
+        ...entry,
+        reason: wrapUntrustedOcr(entry.reason) ?? entry.reason,
+      });
+      const sanitizedSkippedDetails = summarizeWiseSkippedEntries(skipped).map(group => ({
+        ...group,
+        reason: wrapUntrustedOcr(group.reason) ?? group.reason,
+      }));
+      const sanitizedExecutionSkipped = executionSkipped.map(sanitizeReason);
+      const sanitizedExecutionErrors = executionErrors.map(sanitizeReason);
+
       return {
         content: [{
           type: "text",
@@ -858,13 +872,13 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               },
             } : {}),
             results: created.map(({ description: _desc, ...rest }) => rest),
-            skipped_details: summarizeWiseSkippedEntries(skipped),
+            skipped_details: sanitizedSkippedDetails,
             execution: buildBatchExecutionContract({
               mode,
               summary,
               results: created.map(({ description: _desc, ...rest }) => rest),
-              skipped: executionSkipped,
-              errors: executionErrors,
+              skipped: sanitizedExecutionSkipped,
+              errors: sanitizedExecutionErrors,
             }),
           }),
         }],

@@ -267,10 +267,16 @@ function parseCapitalGains(csv: string): CapitalGainsRow[] {
       throw new Error(`Capital Gains CSV row ${i + 1}: expected 10 columns, got ${fields.length}`);
     }
 
+    // Cap `name` at a defensive length so a malformed CSV with multi-line
+    // or unusually long names can't smuggle bulk text. Real security names
+    // fit easily under 128 chars; truncation makes the Lightyear-CSV trust
+    // decision robust to format drift.
+    const rawName = fields[2]!;
+    const name = rawName.length > 128 ? rawName.slice(0, 128) + "…" : rawName;
     rows.push({
       date: fields[0]!,
       ticker: fields[1]!,
-      name: fields[2]!,
+      name,
       isin: fields[3]!,
       country: fields[4]!,
       fees_eur: parseNumber(fields[5]!),

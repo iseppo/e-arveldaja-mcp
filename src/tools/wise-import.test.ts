@@ -4,6 +4,11 @@ import { resolveFileInput } from "../file-validation.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
+// Wise reason strings are OCR-sandbox-wrapped at MCP output since they
+// can carry raw exception / API text — match plain text inside the wrap.
+const wrapped = (text: string): RegExp =>
+  new RegExp(`^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\\n${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$`);
+
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
 }));
@@ -150,7 +155,7 @@ describe("wise import tool", () => {
 
     expect(api.transactions.create).not.toHaveBeenCalled();
     expect(payload.skipped_details).toEqual([
-      { reason: "Already imported (date/amount/counterparty/reference match)", count: 1, sample_ids: ["abc-1"] },
+      { reason: expect.stringMatching(wrapped("Already imported (date/amount/counterparty/reference match)")), count: 1, sample_ids: ["abc-1"] },
     ]);
   });
 
@@ -182,7 +187,7 @@ describe("wise import tool", () => {
 
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(payload.skipped_details).toEqual([
-      { reason: "Fee already imported (date/amount/counterparty match)", count: 1, sample_ids: ["FEE:abc-2"] },
+      { reason: expect.stringMatching(wrapped("Fee already imported (date/amount/counterparty match)")), count: 1, sample_ids: ["FEE:abc-2"] },
     ]);
   });
 
@@ -221,7 +226,7 @@ describe("wise import tool", () => {
       description: "WISE:FEE:abc-3 Wise teenustasu",
     }));
     expect(payload.skipped_details).toContainEqual(
-      expect.objectContaining({ reason: "Already imported (date/amount/counterparty/reference match)", sample_ids: expect.arrayContaining(["abc-3"]) }),
+      expect.objectContaining({ reason: expect.stringMatching(wrapped("Already imported (date/amount/counterparty/reference match)")), sample_ids: expect.arrayContaining(["abc-3"]) }),
     );
     expect(payload.results).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -255,8 +260,8 @@ describe("wise import tool", () => {
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(payload.results).toEqual([]);
     expect(payload.skipped_details).toEqual(expect.arrayContaining([
-      { reason: "Main create failed", count: 1, sample_ids: ["abc-4"] },
-      { reason: "Skipped because main transaction was not created", count: 1, sample_ids: ["FEE:abc-4"] },
+      { reason: expect.stringMatching(wrapped("Main create failed")), count: 1, sample_ids: ["abc-4"] },
+      { reason: expect.stringMatching(wrapped("Skipped because main transaction was not created")), count: 1, sample_ids: ["FEE:abc-4"] },
     ]));
     expect(payload.execution).toMatchObject({
       contract: "batch_execution_v1",
@@ -273,10 +278,10 @@ describe("wise import tool", () => {
       },
       results: [],
       skipped: [
-        { wise_id: "FEE:abc-4", reason: "Skipped because main transaction was not created" },
+        { wise_id: "FEE:abc-4", reason: expect.stringMatching(wrapped("Skipped because main transaction was not created")) },
       ],
       errors: [
-        { wise_id: "abc-4", reason: "Main create failed" },
+        { wise_id: "abc-4", reason: expect.stringMatching(wrapped("Main create failed")) },
       ],
     });
   });
