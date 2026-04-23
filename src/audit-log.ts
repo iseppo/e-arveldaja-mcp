@@ -519,11 +519,23 @@ function renderEntry(entry: AuditEntry): string {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Append a single audit entry to the current connection's Markdown log file. */
-export function logAudit(entry: Omit<AuditEntry, "timestamp">): void {
+/**
+ * Append a single audit entry to a connection's Markdown log file.
+ *
+ * Default target is the currently-active connection. Pass `connectionName`
+ * to direct the entry to a specific connection's log — needed when a tool
+ * fails mid-switch and the audit record belongs on the ORIGINAL (interrupted)
+ * connection, not the new active one.
+ */
+export function logAudit(
+  entry: Omit<AuditEntry, "timestamp">,
+  opts?: { connectionName?: string },
+): void {
   const full: AuditEntry = { ...entry, timestamp: new Date().toISOString() };
   try {
-    const filePath = getLogFilePath();
+    const filePath = opts?.connectionName
+      ? getLogFilePathForConnection(opts.connectionName)
+      : getLogFilePath();
     if (!existsSync(LOGS_DIR)) {
       mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
     }

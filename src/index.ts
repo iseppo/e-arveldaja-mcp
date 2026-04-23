@@ -830,10 +830,13 @@ Reporting:
       const snapshot = captureSnapshot(connectionState, { toolName, isReadOnly });
       const extra = args.length >= 2 ? args[1] as any : undefined;
       const trackMutation = !isReadOnly && !setupMode;
-      if (trackMutation) {
-        inFlightMutations.add(snapshot);
-      }
       try {
+        // Move `add` inside the try so the paired `delete` in finally is
+        // always invoked for the same snapshot — defensive against future
+        // edits inserting throwing code between capture and try.
+        if (trackMutation) {
+          inFlightMutations.add(snapshot);
+        }
         return await invocationStorage.run(snapshot, async () => {
           if (!setupMode && !isReadOnly) {
             await ensureAuditLogLabelResolved(snapshot.index);
@@ -851,22 +854,23 @@ Reporting:
         // code — the entry documents exactly which tool and which connection.
         if (error instanceof ConnectionSwitchInterruptedError && trackMutation) {
           try {
-            // Writes to whichever connection's log is active now (the new
-            // one, post-switch). `details.original_connection_index` points
-            // at the interrupted connection so a user auditing the new log
-            // and seeing this entry knows to cross-reference the old.
+            // Direct the entry to the ORIGINAL (interrupted) connection's
+            // log, not the new active one. The mutation's side effects
+            // (if any) landed on the original company; the audit trail for
+            // that company is where operators will look when investigating.
+            const originalConnectionName = allConfigs[error.originalIndex]?.name;
             logAudit({
               tool: toolName,
               action: "CONNECTION_SWITCH_INTERRUPTED",
               entity_type: "tool_execution",
               summary: `Tool "${toolName}" was interrupted by a connection switch mid-execution. ` +
-                `Further API requests blocked; inspect for partial side effects on connection index ${error.originalIndex}.`,
+                `Further API requests blocked; inspect for partial side effects.`,
               details: {
                 tool_name: toolName,
                 original_connection_index: error.originalIndex,
                 was_read_only: Boolean(error.wasReadOnly),
               },
-            });
+            }, originalConnectionName ? { connectionName: originalConnectionName } : undefined);
           } catch (auditErr) {
             log("error", `Failed to write CONNECTION_SWITCH_INTERRUPTED audit entry: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`);
           }

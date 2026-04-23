@@ -591,4 +591,30 @@ describe("audit log labels", () => {
     expect(auditLog.getAuditLogByConnection("apikey  foo")).toContain("#20");
     expect(auditLog.getAuditLogByConnection("apikey  foo")).not.toContain("#19");
   });
+
+  it("directs logAudit to an override connection's log when connectionName is passed", async () => {
+    // Connection-switch-interruption path: the mutation's audit entry
+    // belongs on the ORIGINAL (interrupted) connection's log, not the
+    // new active one. Verify that the override routes writes correctly.
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    // Active connection is "new_co" — that's what a default logAudit
+    // would write to. We want the entry to land in "old_co" instead.
+    auditLog.initAuditLog(() => "new_co");
+
+    auditLog.logAudit({
+      tool: "confirm_transaction",
+      action: "CONNECTION_SWITCH_INTERRUPTED",
+      entity_type: "tool_execution",
+      summary: "Interrupted by switch",
+      details: { original_connection_index: 0 },
+    }, { connectionName: "old_co" });
+
+    // The interrupted-connection log should contain the entry.
+    expect(auditLog.getAuditLogByConnection("old_co")).toContain("CONNECTION_SWITCH_INTERRUPTED");
+    // The current-active log should NOT — otherwise the entry would be
+    // misfiled on the wrong company.
+    expect(auditLog.getAuditLog()).not.toContain("CONNECTION_SWITCH_INTERRUPTED");
+  });
 });
