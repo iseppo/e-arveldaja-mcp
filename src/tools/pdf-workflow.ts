@@ -400,12 +400,23 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       // Trim to requested limit
       detailed.splice(maxResults);
 
+      // Past-invoice custom_title is often the OCR description copied forward
+      // from the original receipt booking, so wrap at MCP output. Internal
+      // match-against-description logic above already ran on plain strings.
+      const sanitizedDetailed = detailed.map(inv => ({
+        ...inv,
+        items: inv.items?.map(item => ({
+          ...item,
+          custom_title: wrapUntrustedOcr(item.custom_title ?? undefined),
+        })),
+      }));
+
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             supplier_id: clients_id,
-            past_invoices: detailed,
+            past_invoices: sanitizedDetailed,
             suggestion: detailed.length > 0
               ? "Use the purchase article, account, and VAT settings from the most recent similar invoice."
               : "No past invoices found for this supplier. Use list_purchase_articles to find appropriate articles.",

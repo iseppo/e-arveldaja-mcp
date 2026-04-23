@@ -223,9 +223,12 @@ describe("pdf workflow tools", () => {
     expect(payload.supplier_id).toBe(7);
     expect(payload.suggestion).toContain("VAT settings");
     expect(payload.past_invoices).toHaveLength(1);
+    // past_invoices.items[].custom_title is OCR-sandbox-wrapped at MCP
+    // output (often the OCR description copied forward from the original
+    // receipt booking) — match plain text inside the wrap.
     expect(payload.past_invoices[0]!.items).toEqual([
       expect.objectContaining({
-        custom_title: "Internet subscription",
+        custom_title: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nInternet subscription\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/),
         cl_purchase_articles_id: 45,
         purchase_accounts_id: 5230,
         vat_rate_dropdown: "24",

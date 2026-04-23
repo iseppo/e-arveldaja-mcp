@@ -340,7 +340,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               items: unconfirmedSales.map((inv: SaleInvoice) => ({
                 id: inv.id,
                 number: inv.number,
-                client: inv.client_name,
+                client: wrapUntrustedOcr(inv.client_name ?? undefined),
                 gross: effectiveGross(inv),
                 payment_status: inv.payment_status ?? "NOT_PAID",
               })),
@@ -350,7 +350,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               items: unconfirmedPurchases.map((inv: PurchaseInvoice) => ({
                 id: inv.id,
                 number: inv.number,
-                client: inv.client_name,
+                client: wrapUntrustedOcr(inv.client_name ?? undefined),
                 gross: effectiveGross(inv),
                 payment_status: inv.payment_status ?? "NOT_PAID",
               })),
@@ -361,7 +361,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               items: overdueReceivables.slice(0, 10).map((inv: SaleInvoice) => ({
                 id: inv.id,
                 number: inv.number,
-                client: inv.client_name,
+                client: wrapUntrustedOcr(inv.client_name ?? undefined),
                 gross: effectiveGross(inv),
                 payment_status: inv.payment_status ?? "NOT_PAID",
               })),
@@ -372,7 +372,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               items: overduePayables.slice(0, 10).map((inv: PurchaseInvoice) => ({
                 id: inv.id,
                 number: inv.number,
-                client: inv.client_name,
+                client: wrapUntrustedOcr(inv.client_name ?? undefined),
                 gross: effectiveGross(inv),
                 payment_status: inv.payment_status ?? "NOT_PAID",
               })),

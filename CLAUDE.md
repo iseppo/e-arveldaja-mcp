@@ -178,15 +178,64 @@ All mutating API methods (`create`, `update`, `delete`, `confirm`, `deactivate`,
 - `safeJsonParse` enforces 1MB input size limit
 - `listAll()` is bounded to 200 pages max
 - HTTP client rate-limits to ~10 req/sec
-- Error messages are sanitized (no raw API response bodies)
+- Error messages are sanitized — upstream API body text is kept off `Error.message` and forwarded on `HttpError.upstream_detail`, OCR-sandbox-wrapped
 - Cache is bounded to 500 entries with LRU eviction
+- `logAudit` warns (non-blocking) when an entry exceeds PIPE_BUF (4096 B); cross-process append atomicity is guaranteed only below that bound
+
+### OCR / untrusted-text sandbox policy
+
+External-provided text (PDF/OCR, CAMT XML, Wise/Lightyear CSV, upstream API
+error bodies) can carry prompt-injection payloads. To keep these out of the
+LLM's instruction stream, the affected MCP tool outputs wrap the relevant
+fields with a per-call random nonce sandbox via `wrapUntrustedOcr` in
+`src/mcp-json.ts`:
+
+```
+<<UNTRUSTED_OCR_START:<128-bit-hex-nonce>>>
+...untrusted content...
+<<UNTRUSTED_OCR_END:<128-bit-hex-nonce>>>
+```
+
+**Wrapped at MCP output:**
+- Direct processing tools: `extract_pdf_invoice`, `parse_camt053`,
+  `import_camt053`, `process_receipt_batch`, `parse_lightyear_capital_gains`,
+  `import_wise_transactions`, etc.
+- Review/analysis tools consuming imported data: `reconcile_transactions`,
+  `reconcile_inter_account_transfers`, `analyze_unconfirmed_transactions`,
+  `classify_unmatched_transactions`, `suggest_booking`,
+  `find_missing_documents`, `detect_duplicate_purchase_invoice`,
+  `month_end_close_checklist`, `generate_annual_report_data`,
+  `compute_account_balance` (with `include_entries=true`),
+  `compute_receivables_aging`, `compute_payables_aging`,
+  `create_recurring_sale_invoices`.
+- Upstream API errors: `HttpError.upstream_detail` (forwarded to MCP via
+  `toolError`).
+
+**Intentionally NOT wrapped — conscious architectural decision:**
+- Generic CRUD read handlers (`get_journal`, `list_journals`, `get_client`,
+  `list_clients`, `get_transaction`, `list_transactions`, `get_sale_invoice`,
+  `list_sale_invoices`, `get_purchase_invoice`, `list_purchase_invoices`,
+  etc.) return raw API payloads verbatim. Rationale: the trust gate for
+  OCR/CAMT-origin data is at **import** time, where the direct-processing
+  tool wraps it. Once the operator has reviewed and persisted the record
+  in e-arveldaja, list/get calls are treated as reading trusted state.
+- MCP resources in `src/resources/static-resources.ts` follow the same
+  policy: they expose configured reference data (accounts, articles,
+  templates), not imported content.
+
+**When adding a new tool:** if it emits text from OCR/CAMT/CSV, upstream API
+errors, or fields known to be populated by import flows (journal title
+originating from auto-booking, client/supplier names auto-created from
+receipt OCR), wrap at MCP output. CRUD `get_*`/`list_*` over unfiltered
+API data remains raw.
 
 ## Estonian Tax Rules
 
 - **KMD INF**: Partner detail annex, threshold 1000 EUR net per partner
 - **Standard VAT rate**: 24% (from 1.07.2025)
 - **VD**: Intra-community supply declaration (EU only)
-- **CIT on dividends**: 22/78 corporate income tax rate
+- **CIT on dividends**: 22/78 from 2025-01-01; 20/80 before (date-gated via `getCitRateForDate` in `src/tools/estonian-tax.ts`)
+- **ÄS § 157 net-assets block**: `prepare_dividend_package` hard-blocks distributions that lack retained earnings OR would push net assets below share capital. `force=true` overrides both checks (use only alongside a legitimate action such as a capital reduction).
 - **Capital gains**: Securities taxed at 22% income tax
 
 ## Development

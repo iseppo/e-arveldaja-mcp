@@ -310,7 +310,7 @@ function buildUnresolvedItems(
       items: unconfirmedSales.slice(0, 20).map((invoice) => ({
         id: invoice.id!,
         number: invoice.number ?? `${invoice.number_prefix ?? ""}${invoice.number_suffix}`,
-        client: invoice.client_name ?? "",
+        client: wrapUntrustedOcr(invoice.client_name ?? undefined) ?? "",
         gross: effectiveGross(invoice),
       })),
     },
@@ -319,7 +319,7 @@ function buildUnresolvedItems(
       items: unconfirmedPurchases.slice(0, 20).map((invoice) => ({
         id: invoice.id!,
         number: invoice.number,
-        client: invoice.client_name,
+        client: wrapUntrustedOcr(invoice.client_name ?? undefined) ?? "",
         gross: effectiveGross(invoice),
       })),
     },

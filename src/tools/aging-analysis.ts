@@ -1,7 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+
+// Client/supplier names in aging output can be OCR-seeded (auto-created
+// from purchase-invoice receipt flow). Wrap the bucket rows and top-N
+// summaries so aging reports reaching the LLM stay sandboxed even when
+// the underlying invoice was imported from OCR.
+function sanitizeAgingBucketsForOutput<T extends { invoices: Array<{ client?: string | null }> }>(buckets: T[]): T[] {
+  return buckets.map(b => ({
+    ...b,
+    invoices: b.invoices.map(inv => ({
+      ...inv,
+      client: wrapUntrustedOcr(inv.client ?? undefined),
+    })),
+  }));
+}
+
+function sanitizeNamedTotalsForOutput<T extends { name: string }>(list: T[]): T[] {
+  return list.map(entry => ({ ...entry, name: wrapUntrustedOcr(entry.name) ?? entry.name }));
+}
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
@@ -121,8 +139,8 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
             total_unpaid_face_value: unpaid.reduce((s: number, inv: SaleInvoice) => roundMoney(s + effectiveGross(inv)), 0),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
-            aging_buckets: sortedBuckets,
-            top_debtors: topDebtors,
+            aging_buckets: sanitizeAgingBucketsForOutput(sortedBuckets),
+            top_debtors: sanitizeNamedTotalsForOutput(topDebtors),
             ...(unmatched.count > 0 && {
               unmatched_client_invoices: { count: unmatched.count, total: r(unmatched.total), oldest_days: unmatched.oldest_days },
             }),
@@ -215,8 +233,8 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
             total_unpaid_face_value: unpaid.reduce((s: number, inv: PurchaseInvoice) => roundMoney(s + effectiveGross(inv)), 0),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
-            aging_buckets: sortedBuckets,
-            top_creditors: topCreditors,
+            aging_buckets: sanitizeAgingBucketsForOutput(sortedBuckets),
+            top_creditors: sanitizeNamedTotalsForOutput(topCreditors),
             ...(unmatched.count > 0 && {
               unmatched_supplier_invoices: { count: unmatched.count, total: r(unmatched.total), oldest_days: unmatched.oldest_days },
             }),
