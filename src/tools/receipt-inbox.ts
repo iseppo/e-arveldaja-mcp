@@ -180,6 +180,21 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
     };
   }
 
+  // error and notes are built from exception messages during invoice
+  // creation / upload / confirmation / linking. Upstream API errors can
+  // echo invoice_number / supplier_name / notes the operator just
+  // submitted — wrap so any echoed OCR-origin bytes reach the LLM
+  // sandboxed.
+  if (next.error !== undefined) {
+    next = { ...next, error: wrapUntrustedOcr(next.error) ?? next.error };
+  }
+  if (next.notes.length > 0) {
+    next = {
+      ...next,
+      notes: next.notes.map(note => wrapUntrustedOcr(note) ?? note),
+    };
+  }
+
   return next;
 }
 
@@ -1667,6 +1682,22 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         return counts;
       }, {});
 
+      // display_counterparty and each transaction's description/bank_account_name
+      // originate from bank-statement import and are attacker-controllable at
+      // the counterparty layer. Wrap at the MCP boundary so classify output
+      // reaching the LLM is sandboxed. apply_transaction_classifications
+      // re-fetches transactions by id, so wrapped text in the JSON payload
+      // never participates in server-side lookups.
+      const sanitizedGroups = classifiedGroups.map(g => ({
+        ...g,
+        display_counterparty: wrapUntrustedOcr(g.display_counterparty) ?? g.display_counterparty,
+        transactions: g.transactions.map(t => ({
+          ...t,
+          description: wrapUntrustedOcr(t.description ?? undefined),
+          bank_account_name: wrapUntrustedOcr(t.bank_account_name ?? undefined),
+        })),
+      }));
+
       return {
         content: [{
           type: "text",
@@ -1680,7 +1711,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             total_unconfirmed: unconfirmed.length,
             total_unmatched: unmatched.length,
             category_counts: categoryCounts,
-            groups: classifiedGroups,
+            groups: sanitizedGroups,
           }),
         }],
       };

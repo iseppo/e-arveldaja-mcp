@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
@@ -407,13 +407,23 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         actionCounts[s.suggested_action] = (actionCounts[s.suggested_action] ?? 0) + 1;
       }
 
+      // description + bank_account_name are CAMT/Wise-origin text. Wrap at
+      // the MCP boundary so counterparty-controlled bytes reach the LLM
+      // sandboxed. In-memory suggestions[] keeps the plain strings so any
+      // internal logic continues to see the raw values.
+      const sanitizedSuggestions = suggestions.map(s => ({
+        ...s,
+        description: wrapUntrustedOcr(s.description ?? undefined),
+        bank_account_name: wrapUntrustedOcr(s.bank_account_name ?? undefined),
+      }));
+
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             total_unconfirmed: unconfirmed.length,
             summary: actionCounts,
-            suggestions,
+            suggestions: sanitizedSuggestions,
           }),
         }],
       };

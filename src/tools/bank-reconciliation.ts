@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
@@ -323,12 +323,15 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
                 tx.amount,
                 bestMatch.partially_paid_warning,
               );
+          // tx.description and tx.bank_account_name originate from bank-
+          // statement import (CAMT, Wise). Counterparties control the bytes,
+          // so treat them like OCR text at the MCP boundary.
           results.push({
             transaction_id: tx.id,
             date: tx.date,
             amount: tx.amount,
-            description: tx.description,
-            bank_account_name: tx.bank_account_name,
+            description: wrapUntrustedOcr(tx.description ?? undefined),
+            bank_account_name: wrapUntrustedOcr(tx.bank_account_name ?? undefined),
             ref_number: tx.ref_number,
             best_match: bestMatch,
             other_candidate_count: candidates.length - 1,
@@ -1279,7 +1282,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             transaction_id: tx.id, type: tx.type, amount: tx.amount, date: tx.date,
             source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
             target_account: targetTitle, target_dimension_id: targetDimension,
-            description: tx.description, counterparty_name: tx.bank_account_name,
+            description: wrapUntrustedOcr(tx.description ?? undefined), counterparty_name: wrapUntrustedOcr(tx.bank_account_name ?? undefined),
             confidence: Math.min(confidence, 100), match_reasons: reasons, status: "would_confirm",
           });
         } else {
@@ -1296,7 +1299,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               transaction_id: tx.id, type: tx.type, amount: tx.amount, date: tx.date,
               source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
               target_account: targetTitle, target_dimension_id: targetDimension,
-              description: tx.description, counterparty_name: tx.bank_account_name,
+              description: wrapUntrustedOcr(tx.description ?? undefined), counterparty_name: wrapUntrustedOcr(tx.bank_account_name ?? undefined),
               confidence: Math.min(confidence, 100), match_reasons: reasons, status: "confirmed",
             });
           } catch (err: unknown) {

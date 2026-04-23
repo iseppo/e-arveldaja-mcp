@@ -870,8 +870,9 @@ describe("process_receipt_batch rollback handling", () => {
       ],
       needs_review: [],
     });
+    // Notes are OCR-sandbox-wrapped at MCP output; match plain text inside the wrap.
     expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
-      "Invalidated created purchase invoice 9001 because source document upload failed: upload failed.",
+      expect.stringMatching(/Invalidated created purchase invoice 9001 because source document upload failed: upload failed\./),
     ]));
     expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9001);
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();

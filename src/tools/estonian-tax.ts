@@ -84,26 +84,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // Preload journals once for both retained earnings and balance sheet checks
       const allJournals = await api.journals.listAllWithPostings();
 
-      // Check retained earnings balance
+      // Evaluate both legality checks up front as pure data so composition
+      // is explicit: the caller sees BOTH violations in a single error when
+      // both trigger, and dry_run previews are always complete (warnings
+      // and net_assets_check included even when force=true would proceed).
       const retainedResult = await computeAccountBalance(api, retainedAccount, undefined, undefined, effective_date, allJournals);
       const retainedBalance = retainedResult.balance;
       const warnings: string[] = [];
-      if (retainedBalance < grossDividend) {
-        if (!force) {
-          return toolError({
-            error: "Insufficient retained earnings",
-            retained_earnings_balance: retainedBalance,
-            gross_dividend_required: roundMoney(grossDividend),
-            shortfall: roundMoney(grossDividend - retainedBalance),
-            calculation: { net_dividend, cit_rate: citRate.formatted, cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
-            hint: "Distribution may be unlawful per ÄS § 157. Set force=true to create the journal anyway.",
-          });
-        }
-        warnings.push(
-          `Retained earnings balance (${retainedBalance} EUR) is less than gross dividend (${roundMoney(grossDividend)} EUR). ` +
-          `Verify that distribution is lawful per ÄS § 157. Journal created because force=true.`
-        );
-      }
 
       const balances = await computeAllBalances(api, undefined, effective_date, {
         preloadedAccounts: accounts,
@@ -141,25 +128,54 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         );
       }
 
-      if (netAssetsAfterDistribution < roundedShareCapital - 0.01) {
-        if (!force) {
-          // ÄS § 157 prohibits distributions that push net assets below share
-          // capital. Treat this as a hard block by default — same policy as
-          // the retained-earnings check — because creating the journal is
-          // legally unsafe. Operators who have accepted the risk (e.g. a
-          // capital reduction is planned alongside) can still force it.
-          return toolError({
-            error: "ÄS § 157 net assets breach",
-            net_assets_before_distribution: netAssetsBeforeDistribution,
-            gross_dividend: roundMoney(grossDividend),
-            net_assets_after_distribution: netAssetsAfterDistribution,
-            share_capital: roundedShareCapital,
-            share_capital_account: shareCapitalAccount,
-            shortfall: roundMoney(roundedShareCapital - netAssetsAfterDistribution),
-            calculation: { net_dividend, cit_rate: citRate.formatted, cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
-            hint: "Distribution would push net assets below share capital, which ÄS § 157 prohibits. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).",
-          });
-        }
+      const retainedShortfall = retainedBalance < grossDividend;
+      const netAssetsBreach = netAssetsAfterDistribution < roundedShareCapital - 0.01;
+      const violations: string[] = [];
+      if (retainedShortfall) violations.push("Insufficient retained earnings");
+      if (netAssetsBreach) violations.push("ÄS § 157 net assets breach");
+
+      if (violations.length > 0 && !force) {
+        // Report every triggered legality violation in one response so the
+        // operator sees the full picture. ÄS § 157 is explicitly the
+        // framework for retained-earnings distribution legality, so a
+        // retained shortfall is already a § 157 signal; the net-assets
+        // check covers the separate share-capital clause.
+        return toolError({
+          error: violations.join("; "),
+          ...(retainedShortfall && {
+            retained_earnings_check: {
+              balance: retainedBalance,
+              gross_dividend_required: roundMoney(grossDividend),
+              shortfall: roundMoney(grossDividend - retainedBalance),
+            },
+          }),
+          ...(netAssetsBreach && {
+            net_assets_check: {
+              net_assets_before_distribution: netAssetsBeforeDistribution,
+              gross_dividend: roundMoney(grossDividend),
+              net_assets_after_distribution: netAssetsAfterDistribution,
+              share_capital: roundedShareCapital,
+              share_capital_account: shareCapitalAccount,
+              shortfall: roundMoney(roundedShareCapital - netAssetsAfterDistribution),
+            },
+          }),
+          calculation: { net_dividend, cit_rate: citRate.formatted, cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
+          hint:
+            retainedShortfall && netAssetsBreach
+              ? "Both retained-earnings and § 157 net-assets clauses fail. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action)."
+              : retainedShortfall
+                ? "Retained earnings are insufficient. Distribution may be unlawful per ÄS § 157. Set force=true to create the journal anyway."
+                : "Distribution would push net assets below share capital, which ÄS § 157 prohibits. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).",
+        });
+      }
+
+      if (retainedShortfall) {
+        warnings.push(
+          `Retained earnings balance (${retainedBalance} EUR) is less than gross dividend (${roundMoney(grossDividend)} EUR). ` +
+          `Verify that distribution is lawful per ÄS § 157. Journal created because force=true.`
+        );
+      }
+      if (netAssetsBreach) {
         warnings.push(
           `Net assets after distribution (${netAssetsAfterDistribution} EUR) would fall below share capital (${roundedShareCapital} EUR on account ${shareCapitalAccount}). ` +
           `Journal created because force=true. Verify ÄS § 157 compliance through a separate legal action (e.g. capital reduction).`
@@ -206,11 +222,27 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
                 net_dividend,
                 cit_rate: citRate.formatted,
                 cit_amount: cit,
-                gross_dividend: grossDividend,
+                gross_dividend: roundMoney(grossDividend),
               },
               proposed_journal: journalData,
               shareholder: { id: shareholder.id, name: shareholder.name },
-              retained_earnings_balance: retainedBalance,
+              // Mirror the executed path so the preview doesn't hide legality
+              // context: an operator running dry_run with force=true must see
+              // the same § 157 / retained-earnings signals they would on execute.
+              retained_earnings_check: {
+                account: retainedAccount,
+                balance_before: retainedBalance,
+                sufficient: retainedBalance >= grossDividend,
+              },
+              net_assets_check: {
+                net_assets_before_distribution: netAssetsBeforeDistribution,
+                gross_dividend: roundMoney(grossDividend),
+                net_assets_after_distribution: netAssetsAfterDistribution,
+                share_capital_account: shareCapitalAccount,
+                share_capital: roundedShareCapital,
+                sufficient: netAssetsAfterDistribution >= roundedShareCapital,
+              },
+              ...(warnings.length > 0 && { warnings }),
               note: "No journal created. Set dry_run=false to execute.",
             }),
           }],
