@@ -190,6 +190,46 @@ describe("reconcile_transactions", () => {
     expect(payload.matches[0]!.manual_review_required).toBeUndefined();
   });
 
+  it("wraps OCR-origin strings in best_match and the transaction envelope", async () => {
+    // Purchase-invoice client_name/number/ref_number can be OCR-seeded from
+    // the create_purchase_invoice_from_pdf flow. The MCP output must wrap
+    // them so an embedded prompt cannot escape the sandbox.
+    const wrap = /^<<UNTRUSTED_OCR_START:([0-9a-f]{32})>>\n.+\n<<UNTRUSTED_OCR_END:\1>>$/s;
+    const handler = setupReconciliationTool({
+      transactions: [{
+        id: 3,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 180,
+        date: "2026-03-20",
+        description: "Outgoing payment",
+        bank_account_name: "Epsilon OU",
+        ref_number: "RF-TX-EP-001",
+      }],
+      purchases: [{
+        id: 77,
+        status: "CONFIRMED",
+        payment_status: "NOT_PAID",
+        number: "OST-77",
+        clients_id: 30,
+        client_name: "Epsilon OU",
+        gross_price: 180,
+        bank_ref_number: "RF-INV-EP-001",
+      }],
+    });
+
+    const result = await handler({ min_confidence: 0 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matches).toHaveLength(1);
+    const match = payload.matches[0]!;
+    expect(match.ref_number).toMatch(wrap);
+    expect(match.best_match.client_name).toMatch(wrap);
+    expect(match.best_match.number).toMatch(wrap);
+    expect(match.best_match.ref_number).toMatch(wrap);
+  });
+
   it("matches type C transactions against sale invoices (API always stores type C)", async () => {
     const handler = setupReconciliationTool({
       transactions: [{

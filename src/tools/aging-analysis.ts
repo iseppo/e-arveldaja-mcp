@@ -2,24 +2,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
-
-// Client/supplier names in aging output can be OCR-seeded (auto-created
-// from purchase-invoice receipt flow). Wrap the bucket rows and top-N
-// summaries so aging reports reaching the LLM stay sandboxed even when
-// the underlying invoice was imported from OCR.
-function sanitizeAgingBucketsForOutput<T extends { invoices: Array<{ client?: string | null }> }>(buckets: T[]): T[] {
-  return buckets.map(b => ({
-    ...b,
-    invoices: b.invoices.map(inv => ({
-      ...inv,
-      client: wrapUntrustedOcr(inv.client ?? undefined),
-    })),
-  }));
-}
-
-function sanitizeNamedTotalsForOutput<T extends { name: string }>(list: T[]): T[] {
-  return list.map(entry => ({ ...entry, name: wrapUntrustedOcr(entry.name) ?? entry.name }));
-}
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
@@ -30,6 +12,31 @@ interface AgingBucket {
   count: number;
   total: number;
   invoices: Array<{ id: number; number: string; client: string; amount: number; payment_status: string; days_overdue: number }>;
+}
+
+interface NamedTotal {
+  clients_id: number;
+  name: string;
+  total: number;
+  oldest_days: number;
+}
+
+// Client/supplier names in aging output can be OCR-seeded (auto-created
+// from purchase-invoice receipt flow). Wrap the bucket rows and top-N
+// summaries so aging reports reaching the LLM stay sandboxed even when
+// the underlying invoice was imported from OCR.
+function sanitizeAgingBucketsForOutput(buckets: AgingBucket[]) {
+  return buckets.map(b => ({
+    ...b,
+    invoices: b.invoices.map(inv => ({
+      ...inv,
+      client: wrapUntrustedOcr(inv.client),
+    })),
+  }));
+}
+
+function sanitizeNamedTotalsForOutput(list: NamedTotal[]) {
+  return list.map(entry => ({ ...entry, name: wrapUntrustedOcr(entry.name) ?? entry.name }));
 }
 
 function daysBetween(dateStr: string, today: string): number {

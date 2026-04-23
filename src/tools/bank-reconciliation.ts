@@ -323,17 +323,33 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
                 tx.amount,
                 bestMatch.partially_paid_warning,
               );
-          // tx.description and tx.bank_account_name originate from bank-
-          // statement import (CAMT, Wise). Counterparties control the bytes,
-          // so treat them like OCR text at the MCP boundary.
+          // tx.description, tx.bank_account_name, and tx.ref_number originate
+          // from bank-statement import (CAMT, Wise). Counterparties control
+          // those bytes. bestMatch mirrors invoice fields — for purchase
+          // invoices, number/ref_number/client_name can be OCR-seeded from
+          // the receipt flow (see pdf-workflow.ts create_purchase_invoice_from_pdf).
+          // Enumerate best_match explicitly rather than spreading bestMatch so
+          // new MatchCandidate fields cannot silently bypass the wrap.
           results.push({
             transaction_id: tx.id,
             date: tx.date,
             amount: tx.amount,
             description: wrapUntrustedOcr(tx.description ?? undefined),
             bank_account_name: wrapUntrustedOcr(tx.bank_account_name ?? undefined),
-            ref_number: tx.ref_number,
-            best_match: bestMatch,
+            ref_number: wrapUntrustedOcr(tx.ref_number ?? undefined),
+            best_match: {
+              type: bestMatch.type,
+              id: bestMatch.id,
+              number: wrapUntrustedOcr(bestMatch.number) ?? "",
+              client_name: wrapUntrustedOcr(bestMatch.client_name) ?? "",
+              clients_id: bestMatch.clients_id,
+              gross_price: bestMatch.gross_price,
+              payment_status: bestMatch.payment_status,
+              partially_paid_warning: bestMatch.partially_paid_warning,
+              ref_number: wrapUntrustedOcr(bestMatch.ref_number ?? undefined),
+              confidence: bestMatch.confidence,
+              match_reasons: bestMatch.match_reasons,
+            },
             other_candidate_count: candidates.length - 1,
             ...(distribution ? { distribution } : {}),
             ...(bestMatch.partially_paid_warning

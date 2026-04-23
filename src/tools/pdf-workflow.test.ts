@@ -228,7 +228,7 @@ describe("pdf workflow tools", () => {
     // receipt booking) — match plain text inside the wrap.
     expect(payload.past_invoices[0]!.items).toEqual([
       expect.objectContaining({
-        custom_title: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nInternet subscription\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/),
+        custom_title: expect.stringMatching(/^<<UNTRUSTED_OCR_START:([0-9a-f]{32})>>\nInternet subscription\n<<UNTRUSTED_OCR_END:\1>>$/),
         cl_purchase_articles_id: 45,
         purchase_accounts_id: 5230,
         vat_rate_dropdown: "24",
