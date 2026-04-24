@@ -272,13 +272,54 @@ EARVELDAJA_INTEGRATION_TEST=true npm run test:integration
 
 ### Releasing to the MCP Registry
 
-Submissions to the [MCP Registry](https://registry.modelcontextprotocol.io) are driven by `server.json`. Use the official `mcp-publisher` binary from the [`modelcontextprotocol/registry` GitHub releases](https://github.com/modelcontextprotocol/registry/releases) rather than third-party snap/brew packages — unofficial channels can lag behind the current schema and reject the `$schema` version as "deprecated". A one-liner to install the latest version into `~/.local/bin` (make sure that directory is on your `PATH` before any system-wide install):
+Claude Cowork discovers public MCP servers through the [MCP Registry](https://registry.modelcontextprotocol.io). Pushing to GitHub is not enough: publish the same version to npm first, then publish this repo's `server.json` metadata to the registry.
+
+Before publishing, make sure these versions all match:
+
+- `package.json` `version`
+- `package-lock.json` root package `version`
+- `server.json` top-level `version`
+- `server.json` `packages[0].version`
+
+Also make sure `package.json` `mcpName` exactly matches `server.json` `name`; the registry uses that to verify npm package ownership.
+
+Run the normal checks before publishing:
 
 ```bash
-mkdir -p ~/.local/bin && curl -sSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz -C /tmp mcp-publisher && install -m 0755 /tmp/mcp-publisher ~/.local/bin/mcp-publisher && rm -f /tmp/mcp-publisher
+npm run build
+npm test
+npm run test:integration
 ```
 
-Then: `npm publish` (so the registry can cross-reference `mcpName`) → `mcp-publisher login github` → `mcp-publisher publish`.
+Publish the npm package:
+
+```bash
+npm login
+npm publish
+```
+
+Use the official `mcp-publisher` binary from the [`modelcontextprotocol/registry` GitHub releases](https://github.com/modelcontextprotocol/registry/releases) rather than third-party snap/brew packages. Unofficial channels can lag behind the current schema and reject the `$schema` version as "deprecated". A one-liner to install the latest official binary into `~/.local/bin` (make sure that directory is on your `PATH`):
+
+```bash
+mkdir -p ~/.local/bin
+curl -sSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
+  | tar xz -C /tmp mcp-publisher
+install -m 0755 /tmp/mcp-publisher ~/.local/bin/mcp-publisher
+rm -f /tmp/mcp-publisher
+```
+
+Then authenticate and publish the registry entry:
+
+```bash
+mcp-publisher login github
+mcp-publisher publish
+```
+
+Verify the published entry:
+
+```bash
+curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.iseppo/e-arveldaja-mcp"
+```
 
 ## Good to know
 
