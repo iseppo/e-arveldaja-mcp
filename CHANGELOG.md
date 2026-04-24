@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.8] - 2026-04-24
+
+### Added
+- **User-facing workflows and Claude command docs** — package the setup, company overview, and Lightyear booking guides under both `workflows/` and `.claude/commands/` so MCP users can discover the intended flows from installed package files.
+
+### Fixed
+- **Product sale dimension creation** (closes #12) — `create_product` now exposes `cl_sale_accounts_dimensions_id` in the MCP input schema, forwards it to the products API, and documents that `list_account_dimensions` can be used to find valid dimension IDs.
+- **MCP JSON and file-input hardening** — tightened JSON response handling, file validation coverage, and process-invoice syntax checks so malformed inputs fail predictably without losing useful diagnostics.
+
 ## [0.11.7] - 2026-04-22
 
 ### Fixed

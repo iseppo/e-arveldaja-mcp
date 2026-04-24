@@ -149,7 +149,7 @@ The server includes 15 built-in workflow prompts that any MCP client can discove
 | `setup-credentials` | Verify and import API credentials from `apikey.txt` into `.env` storage |
 | `setup-e-arveldaja` | Explain how to configure API credentials when running in setup mode |
 
-**Claude Code** also has these as slash commands: `/accounting-inbox`, `/resolve-accounting-review`, `/prepare-accounting-review-action`, `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`, `/setup-credentials`.
+**Claude Code** also has these as slash commands: `/accounting-inbox`, `/resolve-accounting-review`, `/prepare-accounting-review-action`, `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`, `/company-overview`, `/lightyear-booking`, `/setup-credentials`, `/setup-e-arveldaja`.
 
 ## Usage Examples
 

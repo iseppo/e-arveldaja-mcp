@@ -424,6 +424,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     name: z.string().describe("Product name"),
     code: z.string().describe("Product code"),
     cl_sale_articles_id: z.number().optional().describe("Sales article ID"),
+    cl_sale_accounts_dimensions_id: coerceId.optional().describe("Sales account dimension ID (use list_account_dimensions to find valid IDs)"),
     cl_purchase_articles_id: z.number().optional().describe("Purchase article ID"),
     sales_price: z.number().optional().describe("Sales price"),
     unit: z.string().optional().describe("Unit (e.g. tk, h, km)"),

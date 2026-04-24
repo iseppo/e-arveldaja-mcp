@@ -67,6 +67,7 @@ export interface Product {
   name: string;
   foreign_names?: Record<string, string>;
   cl_sale_articles_id?: number | null;
+  cl_sale_accounts_dimensions_id?: number | null;
   sale_accounts_id?: number | null;
   sale_accounts_dimensions_id?: number | null;
   cl_purchase_articles_id?: number | null;

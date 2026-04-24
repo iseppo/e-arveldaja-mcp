@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { getAllowedRootsStartupWarning, isPathWithinRoot, resolveFileInput, splitAllowedPaths, validateFilePath } from "./file-validation.js";
-import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, existsSync, readFileSync } from "fs";
-import { join, win32, extname } from "path";
+import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, existsSync, readFileSync, rmSync } from "fs";
+import { join, win32, extname, resolve } from "path";
 import { tmpdir } from "os";
 
 describe("validateFilePath", () => {
@@ -120,6 +120,39 @@ describe("validateFilePath", () => {
       "C:\\Users\\Seppo",
       win32,
     )).toBe(true);
+  });
+
+  it("continues searching relative candidates when an earlier existing match is outside allowed roots", async () => {
+    const dir = join(tmpdir(), "earveldaja-relative-search-" + Date.now());
+    const projectRoot = join(dir, "project");
+    const allowedRoot = join(dir, "allowed");
+    mkdirSync(projectRoot, { recursive: true });
+    mkdirSync(allowedRoot, { recursive: true });
+    writeFileSync(join(dir, "statement.csv"), "blocked,parent\n");
+    writeFileSync(join(allowedRoot, "statement.csv"), "allowed,cwd\n");
+
+    const previousAllowedPaths = process.env.EARVELDAJA_ALLOWED_PATHS;
+    const previousCwd = process.cwd();
+    process.env.EARVELDAJA_ALLOWED_PATHS = allowedRoot;
+    process.chdir(allowedRoot);
+
+    vi.resetModules();
+    vi.doMock("./paths.js", () => ({
+      getProjectRoot: () => projectRoot,
+    }));
+
+    try {
+      const module = await import("./file-validation.js");
+      const result = await module.validateFilePath("statement.csv", [".csv"], 1024);
+      expect(result).toBe(resolve(allowedRoot, "statement.csv"));
+    } finally {
+      vi.doUnmock("./paths.js");
+      vi.resetModules();
+      process.chdir(previousCwd);
+      if (previousAllowedPaths === undefined) delete process.env.EARVELDAJA_ALLOWED_PATHS;
+      else process.env.EARVELDAJA_ALLOWED_PATHS = previousAllowedPaths;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -66,6 +66,7 @@ function getCrudToolHarness(toolName: string, overrides?: {
 
   return {
     api,
+    options: call[1] as { inputSchema?: Record<string, unknown> },
     handler: call[2] as (args: Record<string, unknown>, extra?: unknown) => Promise<unknown>,
   };
 }
@@ -263,6 +264,44 @@ describe("coerceNumericFields", () => {
     const items = [{ price: 42 }];
     coerceNumericFields(items, ["price"]);
     expect(items[0]!.price).toBe(42);
+  });
+});
+
+describe("create_product", () => {
+  it("exposes cl_sale_accounts_dimensions_id in the MCP input schema", () => {
+    const { options } = getCrudToolHarness("create_product");
+
+    expect(options.inputSchema).toHaveProperty("cl_sale_accounts_dimensions_id");
+  });
+
+  it("passes cl_sale_accounts_dimensions_id through to the products API", async () => {
+    const { api, handler } = getCrudToolHarness("create_product", {
+      products: {
+        create: vi.fn().mockResolvedValue({ code: 0, messages: [], created_object_id: 123 }),
+      },
+    });
+
+    const result = await handler({
+      name: "Consulting",
+      code: "CONSULT",
+      cl_sale_articles_id: 7,
+      cl_sale_accounts_dimensions_id: 1245521,
+      sales_price: 100,
+      unit: "h",
+    }) as { content: Array<{ text: string }> };
+
+    expect(api.products.create).toHaveBeenCalledWith({
+      name: "Consulting",
+      code: "CONSULT",
+      cl_sale_articles_id: 7,
+      cl_sale_accounts_dimensions_id: 1245521,
+      sales_price: 100,
+      unit: "h",
+    });
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      code: 0,
+      created_object_id: 123,
+    });
   });
 });
 

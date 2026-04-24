@@ -24,10 +24,13 @@ function getEarveldajaEnvironment(): Record<string, string> {
   );
 }
 
-function buildTransportEnv(overrides: Record<string, string> = {}): Record<string, string> {
+function buildTransportEnv(
+  overrides: Record<string, string> = {},
+  options: { inheritEarveldaja?: boolean } = {},
+): Record<string, string> {
   return {
     ...getDefaultEnvironment(),
-    ...getEarveldajaEnvironment(),
+    ...(options.inheritEarveldaja === false ? {} : getEarveldajaEnvironment()),
     ...overrides,
   };
 }
@@ -66,13 +69,25 @@ describe("MCP Server Integration", () => {
   let transport: StdioClientTransport;
 
   beforeAll(async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "earveldaja-mcp-configured-env-"));
+    const apiKeyFile = join(configDir, "apikey.txt");
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: integration-test-key-id",
+      "ApiKey public value: integration-test-public-value",
+      "Password: integration-test-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    chmodSync(apiKeyFile, 0o600);
+
     transport = createTransport({
       env: buildTransportEnv({
         EARVELDAJA_API_KEY_ID: "integration-test-key-id",
         EARVELDAJA_API_PUBLIC_VALUE: "integration-test-public-value",
         EARVELDAJA_API_PASSWORD: "integration-test-password",
+        EARVELDAJA_API_KEY_FILE: apiKeyFile,
         EARVELDAJA_SERVER: "demo",
-      }),
+        EARVELDAJA_CONFIG_DIR: configDir,
+      }, { inheritEarveldaja: false }),
     });
     client = new Client({ name: "integration-test", version: "1.0.0" });
     await client.connect(transport);
@@ -280,7 +295,8 @@ describe("MCP Server Setup Mode", () => {
         EARVELDAJA_API_PUBLIC_VALUE: "",
         EARVELDAJA_API_PASSWORD: "",
         EARVELDAJA_API_KEY_FILE: "",
-      }),
+        EARVELDAJA_CONFIG_DIR: join(tempDir, "global"),
+      }, { inheritEarveldaja: false }),
     });
     client = new Client({ name: "setup-mode-test", version: "1.0.0" });
     await client.connect(transport);
@@ -327,7 +343,7 @@ describe("MCP Server Setup Mode", () => {
 
     expect(result.isError).toBeFalsy();
     expect(data.connections).toEqual([]);
-    expect(data.active).toBeUndefined();
+    expect(data.active).toBeNull();
     expect(data.total).toBe(0);
     expect(data.setup_required).toBe(true);
     expect(data.working_directory).toBe(tempDir);
@@ -436,7 +452,7 @@ describe("MCP Server Startup Credential Import", () => {
         EARVELDAJA_API_PASSWORD: "",
         EARVELDAJA_API_KEY_FILE: "",
         EARVELDAJA_CONFIG_DIR: globalDir,
-      }),
+      }, { inheritEarveldaja: false }),
     });
     client = new Client({ name: "startup-import-test", version: "1.0.0" });
     await client.connect(transport);

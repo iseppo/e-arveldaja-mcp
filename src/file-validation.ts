@@ -77,7 +77,11 @@ export function getAllowedRootsStartupWarning(): string | undefined {
  * 3. Current working directory (fallback)
  */
 export function resolveFilePath(filePath: string): string {
-  if (isAbsolute(filePath)) return resolve(filePath);
+  return getFilePathCandidates(filePath)[0]!;
+}
+
+function getFilePathCandidates(filePath: string): string[] {
+  if (isAbsolute(filePath)) return [resolve(filePath)];
 
   const projectRoot = getProjectRoot();
   const searchBases = [
@@ -86,13 +90,15 @@ export function resolveFilePath(filePath: string): string {
     process.cwd(),               // cwd fallback
   ];
 
+  const candidates: string[] = [];
   for (const base of searchBases) {
     const candidate = resolve(base, filePath);
-    if (existsSync(candidate)) return candidate;
+    if (existsSync(candidate)) candidates.push(candidate);
   }
 
   // Nothing found — return resolved from parent dir for the best error message
-  return resolve(searchBases[0]!, filePath);
+  if (candidates.length === 0) candidates.push(resolve(searchBases[0]!, filePath));
+  return candidates;
 }
 
 /**
@@ -104,37 +110,51 @@ export async function validateFilePath(
   allowedExtensions: string[],
   maxSize: number,
 ): Promise<string> {
-  const resolved = resolveFilePath(filePath);
-  const ext = extname(resolved).toLowerCase();
-  if (!allowedExtensions.includes(ext)) {
-    throw new Error(`Only ${allowedExtensions.join("/")} files are allowed, got: ${ext}`);
+  const inputExt = extname(filePath).toLowerCase();
+  if (!allowedExtensions.includes(inputExt)) {
+    throw new Error(`Only ${allowedExtensions.join("/")} files are allowed, got: ${inputExt}`);
   }
 
-  // Resolve symlinks to get the real path
-  const real = await realpath(resolved);
-  const realExt = extname(real).toLowerCase();
-  if (!allowedExtensions.includes(realExt)) {
-    throw new Error(`Symlink target has disallowed extension: ${realExt}`);
-  }
-
-  // Check allowed directory roots
   const roots = getAllowedRoots();
-  if (!roots.some(root => isPathWithinRoot(real, root))) {
-    throw new Error(
-      `File path outside allowed directories. Allowed roots: ${roots.join(", ")}. ` +
-      `Set EARVELDAJA_ALLOWED_PATHS to override.`
-    );
+  let firstFailure: Error | undefined;
+  let outsideAllowedFailure: Error | undefined;
+
+  for (const resolved of getFilePathCandidates(filePath)) {
+    try {
+      // Resolve symlinks to get the real path
+      const real = await realpath(resolved);
+      const realExt = extname(real).toLowerCase();
+      if (!allowedExtensions.includes(realExt)) {
+        throw new Error(`Symlink target has disallowed extension: ${realExt}`);
+      }
+
+      // Check allowed directory roots. For relative paths, keep searching if
+      // an earlier existing candidate is outside the allowed roots; the same
+      // filename may also exist under cwd/project root and be valid.
+      if (!roots.some(root => isPathWithinRoot(real, root))) {
+        outsideAllowedFailure = new Error(
+          `File path outside allowed directories. Allowed roots: ${roots.join(", ")}. ` +
+          `Set EARVELDAJA_ALLOWED_PATHS to override.`
+        );
+        if (!firstFailure) firstFailure = outsideAllowedFailure;
+        continue;
+      }
+
+      const info = await stat(real);
+      if (!info.isFile()) {
+        throw new Error(`Not a file`);
+      }
+      if (info.size > maxSize) {
+        throw new Error(`File too large: ${(info.size / 1024 / 1024).toFixed(1)} MB (max ${maxSize / 1024 / 1024} MB)`);
+      }
+
+      return real;
+    } catch (error) {
+      if (!firstFailure) firstFailure = error instanceof Error ? error : new Error(String(error));
+    }
   }
 
-  const info = await stat(real);
-  if (!info.isFile()) {
-    throw new Error(`Not a file`);
-  }
-  if (info.size > maxSize) {
-    throw new Error(`File too large: ${(info.size / 1024 / 1024).toFixed(1)} MB (max ${maxSize / 1024 / 1024} MB)`);
-  }
-
-  return real;
+  throw outsideAllowedFailure ?? firstFailure ?? new Error(`File not found: ${filePath}`);
 }
 
 // ---------------------------------------------------------------------------

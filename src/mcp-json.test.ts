@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseMcpResponse,
+  toMcpJson,
   UNTRUSTED_OCR_END_PREFIX,
   UNTRUSTED_OCR_START_PREFIX,
   wrapUntrustedOcr,
@@ -48,5 +50,24 @@ describe("wrapUntrustedOcr", () => {
     expect(actualNonce).not.toBe("DEADBEEFDEADBEEF");
     const realEndCount = wrapped.split(`${UNTRUSTED_OCR_END_PREFIX}${actualNonce}>>`).length - 1;
     expect(realEndCount).toBe(1);
+  });
+});
+
+describe("toMcpJson", () => {
+  it("preserves explicit null values because API nulls are meaningful", () => {
+    const encoded = toMcpJson({
+      clients_id: null,
+      nested: {
+        ref_number: null,
+        omitted: undefined,
+      },
+    });
+
+    expect(parseMcpResponse(encoded)).toEqual({
+      clients_id: null,
+      nested: {
+        ref_number: null,
+      },
+    });
   });
 });

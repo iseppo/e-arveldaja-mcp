@@ -12,3 +12,5 @@ eng.traineddata
 est.traineddata
 logs/
 .mcpregistry_*_token
+json
+"$TMPERR"

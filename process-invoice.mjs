@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { decode } from "@toon-format/toon";
 
 const t = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const c = new Client({ name: "test", version: "1.0.0" });
@@ -8,6 +9,7 @@ await c.connect(t);
 const call = async (name, args) => {
   const r = await c.callTool({ name, arguments: args });
   const txt = r.content[0].text;
+  try { return decode(txt); } catch {}
   try { return JSON.parse(txt); } catch { return txt; }
 };
 
@@ -176,6 +178,8 @@ try {
       create_date: "2026-03-15",
       journal_date: "2026-03-15",
       term_days: 14,
+      vat_price: 0,
+      gross_price: 50.00,
       items: JSON.stringify([{
         custom_title: "Test purchase item",
         cl_purchase_articles_id: purchArticle?.id,
@@ -418,14 +422,14 @@ try {
 
   for (const id of cleanup.products) {
     try {
-      const r = await call("delete_product", { id });
+      const r = await call("deactivate_product", { id });
       console.log(`  Deactivated product ${id}: ${r.code === 0 ? "OK" : JSON.stringify(r).slice(0, 80)}`);
     } catch (e) { console.log(`  Failed to deactivate product ${id}: ${e.message}`); }
   }
 
   for (const id of cleanup.clients) {
     try {
-      const r = await call("delete_client", { id });
+      const r = await call("deactivate_client", { id });
       console.log(`  Deactivated client ${id}: ${r.code === 0 ? "OK" : JSON.stringify(r).slice(0, 80)}`);
     } catch (e) { console.log(`  Failed to deactivate client ${id}: ${e.message}`); }
   }
