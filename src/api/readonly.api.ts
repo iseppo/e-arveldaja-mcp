@@ -22,8 +22,13 @@ async function readonlyCachedGet<T>(client: HttpClient, path: string): Promise<T
   const cacheKey = readonlyCacheKey(client, path);
   const readonlyCached = readonlyCache.get<T>(cacheKey);
   if (readonlyCached !== undefined) return readonlyCached;
+  // Capture generation BEFORE the network round-trip. If a mutator invalidates
+  // the cache while this request is in flight, the generation bumps and
+  // setIfSameGeneration will discard the now-stale result instead of polluting
+  // the cache for ~10 minutes.
+  const gen = readonlyCache.generation;
   const result = await client.get<T>(path);
-  readonlyCache.set(cacheKey, result, REFERENCE_TTL_SECONDS);
+  readonlyCache.setIfSameGeneration(cacheKey, result, gen, REFERENCE_TTL_SECONDS);
   return result;
 }
 
@@ -31,6 +36,8 @@ async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promis
   const cacheKey = readonlyCacheKey(client, `${path}:all`);
   const readonlyCached = readonlyCache.get<T[]>(cacheKey);
   if (readonlyCached !== undefined) return readonlyCached;
+
+  const gen = readonlyCache.generation;
 
   // First request - detect if paginated or plain array
   const first = await client.get<T[] | PaginatedResponse<T>>(path);
@@ -59,7 +66,7 @@ async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promis
     throw new Error(`Unexpected response shape from ${path}`);
   }
 
-  readonlyCache.set(cacheKey, allItems, REFERENCE_TTL_SECONDS);
+  readonlyCache.setIfSameGeneration(cacheKey, allItems, gen, REFERENCE_TTL_SECONDS);
   return allItems;
 }
 

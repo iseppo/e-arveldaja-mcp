@@ -464,6 +464,20 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         // Only auto-confirm if exactly one high-confidence match
         if (candidates.length === 1) {
           const match = candidates[0]!;
+          // Cross-currency skip: if the match survived only on base-currency
+          // evidence, tx.amount is in a different currency than the invoice
+          // gross. Distributing tx.amount as-is books the wrong figure — same
+          // guard that reconcile_transactions applies. Surface for manual review.
+          const crossCurrency =
+            match.match_reasons.includes("exact_base_amount") &&
+            !match.match_reasons.includes("exact_amount");
+          if (crossCurrency) {
+            skipped.push({
+              transaction_id: tx.id,
+              reason: `Cross-currency match (base-amount only) against ${match.type} #${match.id}; compute the correct distribution amount manually before confirming.`,
+            });
+            continue;
+          }
           const invoiceKey = `${match.type.replace("_invoice", "")}:${match.id}`;
           const table = match.type === "sale_invoice" ? "sale_invoices" : "purchase_invoices";
           // Always claim the invoice on attempt so dry-run preview matches execute
@@ -591,6 +605,12 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         confidence: number;
         match_reasons: string[];
         status: string;
+        // Single-confirm policy: the incoming/reciprocal PROJECT row is deleted
+        // after the outgoing confirm succeeds. In execute mode this field reports
+        // the disposition ("deleted" or "orphan" when delete fails); in dry_run
+        // it reports "would_delete_duplicate".
+        incoming_action?: "deleted" | "orphan" | "would_delete_duplicate";
+        incoming_note?: string;
       }
 
       interface AmbiguousPairResult {
@@ -1004,6 +1024,14 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         consumedTxIds.add(txOut.id);
         consumedTxIds.add(txIn.id!);
 
+        // ONE confirm per pair: confirming the outgoing side with a distribution
+        // to the target bank dimension creates a journal that touches BOTH bank
+        // accounts (per CLAUDE.md: "confirming one side creates a journal touching
+        // both bank accounts"). The incoming PROJECT row is a duplicate mirror of
+        // the same physical movement — keeping it would double-book the legs, and
+        // confirming it in this same loop was the bug that motivated this change.
+        // Delete the mirror after the confirm succeeds; on delete failure the
+        // outgoing journal is still correct, only the orphan PROJECT row remains.
         if (dryRun) {
           matchedPairs.push({
             outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id!,
@@ -1011,7 +1039,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             from_account: fromTitle, to_account: toTitle,
             from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
             description_out: wrapUntrustedOcr(txOut.description ?? undefined), description_in: wrapUntrustedOcr(txIn.description ?? undefined),
-            confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons, status: "would_confirm",
+            confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons,
+            status: "would_confirm", incoming_action: "would_delete_duplicate",
           });
         } else {
           try {
@@ -1021,39 +1050,34 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
               entity_id: txOut.id,
               summary: `Confirmed inter-account outgoing ${txOut.amount} EUR (${fromTitle} -> ${toTitle})`,
-              details: { amount: txOut.amount, date: txOut.date },
+              details: { amount: txOut.amount, date: txOut.date, paired_incoming_id: txIn.id },
             });
+
+            let incomingAction: "deleted" | "orphan" = "deleted";
+            let incomingNote: string | undefined;
             try {
-              await ensureClientsId(txIn.id!);
-              await api.transactions.confirm(txIn.id!, [buildAccountDistribution(txOut.accounts_dimensions_id, txIn.amount)]);
+              await api.transactions.delete(txIn.id!);
               logAudit({
-                tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
+                tool: "reconcile_inter_account_transfers", action: "DELETED", entity_type: "transaction",
                 entity_id: txIn.id!,
-                summary: `Confirmed inter-account incoming ${txIn.amount} EUR (${toTitle} <- ${fromTitle})`,
-                details: { amount: txIn.amount, date: txIn.date },
+                summary: `Deleted duplicate incoming row ${txIn.id} after confirming outgoing ${txOut.id} (${fromTitle} -> ${toTitle})`,
+                details: { amount: txIn.amount, date: txIn.date, paired_outgoing_id: txOut.id },
               });
-            } catch (err2: unknown) {
-              // Outgoing confirmed but incoming failed — attempt to roll back outgoing
-              let rollbackMsg = "";
-              try {
-                await api.transactions.invalidate(txOut.id);
-                rollbackMsg = ` Outgoing ${txOut.id} was automatically invalidated.`;
-              } catch (rollbackErr: unknown) {
-                rollbackMsg = ` Automatic invalidation of ${txOut.id} also failed: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}. Manual invalidation required.`;
-              }
-              errors.push({
-                transaction_ids: [txOut.id, txIn.id!],
-                reason: `PARTIAL: outgoing ${txOut.id} confirmed, but incoming ${txIn.id} failed: ${err2 instanceof Error ? err2.message : String(err2)}.${rollbackMsg}`,
-              });
-              continue;
+            } catch (delErr: unknown) {
+              incomingAction = "orphan";
+              incomingNote = `Outgoing ${txOut.id} was confirmed, but deleting the duplicate incoming PROJECT row ${txIn.id} failed: ${delErr instanceof Error ? delErr.message : String(delErr)}. Manually delete ${txIn.id} to avoid double-booking if it is later confirmed.`;
+              errors.push({ transaction_ids: [txOut.id, txIn.id!], reason: incomingNote });
             }
+
             matchedPairs.push({
               outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id!,
               amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
               from_account: fromTitle, to_account: toTitle,
               from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
               description_out: wrapUntrustedOcr(txOut.description ?? undefined), description_in: wrapUntrustedOcr(txIn.description ?? undefined),
-              confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons, status: "confirmed",
+              confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons,
+              status: "confirmed", incoming_action: incomingAction,
+              ...(incomingNote ? { incoming_note: incomingNote } : {}),
             });
           } catch (err: unknown) {
             errors.push({
@@ -1179,6 +1203,9 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         consumedTxIds.add(tx.id);
         consumedTxIds.add(counterpart.id);
 
+        // Same single-confirm policy as Phase 1: one journal per pair. The
+        // reciprocal same-type counterpart is a duplicate record of the same
+        // physical movement, so delete it after tx confirms successfully.
         if (dryRun) {
           matchedPairs.push({
             outgoing_transaction_id: tx.id,
@@ -1195,6 +1222,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             confidence: bestCandidate.confidence,
             match_reasons: bestCandidate.reasons,
             status: "would_confirm",
+            incoming_action: "would_delete_duplicate",
           });
         } else {
           try {
@@ -1206,33 +1234,27 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               entity_type: "transaction",
               entity_id: tx.id,
               summary: `Confirmed reciprocal same-type inter-account transfer ${tx.amount} EUR (${fromTitle} -> ${toTitle})`,
-              details: { amount: tx.amount, date: tx.date },
+              details: { amount: tx.amount, date: tx.date, paired_counterpart_id: counterpart.id },
             });
+
+            let incomingAction: "deleted" | "orphan" = "deleted";
+            let incomingNote: string | undefined;
             try {
-              await ensureClientsId(counterpart.id);
-              await api.transactions.confirm(counterpart.id, [buildAccountDistribution(tx.accounts_dimensions_id, counterpart.amount)]);
+              await api.transactions.delete(counterpart.id);
               logAudit({
                 tool: "reconcile_inter_account_transfers",
-                action: "CONFIRMED",
+                action: "DELETED",
                 entity_type: "transaction",
                 entity_id: counterpart.id,
-                summary: `Confirmed reciprocal same-type inter-account transfer ${counterpart.amount} EUR (${toTitle} -> ${fromTitle})`,
-                details: { amount: counterpart.amount, date: counterpart.date },
+                summary: `Deleted reciprocal same-type duplicate row ${counterpart.id} after confirming ${tx.id} (${fromTitle} -> ${toTitle})`,
+                details: { amount: counterpart.amount, date: counterpart.date, paired_confirmed_id: tx.id },
               });
-            } catch (err2: unknown) {
-              let rollbackMsg = "";
-              try {
-                await api.transactions.invalidate(tx.id);
-                rollbackMsg = ` Transaction ${tx.id} was automatically invalidated.`;
-              } catch (rollbackErr: unknown) {
-                rollbackMsg = ` Automatic invalidation of ${tx.id} also failed: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}. Manual invalidation required.`;
-              }
-              errors.push({
-                transaction_ids: [tx.id, counterpart.id],
-                reason: `PARTIAL: transaction ${tx.id} confirmed, but reciprocal transaction ${counterpart.id} failed: ${err2 instanceof Error ? err2.message : String(err2)}.${rollbackMsg}`,
-              });
-              continue;
+            } catch (delErr: unknown) {
+              incomingAction = "orphan";
+              incomingNote = `Transaction ${tx.id} was confirmed, but deleting the duplicate counterpart PROJECT row ${counterpart.id} failed: ${delErr instanceof Error ? delErr.message : String(delErr)}. Manually delete ${counterpart.id} to avoid double-booking if it is later confirmed.`;
+              errors.push({ transaction_ids: [tx.id, counterpart.id], reason: incomingNote });
             }
+
             matchedPairs.push({
               outgoing_transaction_id: tx.id,
               incoming_transaction_id: counterpart.id,
@@ -1248,6 +1270,8 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
               confidence: bestCandidate.confidence,
               match_reasons: bestCandidate.reasons,
               status: "confirmed",
+              incoming_action: incomingAction,
+              ...(incomingNote ? { incoming_note: incomingNote } : {}),
             });
           } catch (err: unknown) {
             errors.push({

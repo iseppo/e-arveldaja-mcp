@@ -139,8 +139,13 @@ export function validateItemDimensions(
   accountDimensions: AccountDimension[],
 ): string[] {
   const { accountMap, dimensionsByAccount } = createDimensionValidationState(accounts, accountDimensions);
+  // Use positional labels only — item.custom_title is OCR-seeded from
+  // create_purchase_invoice_from_pdf and these error messages flow out via
+  // toolError, which bypasses the MCP output wrap. The index is enough for
+  // the operator to identify the failing row without interpolating untrusted
+  // text into validation prose.
   const errors = validateReferencedAccounts(accounts, items.flatMap((item, index) => {
-    const itemLabel = `Item ${index + 1} "${item.custom_title}"`;
+    const itemLabel = `Item ${index + 1}`;
     return [
       item.purchase_accounts_id === undefined ? null : { id: item.purchase_accounts_id, label: `${itemLabel} purchase account` },
       item.vat_accounts_id === undefined || item.vat_accounts_id === null ? null : { id: item.vat_accounts_id, label: `${itemLabel} VAT account` },
@@ -149,7 +154,7 @@ export function validateItemDimensions(
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i]!;
-    const itemLabel = `Item ${i + 1} "${item.custom_title}"`;
+    const itemLabel = `Item ${i + 1}`;
 
     const purchaseAccountError = validateDimensionTarget({
       accountId: item.purchase_accounts_id,

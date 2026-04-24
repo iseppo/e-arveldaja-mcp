@@ -24,12 +24,31 @@ function requiresOwnerExpenseVatReview(accountName: string | undefined, descript
   return /\b(sõiduauto|auto|vehicle|fuel|kütus|parking|parkim|liising|leasing|representation|esindus|entertainment)\b/.test(text);
 }
 
+const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+// Strict YYYY-MM-DD + calendar validity (rejects 2025-02-31, 01.01.2025, etc.).
+// Round-trips through Date to catch month/day overflow that regex alone allows.
+function isValidIsoDate(s: string): boolean {
+  if (!ISO_DATE_REGEX.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return false;
+  return d.toISOString().slice(0, 10) === s;
+}
+
+const isoDateSchema = (description: string) =>
+  z.string().refine(isValidIsoDate, { message: "Expected valid YYYY-MM-DD date" }).describe(description);
+
 /**
  * Estonian corporate income tax rate on distributed profits (KMS § 50).
- * Rate changed from 20/80 to 22/78 on 2025-01-01. The ISO-date string compare
- * is safe: YYYY-MM-DD sorts lexically as a real date.
+ * Rate changed from 20/80 to 22/78 on 2025-01-01. ISO-date string compare is
+ * only safe for strict YYYY-MM-DD, so we reject anything else defensively —
+ * a DD.MM.YYYY value would compare lexically wrong and silently pick 20/80
+ * for a 2025 distribution.
  */
 export function getCitRateForDate(effective_date: string): { num: number; den: number; formatted: string } {
+  if (!isValidIsoDate(effective_date)) {
+    throw new Error(`getCitRateForDate requires YYYY-MM-DD; got ${JSON.stringify(effective_date)}`);
+  }
   if (effective_date < "2025-01-01") {
     return { num: 20, den: 80, formatted: "20/80" };
   }
@@ -43,7 +62,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     {
       net_dividend: z.number().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: coerceId.describe("Shareholder client ID"),
-      effective_date: z.string().describe("Distribution date (YYYY-MM-DD)"),
+      effective_date: isoDateSchema("Distribution date (YYYY-MM-DD)"),
       retained_earnings_account: z.number().optional().describe("Retained earnings account (default 3020)"),
       dividend_payable_account: z.number().optional().describe("Dividend payable account (default 2370)"),
       tax_payable_account: z.number().optional().describe("CIT payable account (default 2540)"),
@@ -126,14 +145,18 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
 
       // Cross-check: on a balanced ledger, Assets − Liabilities must equal
       // Equity + P&L. A mismatch indicates unbalanced or partially-deleted
-      // journals — warn so the user can investigate before distributing.
-      // Tolerance 0.05 accounts for rounding drift across the 5 sub-totals
-      // (each rounded independently at up to 0.005 EUR).
+      // journals, which means the retained-earnings and §157 net-assets checks
+      // below are computed from an untrustworthy ledger. Hard-block unless
+      // force=true so legal-distribution output is never produced from a broken
+      // balance sheet. Tolerance 0.05 accounts for rounding drift across the 5
+      // sub-totals (each rounded independently at up to 0.005 EUR).
       const assetsMinusLiabilities = roundMoney(totalAssets - totalLiabilities);
-      if (Math.abs(assetsMinusLiabilities - netAssetsBeforeDistribution) > 0.05) {
+      const ledgerImbalance = Math.abs(assetsMinusLiabilities - netAssetsBeforeDistribution) > 0.05;
+      if (ledgerImbalance) {
         warnings.push(
           `Ledger imbalance: Assets − Liabilities (${assetsMinusLiabilities} EUR) ` +
           `does not equal Equity + current-year P&L (${netAssetsBeforeDistribution} EUR). ` +
+          `Retained-earnings and §157 net-assets checks are unreliable on this ledger. ` +
           `Investigate unregistered/deleted journals before distributing.`
         );
       }
@@ -141,6 +164,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const retainedShortfall = retainedBalance < grossDividend;
       const netAssetsBreach = netAssetsAfterDistribution < roundedShareCapital - 0.01;
       const violations: string[] = [];
+      if (ledgerImbalance) violations.push("Ledger is imbalanced — legality checks cannot be trusted");
       if (retainedShortfall) violations.push("Insufficient retained earnings");
       if (netAssetsBreach) violations.push("ÄS § 157 net assets breach");
 
@@ -316,7 +340,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     "Create a journal for a business expense paid personally by the owner. Ordinary business VAT defaults to deductible, while likely restricted categories ask for confirmation unless local rules define the policy.",
     {
       owner_client_id: coerceId.describe("Owner/shareholder client ID"),
-      effective_date: z.string().describe("Expense date (YYYY-MM-DD)"),
+      effective_date: isoDateSchema("Expense date (YYYY-MM-DD)"),
       description: z.string().describe("Expense description"),
       net_amount: z.number().describe("Net amount (without VAT)"),
       vat_rate: z.number().describe("VAT rate as decimal (e.g. 0.24 for 24%, 0.13, 0.09, 0.05, or 0 for no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),

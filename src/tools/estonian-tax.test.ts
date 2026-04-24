@@ -530,10 +530,13 @@ describe("prepare_dividend_package", () => {
   // Ledger-imbalance cross-check (A - L must equal E + P&L)
   // -------------------------------------------------------------------------
 
-  it("emits ledger-imbalance warning when a partially-deleted journal breaks the A − L = E + P&L identity", async () => {
+  it("HARD-BLOCKS dividend creation when a partially-deleted journal breaks the A − L = E + P&L identity", async () => {
     // Construct: one posting side marked is_deleted so the other side drives
     // assets up without a matching equity movement. This is the exact class
-    // of defect the cross-check exists to surface.
+    // of defect the cross-check exists to surface. On an imbalanced ledger
+    // the retained-earnings and §157 net-assets checks compute from wrong
+    // totals, so prepare_dividend_package refuses to produce legal-distribution
+    // output — this is a legal/compliance-sensitive tool.
     const journals = [
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 30000),
@@ -561,11 +564,43 @@ describe("prepare_dividend_package", () => {
       effective_date: "2026-06-01",
     });
 
+    expect(isError(result)).toBe(true);
+    const payload = (result as { content: Array<{ text: string }> }).content[0]!.text;
+    expect(payload).toMatch(/Ledger is imbalanced|Ledger imbalance/);
+  });
+
+  it("ledger-imbalance block is overridable with force=true (operator explicitly accepts the risk)", async () => {
+    const journals = [
+      makeJournal("2024-01-01", [
+        makePosting(1000, "D", 30000),
+        makePosting(3020, "C", 30000),
+      ]),
+      makeJournal("2023-01-01", [
+        makePosting(1000, "D", 5000),
+        makePosting(3000, "C", 5000),
+      ]),
+      makeJournal("2024-06-01", [
+        makePosting(1000, "D", 100),
+        makePosting(3020, "C", 100, undefined, { is_deleted: true }),
+      ]),
+    ];
+    const api2 = makeApi(journals, makeStandardAccounts());
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api2);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 1000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+      force: true,
+      dry_run: true,
+    });
+
     expect(isError(result)).toBe(false);
     const data = parseResult(result);
     const warnings = (data.warnings ?? []) as string[];
     expect(warnings.some(w => w.includes("Ledger imbalance"))).toBe(true);
-    expect(warnings.some(w => w.includes("unregistered/deleted journals"))).toBe(true);
   });
 });
 

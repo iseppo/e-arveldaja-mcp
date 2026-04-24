@@ -353,7 +353,11 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             description: tx.description,
             bank_account_name: tx.bank_account_name,
             suggested_action: "confirm_invoice",
-            reason: `Matches ${bestInvoiceMatch.type} #${bestInvoiceMatch.number} (${bestInvoiceMatch.reasons.join(", ")})${bestInvoiceMatch.partiallyPaidWarning ? " — PARTIALLY_PAID, verify remaining balance" : ""}`,
+            // bestInvoiceMatch.number is OCR-seeded for purchase invoices
+            // (supplier receipt → create_purchase_invoice_from_pdf). Wrap it
+            // inline in the reason prose so the LLM sees the number sandboxed
+            // even though the surrounding prose is developer-controlled.
+            reason: `Matches ${bestInvoiceMatch.type} #${wrapUntrustedOcr(bestInvoiceMatch.number) ?? ""} (${bestInvoiceMatch.reasons.join(", ")})${bestInvoiceMatch.partiallyPaidWarning ? " — PARTIALLY_PAID, verify remaining balance" : ""}`,
             match_confidence: bestInvoiceMatch.confidence,
             ...(!bestInvoiceMatch.partiallyPaidWarning ? {
               distribution: {

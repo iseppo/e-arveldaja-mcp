@@ -51,6 +51,7 @@ function setupInterAccountTool(options: {
       }),
       update: vi.fn().mockResolvedValue({}),
       confirm: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
     },
     saleInvoices: {
       listAll: vi.fn().mockResolvedValue([]),
@@ -538,7 +539,12 @@ describe("auto_confirm_exact_matches", () => {
     expect(payload.auto_confirmed).toBe(1);
   });
 
-  it("auto-confirms base-amount matches when the reference number is exact", async () => {
+  it("does NOT auto-confirm a cross-currency base-amount-only match (nominal tx.amount would book the wrong figure)", async () => {
+    // tx.amount is 1000 SEK against a USD 100 invoice (both worth 92 EUR).
+    // Auto-distributing tx.amount=1000 against a USD 100 invoice is wrong; the
+    // exact_base_amount evidence alone isn't enough to pick the distribution
+    // amount. Match is surfaced via skipped[] for manual review, matching the
+    // same guard reconcile_transactions applies.
     const { handler, api } = setupAutoConfirmTool({
       transactions: [
         {
@@ -573,11 +579,10 @@ describe("auto_confirm_exact_matches", () => {
     const result = await handler({ execute: true });
     const payload = parseMcpResponse(result.content[0]!.text);
 
-    expect(payload.auto_confirmed).toBe(1);
-    expect(payload.results[0]!.match.id).toBe(27);
-    expect(api.transactions.confirm).toHaveBeenCalledWith(18, [
-      { related_table: "sale_invoices", related_id: 27, amount: 1000 },
-    ]);
+    expect(payload.auto_confirmed).toBe(0);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    expect(payload.errors).toHaveLength(1);
+    expect(payload.errors[0]!.reason).toMatch(/Cross-currency match/);
   });
 });
 
@@ -723,7 +728,10 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.pairs[0]!.match_reasons).toContain("same_type_reciprocal_target_inference");
   });
 
-  it("confirms reciprocal same-type own-IBAN transfers through the pair path when execute=true", async () => {
+  it("confirms reciprocal same-type own-IBAN transfers with a single journal and deletes the duplicate when execute=true", async () => {
+    // Same single-journal invariant as the C/D case — confirming one same-type
+    // row creates the full journal; the reciprocal PROJECT row is a duplicate
+    // and is deleted instead of being confirmed.
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 111, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description: "Transfer to SEB" },
@@ -739,13 +747,13 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.matched_pairs).toBe(1);
     expect(payload.matched_one_sided).toBe(0);
     expect(payload.pairs[0]!.status).toBe("confirmed");
-    expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
+    expect(payload.pairs[0]!.incoming_action).toBe("deleted");
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm).toHaveBeenCalledWith(111, [
       { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 500 },
     ]);
-    expect(api.transactions.confirm).toHaveBeenCalledWith(112, [
-      { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 500 },
-    ]);
+    expect(api.transactions.delete).toHaveBeenCalledTimes(1);
+    expect(api.transactions.delete).toHaveBeenCalledWith(112);
   });
 
   it("does not pair or one-side-match reciprocal same-type transfers when base amounts conflict", async () => {
@@ -1002,7 +1010,12 @@ describe("reconcile_inter_account_transfers", () => {
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
-  it("confirms both sides with correct distribution when execute=true", async () => {
+  it("confirms only the outgoing side and deletes the duplicate incoming row when execute=true", async () => {
+    // Single-journal invariant: confirming the outgoing transaction with a
+    // distribution to the target bank dimension creates a journal touching
+    // BOTH bank accounts. Confirming the incoming row as well would duplicate
+    // the journal (the bug this guards against). The incoming PROJECT row is
+    // a mirror of the same physical movement, so it gets deleted.
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 11, status: "PROJECT", is_deleted: false, type: "C", amount: 750, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
@@ -1017,6 +1030,7 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.matched_pairs).toBe(1);
     expect(payload.pairs[0]!.status).toBe("confirmed");
+    expect(payload.pairs[0]!.incoming_action).toBe("deleted");
     expect(payload.execution).toMatchObject({
       contract: "batch_execution_v1",
       mode: "EXECUTED",
@@ -1033,20 +1047,44 @@ describe("reconcile_inter_account_transfers", () => {
           outgoing_transaction_id: 11,
           incoming_transaction_id: 12,
           status: "confirmed",
+          incoming_action: "deleted",
         }),
       ],
       skipped: [],
       errors: [],
     });
 
-    // Outgoing confirmed with destination account + dimension
+    // Outgoing confirmed with destination account + dimension — exactly one confirm call.
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm).toHaveBeenCalledWith(11, [
       { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 750 },
     ]);
-    // Incoming confirmed with source account + dimension
-    expect(api.transactions.confirm).toHaveBeenCalledWith(12, [
-      { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 750 },
-    ]);
+    // Incoming deleted (NOT confirmed) — exactly one delete call on the mirror.
+    expect(api.transactions.delete).toHaveBeenCalledTimes(1);
+    expect(api.transactions.delete).toHaveBeenCalledWith(12);
+  });
+
+  it("reports orphan status and does not invalidate the outgoing when incoming delete fails", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 21, status: "PROJECT", is_deleted: false, type: "C", amount: 300, date: "2026-03-21", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
+        { id: 22, status: "PROJECT", is_deleted: false, type: "D", amount: 300, date: "2026-03-21", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+      ],
+      bankAccounts,
+    });
+    api.transactions.delete.mockRejectedValueOnce(new Error("Delete refused by API"));
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.pairs[0]!.status).toBe("confirmed");
+    expect(payload.pairs[0]!.incoming_action).toBe("orphan");
+    expect(payload.pairs[0]!.incoming_note).toMatch(/Manually delete 22/);
+    expect(payload.errors).toHaveLength(1);
+    expect(payload.summary.error_count).toBe(1);
+    // Outgoing stays confirmed — no rollback on delete failure; the journal is correct.
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(api.transactions.confirm).toHaveBeenCalledWith(21, expect.any(Array));
   });
 
   it("does not double-match a transaction", async () => {

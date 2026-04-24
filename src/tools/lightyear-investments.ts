@@ -9,7 +9,7 @@ import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
-import { parseCSVLine } from "../csv.js";
+import { parseCSV } from "../csv.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 
@@ -134,16 +134,17 @@ async function readCsvFile(filePath: string): Promise<string> {
 }
 
 function parseAccountStatement(csv: string): AccountStatementRow[] {
-  const lines = csv.split("\n").filter(l => l.trim().length > 0);
-  if (lines.length < 2) return [];
+  // Full-file RFC-4180 CSV parse (handles quoted newlines inside fields).
+  // The old split-on-"\n" approach would corrupt any row whose name/reference
+  // field contained an embedded newline, silently skipping or merging rows.
+  const allRows = parseCSV(csv).filter(r => r.some(f => f.trim().length > 0));
+  if (allRows.length < 2) return [];
 
-  // Validate headers
-  const headers = parseCSVLine(lines[0]!);
-  validateHeaders(headers, EXPECTED_STATEMENT_HEADERS, "Account Statement CSV");
+  validateHeaders(allRows[0]!, EXPECTED_STATEMENT_HEADERS, "Account Statement CSV");
 
   const rows: AccountStatementRow[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const fields = parseCSVLine(lines[i]!);
+  for (let i = 1; i < allRows.length; i++) {
+    const fields = allRows[i]!;
     if (fields.length < 13) {
       throw new Error(`Account Statement CSV row ${i + 1}: expected 13 columns, got ${fields.length}`);
     }
@@ -253,16 +254,17 @@ function reconcileHandledStatementCash(
 }
 
 function parseCapitalGains(csv: string): CapitalGainsRow[] {
-  const lines = csv.split("\n").filter(l => l.trim().length > 0);
-  if (lines.length < 2) return [];
+  // Full-file RFC-4180 CSV parse — same rationale as parseAccountStatement:
+  // capital-gains rows embed security names, which can contain commas and
+  // quoted newlines; split-on-"\n" silently drops or merges those rows.
+  const allRows = parseCSV(csv).filter(r => r.some(f => f.trim().length > 0));
+  if (allRows.length < 2) return [];
 
-  // Validate headers
-  const headers = parseCSVLine(lines[0]!);
-  validateHeaders(headers, EXPECTED_GAINS_HEADERS, "Capital Gains CSV");
+  validateHeaders(allRows[0]!, EXPECTED_GAINS_HEADERS, "Capital Gains CSV");
 
   const rows: CapitalGainsRow[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const fields = parseCSVLine(lines[i]!);
+  for (let i = 1; i < allRows.length; i++) {
+    const fields = allRows[i]!;
     if (fields.length < 10) {
       throw new Error(`Capital Gains CSV row ${i + 1}: expected 10 columns, got ${fields.length}`);
     }

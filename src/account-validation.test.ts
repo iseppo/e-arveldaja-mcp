@@ -142,7 +142,11 @@ describe("dimension validators", () => {
     );
 
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain('Item 1 "Internet" purchase account 5000');
+    // Purchase-side error labels use positional index only — item.custom_title
+    // is OCR-seeded from create_purchase_invoice_from_pdf and must not flow
+    // through validation prose (see account-validation.ts).
+    expect(errors[0]).toContain('Item 1 purchase account 5000');
+    expect(errors[0]).not.toContain("Internet");
     expect(errors[0]).toContain("not found");
   });
 

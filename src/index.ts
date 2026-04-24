@@ -50,7 +50,7 @@ import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
 import { registerPrompts } from "./prompts.js";
 import { toolError } from "./tool-error.js";
-import { toMcpJson } from "./mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "./mcp-json.js";
 import { setLogger, log } from "./logger.js";
 import {
   maybeImportCredentialsOnStartup,
@@ -793,10 +793,17 @@ Reporting:
           ? getAuditLogByConnection(params.connection.slice("connection:".length), filter)
           : getAuditLogByLabel(params.connection, filter) || getAuditLogByConnection(params.connection, filter)
         : getAuditLog(filter);
+      // Audit log entries embed OCR/CAMT/Wise-origin fields (PDF item titles,
+      // bank-statement descriptions, auto-booking titles). Reading them back
+      // to the LLM without a sandbox turns this readback into another bypass
+      // route for injection. Wrap the whole markdown so any untrusted fragment
+      // inside the rendered text stays inside nonce delimiters. "No entries"
+      // is developer-controlled and not worth wrapping.
+      const body = content || "No audit log entries found.";
       return {
         content: [{
           type: "text",
-          text: content || "No audit log entries found.",
+          text: content ? (wrapUntrustedOcr(body) ?? body) : body,
         }],
       };
     }
