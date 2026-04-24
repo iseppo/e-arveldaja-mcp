@@ -286,6 +286,7 @@ Also make sure `package.json` `mcpName` exactly matches `server.json` `name`; th
 Run the normal checks before publishing:
 
 ```bash
+npm run validate:release
 npm run build
 npm test
 npm run test:integration
@@ -311,8 +312,8 @@ rm -f /tmp/mcp-publisher
 Then authenticate and publish the registry entry:
 
 ```bash
-mcp-publisher login github
-mcp-publisher publish
+npm run registry:login
+npm run registry:publish
 ```
 
 Verify the published entry:
