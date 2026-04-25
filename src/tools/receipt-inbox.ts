@@ -1444,7 +1444,13 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             notes.push(
               classification === "owner_paid_expense_reimbursement"
                 ? "PDF looks like an owner-paid expense receipt. Review manually before booking."
-                : "Document could not be classified as a supplier purchase invoice.",
+                : classification === "payment_receipt"
+                  ? `Document is a payment receipt${
+                      extracted.invoice_number && !extracted.invoice_number.startsWith("AUTO-")
+                        ? ` for invoice ${extracted.invoice_number}`
+                        : ""
+                    }, not a separate purchase invoice. Booking it would duplicate the underlying invoice — attach to the existing invoice document instead (#15).`
+                  : "Document could not be classified as a supplier purchase invoice.",
             );
             maybeAddLlmFallbackNote(notes, llmFallback);
             results.push({

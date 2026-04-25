@@ -166,7 +166,11 @@ export type TransactionClassificationCategory =
   | "revenue_without_invoice"
   | "unknown";
 
-export type ReceiptClassification = "purchase_invoice" | "owner_paid_expense_reimbursement" | "unclassifiable";
+export type ReceiptClassification =
+  | "purchase_invoice"
+  | "payment_receipt"
+  | "owner_paid_expense_reimbursement"
+  | "unclassifiable";
 
 export interface ExtractedReceiptFields {
   supplier_name?: string;
@@ -1121,6 +1125,17 @@ export function classifyReceiptDocument(text: string, fileName: string): Receipt
     return "owner_paid_expense_reimbursement";
   }
 
+  // Payment receipts: a "Receipt" header / `Receipt-*` filename combined
+  // with both payment-confirmation language ("Date paid", "Amount paid",
+  // "Receipt number", "Payment history") AND a referenced invoice number.
+  // These are confirmations of payment for an invoice that already exists
+  // (or appears separately in the same batch). Booking them as their own
+  // purchase_invoice creates a duplicate of the underlying invoice.
+  // See issue #15.
+  if (looksLikePaymentReceiptForInvoice(text, fileName) && !hasSalesInvoiceKeywords) {
+    return "payment_receipt";
+  }
+
   if (hasInvoiceKeywords) {
     return "purchase_invoice";
   }
@@ -1130,6 +1145,29 @@ export function classifyReceiptDocument(text: string, fileName: string): Receipt
   }
 
   return "unclassifiable";
+}
+
+const PAYMENT_RECEIPT_INDICATORS_RE =
+  /\b(date\s*paid|amount\s*paid|receipt\s*number|payment\s*history|paid\s*on|makstud\s*kuupäev|tasumiskuupäev|maksekuupäev)\b/i;
+const PAYMENT_RECEIPT_FILENAME_RE = /^receipt[-_]/i;
+const PAYMENT_RECEIPT_INVOICE_REFERENCE_RE =
+  /\b(invoice\s*(?:number|nr|no\.?)|arve\s*(?:number|nr|no\.?)|bill\s*number|ostuarve\s*(?:number|nr))\b/i;
+const PAYMENT_RECEIPT_HEADER_RE = /^[\s]*(?:receipt|kviitung|quittung)\s*$/im;
+
+/**
+ * True when a document is a payment confirmation for an underlying invoice.
+ * Strong signals: Receipt-prefixed filename OR explicit "Receipt" header,
+ * combined with payment-confirmation language AND a reference back to an
+ * invoice number. Mere appearance of the word "Receipt" anywhere in body
+ * text is not enough — many invoices say "this serves as a receipt of …".
+ */
+export function looksLikePaymentReceiptForInvoice(text: string, fileName: string): boolean {
+  const hasIndicators = PAYMENT_RECEIPT_INDICATORS_RE.test(text);
+  const hasInvoiceReference = PAYMENT_RECEIPT_INVOICE_REFERENCE_RE.test(text);
+  if (!hasIndicators || !hasInvoiceReference) return false;
+  // Require a structural signal — header or filename — so we don't catch
+  // invoices that happen to summarise prior payment history.
+  return PAYMENT_RECEIPT_FILENAME_RE.test(fileName) || PAYMENT_RECEIPT_HEADER_RE.test(text);
 }
 
 export function hasAutoBookableReceiptFields(
