@@ -104,6 +104,23 @@ describe("extractVatNumber", () => {
     const text = "VAT: EE111111111";
     expect(extractVatNumber(text, { exclude: ["EE111111111", "EE222222222"] })).toBeUndefined();
   });
+
+  it("still applies the buyer-section heuristic to the remaining matches after excluding own VAT", () => {
+    // OCR collapse case: our own VAT lands above 'Bill to' (would normally
+    // win the buyer-section heuristic) and the supplier's VAT lands below.
+    // Excluding own VAT removes the structurally-preferred candidate; the
+    // remaining match must still come back rather than the function
+    // bailing out, even though the surviving VAT is on the buyer side of
+    // the anchor.
+    const text = [
+      "VAT: EE102809963",                  // own VAT (excluded)
+      "Some prose mentioning bill to here",
+      "Supplier VAT: EU372041333",         // remaining match
+    ].join("\n");
+    expect(
+      extractVatNumber(text, { exclude: "EE102809963" }),
+    ).toBe("EU372041333");
+  });
 });
 
 describe("extractIban", () => {

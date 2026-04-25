@@ -114,8 +114,13 @@ export async function resolveSupplierInternal(
     !!ownVat && normalizeVatForCompare(client.invoice_vat_no) === ownVat;
   let selfMatchBlocked = false;
 
-  const annotateSelfMatch = <T extends SupplierResolution>(value: T): T =>
-    selfMatchBlocked ? { ...value, self_match_blocked: true } : value;
+  // self_match_blocked is meant to flag results where the returned client is
+  // suspect (none was found, or only the previewed-new path is left). When
+  // we successfully resolve to a different real supplier via a later step
+  // (e.g. fuzzy name match), the returned result is not suspect — earlier
+  // self-match attempts are bookkeeping only — so we DO NOT propagate the
+  // flag onto found:true returns. The own-VAT-on-page note is surfaced
+  // separately in receipt-inbox via detectSelfVatOnly.
 
   if (fields.supplier_reg_code) {
     const byCode = clients.find(client => client.code === fields.supplier_reg_code && !client.is_deleted);
@@ -123,7 +128,7 @@ export async function resolveSupplierInternal(
       if (isSelfClient(byCode)) {
         selfMatchBlocked = true;
       } else {
-        return annotateSelfMatch({ found: true, created: false, match_type: "registry_code", client: byCode });
+        return { found: true, created: false, match_type: "registry_code", client: byCode };
       }
     }
   }
@@ -141,7 +146,7 @@ export async function resolveSupplierInternal(
         if (isSelfClient(byVat)) {
           selfMatchBlocked = true;
         } else {
-          return annotateSelfMatch({ found: true, created: false, match_type: "vat_no", client: byVat });
+          return { found: true, created: false, match_type: "vat_no", client: byVat };
         }
       }
     }
@@ -165,7 +170,7 @@ export async function resolveSupplierInternal(
           fields.supplier_name.toLowerCase().includes(bestMatch.toLowerCase())
         )
       ) {
-        return annotateSelfMatch({ found: true, created: false, match_type: "name_fuzzy", client: matchedClient });
+        return { found: true, created: false, match_type: "name_fuzzy", client: matchedClient };
       }
     }
   }

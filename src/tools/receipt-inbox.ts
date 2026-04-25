@@ -15,7 +15,6 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { type ApiContext, isCompanyVatRegistered, jsonObjectOrArrayInput, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
-import { extractVatNumber } from "../document-identifiers.js";
 import {
   type InvoiceExtractionFallback,
   summarizeInvoiceExtraction,
@@ -881,18 +880,24 @@ function normalizeVatForCompare(value: string | undefined): string {
 }
 
 /**
- * True when the document text contains a VAT number that equals the active
- * company's own VAT and the deterministic extractor (with own-VAT excluded)
- * did NOT find a different supplier VAT. Indicates the only VAT on the page
- * was the buyer's own (#14): supplier resolution must not silently proceed
- * to creating a duplicate of the active company.
+ * True when the document text contains the active company's own VAT and the
+ * deterministic extractor (called with own-VAT excluded) did NOT recover a
+ * different supplier VAT. Indicates the only VAT on the page was the
+ * buyer's own (#14): supplier resolution must not silently proceed to
+ * creating a duplicate of the active company.
+ *
+ * The check is a normalized-substring scan rather than a full re-run of
+ * extractVatNumber: extraction already ran once with `ownCompanyVat`
+ * excluded, so the only thing left to determine is whether ownVat appears
+ * anywhere in the page at all.
  */
-function detectSelfVatOnly(extracted: ExtractedReceiptFields, ownCompanyVat: string | undefined): boolean {
+export function detectSelfVatOnly(extracted: ExtractedReceiptFields, ownCompanyVat: string | undefined): boolean {
   if (!ownCompanyVat || !extracted.raw_text) return false;
   if (extracted.supplier_vat_no) return false;
   const ownNormalized = normalizeVatForCompare(ownCompanyVat);
-  const rawVat = normalizeVatForCompare(extractVatNumber(extracted.raw_text));
-  return rawVat !== "" && rawVat === ownNormalized;
+  if (!ownNormalized) return false;
+  const normalizedText = extracted.raw_text.replace(/\s+/g, "").toUpperCase();
+  return normalizedText.includes(ownNormalized);
 }
 
 function findBestTransactionMatch(

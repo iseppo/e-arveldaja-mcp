@@ -26,6 +26,7 @@ import {
 } from "./receipt-extraction.js";
 import {
   buildDryRunCreatedInvoicePreview,
+  detectSelfVatOnly,
   readValidatedReceiptFile,
   resolveSupplierFromTransaction,
   revalidateReceiptFilePath,
@@ -307,6 +308,38 @@ describe("detectReceiptCurrency", () => {
     // OpenAI's Estonian receipts. Callers add their own EUR fallback.
     expect(detectReceiptCurrency("Kokku 24,40")).toBeUndefined();
   });
+
+  it("prefers a non-EUR currency when both appear on the same total-line (review HIGH-1)", () => {
+    // OpenAI-style summary line with USD and a EUR equivalent. Without
+    // per-line preference, EUR wins and we book in the wrong currency.
+    expect(detectReceiptCurrency("Total: $40,00 / €37,12")).toBe("USD");
+  });
+
+  it("returns EUR for an EUR-only invoice even when later body text mentions $ in prose (regression guard)", () => {
+    // The prioritized-line ordering keeps total-labelled lines first; an
+    // EUR total line wins over an unrelated body mention of $.
+    const text = [
+      "Subtotal: €100",
+      "Total: €100",
+      "Note: card had a $5 hold that was released",
+    ].join("\n");
+    expect(detectReceiptCurrency(text)).toBe("EUR");
+  });
+
+  it("classifies CAD when the document uses the CA\\$ prefix (review HIGH-2)", () => {
+    // Stripe-issued Canadian invoices — the bare-$ USD pattern used to
+    // swallow these and label them USD. CAD pattern must run first.
+    expect(detectReceiptCurrency("Total: CA$99,00")).toBe("CAD");
+  });
+
+  it("classifies AUD when the document uses the A\\$ prefix", () => {
+    expect(detectReceiptCurrency("Total: A$50.00")).toBe("AUD");
+  });
+
+  it("classifies SGD when the document uses S\\$ — and does not collide with US\\$", () => {
+    expect(detectReceiptCurrency("Total: S$120.00")).toBe("SGD");
+    expect(detectReceiptCurrency("Total: US$120.00")).toBe("USD");
+  });
 });
 
 describe("extractPdfIdentifiers", () => {
@@ -495,6 +528,47 @@ describe("classifyReceiptDocument", () => {
     // and no invoice number reference → falls through to other rules.
     const text = "Receipt\nThank you for your purchase.";
     expect(classifyReceiptDocument(text, "Receipt-1234.pdf")).toBe("owner_paid_expense_reimbursement");
+  });
+
+  it("classifies localised Stripe receipt filenames (Kviitung-/Quittung-) as payment_receipt", () => {
+    const text = [
+      "Kviitung",
+      "Arve number    INV-42",
+      "Date paid      April 20, 2026",
+      "Amount paid    €90.00",
+    ].join("\n");
+    expect(classifyReceiptDocument(text, "Kviitung-2036-1466-3430.pdf")).toBe("payment_receipt");
+    expect(classifyReceiptDocument(text, "Quittung-2036-1466-3430.pdf")).toBe("payment_receipt");
+  });
+});
+
+describe("detectSelfVatOnly", () => {
+  const ownVat = "EE102809963";
+
+  it("is true when raw text contains own VAT and supplier_vat_no is empty", () => {
+    expect(detectSelfVatOnly({ raw_text: "Bill to Seppo AI OÜ\nEE VAT EE102809963" }, ownVat)).toBe(true);
+  });
+
+  it("normalizes whitespace before matching", () => {
+    expect(detectSelfVatOnly({ raw_text: "EE 102 809 963" }, ownVat)).toBe(true);
+  });
+
+  it("is false when supplier_vat_no is set (resolution found a real supplier)", () => {
+    expect(
+      detectSelfVatOnly({ raw_text: "Supplier EU372041333\nBuyer EE102809963", supplier_vat_no: "EU372041333" }, ownVat),
+    ).toBe(false);
+  });
+
+  it("is false when own VAT is not present in raw text", () => {
+    expect(detectSelfVatOnly({ raw_text: "VAT EU372041333" }, ownVat)).toBe(false);
+  });
+
+  it("is false when ownCompanyVat is undefined", () => {
+    expect(detectSelfVatOnly({ raw_text: "VAT EE102809963" }, undefined)).toBe(false);
+  });
+
+  it("is false when raw_text is missing", () => {
+    expect(detectSelfVatOnly({}, ownVat)).toBe(false);
   });
 });
 

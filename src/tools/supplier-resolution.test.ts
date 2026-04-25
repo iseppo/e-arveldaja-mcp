@@ -82,11 +82,13 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
 
     // VAT match against ourselves is blocked, but the fuzzy-name fallback
     // still resolves to the legitimate supplier. self_match_blocked is
-    // surfaced so callers can flag the OCR oddity.
+    // intentionally NOT set on found:true returns: the returned client is
+    // not suspect. The own-VAT-on-page note is surfaced separately at the
+    // receipt-inbox layer via detectSelfVatOnly.
     expect(result.found).toBe(true);
     expect(result.match_type).toBe("name_fuzzy");
     expect(result.client?.id).toBe(200);
-    expect(result.self_match_blocked).toBe(true);
+    expect(result.self_match_blocked).toBeUndefined();
   });
 
   it("returns found=false with self_match_blocked when only the active company exists and VAT matches", async () => {
