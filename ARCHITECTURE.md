@@ -9,7 +9,7 @@ graph TB
     subgraph Server["MCP Server (Node.js + TypeScript)"]
         Entry["index.ts\nMCP entry point"]
 
-        subgraph Tools["tools/ — 109 tools across 15 modules"]
+        subgraph Tools["tools/ — 111 tools across 16 modules"]
             CRUD["crud-tools.ts\nBasic CRUD"]
             PDF["pdf-workflow.ts\nInvoice PDF"]
             OCR["receipt-extraction.ts\nReceipt OCR"]

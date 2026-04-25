@@ -8,7 +8,7 @@ import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
 import { logAudit } from "../audit-log.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
-import { parseJsonObject, type ApiContext } from "./crud-tools.js";
+import { jsonObjectInput, parseJsonObject, type ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerWiseImportTools } from "./wise-import.js";
@@ -24,6 +24,7 @@ import {
   normalizeAutoBookingRuleMatch,
   saveAutoBookingRule,
 } from "../accounting-rules.js";
+import { workflowFromAccountingInboxPayload } from "../workflow-response.js";
 
 const MIN_AUTO_BOOKING_RULE_MATCH_LENGTH = 3;
 
@@ -1460,11 +1461,15 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
         receipt_matching_dimension_id,
         wise_account_dimension_id,
       });
+      const payload = buildPreparedInboxPayload(prepared);
 
       return {
         content: [{
           type: "text",
-          text: toMcpJson(buildPreparedInboxPayload(prepared)),
+          text: toMcpJson({
+            ...payload,
+            workflow: workflowFromAccountingInboxPayload(payload),
+          }),
         }],
       };
     },
@@ -1598,11 +1603,48 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
             : `No safe dry-run steps could be completed automatically yet. ${needsOneDecision.length} small decision(s) and ${needsAccountantReview.length} review item(s) remain.`,
         },
       };
+      const workflow = workflowFromAccountingInboxPayload(payload);
 
       return {
         content: [{
           type: "text",
-          text: toMcpJson(payload),
+          text: toMcpJson({
+            ...payload,
+            workflow,
+          }),
+        }],
+      };
+    },
+  );
+
+  registerTool(server,
+    "continue_accounting_workflow",
+    "Read a previous accounting inbox or workflow response and return the next user-facing action: one question, one review item, one approval card, or the next safe dry-run tool call.",
+    {
+      workflow_state_json: jsonObjectInput.describe("Previous response from prepare_accounting_inbox, run_accounting_inbox_dry_runs, continue_accounting_workflow, or an object containing a workflow field. Legacy callers may pass a JSON object string."),
+    },
+    { ...readOnly, title: "Continue Accounting Workflow" },
+    async ({ workflow_state_json }) => {
+      const workflowState = parseJsonObject(workflow_state_json, "workflow_state_json");
+      const workflow = isRecord(workflowState.workflow)
+        ? workflowState.workflow
+        : workflowFromAccountingInboxPayload(workflowState);
+      const nextAction = isRecord(workflow)
+        ? recordAt(workflow, "recommended_next_action")
+        : undefined;
+      const actionLabel = nextAction
+        ? stringAt(nextAction, "label") ?? stringAt(nextAction, "tool") ?? stringAt(nextAction, "kind")
+        : undefined;
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            message: actionLabel
+              ? `Next action: ${actionLabel}.`
+              : "Next action: no workflow action is currently pending.",
+            workflow,
+          }),
         }],
       };
     },
@@ -1612,7 +1654,7 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
     "resolve_accounting_review_item",
     "Turn one accounting review item into a concrete next-step plan: default handling, unresolved questions, and the safest follow-up workflow or tool.",
     {
-      review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or from a direct execution.needs_review / groups review item"),
+      review_item_json: jsonObjectInput.describe("Object from autopilot.needs_accountant_review[*].resolver_input or from a direct execution.needs_review / groups review item. Legacy callers may still pass a JSON object string."),
     },
     { ...readOnly, title: "Resolve Accounting Review Item" },
     async ({ review_item_json }) => {
@@ -1639,9 +1681,9 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
     "prepare_accounting_review_action",
     "Prepare the concrete next action for one resolved accounting review item, such as deleting a duplicate transaction or saving a stable auto-booking rule.",
     {
-      review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload"),
+      review_item_json: jsonObjectInput.describe("Object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload. Legacy callers may still pass a JSON object string."),
       save_as_rule: z.boolean().optional().describe("When true, prefer preparing a save_auto_booking_rule action when the review item represents a stable recurring treatment."),
-      rule_override_json: z.string().optional().describe("Optional JSON object with explicit rule fields such as purchase_article_id, purchase_account_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason, match, or category."),
+      rule_override_json: jsonObjectInput.optional().describe("Optional object with explicit rule fields such as purchase_article_id, purchase_account_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason, match, or category. Legacy callers may still pass a JSON object string."),
     },
     { ...readOnly, title: "Prepare Accounting Review Action" },
     async ({ review_item_json, save_as_rule, rule_override_json }) => {

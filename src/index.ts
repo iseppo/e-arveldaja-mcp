@@ -46,6 +46,7 @@ import { registerWiseImportTools } from "./tools/wise-import.js";
 import { registerCamtImportTools } from "./tools/camt-import.js";
 import { registerAccountingInboxTools } from "./tools/accounting-inbox.js";
 import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js";
+import { registerWorkflowRecommendationTools } from "./tools/workflow-recommendations.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
 import { registerPrompts } from "./prompts.js";
@@ -999,6 +1000,7 @@ Reporting:
   registerCamtImportTools(scopedServer, api);
   registerAccountingInboxTools(scopedServer, api);
   registerAnalyzeUnconfirmedTools(scopedServer, api);
+  registerWorkflowRecommendationTools(scopedServer);
 
   // Register resources via scopedServer so reads stay pinned to the selected connection
   registerResources(scopedServer, api);

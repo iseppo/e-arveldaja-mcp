@@ -2,9 +2,9 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 109 tools, 15 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 111 tools, 15 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
-> **v0.11 adds accounting inbox autopilot and review resolution.** `run_accounting_inbox_dry_runs` scans a workspace and chains safe dry-run steps into one preview, `resolve_accounting_review_item` + `prepare_accounting_review_action` turn review items into ready-to-approve tool calls, and `save_auto_booking_rule` persists stable supplier booking defaults to `accounting-rules.md`. See the [changelog](CHANGELOG.md) for full details.
+> **v0.11 adds accounting inbox autopilot and review resolution.** `run_accounting_inbox_dry_runs` scans a workspace and chains safe dry-run steps into one preview, `continue_accounting_workflow` turns the previous response into the next question/review/approval action, `resolve_accounting_review_item` + `prepare_accounting_review_action` turn review items into ready-to-approve tool calls, and `save_auto_booking_rule` persists stable supplier booking defaults to `accounting-rules.md`. See the [changelog](CHANGELOG.md) for full details.
 >
 > **v0.10.0 is a major update.** Large parts of the codebase have been rewritten — credential management, bank reconciliation, audit logging, and batch workflows all received significant changes. **You may need to re-add your API credentials** after updating, as the credential storage has moved from reading `apikey*.txt` directly to `.env` files. Your existing `apikey*.txt` files will be detected automatically and the server will offer to import them on first start.
 
@@ -160,6 +160,8 @@ Once the MCP server is connected, just talk to your AI assistant in natural lang
 > "Scan this workspace and tell me what can be done automatically, what needs one decision, and what needs accountant review"
 
 This is the recommended first step for non-accountants. The assistant will use the accounting inbox flow to detect likely CAMT files, Wise CSV exports, and receipt folders, propose safe `dry-run` steps in the right order, and ask only the smallest missing follow-up questions with recommended defaults first.
+
+Accounting inbox and workflow recommendation responses include a `workflow` block with `done`, `needs_decision`, `needs_review`, `recommended_next_action`, `available_actions`, and `approval_previews` so clients can continue from one compact next step instead of choosing among all tools manually.
 
 ### Enter purchase invoices from PDF files
 

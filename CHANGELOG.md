@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Guided workflow continuation** — `continue_accounting_workflow` reads a previous accounting inbox or workflow response and returns the next user-facing action: one question, one review item, one approval card, or one safe dry-run call.
+- **Standard workflow action envelope** — workflow recommendation and accounting inbox responses now include a `workflow_action_v1` block with `done`, `needs_decision`, `needs_review`, `recommended_next_action`, `available_actions`, and `approval_previews`.
+
 ## [0.11.8] - 2026-04-24
 
 ### Added

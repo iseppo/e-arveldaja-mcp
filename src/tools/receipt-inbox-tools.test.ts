@@ -547,6 +547,107 @@ describe("receipt inbox tool status handling", () => {
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
+  it("apply_transaction_classifications returns an approval workflow for dry-run bookings", async () => {
+    const { handler, api } = setupReceiptTool("apply_transaction_classifications", {
+      clients: [
+        {
+          id: 7,
+          name: "OpenAI Ireland Limited",
+          is_supplier: true,
+          is_client: false,
+          cl_code_country: "IE",
+          is_member: false,
+          send_invoice_to_email: false,
+          send_invoice_to_accounting_email: false,
+          is_deleted: false,
+        },
+      ],
+      transactionDetails: {
+        44: {
+          id: 44,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 25,
+          date: "2026-03-22",
+          accounts_dimensions_id: 100,
+          bank_account_name: "LHV Bank",
+          description: "Bank monthly fee",
+          cl_currencies_id: "EUR",
+        },
+      },
+      purchaseArticles: [{
+        id: 501,
+        name_est: "Bank fee",
+        name_eng: "Bank fee",
+        accounts_id: 5230,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        is_disabled: false,
+        priority: 1,
+      }],
+      accounts: [{
+        id: 5230,
+        name_est: "Bank fees",
+        name_eng: "Bank fees",
+        account_type_est: "Kulud",
+        account_type_eng: "Expenses",
+      }],
+    });
+
+    const classificationsJson = JSON.stringify([{
+      category: "bank_fees",
+      apply_mode: "purchase_invoice",
+      normalized_counterparty: "lhv bank",
+      display_counterparty: "LHV Bank",
+      recurring: true,
+      similar_amounts: true,
+      total_amount: 25,
+      suggested_booking: {
+        purchase_article_id: 501,
+        purchase_article_name: "Bank fee",
+        purchase_account_id: 5230,
+        purchase_account_name: "Bank fees",
+        liability_account_id: 2310,
+        reason: "Bank service fee",
+      },
+      reasons: ["keyword"],
+      transactions: [{
+        id: 44,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        description: "Bank monthly fee",
+        bank_account_name: "LHV Bank",
+        accounts_dimensions_id: 100,
+      }],
+    }]);
+
+    const result = await handler({ classifications_json: classificationsJson });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.summary.dry_run_preview).toBe(1);
+    expect(payload.workflow).toMatchObject({
+      contract: "workflow_action_v1",
+      recommended_next_action: {
+        kind: "approve_tool_call",
+        tool: "apply_transaction_classifications",
+        args: {
+          classifications_json: classificationsJson,
+          execute: true,
+        },
+      },
+      approval_previews: [
+        expect.objectContaining({
+          title: "Approve transaction classification booking",
+          accounting_impact: expect.arrayContaining(["1 purchase invoice"]),
+        }),
+      ],
+    });
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
   it("apply_transaction_classifications invalidates the draft invoice if the transaction turns VOID after creation", async () => {
     const getImpl = vi.fn()
       .mockResolvedValueOnce({

@@ -204,6 +204,25 @@ describe("process_receipt_batch rollback handling", () => {
         vat_rate_dropdown: "-",
       },
     });
+    expect(payload.workflow).toMatchObject({
+      contract: "workflow_action_v1",
+      recommended_next_action: {
+        kind: "approve_tool_call",
+        tool: "process_receipt_batch",
+        args: {
+          folder_path: "/tmp/receipts",
+          accounts_dimensions_id: 100,
+          execute: true,
+        },
+      },
+      approval_previews: [
+        expect.objectContaining({
+          title: "Approve receipt batch booking",
+          accounting_impact: expect.arrayContaining(["1 purchase invoice"]),
+          source_documents: ["/tmp/receipts"],
+        }),
+      ],
+    });
 
     rmSync(rulesDir, { recursive: true, force: true });
   });

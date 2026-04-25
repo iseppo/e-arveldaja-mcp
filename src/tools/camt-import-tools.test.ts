@@ -188,6 +188,25 @@ describe("camt import tool", () => {
         counterparty: expect.stringMatching(wrapped("OpenAI, Inc.")),
       }),
     ]));
+    expect(payload.workflow).toMatchObject({
+      contract: "workflow_action_v1",
+      recommended_next_action: {
+        kind: "approve_tool_call",
+        tool: "import_camt053",
+        args: {
+          file_path: "/tmp/camt.xml",
+          accounts_dimensions_id: 7,
+          execute: true,
+        },
+      },
+      approval_previews: [
+        expect.objectContaining({
+          title: "Approve CAMT transaction import",
+          accounting_impact: expect.arrayContaining(["1 bank transaction"]),
+          source_documents: ["/tmp/camt.xml"],
+        }),
+      ],
+    });
   });
 
   it("flags likely duplicates against older manual transactions in dry run", async () => {
