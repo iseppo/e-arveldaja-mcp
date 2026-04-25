@@ -3,6 +3,7 @@ import {
   normalizeDate,
   extractAmounts,
   computeTermDays,
+  extractPdfIdentifiers,
   hasRecurringSimilarAmounts,
   normalizeCounterpartyName,
   looksLikePersonCounterparty,
@@ -471,5 +472,27 @@ describe("extractSupplierName", () => {
     const result = extractSupplierName(text, "invoice.pdf");
     // Should pick the seller (müüja), not the buyer
     expect(result).toMatch(/Tartu Firma/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractPdfIdentifiers — own-VAT exclusion (#14)
+// ---------------------------------------------------------------------------
+
+describe("extractPdfIdentifiers", () => {
+  it("clears supplier_vat_no when the only VAT on the page is the buyer's own", () => {
+    // Mirrors the Anthropic case: supplier prints no VAT, the only VAT line
+    // belongs to the buyer (Seppo AI OÜ EE102809963).
+    const text = [
+      "Anthropic, PBC                      Bill to",
+      "548 Market Street                   Indrek Seppo",
+      "United States                       Estonia",
+      "                                    EE VAT EE102809963",
+    ].join("\n");
+
+    expect(extractPdfIdentifiers(text).supplier_vat_no).toBe("EE102809963");
+    expect(
+      extractPdfIdentifiers(text, { ownCompanyVat: "EE102809963" }).supplier_vat_no,
+    ).toBeUndefined();
   });
 });

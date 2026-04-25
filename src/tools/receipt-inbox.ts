@@ -15,6 +15,7 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { type ApiContext, isCompanyVatRegistered, jsonObjectOrArrayInput, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
+import { extractVatNumber } from "../document-identifiers.js";
 import {
   type InvoiceExtractionFallback,
   summarizeInvoiceExtraction,
@@ -866,10 +867,32 @@ async function scanReceiptFolderInternal(folderPath: string, fileTypes?: FileTyp
   };
 }
 
-async function extractReceiptFields(file: ReceiptFileInfo): Promise<ExtractedReceiptFields> {
+async function extractReceiptFields(
+  file: ReceiptFileInfo,
+  ownCompanyVat?: string,
+): Promise<ExtractedReceiptFields> {
   const validatedPath = await revalidateReceiptFilePath(file);
   const parsedDocument = await parseDocument(validatedPath);
-  return extractReceiptFieldsFromText(parsedDocument.text, file.name);
+  return extractReceiptFieldsFromText(parsedDocument.text, file.name, { ownCompanyVat });
+}
+
+function normalizeVatForCompare(value: string | undefined): string {
+  return (value ?? "").replace(/\s+/g, "").toUpperCase();
+}
+
+/**
+ * True when the document text contains a VAT number that equals the active
+ * company's own VAT and the deterministic extractor (with own-VAT excluded)
+ * did NOT find a different supplier VAT. Indicates the only VAT on the page
+ * was the buyer's own (#14): supplier resolution must not silently proceed
+ * to creating a duplicate of the active company.
+ */
+function detectSelfVatOnly(extracted: ExtractedReceiptFields, ownCompanyVat: string | undefined): boolean {
+  if (!ownCompanyVat || !extracted.raw_text) return false;
+  if (extracted.supplier_vat_no) return false;
+  const ownNormalized = normalizeVatForCompare(ownCompanyVat);
+  const rawVat = normalizeVatForCompare(extractVatNumber(extracted.raw_text));
+  return rawVat !== "" && rawVat === ownNormalized;
 }
 
 function findBestTransactionMatch(
@@ -1374,12 +1397,14 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     async ({ folder_path, accounts_dimensions_id, execute, date_from, date_to }) => {
       const dryRun = execute !== true;
       const scan = await scanReceiptFolderInternal(folder_path, undefined, date_from, date_to);
+      const vatInfo = await api.readonly.getVatInfo();
+      const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
       const context: ReceiptProcessingContext = {
         clients: await api.clients.listAll(),
         purchaseInvoices: await api.purchaseInvoices.listAll(),
         purchaseArticlesWithVat: await getPurchaseArticlesWithVat(api),
         accounts: await api.readonly.getAccounts(),
-        isVatRegistered: await isCompanyVatRegistered(api),
+        isVatRegistered: !!vatInfo.vat_number,
       };
       const allTransactions = await api.transactions.listAll();
       const bankTransactions = allTransactions.filter(transaction =>
@@ -1401,12 +1426,18 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         const notes: string[] = [];
 
         try {
-          const extracted = await extractReceiptFields(file);
+          const extracted = await extractReceiptFields(file, ownCompanyVat);
           const llmFallback = summarizeInvoiceExtraction(extracted);
           const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
+          const selfVatDetected = detectSelfVatOnly(extracted, ownCompanyVat);
 
           if (file.file_type !== "pdf") {
             notes.push("Image receipt OCR-parsed with LiteParse.");
+          }
+          if (selfVatDetected) {
+            notes.push(
+              "Document only printed the buyer's VAT (matches active company). Supplier VAT cleared — verify supplier manually before booking (#14).",
+            );
           }
 
           if (classification !== "purchase_invoice") {
@@ -1453,7 +1484,18 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             continue;
           }
 
-          const supplierResolution = await resolveSupplierInternal(api, context.clients, extracted, !dryRun);
+          const supplierResolution = await resolveSupplierInternal(
+            api,
+            context.clients,
+            extracted,
+            !dryRun,
+            ownCompanyVat ? { ownCompanyVat } : undefined,
+          );
+          if (supplierResolution.self_match_blocked) {
+            notes.push(
+              "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
+            );
+          }
           if (!supplierResolution.client && !supplierResolution.preview_client) {
             notes.push("Supplier could not be resolved or prepared for creation.");
             maybeAddLlmFallbackNote(notes, llmFallback);

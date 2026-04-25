@@ -72,6 +72,38 @@ describe("extractVatNumber", () => {
   it("returns undefined for empty text", () => {
     expect(extractVatNumber("")).toBeUndefined();
   });
+
+  it("excludes a VAT number listed in options.exclude (own-company VAT guard)", () => {
+    expect(extractVatNumber("VAT: EE102809963", { exclude: "EE102809963" })).toBeUndefined();
+  });
+
+  it("normalizes exclude entries (whitespace and case) when filtering", () => {
+    expect(extractVatNumber("VAT: ee 102 809 963", { exclude: " EE102809963 " })).toBeUndefined();
+  });
+
+  it("returns the next non-excluded match when one matches the exclude list", () => {
+    const text = "VAT: EU372041333\nKMKR: EE102809963";
+    expect(extractVatNumber(text, { exclude: "EE102809963" })).toBe("EU372041333");
+  });
+
+  it("falls back to undefined when only the buyer's own VAT is on the page", () => {
+    // Mirrors the Anthropic case from issue #14: supplier prints no VAT,
+    // only the buyer's EE-VAT next to "Bill to". Without an exclude list,
+    // the extractor would happily return the buyer VAT as supplier.
+    const text = [
+      "Anthropic, PBC                      Bill to",
+      "548 Market Street                   Indrek Seppo",
+      "United States                       Estonia",
+      "                                    EE VAT EE102809963",
+    ].join("\n");
+    expect(extractVatNumber(text)).toBe("EE102809963");
+    expect(extractVatNumber(text, { exclude: "EE102809963" })).toBeUndefined();
+  });
+
+  it("accepts an array of VATs to exclude", () => {
+    const text = "VAT: EE111111111";
+    expect(extractVatNumber(text, { exclude: ["EE111111111", "EE222222222"] })).toBeUndefined();
+  });
 });
 
 describe("extractIban", () => {

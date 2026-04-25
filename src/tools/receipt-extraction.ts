@@ -725,10 +725,25 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
   };
 }
 
-export function extractPdfIdentifiers(text: string): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number"> {
+export interface ExtractReceiptFieldsOptions {
+  /**
+   * VAT number of the active company. Used to keep an invoice's buyer-side VAT
+   * (= our own VAT) from being resolved as the supplier when the supplier's
+   * VAT is missing from the document — see issue #14.
+   */
+  ownCompanyVat?: string;
+}
+
+export function extractPdfIdentifiers(
+  text: string,
+  options?: ExtractReceiptFieldsOptions,
+): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number"> {
   return {
     supplier_reg_code: extractRegistryCode(text),
-    supplier_vat_no: extractVatNumber(text),
+    supplier_vat_no: extractVatNumber(
+      text,
+      options?.ownCompanyVat ? { exclude: options.ownCompanyVat } : undefined,
+    ),
     supplier_iban: extractIban(text),
     ref_number: extractReferenceNumber(text),
   };
@@ -1116,8 +1131,12 @@ export function hasAutoBookableReceiptFields(
   );
 }
 
-export function extractReceiptFieldsFromText(text: string, fileName: string): ExtractedReceiptFields {
-  const identifiers = extractPdfIdentifiers(text);
+export function extractReceiptFieldsFromText(
+  text: string,
+  fileName: string,
+  options?: ExtractReceiptFieldsOptions,
+): ExtractedReceiptFields {
+  const identifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date } = extractDates(text);
   const supplierName = extractSupplierName(text, fileName);
   const amounts = extractAmounts(text);

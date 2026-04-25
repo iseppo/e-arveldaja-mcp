@@ -23,14 +23,32 @@ export interface SupplierResolution {
   client?: Client;
   preview_client?: Partial<Client>;
   registry_data?: Record<string, string> | null;
+  /**
+   * Set when a registry-code, VAT, or fuzzy-name match would have returned
+   * the active company itself. Resolution refuses to return such matches —
+   * see issue #14 — but signals the block here so callers can surface a
+   * "needs manual supplier resolution" hint.
+   */
+  self_match_blocked?: boolean;
 }
 
 export interface SupplierResolutionOptions {
   classification_category?: TransactionClassificationCategory;
+  /**
+   * VAT number of the active company. Resolution will refuse to return any
+   * client whose VAT matches this value, defending against the case where the
+   * extractor accepted the buyer's own VAT as the supplier (issue #14).
+   */
+  ownCompanyVat?: string;
   _resolveSupplierOverrides?: {
     country?: string;
     is_physical_entity?: boolean;
   };
+}
+
+function normalizeVatForCompare(value?: string | null): string | undefined {
+  const normalized = value?.replace(/\s+/g, "").toUpperCase();
+  return normalized || undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,26 +109,46 @@ export async function resolveSupplierInternal(
   execute: boolean,
   options?: SupplierResolutionOptions,
 ): Promise<SupplierResolution> {
+  const ownVat = normalizeVatForCompare(options?.ownCompanyVat);
+  const isSelfClient = (client: Client): boolean =>
+    !!ownVat && normalizeVatForCompare(client.invoice_vat_no) === ownVat;
+  let selfMatchBlocked = false;
+
+  const annotateSelfMatch = <T extends SupplierResolution>(value: T): T =>
+    selfMatchBlocked ? { ...value, self_match_blocked: true } : value;
+
   if (fields.supplier_reg_code) {
     const byCode = clients.find(client => client.code === fields.supplier_reg_code && !client.is_deleted);
     if (byCode) {
-      return { found: true, created: false, match_type: "registry_code", client: byCode };
+      if (isSelfClient(byCode)) {
+        selfMatchBlocked = true;
+      } else {
+        return annotateSelfMatch({ found: true, created: false, match_type: "registry_code", client: byCode });
+      }
     }
   }
 
   if (fields.supplier_vat_no) {
-    const normalizedVat = fields.supplier_vat_no.replace(/\s+/g, "").toUpperCase();
-    const byVat = clients.find(client =>
-      !client.is_deleted &&
-      client.invoice_vat_no?.replace(/\s+/g, "").toUpperCase() === normalizedVat,
-    );
-    if (byVat) {
-      return { found: true, created: false, match_type: "vat_no", client: byVat };
+    const normalizedVat = normalizeVatForCompare(fields.supplier_vat_no);
+    if (normalizedVat && ownVat && normalizedVat === ownVat) {
+      selfMatchBlocked = true;
+    } else if (normalizedVat) {
+      const byVat = clients.find(client =>
+        !client.is_deleted &&
+        normalizeVatForCompare(client.invoice_vat_no) === normalizedVat,
+      );
+      if (byVat) {
+        if (isSelfClient(byVat)) {
+          selfMatchBlocked = true;
+        } else {
+          return annotateSelfMatch({ found: true, created: false, match_type: "vat_no", client: byVat });
+        }
+      }
     }
   }
 
   if (fields.supplier_name) {
-    const activeClients = clients.filter(client => !client.is_deleted);
+    const activeClients = clients.filter(client => !client.is_deleted && !isSelfClient(client));
     const names = activeClients.map(client => client.name);
     if (names.length > 0) {
       const bestMatch = closest(fields.supplier_name, names);
@@ -127,7 +165,7 @@ export async function resolveSupplierInternal(
           fields.supplier_name.toLowerCase().includes(bestMatch.toLowerCase())
         )
       ) {
-        return { found: true, created: false, match_type: "name_fuzzy", client: matchedClient };
+        return annotateSelfMatch({ found: true, created: false, match_type: "name_fuzzy", client: matchedClient });
       }
     }
   }
@@ -137,13 +175,27 @@ export async function resolveSupplierInternal(
   const registryData = await fetchRegistryData(fields.supplier_reg_code, supplierCountry, fields.supplier_name);
   const clientName = registryData?.name ?? fields.supplier_name;
   if (!clientName) {
-    return { found: false, created: false, registry_data: registryData };
+    return {
+      found: false,
+      created: false,
+      registry_data: registryData,
+      ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
+    };
   }
+
+  // Even after the matching steps refused a self-match, the previewed *new*
+  // client must not be seeded with our own VAT — otherwise creating the
+  // preview would persist a duplicate client with our own VAT (#14).
+  const previewVatNo = fields.supplier_vat_no &&
+    ownVat &&
+    normalizeVatForCompare(fields.supplier_vat_no) === ownVat
+      ? undefined
+      : fields.supplier_vat_no;
 
   const isPhysicalEntity = overrides?.is_physical_entity ??
     (options?.classification_category !== "salary_payroll" &&
     !fields.supplier_reg_code &&
-    !fields.supplier_vat_no &&
+    !previewVatNo &&
     looksLikePersonCounterparty(normalizeCounterpartyName(clientName), clientName));
 
   const previewClient: Partial<Client> = {
@@ -157,7 +209,7 @@ export async function resolveSupplierInternal(
     is_member: false,
     send_invoice_to_email: false,
     send_invoice_to_accounting_email: false,
-    invoice_vat_no: fields.supplier_vat_no,
+    invoice_vat_no: previewVatNo,
     bank_account_no: fields.supplier_iban,
     address_text: registryData?.address,
   };
@@ -168,6 +220,7 @@ export async function resolveSupplierInternal(
       created: false,
       preview_client: previewClient,
       registry_data: registryData,
+      ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
     };
   }
 
@@ -191,5 +244,6 @@ export async function resolveSupplierInternal(
     client,
     preview_client: previewClient,
     registry_data: registryData,
+    ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
   };
 }
