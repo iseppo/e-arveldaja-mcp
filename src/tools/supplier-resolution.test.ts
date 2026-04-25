@@ -198,6 +198,57 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
     expect(result.self_match_blocked).toBe(true);
   });
 
+  it("falls through to the fuzzy tier when the normalized name matches multiple clients (ambiguity bail-out)", async () => {
+    // Two real clients normalize to the same key — picking one
+    // arbitrarily would silently miscode the invoice. The new tier must
+    // refuse to choose; the fuzzy tier's stricter inclusion check then
+    // either picks the right one or leaves the supplier unresolved.
+    const ownCompany = makeClient({
+      id: 100,
+      name: "Seppo AI OÜ",
+      invoice_vat_no: "EE102809963",
+    });
+    const apple = makeClient({ id: 200, name: "Apple", cl_code_country: "USA" });
+    const appleLp = makeClient({ id: 201, name: "Apple LP", cl_code_country: "USA" });
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [ownCompany, apple, appleLp],
+      { supplier_name: "Apple" },
+      false,
+      { ownCompanyVat: "EE102809963" },
+    );
+
+    // Fuzzy tier picks the literal "Apple" (distance 0). The important
+    // assertion is that match_type is NOT "name_normalized" — the new
+    // tier refused to pick on its own.
+    expect(result.match_type).not.toBe("name_normalized");
+    expect(result.found).toBe(true);
+    expect(result.client?.id).toBe(200);
+  });
+
+  it("does not use the normalized-name tier when the normalized key is shorter than 4 chars", async () => {
+    // Floor mirrors the fuzzy tier's shorterLen >= 4 check so a
+    // single common short word like "abc" can't bridge unrelated
+    // suppliers. With a 3-char key, fuzzy is the only valid path.
+    const ownCompany = makeClient({ id: 100, invoice_vat_no: "EE102809963" });
+    const abcShort = makeClient({ id: 200, name: "ABC", cl_code_country: "USA" });
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [ownCompany, abcShort],
+      { supplier_name: "ABC" },
+      false,
+      { ownCompanyVat: "EE102809963" },
+    );
+
+    // ABC ↔ ABC still matches via the fuzzy tier (distance 0,
+    // similarity 1.0, but shorterLen 3 < 4 → fuzzy ALSO refuses) so
+    // resolution falls through to "not found" / preview.
+    expect(result.match_type).not.toBe("name_normalized");
+    expect(result.found).toBe(false);
+  });
+
   it("resolves to an existing client by normalized name when only the legal-form suffix differs", async () => {
     // The Anthropic case from PR #21: existing client is named just
     // "Anthropic"; the new invoice's supplier_name is "Anthropic, PBC".

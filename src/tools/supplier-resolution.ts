@@ -160,16 +160,31 @@ export async function resolveSupplierInternal(
     // (LLC, Inc, PBC, AG, …) and punctuation, so an invoice supplier like
     // "Anthropic, PBC" finds an existing "Anthropic" client. Without this
     // tier, the fuzzy fallback's 0.7 similarity threshold rejects the
-    // pair (≈0.62) and the supplier_history lookup that drives reuse of
-    // prior bookings never fires.
+    // pair (≈0.6 in our measurements) and the supplier_history lookup
+    // that drives reuse of prior bookings never fires.
+    //
+    // Two guards prevent the new tier from silently miscoding:
+    //  - Minimum-length floor (≥ 4 chars after normalization) mirrors the
+    //    fuzzy tier's `shorterLen >= 4` check, so a single common word
+    //    like "solutions" can't bridge two unrelated suppliers.
+    //  - Ambiguity bail-out: if multiple clients share the same
+    //    normalized key, we fall through to the fuzzy tier rather than
+    //    picking one arbitrarily.
     const normalizedSupplierName = normalizeCompanyName(fields.supplier_name);
-    if (normalizedSupplierName) {
-      const normalizedExactMatch = activeClients.find(
+    if (normalizedSupplierName && normalizedSupplierName.length >= 4) {
+      const normalizedExactMatches = activeClients.filter(
         client => normalizeCompanyName(client.name) === normalizedSupplierName,
       );
-      if (normalizedExactMatch) {
-        return { found: true, created: false, match_type: "name_normalized", client: normalizedExactMatch };
+      if (normalizedExactMatches.length === 1) {
+        return {
+          found: true,
+          created: false,
+          match_type: "name_normalized",
+          client: normalizedExactMatches[0]!,
+        };
       }
+      // length === 0 → no match, length > 1 → ambiguous, both fall
+      // through to the fuzzy tier which has stricter inclusion checks.
     }
 
     const names = activeClients.map(client => client.name);
