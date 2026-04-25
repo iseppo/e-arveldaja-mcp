@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.12.1] - 2026-04-25
+
+### Changed
+- **README release callout** — updated the top-level README version note to describe the v0.12 guided workflow action UX, including `recommend_workflow`, `workflow_action_v1`, `recommended_next_action`, and approval previews.
+
 ## [0.12.0] - 2026-04-25
 
 ### Added
