@@ -955,6 +955,26 @@ describe("wise import tool", () => {
         status: "would_create",
       }),
     ]));
+    expect(payload.workflow).toMatchObject({
+      contract: "workflow_action_v1",
+      recommended_next_action: {
+        kind: "approve_tool_call",
+        tool: "import_wise_transactions",
+        args: {
+          file_path: "/tmp/wise.csv",
+          accounts_dimensions_id: 5,
+          inter_account_dimension_id: 20,
+          execute: true,
+        },
+      },
+      approval_previews: [
+        expect.objectContaining({
+          title: "Approve Wise transaction import",
+          accounting_impact: expect.arrayContaining(["1 bank transaction"]),
+          source_documents: ["/tmp/wise.csv"],
+        }),
+      ],
+    });
     expect(api.transactions.confirm).not.toHaveBeenCalled();
     expect(api.journals.listAllWithPostings).not.toHaveBeenCalled();
   });

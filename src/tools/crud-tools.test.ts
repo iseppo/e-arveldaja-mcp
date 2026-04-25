@@ -101,6 +101,10 @@ describe("parseJsonObject", () => {
     expect(parseJsonObject('{"name":"test"}', "data")).toEqual({ name: "test" });
   });
 
+  it("accepts an already-structured object", () => {
+    expect(parseJsonObject({ name: "test" }, "data")).toEqual({ name: "test" });
+  });
+
   it("throws on JSON array", () => {
     expect(() => parseJsonObject("[1,2]", "data")).toThrow('"data" must be a JSON object');
   });
@@ -114,6 +118,10 @@ describe("parseJsonObjectArray", () => {
   it("parses a valid JSON array of objects", () => {
     const result = parseJsonObjectArray('[{"a":1},{"b":2}]', "items");
     expect(result).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  it("accepts an already-structured array of objects", () => {
+    expect(parseJsonObjectArray([{ a: 1 }, { b: 2 }], "items")).toEqual([{ a: 1 }, { b: 2 }]);
   });
 
   it("throws on non-array JSON", () => {
@@ -316,8 +324,104 @@ describe("create_product", () => {
       unit: "h",
     });
     expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      ok: true,
+      action: "created",
+      entity: "product",
+      id: 123,
       code: 0,
       created_object_id: 123,
+      raw: {
+        code: 0,
+        created_object_id: 123,
+      },
+    });
+  });
+});
+
+describe("structured JSON-compatible inputs", () => {
+  it("update_client accepts an object instead of a JSON string", async () => {
+    const { api, handler } = getCrudToolHarness("update_client", {
+      clients: { update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }) },
+    });
+
+    const result = await handler({ id: 7, data: { email: "new@example.com" } }) as { content: Array<{ text: string }> };
+
+    expect(api.clients.update).toHaveBeenCalledWith(7, { email: "new@example.com" });
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      ok: true,
+      action: "updated",
+      entity: "client",
+      id: 7,
+    });
+  });
+
+  it("create_journal accepts an array of postings instead of a JSON string", async () => {
+    const { api, handler } = getCrudToolHarness("create_journal", {
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([
+          { id: 4000, account_code: "4000", allows_dimensions: false, is_valid: true },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+      journals: {
+        create: vi.fn().mockResolvedValue({ code: 0, messages: [], created_object_id: 456 }),
+      },
+    });
+
+    const result = await handler({
+      effective_date: "2026-04-24",
+      postings: [{ accounts_id: "4000", type: "D", amount: "12.50" }],
+    }) as { content: Array<{ text: string }> };
+
+    expect(api.journals.create).toHaveBeenCalledWith({
+      effective_date: "2026-04-24",
+      cl_currencies_id: "EUR",
+      postings: [{ accounts_id: 4000, type: "D", amount: 12.5 }],
+    });
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      ok: true,
+      action: "created",
+      entity: "journal",
+      id: 456,
+    });
+  });
+
+  it("confirm_transaction accepts an array of distributions instead of a JSON string", async () => {
+    const { api, handler } = getCrudToolHarness("confirm_transaction", {
+      transactions: {
+        get: vi.fn().mockResolvedValue({ id: 1, clients_id: 99 }),
+        confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+      },
+    });
+
+    await handler({
+      id: 1,
+      distributions: [{ related_table: "sale_invoices", related_id: "321", amount: "12" }],
+    });
+
+    expect(api.transactions.confirm).toHaveBeenCalledWith(1, [
+      { related_table: "sale_invoices", related_id: 321, amount: 12 },
+    ]);
+  });
+});
+
+describe("find_client_by_code", () => {
+  it("returns a structured not-found envelope instead of plain text", async () => {
+    const { handler } = getCrudToolHarness("find_client_by_code", {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(null),
+      },
+    });
+
+    const result = await handler({ code: "12345678" }) as { content: Array<{ text: string }> };
+
+    expect(parseMcpResponse(result.content[0]!.text)).toEqual({
+      ok: false,
+      action: "found",
+      entity: "client",
+      found: false,
+      message: "No client found for registry code 12345678.",
+      raw: null,
     });
   });
 });

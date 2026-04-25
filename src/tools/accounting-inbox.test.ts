@@ -1806,6 +1806,107 @@ ${entryXml}
       }),
     ]));
     expect(payload.autopilot.next_recommended_action).toBeUndefined();
+    expect(payload.workflow).toMatchObject({
+      contract: "workflow_action_v1",
+      summary: expect.stringContaining("Ran"),
+      needs_decision: [],
+      needs_review: [],
+      recommended_next_action: {
+        kind: "approve_tool_call",
+        tool: "import_camt053",
+        approval_required: true,
+        args: expect.objectContaining({
+          file_path: join(workspace, "statement.xml"),
+          accounts_dimensions_id: 101,
+          execute: true,
+        }),
+      },
+      approval_previews: [
+        expect.objectContaining({
+          title: "Approve CAMT transaction import",
+          execute_tool: "import_camt053",
+          execute_args: expect.objectContaining({ execute: true }),
+          accounting_impact: expect.arrayContaining([
+            expect.stringContaining("1 bank transaction"),
+          ]),
+          source_documents: [join(workspace, "statement.xml")],
+        }),
+      ],
+    });
+    expect(payload.workflow.available_actions[0]).toEqual(
+      expect.objectContaining({
+        kind: "approve_tool_call",
+        tool: "import_camt053",
+      }),
+    );
+  });
+
+  it("continue_accounting_workflow returns the next user-facing action from a previous inbox response", async () => {
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: { findByCode: vi.fn().mockResolvedValue(undefined), findByName: vi.fn().mockResolvedValue([]), listAll: vi.fn().mockResolvedValue([]) },
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      products: {},
+      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "continue_accounting_workflow");
+    if (!registration) throw new Error("continue_accounting_workflow was not registered");
+    const continueHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await continueHandler({
+      workflow_state_json: {
+        autopilot: {
+          user_summary: "Ran one dry run. One approval remains.",
+          done_automatically: ["CAMT dry run would create 1 transaction."],
+          needs_one_decision: [],
+          needs_accountant_review: [],
+          executed_steps: [{
+            step: 2,
+            tool: "import_camt053",
+            status: "completed",
+            purpose: "Preview CAMT import",
+            summary: "CAMT dry run would create 1 transaction, skip 0, raise 0 possible duplicate review item(s), and report 0 error(s).",
+            suggested_args: {
+              file_path: "/tmp/statement.xml",
+              accounts_dimensions_id: 101,
+              execute: false,
+            },
+            preview: {
+              created_count: 1,
+              skipped_count: 0,
+              possible_duplicate_count: 0,
+              error_count: 0,
+            },
+          }],
+        },
+      },
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.workflow).toMatchObject({
+      contract: "workflow_action_v1",
+      recommended_next_action: {
+        kind: "approve_tool_call",
+        tool: "import_camt053",
+        args: {
+          file_path: "/tmp/statement.xml",
+          accounts_dimensions_id: 101,
+          execute: true,
+        },
+      },
+    });
+    expect(payload.message).toContain("Next action");
   });
 
   it("cleanup_camt_possible_duplicate surfaces partial state when delete throws", async () => {

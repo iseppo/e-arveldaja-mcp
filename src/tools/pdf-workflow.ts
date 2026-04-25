@@ -3,7 +3,7 @@ import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
-import { type ApiContext, isCompanyVatRegistered, parsePurchaseInvoiceItems, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { resolveFileInput } from "../file-validation.js";
@@ -139,7 +139,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       total_net: z.number().describe("Invoice total net amount"),
       total_vat: z.number().describe("Invoice total VAT amount"),
       total_gross: z.number().describe("Invoice total gross amount"),
-      items: z.string().describe("JSON array of items with at least {total_net_price, vat_rate_dropdown?} each"),
+      items: jsonObjectArrayInput.describe("Array of items with at least {total_net_price, vat_rate_dropdown?} each. Legacy callers may still pass a JSON array string."),
       invoice_date: z.string().optional().describe("Invoice date (YYYY-MM-DD)"),
       due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
     },
@@ -147,7 +147,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     async ({ total_net, total_vat, total_gross, items, invoice_date, due_date }) => {
       const errors: string[] = [];
       const warnings: string[] = [];
-      const parsed = safeJsonParse(items, "items");
+      const parsed = parseJsonObjectArray(items, "items");
       if (!Array.isArray(parsed)) {
         return {
           content: [{
@@ -438,8 +438,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       invoice_date: z.string().describe("Invoice date (YYYY-MM-DD)"),
       journal_date: z.string().describe("Turnover/booking date (YYYY-MM-DD)"),
       term_days: z.number().describe("Payment term days"),
-      items: z.string().describe(
-        "JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. " +
+      items: jsonObjectArrayInput.describe(
+        "Array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. Legacy callers may still pass a JSON array string. " +
         "purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts). Same rule applies to vat_accounts_dimensions_id when the VAT account has dimensions. Use list_account_dimensions to look up dimension IDs."
       ),
       vat_price: z.number().optional().describe("EXACT total VAT from the original invoice. Optional because OCR may not extract reliably; pass when known."),

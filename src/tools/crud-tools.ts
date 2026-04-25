@@ -22,6 +22,7 @@ import { readOnly, create, mutate, destructive, send } from "../annotations.js";
 import { HttpError } from "../http-client.js";
 import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
+import { toolResponse } from "../tool-response.js";
 
 export interface ApiContext {
   clients: ClientsApi;
@@ -56,16 +57,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function parseJsonObject(input: string, label: string): Record<string, unknown> {
-  const parsed = safeJsonParse(input, label);
+export function parseJsonObject(input: unknown, label: string): Record<string, unknown> {
+  const parsed = typeof input === "string" ? safeJsonParse(input, label) : input;
   if (!isRecord(parsed)) {
     throw new Error(`"${label}" must be a JSON object`);
   }
   return parsed;
 }
 
-export function parseJsonObjectArray(input: string, label: string): Record<string, unknown>[] {
-  const parsed = safeJsonParse(input, label);
+export function parseJsonObjectArray(input: unknown, label: string): Record<string, unknown>[] {
+  const parsed = typeof input === "string" ? safeJsonParse(input, label) : input;
   if (!Array.isArray(parsed)) {
     throw new Error(`"${label}" must be a JSON array`);
   }
@@ -127,7 +128,7 @@ export function requireNumericFields(items: Record<string, unknown>[], label: st
   });
 }
 
-function parsePostings(input: string): Posting[] {
+function parsePostings(input: unknown): Posting[] {
   const postings = parseJsonObjectArray(input, "postings");
   requireFields(postings, "postings", ["accounts_id", "type", "amount"]);
   requireNumericFields(postings, "postings", [
@@ -145,7 +146,7 @@ function parsePostings(input: string): Posting[] {
   return postings as unknown as Posting[];
 }
 
-function parseTransactionDistributions(input: string): TransactionDistribution[] {
+function parseTransactionDistributions(input: unknown): TransactionDistribution[] {
   const distributions = parseJsonObjectArray(input, "distributions");
   requireFields(distributions, "distributions", ["related_table", "amount"]);
   requireNumericFields(distributions, "distributions", ["amount", "related_id", "related_sub_id"]);
@@ -172,7 +173,7 @@ function parseTransactionDistributions(input: string): TransactionDistribution[]
   return distributions as unknown as TransactionDistribution[];
 }
 
-export function parseSaleInvoiceItems(input: string): SaleInvoiceItem[] {
+export function parseSaleInvoiceItems(input: unknown): SaleInvoiceItem[] {
   const items = parseJsonObjectArray(input, "items");
   requireFields(items, "items", ["products_id", "custom_title", "amount"]);
   requireNumericFields(items, "items", [
@@ -185,7 +186,7 @@ export function parseSaleInvoiceItems(input: string): SaleInvoiceItem[] {
   return items as unknown as SaleInvoiceItem[];
 }
 
-export function parsePurchaseInvoiceItems(input: string): PurchaseInvoiceItem[] {
+export function parsePurchaseInvoiceItems(input: unknown): PurchaseInvoiceItem[] {
   const items = parseJsonObjectArray(input, "items");
   requireFields(items, "items", ["cl_purchase_articles_id", "custom_title"]);
   requireNumericFields(items, "items", [
@@ -204,6 +205,19 @@ const pageParam = z.object({
 
 export const coerceId = z.coerce.number().int().positive();
 const idParam = z.object({ id: coerceId.describe("Object ID") });
+export const jsonObjectInput = z.union([
+  z.record(z.unknown()),
+  z.string(),
+]);
+export const jsonObjectArrayInput = z.union([
+  z.array(z.record(z.unknown())),
+  z.string(),
+]);
+export const jsonObjectOrArrayInput = z.union([
+  z.record(z.unknown()),
+  z.array(z.record(z.unknown())),
+  z.string(),
+]);
 
 const MCP_TAG = "e-arveldaja-mcp";
 
@@ -356,7 +370,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "update_client", "Update an existing client. Server-managed fields (id, is_active, deactivated_date) are rejected — use the dedicated deactivate/restore tools.", {
     id: coerceId.describe("Client ID"),
-    data: z.string().describe("JSON object with fields to update"),
+    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
   }, { ...mutate, title: "Update Client" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const updateErrors = validateUpdateFields(parsed, "client");
@@ -369,7 +383,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Updated client ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "updated",
+      entity: "client",
+      id,
+      message: `Updated client ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "deactivate_client", "Deactivate a client (can be restored with restore_client)", idParam.shape, { ...mutate, title: "Deactivate Client" }, async ({ id }) => {
@@ -403,7 +423,23 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     code: z.string().describe("Business registry code or personal ID"),
   }, { ...readOnly, title: "Find Client by Registry Code" }, async ({ code }) => {
     const result = await api.clients.findByCode(code);
-    return { content: [{ type: "text", text: result ? toMcpJson(result) : "Not found" }] };
+    return result
+      ? toolResponse({
+        action: "found",
+        entity: "client",
+        id: result.id,
+        found: true,
+        message: `Found client for registry code ${code}.`,
+        raw: result,
+      })
+      : toolResponse({
+        ok: false,
+        action: "found",
+        entity: "client",
+        found: false,
+        message: `No client found for registry code ${code}.`,
+        raw: null,
+      });
   });
 
   // =====================
@@ -440,12 +476,18 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       summary: `Created product "${params.name}" (${params.code})`,
       details: { name: params.name, code: params.code, sales_price: params.sales_price },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "created",
+      entity: "product",
+      id: result.created_object_id,
+      message: `Created product "${params.name}" (${params.code}).`,
+      raw: result,
+    });
   });
 
   registerTool(server, "update_product", "Update a product. Server-managed fields (id, is_active, deactivated_date) are rejected — use the dedicated deactivate/restore tools.", {
     id: coerceId.describe("Product ID"),
-    data: z.string().describe("JSON object with fields to update"),
+    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
   }, { ...mutate, title: "Update Product" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const updateErrors = validateUpdateFields(parsed, "product");
@@ -563,8 +605,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     clients_id: z.number().optional().describe("Related client ID"),
     document_number: z.string().optional().describe("Document number"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
-    postings: z.string().describe(
-      "JSON array of postings: [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, base_amount?, projects_project_id?, projects_location_id?, projects_person_id?}]. " +
+    postings: jsonObjectArrayInput.describe(
+      "Array of postings: [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, base_amount?, projects_project_id?, projects_location_id?, projects_person_id?}]. Legacy callers may still pass a JSON array string. " +
       "accounts_dimensions_id is REQUIRED when accounts_id refers to an account with sub-accounts (use list_account_dimensions to look it up). " +
       "base_amount is the EUR equivalent for multi-currency entries (when cl_currencies_id is not EUR). " +
       "projects_project_id / projects_location_id / projects_person_id link the posting to project tracking dimensions."
@@ -603,12 +645,18 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         })),
       },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "created",
+      entity: "journal",
+      id: result.created_object_id,
+      message: `Created journal${params.title ? ` "${params.title}"` : ""} on ${params.effective_date}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "update_journal", "Update a journal entry. Server-managed fields (id, registered, register_date, status) are rejected — use the dedicated confirm/invalidate tools. Once the journal is registered, effective_date is audit-locked; invalidate_journal first to edit it.", {
     id: coerceId.describe("Journal ID"),
-    data: z.string().describe("JSON object with fields to update"),
+    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const current = await api.journals.get(id);
@@ -856,8 +904,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     "For invoice distributions, clients_id is auto-resolved from the invoice.",
     {
     id: coerceId.describe("Transaction ID"),
-    distributions: z.string().optional().describe(
-      "JSON array of distribution rows: [{related_table, related_id, related_sub_id?, amount}]. " +
+      distributions: jsonObjectArrayInput.optional().describe(
+        "Array of distribution rows: [{related_table, related_id, related_sub_id?, amount}]. Legacy callers may still pass a JSON array string. " +
       "related_table values: 'accounts' (book to a GL account), 'purchase_invoices', 'sale_invoices'. " +
       "related_id is REQUIRED for all three related_table values (the account ID, purchase-invoice ID, or sale-invoice ID). " +
       "related_sub_id is REQUIRED when related_table='accounts' and the account has dimensions — " +
@@ -909,7 +957,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "update_transaction", "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference.", {
     id: coerceId.describe("Transaction ID"),
-    data: z.string().describe("JSON object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description, ref_number"),
+    data: jsonObjectInput.describe("Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description, ref_number. Legacy callers may still pass a JSON object string."),
   }, { ...mutate, title: "Update Transaction" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const validationErrors = validateTransactionUpdateData(parsed);
@@ -1067,8 +1115,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
     cl_countries_id: z.string().optional().describe("Country (default EST)"),
     sale_invoice_type: z.string().optional().describe("Type: INVOICE or CREDIT_INVOICE"),
     show_client_balance: z.boolean().optional().describe("Show client balance on invoice"),
-    items: z.string().describe(
-      "JSON array of invoice items: [{products_id, custom_title, amount, unit_net_price, sale_accounts_id?, sale_accounts_dimensions_id?, vat_accounts_id?, cl_sale_articles_id?, discount_percent?, projects_project_id?, projects_location_id?, projects_person_id?}]. " +
+      items: jsonObjectArrayInput.describe(
+        "Array of invoice items: [{products_id, custom_title, amount, unit_net_price, sale_accounts_id?, sale_accounts_dimensions_id?, vat_accounts_id?, cl_sale_articles_id?, discount_percent?, projects_project_id?, projects_location_id?, projects_person_id?}]. Legacy callers may still pass a JSON array string. " +
       "sale_accounts_dimensions_id is REQUIRED when the revenue account has dimensions (sub-accounts). Use list_account_dimensions to look up dimension IDs. " +
       "Note: SaleInvoicesItems schema has no vat_accounts_dimensions_id field — only the purchase side does."
     ),
@@ -1104,7 +1152,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "update_sale_invoice", "Update a sales invoice. Server-managed fields (id, status, registered, register_date) are rejected — use the dedicated confirm/invalidate tools. Once CONFIRMED, create_date and journal_date are audit-locked; invalidate_sale_invoice first to edit them.", {
     id: coerceId.describe("Invoice ID"),
-    data: z.string().describe("JSON with fields to update"),
+    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const current = await api.saleInvoices.get(id);
@@ -1207,8 +1255,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       gross_price: z.number().describe("Total gross amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
-      items: z.string().describe(
-        "JSON array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. " +
+      items: jsonObjectArrayInput.describe(
+        "Array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. Legacy callers may still pass a JSON array string. " +
         "purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts). Same rule applies to vat_accounts_dimensions_id when the VAT account has dimensions. Use list_account_dimensions to look up dimension IDs."
       ),
       notes: z.string().optional().describe("Notes"),
@@ -1265,7 +1313,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "update_purchase_invoice", "Update a purchase invoice. Server-managed fields (id, status, registered, register_date, payment_status) are rejected — use the dedicated confirm/invalidate tools. Once CONFIRMED, create_date and journal_date are audit-locked; invalidate_purchase_invoice first to edit them.", {
     id: coerceId.describe("Invoice ID"),
-    data: z.string().describe("JSON with fields to update"),
+    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const current = await api.purchaseInvoices.get(id);

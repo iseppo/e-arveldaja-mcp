@@ -14,6 +14,7 @@ import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { normalizeCompanyName } from "../company-name.js";
+import { approvalPreviewsFromDryRunSteps, buildWorkflowEnvelope } from "../workflow-response.js";
 
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -1098,12 +1099,35 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
           },
         })),
       }));
+      const workflowArgs = {
+        file_path,
+        accounts_dimensions_id,
+        ...(date_from ? { date_from } : {}),
+        ...(date_to ? { date_to } : {}),
+        execute: false,
+      };
+      const workflowSummary = dryRun
+        ? `CAMT dry run would create ${summary.created_count} bank transaction(s), skip ${summary.skipped_count}, flag ${summary.possible_duplicate_count} possible duplicate(s), and report ${summary.error_count} error(s).`
+        : `CAMT import created ${summary.created_count} bank transaction(s), skipped ${summary.skipped_count}, flagged ${summary.possible_duplicate_count} possible duplicate(s), and reported ${summary.error_count} error(s).`;
+      const workflow = buildWorkflowEnvelope({
+        summary: workflowSummary,
+        needs_review: sanitizedPossibleDuplicates,
+        approval_previews: dryRun
+          ? approvalPreviewsFromDryRunSteps([{
+              tool: "import_camt053",
+              summary: workflowSummary,
+              suggested_args: workflowArgs,
+              preview: summary,
+            }])
+          : [],
+      });
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             mode,
             summary,
+            workflow,
             statement_metadata: sanitizedStatementMetadata,
             total_statement_entries: summary.total_statement_entries,
             eligible_entries: summary.eligible_entries,

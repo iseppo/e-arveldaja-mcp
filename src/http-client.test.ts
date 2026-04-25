@@ -149,6 +149,56 @@ describe("HttpClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    [400, "/purchase_invoices", "Validate the request body", "list_account_dimensions"],
+    [422, "/journals", "Validate the request body", "list_accounts"],
+    [403, "/clients", "Check API token permissions", "get_setup_instructions"],
+    [404, "/clients/123", "Verify that the referenced record still exists", "search_client"],
+    [409, "/purchase_invoices", "Resolve the conflict before retrying", "detect_duplicate_purchase_invoice"],
+  ])("adds recovery hints and next actions for HTTP %i", async (status, path, hintText, nextTool) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ messages: ["Upstream validation text"] }), {
+        status,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config);
+
+    try {
+      await client.get(path);
+      expect.fail("should have thrown");
+    } catch (err) {
+      const e = err as Error & { recovery_hint?: string; next_actions?: Array<{ tool: string }> };
+      expect(e.recovery_hint).toContain(hintText);
+      expect(e.next_actions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tool: nextTool }),
+      ]));
+    }
+  });
+
+  it("adds a rate-limit recovery hint without advertising a non-existent retry tool", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValue(new Response(JSON.stringify({ messages: ["rate limited"] }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config);
+    const promise = client.post("/transactions", { amount: 10 });
+    const expectation = expect(promise).rejects.toMatchObject({
+      recovery_hint: expect.stringContaining("Wait before retrying"),
+      next_actions: undefined,
+    });
+
+    await vi.runAllTimersAsync();
+
+    await expectation;
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
   it("blocks a request before fetch when the request guard rejects", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

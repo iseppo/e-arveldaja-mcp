@@ -12,7 +12,7 @@ import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { type ApiContext, isCompanyVatRegistered, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
+import { type ApiContext, isCompanyVatRegistered, jsonObjectOrArrayInput, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import {
@@ -58,6 +58,7 @@ import {
   buildClassificationReviewGuidance,
   buildReceiptReviewGuidance,
 } from "../estonian-accounting-guidance.js";
+import { approvalPreviewsFromDryRunSteps, buildWorkflowEnvelope } from "../workflow-response.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const FILE_TYPE_EXTENSIONS = {
@@ -1585,6 +1586,28 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       };
       const mode = dryRun ? "DRY_RUN" : "EXECUTED";
       const sanitizedResults = results.map(sanitizeReceiptResultForOutput);
+      const workflowArgs = {
+        folder_path,
+        accounts_dimensions_id,
+        ...(date_from ? { date_from } : {}),
+        ...(date_to ? { date_to } : {}),
+        execute: false,
+      };
+      const workflowSummary = dryRun
+        ? `Receipt dry run would create ${summary.dry_run_preview} purchase invoice(s), match ${summary.matched}, skip ${summary.skipped_duplicate} duplicate(s), leave ${summary.needs_review} in review, and fail ${summary.failed}.`
+        : `Receipt batch created ${summary.created} purchase invoice(s), matched ${summary.matched}, skipped ${summary.skipped_duplicate} duplicate(s), left ${summary.needs_review} in review, and failed ${summary.failed}.`;
+      const workflow = buildWorkflowEnvelope({
+        summary: workflowSummary,
+        needs_review: sanitizedResults.filter(result => result.status === "needs_review"),
+        approval_previews: dryRun
+          ? approvalPreviewsFromDryRunSteps([{
+              tool: "process_receipt_batch",
+              summary: workflowSummary,
+              suggested_args: workflowArgs,
+              preview: summary,
+            }])
+          : [],
+      });
 
       return {
         content: [{
@@ -1594,6 +1617,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             folder_path: scan.folder_path,
             accounts_dimensions_id,
             summary,
+            workflow,
             skipped: scan.skipped,
             results: sanitizedResults,
             execution: buildBatchExecutionContract({
@@ -1722,13 +1746,15 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     "apply_transaction_classifications",
     "Apply the output of classify_unmatched_transactions. DRY RUN by default. Only expense-like categories are auto-booked as purchase invoices; review-only categories are reported back.",
     {
-      classifications_json: z.string().describe("JSON from classify_unmatched_transactions"),
+      classifications_json: jsonObjectOrArrayInput.describe("Structured output from classify_unmatched_transactions. Legacy callers may still pass a JSON string."),
       execute: z.boolean().optional().describe("Actually create invoices and link transactions (default false = dry run)"),
     },
     { ...batch, title: "Apply Transaction Classifications" },
     async ({ classifications_json, execute }) => {
       const dryRun = execute !== true;
-      const parsed = safeJsonParse(classifications_json, "classifications_json");
+      const parsed = typeof classifications_json === "string"
+        ? safeJsonParse(classifications_json, "classifications_json")
+        : classifications_json;
       const groups = extractClassificationGroups(parsed);
 
       const [clients, purchaseArticlesWithVat, purchaseInvoices, accounts] = await Promise.all([
@@ -1997,6 +2023,24 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         failed: results.filter(result => result.status === "failed").length,
       };
       const mode = dryRun ? "DRY_RUN" : "EXECUTED";
+      const workflowArgs = {
+        classifications_json,
+        execute: false,
+      };
+      const workflowSummary = dryRun
+        ? `Classification dry run would create ${summary.dry_run_preview} purchase invoice group(s), skip ${summary.skipped}, and fail ${summary.failed}.`
+        : `Applied ${summary.applied} classification group(s), skipped ${summary.skipped}, and failed ${summary.failed}.`;
+      const workflow = buildWorkflowEnvelope({
+        summary: workflowSummary,
+        approval_previews: dryRun
+          ? approvalPreviewsFromDryRunSteps([{
+              tool: "apply_transaction_classifications",
+              summary: workflowSummary,
+              suggested_args: workflowArgs,
+              preview: summary,
+            }])
+          : [],
+      });
 
       return {
         content: [{
@@ -2005,6 +2049,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             mode,
             dry_run: dryRun,
             summary,
+            workflow,
             results,
             execution: buildBatchExecutionContract({
               mode,

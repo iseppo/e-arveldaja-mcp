@@ -16,6 +16,7 @@ import { roundMoney } from "../money.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { buildInterAccountJournalIndex, findMatchingJournal } from "./inter-account-utils.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
+import { approvalPreviewsFromDryRunSteps, buildWorkflowEnvelope } from "../workflow-response.js";
 
 interface WiseRow {
   id: string;
@@ -844,6 +845,32 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       }));
       const sanitizedExecutionSkipped = executionSkipped.map(sanitizeReason);
       const sanitizedExecutionErrors = executionErrors.map(sanitizeReason);
+      const workflowArgs = {
+        file_path,
+        accounts_dimensions_id,
+        ...(feeAccountDimensionsId !== undefined ? { fee_account_dimensions_id: feeAccountDimensionsId } : {}),
+        ...((inter_account_dimension_id ?? autoDetectedInterAccountDimId) !== undefined
+          ? { inter_account_dimension_id: inter_account_dimension_id ?? autoDetectedInterAccountDimId }
+          : {}),
+        ...(date_from ? { date_from } : {}),
+        ...(date_to ? { date_to } : {}),
+        ...(skip_jar_transfers !== undefined ? { skip_jar_transfers } : {}),
+        execute: false,
+      };
+      const workflowSummary = dryRun
+        ? `Wise dry run would create ${summary.created} bank transaction(s), skip ${summary.skipped}, and report ${summary.error_count} error(s).`
+        : `Wise import created ${summary.created} bank transaction(s), skipped ${summary.skipped}, and reported ${summary.error_count} error(s).`;
+      const workflow = buildWorkflowEnvelope({
+        summary: workflowSummary,
+        approval_previews: dryRun
+          ? approvalPreviewsFromDryRunSteps([{
+              tool: "import_wise_transactions",
+              summary: workflowSummary,
+              suggested_args: workflowArgs,
+              preview: summary,
+            }])
+          : [],
+      });
 
       return {
         content: [{
@@ -851,6 +878,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
           text: toMcpJson({
             mode,
             summary,
+            workflow,
             total_csv_rows: summary.total_csv_rows,
             eligible: summary.eligible,
             filtered_out: summary.filtered_out,
