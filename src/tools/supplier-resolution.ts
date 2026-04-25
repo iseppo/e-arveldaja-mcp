@@ -2,6 +2,7 @@ import { closest, distance } from "fastest-levenshtein";
 import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
+import { normalizeCompanyName } from "../company-name.js";
 import {
   type ExtractedReceiptFields,
   type TransactionClassificationCategory,
@@ -19,7 +20,7 @@ export type SupplierIdentityFields = Pick<ExtractedReceiptFields, "supplier_name
 export interface SupplierResolution {
   found: boolean;
   created: boolean;
-  match_type?: "registry_code" | "vat_no" | "name_fuzzy" | "created";
+  match_type?: "registry_code" | "vat_no" | "name_normalized" | "name_fuzzy" | "created";
   client?: Client;
   preview_client?: Partial<Client>;
   registry_data?: Record<string, string> | null;
@@ -154,6 +155,23 @@ export async function resolveSupplierInternal(
 
   if (fields.supplier_name) {
     const activeClients = clients.filter(client => !client.is_deleted && !isSelfClient(client));
+
+    // First try a normalized-name exact match. Strips legal-form suffixes
+    // (LLC, Inc, PBC, AG, …) and punctuation, so an invoice supplier like
+    // "Anthropic, PBC" finds an existing "Anthropic" client. Without this
+    // tier, the fuzzy fallback's 0.7 similarity threshold rejects the
+    // pair (≈0.62) and the supplier_history lookup that drives reuse of
+    // prior bookings never fires.
+    const normalizedSupplierName = normalizeCompanyName(fields.supplier_name);
+    if (normalizedSupplierName) {
+      const normalizedExactMatch = activeClients.find(
+        client => normalizeCompanyName(client.name) === normalizedSupplierName,
+      );
+      if (normalizedExactMatch) {
+        return { found: true, created: false, match_type: "name_normalized", client: normalizedExactMatch };
+      }
+    }
+
     const names = activeClients.map(client => client.name);
     if (names.length > 0) {
       const bestMatch = closest(fields.supplier_name, names);

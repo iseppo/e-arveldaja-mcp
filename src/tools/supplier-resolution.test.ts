@@ -80,13 +80,14 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       { ownCompanyVat: "EE102809963" },
     );
 
-    // VAT match against ourselves is blocked, but the fuzzy-name fallback
-    // still resolves to the legitimate supplier. self_match_blocked is
-    // intentionally NOT set on found:true returns: the returned client is
-    // not suspect. The own-VAT-on-page note is surfaced separately at the
-    // receipt-inbox layer via detectSelfVatOnly.
+    // VAT match against ourselves is blocked, but a name match still
+    // resolves the legitimate supplier (here via the normalized-name
+    // tier — both names reduce to "anthropic"). self_match_blocked is
+    // intentionally NOT set on found:true returns: the returned client
+    // is not suspect. The own-VAT-on-page note is surfaced separately
+    // at the receipt-inbox layer via detectSelfVatOnly.
     expect(result.found).toBe(true);
-    expect(result.match_type).toBe("name_fuzzy");
+    expect(result.match_type).toBe("name_normalized");
     expect(result.client?.id).toBe(200);
     expect(result.self_match_blocked).toBeUndefined();
   });
@@ -195,6 +196,36 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
 
     expect(result.found).toBe(false);
     expect(result.self_match_blocked).toBe(true);
+  });
+
+  it("resolves to an existing client by normalized name when only the legal-form suffix differs", async () => {
+    // The Anthropic case from PR #21: existing client is named just
+    // "Anthropic"; the new invoice's supplier_name is "Anthropic, PBC".
+    // Without the normalized-name tier, the fuzzy threshold (0.7) rejects
+    // this pair (~0.62) and supplier_history misses 3 prior bookings.
+    const ownCompany = makeClient({
+      id: 100,
+      name: "Seppo AI OÜ",
+      invoice_vat_no: "EE102809963",
+    });
+    const anthropic = makeClient({
+      id: 200,
+      name: "Anthropic",
+      invoice_vat_no: null,
+      cl_code_country: "USA",
+    });
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [ownCompany, anthropic],
+      { supplier_name: "Anthropic, PBC" },
+      false,
+      { ownCompanyVat: "EE102809963" },
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.match_type).toBe("name_normalized");
+    expect(result.client?.id).toBe(200);
   });
 
   it("still resolves a real supplier when only the supplier's VAT is provided", async () => {
