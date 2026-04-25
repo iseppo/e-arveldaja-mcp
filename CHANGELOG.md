@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Self-VAT supplier resolution** (closes #14) — when an invoice prints only the buyer's VAT (e.g. Anthropic receipts that carry no supplier VAT), the deterministic extractor used to pick up the buyer's own EE-VAT and resolve the supplier to the active company itself. `extractVatNumber` now accepts an `exclude` option, `extractPdfIdentifiers` / `extractReceiptFieldsFromText` accept `ownCompanyVat`, and `resolveSupplierInternal` refuses any registry-code / VAT / fuzzy-name match that resolves to a client whose VAT equals the active company's. The previewed new-client never carries the buyer's own VAT. `process_receipt_batch` now reads `/vat_info` once, threads ownCompanyVat through extraction and resolution, surfaces `self_match_blocked` in the response, and adds explanatory notes when the only VAT on the page was ours.
+- **Currency silently defaulting to EUR for USD invoices** (closes #16) — Estonian-language OpenAI invoices print amounts as `40,00 $`. `RECEIPT_CURRENCY_PATTERNS` now matches `$` adjacent to digits as USD and `£` as GBP, in addition to the bare currency codes. `detectReceiptCurrency` returns `string | undefined` rather than silently falling back to "EUR" when no currency token can be bound to an amount line. `summarizeInvoiceExtraction` treats currency as a required field when `total_gross` is set, so missing-currency cases trigger the LLM-fallback recommendation.
+- **Payment receipts double-booking as separate invoices** (closes #15) — Anthropic / Stripe-style payment confirmations (filename `Receipt-*.pdf`, "Receipt" header line, body containing "Date paid" / "Amount paid" / "Payment history" with a referenced invoice number) used to be classified as `purchase_invoice`. `process_receipt_batch` then queued them alongside the underlying invoice and would have created a duplicate on execute. `ReceiptClassification` gains a `payment_receipt` variant; the classifier requires both indicator phrases AND an invoice-number reference AND a structural signal (header or filename) before flagging the new class; `process_receipt_batch` routes payment receipts to `needs_review` with a note pointing at the underlying invoice number.
+
 ## [0.12.1] - 2026-04-25
 
 ### Changed
