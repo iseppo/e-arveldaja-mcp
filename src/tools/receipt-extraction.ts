@@ -36,10 +36,16 @@ const SUPPLIER_METADATA_RE =
   /\b(?:telefon|phone|e-?post|email|kodulehekülg|website|web|iban|swift|reg\.?\s*(?:nr|code)|registrikood|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id|payment method|makseviis|kuupäev|date|due date|maksetähtaeg)\b[:]?/i;
 const SUPPLIER_INVALID_LINE_RE =
   /\b(arve|invoice|receipt|kviitung|tšekk|tsekk|summa|kokku|total|date|kuupäev|due|tasuda|maksta|toode|teenus|qty|kogus|hind|amount|subtotal|shipping|transport|käibemaks|vat|tax)\b/i;
+// Currency detection runs over lines that already contain numeric amounts
+// (see detectReceiptCurrency), so symbol-only patterns like `$` and `£` are
+// safe — they won't fire on prose. The dollar pattern requires digit
+// adjacency (`$40` or `40 $`) to defend against lines that mention "$" in
+// reference data without a numeric. Without these symbol patterns, Estonian
+// USD invoices like "40,00 $" silently default to EUR (#16).
 const RECEIPT_CURRENCY_PATTERNS = [
   { code: "EUR", pattern: /\bEUR\b|€/i },
-  { code: "USD", pattern: /\bUSD\b|\bUS\$/i },
-  { code: "GBP", pattern: /\bGBP\b/i },
+  { code: "USD", pattern: /\bUSD\b|US\$|\$\s*\d|\d\s*\$/i },
+  { code: "GBP", pattern: /\bGBP\b|£/i },
   { code: "SEK", pattern: /\bSEK\b/i },
   { code: "NOK", pattern: /\bNOK\b/i },
   { code: "DKK", pattern: /\bDKK\b/i },
@@ -498,7 +504,13 @@ export function inferSupplierCountry(fields: Pick<ExtractedReceiptFields, "suppl
     "EST";
 }
 
-export function detectReceiptCurrency(text: string): string {
+/**
+ * Detect the receipt's currency from amount-bearing lines. Returns
+ * `undefined` when no currency token is found rather than silently
+ * defaulting to EUR — see issue #16. Callers that need a downstream
+ * default still handle it explicitly via `?? "EUR"`.
+ */
+export function detectReceiptCurrency(text: string): string | undefined {
   const lines = text
     .split(/\r?\n/)
     .map(clampTextLine)
@@ -515,7 +527,7 @@ export function detectReceiptCurrency(text: string): string {
     }
   }
 
-  return "EUR";
+  return undefined;
 }
 
 export function normalizeDate(raw: string): string | undefined {

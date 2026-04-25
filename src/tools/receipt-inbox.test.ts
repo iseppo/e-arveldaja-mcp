@@ -289,8 +289,23 @@ describe("detectReceiptCurrency", () => {
     expect(detectReceiptCurrency("Amount due 12.50 USD")).toBe("USD");
   });
 
-  it("defaults to EUR when no currency marker is present", () => {
-    expect(detectReceiptCurrency("Kokku 24,40")).toBe("EUR");
+  it("detects USD from a Estonian-style amount with a trailing dollar sign (#16)", () => {
+    // OpenAI Estonian invoices print amounts as "40,00 $".
+    expect(detectReceiptCurrency("Kokku 40,00 $")).toBe("USD");
+  });
+
+  it("detects USD from a leading dollar sign", () => {
+    expect(detectReceiptCurrency("Total $90.00")).toBe("USD");
+  });
+
+  it("detects GBP from the £ symbol", () => {
+    expect(detectReceiptCurrency("Total £42.00")).toBe("GBP");
+  });
+
+  it("returns undefined when no currency marker is present (#16)", () => {
+    // Previously defaulted to EUR — silent default masks USD invoices like
+    // OpenAI's Estonian receipts. Callers add their own EUR fallback.
+    expect(detectReceiptCurrency("Kokku 24,40")).toBeUndefined();
   });
 });
 
