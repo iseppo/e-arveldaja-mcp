@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## [0.12.0] - 2026-04-25
 
 ### Added
+- **Workflow recommendation tool** — `recommend_workflow` suggests the safest e-arveldaja workflow for a natural-language accounting goal, or lists common workflows when the goal is not yet known.
 - **Guided workflow continuation** — `continue_accounting_workflow` reads a previous accounting inbox or workflow response and returns the next user-facing action: one question, one review item, one approval card, or one safe dry-run call.
-- **Standard workflow action envelope** — workflow recommendation and accounting inbox responses now include a `workflow_action_v1` block with `done`, `needs_decision`, `needs_review`, `recommended_next_action`, `available_actions`, and `approval_previews`.
+- **Standard workflow action envelope** — workflow recommendation, accounting inbox, CAMT import, Wise import, receipt batch, and classification batch responses now include a `workflow_action_v1` block with `done`, `needs_decision`, `needs_review`, `recommended_next_action`, `available_actions`, and `approval_previews`.
 
 ## [0.11.8] - 2026-04-24
 
