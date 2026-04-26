@@ -1868,7 +1868,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           // confirmed in one shot. With the confidence model in place we
           // refuse to auto-create+confirm any row whose final confidence
           // is "low" — silent miscoding is the worse failure than holding
-          // the row for review. Dry runs always proceed (preview only).
+          // the row for review.
           //
           // We additionally gate `foreign_reverse_charge_default_unverified`
           // at medium: that signal means we auto-applied reverse-charge
@@ -1879,14 +1879,20 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           // blanket "block all medium" is too aggressive here because
           // `booking_not_from_history` makes many legitimate keyword
           // bookings medium too; only this specific signal is gated.
+          //
+          // Dry-run mirrors the same gate so `dry_run_preview` and the
+          // approval card it feeds reflect what `execute=true` would
+          // actually do — otherwise the preview promises a booking that
+          // the executor will refuse and route to review.
           const preCreateSummary = summarize();
           const foreignDefaultUnverified = preCreateSummary.confidence_signals.includes(
             "foreign_reverse_charge_default_unverified",
           );
-          if (!dryRun && (preCreateSummary.confidence === "low" || foreignDefaultUnverified)) {
+          if (preCreateSummary.confidence === "low" || foreignDefaultUnverified) {
             const reasons = preCreateSummary.confidence_signals.join(", ") || "low confidence";
+            const tense = dryRun ? "would be skipped" : "skipped";
             notes.push(
-              `Auto-create skipped: confidence is ${preCreateSummary.confidence} (${reasons}). Manual review required before booking (#19).`,
+              `Auto-create ${tense}: confidence is ${preCreateSummary.confidence} (${reasons}). Manual review required before booking (#19).`,
             );
             results.push({
               file,

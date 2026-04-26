@@ -138,7 +138,11 @@ const WORKFLOWS: WorkflowGuide[] = [
     },
     next_actions: [{
       tool: "process_receipt_batch",
-      args: { folder_path: "<absolute receipt folder path>", execute: false },
+      args: {
+        folder_path: "<absolute receipt folder path>",
+        accounts_dimensions_id: "<bank account dimension id used when matching bank transactions>",
+        execute: false,
+      },
       why: "Batch receipt processing should separate high-confidence candidates from review items first.",
     }],
     keywords: ["receipt", "batch", "ocr", "expenses", "folder", "images"],

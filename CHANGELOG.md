@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-04-26
+
+### Added
+- **Optional stderr debug log file** — set `EARVELDAJA_LOG_FILE=/path/to/mcp.err.log` to tee everything the server writes to stderr (startup warnings, fatal errors, and the structured logger output once the MCP transport is up) into the given file in append mode (`0o600`). Off by default. Cross-platform (Linux, macOS, Windows). Useful when the MCP host swallows stderr. The path is required to be a regular file — pipes, devices, sockets, `/dev/stdout`, and `/proc/self/fd/*` are refused with a warning so the tee cannot corrupt the MCP stdio transport.
+
+### Fixed
+- **`process_receipt_batch` dry-run preview lied about what `execute=true` would do** — the contract gate (#19) for `low` confidence and `foreign_reverse_charge_default_unverified` only ran when `execute=true`. In dry-run mode, gated rows were still labelled `dry_run_preview` and surfaced in the approval card, even though running with `execute=true` would refuse them and route to review. The gate now mirrors in both modes, so dry-run output and approval previews truthfully reflect what execution would do. Existing summary fields and review wording adapt (`Auto-create would be skipped: ...` in dry-run vs `Auto-create skipped: ...` on execute).
+- **`recommend_workflow` `receipt-batch` next-action was not directly runnable** — the suggested args for `process_receipt_batch` omitted the required `accounts_dimensions_id`, so the recommendation failed schema validation when invoked verbatim. Now includes the placeholder `<bank account dimension id used when matching bank transactions>`, matching the CAMT/Wise next-action shape.
+
 ### Changed
 - **Reduced MCP response token cost** — two changes targeting the heaviest response paths:
   - `tool-response.ts` envelope no longer spreads `raw` fields at the root in addition to keeping the `raw:` payload. Previously every `toolResponse(...)` call duplicated the full API payload (~2× envelope size). Consumers now read API fields under `result.raw.*`; envelope meta (`ok`, `action`, `entity`, `id`, `found`, `message`, `warnings`, `next_actions`) and explicit `extra` fields stay at the root.

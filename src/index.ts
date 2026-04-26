@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { installStderrTee } from "./stderr-tee.js";
+installStderrTee();
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -1042,9 +1044,14 @@ If the server is already configured, say that explicitly and treat this as recon
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Route log output through MCP logging protocol
+  // Route log output through MCP logging protocol. When EARVELDAJA_LOG_FILE
+  // is set, also mirror via stderr (the stderr-tee captures it to the file).
+  const debugLogFile = process.env.EARVELDAJA_LOG_FILE && process.env.EARVELDAJA_LOG_FILE.trim() !== "";
   setLogger((level, message) => {
     server.sendLoggingMessage({ level, data: message });
+    if (debugLogFile) {
+      process.stderr.write(`[${level}] ${message}\n`);
+    }
   });
 
   if (setupMode) {

@@ -6,12 +6,12 @@
     "url": "https://github.com/iseppo/e-arveldaja-mcp",
     "source": "github"
   },
-  "version": "0.12.3",
+  "version": "0.12.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "e-arveldaja-mcp",
-      "version": "0.12.3",
+      "version": "0.12.4",
       "transport": {
         "type": "stdio"
       },
@@ -55,6 +55,13 @@
         {
           "name": "EARVELDAJA_DISABLE_PROGRESS",
           "description": "Set to \"1\" or \"true\" to disable MCP progress notifications. Workaround for clients that close the stdio transport when a progress notification arrives after the matching response has been processed.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "EARVELDAJA_LOG_FILE",
+          "description": "Absolute path to a regular file. When set, everything the server writes to stderr is also appended to this file (mode 0o600). Off by default. Cross-platform. Useful when the MCP host swallows stderr. Pipes, devices, sockets, /dev/stdout, and /proc/self/fd/* are refused so the tee cannot corrupt the MCP stdio transport.",
           "isRequired": false,
           "isSecret": false,
           "format": "string"
