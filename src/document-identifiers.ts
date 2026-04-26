@@ -17,8 +17,38 @@ export function extractRegistryCode(text: string): string | undefined {
   return text.match(/(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry code)[:\s]*(\d{8})/i)?.[1];
 }
 
-export function extractVatNumber(text: string): string | undefined {
-  const matches = [...text.matchAll(/(?:KMKR|VAT(?:\s*(?:nr|number|no\.?))?|KM\s*nr|KM-number|Tax ID)[:\s]*([A-Z]{2}[0-9A-Z]{6,})/gi)];
+export interface ExtractVatNumberOptions {
+  /**
+   * VAT number(s) that must NOT be returned. Used to keep the company's own
+   * VAT from being resolved as a supplier when an invoice prints only the
+   * buyer's VAT (e.g. foreign suppliers without an EE registration).
+   * See issue #14.
+   */
+  exclude?: string | readonly string[];
+}
+
+function normalizeVatList(value: string | readonly string[] | undefined): Set<string> {
+  if (!value) return new Set();
+  const list = typeof value === "string" ? [value] : value;
+  const set = new Set<string>();
+  for (const entry of list) {
+    const normalized = entry?.replace(/\s+/g, "").toUpperCase();
+    if (normalized) set.add(normalized);
+  }
+  return set;
+}
+
+export function extractVatNumber(text: string, options?: ExtractVatNumberOptions): string | undefined {
+  const allMatches = [...text.matchAll(/(?:KMKR|VAT(?:\s*(?:nr|number|no\.?))?|KM\s*nr|KM-number|Tax ID)[:\s]*([A-Z]{2}[0-9A-Z]{6,})/gi)];
+  if (allMatches.length === 0) return undefined;
+
+  const exclude = normalizeVatList(options?.exclude);
+  const matches = exclude.size === 0
+    ? allMatches
+    : allMatches.filter(match => {
+        const candidate = match[1]?.replace(/\s+/g, "").toUpperCase();
+        return candidate ? !exclude.has(candidate) : true;
+      });
   if (matches.length === 0) return undefined;
 
   const buyerSectionIndex = text.search(/\b(bill to|invoice to|arve saaja|klient|client)\b/i);

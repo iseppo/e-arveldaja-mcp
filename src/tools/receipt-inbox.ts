@@ -866,10 +866,38 @@ async function scanReceiptFolderInternal(folderPath: string, fileTypes?: FileTyp
   };
 }
 
-async function extractReceiptFields(file: ReceiptFileInfo): Promise<ExtractedReceiptFields> {
+async function extractReceiptFields(
+  file: ReceiptFileInfo,
+  ownCompanyVat?: string,
+): Promise<ExtractedReceiptFields> {
   const validatedPath = await revalidateReceiptFilePath(file);
   const parsedDocument = await parseDocument(validatedPath);
-  return extractReceiptFieldsFromText(parsedDocument.text, file.name);
+  return extractReceiptFieldsFromText(parsedDocument.text, file.name, { ownCompanyVat });
+}
+
+function normalizeVatForCompare(value: string | undefined): string {
+  return (value ?? "").replace(/\s+/g, "").toUpperCase();
+}
+
+/**
+ * True when the document text contains the active company's own VAT and the
+ * deterministic extractor (called with own-VAT excluded) did NOT recover a
+ * different supplier VAT. Indicates the only VAT on the page was the
+ * buyer's own (#14): supplier resolution must not silently proceed to
+ * creating a duplicate of the active company.
+ *
+ * The check is a normalized-substring scan rather than a full re-run of
+ * extractVatNumber: extraction already ran once with `ownCompanyVat`
+ * excluded, so the only thing left to determine is whether ownVat appears
+ * anywhere in the page at all.
+ */
+export function detectSelfVatOnly(extracted: ExtractedReceiptFields, ownCompanyVat: string | undefined): boolean {
+  if (!ownCompanyVat || !extracted.raw_text) return false;
+  if (extracted.supplier_vat_no) return false;
+  const ownNormalized = normalizeVatForCompare(ownCompanyVat);
+  if (!ownNormalized) return false;
+  const normalizedText = extracted.raw_text.replace(/\s+/g, "").toUpperCase();
+  return normalizedText.includes(ownNormalized);
 }
 
 function findBestTransactionMatch(
@@ -1374,12 +1402,14 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     async ({ folder_path, accounts_dimensions_id, execute, date_from, date_to }) => {
       const dryRun = execute !== true;
       const scan = await scanReceiptFolderInternal(folder_path, undefined, date_from, date_to);
+      const vatInfo = await api.readonly.getVatInfo();
+      const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
       const context: ReceiptProcessingContext = {
         clients: await api.clients.listAll(),
         purchaseInvoices: await api.purchaseInvoices.listAll(),
         purchaseArticlesWithVat: await getPurchaseArticlesWithVat(api),
         accounts: await api.readonly.getAccounts(),
-        isVatRegistered: await isCompanyVatRegistered(api),
+        isVatRegistered: !!vatInfo.vat_number,
       };
       const allTransactions = await api.transactions.listAll();
       const bankTransactions = allTransactions.filter(transaction =>
@@ -1401,19 +1431,31 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         const notes: string[] = [];
 
         try {
-          const extracted = await extractReceiptFields(file);
+          const extracted = await extractReceiptFields(file, ownCompanyVat);
           const llmFallback = summarizeInvoiceExtraction(extracted);
           const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
+          const selfVatDetected = detectSelfVatOnly(extracted, ownCompanyVat);
 
           if (file.file_type !== "pdf") {
             notes.push("Image receipt OCR-parsed with LiteParse.");
+          }
+          if (selfVatDetected) {
+            notes.push(
+              "Document only printed the buyer's VAT (matches active company). Supplier VAT cleared — verify supplier manually before booking (#14).",
+            );
           }
 
           if (classification !== "purchase_invoice") {
             notes.push(
               classification === "owner_paid_expense_reimbursement"
                 ? "PDF looks like an owner-paid expense receipt. Review manually before booking."
-                : "Document could not be classified as a supplier purchase invoice.",
+                : classification === "payment_receipt"
+                  ? `Document is a payment receipt${
+                      extracted.invoice_number && !extracted.invoice_number.startsWith("AUTO-")
+                        ? ` for invoice ${extracted.invoice_number}`
+                        : ""
+                    }, not a separate purchase invoice. Booking it would duplicate the underlying invoice — attach to the existing invoice document instead (#15).`
+                  : "Document could not be classified as a supplier purchase invoice.",
             );
             maybeAddLlmFallbackNote(notes, llmFallback);
             results.push({
@@ -1453,7 +1495,18 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             continue;
           }
 
-          const supplierResolution = await resolveSupplierInternal(api, context.clients, extracted, !dryRun);
+          const supplierResolution = await resolveSupplierInternal(
+            api,
+            context.clients,
+            extracted,
+            !dryRun,
+            ownCompanyVat ? { ownCompanyVat } : undefined,
+          );
+          if (supplierResolution.self_match_blocked) {
+            notes.push(
+              "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
+            );
+          }
           if (!supplierResolution.client && !supplierResolution.preview_client) {
             notes.push("Supplier could not be resolved or prepared for creation.");
             maybeAddLlmFallbackNote(notes, llmFallback);

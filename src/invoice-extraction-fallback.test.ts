@@ -41,6 +41,7 @@ describe("summarizeInvoiceExtraction", () => {
     invoice_number: "INV-2024-001",
     invoice_date: "2024-01-15",
     total_gross: 121.0,
+    currency: "EUR",
     due_date: "2024-02-15",
     total_net: 100.0,
     total_vat: 21.0,
@@ -212,7 +213,42 @@ describe("summarizeInvoiceExtraction", () => {
         "supplier_vat_no",
         "supplier_iban",
         "ref_number",
+        "currency",
       ]);
+    });
+  });
+
+  describe("currency requirement (#16)", () => {
+    const baseWithGross = {
+      supplier_name: "Acme OÜ",
+      invoice_number: "INV-2024-001",
+      invoice_date: "2024-01-15",
+      total_gross: 100.0,
+      raw_text: "Invoice content",
+    };
+
+    it("treats currency as required when total_gross is present but currency is missing", () => {
+      const result = summarizeInvoiceExtraction(baseWithGross);
+      expect(result.missing_required_fields).toContain("currency");
+      expect(result.recommended).toBe(true);
+    });
+
+    it("treats currency as optional when total_gross is also missing", () => {
+      const result = summarizeInvoiceExtraction({
+        ...baseWithGross,
+        total_gross: undefined,
+      });
+      expect(result.missing_required_fields).not.toContain("currency");
+      expect(result.missing_optional_fields).toContain("currency");
+    });
+
+    it("does not flag currency when both total_gross and currency are present", () => {
+      const result = summarizeInvoiceExtraction({
+        ...baseWithGross,
+        currency: "USD",
+      });
+      expect(result.missing_required_fields).not.toContain("currency");
+      expect(result.missing_optional_fields).not.toContain("currency");
     });
   });
 });

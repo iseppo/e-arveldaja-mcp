@@ -2,6 +2,7 @@ import { closest, distance } from "fastest-levenshtein";
 import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
+import { normalizeCompanyName } from "../company-name.js";
 import {
   type ExtractedReceiptFields,
   type TransactionClassificationCategory,
@@ -19,18 +20,36 @@ export type SupplierIdentityFields = Pick<ExtractedReceiptFields, "supplier_name
 export interface SupplierResolution {
   found: boolean;
   created: boolean;
-  match_type?: "registry_code" | "vat_no" | "name_fuzzy" | "created";
+  match_type?: "registry_code" | "vat_no" | "name_normalized" | "name_fuzzy" | "created";
   client?: Client;
   preview_client?: Partial<Client>;
   registry_data?: Record<string, string> | null;
+  /**
+   * Set when a registry-code, VAT, or fuzzy-name match would have returned
+   * the active company itself. Resolution refuses to return such matches —
+   * see issue #14 — but signals the block here so callers can surface a
+   * "needs manual supplier resolution" hint.
+   */
+  self_match_blocked?: boolean;
 }
 
 export interface SupplierResolutionOptions {
   classification_category?: TransactionClassificationCategory;
+  /**
+   * VAT number of the active company. Resolution will refuse to return any
+   * client whose VAT matches this value, defending against the case where the
+   * extractor accepted the buyer's own VAT as the supplier (issue #14).
+   */
+  ownCompanyVat?: string;
   _resolveSupplierOverrides?: {
     country?: string;
     is_physical_entity?: boolean;
   };
+}
+
+function normalizeVatForCompare(value?: string | null): string | undefined {
+  const normalized = value?.replace(/\s+/g, "").toUpperCase();
+  return normalized || undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,26 +110,83 @@ export async function resolveSupplierInternal(
   execute: boolean,
   options?: SupplierResolutionOptions,
 ): Promise<SupplierResolution> {
+  const ownVat = normalizeVatForCompare(options?.ownCompanyVat);
+  const isSelfClient = (client: Client): boolean =>
+    !!ownVat && normalizeVatForCompare(client.invoice_vat_no) === ownVat;
+  let selfMatchBlocked = false;
+
+  // self_match_blocked is meant to flag results where the returned client is
+  // suspect (none was found, or only the previewed-new path is left). When
+  // we successfully resolve to a different real supplier via a later step
+  // (e.g. fuzzy name match), the returned result is not suspect — earlier
+  // self-match attempts are bookkeeping only — so we DO NOT propagate the
+  // flag onto found:true returns. The own-VAT-on-page note is surfaced
+  // separately in receipt-inbox via detectSelfVatOnly.
+
   if (fields.supplier_reg_code) {
     const byCode = clients.find(client => client.code === fields.supplier_reg_code && !client.is_deleted);
     if (byCode) {
-      return { found: true, created: false, match_type: "registry_code", client: byCode };
+      if (isSelfClient(byCode)) {
+        selfMatchBlocked = true;
+      } else {
+        return { found: true, created: false, match_type: "registry_code", client: byCode };
+      }
     }
   }
 
   if (fields.supplier_vat_no) {
-    const normalizedVat = fields.supplier_vat_no.replace(/\s+/g, "").toUpperCase();
-    const byVat = clients.find(client =>
-      !client.is_deleted &&
-      client.invoice_vat_no?.replace(/\s+/g, "").toUpperCase() === normalizedVat,
-    );
-    if (byVat) {
-      return { found: true, created: false, match_type: "vat_no", client: byVat };
+    const normalizedVat = normalizeVatForCompare(fields.supplier_vat_no);
+    if (normalizedVat && ownVat && normalizedVat === ownVat) {
+      selfMatchBlocked = true;
+    } else if (normalizedVat) {
+      const byVat = clients.find(client =>
+        !client.is_deleted &&
+        normalizeVatForCompare(client.invoice_vat_no) === normalizedVat,
+      );
+      if (byVat) {
+        if (isSelfClient(byVat)) {
+          selfMatchBlocked = true;
+        } else {
+          return { found: true, created: false, match_type: "vat_no", client: byVat };
+        }
+      }
     }
   }
 
   if (fields.supplier_name) {
-    const activeClients = clients.filter(client => !client.is_deleted);
+    const activeClients = clients.filter(client => !client.is_deleted && !isSelfClient(client));
+
+    // First try a normalized-name exact match. Strips legal-form suffixes
+    // (LLC, Inc, PBC, AG, …) and punctuation, so an invoice supplier like
+    // "Anthropic, PBC" finds an existing "Anthropic" client. Without this
+    // tier, the fuzzy fallback's 0.7 similarity threshold rejects the
+    // pair (≈0.6 in our measurements) and the supplier_history lookup
+    // that drives reuse of prior bookings never fires.
+    //
+    // Two guards prevent the new tier from silently miscoding:
+    //  - Minimum-length floor (≥ 4 chars after normalization) mirrors the
+    //    fuzzy tier's `shorterLen >= 4` check, so a single common word
+    //    like "solutions" can't bridge two unrelated suppliers.
+    //  - Ambiguity bail-out: if multiple clients share the same
+    //    normalized key, we fall through to the fuzzy tier rather than
+    //    picking one arbitrarily.
+    const normalizedSupplierName = normalizeCompanyName(fields.supplier_name);
+    if (normalizedSupplierName && normalizedSupplierName.length >= 4) {
+      const normalizedExactMatches = activeClients.filter(
+        client => normalizeCompanyName(client.name) === normalizedSupplierName,
+      );
+      if (normalizedExactMatches.length === 1) {
+        return {
+          found: true,
+          created: false,
+          match_type: "name_normalized",
+          client: normalizedExactMatches[0]!,
+        };
+      }
+      // length === 0 → no match, length > 1 → ambiguous, both fall
+      // through to the fuzzy tier which has stricter inclusion checks.
+    }
+
     const names = activeClients.map(client => client.name);
     if (names.length > 0) {
       const bestMatch = closest(fields.supplier_name, names);
@@ -137,13 +213,27 @@ export async function resolveSupplierInternal(
   const registryData = await fetchRegistryData(fields.supplier_reg_code, supplierCountry, fields.supplier_name);
   const clientName = registryData?.name ?? fields.supplier_name;
   if (!clientName) {
-    return { found: false, created: false, registry_data: registryData };
+    return {
+      found: false,
+      created: false,
+      registry_data: registryData,
+      ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
+    };
   }
+
+  // Even after the matching steps refused a self-match, the previewed *new*
+  // client must not be seeded with our own VAT — otherwise creating the
+  // preview would persist a duplicate client with our own VAT (#14).
+  const previewVatNo = fields.supplier_vat_no &&
+    ownVat &&
+    normalizeVatForCompare(fields.supplier_vat_no) === ownVat
+      ? undefined
+      : fields.supplier_vat_no;
 
   const isPhysicalEntity = overrides?.is_physical_entity ??
     (options?.classification_category !== "salary_payroll" &&
     !fields.supplier_reg_code &&
-    !fields.supplier_vat_no &&
+    !previewVatNo &&
     looksLikePersonCounterparty(normalizeCounterpartyName(clientName), clientName));
 
   const previewClient: Partial<Client> = {
@@ -157,7 +247,7 @@ export async function resolveSupplierInternal(
     is_member: false,
     send_invoice_to_email: false,
     send_invoice_to_accounting_email: false,
-    invoice_vat_no: fields.supplier_vat_no,
+    invoice_vat_no: previewVatNo,
     bank_account_no: fields.supplier_iban,
     address_text: registryData?.address,
   };
@@ -168,6 +258,7 @@ export async function resolveSupplierInternal(
       created: false,
       preview_client: previewClient,
       registry_data: registryData,
+      ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
     };
   }
 
@@ -191,5 +282,6 @@ export async function resolveSupplierInternal(
     client,
     preview_client: previewClient,
     registry_data: registryData,
+    ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
   };
 }

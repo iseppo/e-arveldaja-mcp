@@ -10,6 +10,8 @@ export interface InvoiceExtractionSnapshot {
   total_net?: number;
   total_vat?: number;
   total_gross?: number;
+  /** ISO 4217 currency code; undefined when extraction couldn't bind a symbol or code to the amount line. */
+  currency?: string;
   raw_text?: string;
 }
 
@@ -30,11 +32,17 @@ export function hasConfidentInvoiceNumber(value?: string): boolean {
 }
 
 export function summarizeInvoiceExtraction(snapshot: InvoiceExtractionSnapshot): InvoiceExtractionFallback {
+  // Currency is conditionally required: only when there's a numeric total to
+  // attach units to. Without it, booking the gross at face value silently
+  // assumes EUR — which is wrong for USD-denominated invoices like the
+  // OpenAI Estonian-language receipts (issue #16).
+  const currencyRequired = snapshot.total_gross !== undefined;
   const missingRequiredFields = [
     snapshot.supplier_name ? undefined : "supplier_name",
     hasConfidentInvoiceNumber(snapshot.invoice_number) ? undefined : "invoice_number",
     snapshot.invoice_date ? undefined : "invoice_date",
     snapshot.total_gross !== undefined ? undefined : "total_gross",
+    currencyRequired && !snapshot.currency ? "currency" : undefined,
   ].filter((value): value is string => value !== undefined);
 
   const missingOptionalFields = [
@@ -45,6 +53,7 @@ export function summarizeInvoiceExtraction(snapshot: InvoiceExtractionSnapshot):
     snapshot.supplier_vat_no ? undefined : "supplier_vat_no",
     snapshot.supplier_iban ? undefined : "supplier_iban",
     snapshot.ref_number ? undefined : "ref_number",
+    !currencyRequired && !snapshot.currency ? "currency" : undefined,
   ].filter((value): value is string => value !== undefined);
 
   const rawTextAvailable = Boolean(snapshot.raw_text?.trim());

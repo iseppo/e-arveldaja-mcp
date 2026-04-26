@@ -36,16 +36,38 @@ const SUPPLIER_METADATA_RE =
   /\b(?:telefon|phone|e-?post|email|kodulehekülg|website|web|iban|swift|reg\.?\s*(?:nr|code)|registrikood|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id|payment method|makseviis|kuupäev|date|due date|maksetähtaeg)\b[:]?/i;
 const SUPPLIER_INVALID_LINE_RE =
   /\b(arve|invoice|receipt|kviitung|tšekk|tsekk|summa|kokku|total|date|kuupäev|due|tasuda|maksta|toode|teenus|qty|kogus|hind|amount|subtotal|shipping|transport|käibemaks|vat|tax)\b/i;
+// Currency detection runs over lines that already contain numeric amounts
+// (see detectReceiptCurrency), so symbol-only patterns like `$`, `£`, and
+// `€` are safe — they won't fire on prose. The dollar pattern requires
+// digit adjacency (`$40` or `40 $`) and a negative lookbehind/lookahead so
+// it doesn't swallow `CA$`, `AU$`, `S$`, etc. — those have their own
+// patterns and must be tried first. Without these symbol patterns,
+// Estonian USD invoices like "40,00 $" silently default to EUR (#16).
 const RECEIPT_CURRENCY_PATTERNS = [
+  // Non-USD dollar variants first — required so the bare-`$` USD pattern
+  // below doesn't capture `CA$99` etc. and label them as USD.
+  { code: "CAD", pattern: /\bCAD\b|(?<![A-Z])CA\$|(?<![A-Z])C\$/i },
+  { code: "AUD", pattern: /\bAUD\b|(?<![A-Z])AU\$|(?<![A-Z])A\$/i },
+  { code: "NZD", pattern: /\bNZD\b|(?<![A-Z])NZ\$/i },
+  { code: "HKD", pattern: /\bHKD\b|(?<![A-Z])HK\$/i },
+  { code: "SGD", pattern: /\bSGD\b|(?<![A-Z])S\$/i },
+  // Bare `$` is USD only when not preceded/followed by a letter (so `US$`
+  // is captured by the explicit `US\$` clause and not by the bare-`$`
+  // tail) and only adjacent to a numeric.
+  { code: "USD", pattern: /\bUSD\b|US\$|(?<![A-Z])\$\s*\d|\d\s*\$(?![A-Z])/i },
   { code: "EUR", pattern: /\bEUR\b|€/i },
-  { code: "USD", pattern: /\bUSD\b|\bUS\$/i },
-  { code: "GBP", pattern: /\bGBP\b/i },
+  { code: "GBP", pattern: /\bGBP\b|£/i },
+  { code: "JPY", pattern: /\bJPY\b|¥/i },
   { code: "SEK", pattern: /\bSEK\b/i },
   { code: "NOK", pattern: /\bNOK\b/i },
   { code: "DKK", pattern: /\bDKK\b/i },
   { code: "CHF", pattern: /\bCHF\b/i },
   { code: "PLN", pattern: /\bPLN\b/i },
 ] as const;
+
+const NON_EUR_CURRENCY_CODES: ReadonlySet<string> = new Set(
+  RECEIPT_CURRENCY_PATTERNS.map(c => c.code).filter(c => c !== "EUR"),
+);
 const PERSON_COUNTERPARTY_COMPANY_WORD_RE =
   /\b(limited|ltd|llc|inc|gmbh|ag|ab|oy|srl|bv|nv|sa|plc|tmi|ireland|operations|services|solutions|group|holding|capital|systems|technologies|media|digital|cloud|platform|company|corp|corporation)\b/i;
 const TEXTUAL_MONTH_VALUE_RE =
@@ -160,7 +182,11 @@ export type TransactionClassificationCategory =
   | "revenue_without_invoice"
   | "unknown";
 
-export type ReceiptClassification = "purchase_invoice" | "owner_paid_expense_reimbursement" | "unclassifiable";
+export type ReceiptClassification =
+  | "purchase_invoice"
+  | "payment_receipt"
+  | "owner_paid_expense_reimbursement"
+  | "unclassifiable";
 
 export interface ExtractedReceiptFields {
   supplier_name?: string;
@@ -498,7 +524,33 @@ export function inferSupplierCountry(fields: Pick<ExtractedReceiptFields, "suppl
     "EST";
 }
 
-export function detectReceiptCurrency(text: string): string {
+/**
+ * On a single line, return all currency codes whose pattern matches.
+ * Pattern order matters for collision-prone variants (CA$/AU$/S$ before
+ * bare USD) — RECEIPT_CURRENCY_PATTERNS is ordered accordingly.
+ */
+function detectCurrenciesOnLine(line: string): string[] {
+  const found: string[] = [];
+  for (const currency of RECEIPT_CURRENCY_PATTERNS) {
+    if (currency.pattern.test(line) && !found.includes(currency.code)) {
+      found.push(currency.code);
+    }
+  }
+  return found;
+}
+
+/**
+ * Detect the receipt's currency from amount-bearing lines. Returns
+ * `undefined` when no currency token is found rather than silently
+ * defaulting to EUR — see issue #16. Callers that need a downstream
+ * default still handle it explicitly via `?? "EUR"`.
+ *
+ * When a single line carries both a non-EUR currency and EUR (e.g.
+ * `Total: $40 / €37,12`), the non-EUR currency wins: invoices are
+ * denominated in one currency and EUR is typically the buyer-side
+ * reference / FX comparison.
+ */
+export function detectReceiptCurrency(text: string): string | undefined {
   const lines = text
     .split(/\r?\n/)
     .map(clampTextLine)
@@ -509,13 +561,13 @@ export function detectReceiptCurrency(text: string): string {
   ];
 
   for (const line of prioritizedLines) {
-    const matched = RECEIPT_CURRENCY_PATTERNS.find(currency => currency.pattern.test(line));
-    if (matched) {
-      return matched.code;
-    }
+    const matches = detectCurrenciesOnLine(line);
+    if (matches.length === 0) continue;
+    const nonEur = matches.find(code => NON_EUR_CURRENCY_CODES.has(code));
+    return nonEur ?? matches[0];
   }
 
-  return "EUR";
+  return undefined;
 }
 
 export function normalizeDate(raw: string): string | undefined {
@@ -725,10 +777,25 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
   };
 }
 
-export function extractPdfIdentifiers(text: string): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number"> {
+export interface ExtractReceiptFieldsOptions {
+  /**
+   * VAT number of the active company. Used to keep an invoice's buyer-side VAT
+   * (= our own VAT) from being resolved as the supplier when the supplier's
+   * VAT is missing from the document — see issue #14.
+   */
+  ownCompanyVat?: string;
+}
+
+export function extractPdfIdentifiers(
+  text: string,
+  options?: ExtractReceiptFieldsOptions,
+): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number"> {
   return {
     supplier_reg_code: extractRegistryCode(text),
-    supplier_vat_no: extractVatNumber(text),
+    supplier_vat_no: extractVatNumber(
+      text,
+      options?.ownCompanyVat ? { exclude: options.ownCompanyVat } : undefined,
+    ),
     supplier_iban: extractIban(text),
     ref_number: extractReferenceNumber(text),
   };
@@ -1094,6 +1161,17 @@ export function classifyReceiptDocument(text: string, fileName: string): Receipt
     return "owner_paid_expense_reimbursement";
   }
 
+  // Payment receipts: a "Receipt" header / `Receipt-*` filename combined
+  // with both payment-confirmation language ("Date paid", "Amount paid",
+  // "Receipt number", "Payment history") AND a referenced invoice number.
+  // These are confirmations of payment for an invoice that already exists
+  // (or appears separately in the same batch). Booking them as their own
+  // purchase_invoice creates a duplicate of the underlying invoice.
+  // See issue #15.
+  if (looksLikePaymentReceiptForInvoice(text, fileName) && !hasSalesInvoiceKeywords) {
+    return "payment_receipt";
+  }
+
   if (hasInvoiceKeywords) {
     return "purchase_invoice";
   }
@@ -1103,6 +1181,32 @@ export function classifyReceiptDocument(text: string, fileName: string): Receipt
   }
 
   return "unclassifiable";
+}
+
+const PAYMENT_RECEIPT_INDICATORS_RE =
+  /\b(date\s*paid|amount\s*paid|receipt\s*number|payment\s*history|paid\s*on|makstud\s*kuupäev|tasumiskuupäev|maksekuupäev)\b/i;
+// Stripe and similar gateways localise both the filename and the document
+// header — accept the common Estonian / German / French equivalents in
+// addition to the English "Receipt".
+const PAYMENT_RECEIPT_FILENAME_RE = /^(?:receipt|kviitung|quittung|reçu|recu)[-_]/i;
+const PAYMENT_RECEIPT_INVOICE_REFERENCE_RE =
+  /\b(invoice\s*(?:number|nr|no\.?)|arve\s*(?:number|nr|no\.?)|bill\s*number|ostuarve\s*(?:number|nr))\b/i;
+const PAYMENT_RECEIPT_HEADER_RE = /^[\s]*(?:receipt|kviitung|quittung|reçu|recu)\s*$/im;
+
+/**
+ * True when a document is a payment confirmation for an underlying invoice.
+ * Strong signals: Receipt-prefixed filename OR explicit "Receipt" header,
+ * combined with payment-confirmation language AND a reference back to an
+ * invoice number. Mere appearance of the word "Receipt" anywhere in body
+ * text is not enough — many invoices say "this serves as a receipt of …".
+ */
+export function looksLikePaymentReceiptForInvoice(text: string, fileName: string): boolean {
+  const hasIndicators = PAYMENT_RECEIPT_INDICATORS_RE.test(text);
+  const hasInvoiceReference = PAYMENT_RECEIPT_INVOICE_REFERENCE_RE.test(text);
+  if (!hasIndicators || !hasInvoiceReference) return false;
+  // Require a structural signal — header or filename — so we don't catch
+  // invoices that happen to summarise prior payment history.
+  return PAYMENT_RECEIPT_FILENAME_RE.test(fileName) || PAYMENT_RECEIPT_HEADER_RE.test(text);
 }
 
 export function hasAutoBookableReceiptFields(
@@ -1116,8 +1220,12 @@ export function hasAutoBookableReceiptFields(
   );
 }
 
-export function extractReceiptFieldsFromText(text: string, fileName: string): ExtractedReceiptFields {
-  const identifiers = extractPdfIdentifiers(text);
+export function extractReceiptFieldsFromText(
+  text: string,
+  fileName: string,
+  options?: ExtractReceiptFieldsOptions,
+): ExtractedReceiptFields {
+  const identifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date } = extractDates(text);
   const supplierName = extractSupplierName(text, fileName);
   const amounts = extractAmounts(text);
