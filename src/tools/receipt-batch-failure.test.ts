@@ -1200,4 +1200,155 @@ describe("process_receipt_batch rollback handling", () => {
       reversed_vat_id: 1,
     });
   });
+
+  it("contract gate (#19): foreign-supplier reverse-charge default does not auto-create+confirm at execute=true", async () => {
+    // Foreign supplier, no explicit reverse-charge phrase, no supplier
+    // history with reversed_vat_id. applyReverseChargeAutoDetection sets
+    // the default; the row's confidence drops to medium with the
+    // foreign_reverse_charge_default_unverified signal; the contract
+    // gate routes it to needs_review instead of create+confirm.
+    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(readdir).mockResolvedValue([
+      { name: "anthropic.pdf", isFile: () => true },
+    ] as any);
+    vi.mocked(stat).mockImplementation(async (path) => {
+      if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
+      return {
+        isDirectory: () => false,
+        size: 512,
+        mtime: new Date("2026-04-20T10:00:00.000Z"),
+      } as any;
+    });
+    vi.mocked(readFile).mockResolvedValue(Buffer.from("anthropic pdf") as any);
+    vi.mocked(resolveFilePath).mockImplementation((path) => path);
+    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
+    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    // raw_text intentionally contains NO reverse-charge phrasing in any
+    // of the supported languages — we want Case 3 (foreign-supplier
+    // default) to fire, not Case 2 (phrase_match), so the contract gate
+    // can be exercised on the unverified-default path.
+    const plainText = "Anthropic invoice for Claude Max subscription, USD 100, no VAT mentioned.";
+    vi.mocked(parseDocument).mockResolvedValue({
+      text: plainText,
+      pageCount: 1,
+    } as any);
+    vi.mocked(classifyReceiptDocument).mockReturnValue("purchase_invoice");
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Anthropic, PBC",
+      invoice_number: "ANT-001",
+      invoice_date: "2026-04-20",
+      due_date: "2026-04-20",
+      total_net: 100,
+      total_vat: 0,
+      total_gross: 100,
+      currency: "USD",
+      description: "Claude Max subscription",
+      raw_text: plainText,
+    } as any);
+    vi.mocked(hasAutoBookableReceiptFields).mockReturnValue(true);
+    vi.mocked(suggestBookingInternal).mockResolvedValue({
+      item: {
+        custom_title: "Claude Max subscription",
+        amount: 1,
+        total_net_price: 100,
+        cl_purchase_articles_id: 501,
+        purchase_accounts_id: 5230,
+        vat_rate_dropdown: "0",
+      },
+      source: "fallback",
+      suggested_purchase_article: { id: 501, name: "Software" },
+    } as any);
+    vi.mocked(resolveSupplierInternal).mockResolvedValue({
+      found: true,
+      created: false,
+      match_type: "name_normalized",
+      client: {
+        id: 200,
+        name: "Anthropic",
+        is_supplier: true,
+        is_client: false,
+        cl_code_country: "USA",
+        is_member: false,
+        send_invoice_to_email: false,
+        send_invoice_to_accounting_email: false,
+        is_deleted: false,
+      },
+    } as any);
+
+    const server = { registerTool: vi.fn() } as any;
+    const api = {
+      clients: {
+        listAll: vi.fn().mockResolvedValue([{
+          id: 200,
+          name: "Anthropic",
+          is_supplier: true,
+          is_client: false,
+          cl_code_country: "USA",
+          is_member: false,
+          send_invoice_to_email: false,
+          send_invoice_to_accounting_email: false,
+          is_deleted: false,
+        }]),
+      },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        createAndSetTotals: vi.fn(),
+        uploadDocument: vi.fn(),
+        confirmWithTotals: vi.fn(),
+        invalidate: vi.fn(),
+      },
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([{
+          id: 5230,
+          name_est: "Software expense",
+          name_eng: "Software expense",
+          account_type_est: "Kulud",
+          account_type_eng: "Expenses",
+        }]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([{
+          id: 501,
+          name_est: "Software",
+          name_eng: "Software",
+          accounts_id: 5230,
+          vat_accounts_id: 1510,
+          cl_vat_articles_id: 1,
+          is_disabled: false,
+          priority: 1,
+        }]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+    } as any;
+
+    registerReceiptInboxTools(server, api);
+
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
+    if (!registration) throw new Error("Tool was not registered");
+    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const result = await handler({
+      folder_path: "/tmp/receipts",
+      accounts_dimensions_id: 100,
+      execute: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(payload.summary.created).toBe(0);
+    expect(payload.summary.needs_review).toBe(1);
+    expect(payload.results[0]!.status).toBe("needs_review");
+    expect(payload.results[0]!.llm_fallback.confidence).toBe("medium");
+    expect(payload.results[0]!.llm_fallback.confidence_signals).toEqual(
+      expect.arrayContaining(["foreign_reverse_charge_default_unverified"]),
+    );
+    // The row carries the auto-applied reverse-charge flag and reason so a
+    // reviewer sees what was assumed; only the create/confirm step is
+    // gated.
+    expect(payload.results[0]!.booking_suggestion.reverse_charge_reason)
+      .toBe("foreign_supplier_default");
+    expect(payload.results[0]!.booking_suggestion.item.reversed_vat_id).toBe(1);
+  });
 });

@@ -1504,13 +1504,11 @@ export function buildKeywordSuggestion(
       ?? findAccountByKeywords(accounts, ["muu", "general", "kulud"]);
 
   if (!article) return undefined;
-  // Codex MEDIUM (#17): if the article maps to a fixed-asset account AND
-  // we have no non-fixed replacement, refuse to emit a suggestion. The
-  // previous code used `account?.id ?? article.accounts_id` on the next
-  // line, which silently propagated the fixed-asset account through the
-  // article-fallback path — exactly the back door the new guards were
-  // meant to shut. Returning undefined forces the caller to route the
-  // row to needs_review instead.
+  // If the article maps to a fixed-asset account AND we have no non-fixed
+  // replacement, refuse to emit a suggestion. Otherwise the article-fallback
+  // path below would silently propagate the fixed-asset account into
+  // `purchase_accounts_id` — the same back door #17 closed elsewhere.
+  // Returning undefined forces the caller to route the row to needs_review.
   if (articleAccount?.is_fixed_asset && !account) return undefined;
 
   return {

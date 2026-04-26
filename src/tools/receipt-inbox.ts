@@ -352,10 +352,10 @@ function extensionToFileType(extension: string): FileType | undefined {
 
 function maybeAddLlmFallbackNote(notes: string[], fallback: InvoiceExtractionFallback): void {
   if (!fallback.recommended) return;
-  // Codex LOW: with the #20 confidence model, `recommended` is true for any
-  // non-high outcome — including medium with no missing required fields
-  // (e.g. supplier_resolution_failed only). Don't emit "incomplete ()"
-  // when the field list is empty; surface the confidence signals instead.
+  // With the #20 confidence model, `recommended` is true for any non-high
+  // outcome — including medium with no missing required fields (e.g.
+  // supplier_resolution_failed only). Don't emit "incomplete ()" when the
+  // field list is empty; surface the confidence signals instead.
   if (fallback.missing_required_fields.length > 0) {
     const missing = fallback.missing_required_fields.join(", ");
     notes.push(`Deterministic extraction is incomplete (${missing}). Use extracted.raw_text and llm_fallback guidance instead of guessing missing fields.`);
@@ -1758,11 +1758,10 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
           if (bookingSuggestion) {
             applyReverseChargeAutoDetection(bookingSuggestion, extracted, supplierResolution, context.isVatRegistered, notes);
-            // Codex MEDIUM (#18): the foreign-supplier reverse-charge
-            // default fits SaaS/services but mis-codes goods imports, so
-            // it must NOT silently auto-confirm. Flag it as a medium
-            // confidence signal so the contract gate (#19) routes the row
-            // to needs_review rather than create+confirm.
+            // Foreign-supplier reverse-charge default fits SaaS/services
+            // but mis-codes goods imports, so it must NOT silently
+            // auto-confirm (#18). Flag the row so the contract gate (#19)
+            // routes it to needs_review rather than create+confirm.
             if (bookingSuggestion.reverse_charge_reason === "foreign_supplier_default") {
               signals.foreign_reverse_charge_default_unverified = true;
             }
@@ -1817,11 +1816,11 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           // supplier identity are almost always the same invoice scanned
           // twice. The first wins; the second is flagged.
           //
-          // Codex LOW: also key by reg_code / VAT / normalized supplier
-          // name so dry runs that haven't yet created a client (only a
-          // preview_client) still detect the dupe. Without this, scanning
-          // an unknown supplier twice would silently under-report the
-          // risk in dry-run output.
+          // Also key by reg_code / VAT / normalized supplier name so dry
+          // runs that haven't yet created a client (only a preview_client)
+          // still detect the dupe. Without this, scanning an unknown
+          // supplier twice would silently under-report the risk in
+          // dry-run output.
           if (extracted.invoice_number) {
             const myInvoice = extracted.invoice_number.trim().toLowerCase();
             const myRegCode = extracted.supplier_reg_code?.trim();
@@ -1870,11 +1869,24 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           // refuse to auto-create+confirm any row whose final confidence
           // is "low" — silent miscoding is the worse failure than holding
           // the row for review. Dry runs always proceed (preview only).
+          //
+          // We additionally gate `foreign_reverse_charge_default_unverified`
+          // at medium: that signal means we auto-applied reverse-charge
+          // because the supplier is foreign with no explicit phrase or
+          // history backing. The default is right for SaaS / services and
+          // wrong for goods imports — the fact that the rest of the
+          // extraction succeeded does not let us judge which it is. A
+          // blanket "block all medium" is too aggressive here because
+          // `booking_not_from_history` makes many legitimate keyword
+          // bookings medium too; only this specific signal is gated.
           const preCreateSummary = summarize();
-          if (!dryRun && preCreateSummary.confidence === "low") {
+          const foreignDefaultUnverified = preCreateSummary.confidence_signals.includes(
+            "foreign_reverse_charge_default_unverified",
+          );
+          if (!dryRun && (preCreateSummary.confidence === "low" || foreignDefaultUnverified)) {
             const reasons = preCreateSummary.confidence_signals.join(", ") || "low confidence";
             notes.push(
-              `Auto-create skipped: confidence is low (${reasons}). Manual review required before booking (#19).`,
+              `Auto-create skipped: confidence is ${preCreateSummary.confidence} (${reasons}). Manual review required before booking (#19).`,
             );
             results.push({
               file,

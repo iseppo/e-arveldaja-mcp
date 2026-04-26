@@ -633,11 +633,10 @@ describe("buildKeywordSuggestion (#17)", () => {
     expect(result?.suggested_account?.is_fixed_asset).toBe(false);
   });
 
-  it("returns undefined when the article maps to fixed-asset AND no non-fixed replacement exists (codex MEDIUM)", () => {
-    // The Codex review caught the back door: even with the fixed-asset
-    // article account refused, item.purchase_accounts_id used to fall
-    // back to article.accounts_id when keyword search failed. This test
-    // pins the new behaviour: refuse to emit a suggestion at all so the
+  it("returns undefined when the article maps to fixed-asset AND no non-fixed replacement exists", () => {
+    // Even with the fixed-asset article account refused, item.purchase_accounts_id
+    // used to fall back to article.accounts_id when keyword search failed —
+    // re-opening the back door. Refuse to emit a suggestion at all so the
     // caller routes the row to needs_review.
     const articles = [
       { id: 1, name_est: "Tarkvara litsents", name_eng: "Software license", accounts_id: 1810 },

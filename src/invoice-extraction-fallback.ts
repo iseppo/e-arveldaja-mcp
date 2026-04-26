@@ -41,7 +41,7 @@ export interface ExtractionConfidenceSignals {
    * not by an explicit phrase in the document and not by supplier history.
    * The default is convenient for the SaaS/service common case but wrong
    * for goods imports, so the row is downgraded to medium confidence and
-   * routed to review rather than auto-confirmed. (Codex MEDIUM follow-up.)
+   * routed to review rather than auto-confirmed.
    */
   foreign_reverse_charge_default_unverified?: boolean;
 }
