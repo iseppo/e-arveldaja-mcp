@@ -51,6 +51,13 @@
           "isRequired": false,
           "isSecret": false,
           "format": "string"
+        },
+        {
+          "name": "EARVELDAJA_DISABLE_PROGRESS",
+          "description": "Set to \"1\" or \"true\" to disable MCP progress notifications. Workaround for clients that close the stdio transport when a progress notification arrives after the matching response has been processed.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
         }
       ]
     }
