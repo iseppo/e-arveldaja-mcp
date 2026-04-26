@@ -41,6 +41,13 @@ export interface SupplierResolutionOptions {
    * extractor accepted the buyer's own VAT as the supplier (issue #14).
    */
   ownCompanyVat?: string;
+  /**
+   * Registry code of the active company. Resolution will refuse to return any
+   * client whose `code` matches this value. Complements `ownCompanyVat` for
+   * clients that lack a VAT number — common when a young Estonian OÜ has
+   * their own client record from before VAT registration (issue #22).
+   */
+  ownCompanyRegistryCode?: string;
   _resolveSupplierOverrides?: {
     country?: string;
     is_physical_entity?: boolean;
@@ -111,8 +118,12 @@ export async function resolveSupplierInternal(
   options?: SupplierResolutionOptions,
 ): Promise<SupplierResolution> {
   const ownVat = normalizeVatForCompare(options?.ownCompanyVat);
-  const isSelfClient = (client: Client): boolean =>
-    !!ownVat && normalizeVatForCompare(client.invoice_vat_no) === ownVat;
+  const ownCode = options?.ownCompanyRegistryCode?.trim() || undefined;
+  const isSelfClient = (client: Client): boolean => {
+    if (ownVat && normalizeVatForCompare(client.invoice_vat_no) === ownVat) return true;
+    if (ownCode && client.code?.trim() === ownCode) return true;
+    return false;
+  };
   let selfMatchBlocked = false;
 
   // self_match_blocked is meant to flag results where the returned client is
@@ -124,12 +135,19 @@ export async function resolveSupplierInternal(
   // separately in receipt-inbox via detectSelfVatOnly.
 
   if (fields.supplier_reg_code) {
-    const byCode = clients.find(client => client.code === fields.supplier_reg_code && !client.is_deleted);
-    if (byCode) {
-      if (isSelfClient(byCode)) {
-        selfMatchBlocked = true;
-      } else {
-        return { found: true, created: false, match_type: "registry_code", client: byCode };
+    if (ownCode && fields.supplier_reg_code.trim() === ownCode) {
+      // Mirrors the VAT-on-page guard below (#22): the OCR may have read
+      // the buyer's own registry code as the supplier code. Block before
+      // client lookup so we never create a supplier with our own code.
+      selfMatchBlocked = true;
+    } else {
+      const byCode = clients.find(client => client.code === fields.supplier_reg_code && !client.is_deleted);
+      if (byCode) {
+        if (isSelfClient(byCode)) {
+          selfMatchBlocked = true;
+        } else {
+          return { found: true, created: false, match_type: "registry_code", client: byCode };
+        }
       }
     }
   }
@@ -229,16 +247,23 @@ export async function resolveSupplierInternal(
     normalizeVatForCompare(fields.supplier_vat_no) === ownVat
       ? undefined
       : fields.supplier_vat_no;
+  // Same defense for the registry code (#22): if OCR mis-attributed the
+  // buyer's own code as the supplier's, do not persist it on the preview.
+  const previewRegCode = fields.supplier_reg_code &&
+    ownCode &&
+    fields.supplier_reg_code.trim() === ownCode
+      ? undefined
+      : fields.supplier_reg_code;
 
   const isPhysicalEntity = overrides?.is_physical_entity ??
     (options?.classification_category !== "salary_payroll" &&
-    !fields.supplier_reg_code &&
+    !previewRegCode &&
     !previewVatNo &&
     looksLikePersonCounterparty(normalizeCounterpartyName(clientName), clientName));
 
   const previewClient: Partial<Client> = {
     name: clientName,
-    code: fields.supplier_reg_code,
+    code: previewRegCode,
     is_client: false,
     is_supplier: true,
     cl_code_country: supplierCountry,

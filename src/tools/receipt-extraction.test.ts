@@ -1,9 +1,14 @@
 import { describe, it, expect } from "vitest";
+import type { Account } from "../types/api.js";
 import {
   normalizeDate,
   extractAmounts,
+  buildKeywordSuggestion,
   computeTermDays,
+  detectReverseChargeFromText,
   extractPdfIdentifiers,
+  findAccountByKeywords,
+  findPurchaseArticleByKeywords,
   hasRecurringSimilarAmounts,
   normalizeCounterpartyName,
   looksLikePersonCounterparty,
@@ -494,5 +499,162 @@ describe("extractPdfIdentifiers", () => {
     expect(
       extractPdfIdentifiers(text, { ownCompanyVat: "EE102809963" }).supplier_vat_no,
     ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findAccountByKeywords — substring bug + fixed-asset guard (#17)
+// ---------------------------------------------------------------------------
+
+function makeAccount(overrides: Partial<Account> & { id: number; name_est: string }): Account {
+  return {
+    id: overrides.id,
+    name_est: overrides.name_est,
+    name_eng: overrides.name_eng ?? "",
+    account_type_est: overrides.account_type_est ?? "",
+    account_type_eng: overrides.account_type_eng ?? "",
+    balance_type: overrides.balance_type ?? "D",
+    is_valid: overrides.is_valid ?? true,
+    allows_deactivation: overrides.allows_deactivation ?? true,
+    is_vat_account: overrides.is_vat_account ?? false,
+    is_fixed_asset: overrides.is_fixed_asset ?? false,
+    transaction_in_bindable: true,
+    transaction_out_bindable: true,
+    cl_account_groups: [],
+    default_disabled: false,
+    transaction_in_user_bindable: true,
+    transaction_out_user_bindable: true,
+    is_product_account: false,
+  } as Account;
+}
+
+describe("findAccountByKeywords (#17)", () => {
+  it("does not match the keyword 'it' inside 'Ehitised' (the original Buildings miscoding bug)", () => {
+    // The substring bug: text.includes("it") was true for "ehitised",
+    // routing OpenAI/ChatGPT receipts to id=1810 Ehitised (Buildings).
+    const accounts = [
+      makeAccount({ id: 1810, name_est: "Ehitised", is_fixed_asset: true }),
+      makeAccount({ id: 4920, name_est: "Internet ja sideteenused" }),
+    ];
+    const result = findAccountByKeywords(accounts, ["it"]);
+    expect(result?.id).not.toBe(1810);
+  });
+
+  it("filters out fixed-asset accounts even when the keyword matches their name", () => {
+    // Defense in depth: even if a keyword does match a fixed-asset name
+    // exactly, refuse it. SaaS/services are categorically not fixed assets.
+    const accounts = [
+      makeAccount({ id: 1830, name_est: "Muu materiaalne põhivara", is_fixed_asset: true }),
+      makeAccount({ id: 5990, name_est: "Muud mitmesugused tegevuskulud" }),
+    ];
+    const result = findAccountByKeywords(accounts, ["muu"]);
+    expect(result?.id).toBe(5990);
+    expect(result?.is_fixed_asset).toBe(false);
+  });
+
+  it("matches whole-word keywords correctly (positive case)", () => {
+    const accounts = [
+      makeAccount({ id: 4920, name_est: "Internet ja sideteenused" }),
+    ];
+    const result = findAccountByKeywords(accounts, ["internet"]);
+    expect(result?.id).toBe(4920);
+  });
+
+  it("treats Estonian non-ASCII letters as part of a word (õ does not break a boundary)", () => {
+    const accounts = [
+      makeAccount({ id: 5310, name_est: "Sõidukikulud" }),
+    ];
+    // "auto" must not match because there is no `auto` substring as a
+    // standalone word in `sõidukikulud`. (Pinning the boundary behaviour.)
+    expect(findAccountByKeywords(accounts, ["auto"])?.id).toBeUndefined();
+    // "sõiduk" (whole-word fragment in "sõidukikulud") wouldn't match
+    // either — the boundary is at the start of the word; only a full
+    // standalone token matches. This is intentional: prefer false
+    // negatives over false positives in keyword routing.
+  });
+});
+
+describe("findPurchaseArticleByKeywords (#17)", () => {
+  it("matches by whole word, not substring", () => {
+    // "office" must not match by being a substring of an unrelated word
+    // and must match standalone tokens cleanly.
+    const articles = [
+      { id: 1, name_est: "Officeruumi rent", name_eng: "Office space rent" },
+      { id: 2, name_est: "Materjalid", name_eng: "Materials" },
+    ];
+    const result = findPurchaseArticleByKeywords(articles, ["office"]);
+    expect(result?.id).toBe(1);
+  });
+});
+
+describe("buildKeywordSuggestion (#17)", () => {
+  const baseAccounts = [
+    makeAccount({ id: 1810, name_est: "Ehitised", is_fixed_asset: true }),
+    makeAccount({ id: 1830, name_est: "Muu materiaalne põhivara", is_fixed_asset: true }),
+    makeAccount({ id: 4920, name_est: "Internet ja sideteenused" }),
+    makeAccount({ id: 5990, name_est: "Muud mitmesugused tegevuskulud" }),
+  ];
+  const baseArticles = [
+    { id: 10, name_est: "Internetikulu", name_eng: "Internet expense", accounts_id: 4920 },
+    { id: 99, name_est: "Muu kulu", name_eng: "Other expense", accounts_id: 5990 },
+  ];
+
+  it("does not pick a fixed-asset account for an OpenAI/ChatGPT-style hint (#17 regression)", () => {
+    const result = buildKeywordSuggestion(baseArticles, baseAccounts, "OpenAI ChatGPT subscription");
+    expect(result?.suggested_account?.is_fixed_asset).toBe(false);
+    expect(result?.suggested_account?.id).toBe(4920);
+    expect(result?.source).toBe("keyword_match");
+  });
+
+  it("does not pick a fixed-asset account for an Anthropic/Claude hint", () => {
+    const result = buildKeywordSuggestion(baseArticles, baseAccounts, "Anthropic Claude Max subscription");
+    expect(result?.suggested_account?.is_fixed_asset).toBe(false);
+    expect(result?.suggested_account?.id).toBe(4920);
+  });
+
+  it("falls back to a non-fixed-asset account when the keyword tier finds no specific match", () => {
+    // Hint matches no specific tier → drops to the muu/general fallback.
+    // Even there, must not return a fixed-asset account.
+    const result = buildKeywordSuggestion(baseArticles, baseAccounts, "Random unmatched supplier");
+    expect(result?.suggested_account?.is_fixed_asset).toBe(false);
+  });
+
+  it("refuses to return an article-bound account when that account is a fixed asset (article misconfiguration guard)", () => {
+    // Article points at fixed-asset Ehitised — the back-door route to the
+    // original miscoding. Resolution must override and use a keyword-found
+    // non-fixed-asset account instead.
+    const articles = [
+      { id: 1, name_est: "Tarkvara litsents", name_eng: "Software license", accounts_id: 1810 },
+    ];
+    const result = buildKeywordSuggestion(articles, baseAccounts, "OpenAI subscription");
+    expect(result?.suggested_account?.id).not.toBe(1810);
+    expect(result?.suggested_account?.is_fixed_asset).toBe(false);
+  });
+});
+
+describe("detectReverseChargeFromText (#18)", () => {
+  it("matches Estonian phrase 'pöördmaksustamise alusel'", () => {
+    expect(detectReverseChargeFromText("Pöördmaksustamise alusel makstav maks")).toBe(true);
+  });
+
+  it("matches English 'reverse charge'", () => {
+    expect(detectReverseChargeFromText("Subject to reverse charge")).toBe(true);
+  });
+
+  it("matches German 'Steuerschuldnerschaft des Leistungsempfängers'", () => {
+    expect(detectReverseChargeFromText("Steuerschuldnerschaft des Leistungsempfängers")).toBe(true);
+  });
+
+  it("matches French 'autoliquidation'", () => {
+    expect(detectReverseChargeFromText("Autoliquidation de la TVA")).toBe(true);
+  });
+
+  it("returns false for plain invoice text without reverse-charge phrasing", () => {
+    expect(detectReverseChargeFromText("VAT 20% included")).toBe(false);
+  });
+
+  it("returns false for empty/undefined input", () => {
+    expect(detectReverseChargeFromText(undefined)).toBe(false);
+    expect(detectReverseChargeFromText("")).toBe(false);
   });
 });
