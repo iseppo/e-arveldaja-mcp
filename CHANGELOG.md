@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+- **Reduced MCP response token cost** — two changes targeting the heaviest response paths:
+  - `tool-response.ts` envelope no longer spreads `raw` fields at the root in addition to keeping the `raw:` payload. Previously every `toolResponse(...)` call duplicated the full API payload (~2× envelope size). Consumers now read API fields under `result.raw.*`; envelope meta (`ok`, `action`, `entity`, `id`, `found`, `message`, `warnings`, `next_actions`) and explicit `extra` fields stay at the root.
+  - `list_clients`, `list_products`, `list_journals`, `list_transactions`, `list_sale_invoices`, `list_purchase_invoices` now default to a brief view (`view: "brief" | "full"`, default `brief`) that returns only triage fields (id + key business fields). Pass `view="full"` for the legacy full payload, or use the matching `get_*` tool for full detail of a specific row. Measured TOON-encoded reduction on synthetic 30-row payloads: clients ~93%, transactions ~85%, sale_invoices ~73%; brief output also re-enables TOON tabular form by stripping nested objects/arrays, compounding the saving. Internal tools (`accounting-inbox`, `bank-reconciliation`, `analyze-unconfirmed`, etc.) call the API layer directly and are unaffected.
+
 ## [0.12.3] - 2026-04-26
 
 ### Fixed

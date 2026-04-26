@@ -328,8 +328,6 @@ describe("create_product", () => {
       action: "created",
       entity: "product",
       id: 123,
-      code: 0,
-      created_object_id: 123,
       raw: {
         code: 0,
         created_object_id: 123,

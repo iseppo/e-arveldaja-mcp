@@ -14,15 +14,8 @@ export interface ToolResponseEnvelopeOptions {
   extra?: Record<string, unknown>;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 export function toolResponseEnvelope(options: ToolResponseEnvelopeOptions): Record<string, unknown> {
-  const rawFields = isRecord(options.raw) ? options.raw : {};
-
   return {
-    ...rawFields,
     ok: options.ok ?? true,
     action: options.action,
     entity: options.entity,

@@ -23,6 +23,7 @@ import { HttpError } from "../http-client.js";
 import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { toolResponse } from "../tool-response.js";
+import { applyListView, viewParam } from "../list-views.js";
 
 export interface ApiContext {
   clients: ClientsApi;
@@ -327,9 +328,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // CLIENTS
   // =====================
 
-  registerTool(server, "list_clients", "List all clients (buyers/suppliers). Paginated.", pageParam.shape, { ...readOnly, title: "List Clients" }, async (params) => {
+  registerTool(server, "list_clients",
+    "List all clients (buyers/suppliers). Paginated. Returns brief view (id, name, code, email, vat_no, is_client/is_supplier flags) by default; pass view='full' or call get_client for full detail.",
+    { ...pageParam.shape, ...viewParam },
+    { ...readOnly, title: "List Clients" }, async (params) => {
     const result = await api.clients.list(params);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    const compact = { ...result, items: applyListView("client", result.items, params.view) };
+    return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_client", "Get a single client by ID", idParam.shape, { ...readOnly, title: "Get Client" }, async ({ id }) => {
@@ -446,9 +451,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // PRODUCTS
   // =====================
 
-  registerTool(server, "list_products", "List all products/services. Paginated.", pageParam.shape, { ...readOnly, title: "List Products" }, async (params) => {
+  registerTool(server, "list_products",
+    "List all products/services. Paginated. Returns brief view (id, name, code, sales_price, unit) by default; pass view='full' or call get_product for full detail.",
+    { ...pageParam.shape, ...viewParam },
+    { ...readOnly, title: "List Products" }, async (params) => {
     const result = await api.products.list(params);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    const compact = { ...result, items: applyListView("product", result.items, params.view) };
+    return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_product", "Get a single product by ID", idParam.shape, { ...readOnly, title: "Get Product" }, async ({ id }) => {
@@ -528,10 +537,11 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // =====================
 
   registerTool(server, "list_journals",
-    "List journal entries. Paginated. Postings omitted — use get_journal for full details. " +
+    "List journal entries. Paginated. Returns brief view (id, effective_date, number, title, document_number, registered, clients_id, operation_type) by default — postings always omitted at this surface; pass view='full' for the remaining header fields, or call get_journal for postings. " +
     "Optional filters are applied client-side after listAll() when any filter is provided, which avoids repeated page-by-page walks.",
     {
       ...pageParam.shape,
+      ...viewParam,
       effective_date_from: z.string().optional().describe("Only journals with effective_date >= this (YYYY-MM-DD)"),
       effective_date_to: z.string().optional().describe("Only journals with effective_date <= this (YYYY-MM-DD)"),
       registered: z.boolean().optional().describe("Only registered (true) or unregistered (false) journals"),
@@ -550,9 +560,10 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         || params.clients_id !== undefined;
       if (!hasFilter) {
         const result = await api.journals.list(params);
+        const stripped = result.items.map(({ postings: _postings, ...rest }) => rest);
         const compact = {
           ...result,
-          items: result.items.map(({ postings: _postings, ...rest }) => rest),
+          items: applyListView("journal", stripped, params.view),
         };
         return { content: [{ type: "text", text: toMcpJson(compact) }] };
       }
@@ -576,8 +587,9 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       // mistake "past the end" for "legitimately empty page" silently.
       const outOfRange = requestedPage > totalPages;
       const start = (requestedPage - 1) * perPage;
-      const items = filtered.slice(start, start + perPage)
+      const stripped = filtered.slice(start, start + perPage)
         .map(({ postings: _postings, ...rest }) => rest);
+      const items = applyListView("journal", stripped, params.view);
       return {
         content: [{
           type: "text",
@@ -796,10 +808,11 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // =====================
 
   registerTool(server, "list_transactions",
-    "List bank transactions. Paginated. " +
+    "List bank transactions. Paginated. Returns brief view (id, date, amount, currency, status, type, clients_id, accounts_dimensions_id, bank_ref_number, description) by default; pass view='full' or call get_transaction for full detail (including items). " +
     "Optional filters are applied client-side after listAll() when any filter is provided, so callers don't need to paginate through dozens of pages to find matching rows.",
     {
       ...pageParam.shape,
+      ...viewParam,
       date_from: z.string().optional().describe("Only transactions with date >= this (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only transactions with date <= this (YYYY-MM-DD)"),
       status: z.string().optional().describe("Filter by status: PROJECT, CONFIRMED, or VOID"),
@@ -824,7 +837,8 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         || params.clients_id !== undefined;
       if (!hasFilter) {
         const result = await api.transactions.list(params);
-        return { content: [{ type: "text", text: toMcpJson(result) }] };
+        const compact = { ...result, items: applyListView("transaction", result.items, params.view) };
+        return { content: [{ type: "text", text: toMcpJson(compact) }] };
       }
       const all = await api.transactions.listAllCached();
       const bankRefContains = params.bank_ref_contains?.toLowerCase();
@@ -851,7 +865,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
       const outOfRange = requestedPage > totalPages;
       const start = (requestedPage - 1) * perPage;
-      const items = filtered.slice(start, start + perPage);
+      const items = applyListView("transaction", filtered.slice(start, start + perPage), params.view);
       return {
         content: [{
           type: "text",
@@ -1094,9 +1108,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // SALE INVOICES
   // =====================
 
-  registerTool(server, "list_sale_invoices", "List sales invoices. Paginated.", pageParam.shape, { ...readOnly, title: "List Sale Invoices" }, async (params) => {
+  registerTool(server, "list_sale_invoices",
+    "List sales invoices. Paginated. Returns brief view (id, number, clients_id, client_name, dates, status/payment_status, gross/net price, currency, term_days) by default; pass view='full' or call get_sale_invoice for items, deliveries, and remaining detail.",
+    { ...pageParam.shape, ...viewParam },
+    { ...readOnly, title: "List Sale Invoices" }, async (params) => {
     const result = await api.saleInvoices.list(params);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    const compact = { ...result, items: applyListView("sale_invoice", result.items, params.view) };
+    return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_sale_invoice", "Get a sales invoice by ID (includes items, deliveries)", idParam.shape, { ...readOnly, title: "Get Sale Invoice" }, async ({ id }) => {
@@ -1232,9 +1250,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   // PURCHASE INVOICES
   // =====================
 
-  registerTool(server, "list_purchase_invoices", "List purchase invoices. Paginated.", pageParam.shape, { ...readOnly, title: "List Purchase Invoices" }, async (params) => {
+  registerTool(server, "list_purchase_invoices",
+    "List purchase invoices. Paginated. Returns brief view (id, number, clients_id, client_name, dates, status/payment_status, gross/net/vat price, currency, term_days, bank_ref_number) by default; pass view='full' or call get_purchase_invoice for items and remaining detail.",
+    { ...pageParam.shape, ...viewParam },
+    { ...readOnly, title: "List Purchase Invoices" }, async (params) => {
     const result = await api.purchaseInvoices.list(params);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    const compact = { ...result, items: applyListView("purchase_invoice", result.items, params.view) };
+    return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_purchase_invoice", "Get a purchase invoice by ID", idParam.shape, { ...readOnly, title: "Get Purchase Invoice" }, async ({ id }) => {
