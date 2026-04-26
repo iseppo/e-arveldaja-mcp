@@ -1497,12 +1497,21 @@ export function buildKeywordSuggestion(
   const articleAccount = article?.accounts_id
     ? accounts.find(candidate => candidate.id === article.accounts_id)
     : undefined;
-  const account = articleAccount && !articleAccount.is_fixed_asset
+  const articleAccountUsable = !!articleAccount && !articleAccount.is_fixed_asset;
+  const account = articleAccountUsable
     ? articleAccount
     : findAccountByKeywords(accounts, accountKeywords)
       ?? findAccountByKeywords(accounts, ["muu", "general", "kulud"]);
 
   if (!article) return undefined;
+  // Codex MEDIUM (#17): if the article maps to a fixed-asset account AND
+  // we have no non-fixed replacement, refuse to emit a suggestion. The
+  // previous code used `account?.id ?? article.accounts_id` on the next
+  // line, which silently propagated the fixed-asset account through the
+  // article-fallback path — exactly the back door the new guards were
+  // meant to shut. Returning undefined forces the caller to route the
+  // row to needs_review instead.
+  if (articleAccount?.is_fixed_asset && !account) return undefined;
 
   return {
     source: article === fallbackArticle ? "fallback" : "keyword_match",
@@ -1510,7 +1519,8 @@ export function buildKeywordSuggestion(
     suggested_purchase_article: { id: article.id, name: article.name_est || article.name_eng },
     item: {
       cl_purchase_articles_id: article.id,
-      purchase_accounts_id: account?.id ?? article.accounts_id,
+      // article.accounts_id is only used as a fallback when itself non-fixed.
+      purchase_accounts_id: account?.id ?? (articleAccountUsable ? article.accounts_id : undefined),
       custom_title: "Receipt expense",
       amount: 1,
     },

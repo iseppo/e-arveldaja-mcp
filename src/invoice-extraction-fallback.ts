@@ -36,6 +36,14 @@ export interface ExtractionConfidenceSignals {
   reverse_charge_phrase_unhandled?: boolean;
   /** Booking suggestion proposes a fixed-asset account for an implausibly small invoice. */
   improbable_fixed_asset?: boolean;
+  /**
+   * Reverse-charge was set via the foreign-supplier default (#18) — i.e.
+   * not by an explicit phrase in the document and not by supplier history.
+   * The default is convenient for the SaaS/service common case but wrong
+   * for goods imports, so the row is downgraded to medium confidence and
+   * routed to review rather than auto-confirmed. (Codex MEDIUM follow-up.)
+   */
+  foreign_reverse_charge_default_unverified?: boolean;
 }
 
 export interface InvoiceExtractionFallback {
@@ -116,6 +124,7 @@ export function summarizeInvoiceExtraction(
 
   if (signals?.supplier_resolution_failed) mediumSignals.push("supplier_resolution_failed");
   if (signals?.improbable_fixed_asset) mediumSignals.push("improbable_fixed_asset");
+  if (signals?.foreign_reverse_charge_default_unverified) mediumSignals.push("foreign_reverse_charge_default_unverified");
   // Booking from a keyword/fallback path is fine for low-stakes review,
   // but it's a soft signal that we did NOT find a confirming history. Only
   // downgrade to medium when paired with another medium-or-low signal —

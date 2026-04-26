@@ -352,8 +352,19 @@ function extensionToFileType(extension: string): FileType | undefined {
 
 function maybeAddLlmFallbackNote(notes: string[], fallback: InvoiceExtractionFallback): void {
   if (!fallback.recommended) return;
-  const missing = fallback.missing_required_fields.join(", ");
-  notes.push(`Deterministic extraction is incomplete (${missing}). Use extracted.raw_text and llm_fallback guidance instead of guessing missing fields.`);
+  // Codex LOW: with the #20 confidence model, `recommended` is true for any
+  // non-high outcome — including medium with no missing required fields
+  // (e.g. supplier_resolution_failed only). Don't emit "incomplete ()"
+  // when the field list is empty; surface the confidence signals instead.
+  if (fallback.missing_required_fields.length > 0) {
+    const missing = fallback.missing_required_fields.join(", ");
+    notes.push(`Deterministic extraction is incomplete (${missing}). Use extracted.raw_text and llm_fallback guidance instead of guessing missing fields.`);
+  } else {
+    const detail = fallback.confidence_signals.length > 0
+      ? fallback.confidence_signals.join(", ")
+      : fallback.reason;
+    notes.push(`Deterministic extraction confidence is ${fallback.confidence} (${detail}). Use extracted.raw_text and llm_fallback guidance to verify before booking.`);
+  }
 }
 
 function buildSyntheticItem(
@@ -975,26 +986,6 @@ async function safeGetInvoiceInfo(api: ApiContext): Promise<{ invoice_company_na
 }
 
 /**
- * Build the typed cross-reference for a payment receipt (issue #23).
- *
- * Payment receipts (Stripe / Anthropic / Wise outbound notifications) print
- * a reference to the underlying invoice they confirm. The deterministic
- * extractor's `invoice_number` is the receipt's best guess at that
- * reference. We expose the value as a typed field so downstream callers
- * (auto-attach via upload_invoice_document, manual review UIs) don't have
- * to parse it back out of the human note.
- *
- * `matched: true` AND `matched_invoice_id` are populated when the receipt's
- * invoice number resolves to an existing purchase invoice in this company's
- * book, status not DELETED/INVALIDATED. A no-match is still returned with
- * the invoice number so callers can chain a fallback (search the batch,
- * ask the user, etc.).
- *
- * AUTO-prefixed invoice numbers are placeholders the extractor synthesises
- * when it cannot find a confident number; we don't expose those — they'd
- * cause spurious cross-references.
- */
-/**
  * Auto-detect reverse-charge VAT and apply it to a booking suggestion (#18).
  *
  * Precedence:
@@ -1052,6 +1043,26 @@ export function applyReverseChargeAutoDetection(
   bookingSuggestion.reverse_charge_reason = "none";
 }
 
+/**
+ * Build the typed cross-reference for a payment receipt (issue #23).
+ *
+ * Payment receipts (Stripe / Anthropic / Wise outbound notifications) print
+ * a reference to the underlying invoice they confirm. The deterministic
+ * extractor's `invoice_number` is the receipt's best guess at that
+ * reference. We expose the value as a typed field so downstream callers
+ * (auto-attach via upload_invoice_document, manual review UIs) don't have
+ * to parse it back out of the human note.
+ *
+ * `matched: true` AND `matched_invoice_id` are populated when the receipt's
+ * invoice number resolves to an existing purchase invoice in this company's
+ * book, status not DELETED/INVALIDATED. A no-match is still returned with
+ * the invoice number so callers can chain a fallback (search the batch,
+ * ask the user, etc.).
+ *
+ * AUTO-prefixed invoice numbers are placeholders the extractor synthesises
+ * when it cannot find a confident number; we don't expose those — they'd
+ * cause spurious cross-references.
+ */
 export function buildReferencedInvoiceForPaymentReceipt(
   invoiceNumber: string | undefined,
   purchaseInvoices: PurchaseInvoice[],
@@ -1747,6 +1758,14 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
           if (bookingSuggestion) {
             applyReverseChargeAutoDetection(bookingSuggestion, extracted, supplierResolution, context.isVatRegistered, notes);
+            // Codex MEDIUM (#18): the foreign-supplier reverse-charge
+            // default fits SaaS/services but mis-codes goods imports, so
+            // it must NOT silently auto-confirm. Flag it as a medium
+            // confidence signal so the contract gate (#19) routes the row
+            // to needs_review rather than create+confirm.
+            if (bookingSuggestion.reverse_charge_reason === "foreign_supplier_default") {
+              signals.foreign_reverse_charge_default_unverified = true;
+            }
             signals.booking_from_history = bookingSuggestion.source === "supplier_history";
             // Improbable fixed-asset guard (#20): a small invoice routed
             // to a fixed-asset account is almost certainly miscoded. The
@@ -1794,14 +1813,29 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           }
 
           // In-batch duplicate detection (#19): two files in the same batch
-          // bearing the same supplier-side invoice number for the same
-          // resolved supplier are almost always the same invoice scanned
+          // bearing the same supplier-side invoice number AND a matching
+          // supplier identity are almost always the same invoice scanned
           // twice. The first wins; the second is flagged.
-          if (resolvedClientId && extracted.invoice_number) {
-            const earlier = results.find(prev =>
-              prev.supplier_resolution?.client?.id === resolvedClientId &&
-              prev.extracted?.invoice_number?.trim().toLowerCase() === extracted.invoice_number?.trim().toLowerCase(),
-            );
+          //
+          // Codex LOW: also key by reg_code / VAT / normalized supplier
+          // name so dry runs that haven't yet created a client (only a
+          // preview_client) still detect the dupe. Without this, scanning
+          // an unknown supplier twice would silently under-report the
+          // risk in dry-run output.
+          if (extracted.invoice_number) {
+            const myInvoice = extracted.invoice_number.trim().toLowerCase();
+            const myRegCode = extracted.supplier_reg_code?.trim();
+            const myVat = normalizeVatForCompare(extracted.supplier_vat_no);
+            const myNameKey = extracted.supplier_name ? normalizeCompanyName(extracted.supplier_name) : "";
+            const earlier = results.find(prev => {
+              if (prev.extracted?.invoice_number?.trim().toLowerCase() !== myInvoice) return false;
+              if (resolvedClientId && prev.supplier_resolution?.client?.id === resolvedClientId) return true;
+              if (myRegCode && prev.extracted?.supplier_reg_code?.trim() === myRegCode) return true;
+              if (myVat && normalizeVatForCompare(prev.extracted?.supplier_vat_no) === myVat) return true;
+              if (myNameKey.length >= 4 && prev.extracted?.supplier_name &&
+                  normalizeCompanyName(prev.extracted.supplier_name) === myNameKey) return true;
+              return false;
+            });
             if (earlier) {
               signals.duplicate_invoice_in_batch = true;
             }

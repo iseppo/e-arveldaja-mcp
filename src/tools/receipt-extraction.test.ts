@@ -564,13 +564,15 @@ describe("findAccountByKeywords (#17)", () => {
     const accounts = [
       makeAccount({ id: 5310, name_est: "Sõidukikulud" }),
     ];
-    // "auto" must not match because there is no `auto` substring as a
-    // standalone word in `sõidukikulud`. (Pinning the boundary behaviour.)
+    // "auto" must not match — `auto` is not a prefix of any word in
+    // `sõidukikulud`, and the matcher requires a leading word boundary.
     expect(findAccountByKeywords(accounts, ["auto"])?.id).toBeUndefined();
-    // "sõiduk" (whole-word fragment in "sõidukikulud") wouldn't match
-    // either — the boundary is at the start of the word; only a full
-    // standalone token matches. This is intentional: prefer false
-    // negatives over false positives in keyword routing.
+    // "sõiduk" DOES match `sõidukikulud` — the matcher is prefix-at-word-
+    // boundary by design (so Estonian suffixes like `muud` / `muude`
+    // still match a `muu` keyword). Pin that behaviour here so a future
+    // tweak that tightens the regex to require a trailing boundary
+    // doesn't silently drop legitimate inflected matches.
+    expect(findAccountByKeywords(accounts, ["sõiduk"])?.id).toBe(5310);
   });
 });
 
@@ -629,6 +631,35 @@ describe("buildKeywordSuggestion (#17)", () => {
     const result = buildKeywordSuggestion(articles, baseAccounts, "OpenAI subscription");
     expect(result?.suggested_account?.id).not.toBe(1810);
     expect(result?.suggested_account?.is_fixed_asset).toBe(false);
+  });
+
+  it("returns undefined when the article maps to fixed-asset AND no non-fixed replacement exists (codex MEDIUM)", () => {
+    // The Codex review caught the back door: even with the fixed-asset
+    // article account refused, item.purchase_accounts_id used to fall
+    // back to article.accounts_id when keyword search failed. This test
+    // pins the new behaviour: refuse to emit a suggestion at all so the
+    // caller routes the row to needs_review.
+    const articles = [
+      { id: 1, name_est: "Tarkvara litsents", name_eng: "Software license", accounts_id: 1810 },
+    ];
+    const accountsWithOnlyFixed = [
+      makeAccount({ id: 1810, name_est: "Ehitised", is_fixed_asset: true }),
+      makeAccount({ id: 1830, name_est: "Muu materiaalne põhivara", is_fixed_asset: true }),
+    ];
+    const result = buildKeywordSuggestion(articles, accountsWithOnlyFixed, "OpenAI subscription");
+    expect(result).toBeUndefined();
+  });
+
+  it("does not propagate article.accounts_id into the item when the article account is fixed-asset", () => {
+    // Even when keyword fallback finds a replacement account, the item
+    // must not surface the original article.accounts_id (1810) as a
+    // backup — the suggested account is the only safe value to write.
+    const articles = [
+      { id: 1, name_est: "Tarkvara litsents", name_eng: "Software license", accounts_id: 1810 },
+    ];
+    const result = buildKeywordSuggestion(articles, baseAccounts, "OpenAI subscription");
+    expect(result?.item.purchase_accounts_id).not.toBe(1810);
+    expect(result?.item.purchase_accounts_id).toBe(result?.suggested_account?.id);
   });
 });
 

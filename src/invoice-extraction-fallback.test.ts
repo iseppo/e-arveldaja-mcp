@@ -272,6 +272,15 @@ describe("summarizeInvoiceExtraction", () => {
       expect(result.confidence_signals).toContain("improbable_fixed_asset");
     });
 
+    it("downgrades to medium when foreign_reverse_charge_default_unverified is set (codex MEDIUM follow-up to #18)", () => {
+      // Foreign-supplier reverse-charge default is convenient for
+      // SaaS/services but wrong for goods imports. The signal stops the
+      // contract gate from auto-confirming until a reviewer agrees.
+      const result = summarizeInvoiceExtraction(baseGood, { foreign_reverse_charge_default_unverified: true });
+      expect(result.confidence).toBe("medium");
+      expect(result.confidence_signals).toContain("foreign_reverse_charge_default_unverified");
+    });
+
     it("low signals dominate medium signals when both are present", () => {
       const result = summarizeInvoiceExtraction(baseGood, {
         self_vat_detected: true,
