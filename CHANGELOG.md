@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-04-26
+
 ### Fixed
 - **Booking suggestion miscoding SaaS as Buildings** (closes #17) — `findAccountByKeywords` used `String.prototype.includes`, so the keyword `"it"` matched as a substring of `"Ehitised"` (Buildings, id=1810) and routed OpenAI/ChatGPT/Anthropic receipts into a fixed-asset acquisition account. The matcher is now a prefix-at-word-boundary regex (Unicode `\p{L}\p{N}` boundaries so Estonian suffixes like `muud`/`muude` still match `muu`), and any `is_fixed_asset` account is filtered out of keyword/fallback paths — even when reached via a misconfigured purchase-article's `accounts_id`. The keyword map is expanded for OpenAI / ChatGPT / Anthropic / Claude / Cursor and prefers `tarkvara` / `internet` / `sideteenus` keys before generic ones.
 - **Reverse-charge VAT not auto-detected for foreign suppliers** (closes #18) — `BookingSuggestion` gains a `reverse_charge_reason` field. `applyReverseChargeAutoDetection` (a) preserves any `reversed_vat_id` already set by supplier history / local rules; (b) auto-applies reverse-charge when an explicit phrase matches in OCR text — Estonian `pöördmaksustamise alusel`, English `reverse charge`, German `Steuerschuldnerschaft des Leistungsempfängers`, French `autoliquidation`; (c) falls back to a foreign-supplier default when the active company is VAT-registered AND the resolved supplier country is not `EST`. Decisions are surfaced as human-readable notes plus `reverse_charge_reason` for downstream review.
