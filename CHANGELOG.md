@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-04-26
+
 ### Fixed
 - **Long-running tools crashed the Claude Code MCP transport with "Received a progress notification for an unknown token"** — call sites in `camt-import`, `bank-reconciliation`, `receipt-inbox`, `wise-import`, `analyze-unconfirmed`, `lightyear-investments`, and `api/base-resource` invoked `reportProgress` once per item across loops of 50–69+ entries. Each emit was awaited but landed in the OS stdio buffer; on slow clients the response was matched and the progressToken handler cleared *before* the trailing notifications were drained, and Claude Code treats any "unknown token" progress notification as a fatal transport error (closes the stdio pipe; the user must reconnect via `/mcp`). `reportProgress` now (a) throttles to at most one notification per 100 ms within an invocation, (b) skips the trailing `progress >= total` emit since the response itself signals completion, and (c) honors a `EARVELDAJA_DISABLE_PROGRESS=1` env-var kill switch for environments still affected. Throttle state is per-invocation (WeakMap keyed by the SDK's tool extra), so concurrent tool calls and back-to-back invocations never share a window.
 
