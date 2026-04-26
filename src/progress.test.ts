@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { reportProgress, toolExtraStorage, type ToolExtra } from "./progress.js";
+import { reportProgress, runWithExtra, toolExtraStorage, type ToolExtra } from "./progress.js";
 
 describe("reportProgress", () => {
   it("sends progress notifications when the client supplies progressToken=0", async () => {
@@ -98,6 +98,75 @@ describe("reportProgress", () => {
       expect(sendNotification).not.toHaveBeenCalled();
     } finally {
       process.env.EARVELDAJA_DISABLE_PROGRESS = original;
+    }
+  });
+
+  it("runWithExtra suppresses progress emitted within the leading throttle window", async () => {
+    // Reproduces the production race: paginated tools that complete in
+    // <100 ms (e.g. cached `list_transactions` with 6 pages) used to emit
+    // `progress: 0` on the first page fetch. That notification arrived at
+    // the client *after* the response, the SDK had already cleared the
+    // progressToken, and Claude Code closed the transport. Pre-seeding the
+    // throttle baseline at invocation start keeps the emit silent.
+    const sendNotification = vi.fn().mockResolvedValue(undefined);
+    const extra: ToolExtra = { sendNotification, _meta: { progressToken: "tok" } };
+
+    let nowMs = 1_000_000;
+    const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    try {
+      await runWithExtra(extra, async () => {
+        nowMs += 1; // 1 ms into invocation — fast page fetch
+        await reportProgress(0, 6);
+        nowMs += 50; // 51 ms in — still inside the leading window
+        await reportProgress(1, 6);
+        nowMs += 40; // 91 ms in — still inside
+        await reportProgress(2, 6);
+      });
+      expect(sendNotification).not.toHaveBeenCalled();
+    } finally {
+      dateSpy.mockRestore();
+    }
+  });
+
+  it("runWithExtra emits once the leading throttle window has elapsed", async () => {
+    const sendNotification = vi.fn().mockResolvedValue(undefined);
+    const extra: ToolExtra = { sendNotification, _meta: { progressToken: "tok" } };
+
+    let nowMs = 1_000_000;
+    const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    try {
+      await runWithExtra(extra, async () => {
+        nowMs += 150; // past the 100 ms leading window
+        await reportProgress(1, 6);
+      });
+      expect(sendNotification).toHaveBeenCalledTimes(1);
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: "notifications/progress",
+        params: { progressToken: "tok", progress: 1, total: 6 },
+      });
+    } finally {
+      dateSpy.mockRestore();
+    }
+  });
+
+  it("runWithExtra emits at the exact +100 ms boundary (strict-less-than throttle)", async () => {
+    // Pin the boundary: `now - last < PROGRESS_THROTTLE_MS` is strict, so an
+    // emit at exactly +100 ms is allowed. Defends against an accidental flip
+    // to `<=`, which would re-open the leading-window race for tools that
+    // first attempt to emit at the threshold.
+    const sendNotification = vi.fn().mockResolvedValue(undefined);
+    const extra: ToolExtra = { sendNotification, _meta: { progressToken: "tok" } };
+
+    let nowMs = 1_000_000;
+    const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    try {
+      await runWithExtra(extra, async () => {
+        nowMs += 100;
+        await reportProgress(1, 6);
+      });
+      expect(sendNotification).toHaveBeenCalledTimes(1);
+    } finally {
+      dateSpy.mockRestore();
     }
   });
 

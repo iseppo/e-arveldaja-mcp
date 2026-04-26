@@ -21,7 +21,7 @@ import {
   type CredentialStorageScope,
   type Config,
 } from "./config.js";
-import { toolExtraStorage } from "./progress.js";
+import { runWithExtra } from "./progress.js";
 import { HttpClient } from "./http-client.js";
 import { ClientsApi } from "./api/clients.api.js";
 import { ProductsApi } from "./api/products.api.js";
@@ -871,7 +871,7 @@ Reporting:
             await ensureAuditLogLabelResolved(snapshot.index);
           }
           const runInExtra = extra
-            ? () => toolExtraStorage.run(extra, () => handler(...args))
+            ? () => runWithExtra(extra, () => handler(...args))
             : () => handler(...args);
           return runInExtra();
         });

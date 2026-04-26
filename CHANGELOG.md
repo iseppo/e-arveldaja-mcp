@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Claude Code MCP transport still dropped on fast paginated tools after 0.12.3** — the 100 ms throttle introduced in 0.12.3 only suppressed the *second and later* `reportProgress` calls within an invocation. The first emit always passed (the throttle map's default is 0, so `Date.now() - 0` is far larger than 100 ms), so any tool whose first `await reportProgress(...)` fired right after a fast page-1 fetch still raced its own response. Production logs from 2026-04-26 captured three drops in one session (`list_transactions`, `detect_duplicate_purchase_invoice`, `reconcile_inter_account_transfers`) where the tool completed in 7–42 ms and the leading `progress: 0` notification arrived at the client *after* the response had cleared the progressToken — Claude Code closed the stdio transport and the server had to reconnect. The throttle baseline is now pre-seeded to invocation start via a new `runWithExtra` wrapper around `toolExtraStorage.run`, so tools that finish inside the 100 ms window emit zero progress notifications. Slow tools (>100 ms first-emit latency) still report progress as before.
+
 ## [0.12.4] - 2026-04-26
 
 ### Added
