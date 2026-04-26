@@ -218,6 +218,104 @@ describe("summarizeInvoiceExtraction", () => {
     });
   });
 
+  describe("confidence model (#20)", () => {
+    const baseGood = {
+      supplier_name: "Acme OÜ",
+      invoice_number: "INV-2024-001",
+      invoice_date: "2024-01-15",
+      total_gross: 121.0,
+      currency: "EUR",
+      raw_text: "Invoice content",
+    };
+
+    it("returns high confidence when raw text + all required fields are present and no signals fire", () => {
+      const result = summarizeInvoiceExtraction(baseGood);
+      expect(result.confidence).toBe("high");
+      expect(result.confidence_signals).toEqual([]);
+      expect(result.recommended).toBe(false);
+    });
+
+    it("downgrades to low when self_vat_detected is set (#14)", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { self_vat_detected: true });
+      expect(result.confidence).toBe("low");
+      expect(result.confidence_signals).toContain("self_vat_detected");
+      expect(result.recommended).toBe(true);
+    });
+
+    it("downgrades to low when currency is required but absent (#16)", () => {
+      const result = summarizeInvoiceExtraction({ ...baseGood, currency: undefined });
+      expect(result.confidence).toBe("low");
+      expect(result.confidence_signals).toContain("currency_defaulted");
+    });
+
+    it("downgrades to low when duplicate_invoice_in_batch is set (#19)", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { duplicate_invoice_in_batch: true });
+      expect(result.confidence).toBe("low");
+      expect(result.confidence_signals).toContain("duplicate_invoice_in_batch");
+    });
+
+    it("downgrades to low when reverse_charge_phrase_unhandled is set (#18)", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { reverse_charge_phrase_unhandled: true });
+      expect(result.confidence).toBe("low");
+      expect(result.confidence_signals).toContain("reverse_charge_phrase_unhandled");
+    });
+
+    it("downgrades to medium when supplier_resolution_failed (no other signals)", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { supplier_resolution_failed: true });
+      expect(result.confidence).toBe("medium");
+      expect(result.confidence_signals).toContain("supplier_resolution_failed");
+    });
+
+    it("downgrades to medium when improbable_fixed_asset is set (#17)", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { improbable_fixed_asset: true });
+      expect(result.confidence).toBe("medium");
+      expect(result.confidence_signals).toContain("improbable_fixed_asset");
+    });
+
+    it("low signals dominate medium signals when both are present", () => {
+      const result = summarizeInvoiceExtraction(baseGood, {
+        self_vat_detected: true,
+        supplier_resolution_failed: true,
+      });
+      expect(result.confidence).toBe("low");
+    });
+
+    it("downgrades to medium when booking_from_history is explicitly false", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { booking_from_history: false });
+      expect(result.confidence).toBe("medium");
+      expect(result.confidence_signals).toContain("booking_not_from_history");
+    });
+
+    it("stays high when booking_from_history is true", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { booking_from_history: true });
+      expect(result.confidence).toBe("high");
+      expect(result.recommended).toBe(false);
+    });
+
+    it("forces low when raw_text is missing regardless of other inputs", () => {
+      const result = summarizeInvoiceExtraction({ ...baseGood, raw_text: undefined });
+      expect(result.confidence).toBe("low");
+      expect(result.confidence_signals).toContain("raw_text_missing");
+    });
+
+    it("collects multiple signals into confidence_signals", () => {
+      const result = summarizeInvoiceExtraction(baseGood, {
+        self_vat_detected: true,
+        duplicate_invoice_in_batch: true,
+      });
+      expect(result.confidence_signals).toEqual(
+        expect.arrayContaining(["self_vat_detected", "duplicate_invoice_in_batch"]),
+      );
+    });
+
+    it("recommended remains true for any non-high confidence (backwards compat)", () => {
+      const lowResult = summarizeInvoiceExtraction(baseGood, { self_vat_detected: true });
+      const mediumResult = summarizeInvoiceExtraction(baseGood, { supplier_resolution_failed: true });
+      expect(lowResult.recommended).toBe(true);
+      expect(mediumResult.recommended).toBe(true);
+    });
+  });
+
   describe("currency requirement (#16)", () => {
     const baseWithGross = {
       supplier_name: "Acme OÜ",

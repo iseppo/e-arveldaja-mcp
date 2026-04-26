@@ -17,6 +17,7 @@ import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase
 import { parseDocument } from "../document-parser.js";
 import { normalizeCompanyName } from "../company-name.js";
 import {
+  type ExtractionConfidenceSignals,
   type InvoiceExtractionFallback,
   summarizeInvoiceExtraction,
 } from "../invoice-extraction-fallback.js";
@@ -1559,7 +1560,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
   registerTool(server,
     "process_receipt_batch",
-    "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback for model/manual review. Purchase invoices can be created, confirmed, and matched to bank transactions when execute=true.",
+    "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback (with a confidence: low|medium|high score, see #20) for model/manual review. Purchase invoices can be created, confirmed, and matched to bank transactions when execute=true — but rows whose final confidence is low are routed to needs_review even on execute=true (#19).",
     {
       folder_path: z.string().describe("Folder path with receipts"),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID used when matching bank transactions"),
@@ -1610,9 +1611,18 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
         try {
           const extracted = await extractReceiptFields(file, ownCompanyVat);
-          const llmFallback = summarizeInvoiceExtraction(extracted);
           const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
           const selfVatDetected = detectSelfVatOnly(extracted, ownCompanyVat);
+
+          // Confidence signals accumulated as we walk the per-file pipeline
+          // (#20). The summary is recomputed at each push site rather than
+          // once up-front so late-stage findings (supplier resolution
+          // outcome, booking source, in-batch duplicates, reverse-charge
+          // phrasing without a flag) feed into the confidence verdict.
+          const signals: ExtractionConfidenceSignals = {};
+          if (selfVatDetected) signals.self_vat_detected = true;
+          const summarize = () => summarizeInvoiceExtraction(extracted, signals);
+          const llmFallback = summarize();
 
           if (file.file_type !== "pdf") {
             notes.push("Image receipt OCR-parsed with LiteParse.");
@@ -1695,21 +1705,23 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
             );
           }
+          if (!supplierResolution.found) signals.supplier_resolution_failed = true;
           if (!supplierResolution.client && !supplierResolution.preview_client) {
+            const fallback = summarize();
             notes.push("Supplier could not be resolved or prepared for creation.");
-            maybeAddLlmFallbackNote(notes, llmFallback);
+            maybeAddLlmFallbackNote(notes, fallback);
             results.push({
               file,
               classification,
               status: "needs_review",
               extracted,
-              llm_fallback: llmFallback,
+              llm_fallback: fallback,
               supplier_resolution: supplierResolution,
               review_guidance: buildReceiptReviewGuidance({
                 classification,
                 notes,
                 extracted,
-                llmFallback,
+                llmFallback: fallback,
               }),
               notes,
             });
@@ -1735,27 +1747,64 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
           if (bookingSuggestion) {
             applyReverseChargeAutoDetection(bookingSuggestion, extracted, supplierResolution, context.isVatRegistered, notes);
+            signals.booking_from_history = bookingSuggestion.source === "supplier_history";
+            // Improbable fixed-asset guard (#20): a small invoice routed
+            // to a fixed-asset account is almost certainly miscoded. The
+            // 1000 EUR threshold is a defensive heuristic — typical SaaS,
+            // cloud, professional-services invoices fall well below it.
+            if (
+              bookingSuggestion.suggested_account?.is_fixed_asset &&
+              extracted.total_gross !== undefined &&
+              extracted.total_gross < 1000
+            ) {
+              signals.improbable_fixed_asset = true;
+            }
+            // Reverse-charge phrase present but the booking suggestion did
+            // not flag it: should be rare since applyReverseChargeAutoDetection
+            // sets it automatically. The signal handles edge cases where the
+            // phrase regex hits but downstream logic refused to apply.
+            if (
+              detectReverseChargeFromText(extracted.raw_text) &&
+              !bookingSuggestion.item.reversed_vat_id
+            ) {
+              signals.reverse_charge_phrase_unhandled = true;
+            }
           }
 
           if (!bookingSuggestion) {
+            const fallback = summarize();
             notes.push("Could not find a purchase article / account suggestion for this receipt.");
-            maybeAddLlmFallbackNote(notes, llmFallback);
+            maybeAddLlmFallbackNote(notes, fallback);
             results.push({
               file,
               classification,
               status: "needs_review",
               extracted,
-              llm_fallback: llmFallback,
+              llm_fallback: fallback,
               supplier_resolution: supplierResolution,
               review_guidance: buildReceiptReviewGuidance({
                 classification,
                 notes,
                 extracted,
-                llmFallback,
+                llmFallback: fallback,
               }),
               notes,
             });
             continue;
+          }
+
+          // In-batch duplicate detection (#19): two files in the same batch
+          // bearing the same supplier-side invoice number for the same
+          // resolved supplier are almost always the same invoice scanned
+          // twice. The first wins; the second is flagged.
+          if (resolvedClientId && extracted.invoice_number) {
+            const earlier = results.find(prev =>
+              prev.supplier_resolution?.client?.id === resolvedClientId &&
+              prev.extracted?.invoice_number?.trim().toLowerCase() === extracted.invoice_number?.trim().toLowerCase(),
+            );
+            if (earlier) {
+              signals.duplicate_invoice_in_batch = true;
+            }
           }
 
           if (resolvedClientId && extracted.invoice_number && extracted.invoice_date && extracted.total_gross !== undefined) {
@@ -1772,7 +1821,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
                 classification,
                 status: "skipped_duplicate",
                 extracted,
-                llm_fallback: llmFallback,
+                llm_fallback: summarize(),
                 supplier_resolution: supplierResolution,
                 booking_suggestion: bookingSuggestion,
                 duplicate_match: duplicate,
@@ -1780,6 +1829,36 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               });
               continue;
             }
+          }
+
+          // Contract gate (#19): the legacy `execute=true` path created AND
+          // confirmed in one shot. With the confidence model in place we
+          // refuse to auto-create+confirm any row whose final confidence
+          // is "low" — silent miscoding is the worse failure than holding
+          // the row for review. Dry runs always proceed (preview only).
+          const preCreateSummary = summarize();
+          if (!dryRun && preCreateSummary.confidence === "low") {
+            const reasons = preCreateSummary.confidence_signals.join(", ") || "low confidence";
+            notes.push(
+              `Auto-create skipped: confidence is low (${reasons}). Manual review required before booking (#19).`,
+            );
+            results.push({
+              file,
+              classification,
+              status: "needs_review",
+              extracted,
+              llm_fallback: preCreateSummary,
+              supplier_resolution: supplierResolution,
+              booking_suggestion: bookingSuggestion,
+              review_guidance: buildReceiptReviewGuidance({
+                classification,
+                notes,
+                extracted,
+                llmFallback: preCreateSummary,
+              }),
+              notes,
+            });
+            continue;
           }
 
           const created = await createAndMaybeMatchPurchaseInvoice(
@@ -1799,7 +1878,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             classification,
             status: created.status,
             extracted,
-            llm_fallback: llmFallback,
+            llm_fallback: summarize(),
             supplier_resolution: supplierResolution,
             booking_suggestion: bookingSuggestion,
             created_invoice: created.created_invoice,
