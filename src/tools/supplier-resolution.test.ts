@@ -279,6 +279,77 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
     expect(result.client?.id).toBe(200);
   });
 
+  it("blocks a registry-code self-match when the active company's record has no VAT (issue #22)", async () => {
+    // Active company has VAT (recently registered) but the only client
+    // record carrying its registry code was created before VAT registration
+    // and has invoice_vat_no=null. The VAT-only self-match misses; the
+    // reg-code-based self-match catches it.
+    const ownStaleClient = makeClient({
+      id: 100,
+      name: "Seppo AI OÜ",
+      invoice_vat_no: null,
+      code: "17133416",
+    });
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [ownStaleClient],
+      { supplier_reg_code: "17133416", supplier_name: "Seppo AI OÜ" },
+      false,
+      { ownCompanyVat: "EE102809963", ownCompanyRegistryCode: "17133416" },
+    );
+
+    expect(result.found).toBe(false);
+    expect(result.self_match_blocked).toBe(true);
+    expect(result.client?.id).not.toBe(100);
+  });
+
+  it("blocks self-match when supplier_reg_code equals ownCompanyRegistryCode but no client carries that code", async () => {
+    // The OCR mis-attributed our own reg code as the supplier code; even
+    // without any matching client we must refuse to create a new supplier
+    // with our own code.
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [],
+      { supplier_reg_code: "17133416", supplier_name: "Anthropic, PBC" },
+      false,
+      { ownCompanyRegistryCode: "17133416" },
+    );
+
+    expect(result.found).toBe(false);
+    expect(result.self_match_blocked).toBe(true);
+    // The previewed new client must NOT carry our own reg code.
+    expect(result.preview_client?.code).toBeUndefined();
+  });
+
+  it("treats any client carrying our own reg code as 'self' and filters it from name-based fallbacks", async () => {
+    // Estonian reg codes are unique by design, so a *real* supplier sharing
+    // our code is impossible in practice. The test pins the chosen
+    // safe-by-default behaviour: the reg-code guard treats equality
+    // strictly, even at the cost of refusing to resolve a synthetic
+    // collision. If it ever happens for real, manual resolution is correct.
+    const collidingSupplier = makeClient({
+      id: 200,
+      name: "Anthropic, PBC",
+      code: "17133416",
+      cl_code_country: "USA",
+    });
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [collidingSupplier],
+      { supplier_reg_code: "17133416", supplier_name: "Anthropic, PBC" },
+      false,
+      { ownCompanyRegistryCode: "17133416" },
+    );
+
+    expect(result.self_match_blocked).toBe(true);
+    expect(result.found).toBe(false);
+    expect(result.client).toBeUndefined();
+    // Preview client must NOT carry our own reg code.
+    expect(result.preview_client?.code).toBeUndefined();
+  });
+
   it("still resolves a real supplier when only the supplier's VAT is provided", async () => {
     const ownCompany = makeClient({
       id: 100,

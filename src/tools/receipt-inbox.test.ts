@@ -25,7 +25,10 @@ import {
   suggestBookingInternal,
 } from "./receipt-extraction.js";
 import {
+  applyReverseChargeAutoDetection,
   buildDryRunCreatedInvoicePreview,
+  buildReferencedInvoiceForPaymentReceipt,
+  deriveOwnCompanyRegistryCode,
   detectSelfVatOnly,
   readValidatedReceiptFile,
   resolveSupplierFromTransaction,
@@ -569,6 +572,224 @@ describe("detectSelfVatOnly", () => {
 
   it("is false when raw_text is missing", () => {
     expect(detectSelfVatOnly({}, ownVat)).toBe(false);
+  });
+});
+
+describe("applyReverseChargeAutoDetection (#18)", () => {
+  type ApplyArgs = Parameters<typeof applyReverseChargeAutoDetection>;
+
+  function makeBookingSuggestion(reversed_vat_id?: number): ApplyArgs[0] {
+    return {
+      source: "keyword_match",
+      item: {
+        cl_purchase_articles_id: 1,
+        purchase_accounts_id: 4900,
+        custom_title: "Test",
+        amount: 1,
+        ...(reversed_vat_id !== undefined ? { reversed_vat_id } : {}),
+      },
+    } as ApplyArgs[0];
+  }
+
+  it("preserves an existing reversed_vat_id from supplier history", () => {
+    const booking = makeBookingSuggestion(1);
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(
+      booking,
+      { raw_text: "Random text" } as ApplyArgs[1],
+      { found: false, created: false } as ApplyArgs[2],
+      true,
+      notes,
+    );
+    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(booking.reverse_charge_reason).toBe("supplier_history");
+    expect(notes).toEqual([]);
+  });
+
+  it("auto-applies reverse-charge from explicit Estonian phrase 'pöördmaksustamise alusel'", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(
+      booking,
+      { raw_text: "Pöördmaksustamise alusel makstav maks" } as ApplyArgs[1],
+      { found: false, created: false } as ApplyArgs[2],
+      true,
+      notes,
+    );
+    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(booking.reverse_charge_reason).toBe("phrase_match");
+    expect(notes[0]).toContain("phrase");
+  });
+
+  it("auto-applies reverse-charge from English 'reverse charge' phrase", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(
+      booking,
+      { raw_text: "VAT 0% — reverse charge" } as ApplyArgs[1],
+      { found: false, created: false } as ApplyArgs[2],
+      true,
+      notes,
+    );
+    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(booking.reverse_charge_reason).toBe("phrase_match");
+  });
+
+  it("auto-applies reverse-charge from German 'Steuerschuldnerschaft des Leistungsempfängers'", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(
+      booking,
+      { raw_text: "Steuerschuldnerschaft des Leistungsempfängers" } as ApplyArgs[1],
+      { found: false, created: false } as ApplyArgs[2],
+      true,
+      notes,
+    );
+    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(booking.reverse_charge_reason).toBe("phrase_match");
+  });
+
+  it("falls back to foreign-supplier default when phrase is absent and supplier country !== EST", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(
+      booking,
+      { raw_text: "Plain invoice text" } as ApplyArgs[1],
+      { found: true, created: false, client: { cl_code_country: "USA" } } as ApplyArgs[2],
+      true,
+      notes,
+    );
+    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(booking.reverse_charge_reason).toBe("foreign_supplier_default");
+    expect(notes[0]).toContain("USA");
+  });
+
+  it("does NOT apply foreign-supplier default when active company is not VAT-registered", () => {
+    // No VAT registration → reversed_vat_id has no meaning; leave it unset.
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(
+      booking,
+      { raw_text: "Plain invoice text" } as ApplyArgs[1],
+      { found: true, created: false, client: { cl_code_country: "USA" } } as ApplyArgs[2],
+      false,
+      notes,
+    );
+    expect(booking.item.reversed_vat_id).toBeUndefined();
+    expect(booking.reverse_charge_reason).toBe("none");
+  });
+
+  it("does NOT apply when supplier is Estonian (resolved country EST)", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(
+      booking,
+      { raw_text: "Plain invoice text" } as ApplyArgs[1],
+      { found: true, created: false, client: { cl_code_country: "EST" } } as ApplyArgs[2],
+      true,
+      notes,
+    );
+    expect(booking.item.reversed_vat_id).toBeUndefined();
+    expect(booking.reverse_charge_reason).toBe("none");
+  });
+
+  it("uses preview_client country when no resolved client is present", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(
+      booking,
+      { raw_text: "Plain invoice text" } as ApplyArgs[1],
+      { found: false, created: false, preview_client: { cl_code_country: "DEU" } } as ApplyArgs[2],
+      true,
+      notes,
+    );
+    expect(booking.item.reversed_vat_id).toBe(1);
+    expect(booking.reverse_charge_reason).toBe("foreign_supplier_default");
+  });
+
+  it("phrase match wins over foreign-supplier default (no double-prompting)", () => {
+    const booking = makeBookingSuggestion();
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(
+      booking,
+      { raw_text: "Reverse charge applies" } as ApplyArgs[1],
+      { found: true, created: false, client: { cl_code_country: "USA" } } as ApplyArgs[2],
+      true,
+      notes,
+    );
+    expect(booking.reverse_charge_reason).toBe("phrase_match");
+    expect(notes).toHaveLength(1);
+  });
+});
+
+describe("buildReferencedInvoiceForPaymentReceipt (#23)", () => {
+  const invoices = [
+    { id: 501, number: "ABC-001", status: "CONFIRMED" },
+    { id: 502, number: "ABC-002", status: "DELETED" },
+  ] as Parameters<typeof buildReferencedInvoiceForPaymentReceipt>[1];
+
+  it("returns matched=true with invoice id when the receipt's invoice number resolves to a live invoice", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-001", invoices);
+    expect(result).toEqual({ invoice_number: "ABC-001", matched: true, matched_invoice_id: 501 });
+  });
+
+  it("normalizes case and trims when matching invoice numbers", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt(" abc-001 ", invoices);
+    expect(result?.matched).toBe(true);
+    expect(result?.matched_invoice_id).toBe(501);
+  });
+
+  it("returns matched=false when no live invoice matches (caller can chain a fallback)", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt("DOES-NOT-EXIST", invoices);
+    expect(result).toEqual({ invoice_number: "DOES-NOT-EXIST", matched: false });
+  });
+
+  it("does not match a DELETED/INVALIDATED invoice", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-002", invoices);
+    expect(result?.matched).toBe(false);
+  });
+
+  it("returns undefined for an empty or AUTO-prefixed invoice number (synthetic placeholder)", () => {
+    expect(buildReferencedInvoiceForPaymentReceipt(undefined, invoices)).toBeUndefined();
+    expect(buildReferencedInvoiceForPaymentReceipt("", invoices)).toBeUndefined();
+    expect(buildReferencedInvoiceForPaymentReceipt("AUTO-20260320-RECEIPT", invoices)).toBeUndefined();
+  });
+});
+
+describe("deriveOwnCompanyRegistryCode (#22)", () => {
+  // Minimal Client objects — fields not under test are loose-cast.
+  const makeClient = (overrides: { id: number; name: string; code?: string | null; invoice_vat_no?: string | null; is_deleted?: boolean }) =>
+    ({
+      id: overrides.id,
+      name: overrides.name,
+      code: overrides.code ?? null,
+      invoice_vat_no: overrides.invoice_vat_no ?? null,
+      is_deleted: overrides.is_deleted ?? false,
+    }) as Parameters<typeof deriveOwnCompanyRegistryCode>[0][number];
+
+  it("derives reg code from a client matching by VAT", () => {
+    const clients = [makeClient({ id: 100, name: "Seppo AI OÜ", code: "17133416", invoice_vat_no: "EE102809963" })];
+    expect(deriveOwnCompanyRegistryCode(clients, "EE102809963", "Seppo AI OÜ")).toBe("17133416");
+  });
+
+  it("derives reg code from a unique normalized-name match when VAT path misses", () => {
+    // Stale client record: name matches /invoice_info, code is set, but VAT
+    // was never backfilled. This is the canonical #22 scenario.
+    const clients = [makeClient({ id: 100, name: "Seppo AI OÜ", code: "17133416", invoice_vat_no: null })];
+    expect(deriveOwnCompanyRegistryCode(clients, "EE102809963", "Seppo AI OÜ")).toBe("17133416");
+  });
+
+  it("does not derive when the normalized name resolves ambiguously (multiple matches)", () => {
+    const clients = [
+      makeClient({ id: 100, name: "Seppo AI OÜ", code: "17133416" }),
+      makeClient({ id: 101, name: "Seppo AI", code: "99999999" }),
+    ];
+    expect(deriveOwnCompanyRegistryCode(clients, undefined, "Seppo AI OÜ")).toBeUndefined();
+  });
+
+  it("does not derive when invoice_company_name is unset and no VAT match exists", () => {
+    const clients = [makeClient({ id: 100, name: "Seppo AI OÜ", code: "17133416" })];
+    expect(deriveOwnCompanyRegistryCode(clients, undefined, undefined)).toBeUndefined();
   });
 });
 

@@ -230,6 +230,14 @@ export interface BookingSuggestion {
   suggested_liability_account_id?: number;
   suggested_account?: Account;
   suggested_purchase_article?: { id: number; name: string };
+  /**
+   * Why `item.reversed_vat_id` was set (or left unset). Surfaced so reviewers
+   * can see whether the reverse-charge flag came from explicit text in the
+   * document, a foreign-supplier heuristic, supplier history, or nothing
+   * (issue #18). The field is populated by the caller after a booking
+   * suggestion is produced; `suggestBookingInternal` itself does not set it.
+   */
+  reverse_charge_reason?: "phrase_match" | "foreign_supplier_default" | "supplier_history" | "none";
 }
 
 export interface InvoiceSummaryForMatching {
@@ -522,6 +530,25 @@ export function inferSupplierCountry(fields: Pick<ExtractedReceiptFields, "suppl
     getClientCountryFromVatNumber(fields.supplier_vat_no) ??
     getClientCountryFromText(fields.raw_text) ??
     "EST";
+}
+
+// Phrases an invoice/receipt prints when VAT is shifted to the recipient
+// (Estonian, English, German, French). The match is intentionally broad:
+// false positives push reverse_charge_reason="phrase_match" onto a booking
+// reviewer's screen, which they can override; false negatives silently
+// miscode VAT — the worse failure mode (issue #18).
+const REVERSE_CHARGE_PHRASES_RE =
+  /\b(p[öo]ördmaksustamise|p[öo]ördmaksustamine|p[öo]ördk[äa]ibemaks|reverse[\s-]?charge(?:d)?(?:\s*vat)?|vat\s*(?:to\s*be\s*)?paid\s*by\s*(?:the\s*)?recipient|steuerschuldnerschaft\s*des\s*leistungsempf[äa]ngers|autoliquidation(?:\s*de\s*la\s*tva)?)\b/i;
+
+/**
+ * Detect explicit reverse-charge language in raw OCR text. Used by the
+ * receipt-batch flow to set `reversed_vat_id=1` on booking suggestions
+ * automatically (issue #18). Phrase coverage is the high-precision signal;
+ * a foreign-supplier heuristic can be applied separately as a backstop.
+ */
+export function detectReverseChargeFromText(text: string | undefined): boolean {
+  if (!text) return false;
+  return REVERSE_CHARGE_PHRASES_RE.test(text);
 }
 
 /**
@@ -1379,11 +1406,36 @@ function pickFirstDefined<T>(...values: Array<T | undefined>): T | undefined {
   return undefined;
 }
 
+/**
+ * Prefix-at-word-boundary keyword match. The keyword has to start at the
+ * beginning of a word (string start or any non-letter/non-digit), but may
+ * be followed by additional letters — Estonian inflects nouns heavily and
+ * a fixed keyword like `muu` should still match `muud` / `muude`.
+ *
+ * Why not plain `String.prototype.includes`? The canonical bug was the
+ * 2-letter keyword `"it"` catching the substring inside `"Ehitised"`
+ * (Buildings), miscoding OpenAI/ChatGPT receipts as fixed-asset
+ * acquisitions (issue #17). Requiring a word boundary at the start kills
+ * that without sacrificing Estonian suffix flexibility.
+ *
+ * Boundary characters use Unicode `\p{L}\p{N}` so Estonian non-ASCII
+ * letters (õ, ä, ö, ü, š, ž) act as part of a word.
+ */
+function matchesKeywordWithBoundary(text: string, keyword: string): boolean {
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}`, "iu").test(text);
+}
+
 export function findAccountByKeywords(accounts: Account[], keywords: string[]): Account | undefined {
   const loweredKeywords = keywords.map(keyword => keyword.toLowerCase());
   return accounts.find(account => {
+    // Sanity guard (#17): keyword matching never picks fixed-asset accounts.
+    // SaaS/services/subscriptions are categorically not fixed assets;
+    // before this guard, the substring bug routed them to "Ehitised"
+    // (Buildings, id=1810) via the `"it"` keyword.
+    if (account.is_fixed_asset) return false;
     const text = `${account.name_est} ${account.name_eng} ${account.account_type_est} ${account.account_type_eng}`.toLowerCase();
-    return loweredKeywords.some(keyword => text.includes(keyword));
+    return loweredKeywords.some(keyword => matchesKeywordWithBoundary(text, keyword));
   });
 }
 
@@ -1397,7 +1449,7 @@ export function findPurchaseArticleByKeywords(
     .sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999))
     .find(article => {
       const text = `${article.name_est} ${article.name_eng}`.toLowerCase();
-      return loweredKeywords.some(keyword => text.includes(keyword));
+      return loweredKeywords.some(keyword => matchesKeywordWithBoundary(text, keyword));
     });
 }
 
@@ -1416,9 +1468,13 @@ export function buildKeywordSuggestion(
   } else if (/(wolt|restaurant|cafe|toit|food)/i.test(normalizedHints)) {
     articleKeywords = ["toit", "food", "representation", "esindus"];
     accountKeywords = ["representation", "esindus", "food", "toit"];
-  } else if (/(software|subscription|hosting|cloud|openai|google|zoom|slack|github|microsoft)/i.test(normalizedHints)) {
-    articleKeywords = ["software", "subscription", "sideteenus", "it", "internet"];
-    accountKeywords = ["software", "subscription", "it", "internet", "sideteenus"];
+  } else if (/(software|subscription|hosting|cloud|openai|chatgpt|anthropic|claude|cursor|google|zoom|slack|github|microsoft|api\b|credits)/i.test(normalizedHints)) {
+    // Article-level keywords are tried in order; longer/specific keys come
+    // first so the boundary matcher (#17) doesn't accidentally pick a generic
+    // entry. Bare "it" is intentionally NOT here — it is too short and was
+    // the source of the original Ehitised miscoding bug.
+    articleKeywords = ["tarkvara", "software", "internet", "side", "subscription", "sideteenus", "internetikulu"];
+    accountKeywords = ["tarkvara", "software", "internet", "sideteenus"];
   } else if (/(bank|pank|fee|teenustasu|commission)/i.test(normalizedHints)) {
     articleKeywords = ["bank", "teenus", "fee"];
     accountKeywords = ["bank", "teenus", "fee"];
@@ -1432,12 +1488,28 @@ export function buildKeywordSuggestion(
 
   const fallbackArticle = findPurchaseArticleByKeywords(purchaseArticles, ["muu", "other", "general"]);
   const article = findPurchaseArticleByKeywords(purchaseArticles, articleKeywords) ?? fallbackArticle;
-  const account = article?.accounts_id
+  // Resolve the suggested account. If the article's own accounts_id points
+  // at a fixed-asset account (rare misconfiguration), refuse it and fall
+  // back to keyword search — `findAccountByKeywords` already filters fixed
+  // assets out (#17). Without this layer, a single bad purchase-article
+  // configuration could re-introduce the Ehitised miscoding through the
+  // back door.
+  const articleAccount = article?.accounts_id
     ? accounts.find(candidate => candidate.id === article.accounts_id)
+    : undefined;
+  const articleAccountUsable = !!articleAccount && !articleAccount.is_fixed_asset;
+  const account = articleAccountUsable
+    ? articleAccount
     : findAccountByKeywords(accounts, accountKeywords)
       ?? findAccountByKeywords(accounts, ["muu", "general", "kulud"]);
 
   if (!article) return undefined;
+  // If the article maps to a fixed-asset account AND we have no non-fixed
+  // replacement, refuse to emit a suggestion. Otherwise the article-fallback
+  // path below would silently propagate the fixed-asset account into
+  // `purchase_accounts_id` — the same back door #17 closed elsewhere.
+  // Returning undefined forces the caller to route the row to needs_review.
+  if (articleAccount?.is_fixed_asset && !account) return undefined;
 
   return {
     source: article === fallbackArticle ? "fallback" : "keyword_match",
@@ -1445,7 +1517,8 @@ export function buildKeywordSuggestion(
     suggested_purchase_article: { id: article.id, name: article.name_est || article.name_eng },
     item: {
       cl_purchase_articles_id: article.id,
-      purchase_accounts_id: account?.id ?? article.accounts_id,
+      // article.accounts_id is only used as a fallback when itself non-fixed.
+      purchase_accounts_id: account?.id ?? (articleAccountUsable ? article.accounts_id : undefined),
       custom_title: "Receipt expense",
       amount: 1,
     },

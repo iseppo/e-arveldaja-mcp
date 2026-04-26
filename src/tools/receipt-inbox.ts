@@ -15,7 +15,9 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { type ApiContext, isCompanyVatRegistered, jsonObjectOrArrayInput, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
+import { normalizeCompanyName } from "../company-name.js";
 import {
+  type ExtractionConfidenceSignals,
   type InvoiceExtractionFallback,
   summarizeInvoiceExtraction,
 } from "../invoice-extraction-fallback.js";
@@ -33,6 +35,7 @@ import {
   computeTermDays,
   deriveAutoBookedNetAmount,
   deriveAutoBookedVatPrice,
+  detectReverseChargeFromText,
   extractReceiptFieldsFromText,
   findAccountByKeywords,
   findPurchaseArticleByKeywords,
@@ -116,6 +119,18 @@ interface ReceiptBatchFileResult {
     candidate?: TransactionMatchCandidate;
     linked?: boolean;
     confirmed_transaction_id?: number;
+  };
+  /**
+   * Set on `classification === "payment_receipt"` results to expose the
+   * underlying invoice the receipt confirms payment for. Surfaced as a
+   * typed field rather than parsing back out of `notes` so downstream
+   * tooling (auto-attach via upload_invoice_document, reconciliation) has
+   * a stable cross-reference (#23).
+   */
+  referenced_invoice?: {
+    invoice_number: string;
+    matched: boolean;
+    matched_invoice_id?: number;
   };
   notes: string[];
   error?: string;
@@ -337,8 +352,19 @@ function extensionToFileType(extension: string): FileType | undefined {
 
 function maybeAddLlmFallbackNote(notes: string[], fallback: InvoiceExtractionFallback): void {
   if (!fallback.recommended) return;
-  const missing = fallback.missing_required_fields.join(", ");
-  notes.push(`Deterministic extraction is incomplete (${missing}). Use extracted.raw_text and llm_fallback guidance instead of guessing missing fields.`);
+  // With the #20 confidence model, `recommended` is true for any non-high
+  // outcome — including medium with no missing required fields (e.g.
+  // supplier_resolution_failed only). Don't emit "incomplete ()" when the
+  // field list is empty; surface the confidence signals instead.
+  if (fallback.missing_required_fields.length > 0) {
+    const missing = fallback.missing_required_fields.join(", ");
+    notes.push(`Deterministic extraction is incomplete (${missing}). Use extracted.raw_text and llm_fallback guidance instead of guessing missing fields.`);
+  } else {
+    const detail = fallback.confidence_signals.length > 0
+      ? fallback.confidence_signals.join(", ")
+      : fallback.reason;
+    notes.push(`Deterministic extraction confidence is ${fallback.confidence} (${detail}). Use extracted.raw_text and llm_fallback guidance to verify before booking.`);
+  }
 }
 
 function buildSyntheticItem(
@@ -875,7 +901,7 @@ async function extractReceiptFields(
   return extractReceiptFieldsFromText(parsedDocument.text, file.name, { ownCompanyVat });
 }
 
-function normalizeVatForCompare(value: string | undefined): string {
+function normalizeVatForCompare(value: string | null | undefined): string {
   return (value ?? "").replace(/\s+/g, "").toUpperCase();
 }
 
@@ -898,6 +924,161 @@ export function detectSelfVatOnly(extracted: ExtractedReceiptFields, ownCompanyV
   if (!ownNormalized) return false;
   const normalizedText = extracted.raw_text.replace(/\s+/g, "").toUpperCase();
   return normalizedText.includes(ownNormalized);
+}
+
+/**
+ * Derive the active company's registry code by looking it up in the clients
+ * list. There is no e-arveldaja API endpoint that exposes the active
+ * company's reg code directly, so we infer it from the company's own client
+ * record. Two paths, in order:
+ *
+ *   1. Match a client by `invoice_vat_no` against the active company's VAT.
+ *      Fast and unambiguous when the company has VAT and at least one client
+ *      record reflects it.
+ *   2. Match a client by normalized name against `invoice_company_name` from
+ *      `/invoice_info`. Catches the case where the active company recently
+ *      registered for VAT but its own client record has a stale (null/old)
+ *      `invoice_vat_no` — the very situation #22 calls out.
+ *
+ * Path 2 requires a unique normalized-name match (≥4 chars, exactly one
+ * client) so we don't pick up a coincidentally-named supplier.
+ */
+export function deriveOwnCompanyRegistryCode(
+  clients: Client[],
+  ownCompanyVat: string | undefined,
+  ownCompanyName: string | undefined,
+): string | undefined {
+  const ownVatN = normalizeVatForCompare(ownCompanyVat);
+  if (ownVatN) {
+    const byVat = clients.find(
+      client => !client.is_deleted && normalizeVatForCompare(client.invoice_vat_no) === ownVatN,
+    );
+    if (byVat?.code?.trim()) return byVat.code.trim();
+  }
+  if (ownCompanyName) {
+    const targetKey = normalizeCompanyName(ownCompanyName);
+    if (targetKey.length >= 4) {
+      const candidates = clients.filter(
+        client => !client.is_deleted && normalizeCompanyName(client.name) === targetKey,
+      );
+      if (candidates.length === 1 && candidates[0]!.code?.trim()) {
+        return candidates[0]!.code.trim();
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolve `invoice_info` defensively. The endpoint is a recent addition;
+ * test stubs and older API client mocks may not implement it. Returning an
+ * empty object on any failure keeps the receipt-batch flow working — we
+ * just lose the name-based fallback path for ownCompanyRegistryCode (#22).
+ */
+async function safeGetInvoiceInfo(api: ApiContext): Promise<{ invoice_company_name?: string | null }> {
+  try {
+    const fn = api.readonly.getInvoiceInfo;
+    if (typeof fn !== "function") return {};
+    return await fn.call(api.readonly);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Auto-detect reverse-charge VAT and apply it to a booking suggestion (#18).
+ *
+ * Precedence:
+ *  1. If supplier history (or local rules) already set `reversed_vat_id`,
+ *     keep it — the call site has the strongest signal.
+ *  2. Otherwise, an explicit reverse-charge phrase in OCR text wins
+ *     (`reverse charge`, `pöördmaksustamine`, `Steuerschuldnerschaft des
+ *     Leistungsempfängers`, …).
+ *  3. Otherwise, when the active company is VAT-registered AND the
+ *     resolved supplier is foreign (`cl_code_country !== "EST"`), apply
+ *     reverse-charge as a service-invoice default. False positives push
+ *     the result onto a reviewer; false negatives miscode VAT silently.
+ *
+ * The chosen reason is recorded on `bookingSuggestion.reverse_charge_reason`
+ * and a human-readable note is appended for the review surface.
+ */
+export function applyReverseChargeAutoDetection(
+  bookingSuggestion: BookingSuggestion,
+  extracted: ExtractedReceiptFields,
+  supplierResolution: SupplierResolution,
+  isVatRegistered: boolean,
+  notes: string[],
+): void {
+  // Case 1: history / local rule already decided.
+  if (bookingSuggestion.item.reversed_vat_id !== undefined &&
+      bookingSuggestion.item.reversed_vat_id !== null) {
+    bookingSuggestion.reverse_charge_reason = "supplier_history";
+    return;
+  }
+
+  // Case 2: phrase match.
+  if (detectReverseChargeFromText(extracted.raw_text)) {
+    bookingSuggestion.item.reversed_vat_id = 1;
+    bookingSuggestion.reverse_charge_reason = "phrase_match";
+    notes.push(
+      "Reverse-charge VAT auto-applied from explicit phrase in invoice text (#18). Verify the booking before confirming.",
+    );
+    return;
+  }
+
+  // Case 3: foreign-supplier default. Requires (a) a VAT-registered active
+  // company — without VAT registration the field has no effect — and (b) a
+  // supplier whose resolved country is not Estonia.
+  const supplierCountry =
+    supplierResolution.client?.cl_code_country ?? supplierResolution.preview_client?.cl_code_country;
+  if (isVatRegistered && supplierCountry && supplierCountry !== "EST") {
+    bookingSuggestion.item.reversed_vat_id = 1;
+    bookingSuggestion.reverse_charge_reason = "foreign_supplier_default";
+    notes.push(
+      `Reverse-charge VAT auto-applied as foreign-supplier default (supplier country: ${supplierCountry}). Override if the invoice is for goods imports rather than services (#18).`,
+    );
+    return;
+  }
+
+  bookingSuggestion.reverse_charge_reason = "none";
+}
+
+/**
+ * Build the typed cross-reference for a payment receipt (issue #23).
+ *
+ * Payment receipts (Stripe / Anthropic / Wise outbound notifications) print
+ * a reference to the underlying invoice they confirm. The deterministic
+ * extractor's `invoice_number` is the receipt's best guess at that
+ * reference. We expose the value as a typed field so downstream callers
+ * (auto-attach via upload_invoice_document, manual review UIs) don't have
+ * to parse it back out of the human note.
+ *
+ * `matched: true` AND `matched_invoice_id` are populated when the receipt's
+ * invoice number resolves to an existing purchase invoice in this company's
+ * book, status not DELETED/INVALIDATED. A no-match is still returned with
+ * the invoice number so callers can chain a fallback (search the batch,
+ * ask the user, etc.).
+ *
+ * AUTO-prefixed invoice numbers are placeholders the extractor synthesises
+ * when it cannot find a confident number; we don't expose those — they'd
+ * cause spurious cross-references.
+ */
+export function buildReferencedInvoiceForPaymentReceipt(
+  invoiceNumber: string | undefined,
+  purchaseInvoices: PurchaseInvoice[],
+): { invoice_number: string; matched: boolean; matched_invoice_id?: number } | undefined {
+  const trimmed = invoiceNumber?.trim();
+  if (!trimmed || trimmed.toUpperCase().startsWith("AUTO-")) return undefined;
+  const normalized = trimmed.toLowerCase();
+  const found = purchaseInvoices.find(invoice =>
+    invoice.status !== "DELETED" &&
+    invoice.status !== "INVALIDATED" &&
+    invoice.number.trim().toLowerCase() === normalized,
+  );
+  if (found?.id !== undefined) {
+    return { invoice_number: trimmed, matched: true, matched_invoice_id: found.id };
+  }
+  return { invoice_number: trimmed, matched: false };
 }
 
 function findBestTransactionMatch(
@@ -1390,7 +1571,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
   registerTool(server,
     "process_receipt_batch",
-    "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback for model/manual review. Purchase invoices can be created, confirmed, and matched to bank transactions when execute=true.",
+    "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback (with a confidence: low|medium|high score, see #20) for model/manual review. Purchase invoices can be created, confirmed, and matched to bank transactions when execute=true — but rows whose final confidence is low are routed to needs_review even on execute=true (#19).",
     {
       folder_path: z.string().describe("Folder path with receipts"),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID used when matching bank transactions"),
@@ -1403,6 +1584,10 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       const dryRun = execute !== true;
       const scan = await scanReceiptFolderInternal(folder_path, undefined, date_from, date_to);
       const vatInfo = await api.readonly.getVatInfo();
+      // getInvoiceInfo is best-effort: a missing endpoint or test stub means
+      // we lose the name-based fallback for ownCompanyRegistryCode (#22),
+      // but VAT-based self-match still works.
+      const invoiceInfo = await safeGetInvoiceInfo(api);
       const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
       const context: ReceiptProcessingContext = {
         clients: await api.clients.listAll(),
@@ -1411,6 +1596,11 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         accounts: await api.readonly.getAccounts(),
         isVatRegistered: !!vatInfo.vat_number,
       };
+      const ownCompanyRegistryCode = deriveOwnCompanyRegistryCode(
+        context.clients,
+        ownCompanyVat,
+        invoiceInfo.invoice_company_name?.trim() || undefined,
+      );
       const allTransactions = await api.transactions.listAll();
       const bankTransactions = allTransactions.filter(transaction =>
         transaction.accounts_dimensions_id === accounts_dimensions_id &&
@@ -1432,9 +1622,18 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
         try {
           const extracted = await extractReceiptFields(file, ownCompanyVat);
-          const llmFallback = summarizeInvoiceExtraction(extracted);
           const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
           const selfVatDetected = detectSelfVatOnly(extracted, ownCompanyVat);
+
+          // Confidence signals accumulated as we walk the per-file pipeline
+          // (#20). The summary is recomputed at each push site rather than
+          // once up-front so late-stage findings (supplier resolution
+          // outcome, booking source, in-batch duplicates, reverse-charge
+          // phrasing without a flag) feed into the confidence verdict.
+          const signals: ExtractionConfidenceSignals = {};
+          if (selfVatDetected) signals.self_vat_detected = true;
+          const summarize = () => summarizeInvoiceExtraction(extracted, signals);
+          const llmFallback = summarize();
 
           if (file.file_type !== "pdf") {
             notes.push("Image receipt OCR-parsed with LiteParse.");
@@ -1446,13 +1645,17 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           }
 
           if (classification !== "purchase_invoice") {
+            const referencedInvoice =
+              classification === "payment_receipt"
+                ? buildReferencedInvoiceForPaymentReceipt(extracted.invoice_number, context.purchaseInvoices)
+                : undefined;
             notes.push(
               classification === "owner_paid_expense_reimbursement"
                 ? "PDF looks like an owner-paid expense receipt. Review manually before booking."
                 : classification === "payment_receipt"
                   ? `Document is a payment receipt${
-                      extracted.invoice_number && !extracted.invoice_number.startsWith("AUTO-")
-                        ? ` for invoice ${extracted.invoice_number}`
+                      referencedInvoice
+                        ? ` for invoice ${referencedInvoice.invoice_number}`
                         : ""
                     }, not a separate purchase invoice. Booking it would duplicate the underlying invoice — attach to the existing invoice document instead (#15).`
                   : "Document could not be classified as a supplier purchase invoice.",
@@ -1464,6 +1667,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               status: "needs_review",
               extracted,
               llm_fallback: llmFallback,
+              ...(referencedInvoice ? { referenced_invoice: referencedInvoice } : {}),
               review_guidance: buildReceiptReviewGuidance({
                 classification,
                 notes,
@@ -1500,28 +1704,35 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             context.clients,
             extracted,
             !dryRun,
-            ownCompanyVat ? { ownCompanyVat } : undefined,
+            ownCompanyVat || ownCompanyRegistryCode
+              ? {
+                  ...(ownCompanyVat ? { ownCompanyVat } : {}),
+                  ...(ownCompanyRegistryCode ? { ownCompanyRegistryCode } : {}),
+                }
+              : undefined,
           );
           if (supplierResolution.self_match_blocked) {
             notes.push(
               "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
             );
           }
+          if (!supplierResolution.found) signals.supplier_resolution_failed = true;
           if (!supplierResolution.client && !supplierResolution.preview_client) {
+            const fallback = summarize();
             notes.push("Supplier could not be resolved or prepared for creation.");
-            maybeAddLlmFallbackNote(notes, llmFallback);
+            maybeAddLlmFallbackNote(notes, fallback);
             results.push({
               file,
               classification,
               status: "needs_review",
               extracted,
-              llm_fallback: llmFallback,
+              llm_fallback: fallback,
               supplier_resolution: supplierResolution,
               review_guidance: buildReceiptReviewGuidance({
                 classification,
                 notes,
                 extracted,
-                llmFallback,
+                llmFallback: fallback,
               }),
               notes,
             });
@@ -1545,25 +1756,88 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             context,
           );
 
+          if (bookingSuggestion) {
+            applyReverseChargeAutoDetection(bookingSuggestion, extracted, supplierResolution, context.isVatRegistered, notes);
+            // Foreign-supplier reverse-charge default fits SaaS/services
+            // but mis-codes goods imports, so it must NOT silently
+            // auto-confirm (#18). Flag the row so the contract gate (#19)
+            // routes it to needs_review rather than create+confirm.
+            if (bookingSuggestion.reverse_charge_reason === "foreign_supplier_default") {
+              signals.foreign_reverse_charge_default_unverified = true;
+            }
+            signals.booking_from_history = bookingSuggestion.source === "supplier_history";
+            // Improbable fixed-asset guard (#20): a small invoice routed
+            // to a fixed-asset account is almost certainly miscoded. The
+            // 1000 EUR threshold is a defensive heuristic — typical SaaS,
+            // cloud, professional-services invoices fall well below it.
+            if (
+              bookingSuggestion.suggested_account?.is_fixed_asset &&
+              extracted.total_gross !== undefined &&
+              extracted.total_gross < 1000
+            ) {
+              signals.improbable_fixed_asset = true;
+            }
+            // Reverse-charge phrase present but the booking suggestion did
+            // not flag it: should be rare since applyReverseChargeAutoDetection
+            // sets it automatically. The signal handles edge cases where the
+            // phrase regex hits but downstream logic refused to apply.
+            if (
+              detectReverseChargeFromText(extracted.raw_text) &&
+              !bookingSuggestion.item.reversed_vat_id
+            ) {
+              signals.reverse_charge_phrase_unhandled = true;
+            }
+          }
+
           if (!bookingSuggestion) {
+            const fallback = summarize();
             notes.push("Could not find a purchase article / account suggestion for this receipt.");
-            maybeAddLlmFallbackNote(notes, llmFallback);
+            maybeAddLlmFallbackNote(notes, fallback);
             results.push({
               file,
               classification,
               status: "needs_review",
               extracted,
-              llm_fallback: llmFallback,
+              llm_fallback: fallback,
               supplier_resolution: supplierResolution,
               review_guidance: buildReceiptReviewGuidance({
                 classification,
                 notes,
                 extracted,
-                llmFallback,
+                llmFallback: fallback,
               }),
               notes,
             });
             continue;
+          }
+
+          // In-batch duplicate detection (#19): two files in the same batch
+          // bearing the same supplier-side invoice number AND a matching
+          // supplier identity are almost always the same invoice scanned
+          // twice. The first wins; the second is flagged.
+          //
+          // Also key by reg_code / VAT / normalized supplier name so dry
+          // runs that haven't yet created a client (only a preview_client)
+          // still detect the dupe. Without this, scanning an unknown
+          // supplier twice would silently under-report the risk in
+          // dry-run output.
+          if (extracted.invoice_number) {
+            const myInvoice = extracted.invoice_number.trim().toLowerCase();
+            const myRegCode = extracted.supplier_reg_code?.trim();
+            const myVat = normalizeVatForCompare(extracted.supplier_vat_no);
+            const myNameKey = extracted.supplier_name ? normalizeCompanyName(extracted.supplier_name) : "";
+            const earlier = results.find(prev => {
+              if (prev.extracted?.invoice_number?.trim().toLowerCase() !== myInvoice) return false;
+              if (resolvedClientId && prev.supplier_resolution?.client?.id === resolvedClientId) return true;
+              if (myRegCode && prev.extracted?.supplier_reg_code?.trim() === myRegCode) return true;
+              if (myVat && normalizeVatForCompare(prev.extracted?.supplier_vat_no) === myVat) return true;
+              if (myNameKey.length >= 4 && prev.extracted?.supplier_name &&
+                  normalizeCompanyName(prev.extracted.supplier_name) === myNameKey) return true;
+              return false;
+            });
+            if (earlier) {
+              signals.duplicate_invoice_in_batch = true;
+            }
           }
 
           if (resolvedClientId && extracted.invoice_number && extracted.invoice_date && extracted.total_gross !== undefined) {
@@ -1580,7 +1854,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
                 classification,
                 status: "skipped_duplicate",
                 extracted,
-                llm_fallback: llmFallback,
+                llm_fallback: summarize(),
                 supplier_resolution: supplierResolution,
                 booking_suggestion: bookingSuggestion,
                 duplicate_match: duplicate,
@@ -1588,6 +1862,49 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               });
               continue;
             }
+          }
+
+          // Contract gate (#19): the legacy `execute=true` path created AND
+          // confirmed in one shot. With the confidence model in place we
+          // refuse to auto-create+confirm any row whose final confidence
+          // is "low" — silent miscoding is the worse failure than holding
+          // the row for review. Dry runs always proceed (preview only).
+          //
+          // We additionally gate `foreign_reverse_charge_default_unverified`
+          // at medium: that signal means we auto-applied reverse-charge
+          // because the supplier is foreign with no explicit phrase or
+          // history backing. The default is right for SaaS / services and
+          // wrong for goods imports — the fact that the rest of the
+          // extraction succeeded does not let us judge which it is. A
+          // blanket "block all medium" is too aggressive here because
+          // `booking_not_from_history` makes many legitimate keyword
+          // bookings medium too; only this specific signal is gated.
+          const preCreateSummary = summarize();
+          const foreignDefaultUnverified = preCreateSummary.confidence_signals.includes(
+            "foreign_reverse_charge_default_unverified",
+          );
+          if (!dryRun && (preCreateSummary.confidence === "low" || foreignDefaultUnverified)) {
+            const reasons = preCreateSummary.confidence_signals.join(", ") || "low confidence";
+            notes.push(
+              `Auto-create skipped: confidence is ${preCreateSummary.confidence} (${reasons}). Manual review required before booking (#19).`,
+            );
+            results.push({
+              file,
+              classification,
+              status: "needs_review",
+              extracted,
+              llm_fallback: preCreateSummary,
+              supplier_resolution: supplierResolution,
+              booking_suggestion: bookingSuggestion,
+              review_guidance: buildReceiptReviewGuidance({
+                classification,
+                notes,
+                extracted,
+                llmFallback: preCreateSummary,
+              }),
+              notes,
+            });
+            continue;
           }
 
           const created = await createAndMaybeMatchPurchaseInvoice(
@@ -1607,7 +1924,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             classification,
             status: created.status,
             extracted,
-            llm_fallback: llmFallback,
+            llm_fallback: summarize(),
             supplier_resolution: supplierResolution,
             booking_suggestion: bookingSuggestion,
             created_invoice: created.created_invoice,
