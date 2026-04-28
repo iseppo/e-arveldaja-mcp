@@ -82,11 +82,13 @@ Review the results:
 - Treat `execution.summary` as the canonical source for counts, and use `pairs`, `one_sided`, `already_handled`, and `ambiguous_pairs` for detailed breakdown.
 - `already_handled`: transfers already journalized from the other side — safe to delete
 - `one_sided`: would confirm against the other bank account
-- `pairs`: would confirm both outgoing and incoming sides
+- `pairs`: would confirm the outgoing side and delete the duplicate incoming `PROJECT` row (`incoming_action: "would_delete_duplicate"`)
 - `execution.errors`: any confirmation failures or other blocking issues
+- Never manually confirm both sides of a transfer pair; that duplicates the journal and breaks the single-journal invariant.
 
 Ask for approval. If approved, call again with `execute: true`.
 - If there are 3+ bank accounts and IBAN is missing, provide `target_accounts_dimensions_id`.
+- In `pairs`, `incoming_action: "deleted"` is normal; `incoming_action: "orphan"` means the duplicate incoming row could not be deleted and needs explicit follow-up.
 
 **WARNING:** Do not manually confirm Wise-side transfers that were already confirmed via LHV CAMT — this creates duplicate journal entries.
 

@@ -368,9 +368,23 @@ describe("registerPrompts", () => {
     expect(text).not.toContain("Current portfolio value (from step 3)");
   });
 
+  it("keeps shipped Lightyear markdown prompts aligned with required distribution inputs", () => {
+    for (const relativePath of ["workflows/lightyear-booking.md", ".claude/commands/lightyear-booking.md"]) {
+      const text = readPromptSurface(relativePath);
+
+      expect(text).toContain("income_account");
+      expect(text).toContain("ask the user for an income_account number");
+      expect(text).toContain("tax_account");
+      expect(text).toContain("current accounting carrying value / cost basis");
+      expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
+      expect(text).not.toContain("Call `book_lightyear_distributions` with `dry_run: true`.");
+    }
+  });
+
   it("keeps shipped book-invoice markdown prompts aligned with MCP prompt safety rails", () => {
     for (const relativePath of ["workflows/book-invoice.md", ".claude/commands/book-invoice.md"]) {
       const text = readPromptSurface(relativePath);
+      expect(text).toContain("get_vat_info");
       expect(text).toContain("hints.raw_text");
       expect(text).toContain("llm_fallback");
       expect(text).toContain("source of truth");
@@ -383,6 +397,7 @@ describe("registerPrompts", () => {
       expect(text).toContain("calendar-day difference between `invoice_date` and `due_date`");
       expect(text).toContain("If `due_date` is missing");
       expect(text).toContain("Do not infer reverse charge from supplier country alone.");
+      expect(text).toContain("intra-community acquisitions of goods");
       expect(text).toContain("place of supply in Estonia");
       expect(text).toContain("vat_accounts_dimensions_id");
       expect(text).toContain("stop and ask the user instead of guessing");
@@ -403,7 +418,10 @@ describe("registerPrompts", () => {
       expect(text).toContain("already_handled");
       expect(text).toContain("Wise-side transfers");
       expect(text).toContain("Do not infer incoming vs outgoing direction from `type` alone");
+      expect(text).toContain('incoming_action: "would_delete_duplicate"');
+      expect(text).toContain("Never manually confirm both sides");
       expect(text).not.toContain("`D`=incoming, `C`=outgoing");
+      expect(text).not.toContain("would confirm both outgoing and incoming sides");
       expect(text).not.toContain("Call `get_transaction`");
     }
   });

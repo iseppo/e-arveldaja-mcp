@@ -4,7 +4,13 @@ Book a purchase invoice from a source document. Extract the data, validate it, r
 
 **Input:** Absolute path to the invoice document (`.pdf`, `.jpg`, `.jpeg`, `.png`).
 
-## Step 1: Extract the document text
+## Step 1: Check VAT registration
+
+Call `get_vat_info` first to confirm whether this company is currently VAT-registered.
+
+Use that status when deciding whether VAT fields matter for the booking and which VAT treatments are valid. A non-VAT company must not have item-level VAT applied.
+
+## Step 2: Extract the document text
 
 Call `extract_pdf_invoice`:
 - `file_path`: absolute path to the invoice document
@@ -25,7 +31,7 @@ Extract all of the following from `hints.raw_text`:
 - Supplier IBAN
 - Payment reference number
 
-## Step 2: Validate the totals
+## Step 3: Validate the totals
 
 Call `validate_invoice_data`:
 - `total_net`: extracted net total
@@ -37,7 +43,7 @@ Call `validate_invoice_data`:
 
 If validation returns `valid=false` or any errors, stop and ask the user to review the extraction before creating anything.
 
-## Step 3: Resolve the supplier without creating duplicates
+## Step 4: Resolve the supplier without creating duplicates
 
 Call `resolve_supplier`:
 - `name`: supplier name
@@ -48,26 +54,26 @@ Call `resolve_supplier`:
 
 This either returns an existing supplier match or registry data for a possible new supplier.
 
-## Step 4: Check duplicate risk before creating anything
+## Step 5: Check duplicate risk before creating anything
 
 Call `detect_duplicate_purchase_invoice` with:
 - `date_from`: invoice date
 - `date_to`: invoice date
 - `invoice_number`: extracted invoice number
 - `gross_price`: extracted gross total
-- `clients_id`: resolved client ID if step 3 returned `found=true`
+- `clients_id`: resolved client ID if step 4 returned `found=true`
 
 Inspect `candidate_invoice_number_matches` and `candidate_same_amount_date_matches` first.
 - Also review `exact_duplicates` and `suspicious_same_amount_date` as warning context.
 - If a candidate looks like the same invoice, stop and report it before creating anything.
 
-## Step 5: Ensure the supplier client exists
+## Step 6: Ensure the supplier client exists
 
-- If step 3 returned `found=true`, use `client.id` as `supplier_client_id`.
+- If step 4 returned `found=true`, use `client.id` as `supplier_client_id`.
 - Otherwise call `resolve_supplier` again with the same identifiers and `auto_create: true`.
 - Use `api_response.created_object_id` as `supplier_client_id`. If no client ID is returned, stop and report the failure.
 
-## Step 6: Reuse the best booking setup
+## Step 7: Reuse the best booking setup
 
 Call `suggest_booking`:
 - `clients_id`: supplier client ID
@@ -81,21 +87,23 @@ Review `past_invoices` and reuse the most relevant:
 
 If there is no suitable history, call `list_purchase_articles` or ask the user instead of inventing IDs.
 
-## Step 7: Determine VAT treatment
+## Step 8: Determine VAT treatment
 
+- Take the VAT-registration status from step 1 into account.
 - For normal domestic invoices, keep the VAT treatment shown on the document.
 - Do not infer reverse charge from supplier country alone.
-- Reuse a confirmed prior VAT treatment from `suggest_booking` when it clearly fits the same supplier and service.
-- Only set `reversed_vat_id: 1` when the evidence supports that this is a foreign service with place of supply in Estonia and the reverse-charge treatment is actually applicable.
-- If the foreign-service VAT treatment is still unclear from the document and prior confirmed history, stop and ask the user instead of guessing.
+- Estonian reverse-charge rules cover several distinct cases, including EU B2B services with place of supply in Estonia, non-EU services with place of supply in Estonia, intra-community acquisitions of goods, and certain domestic construction/scrap schemes.
+- Reuse a confirmed prior VAT treatment from `suggest_booking` when it clearly fits the same supplier and same kind of transaction.
+- Only carry over `reversed_vat_id: 1` from a past confirmed invoice when the current invoice is the same kind of transaction.
+- If the VAT treatment is unclear from the document and prior confirmed history, stop and ask the user instead of guessing.
 
-## Step 8: Derive the remaining invoice fields
+## Step 9: Derive the remaining invoice fields
 
 - `journal_date`: normally `invoice_date` unless a different turnover date is clearly stated on the invoice
 - `term_days`: the calendar-day difference between `invoice_date` and `due_date`
 - If `due_date` is missing, use `term_days: 0` and mention that assumption in the final summary
 
-## Step 9: Preview the booking and ask for approval
+## Step 10: Preview the booking and ask for approval
 
 Before creating anything, present:
 - Supplier name and supplier client ID
@@ -106,7 +114,7 @@ Before creating anything, present:
 
 If the user has not explicitly approved the preview, stop here and wait.
 
-## Step 10: Create the purchase invoice
+## Step 11: Create the purchase invoice
 
 Call `create_purchase_invoice_from_pdf`:
 - `supplier_client_id`
@@ -124,10 +132,10 @@ Call `create_purchase_invoice_from_pdf`:
 
 Use the exact `vat_price` and `gross_price` from the invoice. Do not recalculate them.
 
-## Step 11: Confirm and report
+## Step 12: Confirm and report
 
 Call `confirm_purchase_invoice`:
-- `id`: the invoice ID from step 10
+- `id`: the invoice ID from step 11
 
 Report the result:
 
