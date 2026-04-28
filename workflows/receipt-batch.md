@@ -26,7 +26,7 @@ If there are no valid files, stop.
 Call `process_receipt_batch`:
 - `folder_path`: the provided folder
 - `accounts_dimensions_id`: the provided dimension ID
-- `execute`: `false`
+- `execution_mode`: `dry_run`
 - include `date_from` / `date_to` when provided
 
 Review:
@@ -42,9 +42,11 @@ Group the preview by status:
 
 ### Step 3: Approval gate
 
-State clearly that `execute: false` is only a preview.
+State clearly that `execution_mode: "dry_run"` is only a preview.
 
-Ask for approval before running `process_receipt_batch` with `execute: true`.
+Ask for approval before running `process_receipt_batch` with `execution_mode: "create"`.
+
+`execution_mode: "create"` creates and uploads PROJECT purchase invoices, but leaves them unconfirmed for review. Do not use `execution_mode: "create_and_confirm"` unless the user separately approves confirming the created invoices after reviewing them.
 
 If the user does not explicitly approve, stop.
 
@@ -53,12 +55,12 @@ If the user does not explicitly approve, stop.
 Call `process_receipt_batch` again:
 - `folder_path`: the provided folder
 - `accounts_dimensions_id`: the provided dimension ID
-- `execute`: `true`
+- `execution_mode`: `create`
 - include `date_from` / `date_to` when provided
 
 Report:
 - `execution.summary.created`
-- `execution.summary.matched`
+- `execution.summary.matched` (normally 0 in `execution_mode: "create"` because invoices are left unconfirmed)
 - `execution.summary.skipped_duplicate`
 - `execution.summary.needs_review`
 - `execution.summary.failed`

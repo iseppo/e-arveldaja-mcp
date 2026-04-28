@@ -509,7 +509,7 @@ Follow these steps in order:
 3. Call \`process_receipt_batch\` with:
    - folder_path: "${folder_path}"
    - accounts_dimensions_id: ${accounts_dimensions_id}
-   - execute: false
+   - execution_mode: "dry_run"
    ${date_from ? `- date_from: "${date_from}"` : ""}
    ${date_to ? `- date_to: "${date_to}"` : ""}
 
@@ -525,22 +525,23 @@ Follow these steps in order:
    - \`execution.errors\`: show the file and exact error.
 
 6. Make the approval checkpoint explicit:
-   - Say that \`execute: false\` was only a preview.
+   - Say that \`execution_mode: "dry_run"\` was only a preview.
    - Do not imply that any invoice already exists.
-   - Ask whether to proceed with \`execute: true\`.
+   - Ask whether to proceed with \`execution_mode: "create"\` to create and upload draft PROJECT invoices.
+   - Do not use \`execution_mode: "create_and_confirm"\` unless the user separately approves confirming the created invoices after reviewing them.
 
 7. If the user does not explicitly approve execution, stop here.
 
 8. After approval, call \`process_receipt_batch\` again with:
    - folder_path: "${folder_path}"
    - accounts_dimensions_id: ${accounts_dimensions_id}
-   - execute: true
+   - execution_mode: "create"
    ${date_from ? `- date_from: "${date_from}"` : ""}
    ${date_to ? `- date_to: "${date_to}"` : ""}
 
 9. Report the execution summary:
    - \`execution.summary.created\`
-   - \`execution.summary.matched\`
+   - \`execution.summary.matched\` (normally 0 in \`execution_mode: "create"\` because invoices are left unconfirmed)
    - \`execution.summary.skipped_duplicate\`
    - \`execution.summary.needs_review\`
    - \`execution.summary.failed\`

@@ -233,7 +233,7 @@ describe("registerPrompts", () => {
     expect(missingTransactionText).toContain('mode="transaction" requires transaction_id');
   });
 
-  it("keeps receipt-batch explicit about preview-only receipt processing before execute=true", async () => {
+  it("keeps receipt-batch explicit about preview-only receipt processing before create mode", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "receipt-batch", {
       folder_path: "/tmp/receipts",
@@ -242,8 +242,9 @@ describe("registerPrompts", () => {
 
     expect(text).toContain("scan_receipt_folder");
     expect(text).toContain("process_receipt_batch");
-    expect(text).toContain("execute: false");
-    expect(text).toContain("execute: true");
+    expect(text).toContain('execution_mode: "dry_run"');
+    expect(text).toContain('execution_mode: "create"');
+    expect(text).toContain('execution_mode: "create_and_confirm"');
     expect(text).toContain("Treat `execution` as the canonical batch payload when present.");
     expect(text).toContain("execution.results");
     expect(text).toContain("execution.needs_review");
@@ -457,6 +458,8 @@ describe("registerPrompts", () => {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("scan_receipt_folder");
       expect(text).toContain("process_receipt_batch");
+      expect(text).toContain("execution_mode");
+      expect(text).toContain("create_and_confirm");
       expect(text).toContain("Treat `execution` as the canonical batch payload when present.");
       expect(text).toContain("execution.results");
       expect(text).toContain("execution.needs_review");

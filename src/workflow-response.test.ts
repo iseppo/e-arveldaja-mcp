@@ -34,7 +34,7 @@ describe("workflow response helpers", () => {
       suggested_args: {
         folder_path: "/tmp/receipts",
         accounts_dimensions_id: 100,
-        execute: false,
+        execution_mode: "dry_run",
       },
       preview: {
         created: 0,
@@ -52,7 +52,7 @@ describe("workflow response helpers", () => {
       execute_args: {
         folder_path: "/tmp/receipts",
         accounts_dimensions_id: 100,
-        execute: true,
+        execution_mode: "create",
       },
       accounting_impact: expect.arrayContaining(["2 purchase invoices"]),
       source_documents: ["/tmp/receipts"],

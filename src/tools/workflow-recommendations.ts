@@ -141,7 +141,7 @@ const WORKFLOWS: WorkflowGuide[] = [
       args: {
         folder_path: "<absolute receipt folder path>",
         accounts_dimensions_id: "<bank account dimension id used when matching bank transactions>",
-        execute: false,
+        execution_mode: "dry_run",
       },
       why: "Batch receipt processing should separate high-confidence candidates from review items first.",
     }],

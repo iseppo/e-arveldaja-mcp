@@ -73,8 +73,10 @@ const SUPPORTED_EXTENSIONS = [...FILE_TYPE_EXTENSIONS.pdf, ...FILE_TYPE_EXTENSIO
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 const EXACT_MATCH_THRESHOLD = 90;
 const POSSIBLE_MATCH_THRESHOLD = 70;
+const RECEIPT_BATCH_EXECUTION_MODES = ["dry_run", "create", "create_and_confirm"] as const;
 
 type FileType = keyof typeof FILE_TYPE_EXTENSIONS;
+type ReceiptBatchExecutionMode = typeof RECEIPT_BATCH_EXECUTION_MODES[number];
 type ReceiptBatchStatus =
   | "matched"
   | "created"
@@ -222,6 +224,19 @@ interface TransactionMatchCandidate {
   description?: string | null;
   confidence: number;
   reasons: string[];
+}
+
+function resolveReceiptBatchExecutionMode(
+  execute: boolean | undefined,
+  executionMode: ReceiptBatchExecutionMode | undefined,
+): { mode: ReceiptBatchExecutionMode; legacyExecuteCreate: boolean } {
+  if (executionMode) {
+    return { mode: executionMode, legacyExecuteCreate: false };
+  }
+  if (execute === true) {
+    return { mode: "create", legacyExecuteCreate: true };
+  }
+  return { mode: "dry_run", legacyExecuteCreate: false };
 }
 
 interface InvoiceDuplicateMatch {
@@ -1159,10 +1174,13 @@ async function createAndMaybeMatchPurchaseInvoice(
   supplierResolution: SupplierResolution,
   bookingSuggestion: BookingSuggestion,
   bankTransactions: Transaction[],
-  execute: boolean,
+  executionMode: ReceiptBatchExecutionMode,
+  legacyExecuteCreate: boolean,
   consumedTransactionIds: Set<number>,
 ): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error">> {
   const notes: string[] = [];
+  const dryRun = executionMode === "dry_run";
+  const shouldConfirm = executionMode === "create_and_confirm";
   const supplier = supplierResolution.client;
   const supplierId = supplier?.id;
   const supplierName = supplier?.name ?? supplierResolution.preview_client?.name;
@@ -1215,15 +1233,15 @@ async function createAndMaybeMatchPurchaseInvoice(
     bank_ref_number: extracted.ref_number,
   };
 
-  const candidate = execute
-    ? undefined
-    : findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds);
+  const candidate = dryRun
+    ? findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds)
+    : undefined;
 
   if (invoiceCurrency !== "EUR") {
     notes.push(`Detected non-EUR receipt currency ${invoiceCurrency}; invoice will use the source currency amount.`);
   }
 
-  if (!execute) {
+  if (dryRun) {
     if (candidate) {
       notes.push(`Dry run: matched candidate transaction ${candidate.transaction_id} at confidence ${candidate.confidence}.`);
     } else if (invoiceCurrency !== "EUR") {
@@ -1241,6 +1259,10 @@ async function createAndMaybeMatchPurchaseInvoice(
   if (!supplierId || !supplier) {
     notes.push("Supplier resolution did not return a concrete client ID.");
     return { notes, status: "needs_review" };
+  }
+
+  if (legacyExecuteCreate) {
+    notes.push('Legacy execute=true maps to execution_mode="create"; invoice will be created and uploaded but left unconfirmed (#19).');
   }
 
   let createdInvoice: PurchaseInvoice;
@@ -1339,6 +1361,22 @@ async function createAndMaybeMatchPurchaseInvoice(
     } catch (error) {
       return rollbackCreatedInvoice("source document upload failed", error);
     }
+  }
+
+  if (!shouldConfirm) {
+    notes.push("Created purchase invoice was left unconfirmed. Review it and call confirm_purchase_invoice after approval (#19).");
+    context.purchaseInvoices.push(createdInvoice);
+    return {
+      notes,
+      status: "created",
+      created_invoice: {
+        id: createdInvoice.id,
+        number: createdInvoice.number,
+        status: createdInvoice.status,
+        confirmed: false,
+        uploaded_document: uploadedDocument,
+      },
+    };
   }
 
   if (createdInvoice.id) {
@@ -1571,17 +1609,22 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
   registerTool(server,
     "process_receipt_batch",
-    "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback (with a confidence: low|medium|high score, see #20) for model/manual review. Purchase invoices can be created, confirmed, and matched to bank transactions when execute=true — but rows whose final confidence is low are routed to needs_review even on execute=true (#19).",
+    "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback (with a confidence: low|medium|high score, see #20) for model/manual review. Use execution_mode='create' to create/upload PROJECT invoices, or execution_mode='create_and_confirm' only after approval for high-confidence rows. Legacy execute=true maps to execution_mode='create' (#19).",
     {
       folder_path: z.string().describe("Folder path with receipts"),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID used when matching bank transactions"),
-      execute: z.boolean().optional().describe("Actually create and book invoices (default false = dry run)"),
+      execution_mode: z.enum(RECEIPT_BATCH_EXECUTION_MODES).optional().describe("Execution phase: dry_run (default), create (create/upload PROJECT invoices only), or create_and_confirm (create, upload, confirm, and exact-match bank transactions after explicit approval)"),
+      execute: z.boolean().optional().describe("Deprecated compatibility flag. true maps to execution_mode='create'; false maps to dry_run when execution_mode is omitted."),
       date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
     },
     { ...batch, openWorldHint: true, title: "Process Receipt Batch" },
-    async ({ folder_path, accounts_dimensions_id, execute, date_from, date_to }) => {
-      const dryRun = execute !== true;
+    async ({ folder_path, accounts_dimensions_id, execution_mode, execute, date_from, date_to }) => {
+      const { mode: executionMode, legacyExecuteCreate } = resolveReceiptBatchExecutionMode(
+        execute,
+        execution_mode as ReceiptBatchExecutionMode | undefined,
+      );
+      const dryRun = executionMode === "dry_run";
       const scan = await scanReceiptFolderInternal(folder_path, undefined, date_from, date_to);
       const vatInfo = await api.readonly.getVatInfo();
       // getInvoiceInfo is best-effort: a missing endpoint or test stub means
@@ -1864,11 +1907,10 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             }
           }
 
-          // Contract gate (#19): the legacy `execute=true` path created AND
-          // confirmed in one shot. With the confidence model in place we
-          // refuse to auto-create+confirm any row whose final confidence
-          // is "low" — silent miscoding is the worse failure than holding
-          // the row for review.
+          // Contract gate (#19): the explicit create/create_and_confirm
+          // paths still refuse to mutate any row whose final confidence is
+          // "low" — silent miscoding is the worse failure than holding the
+          // row for review.
           //
           // We additionally gate `foreign_reverse_charge_default_unverified`
           // at medium: that signal means we auto-applied reverse-charge
@@ -1881,18 +1923,20 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           // bookings medium too; only this specific signal is gated.
           //
           // Dry-run mirrors the same gate so `dry_run_preview` and the
-          // approval card it feeds reflect what `execute=true` would
-          // actually do — otherwise the preview promises a booking that
-          // the executor will refuse and route to review.
+          // approval card it feeds reflect what `execution_mode="create"`
+          // would actually do — otherwise the preview promises a booking
+          // that the executor will refuse and route to review.
           const preCreateSummary = summarize();
           const foreignDefaultUnverified = preCreateSummary.confidence_signals.includes(
             "foreign_reverse_charge_default_unverified",
           );
-          if (preCreateSummary.confidence === "low" || foreignDefaultUnverified) {
+          const confirmModeNeedsHighConfidence =
+            executionMode === "create_and_confirm" && preCreateSummary.confidence !== "high";
+          if (preCreateSummary.confidence === "low" || foreignDefaultUnverified || confirmModeNeedsHighConfidence) {
             const reasons = preCreateSummary.confidence_signals.join(", ") || "low confidence";
             const tense = dryRun ? "would be skipped" : "skipped";
             notes.push(
-              `Auto-create ${tense}: confidence is ${preCreateSummary.confidence} (${reasons}). Manual review required before booking (#19).`,
+              `Auto-create ${tense}: confidence is ${preCreateSummary.confidence} (${reasons}). Manual review required before booking or confirming (#19).`,
             );
             results.push({
               file,
@@ -1921,7 +1965,8 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             supplierResolution,
             bookingSuggestion,
             bankTransactions,
-            !dryRun,
+            executionMode,
+            legacyExecuteCreate,
             consumedTransactionIds,
           );
 
@@ -1950,6 +1995,8 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       }
 
       const summary = {
+        execution_mode: executionMode,
+        legacy_execute_create: legacyExecuteCreate,
         dry_run: dryRun,
         scanned_files: scan.files.length,
         skipped_invalid_files: scan.skipped.length,
@@ -1967,7 +2014,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         accounts_dimensions_id,
         ...(date_from ? { date_from } : {}),
         ...(date_to ? { date_to } : {}),
-        execute: false,
+        execution_mode: "create",
       };
       const workflowSummary = dryRun
         ? `Receipt dry run would create ${summary.dry_run_preview} purchase invoice(s), match ${summary.matched}, skip ${summary.skipped_duplicate} duplicate(s), leave ${summary.needs_review} in review, and fail ${summary.failed}.`
@@ -1990,6 +2037,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           type: "text",
           text: toMcpJson({
             mode,
+            execution_mode: executionMode,
             folder_path: scan.folder_path,
             accounts_dimensions_id,
             summary,

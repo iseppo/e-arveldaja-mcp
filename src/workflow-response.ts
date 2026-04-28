@@ -172,6 +172,11 @@ function withExecuteTrue(args: Record<string, unknown>): Record<string, unknown>
   return { ...args, execute: true };
 }
 
+function withReceiptCreateMode(args: Record<string, unknown>): Record<string, unknown> {
+  const { execute: _execute, execution_mode: _executionMode, ...rest } = args;
+  return { ...rest, execution_mode: "create" };
+}
+
 function impactLine(count: number | undefined, singular: string, plural = `${singular}s`): string | undefined {
   if (!count || count <= 0) return undefined;
   return `${count} ${count === 1 ? singular : plural}`;
@@ -243,7 +248,7 @@ export function approvalPreviewFromDryRunStep(step: unknown): ApprovalPreview | 
       approval_required: true,
       source_tool: tool,
       execute_tool: tool,
-      execute_args: withExecuteTrue(args),
+      execute_args: withReceiptCreateMode(args),
       accounting_impact: [
         impactLine(wouldCreate, "purchase invoice"),
         impactLine(matched, "matched transaction"),

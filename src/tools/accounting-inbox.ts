@@ -582,7 +582,7 @@ function buildRecommendedSteps(params: {
       suggested_args: {
         folder_path: primaryReceiptFolder.path,
         ...(dimensionId !== undefined ? { accounts_dimensions_id: dimensionId } : {}),
-        execute: false,
+        execution_mode: "dry_run",
       },
       missing_inputs: missingInputs,
       reason: dimensionId !== undefined

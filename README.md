@@ -326,7 +326,7 @@ curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.ise
 
 ## Good to know
 
-- **Dry run by default.** Batch operations (bank import, Wise import, Lightyear booking, receipt processing, auto-confirm) preview results first. You must explicitly confirm or pass `execute=true` to create records.
+- **Dry run by default.** Batch operations (bank import, Wise import, Lightyear booking, receipt processing, auto-confirm) preview results first. You must explicitly confirm before mutating records. Receipt batches use `execution_mode="create"` to create/upload unconfirmed PROJECT invoices; confirmation is a separate approval step.
 - **Accounting choices prefer evidence.** For purchase booking, the server prefers treatment from similar confirmed supplier invoices. If that history is missing, it can use `accounting-rules.md`. For unmatched bank-transaction auto-booking, it no longer invents VAT treatment from weak heuristics alone.
 - **Large datasets need date filters.** The server loads up to 200 pages of data per query. Companies with thousands of invoices or transactions should narrow reporting and reconciliation tools with date ranges — otherwise the tool will ask you to.
 - **Caching.** API responses are cached for 2–5 minutes and automatically invalidated when you create, update, or delete records through the server. Changes made directly in the e-arveldaja web UI may take a few minutes to appear.

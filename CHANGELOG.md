@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`process_receipt_batch` approval boundary for #19** — added explicit `execution_mode` phases: `dry_run`, `create`, and `create_and_confirm`. Legacy `execute=true` now maps to `execution_mode="create"` with a warning, so batch receipt processing creates/uploads PROJECT purchase invoices but leaves confirmation and bank matching behind a separate approval step. Receipt approval previews and prompts now recommend `execution_mode="create"` instead of the old one-shot create+confirm path.
+
 ## [0.12.6] - 2026-04-28
 
 ### Fixed
