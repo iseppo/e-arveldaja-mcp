@@ -5,7 +5,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
-import { validateFilePath, getAllowedRoots, resolveFilePath } from "../file-validation.js";
+import { validateFilePath, getAllowedRoots, resolveFilePath, isPathWithinRoot } from "../file-validation.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { readOnly, batch } from "../annotations.js";
@@ -312,7 +312,7 @@ async function validateFolderPath(folderPath: string): Promise<string> {
   const real = await realpath(resolved);
   const roots = getAllowedRoots();
 
-  if (!roots.some(root => real.startsWith(`${root}/`) || real === root)) {
+  if (!roots.some(root => isPathWithinRoot(real, root))) {
     throw new Error(
       `Folder path outside allowed directories. Allowed roots: ${roots.join(", ")}. ` +
       `Set EARVELDAJA_ALLOWED_PATHS to override.`,
@@ -2370,7 +2370,11 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
           const status = dryRun
             ? (wouldCreateCount > 0 ? "dry_run_preview" : "skipped")
-            : (createdInvoiceIds.length > 0 || attemptedCreateCount > 0 ? "applied" : "skipped");
+            : (createdInvoiceIds.length > 0
+                ? "applied"
+                : attemptedCreateCount > 0
+                  ? "failed"
+                  : "skipped");
 
           results.push({
             category: group.category,

@@ -648,7 +648,7 @@ describe("receipt inbox tool status handling", () => {
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
-  it("apply_transaction_classifications invalidates the draft invoice if the transaction turns VOID after creation", async () => {
+  it("apply_transaction_classifications reports failed when a draft invoice is invalidated after stale transaction detection", async () => {
     const getImpl = vi.fn()
       .mockResolvedValueOnce({
         id: 43,
@@ -769,7 +769,7 @@ describe("receipt inbox tool status handling", () => {
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.results).toHaveLength(1);
-    expect(payload.results[0]!.status).toBe("applied");
+    expect(payload.results[0]!.status).toBe("failed");
     expect(payload.results[0]!.created_invoice_ids).toEqual([]);
     expect(payload.results[0]!.linked_transaction_ids).toEqual([]);
     expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
