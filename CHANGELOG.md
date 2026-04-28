@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-04-28
+
+### Fixed
+- **Shipped workflow prompt drift** — synced the packaged `book-invoice`, `lightyear-booking`, and `reconcile-bank` workflow/Claude command docs with the current tool behavior and safety rails. The prompts now include the VAT-registration precheck, more precise reverse-charge guidance, required Lightyear distribution account inputs, external-file data handling, and the current inter-account transfer duplicate-cleanup contract.
+- **Receipt inbox Windows path and stale transaction status handling** — folder validation now uses the shared path-root containment helper so Windows-style allowed child folders are accepted correctly. `apply_transaction_classifications` now reports `failed` instead of `applied` when invoice creation was attempted but stale transaction detection invalidated the draft and left no invoice or transaction link behind.
+
 ## [0.12.5] - 2026-04-27
 
 ### Fixed
