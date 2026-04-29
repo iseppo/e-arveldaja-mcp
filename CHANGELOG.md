@@ -2,8 +2,12 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-04-29
+
 ### Fixed
 - **`process_receipt_batch` approval boundary for #19** — added explicit `execution_mode` phases: `dry_run`, `create`, and `create_and_confirm`. Legacy `execute=true` now maps to `execution_mode="create"` with a warning, so batch receipt processing creates/uploads PROJECT purchase invoices but leaves confirmation and bank matching behind a separate approval step. Receipt approval previews and prompts now recommend `execution_mode="create"` instead of the old one-shot create+confirm path.
+- **Lightyear capital-gains export drift** — `parse_lightyear_capital_gains` now reads required columns by header name instead of fixed positions, so newer Lightyear FIFO exports that insert `Asset Class` before `Fees (EUR)` parse correctly while the legacy 10-column export remains supported.
+- **Wise date filter validation** — `import_wise_transactions` now rejects malformed `date_from` / `date_to` values and reversed ranges before reading or creating transactions, preventing typoed filters from silently producing partial or surprising imports.
 
 ## [0.12.6] - 2026-04-28
 
