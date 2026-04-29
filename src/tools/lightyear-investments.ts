@@ -22,7 +22,7 @@ const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 const KNOWN_CASH_EQUIVALENT_TICKERS = new Set(["BRICEKSP", "ICSUSSDP"]);
 
 const EXPECTED_STATEMENT_HEADERS = ["Date", "Reference", "Ticker", "ISIN", "Type", "Quantity", "CCY", "Price/share", "Gross Amount", "FX Rate", "Fee", "Net Amt.", "Tax Amt."];
-const EXPECTED_GAINS_HEADERS = ["Date", "Ticker", "Name", "ISIN", "Country", "Fees (EUR)", "Quantity", "Cost Basis (EUR)", "Proceeds (EUR)", "Capital Gains (EUR)"];
+const REQUIRED_GAINS_HEADERS = ["Date", "Ticker", "Name", "ISIN", "Country", "Fees (EUR)", "Quantity", "Cost Basis (EUR)", "Proceeds (EUR)", "Capital Gains (EUR)"] as const;
 
 interface AccountStatementRow {
   row_index: number;
@@ -122,6 +122,27 @@ function validateHeaders(actual: string[], expected: string[], label: string): v
       );
     }
   }
+}
+
+function buildHeaderIndex<T extends readonly string[]>(actual: string[], required: T, label: string): Record<T[number], number> {
+  const indexes = new Map<string, number>();
+  for (let i = 0; i < actual.length; i++) {
+    const header = actual[i]!.trim();
+    if (indexes.has(header)) {
+      throw new Error(`${label}: duplicate column "${header}". File may not be a valid Lightyear export.`);
+    }
+    indexes.set(header, i);
+  }
+
+  const missing = required.filter((header) => !indexes.has(header));
+  if (missing.length > 0) {
+    throw new Error(
+      `${label}: missing required column${missing.length === 1 ? "" : "s"} ${missing.map(h => `"${h}"`).join(", ")}. ` +
+      `File may not be a valid Lightyear export.`
+    );
+  }
+
+  return Object.fromEntries(required.map((header) => [header, indexes.get(header)!])) as Record<T[number], number>;
 }
 
 async function readCsvFile(filePath: string): Promise<string> {
@@ -260,32 +281,33 @@ function parseCapitalGains(csv: string): CapitalGainsRow[] {
   const allRows = parseCSV(csv).filter(r => r.some(f => f.trim().length > 0));
   if (allRows.length < 2) return [];
 
-  validateHeaders(allRows[0]!, EXPECTED_GAINS_HEADERS, "Capital Gains CSV");
+  const headerIndex = buildHeaderIndex(allRows[0]!, REQUIRED_GAINS_HEADERS, "Capital Gains CSV");
+  const expectedColumns = Math.max(...Object.values(headerIndex)) + 1;
 
   const rows: CapitalGainsRow[] = [];
   for (let i = 1; i < allRows.length; i++) {
     const fields = allRows[i]!;
-    if (fields.length < 10) {
-      throw new Error(`Capital Gains CSV row ${i + 1}: expected 10 columns, got ${fields.length}`);
+    if (fields.length < expectedColumns) {
+      throw new Error(`Capital Gains CSV row ${i + 1}: expected ${expectedColumns} columns, got ${fields.length}`);
     }
 
     // Cap `name` at a defensive length so a malformed CSV with multi-line
     // or unusually long names can't smuggle bulk text. Real security names
     // fit easily under 128 chars; truncation makes the Lightyear-CSV trust
     // decision robust to format drift.
-    const rawName = fields[2]!;
+    const rawName = fields[headerIndex.Name]!;
     const name = rawName.length > 128 ? rawName.slice(0, 128) + "…" : rawName;
     rows.push({
-      date: fields[0]!,
-      ticker: fields[1]!,
+      date: fields[headerIndex.Date]!,
+      ticker: fields[headerIndex.Ticker]!,
       name,
-      isin: fields[3]!,
-      country: fields[4]!,
-      fees_eur: parseNumber(fields[5]!),
-      quantity: parseNumber(fields[6]!),
-      cost_basis_eur: parseNumber(fields[7]!),
-      proceeds_eur: parseNumber(fields[8]!),
-      capital_gains_eur: parseNumber(fields[9]!),
+      isin: fields[headerIndex.ISIN]!,
+      country: fields[headerIndex.Country]!,
+      fees_eur: parseNumber(fields[headerIndex["Fees (EUR)"]]!),
+      quantity: parseNumber(fields[headerIndex.Quantity]!),
+      cost_basis_eur: parseNumber(fields[headerIndex["Cost Basis (EUR)"]]!),
+      proceeds_eur: parseNumber(fields[headerIndex["Proceeds (EUR)"]]!),
+      capital_gains_eur: parseNumber(fields[headerIndex["Capital Gains (EUR)"]]!),
     });
   }
   return rows;

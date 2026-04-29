@@ -28,6 +28,16 @@ const STATEMENT_HEADER = [
   "Price/share", "Gross Amount", "FX Rate", "Fee", "Net Amt.", "Tax Amt.",
 ].join(",");
 
+const CAPITAL_GAINS_HEADER_WITH_ASSET_CLASS = [
+  "Date", "Ticker", "Name", "ISIN", "Country", "Asset Class", "Fees (EUR)",
+  "Quantity", "Cost Basis (EUR)", "Proceeds (EUR)", "Capital Gains (EUR)",
+].join(",");
+
+const CAPITAL_GAINS_LEGACY_HEADER = [
+  "Date", "Ticker", "Name", "ISIN", "Country", "Fees (EUR)",
+  "Quantity", "Cost Basis (EUR)", "Proceeds (EUR)", "Capital Gains (EUR)",
+].join(",");
+
 function csvRow(values: string[]): string {
   return values.map((value) => `"${value}"`).join(",");
 }
@@ -36,8 +46,12 @@ function buildStatementCsv(rows: string[][]): string {
   return `${STATEMENT_HEADER}\n${rows.map(csvRow).join("\n")}\n`;
 }
 
+function buildCapitalGainsCsv(rows: string[][], header = CAPITAL_GAINS_HEADER_WITH_ASSET_CLASS): string {
+  return `${header}\n${rows.map(csvRow).join("\n")}\n`;
+}
+
 function setupLightyearTool(
-  toolName: "parse_lightyear_statement" | "book_lightyear_trades",
+  toolName: "parse_lightyear_statement" | "parse_lightyear_capital_gains" | "book_lightyear_trades",
   options: {
     journals?: unknown[];
     createImpl?: ReturnType<typeof vi.fn>;
@@ -75,6 +89,70 @@ describe("lightyear investments tools", () => {
   beforeEach(() => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/lightyear.csv" });
     mockedReadFile.mockReset();
+  });
+
+  it("parses Lightyear capital gains exports that include Asset Class", async () => {
+    mockedReadFile.mockResolvedValue(buildCapitalGainsCsv([
+      [
+        "24/04/2026 18:55:48", "AMD", "AMD", "US0079031078", "United States",
+        "equity", "0.08531697620", "0.288403857",
+        "49.514474937193785175860000000", "85.316975995880840781024000000",
+        "35.802501058687055605164000000",
+      ],
+    ]));
+
+    const { handler } = setupLightyearTool("parse_lightyear_capital_gains");
+    const result = await handler({
+      file_path: "/tmp/lightyear.csv",
+    });
+
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.sales).toHaveLength(1);
+    expect(payload.sales[0]).toEqual(expect.objectContaining({
+      date: "2026-04-24",
+      ticker: "AMD",
+      isin: "US0079031078",
+      country: "United States",
+      quantity: 0.288403857,
+      cost_basis_eur: 49.51,
+      proceeds_eur: 85.32,
+      capital_gains_eur: 35.8,
+      fees_eur: 0.0853169762,
+    }));
+    expect(payload.totals).toEqual(expect.objectContaining({
+      cost_basis_eur: 49.51,
+      proceeds_eur: 85.32,
+      capital_gains_eur: 35.8,
+      fees_eur: 0.09,
+    }));
+  });
+
+  it("keeps parsing legacy Lightyear capital gains exports without Asset Class", async () => {
+    mockedReadFile.mockResolvedValue(buildCapitalGainsCsv([
+      [
+        "24/04/2026 18:55:48", "AMD", "AMD", "US0079031078", "United States",
+        "0.08531697620", "0.288403857",
+        "49.514474937193785175860000000", "85.316975995880840781024000000",
+        "35.802501058687055605164000000",
+      ],
+    ], CAPITAL_GAINS_LEGACY_HEADER));
+
+    const { handler } = setupLightyearTool("parse_lightyear_capital_gains");
+    const result = await handler({
+      file_path: "/tmp/lightyear.csv",
+    });
+
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.sales[0]).toEqual(expect.objectContaining({
+      date: "2026-04-24",
+      ticker: "AMD",
+      quantity: 0.288403857,
+      cost_basis_eur: 49.51,
+      proceeds_eur: 85.32,
+      capital_gains_eur: 35.8,
+    }));
   });
 
   it("keeps BRICEKSP buy/sell rows out of booked trades while leaving reconciliation balanced", async () => {
