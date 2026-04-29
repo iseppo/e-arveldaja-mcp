@@ -18,6 +18,8 @@ import { buildInterAccountJournalIndex, findMatchingJournal } from "./inter-acco
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { approvalPreviewsFromDryRunSteps, buildWorkflowEnvelope } from "../workflow-response.js";
 
+const ISO_DATE_REGEX = /^(\d{4})-(\d{2})-(\d{2})$/;
+
 interface WiseRow {
   id: string;
   status: string;
@@ -102,6 +104,34 @@ function parseWiseCSV(csv: string): WiseRow[] {
 function wiseDate(dateStr: string): string {
   // "2026-01-19 17:59:56" → "2026-01-19"
   return dateStr.split(" ")[0] ?? dateStr;
+}
+
+function assertIsoDate(value: string | undefined, fieldName: "date_from" | "date_to"): void {
+  if (value === undefined) return;
+  const match = value.match(ISO_DATE_REGEX);
+  if (!match) {
+    throw new Error(`${fieldName} must be a valid date in YYYY-MM-DD format, got "${value}"`);
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    throw new Error(`${fieldName} must be a valid date in YYYY-MM-DD format, got "${value}"`);
+  }
+}
+
+function validateWiseDateRange(dateFrom: string | undefined, dateTo: string | undefined): void {
+  assertIsoDate(dateFrom, "date_from");
+  assertIsoDate(dateTo, "date_to");
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    throw new Error(`date_from ${dateFrom} must be on or before date_to ${dateTo}`);
+  }
 }
 
 function normalizeWiseDirection(direction: string): "IN" | "OUT" | "NEUTRAL" | undefined {
@@ -346,8 +376,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         "Auto-detected if only one other bank account exists. Required when there are 3+ bank accounts."
       ),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
-      date_from: z.string().optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
-      date_to: z.string().optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
+      date_from: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
+      date_to: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
       skip_jar_transfers: z.boolean().optional().describe("Skip Jar (savings pot) transfers — internal movements within Wise (default true)"),
     },
     { ...batch, openWorldHint: true, title: "Import Wise Transactions" },
@@ -362,6 +392,8 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       date_to,
       skip_jar_transfers,
     }) => {
+      validateWiseDateRange(date_from, date_to);
+
       const skipJars = skip_jar_transfers !== false;
       const { path: resolved, cleanup } = await resolveFileInput(file_path, [".csv"], 10 * 1024 * 1024);
       let csv: string;

@@ -586,6 +586,47 @@ describe("wise import tool", () => {
     ]);
   });
 
+  it("rejects malformed date_from before filtering rows", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "bad-date-1", "COMPLETED", "OUT", "2026-01-22 09:00:00", "2026-01-22 09:00:00",
+      "0", "EUR", "0", "EUR",
+      "Seppo AI OÜ", "25", "EUR",
+      "Acme Ltd", "25", "EUR",
+      "1", "INV-BAD-DATE", "", "", "General", "",
+    ]));
+
+    const { api, handler } = setupWiseTool([]);
+
+    await expect(handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      date_from: "2026-1-20",
+      execute: true,
+    })).rejects.toThrow('date_from must be a valid date in YYYY-MM-DD format, got "2026-1-20"');
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects date_from after date_to before filtering rows", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "bad-range-1", "COMPLETED", "OUT", "2026-01-22 09:00:00", "2026-01-22 09:00:00",
+      "0", "EUR", "0", "EUR",
+      "Seppo AI OÜ", "25", "EUR",
+      "Acme Ltd", "25", "EUR",
+      "1", "INV-BAD-RANGE", "", "", "General", "",
+    ]));
+
+    const { api, handler } = setupWiseTool([]);
+
+    await expect(handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      date_from: "2026-01-31",
+      date_to: "2026-01-01",
+      execute: true,
+    })).rejects.toThrow("date_from 2026-01-31 must be on or before date_to 2026-01-01");
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
   it("does not treat same-amount rows in different currencies as duplicates", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "fx-dup-1", "COMPLETED", "OUT", "2026-01-17 09:00:00", "2026-01-17 09:00:00",
