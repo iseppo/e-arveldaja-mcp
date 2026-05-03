@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-05-03
+
+### Fixed
+- **Year-end close current-year profit account** — changed the default current-year profit/loss account from `3310` to the e-arveldaja standard `2970`, and added an `accounting-rules.md` override (`Current year profit account: ...`) for companies with custom charts of accounts. The year-end close proposal, validation, annual report equity mapping, warnings, and tests now use the resolved account consistently.
+- **Opening balance API coverage warning** — added a visible warning to `compute_balance_sheet`, `compute_account_balance`, `compute_trial_balance`, `compute_profit_and_loss`, and `list_journals` that e-arveldaja's separate "Algbilansi kanded" section is not exposed by the documented `/journals` API data available to the MCP server. Documented the API gap and requested behavior in `spec_problems.md`.
+
 ## [0.13.0] - 2026-04-29
 
 ### Fixed
