@@ -336,6 +336,27 @@ describe("create_product", () => {
   });
 });
 
+describe("list_journals", () => {
+  it("warns that opening balance entries may be absent from journal API results", async () => {
+    const { handler } = getCrudToolHarness("list_journals", {
+      journals: {
+        list: vi.fn().mockResolvedValue({
+          current_page: 1,
+          total_pages: 1,
+          items: [],
+        }),
+      },
+    });
+
+    const result = await handler({}) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(payload.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("Algbilansi kanded"),
+    ]));
+  });
+});
+
 describe("structured JSON-compatible inputs", () => {
   it("update_client accepts an object instead of a JSON string", async () => {
     const { api, handler } = getCrudToolHarness("update_client", {

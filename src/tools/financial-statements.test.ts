@@ -253,6 +253,9 @@ describe("compute_trial_balance", () => {
     expect(payload.totals.debit).toBe(1000);
     expect(payload.totals.credit).toBe(1000);
     expect(payload.totals.difference).toBe(0);
+    expect(payload.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("Algbilansi kanded"),
+    ]));
   });
 
   it("passes date range through to the output", async () => {
@@ -312,6 +315,9 @@ describe("compute_balance_sheet", () => {
     expect(payload.check.balanced).toBe(true);
     expect(payload.check.assets).toBe(10000);
     expect(payload.check.liabilities_plus_equity).toBe(10000);
+    expect(payload.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("Algbilansi kanded"),
+    ]));
   });
 
   it("includes current-year P&L in equity for balance check", async () => {
@@ -392,6 +398,9 @@ describe("compute_profit_and_loss", () => {
     expect(payload.revenue.total).toBe(20000);
     expect(payload.expenses.total).toBe(10000);
     expect(payload.net_profit).toBe(10000);
+    expect(payload.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("Algbilansi kanded"),
+    ]));
   });
 
   it("net profit is negative when expenses exceed revenue (loss)", async () => {

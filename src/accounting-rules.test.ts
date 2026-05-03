@@ -6,6 +6,7 @@ import {
   findAutoBookingRule,
   getCashFlowCategoryRule,
   getAccountingRulesPath,
+  getCurrentYearProfitAccountRule,
   getDefaultOwnerExpenseVatDeductionMode,
   getDefaultOwnerExpenseVatDeductionRatio,
   getLiabilityClassificationRule,
@@ -44,6 +45,9 @@ Default VAT deduction mode: partial ratio 0.5
 | 5230 | none | |
 | 5250 | partial | 0.25 |
 
+## Annual Report
+Current year profit account: 2999
+
 ## Liability Classification
 | account_id | classification |
 | --- | --- |
@@ -67,6 +71,7 @@ Default VAT deduction mode: partial ratio 0.5
     expect(getOwnerExpenseVatDeductionModeForAccount(5230)).toBe("none");
     expect(getOwnerExpenseVatDeductionModeForAccount(5250)).toBe("partial");
     expect(getOwnerExpenseVatDeductionRatioForAccount(5250)).toBe(0.25);
+    expect(getCurrentYearProfitAccountRule()).toBe(2999);
     expect(getLiabilityClassificationRule(2100)).toBe("non_current");
     expect(getCashFlowCategoryRule(2100)).toBe("financing");
 

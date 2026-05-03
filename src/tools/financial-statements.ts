@@ -7,6 +7,7 @@ import type { Account, Journal, SaleInvoice, PurchaseInvoice } from "../types/ap
 import { roundMoney, effectiveGross } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
+import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
 
 export interface AccountBalance {
   account_id: number;
@@ -145,6 +146,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               difference: roundMoney(totalDebit - totalCredit),
             },
             account_count: balances.length,
+            warnings: withOpeningBalanceApiLimitation(),
           }),
         }],
       };
@@ -213,7 +215,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               liabilities_plus_equity: roundMoney(totalLiabilities + totalEquityWithCurrentYearPL),
               balanced: Math.abs(totalAssets - totalLiabilities - totalEquityWithCurrentYearPL) < 0.01,
             },
-            ...(warnings.length > 0 && { warnings }),
+            warnings: withOpeningBalanceApiLimitation(warnings),
           }),
         }],
       };
@@ -251,6 +253,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               total: roundMoney(totalExpenses),
             },
             net_profit: roundMoney(totalRevenue - totalExpenses),
+            warnings: withOpeningBalanceApiLimitation(),
           }),
         }],
       };

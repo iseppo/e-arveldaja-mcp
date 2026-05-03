@@ -1,9 +1,24 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Account, Journal } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { buildAnnualReportData, registerAnnualReportTools } from "./annual-report.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makePosting, makeJournal } from "../__fixtures__/accounting.js";
+import { resetAccountingRulesCache } from "../accounting-rules.js";
+
+const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
+
+afterEach(() => {
+  if (ORIGINAL_RULES_FILE === undefined) {
+    delete process.env.EARVELDAJA_RULES_FILE;
+  } else {
+    process.env.EARVELDAJA_RULES_FILE = ORIGINAL_RULES_FILE;
+  }
+  resetAccountingRulesCache();
+});
 
 function makeAccount(overrides: Partial<Account> & Pick<Account,
   "id" |
@@ -69,7 +84,7 @@ function createApi(
       name_eng: "Retained earnings",
     }),
     makeAccount({
-      id: 3310,
+      id: 2970,
       balance_type: "C",
       account_type_est: "Omakapital",
       account_type_eng: "Equity",
@@ -132,10 +147,14 @@ function setupTool(
   options: {
     journals?: Journal[];
     transactions?: unknown[];
+    extraAccounts?: Account[];
   } = {},
 ): (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> {
   const server = { registerTool: vi.fn() } as any;
-  const api = createApi(options.journals ?? [], { transactions: options.transactions });
+  const api = createApi(options.journals ?? [], {
+    transactions: options.transactions,
+    extraAccounts: options.extraAccounts,
+  });
   registerAnnualReportTools(server, api);
 
   const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === toolName);
@@ -184,17 +203,17 @@ describe("buildAnnualReportData", () => {
       expect.objectContaining({ label: "Agio", amount: 20 }),
       expect.objectContaining({ label: "Eelmiste perioodide jaotamata kasum", amount: 50 }),
     ]));
-    expect(equity.accounts.flatMap((line) => line.source_accounts.map((account) => account.account_id))).not.toContain(3310);
+    expect(equity.accounts.flatMap((line) => line.source_accounts.map((account) => account.account_id))).not.toContain(2970);
     expect(equity.current_year_result.amount).toBe(50);
     expect(equity.current_year_result.source_accounts).toEqual([]);
     expect(equity.total_equity).toBe(220);
   });
 
-  it("keeps the income statement populated after YECL close journals and surfaces 3310 in the equity section", async () => {
+  it("keeps the income statement populated after YECL close journals and surfaces 2970 in the equity section", async () => {
     const closingJournal = makeJournal("2025-12-31", [
       makePosting(3001, "D", 60),
       makePosting(5000, "C", 10),
-      makePosting(3310, "C", 50),
+      makePosting(2970, "C", 50),
     ], {
       document_number: "YECL-2025",
       title: "Aasta lõppkanne 2025",
@@ -210,7 +229,7 @@ describe("buildAnnualReportData", () => {
     expect(equity.current_year_result.amount).toBe(50);
     expect(equity.current_year_result.source_accounts).toEqual([
       {
-        account_id: 3310,
+        account_id: 2970,
         name: "Aruandeaasta kasum",
         amount: 50,
       },
@@ -240,6 +259,78 @@ describe("buildAnnualReportData", () => {
 
     expect(payload.unresolved_items.unconfirmed_transactions.count).toBe(0);
     expect(payload.unresolved_items.total_issues).toBe(0);
+  });
+
+  it("prepare_year_end_close uses the standard 2970 current-year profit account by default", async () => {
+    const handler = setupTool("prepare_year_end_close", {
+      journals: baseJournals,
+      extraAccounts: [
+        makeAccount({
+          id: 2970,
+          balance_type: "C",
+          account_type_est: "Omakapital",
+          account_type_eng: "Equity",
+          name_est: "Aruandeaasta kasum",
+          name_eng: "Current year profit",
+        }),
+      ],
+    });
+
+    const result = await handler({ year: 2025 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+    const closingEntry = payload.proposed_journal_entries.find((entry: { source: string }) => entry.source === "closing");
+
+    expect(closingEntry.postings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        accounts_id: 2970,
+        account_name: "Aruandeaasta kasum",
+        type: "C",
+        amount: 50,
+      }),
+    ]));
+    expect(closingEntry.rationale).toContain("account 2970");
+  });
+
+  it("prepare_year_end_close honors the configured current-year profit account", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-annual-rules-"));
+    const rulesPath = join(dir, "accounting-rules.md");
+    writeFileSync(rulesPath, `# Accounting Rules
+
+## Annual Report
+Current year profit account: 2999
+`, "utf-8");
+    process.env.EARVELDAJA_RULES_FILE = rulesPath;
+    resetAccountingRulesCache();
+
+    const handler = setupTool("prepare_year_end_close", {
+      journals: baseJournals,
+      extraAccounts: [
+        makeAccount({
+          id: 2999,
+          balance_type: "C",
+          account_type_est: "Omakapital",
+          account_type_eng: "Equity",
+          name_est: "Aruandeaasta kasum erikonto",
+          name_eng: "Current year profit override",
+        }),
+      ],
+    });
+
+    const result = await handler({ year: 2025 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+    const closingEntry = payload.proposed_journal_entries.find((entry: { source: string }) => entry.source === "closing");
+
+    expect(closingEntry.postings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        accounts_id: 2999,
+        account_name: "Aruandeaasta kasum erikonto",
+        type: "C",
+        amount: 50,
+      }),
+    ]));
+    expect(closingEntry.rationale).toContain("account 2999");
+
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("keeps non-loan liabilities in the balance sheet sections instead of dropping them", async () => {

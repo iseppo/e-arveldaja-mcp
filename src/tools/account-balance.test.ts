@@ -120,6 +120,9 @@ describe("compute_account_balance tool", () => {
     expect(data.debit_total).toBe(500);
     expect(data.credit_total).toBe(200);
     expect(data.balance_type).toBe("D");
+    expect(data.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("Algbilansi kanded"),
+    ]));
   });
 
   it("computes C-type balance as credits minus debits", async () => {

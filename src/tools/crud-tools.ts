@@ -24,6 +24,7 @@ import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { toolResponse } from "../tool-response.js";
 import { applyListView, viewParam } from "../list-views.js";
+import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
 
 export interface ApiContext {
   clients: ClientsApi;
@@ -564,6 +565,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         const compact = {
           ...result,
           items: applyListView("journal", stripped, params.view),
+          warnings: withOpeningBalanceApiLimitation(),
         };
         return { content: [{ type: "text", text: toMcpJson(compact) }] };
       }
@@ -601,6 +603,7 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
             filtered_client_side: true,
             out_of_range: outOfRange,
             items,
+            warnings: withOpeningBalanceApiLimitation(),
           }),
         }],
       };

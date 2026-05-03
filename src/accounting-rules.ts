@@ -64,6 +64,7 @@ const accountingRulesSchema = z.object({
     account_overrides: z.record(z.string(), ownerExpenseVatRuleSchema).optional(),
   }).optional(),
   annual_report: z.object({
+    current_year_profit_account: z.number().int().optional(),
     liability_classification: z.record(z.string(), liabilityClassificationSchema).optional(),
     cash_flow_category: z.record(z.string(), cashFlowCategorySchema).optional(),
   }).optional(),
@@ -142,6 +143,11 @@ Optional account overrides table:
 - \`expense_account\`
 - \`vat_deduction_mode\`
 - \`vat_deduction_ratio\`
+
+## Annual Report
+
+If your chart of accounts uses a custom current-year profit/loss account, add a plain text line under Annual Report:
+- \`Current year profit account: 2970\`
 
 ## Liability Classification
 
@@ -314,8 +320,15 @@ function parseAutoBookingRules(sectionLines: string[]): AccountingRules["auto_bo
 }
 
 function parseAnnualReportRules(sectionMap: Map<string, string[]>): AccountingRules["annual_report"] {
+  const annualReportLines = sectionMap.get("annual_report") ?? [];
   const liabilityRows = parseMarkdownTable(sectionMap.get("liability_classification") ?? []);
   const cashFlowRows = parseMarkdownTable(sectionMap.get("cash_flow_category") ?? []);
+  const currentYearProfitAccountLine = annualReportLines
+    .map(line => line.trim())
+    .find(line => /^current year profit account:/i.test(line));
+  const currentYearProfitAccount = parseOptionalInt(
+    currentYearProfitAccountLine?.match(/^current year profit account:\s*(\d+)$/i)?.[1],
+  );
 
   const liabilityClassification: Record<string, LiabilityClassificationRule> = {};
   for (const row of liabilityRows) {
@@ -333,11 +346,16 @@ function parseAnnualReportRules(sectionMap: Map<string, string[]>): AccountingRu
     cashFlowCategory[accountId] = category;
   }
 
-  if (Object.keys(liabilityClassification).length === 0 && Object.keys(cashFlowCategory).length === 0) {
+  if (
+    currentYearProfitAccount === undefined &&
+    Object.keys(liabilityClassification).length === 0 &&
+    Object.keys(cashFlowCategory).length === 0
+  ) {
     return undefined;
   }
 
   return {
+    ...(currentYearProfitAccount !== undefined ? { current_year_profit_account: currentYearProfitAccount } : {}),
     ...(Object.keys(liabilityClassification).length > 0 ? { liability_classification: liabilityClassification } : {}),
     ...(Object.keys(cashFlowCategory).length > 0 ? { cash_flow_category: cashFlowCategory } : {}),
   };
@@ -539,6 +557,10 @@ export function getLiabilityClassificationRule(accountId: number): LiabilityClas
 
 export function getCashFlowCategoryRule(accountId: number): CashFlowCategoryRule | undefined {
   return loadAccountingRules().annual_report?.cash_flow_category?.[String(accountId)];
+}
+
+export function getCurrentYearProfitAccountRule(): number | undefined {
+  return loadAccountingRules().annual_report?.current_year_profit_account;
 }
 
 export function getDefaultOwnerExpenseVatDeductionMode(): OwnerExpenseVatDeductionModeRule | undefined {

@@ -12,7 +12,7 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { CURRENT_YEAR_PROFIT_ACCOUNT } from "../accounting-defaults.js";
-import { getCashFlowCategoryRule, getLiabilityClassificationRule } from "../accounting-rules.js";
+import { getCashFlowCategoryRule, getCurrentYearProfitAccountRule, getLiabilityClassificationRule } from "../accounting-rules.js";
 
 type PostingType = "D" | "C";
 type CashFlowClass = "operating" | "investing" | "financing" | "unclassified";
@@ -365,6 +365,7 @@ function buildClosingProposal(
   year: number,
   yearProfitAndLossBalances: AccountBalance[],
   accountsById: Map<number, Account>,
+  currentYearProfitAccountId: number,
 ): JournalProposal | null {
   const profitAndLossAccounts = yearProfitAndLossBalances
     .filter((balance) => balance.account_type_est === "Tulud" || balance.account_type_est === "Kulud")
@@ -377,11 +378,11 @@ function buildClosingProposal(
   const totalRevenue = sumStatementBalances(yearProfitAndLossBalances, (balance) => balance.account_type_est === "Tulud");
   const totalExpenses = sumStatementBalances(yearProfitAndLossBalances, (balance) => balance.account_type_est === "Kulud");
   const netProfit = roundMoney(totalRevenue - totalExpenses);
-  const currentYearProfitAccount = accountsById.get(CURRENT_YEAR_PROFIT_ACCOUNT);
+  const currentYearProfitAccount = accountsById.get(currentYearProfitAccountId);
 
   if (Math.abs(netProfit) >= 0.005) {
     profitAndLossAccounts.push({
-      accounts_id: CURRENT_YEAR_PROFIT_ACCOUNT,
+      accounts_id: currentYearProfitAccountId,
       account_name: currentYearProfitAccount?.name_est ?? "Aruandeaasta kasum",
       type: netProfit > 0 ? "C" : "D",
       amount: roundMoney(Math.abs(netProfit)),
@@ -399,7 +400,7 @@ function buildClosingProposal(
     title: `Aasta lõppkanne ${year}`,
     effective_date: `${year}-12-31`,
     document_number: `YECL-${year}`,
-    rationale: "Closes all revenue and expense accounts into account 3310 (current year profit/loss).",
+    rationale: `Closes all revenue and expense accounts into account ${currentYearProfitAccountId} (current year profit/loss).`,
     postings: profitAndLossAccounts,
     totals: {
       debit,
@@ -476,7 +477,8 @@ async function analyzeYearEndClose(api: ApiContext, year: number): Promise<YearE
     computeAllBalances(api, from, to, { preloadedAccounts: accounts, preloadedJournals: allJournals }),
   ]);
 
-  const accountErrors = validateAccounts(accounts, [{ id: CURRENT_YEAR_PROFIT_ACCOUNT, label: "Current year profit account" }]);
+  const currentYearProfitAccountId = getCurrentYearProfitAccountRule() ?? CURRENT_YEAR_PROFIT_ACCOUNT;
+  const accountErrors = validateAccounts(accounts, [{ id: currentYearProfitAccountId, label: "Current year profit account" }]);
   if (accountErrors.length > 0) {
     return {
       error: "Account validation failed",
@@ -497,7 +499,7 @@ async function analyzeYearEndClose(api: ApiContext, year: number): Promise<YearE
   const equityIncludingCurrentYearResult = roundMoney(equity + netProfit);
   const balanceDifference = roundMoney(assets - liabilities - equityIncludingCurrentYearResult);
 
-  const closingProposal = buildClosingProposal(year, yearProfitAndLossBalances, accountsById);
+  const closingProposal = buildClosingProposal(year, yearProfitAndLossBalances, accountsById, currentYearProfitAccountId);
   const accrualReview = buildAccrualReview(yearEndBalances, accountsById, unresolvedItems);
 
   const warnings: string[] = [];
@@ -510,10 +512,10 @@ async function analyzeYearEndClose(api: ApiContext, year: number): Promise<YearE
   if (Math.abs(balanceDifference) >= 0.01) {
     warnings.push(`Balance sheet does not balance at ${to}. Difference: ${balanceDifference} EUR.`);
   }
-  const currentYearProfitBalance = yearEndBalances.find((balance) => balance.account_id === CURRENT_YEAR_PROFIT_ACCOUNT);
+  const currentYearProfitBalance = yearEndBalances.find((balance) => balance.account_id === currentYearProfitAccountId);
   if (currentYearProfitBalance && Math.abs(statementAmount(currentYearProfitBalance)) >= 0.01 && closingProposal) {
     warnings.push(
-      `Account 3310 already has a balance of ${roundMoney(statementAmount(currentYearProfitBalance))} EUR while P&L accounts are still open. Verify there is no partial close.`,
+      `Account ${currentYearProfitAccountId} already has a balance of ${roundMoney(statementAmount(currentYearProfitBalance))} EUR while P&L accounts are still open. Verify there is no partial close.`,
     );
   }
   if (closingProposal && Math.abs(closingProposal.totals.difference) >= 0.01) {
@@ -672,6 +674,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   ]);
 
   const accountsById = new Map(accounts.map((account) => [account.id, account]));
+  const currentYearProfitAccountId = getCurrentYearProfitAccountRule() ?? CURRENT_YEAR_PROFIT_ACCOUNT;
   const warnings: string[] = [];
 
   const currentAssets = buildStatementLine("Käibevara", yearEndBalances, (balance) =>
@@ -699,11 +702,11 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const totalLiabilities = sumStatementBalances(yearEndBalances, (balance) => balance.account_type_est === "Kohustused");
 
   const equityAccountLines = yearEndBalances
-    .filter((balance) => balance.account_type_est === "Omakapital" && balance.account_id !== CURRENT_YEAR_PROFIT_ACCOUNT)
+    .filter((balance) => balance.account_type_est === "Omakapital" && balance.account_id !== currentYearProfitAccountId)
     .map((balance) => buildBalanceLine(balance))
     .filter((line) => Math.abs(line.amount) >= 0.01);
   const currentYearProfitAccountLine = buildStatementLine("Aruandeaasta kasum", yearEndBalances, (balance) =>
-    balance.account_type_est === "Omakapital" && balance.account_id === CURRENT_YEAR_PROFIT_ACCOUNT,
+    balance.account_type_est === "Omakapital" && balance.account_id === currentYearProfitAccountId,
   );
 
   const revenueLine = buildStatementLine("Müügitulu", yearProfitAndLossBalances, (balance) =>
@@ -783,7 +786,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     Math.abs(currentYearProfitAccountLine.amount - netProfit) >= 0.01
   ) {
     warnings.push(
-      `Account 3310 balance (${currentYearProfitAccountLine.amount} EUR) differs from computed current-year result ` +
+      `Account ${currentYearProfitAccountId} balance (${currentYearProfitAccountLine.amount} EUR) differs from computed current-year result ` +
       `(${netProfit} EUR). YECL-* journals were excluded from the income statement, so review whether a partial close was posted.`,
     );
   }

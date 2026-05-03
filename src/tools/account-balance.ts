@@ -7,6 +7,7 @@ import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { DEFAULT_DEBT_CHECK_ACCOUNTS } from "../accounting-defaults.js";
+import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
 
 interface BalanceDetail {
   journal_id: number;
@@ -134,6 +135,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(include_entries && {
           entries: result.entries.map(e => ({ ...e, title: wrapUntrustedOcr(e.title) ?? e.title })),
         }),
+        warnings: withOpeningBalanceApiLimitation(),
       };
 
       return { content: [{ type: "text", text: toMcpJson(summary) }] };
