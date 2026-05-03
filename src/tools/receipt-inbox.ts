@@ -61,7 +61,7 @@ import {
   buildClassificationReviewGuidance,
   buildReceiptReviewGuidance,
 } from "../estonian-accounting-guidance.js";
-import { approvalPreviewsFromDryRunSteps, buildWorkflowEnvelope } from "../workflow-response.js";
+import { buildWorkflowEnvelope } from "../workflow-response.js";
 
 const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 const FILE_TYPE_EXTENSIONS = {
@@ -2022,13 +2022,13 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
       const workflow = buildWorkflowEnvelope({
         summary: workflowSummary,
         needs_review: sanitizedResults.filter(result => result.status === "needs_review"),
-        approval_previews: dryRun
-          ? approvalPreviewsFromDryRunSteps([{
+        dry_run_steps: dryRun
+          ? [{
               tool: "process_receipt_batch",
               summary: workflowSummary,
               suggested_args: workflowArgs,
               preview: summary,
-            }])
+            }]
           : [],
       });
 
@@ -2460,13 +2460,13 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         : `Applied ${summary.applied} classification group(s), skipped ${summary.skipped}, and failed ${summary.failed}.`;
       const workflow = buildWorkflowEnvelope({
         summary: workflowSummary,
-        approval_previews: dryRun
-          ? approvalPreviewsFromDryRunSteps([{
+        dry_run_steps: dryRun
+          ? [{
               tool: "apply_transaction_classifications",
               summary: workflowSummary,
               suggested_args: workflowArgs,
               preview: summary,
-            }])
+            }]
           : [],
       });
 

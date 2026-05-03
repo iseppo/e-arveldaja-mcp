@@ -45,9 +45,16 @@ interface BuildWorkflowEnvelopeOptions {
   needs_decision?: unknown[];
   needs_review?: unknown[];
   recommended_step?: unknown;
+  dry_run_steps?: unknown[];
   approval_previews?: ApprovalPreview[];
   fallback_actions?: WorkflowAction[];
 }
+
+type MaterializingDryRunTool =
+  | "import_camt053"
+  | "import_wise_transactions"
+  | "process_receipt_batch"
+  | "apply_transaction_classifications";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -127,6 +134,26 @@ function actionFromApprovalPreview(preview: ApprovalPreview): WorkflowAction {
   };
 }
 
+function blockedDryRunLabel(tool: MaterializingDryRunTool): string {
+  switch (tool) {
+    case "import_camt053":
+      return "Review blocked CAMT dry run";
+    case "import_wise_transactions":
+      return "Review blocked Wise dry run";
+    case "process_receipt_batch":
+      return "Review blocked receipt batch dry run";
+    case "apply_transaction_classifications":
+      return "Review blocked transaction classification dry run";
+  }
+}
+
+function isMaterializingDryRunTool(tool: string): tool is MaterializingDryRunTool {
+  return tool === "import_camt053"
+    || tool === "import_wise_transactions"
+    || tool === "process_receipt_batch"
+    || tool === "apply_transaction_classifications";
+}
+
 function doneAction(): WorkflowAction {
   return {
     kind: "done",
@@ -140,14 +167,28 @@ export function buildWorkflowEnvelope(options: BuildWorkflowEnvelopeOptions): Wo
   const done = options.done ?? [];
   const needsDecision = options.needs_decision ?? [];
   const needsReview = options.needs_review ?? [];
-  const approvalPreviews = options.approval_previews ?? [];
+  const dryRunSteps = options.dry_run_steps ?? [];
+  const approvalPreviews = [
+    ...(options.approval_previews ?? []),
+    ...approvalPreviewsFromDryRunSteps(dryRunSteps),
+  ];
+  const blockedDryRunActions = workflowActionsFromBlockedDryRunSteps(dryRunSteps);
   const recommendedAction = actionFromRecommendedStep(options.recommended_step);
+  const decisionActions = needsDecision
+    .slice(0, 1)
+    .map(actionFromQuestion)
+    .filter((action): action is WorkflowAction => action !== undefined);
+  const reviewActions = needsReview
+    .slice(0, 3)
+    .map(actionFromReviewItem)
+    .filter((action): action is WorkflowAction => action !== undefined);
 
   const availableActions: WorkflowAction[] = [
     ...approvalPreviews.map(actionFromApprovalPreview),
+    ...blockedDryRunActions,
     ...(recommendedAction ? [recommendedAction] : []),
-    ...needsDecision.slice(0, 1).map(actionFromQuestion).filter((action): action is WorkflowAction => action !== undefined),
-    ...needsReview.slice(0, 3).map(actionFromReviewItem).filter((action): action is WorkflowAction => action !== undefined),
+    ...decisionActions,
+    ...reviewActions,
     ...(options.fallback_actions ?? []),
   ];
 
@@ -239,9 +280,10 @@ export function approvalPreviewFromDryRunStep(step: unknown): ApprovalPreview | 
     const dryRunPreview = numberAt(preview, "dry_run_preview") ?? 0;
     const wouldCreate = created > 0 ? created : dryRunPreview;
     const matched = numberAt(preview, "matched") ?? 0;
+    const skippedDuplicate = numberAt(preview, "skipped_duplicate") ?? 0;
     const reviewCount = numberAt(preview, "needs_review") ?? 0;
     const failed = numberAt(preview, "failed") ?? 0;
-    if ((wouldCreate <= 0 && matched <= 0) || reviewCount > 0 || failed > 0) return undefined;
+    if ((wouldCreate <= 0 && matched <= 0) || skippedDuplicate > 0 || reviewCount > 0 || failed > 0) return undefined;
     return {
       title: "Approve receipt batch booking",
       summary: stringAt(step, "summary") ?? `Receipt dry run would create ${wouldCreate} invoice(s).`,
@@ -252,11 +294,11 @@ export function approvalPreviewFromDryRunStep(step: unknown): ApprovalPreview | 
       accounting_impact: [
         impactLine(wouldCreate, "purchase invoice"),
         impactLine(matched, "matched transaction"),
-        impactLine(numberAt(preview, "skipped_duplicate"), "skipped duplicate"),
+        impactLine(skippedDuplicate, "skipped duplicate"),
         reviewCount > 0 ? `${reviewCount} receipt(s) still need review before approval` : undefined,
         failed > 0 ? `${failed} receipt(s) failed and should be fixed before approval` : undefined,
       ].filter((line): line is string => line !== undefined),
-      duplicate_risk: reviewCount > 0 || failed > 0
+      duplicate_risk: skippedDuplicate > 0 || reviewCount > 0 || failed > 0
         ? "Review unresolved receipt items before approving execution."
         : "No unresolved receipt review items were reported by the dry run.",
       source_documents: sourceDocuments(args),
@@ -293,6 +335,74 @@ export function approvalPreviewsFromDryRunSteps(steps: unknown[]): ApprovalPrevi
     .filter((preview): preview is ApprovalPreview => preview !== undefined);
 }
 
+function blockedDryRunReasons(tool: MaterializingDryRunTool, preview: Record<string, unknown>): string[] {
+  switch (tool) {
+    case "import_camt053": {
+      const possibleDuplicates = numberAt(preview, "possible_duplicate_count") ?? 0;
+      const errors = numberAt(preview, "error_count") ?? 0;
+      return [
+        impactLine(possibleDuplicates, "possible duplicate"),
+        impactLine(errors, "import error"),
+      ].filter((line): line is string => line !== undefined);
+    }
+    case "import_wise_transactions": {
+      const errors = numberAt(preview, "error_count") ?? 0;
+      return [
+        impactLine(errors, "import error"),
+      ].filter((line): line is string => line !== undefined);
+    }
+    case "process_receipt_batch": {
+      const skippedDuplicate = numberAt(preview, "skipped_duplicate") ?? 0;
+      const needsReview = numberAt(preview, "needs_review") ?? 0;
+      const failed = numberAt(preview, "failed") ?? 0;
+      return [
+        impactLine(skippedDuplicate, "skipped duplicate"),
+        impactLine(needsReview, "receipt needing review", "receipts needing review"),
+        impactLine(failed, "failed receipt"),
+      ].filter((line): line is string => line !== undefined);
+    }
+    case "apply_transaction_classifications": {
+      const failed = numberAt(preview, "failed") ?? 0;
+      return [
+        impactLine(failed, "failed classification group"),
+      ].filter((line): line is string => line !== undefined);
+    }
+  }
+}
+
+export function workflowActionFromBlockedDryRunStep(step: unknown): WorkflowAction | undefined {
+  if (!isRecord(step)) return undefined;
+  const tool = stringAt(step, "tool");
+  const args = recordAt(step, "suggested_args") ?? {};
+  const preview = recordAt(step, "preview");
+  if (!tool || !isMaterializingDryRunTool(tool) || !preview) return undefined;
+  if (approvalPreviewFromDryRunStep(step)) return undefined;
+
+  const reasons = blockedDryRunReasons(tool, preview);
+  if (reasons.length === 0) return undefined;
+
+  return {
+    kind: "review_item",
+    label: blockedDryRunLabel(tool),
+    why: [
+      stringAt(step, "summary") ?? "This materializing dry run is not safe to approve yet.",
+      `Blocked by ${reasons.join(", ")}.`,
+    ].join(" "),
+    approval_required: false,
+    args: {
+      source_tool: tool,
+      source_documents: sourceDocuments(args),
+      preview,
+    },
+  };
+}
+
+export function workflowActionsFromBlockedDryRunSteps(steps: unknown[]): WorkflowAction[] {
+  return steps
+    .map(workflowActionFromBlockedDryRunStep)
+    .filter((action): action is WorkflowAction => action !== undefined);
+}
+
 export function workflowFromAccountingInboxPayload(payload: Record<string, unknown>): WorkflowEnvelope {
   const autopilot = recordAt(payload, "autopilot");
   if (autopilot) {
@@ -302,7 +412,7 @@ export function workflowFromAccountingInboxPayload(payload: Record<string, unkno
       needs_decision: arrayAt(autopilot, "needs_one_decision"),
       needs_review: arrayAt(autopilot, "needs_accountant_review"),
       recommended_step: recordAt(autopilot, "next_recommended_action"),
-      approval_previews: approvalPreviewsFromDryRunSteps(arrayAt(autopilot, "executed_steps")),
+      dry_run_steps: arrayAt(autopilot, "executed_steps"),
     });
   }
 

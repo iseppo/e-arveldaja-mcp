@@ -16,7 +16,7 @@ import { roundMoney } from "../money.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { buildInterAccountJournalIndex, findMatchingJournal } from "./inter-account-utils.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
-import { approvalPreviewsFromDryRunSteps, buildWorkflowEnvelope } from "../workflow-response.js";
+import { buildWorkflowEnvelope } from "../workflow-response.js";
 
 const ISO_DATE_REGEX = /^(\d{4})-(\d{2})-(\d{2})$/;
 
@@ -894,13 +894,13 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         : `Wise import created ${summary.created} bank transaction(s), skipped ${summary.skipped}, and reported ${summary.error_count} error(s).`;
       const workflow = buildWorkflowEnvelope({
         summary: workflowSummary,
-        approval_previews: dryRun
-          ? approvalPreviewsFromDryRunSteps([{
+        dry_run_steps: dryRun
+          ? [{
               tool: "import_wise_transactions",
               summary: workflowSummary,
               suggested_args: workflowArgs,
               preview: summary,
-            }])
+            }]
           : [],
       });
 
