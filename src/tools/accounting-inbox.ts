@@ -25,6 +25,11 @@ import {
   saveAutoBookingRule,
 } from "../accounting-rules.js";
 import { workflowFromAccountingInboxPayload } from "../workflow-response.js";
+import {
+  buildReceiptDryRunPreview,
+  receiptDryRunLeavesPendingMaterialization,
+  summarizeReceiptDryRunPreview,
+} from "./accounting-inbox-autopilot.js";
 
 const MIN_AUTO_BOOKING_RULE_MATCH_LENGTH = 3;
 
@@ -1298,8 +1303,7 @@ function summarizeAutopilotToolResult(
     case "process_receipt_batch": {
       const execution = recordAt(payload, "execution") ?? {};
       const summary = recordAt(execution, "summary") ?? {};
-      const reviewCount = numberAt(summary, "needs_review") ?? 0;
-      const failedCount = numberAt(summary, "failed") ?? 0;
+      const preview = buildReceiptDryRunPreview(summary);
       const followUps: AutopilotFollowUp[] = arrayAt(execution, "needs_review")
         .filter(isRecord)
         .slice(0, 5)
@@ -1320,24 +1324,18 @@ function summarizeAutopilotToolResult(
             },
           );
         });
-      if (failedCount > 0) {
+      if (preview.failed > 0) {
         followUps.push(toAutopilotFollowUp(
           tool,
-          `${failedCount} receipt(s) failed the dry run completely.`,
+          `${preview.failed} receipt(s) failed the dry run completely.`,
           {
             recommendation: "Kontrolli esmalt täpset extraction- või booking-viga; ilma piisava alusdokumendi või korrektse käsitluseta ei tohiks neid automaatselt läbi lasta.",
           },
         ));
       }
       return {
-        summary: `Receipt dry run would create ${numberAt(summary, "created") ?? 0} invoice(s), match ${numberAt(summary, "matched") ?? 0}, skip ${numberAt(summary, "skipped_duplicate") ?? 0} duplicate(s), leave ${reviewCount} in review, and fail ${failedCount}.`,
-        preview: {
-          created: numberAt(summary, "created") ?? 0,
-          matched: numberAt(summary, "matched") ?? 0,
-          skipped_duplicate: numberAt(summary, "skipped_duplicate") ?? 0,
-          needs_review: reviewCount,
-          failed: failedCount,
-        },
+        summary: summarizeReceiptDryRunPreview(preview),
+        preview,
         followUps,
       };
     }
@@ -1432,10 +1430,7 @@ function leavesPendingMaterializationAfterDryRun(
       return (numberAt(preview, "created") ?? 0) > 0 ||
         (numberAt(preview, "error_count") ?? 0) > 0;
     case "process_receipt_batch":
-      return (numberAt(preview, "created") ?? 0) > 0 ||
-        (numberAt(preview, "matched") ?? 0) > 0 ||
-        (numberAt(preview, "needs_review") ?? 0) > 0 ||
-        (numberAt(preview, "failed") ?? 0) > 0;
+      return receiptDryRunLeavesPendingMaterialization(preview);
     default:
       return false;
   }

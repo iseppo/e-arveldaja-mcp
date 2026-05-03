@@ -3,11 +3,15 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
+import { parseDocument } from "../document-parser.js";
 import { registerAccountingInboxTools } from "./accounting-inbox.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import * as auditLogModule from "../audit-log.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
+vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
+
+const mockedParseDocument = vi.mocked(parseDocument);
 
 function setupAccountingInboxTool(apiOverrides: Record<string, unknown> = {}, toolName = "prepare_accounting_inbox") {
   const server = { registerTool: vi.fn() } as any;
@@ -104,6 +108,7 @@ const workspacesToClean: string[] = [];
 
 afterEach(async () => {
   await Promise.all(workspacesToClean.splice(0).map(path => rm(path, { recursive: true, force: true })));
+  mockedParseDocument.mockReset();
 });
 
 describe("prepare_accounting_inbox", () => {
@@ -481,6 +486,126 @@ describe("prepare_accounting_inbox", () => {
     expect(payload.autopilot.needs_one_decision).toEqual([]);
     expect(payload.autopilot.next_question).toBeUndefined();
     expect(payload.prepared_inbox.next_recommended_action).toBeUndefined();
+  });
+
+  it("does not classify unmatched transactions while receipt dry-run invoices are waiting for approval", async () => {
+    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const receiptsDir = join(workspace, "receipts");
+    await mkdir(receiptsDir, { recursive: true });
+    await writeFile(join(receiptsDir, "receipt-1.pdf"), "fake pdf");
+
+    mockedParseDocument.mockResolvedValue({
+      text: [
+        "Invoice",
+        "Supplier: Acme Software OÜ",
+        "Invoice number: INV-2026-001",
+        "Invoice date: 2026-03-10",
+        "Total net: 100.00 EUR",
+        "VAT 24%: 24.00 EUR",
+        "Total: 124.00 EUR",
+        "Software subscription",
+      ].join("\n"),
+      pageCount: 1,
+      result: { text: "", pages: [] } as any,
+    });
+
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, {
+      clients: {
+        findByCode: vi.fn().mockResolvedValue(undefined),
+        findByName: vi.fn().mockResolvedValue([]),
+        listAll: vi.fn().mockResolvedValue([
+          {
+            id: 7,
+            name: "Acme Software OÜ",
+            is_deleted: false,
+            is_supplier: true,
+          },
+        ]),
+      },
+      journals: {
+        listAllWithPostings: vi.fn().mockResolvedValue([]),
+      },
+      products: {},
+      saleInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          {
+            accounts_dimensions_id: 101,
+            account_name_est: "LHV põhikonto",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
+          },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          {
+            id: 101,
+            accounts_id: 1020,
+            title_est: "LHV põhikonto",
+            is_deleted: false,
+          },
+        ]),
+        getAccounts: vi.fn().mockResolvedValue([
+          {
+            id: 5230,
+            name_est: "Muud tegevuskulud",
+            name_eng: "General expense",
+            account_type_est: "Kulud",
+            account_type_eng: "Expenses",
+          },
+        ]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([
+          {
+            id: 99,
+            name_est: "Muu kulu",
+            name_eng: "Other general expense",
+            accounts_id: 5230,
+            vat_accounts_id: 1510,
+            cl_vat_articles_id: 1,
+            vat_rate_dropdown: "24",
+            is_disabled: false,
+            priority: 1,
+          },
+        ]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    } as any);
+
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    if (!registration) throw new Error("Autopilot tool was not registered");
+    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await autopilotHandler({ workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.autopilot.executed_steps.map((step: any) => step.tool)).toEqual([
+      "process_receipt_batch",
+    ]);
+    expect(payload.autopilot.executed_steps[0].summary).toContain("would create 1 invoice");
+    expect(payload.autopilot.executed_steps[0].preview).toMatchObject({
+      dry_run_preview: 1,
+    });
+    expect(payload.autopilot.skipped_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "classify_unmatched_transactions",
+        summary: expect.stringContaining("pending changes"),
+      }),
+    ]));
+    expect(payload.workflow.recommended_next_action).toMatchObject({
+      kind: "approve_tool_call",
+      tool: "process_receipt_batch",
+      approval_required: true,
+    });
   });
 
   it("keeps each CAMT possible duplicate as a separate review follow-up with its own resolver payload", async () => {
