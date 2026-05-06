@@ -48,7 +48,14 @@ describe("workflow response helpers", () => {
     });
     expect(workflow.available_actions[1]).toMatchObject({
       kind: "review_item",
-      tool: "resolve_accounting_review_item",
+      tool: "continue_accounting_workflow",
+      args: {
+        action: "resolve_review",
+        review_item_json: {
+          summary: "Review a supplier match.",
+          recommendation: "Confirm the supplier before booking.",
+        },
+      },
     });
   });
 

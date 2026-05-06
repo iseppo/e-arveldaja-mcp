@@ -96,6 +96,86 @@ describe("safeJsonParse", () => {
   });
 });
 
+describe("registerCrudTools", () => {
+  it("keeps the public CRUD and reference tool surface registered", () => {
+    const server = { registerTool: vi.fn() };
+    const api = {
+      clients: {},
+      products: {},
+      journals: {},
+      transactions: {},
+      saleInvoices: {},
+      purchaseInvoices: {},
+      readonly: {},
+    };
+
+    registerCrudTools(server as never, api as never);
+
+    expect(server.registerTool.mock.calls.map(([name]) => name)).toEqual([
+      "list_clients",
+      "get_client",
+      "create_client",
+      "update_client",
+      "deactivate_client",
+      "restore_client",
+      "search_client",
+      "find_client_by_code",
+      "list_products",
+      "get_product",
+      "create_product",
+      "update_product",
+      "deactivate_product",
+      "restore_product",
+      "list_journals",
+      "get_journal",
+      "create_journal",
+      "update_journal",
+      "delete_journal",
+      "confirm_journal",
+      "batch_confirm_journals",
+      "invalidate_journal",
+      "list_transactions",
+      "get_transaction",
+      "create_transaction",
+      "confirm_transaction",
+      "update_transaction",
+      "invalidate_transaction",
+      "delete_transaction",
+      "batch_delete_transactions",
+      "list_sale_invoices",
+      "get_sale_invoice",
+      "create_sale_invoice",
+      "update_sale_invoice",
+      "delete_sale_invoice",
+      "confirm_sale_invoice",
+      "invalidate_sale_invoice",
+      "get_sale_invoice_delivery_options",
+      "send_sale_invoice",
+      "get_sale_invoice_document",
+      "list_purchase_invoices",
+      "get_purchase_invoice",
+      "create_purchase_invoice",
+      "update_purchase_invoice",
+      "delete_purchase_invoice",
+      "confirm_purchase_invoice",
+      "invalidate_purchase_invoice",
+      "list_accounts",
+      "list_account_dimensions",
+      "list_currencies",
+      "list_sale_articles",
+      "list_purchase_articles",
+      "list_templates",
+      "list_projects",
+      "get_invoice_info",
+      "get_vat_info",
+      "list_invoice_series",
+      "create_invoice_series",
+      "list_bank_accounts",
+      "create_bank_account",
+    ]);
+  });
+});
+
 describe("parseJsonObject", () => {
   it("parses a valid JSON object", () => {
     expect(parseJsonObject('{"name":"test"}', "data")).toEqual({ name: "test" });

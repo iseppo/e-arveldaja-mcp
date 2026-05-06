@@ -10,7 +10,8 @@ Take one accounting review item and turn it into the next concrete step with the
 
 ### Step 1: Resolve the review item
 
-Call `resolve_accounting_review_item`:
+Call `continue_accounting_workflow`:
+- action: "resolve_review"
 - `review_item_json`: the provided JSON object
 
 Treat the tool response as the source of truth:
@@ -36,4 +37,6 @@ Always present:
 
 ### Step 4: When the review item is already understood
 
-If the next step is clear, continue with `prepare_accounting_review_action` instead of inventing your own action plan.
+If the next step is clear, continue with `continue_accounting_workflow` and `action: "prepare_action"` instead of inventing your own action plan.
+
+`resolve_accounting_review_item` remains available as a compatibility primitive, but prefer the merged continuation tool for new flows.

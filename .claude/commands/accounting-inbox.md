@@ -10,7 +10,8 @@ Start from one workspace-level scan, propose only the next safe dry-run steps, a
 
 ### Step 1: Scan the workspace
 
-Call `run_accounting_inbox_dry_runs`:
+Call `accounting_inbox`:
+- set `mode` to `dry_run`
 - include `workspace_path` when the user provided one
 
 Treat the tool response as the first-pass source of truth:
@@ -40,13 +41,13 @@ If `autopilot.needs_one_decision` is non-empty:
 - ask only those listed questions
 - ask them one at a time
 - always start with the recommended default
-- if the user answers, re-run `run_accounting_inbox_dry_runs` with the chosen override values before continuing
+- if the user answers, re-run `accounting_inbox` with `mode: "dry_run"` and the chosen override values before continuing
 
 If an item under `autopilot.needs_accountant_review` includes:
 - `recommendation`: present that first as the default compliant handling
 - `compliance_basis`: summarize it briefly in plain language
 - `follow_up_questions`: ask only those questions that the payload itself did not already answer
-- `resolver_input`: pass that object to `resolve_accounting_review_item` before inventing your own follow-up plan
+- `resolver_input`: pass that object to `continue_accounting_workflow` with `action: "resolve_review"` before inventing your own follow-up plan
 
 If there are no unresolved questions, continue immediately.
 

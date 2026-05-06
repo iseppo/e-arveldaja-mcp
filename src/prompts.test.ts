@@ -126,7 +126,8 @@ describe("registerPrompts", () => {
       workspace_path: "/tmp/accounting",
     });
 
-    expect(text).toContain("run_accounting_inbox_dry_runs");
+    expect(text).toContain("accounting_inbox");
+    expect(text).toContain('mode: "dry_run"');
     expect(text).toContain('workspace_path: "/tmp/accounting"');
     expect(text).toContain("prepared_inbox");
     expect(text).toContain("autopilot.executed_steps");
@@ -134,11 +135,12 @@ describe("registerPrompts", () => {
     expect(text).toContain("autopilot.next_question");
     expect(text).toContain("ask only those listed questions");
     expect(text).toContain("always start with the recommended default");
-    expect(text).toContain("re-run `run_accounting_inbox_dry_runs`");
+    expect(text).toContain("re-run `accounting_inbox`");
     expect(text).toContain("compliance_basis");
     expect(text).toContain("follow_up_questions");
     expect(text).toContain("resolver_input");
-    expect(text).toContain("resolve_accounting_review_item");
+    expect(text).toContain("continue_accounting_workflow");
+    expect(text).toContain('action: "resolve_review"');
     expect(text).toContain("treat it as the default next safe step");
     expect(text).toContain("dry runs were already completed automatically");
     expect(text).toContain("do not use any `execute: true` mutation without explicit approval");
@@ -154,7 +156,8 @@ describe("registerPrompts", () => {
       review_item_json: "{\"review_type\":\"classification_group\"}",
     });
 
-    expect(text).toContain("resolve_accounting_review_item");
+    expect(text).toContain("continue_accounting_workflow");
+    expect(text).toContain('action: "resolve_review"');
     expect(text).toContain("recommendation");
     expect(text).toContain("compliance_basis");
     expect(text).toContain("unresolved_questions");
@@ -170,7 +173,8 @@ describe("registerPrompts", () => {
       save_as_rule: true,
     });
 
-    expect(text).toContain("prepare_accounting_review_action");
+    expect(text).toContain("continue_accounting_workflow");
+    expect(text).toContain('action: "prepare_action"');
     expect(text).toContain("proposed_action");
     expect(text).toContain("save_as_rule");
     expect(text).toContain("suggested_workflow");
@@ -476,7 +480,8 @@ describe("registerPrompts", () => {
   it("keeps shipped accounting-inbox markdown prompts aligned with recommendation-first triage", () => {
     for (const relativePath of ["workflows/accounting-inbox.md", ".claude/commands/accounting-inbox.md"]) {
       const text = readPromptSurface(relativePath);
-      expect(text).toContain("run_accounting_inbox_dry_runs");
+      expect(text).toContain("accounting_inbox");
+      expect(text).toContain("mode");
       expect(text).toContain("autopilot.executed_steps");
       expect(text).toContain("autopilot.next_recommended_action");
       expect(text).toContain("autopilot.next_question");
@@ -485,8 +490,9 @@ describe("registerPrompts", () => {
       expect(text).toContain("compliance_basis");
       expect(text).toContain("follow_up_questions");
       expect(text).toContain("resolver_input");
-      expect(text).toContain("resolve_accounting_review_item");
-      expect(text).toContain("re-run `run_accounting_inbox_dry_runs`");
+      expect(text).toContain("continue_accounting_workflow");
+      expect(text).toContain('action: "resolve_review"');
+      expect(text).toContain("re-run `accounting_inbox`");
       expect(text).toContain("done automatically");
       expect(text).toContain("needs one decision");
       expect(text).toContain("needs accountant review");
@@ -496,6 +502,8 @@ describe("registerPrompts", () => {
   it("keeps shipped resolve-accounting-review markdown prompts aligned with the resolver flow", () => {
     for (const relativePath of ["workflows/resolve-accounting-review.md", ".claude/commands/resolve-accounting-review.md"]) {
       const text = readPromptSurface(relativePath);
+      expect(text).toContain("continue_accounting_workflow");
+      expect(text).toContain('action: "resolve_review"');
       expect(text).toContain("resolve_accounting_review_item");
       expect(text).toContain("recommendation");
       expect(text).toContain("compliance_basis");
@@ -508,6 +516,8 @@ describe("registerPrompts", () => {
   it("keeps shipped prepare-accounting-review-action markdown prompts aligned with the action flow", () => {
     for (const relativePath of ["workflows/prepare-accounting-review-action.md", ".claude/commands/prepare-accounting-review-action.md"]) {
       const text = readPromptSurface(relativePath);
+      expect(text).toContain("continue_accounting_workflow");
+      expect(text).toContain('action: "prepare_action"');
       expect(text).toContain("prepare_accounting_review_action");
       expect(text).toContain("proposed_action");
       expect(text).toContain("save_auto_booking_rule");

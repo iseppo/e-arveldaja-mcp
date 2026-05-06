@@ -81,6 +81,28 @@ describe("recommend_workflow", () => {
     expect(JSON.stringify(payload.workflow)).not.toContain("<describe the user's accounting goal>");
   });
 
+  it("recommends accounting_inbox as the merged entry point for workspace triage", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+
+    const result = await handler({ goal: "scan this workspace and triage accounting inbox files" });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+
+    expect(payload.recommended_workflow).toMatchObject({
+      id: "accounting-inbox",
+    });
+    expect(payload.raw.primary_tools).toContain("accounting_inbox");
+    expect(payload.raw.primary_tools).toContain("continue_accounting_workflow");
+    expect(payload.next_actions[0]).toMatchObject({
+      tool: "accounting_inbox",
+      args: { mode: "dry_run" },
+    });
+    expect(payload.workflow.recommended_next_action).toMatchObject({
+      kind: "tool_call",
+      tool: "accounting_inbox",
+      args: { mode: "dry_run" },
+    });
+  });
+
   it("recommends the registered apply transaction classifications tool for receipt batches", async () => {
     const { handler } = getRecommendWorkflowHarness();
 

@@ -1,3 +1,5 @@
+import { arrayAt, isRecord, numberAt, recordAt, stringAt } from "./record-utils.js";
+
 export type WorkflowActionKind =
   | "tool_call"
   | "answer_question"
@@ -56,30 +58,6 @@ type MaterializingDryRunTool =
   | "process_receipt_batch"
   | "apply_transaction_classifications";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stringAt(record: Record<string, unknown>, key: string): string | undefined {
-  const value = record[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-function numberAt(record: Record<string, unknown>, key: string): number | undefined {
-  const value = record[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function arrayAt(record: Record<string, unknown>, key: string): unknown[] {
-  const value = record[key];
-  return Array.isArray(value) ? value : [];
-}
-
-function recordAt(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
-  const value = record[key];
-  return isRecord(value) ? value : undefined;
-}
-
 function actionFromQuestion(question: unknown): WorkflowAction | undefined {
   if (!isRecord(question)) return undefined;
   const prompt = stringAt(question, "summary") ?? stringAt(question, "question");
@@ -101,8 +79,8 @@ function actionFromReviewItem(reviewItem: unknown): WorkflowAction | undefined {
   return {
     kind: "review_item",
     label: "Resolve the first accounting review item",
-    tool: "resolve_accounting_review_item",
-    args: { review_item_json: resolverInput },
+    tool: "continue_accounting_workflow",
+    args: { action: "resolve_review", review_item_json: resolverInput },
     why: stringAt(reviewItem, "summary") ?? "A review item needs accounting judgement before execution.",
     recommendation: stringAt(reviewItem, "recommendation"),
     approval_required: false,

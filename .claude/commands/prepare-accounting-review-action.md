@@ -12,7 +12,8 @@ Turn a resolved accounting review item into the next concrete action, such as cl
 
 ### Step 1: Prepare the action
 
-Call `prepare_accounting_review_action`:
+Call `continue_accounting_workflow`:
+- action: "prepare_action"
 - `review_item_json`: the provided JSON object
 - include `save_as_rule` when the user has confirmed this should become a reusable rule
 - include `rule_override_json` when the booking fields have already been chosen explicitly
@@ -33,3 +34,5 @@ Treat the tool response as the source of truth:
 - ask for explicit approval before executing any `proposed_action`
 - if the action is `cleanup_camt_possible_duplicate`, explain briefly that it fills missing CAMT metadata onto the kept older transaction before deleting the duplicate PROJECT row
 - if the action is `save_auto_booking_rule`, explain briefly that it updates the local `accounting-rules.md` file
+
+`prepare_accounting_review_action` remains available as a compatibility primitive, but prefer the merged continuation tool for new flows.

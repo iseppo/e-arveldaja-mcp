@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Workflow tool surface cleanup** — extracted reference-data registrations from `crud-tools.ts` into a focused module with registration snapshot coverage, and updated shipped workflow docs to prefer the merged `accounting_inbox` / `continue_accounting_workflow` entry points while keeping older focused tools documented as compatibility primitives. (#39)
+
 ## [0.13.1] - 2026-05-03
 
 ### Fixed

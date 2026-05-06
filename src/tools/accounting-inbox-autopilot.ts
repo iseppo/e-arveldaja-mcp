@@ -1,3 +1,5 @@
+import { numberAt } from "../record-utils.js";
+
 export interface ReceiptDryRunPreview extends Record<string, unknown> {
   created: number;
   dry_run_preview: number;
@@ -5,11 +7,6 @@ export interface ReceiptDryRunPreview extends Record<string, unknown> {
   skipped_duplicate: number;
   needs_review: number;
   failed: number;
-}
-
-function numberAt(record: Record<string, unknown>, key: string): number | undefined {
-  const value = record[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 export function buildReceiptDryRunPreview(summary: Record<string, unknown>): ReceiptDryRunPreview {
