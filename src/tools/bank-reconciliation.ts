@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
@@ -13,6 +14,9 @@ import { roundMoney } from "../money.js";
 import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal, toUtcDay } from "./inter-account-utils.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
+
+type BankReconciliationToolResult = Promise<{ content: Array<{ text: string }> }>;
+type BankReconciliationToolHandler = (args: Record<string, unknown>) => BankReconciliationToolResult;
 
 function validateInterAccountDateGap(maxDateGap: number | undefined): number {
   const value = maxDateGap ?? 1;
@@ -228,8 +232,20 @@ export function getInvoiceMatchEligibility(
 }
 
 export function registerBankReconciliationTools(server: McpServer, api: ApiContext): void {
+  const handlers = new Map<string, BankReconciliationToolHandler>();
 
-  registerTool(server, "reconcile_transactions",
+  function registerCapturedTool<Args extends z.ZodRawShape>(
+    name: string,
+    description: string,
+    paramsSchema: Args,
+    annotations: ToolAnnotations,
+    cb: (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown,
+  ): void {
+    handlers.set(name, cb as unknown as BankReconciliationToolHandler);
+    registerTool(server, name, description, paramsSchema, annotations, cb);
+  }
+
+  registerCapturedTool("reconcile_transactions",
     "Match unconfirmed bank transactions to open sale/purchase invoices. " +
     "Returns suggested matches with confidence scores and ready-to-use distribution data.",
     {
@@ -376,7 +392,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
     }
   );
 
-  registerTool(server, "auto_confirm_exact_matches",
+  registerCapturedTool("auto_confirm_exact_matches",
     "Batch-confirm bank transactions with a single high-confidence match (>=90). DRY RUN by default — set execute=true to confirm.",
     {
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),
@@ -549,7 +565,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
     }
   );
 
-  registerTool(server, "reconcile_inter_account_transfers",
+  registerCapturedTool("reconcile_inter_account_transfers",
     "Match and confirm inter-account transfers (own bank account to own bank account). " +
     "DUPLICATE-SAFE: checks existing journal entries before confirming — skips transfers already " +
     "journalized from the other account side (e.g. confirmed via CAMT import). " +
@@ -1394,5 +1410,92 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
         }],
       };
     }
+  );
+
+  async function invokeCapturedTool(
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = handlers.get(tool);
+    if (!handler) {
+      throw new Error(`Bank reconciliation wrapper could not find tool handler for ${tool}`);
+    }
+
+    const result = await handler(args);
+    const text = result.content[0]?.text;
+    if (!text) {
+      throw new Error(`Bank reconciliation wrapper received no text payload from ${tool}`);
+    }
+
+    const parsed = parseMcpResponse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : { value: parsed };
+  }
+
+  registerTool(server, "reconcile_bank_transactions",
+    "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, and mode='inter_account_dry_run' for own-account transfer detection.",
+    {
+      mode: z.enum(["suggest", "dry_run_auto_confirm", "execute_auto_confirm", "inter_account_dry_run"])
+        .optional()
+        .describe("Workflow phase to run. Defaults to suggest."),
+      min_confidence: z.number().optional().describe("Minimum confidence threshold for invoice matching modes."),
+      max_date_gap: z.number().int().min(0).max(MAX_INTER_ACCOUNT_DATE_GAP_DAYS).optional()
+        .describe(`Maximum days between inter-account transfer legs (default 1, max ${MAX_INTER_ACCOUNT_DATE_GAP_DAYS}).`),
+      target_accounts_dimensions_id: z.number().optional().describe(
+        "For inter_account_dry_run one-sided transfers, specify the target bank account dimension ID when it cannot be inferred."
+      ),
+    },
+    { ...batch, title: "Reconcile Bank Transactions" },
+    async ({ mode, min_confidence, max_date_gap, target_accounts_dimensions_id }) => {
+      const selectedMode = mode ?? "suggest";
+      let delegatedTool: string;
+      let delegatedArgs: Record<string, unknown>;
+
+      switch (selectedMode) {
+        case "suggest":
+          delegatedTool = "reconcile_transactions";
+          delegatedArgs = {
+            ...(min_confidence !== undefined ? { min_confidence } : {}),
+          };
+          break;
+        case "dry_run_auto_confirm":
+          delegatedTool = "auto_confirm_exact_matches";
+          delegatedArgs = {
+            execute: false,
+            ...(min_confidence !== undefined ? { min_confidence } : {}),
+          };
+          break;
+        case "execute_auto_confirm":
+          delegatedTool = "auto_confirm_exact_matches";
+          delegatedArgs = {
+            execute: true,
+            ...(min_confidence !== undefined ? { min_confidence } : {}),
+          };
+          break;
+        case "inter_account_dry_run":
+          delegatedTool = "reconcile_inter_account_transfers";
+          delegatedArgs = {
+            execute: false,
+            ...(max_date_gap !== undefined ? { max_date_gap } : {}),
+            ...(target_accounts_dimensions_id !== undefined ? { target_accounts_dimensions_id } : {}),
+          };
+          break;
+      }
+
+      const result = await invokeCapturedTool(delegatedTool, delegatedArgs);
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            recommended_entry_point: "reconcile_bank_transactions",
+            mode: selectedMode,
+            delegated_tool: delegatedTool,
+            delegated_args: delegatedArgs,
+            result,
+          }),
+        }],
+      };
+    },
   );
 }

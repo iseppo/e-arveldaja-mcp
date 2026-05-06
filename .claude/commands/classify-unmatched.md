@@ -11,17 +11,20 @@ Classify unmatched bank transactions, preview the auto-bookable purchase-invoice
 
 ### Step 1: Classify the transactions
 
-Call `classify_unmatched_transactions`:
+Call `classify_bank_transactions`:
+- mode: "classify"
 - `accounts_dimensions_id`: the provided dimension ID
 - include `date_from` / `date_to` when provided
 
-Show:
-- `total_unconfirmed`
-- `total_unmatched`
-- `category_counts`
-- `groups`
+`classify_unmatched_transactions` remains available as a compatibility primitive.
 
-For each group, show:
+Show:
+- `result.total_unconfirmed`
+- `result.total_unmatched`
+- `result.category_counts`
+- `result.groups`
+
+For each group in `result.groups`, show:
 - `category`
 - `display_counterparty`
 - `apply_mode`
@@ -38,19 +41,21 @@ For each group, show:
 
 ### Step 3: Dry-run the application
 
-Call `apply_transaction_classifications`:
-- `classifications_json`: `JSON.stringify(the full response from step 1)`
-- `execute`: `false`
+Call `classify_bank_transactions`:
+- mode: "dry_run_apply"
+- `classifications_json`: `JSON.stringify(the result payload from step 1)`
+
+`apply_transaction_classifications` remains available as a compatibility primitive.
 
 Group the result by status:
-- Treat `execution` as the canonical batch payload when present.
-- Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
-- `execution.results` entries with `status="dry_run_preview"`: would create purchase invoices and link transactions, but nothing has been created yet
-- `execution.skipped`: review-only or no longer applicable
-- `execution.errors`: exact blocking errors
+- Treat `result.execution` as the canonical batch payload when present.
+- Prefer `result.execution.summary`, `result.execution.results`, `result.execution.skipped`, `result.execution.errors`, and `result.execution.audit_reference`.
+- `result.execution.results` entries with `status="dry_run_preview"`: would create purchase invoices and link transactions, but nothing has been created yet
+- `result.execution.skipped`: review-only or no longer applicable
+- `result.execution.errors`: exact blocking errors
 
 If the user wants only some groups applied:
-- build a filtered JSON object that preserves the top-level metadata and only the approved `groups`
+- build a filtered JSON object from the step 1 result payload that preserves the top-level metadata and only the approved `groups`
 - pass that filtered JSON object as `classifications_json`
 
 ### Step 4: Approval gate
@@ -61,15 +66,15 @@ If the user does not explicitly approve, stop.
 
 ### Step 5: Execute
 
-Call `apply_transaction_classifications` again:
+Call `classify_bank_transactions` again:
+- mode: "execute_apply"
 - `classifications_json`: the approved full or filtered JSON object
-- `execute`: `true`
 
 Report:
-- `execution.summary.applied`
-- `execution.summary.skipped`
-- `execution.summary.failed`
+- `result.execution.summary.applied`
+- `result.execution.summary.skipped`
+- `result.execution.summary.failed`
 - `created_invoice_ids`
 - `linked_transaction_ids`
 - which groups still need manual review
-- mention that side effects can be reviewed via `execution.audit_reference`
+- mention that side effects can be reviewed via `result.execution.audit_reference`

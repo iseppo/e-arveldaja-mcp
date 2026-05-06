@@ -217,8 +217,11 @@ describe("registerPrompts", () => {
     const transactionText = await getPromptText(server, "reconcile-bank", { mode: "transaction", transaction_id: 123 });
     const missingTransactionText = await getPromptText(server, "reconcile-bank", { mode: "transaction" });
 
-    expect(autoText).toContain("execute: false");
-    expect(autoText).toContain("execute: true");
+    expect(autoText).toContain("reconcile_bank_transactions");
+    expect(autoText).toContain('mode: "dry_run_auto_confirm"');
+    expect(autoText).toContain('mode: "execute_auto_confirm"');
+    expect(autoText).toContain("result.execution");
+    expect(autoText).toContain('call `reconcile_inter_account_transfers` with `execute: true`');
     // Single-journal invariant + incoming_action terms for reconcile_inter_account_transfers
     expect(autoText).toContain('incoming_action: "would_delete_duplicate"');
     expect(autoText).toContain("Never manually confirm both sides");
@@ -233,6 +236,7 @@ describe("registerPrompts", () => {
     expect(reviewText).toContain("prepare the distribution manually");
     // Transaction mode: uses transaction_id literally, not interpolated arbitrary string
     expect(transactionText).toContain("transaction ID 123");
+    expect(transactionText).toContain('mode: "suggest"');
     // Transaction mode without id: stops and asks for id
     expect(missingTransactionText).toContain('mode="transaction" requires transaction_id');
   });
@@ -310,15 +314,18 @@ describe("registerPrompts", () => {
       accounts_dimensions_id: 55,
     });
 
-    expect(text).toContain("classify_unmatched_transactions");
+    expect(text).toContain("classify_bank_transactions");
+    expect(text).toContain('mode: "classify"');
     expect(text).toContain("apply_transaction_classifications");
-    expect(text).toContain("classifications_json: JSON.stringify(the full response from step 1)");
-    expect(text).toContain("execute: false");
-    expect(text).toContain("execute: true");
-    expect(text).toContain("execution.results");
-    expect(text).toContain("execution.skipped");
-    expect(text).toContain("execution.errors");
-    expect(text).toContain("execution.audit_reference");
+    expect(text).toContain('mode: "dry_run_apply"');
+    expect(text).toContain('mode: "execute_apply"');
+    expect(text).toContain("classifications_json: JSON.stringify(the result payload from step 1)");
+    expect(text).not.toContain("classifications_json: JSON.stringify(the full response from step 1)");
+    expect(text).toContain("result.total_unconfirmed");
+    expect(text).toContain("result.execution.results");
+    expect(text).toContain("result.execution.skipped");
+    expect(text).toContain("result.execution.errors");
+    expect(text).toContain("result.execution.audit_reference");
     expect(text).toContain('apply_mode="purchase_invoice"');
     expect(text).toContain("review_guidance");
     expect(text).toContain("filtered JSON object");
@@ -416,10 +423,14 @@ describe("registerPrompts", () => {
   it("keeps shipped reconcile-bank markdown prompts aligned with distribution key handling", () => {
     for (const relativePath of ["workflows/reconcile-bank.md", ".claude/commands/reconcile-bank.md"]) {
       const text = readPromptSurface(relativePath);
+      expect(text).toContain("reconcile_bank_transactions");
+      expect(text).toContain("result.total_unconfirmed");
+      expect(text).toContain("result.execution.summary");
       expect(text).toContain("no `distribution` key is present");
       expect(text).toContain("match.distribution");
       expect(text).toContain("prepare the distribution manually");
       expect(text).toContain("reconcile_inter_account_transfers");
+      expect(text).toContain('mode: "inter_account_dry_run"');
       expect(text).toContain("already_handled");
       expect(text).toContain("Wise-side transfers");
       expect(text).toContain("Do not infer incoming vs outgoing direction from `type` alone");
@@ -607,11 +618,16 @@ describe("registerPrompts", () => {
   it("keeps shipped classify-unmatched markdown prompts aligned with filtered dry runs", () => {
     for (const relativePath of ["workflows/classify-unmatched.md", ".claude/commands/classify-unmatched.md"]) {
       const text = readPromptSurface(relativePath);
+      expect(text).toContain("classify_bank_transactions");
       expect(text).toContain("classify_unmatched_transactions");
       expect(text).toContain("apply_transaction_classifications");
+      expect(text).toContain('mode: "dry_run_apply"');
+      expect(text).toContain('mode: "execute_apply"');
       expect(text).toContain("classifications_json");
-      expect(text).toContain("execution.summary");
-      expect(text).toContain("execution.audit_reference");
+      expect(text).toContain("JSON.stringify(the result payload from step 1)");
+      expect(text).not.toContain("JSON.stringify(the full response from step 1)");
+      expect(text).toContain("result.execution.summary");
+      expect(text).toContain("result.execution.audit_reference");
       expect(text).toContain("filtered JSON object");
     }
   });

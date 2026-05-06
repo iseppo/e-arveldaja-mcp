@@ -113,15 +113,15 @@ const WORKFLOWS: WorkflowGuide[] = [
     title: "Reconcile Bank Transactions",
     summary: "Match unconfirmed bank transactions to invoices, transfers, or accounts.",
     when_to_use: ["unmatched bank transactions", "match payments", "confirm transactions", "reconcile"],
-    primary_tools: ["reconcile_transactions", "auto_confirm_exact_matches", "reconcile_inter_account_transfers"],
+    primary_tools: ["reconcile_bank_transactions", "reconcile_transactions", "auto_confirm_exact_matches", "reconcile_inter_account_transfers"],
     risk_policy: {
       default_mode: "confirm_once",
       interrupt_when: ["partial payment", "cross-currency match", "multiple candidates", "inter-account transfer"],
     },
     next_actions: [{
-      tool: "reconcile_transactions",
-      args: { min_confidence: 30 },
-      why: "Show plausible matches first, then confirm only high-confidence or approved matches.",
+      tool: "reconcile_bank_transactions",
+      args: { mode: "suggest", min_confidence: 30 },
+      why: "Show plausible matches through the merged bank reconciliation entry point first, then confirm only high-confidence or approved matches.",
     }],
     keywords: ["reconcile", "match", "unconfirmed", "payment", "bank transaction", "partial", "confirm"],
   },
@@ -131,7 +131,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     title: "Process Receipt Batch",
     summary: "OCR a folder of receipts/invoices, auto-book high-confidence items, and keep ambiguous ones in review.",
     when_to_use: ["folder of receipts", "many PDFs/images", "expense receipts", "batch booking"],
-    primary_tools: ["process_receipt_batch", "classify_unmatched_transactions", "apply_transaction_classifications"],
+    primary_tools: ["process_receipt_batch", "classify_bank_transactions", "classify_unmatched_transactions", "apply_transaction_classifications"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["new supplier", "OCR uncertainty", "missing VAT/account treatment", "owner expense ambiguity"],

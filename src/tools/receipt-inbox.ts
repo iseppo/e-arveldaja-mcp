@@ -1,9 +1,10 @@
 import { readFile, readdir, realpath, stat } from "fs/promises";
 import { extname, join } from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { validateFilePath, getAllowedRoots, resolveFilePath, isPathWithinRoot } from "../file-validation.js";
 import { roundMoney } from "../money.js";
@@ -77,6 +78,9 @@ const RECEIPT_BATCH_EXECUTION_MODES = ["dry_run", "create", "create_and_confirm"
 
 type FileType = keyof typeof FILE_TYPE_EXTENSIONS;
 type ReceiptBatchExecutionMode = typeof RECEIPT_BATCH_EXECUTION_MODES[number];
+
+type ReceiptInboxToolResult = Promise<{ content: Array<{ text: string }> }>;
+type ReceiptInboxToolHandler = (args: Record<string, unknown>) => ReceiptInboxToolResult;
 type ReceiptBatchStatus =
   | "matched"
   | "created"
@@ -1588,6 +1592,19 @@ function extractClassificationGroups(payload: unknown): ClassifiedTransactionGro
 // ---------------------------------------------------------------------------
 
 export function registerReceiptInboxTools(server: McpServer, api: ApiContext): void {
+  const handlers = new Map<string, ReceiptInboxToolHandler>();
+
+  function registerCapturedTool<Args extends z.ZodRawShape>(
+    name: string,
+    description: string,
+    paramsSchema: Args,
+    annotations: ToolAnnotations,
+    cb: (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown,
+  ): void {
+    handlers.set(name, cb as unknown as ReceiptInboxToolHandler);
+    registerTool(server, name, description, paramsSchema, annotations, cb);
+  }
+
   registerTool(server,
     "scan_receipt_folder",
     "Scan a folder for supported receipt files (PDF, JPG, PNG) without recursing into subfolders. Returns valid file metadata and skipped entries.",
@@ -2062,7 +2079,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     },
   );
 
-  registerTool(server,
+  registerCapturedTool(
     "classify_unmatched_transactions",
     "Classify unconfirmed bank transactions that do not match any sale or purchase invoice. Read-only analysis with suggested booking defaults.",
     {
@@ -2166,7 +2183,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     },
   );
 
-  registerTool(server,
+  registerCapturedTool(
     "apply_transaction_classifications",
     "Apply the output of classify_unmatched_transactions. DRY RUN by default. Only expense-like categories are auto-booked as purchase invoices; review-only categories are reported back.",
     {
@@ -2489,6 +2506,80 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               skipped: results.filter(result => result.status === "skipped"),
               errors: results.filter(result => result.status === "failed"),
             }),
+          }),
+        }],
+      };
+    },
+  );
+
+  async function invokeCapturedTool(
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = handlers.get(tool);
+    if (!handler) {
+      throw new Error(`Classification wrapper could not find tool handler for ${tool}`);
+    }
+
+    const result = await handler(args);
+    const text = result.content[0]?.text;
+    if (!text) {
+      throw new Error(`Classification wrapper received no text payload from ${tool}`);
+    }
+
+    const parsed = parseMcpResponse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : { value: parsed };
+  }
+
+  registerTool(server,
+    "classify_bank_transactions",
+    "Merged unmatched bank transaction classification entry point. Use mode='classify' to group unmatched transactions, mode='dry_run_apply' to preview applying classifications, or mode='execute_apply' to create and link purchase invoices after approval.",
+    {
+      mode: z.enum(["classify", "dry_run_apply", "execute_apply"]).optional().describe("Workflow phase to run. Defaults to classify."),
+      accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID. Required for mode='classify'."),
+      date_from: z.string().optional().describe("Optional lower transaction date bound for mode='classify' (YYYY-MM-DD)."),
+      date_to: z.string().optional().describe("Optional upper transaction date bound for mode='classify' (YYYY-MM-DD)."),
+      classifications_json: jsonObjectOrArrayInput.optional().describe("Structured output from mode='classify'. Required for apply modes."),
+    },
+    { ...batch, title: "Classify Bank Transactions" },
+    async ({ mode, accounts_dimensions_id, date_from, date_to, classifications_json }) => {
+      const selectedMode = mode ?? "classify";
+      let delegatedTool: string;
+      let delegatedArgs: Record<string, unknown>;
+
+      if (selectedMode === "classify") {
+        if (accounts_dimensions_id === undefined) {
+          throw new Error("accounts_dimensions_id is required when mode is classify");
+        }
+        delegatedTool = "classify_unmatched_transactions";
+        delegatedArgs = {
+          accounts_dimensions_id,
+          ...(date_from !== undefined ? { date_from } : {}),
+          ...(date_to !== undefined ? { date_to } : {}),
+        };
+      } else {
+        if (classifications_json === undefined) {
+          throw new Error("classifications_json is required when applying transaction classifications");
+        }
+        delegatedTool = "apply_transaction_classifications";
+        delegatedArgs = {
+          classifications_json,
+          execute: selectedMode === "execute_apply",
+        };
+      }
+
+      const result = await invokeCapturedTool(delegatedTool, delegatedArgs);
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            recommended_entry_point: "classify_bank_transactions",
+            mode: selectedMode,
+            delegated_tool: delegatedTool,
+            delegated_args: delegatedArgs,
+            result,
           }),
         }],
       };

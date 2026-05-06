@@ -9,19 +9,22 @@ Match unconfirmed bank transactions to open invoices and confirm the matches.
 
 ## Step 1: Get matches
 
-Call `reconcile_transactions`:
-- `min_confidence`: `30` (to see all potential matches including low-confidence ones)
+- Preferred: call `reconcile_bank_transactions`:
+- mode: "suggest"
+- min_confidence: 30 (to see all potential matches including low-confidence ones)
+
+`reconcile_transactions` remains available as a compatibility primitive.
 
 Review the output:
-- `total_unconfirmed`: bank transactions needing attention
-- `matched`: transactions with at least one candidate match
-- `unmatched`: no match found
+- `result.total_unconfirmed`: bank transactions needing attention
+- `result.matched`: transactions with at least one candidate match
+- `result.unmatched`: no match found
 
-If `total_unconfirmed` is 0, everything is reconciled — stop here.
+If `result.total_unconfirmed` is 0, everything is reconciled — stop here.
 
 ## Step 2: Present matches
 
-Show a summary grouped by confidence level:
+Show a summary grouped by confidence level from `result.matches`:
 
 **HIGH (>=80):** Safe to auto-confirm.
 - Transaction: date, amount, description, and raw `type` if helpful
@@ -40,15 +43,17 @@ If no `distribution` key is present or a partially paid warning is present, say 
 
 First, do a dry run:
 
-Call `auto_confirm_exact_matches`:
-- `execute`: `false`
-- `min_confidence`: `90`
+Call `reconcile_bank_transactions`:
+- mode: "dry_run_auto_confirm"
+- min_confidence: 90
 
-Treat `execution` as the canonical batch payload when present. Prefer `execution.summary`, `execution.results`, `execution.errors`, and `execution.audit_reference`.
+`auto_confirm_exact_matches` remains available as a compatibility primitive.
+
+Treat `result.execution` as the canonical batch payload when present. Prefer `result.execution.summary`, `result.execution.results`, `result.execution.errors`, and `result.execution.audit_reference`.
 
 Show what would be confirmed. Ask user for approval.
 
-If approved, call again with `execute: true`.
+If approved, call again with `mode: "execute_auto_confirm"`.
 
 Report: how many confirmed, how many skipped, any errors.
 
@@ -66,7 +71,7 @@ Only do this when a `distribution` key is present.
 
 ### Single transaction mode
 
-Call `reconcile_transactions` with `min_confidence: 0`, then filter the returned matches to the requested transaction ID.
+Call `reconcile_bank_transactions` with `mode: "suggest"` and `min_confidence: 0`, then filter `result.matches` to the requested transaction ID.
 - If no match exists for that transaction, report that and stop.
 - If the user approves a match and it has a `distribution` key, call `confirm_transaction` with `distributions: JSON.stringify([match.distribution])`.
 - If no `distribution` key is present, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
@@ -75,18 +80,20 @@ Call `reconcile_transactions` with `min_confidence: 0`, then filter the returned
 
 For transfers between your own bank accounts (counterparty matches company name or IBAN matches another own account):
 
-Call `reconcile_inter_account_transfers`:
-- `execute`: `false` (dry run first)
+Call `reconcile_bank_transactions`:
+- mode: "inter_account_dry_run" (dry run first)
+
+`reconcile_inter_account_transfers` remains available as a compatibility primitive.
 
 Review the results:
-- Treat `execution.summary` as the canonical source for counts, and use `pairs`, `one_sided`, `already_handled`, and `ambiguous_pairs` for detailed breakdown.
+- Treat `result.execution.summary` as the canonical source for counts, and use `result.pairs`, `result.one_sided`, `result.already_handled`, and `result.ambiguous_pairs` for detailed breakdown.
 - `already_handled`: transfers already journalized from the other side — safe to delete
 - `one_sided`: would confirm against the other bank account
 - `pairs`: would confirm the outgoing side and delete the duplicate incoming `PROJECT` row (`incoming_action: "would_delete_duplicate"`)
-- `execution.errors`: any confirmation failures or other blocking issues
+- `result.execution.errors`: any confirmation failures or other blocking issues
 - Never manually confirm both sides of a transfer pair; that duplicates the journal and breaks the single-journal invariant.
 
-Ask for approval. If approved, call again with `execute: true`.
+Ask for approval. If approved, call `reconcile_inter_account_transfers` with `execute: true`.
 - If there are 3+ bank accounts and IBAN is missing, provide `target_accounts_dimensions_id`.
 - In `pairs`, `incoming_action: "deleted"` is normal; `incoming_action: "orphan"` means the duplicate incoming row could not be deleted and needs explicit follow-up.
 
@@ -105,4 +112,4 @@ Report:
 - Transactions confirmed in this session
 - Remaining unconfirmed transactions
 - Unmatched transactions requiring manual attention
-- If mutating tools were executed, mention that side effects can be reviewed via `execution.audit_reference`
+- If mutating tools were executed, mention that side effects can be reviewed via `result.execution.audit_reference`

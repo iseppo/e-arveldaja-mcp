@@ -78,6 +78,123 @@ function setupReceiptTool(
 }
 
 describe("receipt inbox tool status handling", () => {
+  it("classify_bank_transactions classifies unmatched transactions through the merged entry point", async () => {
+    const { handler } = setupReceiptTool("classify_bank_transactions", {
+      transactions: [{
+        id: 1,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 15,
+        date: "2026-03-20",
+        accounts_dimensions_id: 100,
+        bank_account_name: "LHV Bank",
+        description: "Bank monthly fee",
+      }],
+      clients: [],
+      purchaseArticles: [{
+        id: 501,
+        name_est: "Bank fee",
+        accounts_id: 5230,
+        is_disabled: false,
+        priority: 1,
+      }],
+      accounts: [{
+        id: 5230,
+        name_est: "Bank fees",
+        account_type_est: "Kulud",
+      }],
+    });
+
+    const result = await handler({ mode: "classify", accounts_dimensions_id: 100 });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.mode).toBe("classify");
+    expect(payload.recommended_entry_point).toBe("classify_bank_transactions");
+    expect(payload.result.total_unmatched).toBe(1);
+    expect(payload.result.groups[0]!.category).toBe("bank_fees");
+  });
+
+  it("classify_bank_transactions dry-runs classification application without creating invoices", async () => {
+    const { handler, api } = setupReceiptTool("classify_bank_transactions", {
+      clients: [{
+        id: 7,
+        name: "OpenAI Ireland Limited",
+        is_supplier: true,
+        is_client: false,
+        cl_code_country: "IE",
+        is_deleted: false,
+      }],
+      transactionDetails: {
+        44: {
+          id: 44,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 25,
+          date: "2026-03-22",
+          accounts_dimensions_id: 100,
+          bank_account_name: "LHV Bank",
+          description: "Bank monthly fee",
+          cl_currencies_id: "EUR",
+        },
+      },
+      purchaseArticles: [{
+        id: 501,
+        name_est: "Bank fee",
+        name_eng: "Bank fee",
+        accounts_id: 5230,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        is_disabled: false,
+        priority: 1,
+      }],
+      accounts: [{
+        id: 5230,
+        name_est: "Bank fees",
+        name_eng: "Bank fees",
+        account_type_est: "Kulud",
+        account_type_eng: "Expenses",
+      }],
+    });
+
+    const classificationsJson = JSON.stringify([{
+      category: "bank_fees",
+      apply_mode: "purchase_invoice",
+      normalized_counterparty: "lhv bank",
+      display_counterparty: "LHV Bank",
+      recurring: true,
+      similar_amounts: true,
+      total_amount: 25,
+      suggested_booking: {
+        purchase_article_id: 501,
+        purchase_article_name: "Bank fee",
+        purchase_account_id: 5230,
+        purchase_account_name: "Bank fees",
+        liability_account_id: 2310,
+        reason: "Bank service fee",
+      },
+      reasons: ["keyword"],
+      transactions: [{
+        id: 44,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        description: "Bank monthly fee",
+        bank_account_name: "LHV Bank",
+        accounts_dimensions_id: 100,
+      }],
+    }]);
+
+    const result = await handler({ mode: "dry_run_apply", classifications_json: classificationsJson });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.mode).toBe("dry_run_apply");
+    expect(payload.result.mode).toBe("DRY_RUN");
+    expect(payload.result.summary.dry_run_preview).toBe(1);
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
   it("classify_unmatched_transactions excludes VOID transactions", async () => {
     const { handler } = setupReceiptTool("classify_unmatched_transactions", {
       transactions: [

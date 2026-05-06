@@ -6,6 +6,7 @@ function setupReconciliationTool(options: {
   transactions?: unknown[];
   sales?: unknown[];
   purchases?: unknown[];
+  toolName?: string;
 } = {}) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
@@ -21,12 +22,16 @@ function setupReconciliationTool(options: {
     },
     readonly: {
       getBankAccounts: vi.fn().mockResolvedValue([]),
+      getAccountDimensions: vi.fn().mockResolvedValue([]),
+      getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
     },
+    journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
 
   registerBankReconciliationTools(server, api);
 
-  const registration = server.registerTool.mock.calls.find(([name]) => name === "reconcile_transactions");
+  const registration = server.registerTool.mock.calls.find(([name]) => name === (options.toolName ?? "reconcile_transactions"));
   if (!registration) {
     throw new Error("Tool was not registered");
   }
@@ -40,6 +45,7 @@ function setupInterAccountTool(options: {
   companyName?: string;
   journals?: unknown[];
   accountDimensions?: unknown[];
+  toolName?: string;
 } = {}) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
@@ -81,7 +87,7 @@ function setupInterAccountTool(options: {
   registerBankReconciliationTools(server, api);
 
   const registration = server.registerTool.mock.calls.find(
-    ([name]: [string]) => name === "reconcile_inter_account_transfers"
+    ([name]: [string]) => name === (options.toolName ?? "reconcile_inter_account_transfers")
   );
   if (!registration) {
     throw new Error("Tool was not registered");
@@ -94,6 +100,133 @@ function setupInterAccountTool(options: {
 }
 
 describe("reconcile_transactions", () => {
+  describe("reconcile_bank_transactions wrapper", () => {
+    it("runs invoice-match suggestions through the merged entry point", async () => {
+      const handler = setupReconciliationTool({
+        toolName: "reconcile_bank_transactions",
+        transactions: [{
+          id: 1,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 100,
+          date: "2026-03-20",
+          bank_account_name: "Acme OU",
+          ref_number: "RF123",
+        }],
+        sales: [{
+          id: 10,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+          number: "ARV-10",
+          clients_id: 20,
+          client_name: "Acme OU",
+          gross_price: 100,
+          bank_ref_number: "RF123",
+        }],
+      });
+
+      const result = await handler({ mode: "suggest", min_confidence: 50 });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.mode).toBe("suggest");
+      expect(payload.recommended_entry_point).toBe("reconcile_bank_transactions");
+      expect(payload.result.matched).toBe(1);
+      expect(payload.result.matches[0]!.best_match.id).toBe(10);
+    });
+
+    it("dry-runs exact-match confirmation without mutating", async () => {
+      const handler = setupReconciliationTool({
+        toolName: "reconcile_bank_transactions",
+        transactions: [{
+          id: 2,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 100,
+          date: "2026-03-20",
+          bank_account_name: "Acme OU",
+          ref_number: "RF123",
+        }],
+        sales: [{
+          id: 11,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+          number: "ARV-11",
+          clients_id: 21,
+          client_name: "Acme OU",
+          gross_price: 100,
+          bank_ref_number: "RF123",
+        }],
+      });
+
+      const result = await handler({ mode: "dry_run_auto_confirm", min_confidence: 90 });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.mode).toBe("dry_run_auto_confirm");
+      expect(payload.result.mode).toBe("DRY_RUN");
+      expect(payload.result.results[0]!.status).toBe("would_confirm");
+    });
+
+    it("executes exact-match confirmation only in execute_auto_confirm mode", async () => {
+      const server = { registerTool: vi.fn() } as any;
+      const api = {
+        transactions: {
+          listAll: vi.fn().mockResolvedValue([
+            { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", bank_account_name: "Beta OU", ref_number: "RF456" },
+          ]),
+          confirm: vi.fn().mockResolvedValue({}),
+        },
+        saleInvoices: {
+          listAll: vi.fn().mockResolvedValue([
+            { id: 12, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-12", clients_id: 22, client_name: "Beta OU", gross_price: 200, bank_ref_number: "RF456" },
+          ]),
+        },
+        purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+        readonly: {
+          getBankAccounts: vi.fn().mockResolvedValue([]),
+          getAccountDimensions: vi.fn().mockResolvedValue([]),
+          getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
+        },
+        journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+        clients: { findByName: vi.fn().mockResolvedValue([]) },
+      } as any;
+      registerBankReconciliationTools(server, api);
+      const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "reconcile_bank_transactions");
+      if (!registration) throw new Error("Tool was not registered");
+
+      const result = await registration[2]({ mode: "execute_auto_confirm", min_confidence: 90 });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.mode).toBe("execute_auto_confirm");
+      expect(payload.result.mode).toBe("EXECUTED");
+      expect(api.transactions.confirm).toHaveBeenCalledWith(3, [
+        { related_table: "sale_invoices", related_id: 12, amount: 200 },
+      ]);
+    });
+
+    it("runs inter-account transfer detection in dry-run mode", async () => {
+      const { handler } = setupInterAccountTool({
+        transactions: [
+          { id: 4, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
+          { id: 5, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+        ],
+        bankAccounts: [
+          { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+          { id: 2, account_name_est: "SEB", account_no: "EE987654321098765432", iban_code: "EE987654321098765432", accounts_dimensions_id: 200 },
+        ],
+        toolName: "reconcile_bank_transactions",
+      });
+
+      const result = await handler({ mode: "inter_account_dry_run" });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.mode).toBe("inter_account_dry_run");
+      expect(payload.result.mode).toBe("DRY_RUN");
+      expect(payload.result.matched_pairs).toBe(1);
+    });
+  });
+
   it("ignores VOID transactions", async () => {
     const handler = setupReconciliationTool({
       transactions: [{
