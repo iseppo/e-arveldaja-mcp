@@ -45,10 +45,13 @@ function setupWiseTool(
     bankAccounts?: unknown[];
     invoiceInfo?: unknown;
     findByNameResult?: unknown[];
+    purchaseInvoices?: unknown[];
+    purchaseInvoiceUpdate?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   const server = { registerTool: vi.fn() } as any;
   const create = createImpl ?? vi.fn().mockResolvedValue({ created_object_id: 9001 });
+  const purchaseInvoiceUpdate = options.purchaseInvoiceUpdate ?? vi.fn().mockResolvedValue({});
   const api = {
     clients: {
       listAll: vi.fn().mockResolvedValue([{ id: 77, name: "Wise" }]),
@@ -72,6 +75,10 @@ function setupWiseTool(
       create,
       update: vi.fn().mockResolvedValue({}),
       confirm: vi.fn().mockResolvedValue({}),
+    },
+    purchaseInvoices: options.purchaseInvoices === undefined ? undefined : {
+      listAll: vi.fn().mockResolvedValue(options.purchaseInvoices),
+      update: purchaseInvoiceUpdate,
     },
   } as any;
 
@@ -1060,5 +1067,193 @@ describe("wise import tool", () => {
       related_sub_id: 30,
       amount: 300,
     }]);
+  });
+
+  describe("invoice currency fixes", () => {
+    const usdRow = (sourceAmount: string, targetAmount: string, supplier: string, date: string) => buildCsvRow([
+      `usd-${date}`, "COMPLETED", "OUT", `${date} 09:00:00`, `${date} 09:00:00`,
+      "0", "EUR", "0", "USD",
+      "Seppo OU", sourceAmount, "EUR",
+      supplier, targetAmount, "USD",
+      "1.17185", "", "", "", "General", "",
+    ]);
+
+    it("locks the Wise rate onto a matching foreign-currency invoice (dry run)", async () => {
+      mockedReadFile.mockResolvedValue(usdRow("17.07", "20", "OpenAI", "2026-05-01"));
+      const purchaseInvoiceUpdate = vi.fn().mockResolvedValue({});
+      const { handler } = setupWiseTool([], undefined, {
+        purchaseInvoices: [{
+          id: 700, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
+          number: "USD-700", client_name: "OpenAI",
+          cl_currencies_id: "USD", gross_price: 20,
+          base_gross_price: 17.10, currency_rate: 0.855,
+          create_date: "2026-05-01",
+        }],
+        purchaseInvoiceUpdate,
+      });
+
+      const result = await handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: false,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.invoice_currency_fixes).toBeDefined();
+      expect(payload.invoice_currency_fixes.foreign_currency_lock).toBe(1);
+      expect(payload.invoice_currency_fixes.candidates[0].result).toBe("would_update");
+      expect(payload.invoice_currency_fixes.candidates[0].wise_currency_rate).toBeCloseTo(0.8535, 4);
+      expect(purchaseInvoiceUpdate).not.toHaveBeenCalled();
+    });
+
+    it("applies the foreign-currency lock when execute=true", async () => {
+      mockedReadFile.mockResolvedValue(usdRow("17.07", "20", "OpenAI", "2026-05-01"));
+      const purchaseInvoiceUpdate = vi.fn().mockResolvedValue({});
+      const { handler } = setupWiseTool([], undefined, {
+        purchaseInvoices: [{
+          id: 701, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
+          number: "USD-701", client_name: "OpenAI",
+          cl_currencies_id: "USD", gross_price: 20,
+          base_gross_price: 17.10, currency_rate: 0.855,
+          create_date: "2026-05-01",
+        }],
+        purchaseInvoiceUpdate,
+      });
+
+      await handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: true,
+      });
+
+      expect(purchaseInvoiceUpdate).toHaveBeenCalledTimes(1);
+      const [invoiceId, patch] = purchaseInvoiceUpdate.mock.calls[0]!;
+      expect(invoiceId).toBe(701);
+      expect(patch.base_gross_price).toBeCloseTo(17.07, 2);
+      expect(patch.currency_rate).toBeCloseTo(0.8535, 4);
+    });
+
+    it("skips when invoice already carries the Wise rate (idempotent re-import)", async () => {
+      mockedReadFile.mockResolvedValue(usdRow("17.07", "20", "OpenAI", "2026-05-01"));
+      const purchaseInvoiceUpdate = vi.fn().mockResolvedValue({});
+      const { handler } = setupWiseTool([], undefined, {
+        purchaseInvoices: [{
+          id: 702, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
+          number: "USD-702", client_name: "OpenAI",
+          cl_currencies_id: "USD", gross_price: 20,
+          base_gross_price: 17.07, currency_rate: 0.8535,
+          create_date: "2026-05-01",
+        }],
+        purchaseInvoiceUpdate,
+      });
+
+      const result = await handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: true,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.invoice_currency_fixes).toBeUndefined();
+      expect(purchaseInvoiceUpdate).not.toHaveBeenCalled();
+    });
+
+    it("flags ambiguous matches and refuses to apply when one Wise row maps to multiple invoices", async () => {
+      mockedReadFile.mockResolvedValue(usdRow("17.07", "20", "OpenAI", "2026-05-01"));
+      const purchaseInvoiceUpdate = vi.fn().mockResolvedValue({});
+      const { handler } = setupWiseTool([], undefined, {
+        purchaseInvoices: [
+          {
+            id: 703, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
+            number: "USD-703-A", client_name: "OpenAI",
+            cl_currencies_id: "USD", gross_price: 20,
+            base_gross_price: 17.10, create_date: "2026-05-01",
+          },
+          {
+            id: 704, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
+            number: "USD-703-B", client_name: "OpenAI",
+            cl_currencies_id: "USD", gross_price: 20,
+            base_gross_price: 17.10, create_date: "2026-05-02",
+          },
+        ],
+        purchaseInvoiceUpdate,
+      });
+
+      await handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: true,
+      });
+
+      expect(purchaseInvoiceUpdate).not.toHaveBeenCalled();
+    });
+
+    it("auto-fixes a legacy EUR booking within ±0.10 EUR of the Wise settlement", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRow([
+        "eur-1", "COMPLETED", "OUT", "2026-05-01 09:00:00", "2026-05-01 09:00:00",
+        "0", "EUR", "0", "EUR",
+        "Seppo OU", "17.07", "EUR",
+        "OpenAI", "17.07", "EUR",
+        "1", "", "", "", "General", "",
+      ]));
+      const purchaseInvoiceUpdate = vi.fn().mockResolvedValue({});
+      const { handler } = setupWiseTool([], undefined, {
+        purchaseInvoices: [{
+          id: 705, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
+          number: "EUR-705", client_name: "OpenAI",
+          cl_currencies_id: "EUR", gross_price: 17.10,
+          create_date: "2026-05-01",
+        }],
+        purchaseInvoiceUpdate,
+      });
+
+      await handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: true,
+      });
+
+      expect(purchaseInvoiceUpdate).toHaveBeenCalledTimes(1);
+      const [, patch] = purchaseInvoiceUpdate.mock.calls[0]!;
+      expect(patch.gross_price).toBeCloseTo(17.07, 2);
+      expect(patch.base_gross_price).toBeUndefined();
+      expect(patch.currency_rate).toBeUndefined();
+    });
+
+    it("does not auto-fix EUR invoices when diff exceeds 0.10 EUR (avoids stomping real underpayments)", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRow([
+        "eur-2", "COMPLETED", "OUT", "2026-05-01 09:00:00", "2026-05-01 09:00:00",
+        "0", "EUR", "0", "EUR",
+        "Seppo OU", "10.00", "EUR",
+        "OpenAI", "10.00", "EUR",
+        "1", "", "", "", "General", "",
+      ]));
+      const purchaseInvoiceUpdate = vi.fn().mockResolvedValue({});
+      const { handler } = setupWiseTool([], undefined, {
+        purchaseInvoices: [{
+          id: 706, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
+          number: "EUR-706", client_name: "OpenAI",
+          cl_currencies_id: "EUR", gross_price: 17.10,
+          create_date: "2026-05-01",
+        }],
+        purchaseInvoiceUpdate,
+      });
+
+      const result = await handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: true,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.invoice_currency_fixes).toBeUndefined();
+      expect(purchaseInvoiceUpdate).not.toHaveBeenCalled();
+    });
   });
 });
