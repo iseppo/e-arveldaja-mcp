@@ -65,6 +65,14 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
    * For non-VAT companies (isVatRegistered=false): invoice-level vat_price stays 0
    * because input VAT is not deductible. gross_price is still set to actual payable amount.
    * Items get project_no_vat_gross_price set for VAT tracking.
+   *
+   * For foreign-currency invoices (cl_currencies_id != "EUR"):
+   * data.currency_rate is required (EUR per 1 foreign unit). base_net_price /
+   * base_vat_price / base_gross_price can be supplied explicitly to match the
+   * actual EUR settlement (e.g. Wise card-payment rate); otherwise they are
+   * auto-derived as round(amount * currency_rate, 2). For EUR invoices the
+   * base_* fields are forced to mirror the foreign-currency totals so the
+   * server-side payment matcher does not see a phantom rounding gap.
    */
   async createAndSetTotals(
     data: CreatePurchaseInvoiceData,
@@ -72,6 +80,14 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     grossPrice?: number,
     isVatRegistered = true,
   ): Promise<PurchaseInvoice> {
+    const currency = (data.cl_currencies_id ?? "EUR").toUpperCase();
+    const isForeignCurrency = currency !== "EUR";
+    if (isForeignCurrency && (data.currency_rate === undefined || data.currency_rate === null || !Number.isFinite(data.currency_rate) || data.currency_rate <= 0)) {
+      throw new Error(
+        `currency_rate is required when cl_currencies_id="${currency}". ` +
+        `Pass the EUR-per-${currency} rate (for Wise card payments use Source amount / Target amount from the Wise CSV).`
+      );
+    }
     const normalizedItems = normalizeItemsForNonVat(
       data.items,
       isVatRegistered,
@@ -126,7 +142,26 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         lastItem.project_no_vat_gross_price = roundMoney(currentGross + vatDiff);
       }
 
-      await this.update(id, { vat_price: vat, gross_price: gross, items: patchItems } as Partial<PurchaseInvoice>);
+      const patchPayload: Partial<PurchaseInvoice> = {
+        vat_price: vat,
+        gross_price: gross,
+        items: patchItems,
+      };
+
+      if (isForeignCurrency) {
+        const rate = data.currency_rate!;
+        const net = roundMoney(itemNet);
+        const baseNet = data.base_net_price ?? roundMoney(net * rate);
+        const baseVat = data.base_vat_price ?? roundMoney(vat * rate);
+        const baseGross = data.base_gross_price ?? roundMoney(gross * rate);
+        patchPayload.cl_currencies_id = currency;
+        patchPayload.currency_rate = rate;
+        patchPayload.base_net_price = baseNet;
+        patchPayload.base_vat_price = baseVat;
+        patchPayload.base_gross_price = baseGross;
+      }
+
+      await this.update(id, patchPayload);
 
       return this.get(id);
     } catch (error) {

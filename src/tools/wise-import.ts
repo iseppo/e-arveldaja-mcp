@@ -16,6 +16,8 @@ import { roundMoney } from "../money.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { buildInterAccountJournalIndex, findMatchingJournal } from "./inter-account-utils.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
+import { roundTo } from "../money.js";
+import type { PurchaseInvoice } from "../types/api.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 
 const ISO_DATE_REGEX = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -850,6 +852,172 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         }
       }
 
+      // --- Post-import: scan eligible payment rows for unpaid purchase
+      // invoices that should be repriced to Wise's actual EUR conversion.
+      // This addresses the recurring kursivahe jääk on USD/foreign-currency
+      // card payments where the original booking used a guessed rate.
+      const invoiceFixCandidates: Array<{
+        wise_id: string;
+        date: string;
+        supplier_name: string;
+        target_amount: number;
+        target_currency: string;
+        source_amount_eur: number;
+        wise_currency_rate: number;
+        invoice_id: number;
+        invoice_number: string;
+        invoice_currency: string;
+        invoice_gross: number;
+        current_base_gross?: number;
+        current_currency_rate?: number;
+        category: "foreign_currency_lock" | "eur_legacy_autofix";
+        proposed_action: string;
+        result?: "would_update" | "updated" | "error" | "ambiguous_skipped" | "already_matches";
+        error?: string;
+      }> = [];
+
+      const paymentRows = eligible.filter(r => transactionTypeForWiseDirection(r.direction) === "C" && bookedAmountForWiseRow(r) > 0);
+      const purchaseInvoicesApi = api.purchaseInvoices;
+      const hasPaymentCandidates = paymentRows.length > 0 && purchaseInvoicesApi !== undefined;
+      const allPurchaseInvoices = hasPaymentCandidates ? await purchaseInvoicesApi.listAll() : [];
+      const unpaidInvoices: PurchaseInvoice[] = allPurchaseInvoices.filter(inv =>
+        inv.id !== undefined &&
+        inv.status === "CONFIRMED" &&
+        (inv.payment_status === "PARTIALLY_PAID" || inv.payment_status === "UNPAID" || inv.payment_status === "OVERDUE")
+      );
+
+      for (const row of paymentRows) {
+        const counterparty = counterpartyNameForWiseRow(row);
+        if (!counterparty) continue;
+        const counterpartyKey = normalizeWiseCompanyName(counterparty);
+        if (!counterpartyKey) continue;
+        const date = wiseDate(row.finishedOn || row.createdOn);
+        const targetCurrency = normalizeWiseCurrency(row.targetCurrency);
+        const sourceCurrency = normalizeWiseCurrency(row.sourceCurrency);
+        const targetAmount = row.targetAmount;
+        const sourceAmount = row.sourceAmount; // EUR (after fees) for OUT rows
+        const isForeignCardPayment = sourceCurrency === "EUR" && targetCurrency !== "EUR" && targetAmount > 0;
+
+        for (const inv of unpaidInvoices) {
+          const invSupplierKey = normalizeWiseCompanyName(inv.client_name);
+          if (!invSupplierKey || invSupplierKey !== counterpartyKey) continue;
+
+          // Date window: invoice within ±5 days of payment
+          const invDate = inv.create_date;
+          if (!invDate) continue;
+          const dayDiff = Math.abs((Date.parse(invDate) - Date.parse(date)) / 86400000);
+          if (!Number.isFinite(dayDiff) || dayDiff > 5) continue;
+
+          const invCurrency = (inv.cl_currencies_id ?? "EUR").toUpperCase();
+          const invGross = inv.gross_price;
+          if (invGross === undefined || invGross === null) continue;
+
+          if (isForeignCardPayment && invCurrency === targetCurrency && Math.abs(invGross - targetAmount) < 0.01) {
+            const wiseRate = roundTo(sourceAmount / targetAmount, 6);
+            const proposedBaseGross = roundMoney(sourceAmount);
+            // Idempotency: skip when the invoice already carries the Wise
+            // settlement values (within 1 cent for base_gross and 6dp for
+            // rate) so a re-imported CSV does not re-update the same row.
+            const currentBaseGross = inv.base_gross_price ?? undefined;
+            const currentRate = inv.currency_rate ?? undefined;
+            const baseGrossMatches = currentBaseGross !== undefined && Math.abs(roundMoney(currentBaseGross) - proposedBaseGross) < 0.01;
+            const rateMatches = currentRate !== undefined && Math.abs(roundTo(currentRate, 6) - wiseRate) < 1e-6;
+            if (baseGrossMatches && rateMatches) continue;
+            invoiceFixCandidates.push({
+              wise_id: row.id,
+              date,
+              supplier_name: counterparty,
+              target_amount: targetAmount,
+              target_currency: targetCurrency,
+              source_amount_eur: sourceAmount,
+              wise_currency_rate: wiseRate,
+              invoice_id: inv.id!,
+              invoice_number: inv.number,
+              invoice_currency: invCurrency,
+              invoice_gross: invGross,
+              current_base_gross: currentBaseGross,
+              current_currency_rate: currentRate,
+              category: "foreign_currency_lock",
+              proposed_action: `Lock invoice ${inv.number} to Wise rate: base_gross_price ${(currentBaseGross ?? 0).toFixed(2)} → ${proposedBaseGross.toFixed(2)} EUR, currency_rate → ${wiseRate}.`,
+            });
+          } else {
+            const eurDiff = roundMoney(invGross - sourceAmount);
+            if (invCurrency === "EUR" && eurDiff !== 0 && Math.abs(eurDiff) < 0.10) {
+              invoiceFixCandidates.push({
+                wise_id: row.id,
+                date,
+                supplier_name: counterparty,
+                target_amount: targetAmount,
+                target_currency: targetCurrency,
+                source_amount_eur: sourceAmount,
+                wise_currency_rate: 1,
+                invoice_id: inv.id!,
+                invoice_number: inv.number,
+                invoice_currency: invCurrency,
+                invoice_gross: invGross,
+                current_base_gross: inv.base_gross_price ?? undefined,
+                current_currency_rate: inv.currency_rate ?? undefined,
+                category: "eur_legacy_autofix",
+                proposed_action: `Auto-fix legacy EUR booking ${inv.number}: gross_price ${invGross.toFixed(2)} → ${sourceAmount.toFixed(2)} EUR (Wise actual settlement, diff ${eurDiff.toFixed(2)}).`,
+              });
+            }
+          }
+        }
+      }
+
+      // Ambiguity guard: when one Wise row matches multiple unpaid invoices
+      // for the same supplier+amount+date window, do not pick — flag both as
+      // ambiguous_skipped and let the operator resolve manually.
+      const candidatesByWiseId = new Map<string, number>();
+      for (const fix of invoiceFixCandidates) {
+        candidatesByWiseId.set(fix.wise_id, (candidatesByWiseId.get(fix.wise_id) ?? 0) + 1);
+      }
+      for (const fix of invoiceFixCandidates) {
+        if ((candidatesByWiseId.get(fix.wise_id) ?? 0) > 1) {
+          fix.result = "ambiguous_skipped";
+          fix.proposed_action = `Ambiguous match — multiple unpaid invoices for ${fix.supplier_name} match Wise row ${fix.wise_id}; resolve manually before applying.`;
+        }
+      }
+
+      if (!dryRun && invoiceFixCandidates.length > 0 && purchaseInvoicesApi) {
+        for (const fix of invoiceFixCandidates) {
+          if (fix.result === "ambiguous_skipped") continue;
+          try {
+            if (fix.category === "foreign_currency_lock") {
+              await purchaseInvoicesApi.update(fix.invoice_id, {
+                currency_rate: fix.wise_currency_rate,
+                base_gross_price: roundMoney(fix.source_amount_eur),
+              } as Partial<PurchaseInvoice>);
+              fix.result = "updated";
+              logAudit({
+                tool: "import_wise_transactions", action: "UPDATED", entity_type: "purchase_invoice",
+                entity_id: fix.invoice_id,
+                summary: `Locked Wise rate for ${fix.invoice_number}: ${fix.target_amount} ${fix.target_currency} → ${fix.source_amount_eur} EUR @ ${fix.wise_currency_rate}`,
+                details: { wise_id: fix.wise_id, currency_rate: fix.wise_currency_rate, base_gross_price: fix.source_amount_eur },
+              });
+            } else if (fix.category === "eur_legacy_autofix") {
+              await purchaseInvoicesApi.update(fix.invoice_id, {
+                gross_price: roundMoney(fix.source_amount_eur),
+              } as Partial<PurchaseInvoice>);
+              fix.result = "updated";
+              logAudit({
+                tool: "import_wise_transactions", action: "UPDATED", entity_type: "purchase_invoice",
+                entity_id: fix.invoice_id,
+                summary: `Auto-fixed EUR rounding for ${fix.invoice_number}: ${fix.invoice_gross} → ${fix.source_amount_eur} EUR`,
+                details: { wise_id: fix.wise_id, old_gross: fix.invoice_gross, new_gross: fix.source_amount_eur },
+              });
+            }
+          } catch (err) {
+            fix.result = "error";
+            fix.error = err instanceof Error ? err.message : String(err);
+          }
+        }
+      } else if (dryRun) {
+        for (const fix of invoiceFixCandidates) {
+          if (fix.result !== "ambiguous_skipped") fix.result = "would_update";
+        }
+      }
+
       const mode = dryRun ? "DRY_RUN" : "EXECUTED";
       const executionSkipped = skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason));
       const executionErrors = skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason));
@@ -929,6 +1097,16 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 already_journalized: interAccountResults.filter(r => r.status === "already_journalized").length,
                 confirmed: interAccountResults.filter(r => r.status === "confirmed_inter_account").length,
                 details: interAccountResults,
+              },
+            } : {}),
+            ...(invoiceFixCandidates.length > 0 ? {
+              invoice_currency_fixes: {
+                total: invoiceFixCandidates.length,
+                foreign_currency_lock: invoiceFixCandidates.filter(f => f.category === "foreign_currency_lock").length,
+                eur_legacy_autofix: invoiceFixCandidates.filter(f => f.category === "eur_legacy_autofix").length,
+                updated: invoiceFixCandidates.filter(f => f.result === "updated").length,
+                errors: invoiceFixCandidates.filter(f => f.result === "error").length,
+                candidates: invoiceFixCandidates,
               },
             } : {}),
             results: created.map(({ description: _desc, ...rest }) => rest),

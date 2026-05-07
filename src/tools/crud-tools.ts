@@ -1266,7 +1266,9 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "create_purchase_invoice",
-    "Create a draft purchase invoice with line items. Requires cl_purchase_articles_id (use list_purchase_articles). Pass EXACT vat_price and gross_price from the original invoice.",
+    "Create a draft purchase invoice with line items. Requires cl_purchase_articles_id (use list_purchase_articles). Pass EXACT vat_price and gross_price from the original invoice. " +
+    "For non-EUR invoices pass cl_currencies_id and currency_rate (EUR per 1 foreign unit). " +
+    "Optionally pass base_net_price/base_vat_price/base_gross_price to lock the EUR settlement values to the actual payment (e.g. Wise card-payment exchange) and avoid PARTIALLY_PAID rounding.",
     {
       clients_id: coerceId.describe("Supplier client ID"),
       client_name: z.string().describe("Supplier name"),
@@ -1277,6 +1279,10 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       vat_price: z.number().describe("Total VAT amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       gross_price: z.number().describe("Total gross amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
+      currency_rate: z.number().positive().optional().describe("Exchange rate as EUR per 1 foreign currency unit. Required when cl_currencies_id != EUR. For Wise card payments use Source amount (after fees) / Target amount."),
+      base_net_price: z.number().optional().describe("EUR equivalent of net_price (foreign-currency invoices). Auto-derived from currency_rate when omitted."),
+      base_vat_price: z.number().optional().describe("EUR equivalent of vat_price (foreign-currency invoices). Auto-derived from currency_rate when omitted."),
+      base_gross_price: z.number().optional().describe("EUR equivalent of gross_price (foreign-currency invoices). Pass the actual settled EUR amount (Wise Source amount after fees) to avoid PARTIALLY_PAID jääk. Auto-derived from currency_rate when omitted."),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
       items: jsonObjectArrayInput.describe(
         "Array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. Legacy callers may still pass a JSON array string. " +
@@ -1301,6 +1307,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         return toolError({ error: "Account validation failed", details: dimErrors });
       }
 
+      const currencyCode = (params.cl_currencies_id ?? "EUR").toUpperCase();
+      if (currencyCode !== "EUR" && (params.currency_rate === undefined || params.currency_rate === null)) {
+        return toolError({
+          error: `currency_rate is required when cl_currencies_id="${currencyCode}". Pass EUR per 1 ${currencyCode} (Wise: Source amount / Target amount).`,
+        });
+      }
+
       const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.clients_id,
         client_name: params.client_name,
@@ -1308,7 +1321,11 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         create_date: params.create_date,
         journal_date: params.journal_date,
         term_days: params.term_days,
-        cl_currencies_id: params.cl_currencies_id ?? "EUR",
+        cl_currencies_id: currencyCode,
+        currency_rate: params.currency_rate,
+        base_net_price: params.base_net_price,
+        base_vat_price: params.base_vat_price,
+        base_gross_price: params.base_gross_price,
         liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
         bank_ref_number: params.bank_ref_number,
         bank_account_no: params.bank_account_no,
