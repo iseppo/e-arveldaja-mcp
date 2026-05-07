@@ -1182,6 +1182,45 @@ describe("wise import tool", () => {
         purchaseInvoiceUpdate,
       });
 
+      const result = await handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: true,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      // Positive assertion: matching produced two candidates (so the
+      // matching path is not silently broken) AND both got marked as
+      // ambiguous_skipped instead of being applied.
+      expect(payload.invoice_currency_fixes).toBeDefined();
+      expect(payload.invoice_currency_fixes.foreign_currency_lock).toBe(2);
+      expect(payload.invoice_currency_fixes.candidates).toHaveLength(2);
+      for (const candidate of payload.invoice_currency_fixes.candidates) {
+        expect(candidate.result).toBe("ambiguous_skipped");
+      }
+      expect(purchaseInvoiceUpdate).not.toHaveBeenCalled();
+    });
+
+    it("re-applies when currency_rate already matches but base_gross_price is stale", async () => {
+      // The idempotency guard requires BOTH base_gross_price (within 1 ¢)
+      // and currency_rate (within 1e-6) to match. A partial match must
+      // still produce a fix, otherwise the operator can never recover from
+      // a state where someone manually patched the rate but not the base.
+      mockedReadFile.mockResolvedValue(usdRow("17.07", "20", "OpenAI", "2026-05-01"));
+      const purchaseInvoiceUpdate = vi.fn().mockResolvedValue({});
+      const { handler } = setupWiseTool([], undefined, {
+        purchaseInvoices: [{
+          id: 720, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
+          number: "USD-720", client_name: "OpenAI",
+          cl_currencies_id: "USD", gross_price: 20,
+          base_gross_price: 17.10,           // stale
+          currency_rate: 0.8535,              // already matches Wise
+          create_date: "2026-05-01",
+        }],
+        purchaseInvoiceUpdate,
+      });
+
       await handler({
         file_path: "/tmp/wise.csv",
         accounts_dimensions_id: 5,
@@ -1189,7 +1228,9 @@ describe("wise import tool", () => {
         execute: true,
       });
 
-      expect(purchaseInvoiceUpdate).not.toHaveBeenCalled();
+      expect(purchaseInvoiceUpdate).toHaveBeenCalledTimes(1);
+      const [, patch] = purchaseInvoiceUpdate.mock.calls[0]!;
+      expect(patch.base_gross_price).toBeCloseTo(17.07, 2);
     });
 
     it("auto-fixes a legacy EUR booking within ±0.10 EUR of the Wise settlement", async () => {
@@ -1223,6 +1264,45 @@ describe("wise import tool", () => {
       expect(patch.gross_price).toBeCloseTo(17.07, 2);
       expect(patch.base_gross_price).toBeUndefined();
       expect(patch.currency_rate).toBeUndefined();
+    });
+
+    it("uses roundMoney for the 0.10-EUR boundary so float noise cannot smuggle a 0.10 diff into the autofix bucket", async () => {
+      // 0.30 - 0.20 in IEEE-754 yields 0.09999999999999998. With raw float
+      // math, `Math.abs(diff) < 0.10` would be true and Wise import would
+      // auto-fix the invoice. With the roundMoney() fix, the diff snaps to
+      // exactly 0.10, which is NOT < 0.10, so the autofix is correctly
+      // skipped — and reconcile_currency_rounding's fx_difference bucket
+      // (>= 0.10) handles it instead.
+      mockedReadFile.mockResolvedValue(buildCsvRow([
+        "eur-3", "COMPLETED", "OUT", "2026-05-01 09:00:00", "2026-05-01 09:00:00",
+        "0", "EUR", "0", "EUR",
+        "Seppo OU", "0.20", "EUR",
+        "OpenAI", "0.20", "EUR",
+        "1", "", "", "", "General", "",
+      ]));
+      const purchaseInvoiceUpdate = vi.fn().mockResolvedValue({});
+      const { handler } = setupWiseTool([], undefined, {
+        purchaseInvoices: [{
+          id: 707, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
+          number: "EUR-707", client_name: "OpenAI",
+          cl_currencies_id: "EUR", gross_price: 0.30,
+          create_date: "2026-05-01",
+        }],
+        purchaseInvoiceUpdate,
+      });
+
+      const result = await handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: true,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      // Boundary case: rounded diff is exactly 0.10 → autofix range
+      // (< 0.10) does NOT include it, so no candidate, no update.
+      expect(payload.invoice_currency_fixes).toBeUndefined();
+      expect(purchaseInvoiceUpdate).not.toHaveBeenCalled();
     });
 
     it("does not auto-fix EUR invoices when diff exceeds 0.10 EUR (avoids stomping real underpayments)", async () => {
