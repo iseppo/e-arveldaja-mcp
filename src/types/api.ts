@@ -390,6 +390,10 @@ export interface CreatePurchaseInvoiceData extends Pick<PurchaseInvoice,
   "journal_date" |
   "term_days" |
   "cl_currencies_id" |
+  "currency_rate" |
+  "base_net_price" |
+  "base_vat_price" |
+  "base_gross_price" |
   "liability_accounts_id" |
   "bank_ref_number" |
   "bank_account_no" |

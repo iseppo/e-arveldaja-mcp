@@ -103,6 +103,19 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved));
         const llmFallback = summarizeInvoiceExtraction(extracted);
 
+        const warnings: string[] = [];
+        // ISO-4217 codes are exactly three uppercase letters. Reject anything
+        // else — the OCR-derived `extracted.currency` could otherwise smuggle
+        // attacker text into the warning string (which is not OCR-wrapped).
+        const rawCurrency = extracted.currency?.toUpperCase();
+        const detectedCurrency = rawCurrency && /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : undefined;
+        if (detectedCurrency && detectedCurrency !== "EUR") {
+          warnings.push(
+            `Invoice in ${detectedCurrency}. When booking, pass cl_currencies_id="${detectedCurrency}" plus currency_rate (EUR per 1 ${detectedCurrency}). ` +
+            `For Wise card payments take the rate from the Wise CSV "Source amount (after fees)" / "Target amount (after fees)" — that locks the EUR base_* values to the actual conversion and avoids PARTIALLY_PAID rounding jääk.`
+          );
+        }
+
         return {
           content: [{
             type: "text",
@@ -118,6 +131,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
                 raw_text: wrapUntrustedOcr(extracted.raw_text),
                 description: wrapUntrustedOcr(extracted.description),
                 supplier_name: wrapUntrustedOcr(extracted.supplier_name),
+                ...(warnings.length > 0 ? { warnings } : {}),
               },
               llm_fallback: llmFallback,
               page_count: parsedDocument.pageCount,
@@ -134,6 +148,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     "Validate extracted invoice data before creating a purchase invoice. " +
     "Checks that net + VAT = gross, item totals match invoice total, " +
     "dates are valid, and required fields are present. " +
+    "For non-EUR invoices also warns when an explicit currency_rate / base_net_price is missing — " +
+    "without these the booked EUR amount may not match the actual Wise card-payment conversion " +
+    "and the invoice can land in PARTIALLY_PAID. " +
     "Call this BEFORE create_purchase_invoice_from_pdf.",
     {
       total_net: z.number().describe("Invoice total net amount"),
@@ -142,9 +159,12 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       items: jsonObjectArrayInput.describe("Array of items with at least {total_net_price, vat_rate_dropdown?} each. Legacy callers may still pass a JSON array string."),
       invoice_date: z.string().optional().describe("Invoice date (YYYY-MM-DD)"),
       due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
+      cl_currencies_id: z.string().optional().describe("Invoice currency (default EUR). Pass the OCR-detected currency to enable foreign-currency rate guardrails."),
+      currency_rate: z.number().positive().optional().describe("Planned exchange rate (EUR per 1 foreign unit). Optional — passed only to silence the foreign-currency warning."),
+      base_net_price: z.number().optional().describe("Planned EUR-equivalent net amount. Optional — passed only to silence the foreign-currency warning."),
     },
     { ...readOnly, title: "Validate Invoice Data" },
-    async ({ total_net, total_vat, total_gross, items, invoice_date, due_date }) => {
+    async ({ total_net, total_vat, total_gross, items, invoice_date, due_date, cl_currencies_id, currency_rate, base_net_price }) => {
       const errors: string[] = [];
       const warnings: string[] = [];
       const parsed = parseJsonObjectArray(items, "items");
@@ -248,6 +268,18 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       // Zero/negative totals
       if (total_gross <= 0) warnings.push(`Gross amount is ${total_gross} (zero or negative)`);
       if (total_net <= 0) warnings.push(`Net amount is ${total_net} (zero or negative)`);
+
+      // Foreign-currency rate guardrail: bookings without an explicit
+      // currency_rate / base_net_price tend to land in PARTIALLY_PAID once the
+      // Wise card-payment kursi vahe shows up.
+      const currencyCode = (cl_currencies_id ?? "EUR").toUpperCase();
+      if (currencyCode !== "EUR" && currency_rate === undefined && base_net_price === undefined) {
+        warnings.push(
+          `Foreign-currency invoice (${currencyCode}): no currency_rate or base_net_price provided. ` +
+          `Without these, the EUR booking may not match the actual Wise card-payment conversion and the invoice can stay PARTIALLY_PAID. ` +
+          `Pass currency_rate (Wise CSV "Source amount (after fees)" / "Target amount (after fees)") and/or base_gross_price to lock the EUR settlement.`
+        );
+      }
 
       const valid = errors.length === 0;
 
@@ -431,7 +463,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     "The source file is required and upload is mandatory; if upload fails after invoice creation, the draft invoice is invalidated. " +
     "Pass EXACT vat_price and gross_price from the original invoice for payment matching. " +
     "These are OPTIONAL here (unlike create_purchase_invoice which requires them) because OCR may not reliably extract invoice-level totals; " +
-    "confirm_purchase_invoice / confirmWithTotals will self-heal from item-level figures at confirmation time when invoice-level values are missing.",
+    "confirm_purchase_invoice / confirmWithTotals will self-heal from item-level figures at confirmation time when invoice-level values are missing. " +
+    "For non-EUR invoices pass currency + currency_rate (EUR per 1 foreign unit). " +
+    "Optionally pass base_net_price/base_vat_price/base_gross_price to lock the EUR settlement values to the actual payment (e.g. Wise card-payment exchange) so the invoice reconciles without a PARTIALLY_PAID jääk.",
     {
       supplier_client_id: coerceId.describe("Supplier client ID (from resolve_supplier)"),
       invoice_number: z.string().describe("Invoice number"),
@@ -448,7 +482,11 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       notes: z.string().optional().describe("Notes (e.g. PDF filename)"),
       ref_number: z.string().optional().describe("Reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
-      currency: z.string().optional().describe("Currency code (default EUR)"),
+      currency: z.string().optional().describe("Currency code (default EUR). Use the original invoice currency (e.g. USD) and supply currency_rate."),
+      currency_rate: z.number().positive().optional().describe("Exchange rate as EUR per 1 foreign currency unit. Required when currency != EUR. For Wise card payments use Source amount (after fees) / Target amount."),
+      base_net_price: z.number().optional().describe("EUR equivalent of net_price. Auto-derived from currency_rate when omitted."),
+      base_vat_price: z.number().optional().describe("EUR equivalent of vat_price. Auto-derived from currency_rate when omitted."),
+      base_gross_price: z.number().optional().describe("EUR equivalent of gross_price. Pass the actual settled EUR amount (Wise Source amount after fees) to avoid PARTIALLY_PAID jääk. Auto-derived from currency_rate when omitted."),
       file_path: z.string().describe("Absolute path to the source invoice document (PDF/JPG/PNG) — uploaded to the invoice during creation. Also accepts a base64 payload (\"base64:<data>\") for cross-system file transfer from remote MCP clients."),
     },
     { ...create, openWorldHint: true, title: "Create Purchase Invoice from PDF" },
@@ -471,6 +509,13 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         return toolError({ error: "Account validation failed", details: dimErrors });
       }
 
+      const currencyCode = (params.currency ?? "EUR").toUpperCase();
+      if (currencyCode !== "EUR" && (params.currency_rate === undefined || params.currency_rate === null)) {
+        return toolError({
+          error: `currency_rate is required when currency="${currencyCode}". Pass EUR per 1 ${currencyCode} (Wise: Source amount / Target amount).`,
+        });
+      }
+
       const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.supplier_client_id,
         client_name: supplier.name,
@@ -478,7 +523,11 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         create_date: params.invoice_date,
         journal_date: params.journal_date,
         term_days: params.term_days,
-        cl_currencies_id: params.currency ?? "EUR",
+        cl_currencies_id: currencyCode,
+        currency_rate: params.currency_rate,
+        base_net_price: params.base_net_price,
+        base_vat_price: params.base_vat_price,
+        base_gross_price: params.base_gross_price,
         liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
         bank_ref_number: params.ref_number,
         bank_account_no: params.bank_account_no,

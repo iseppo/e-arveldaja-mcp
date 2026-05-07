@@ -112,6 +112,87 @@ afterEach(async () => {
 });
 
 describe("prepare_accounting_inbox", () => {
+  it("exposes accounting_inbox scan mode as the merged scan entry point", async () => {
+    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    const { handler } = setupAccountingInboxTool({
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          {
+            accounts_dimensions_id: 101,
+            account_name_est: "LHV põhikonto",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
+          },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          {
+            id: 101,
+            accounts_id: 1020,
+            title_est: "LHV põhikonto",
+            is_deleted: false,
+          },
+        ]),
+      },
+    }, "accounting_inbox");
+
+    const result = await handler({ mode: "scan", workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.detected_inputs.camt_files).toHaveLength(1);
+    expect(payload.recommended_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: "parse_camt053" }),
+      expect.objectContaining({ tool: "import_camt053" }),
+    ]));
+    expect(payload.workflow.contract).toBe("workflow_action_v1");
+    expect(payload.autopilot).toBeUndefined();
+  });
+
+  it("exposes accounting_inbox dry_run mode as the merged autopilot entry point", async () => {
+    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    const { handler } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+      },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([
+          {
+            accounts_dimensions_id: 101,
+            account_name_est: "LHV põhikonto",
+            account_no: "EE637700771011212909",
+            iban_code: "EE637700771011212909",
+          },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          {
+            id: 101,
+            accounts_id: 1020,
+            title_est: "LHV põhikonto",
+            is_deleted: false,
+          },
+        ]),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+    }, "accounting_inbox");
+
+    const result = await handler({ mode: "dry_run", workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.prepared_inbox.detected_inputs.camt_files).toHaveLength(1);
+    expect(payload.autopilot.executed_steps.map((step: any) => step.tool)).toEqual([
+      "parse_camt053",
+      "import_camt053",
+      "classify_unmatched_transactions",
+    ]);
+    expect(payload.workflow.contract).toBe("workflow_action_v1");
+  });
+
   it("detects likely accounting inputs and suggests the first dry-run flow with defaults", async () => {
     const workspace = await createWorkspace();
     workspacesToClean.push(workspace);
@@ -2032,6 +2113,86 @@ ${entryXml}
       },
     });
     expect(payload.message).toContain("Next action");
+  });
+
+  it("continue_accounting_workflow can resolve a review item through action mode", async () => {
+    const { handler } = setupAccountingInboxTool({}, "continue_accounting_workflow");
+
+    const result = await handler({
+      action: "resolve_review",
+      review_item_json: {
+        review_type: "classification_group",
+        group: {
+          category: "owner_transfers",
+          display_counterparty: "Seppo Sepp",
+          review_guidance: {
+            recommendation: "Soovitus: ära tee sellest ostuarvet.",
+            compliance_basis: ["RPS § 6–7"],
+            follow_up_questions: ["Kas see on laen või dividend?"],
+          },
+        },
+      },
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload).toMatchObject({
+      review_type: "classification_group",
+      status: "needs_answers",
+      recommendation: expect.stringContaining("ära tee sellest ostuarvet"),
+      unresolved_questions: ["Kas see on laen või dividend?"],
+      suggested_workflow: "classify-unmatched",
+    });
+    expect(payload.assistant_guidance).toContain(
+      "Ask only unresolved_questions, and only if the payload itself does not already answer them.",
+    );
+  });
+
+  it("continue_accounting_workflow can prepare a review action through action mode", async () => {
+    const { handler } = setupAccountingInboxTool({}, "continue_accounting_workflow");
+
+    const result = await handler({
+      action: "prepare_action",
+      review_item_json: {
+        review_type: "camt_possible_duplicate",
+        item: {
+          new_transaction_api_id: 9001,
+          existing_transactions: [
+            {
+              id: 77,
+              status: "CONFIRMED",
+              suggested_patch_missing_fields: {
+                bank_ref_number: "CAMT-REF-1",
+              },
+            },
+          ],
+          review_guidance: {
+            recommendation: "Keep the confirmed transaction and remove the new duplicate.",
+            compliance_basis: ["RPS § 6–7"],
+            follow_up_questions: [],
+          },
+        },
+      },
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload).toMatchObject({
+      status: "ready_for_approval",
+      proposed_action: {
+        type: "tool_call",
+        tool: "cleanup_camt_possible_duplicate",
+        args: {
+          keep_transaction_id: 77,
+          delete_transaction_id: 9001,
+          patch_missing_fields: {
+            bank_ref_number: "CAMT-REF-1",
+          },
+        },
+        approval_required: true,
+      },
+    });
+    expect(payload.assistant_guidance).toContain(
+      "If proposed_action is present, ask for explicit approval before executing it.",
+    );
   });
 
   it("cleanup_camt_possible_duplicate surfaces partial state when delete throws", async () => {

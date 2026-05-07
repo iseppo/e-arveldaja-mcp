@@ -2,9 +2,9 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 111 tools, 15 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 113 tools, 15 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
-> **v0.12 adds guided workflow actions.** `recommend_workflow` suggests the safest accounting flow for a natural-language goal, and key workflow/batch tools now return a `workflow_action_v1` envelope with `recommended_next_action`, review questions, and approval previews. `run_accounting_inbox_dry_runs` still chains safe dry-run steps into one preview, while `continue_accounting_workflow` turns any previous workflow response into the next question, review item, approval card, or safe dry-run call. See the [changelog](CHANGELOG.md) for full details.
+> **Guided workflow actions.** `recommend_workflow` suggests the safest accounting flow for a natural-language goal, and key workflow/batch tools return a `workflow_action_v1` envelope with `recommended_next_action`, review questions, and approval previews. `accounting_inbox` is the preferred merged entry point for workspace triage, `continue_accounting_workflow` is the preferred merged continuation tool, and bank work now has `reconcile_bank_transactions` plus `classify_bank_transactions` as mode-based entry points. Older focused tools such as `run_accounting_inbox_dry_runs`, `resolve_accounting_review_item`, `prepare_accounting_review_action`, `reconcile_transactions`, and `apply_transaction_classifications` remain available as compatibility primitives. See the [changelog](CHANGELOG.md) for full details.
 >
 > **v0.10.0 is a major update.** Large parts of the codebase have been rewritten — credential management, bank reconciliation, audit logging, and batch workflows all received significant changes. **You may need to re-add your API credentials** after updating, as the credential storage has moved from reading `apikey*.txt` directly to `.env` files. Your existing `apikey*.txt` files will be detected automatically and the server will offer to import them on first start.
 
@@ -137,11 +137,11 @@ The server includes 15 built-in workflow prompts that any MCP client can discove
 | `resolve-accounting-review` | Turn one accounting review item into a concrete next-step plan with compliance references |
 | `prepare-accounting-review-action` | Prepare the concrete next action for a resolved review item (delete duplicate, save rule, etc.) |
 | `book-invoice` | Book a purchase invoice from PDF: extract, validate, resolve supplier, preview, create, upload, confirm |
-| `receipt-batch` | Scan a receipt folder, preview auto-bookable items, then batch-create after approval |
+| `receipt-batch` | Scan receipts and classify unmatched bank transactions through `classify_bank_transactions`, then apply after approval |
 | `import-camt` | Parse CAMT.053 XML, preview imported bank transactions, then create after approval |
 | `import-wise` | Preview Wise CSV import results, fees, duplicates, and Jar skips before execution |
 | `classify-unmatched` | Group unmatched bank transactions, preview suggested booking actions, then apply after approval |
-| `reconcile-bank` | Match bank transactions to invoices, auto-confirm or review manually |
+| `reconcile-bank` | Match bank transactions through `reconcile_bank_transactions`, then auto-confirm or review manually |
 | `month-end-close` | Blockers, missing docs, duplicates, trial balance, P&L, balance sheet |
 | `new-supplier` | Create supplier with Estonian business registry lookup |
 | `company-overview` | Financial dashboard: balance sheet, P&L, receivables, payables |

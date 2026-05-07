@@ -182,6 +182,45 @@ describe("pdf workflow tools", () => {
     }));
   });
 
+  it("emits a foreign-currency warning with an ISO-validated currency code", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/invoice.pdf" });
+    mockedParseDocument.mockResolvedValue({
+      text: "Acme Ltd\nInvoice number INV-9001\nDate of issue April 10, 2026\nSubtotal $20.00\nTotal $20.00 USD",
+      pageCount: 1,
+      result: { text: "", pages: [] } as any,
+    });
+
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice");
+    const response = await handler({ file_path: "/tmp/invoice.pdf" });
+    const payload = parseMcpResponse(response.content[0]!.text);
+
+    expect(payload.extracted.currency).toBe("USD");
+    expect(payload.extracted.warnings).toEqual([
+      expect.stringMatching(/^Invoice in USD\. When booking, pass cl_currencies_id="USD"/),
+    ]);
+    // Hardening proof: the interpolated currency is exactly the 3-letter
+    // ISO code, never raw OCR text. Anything that fails /^[A-Z]{3}$/ is
+    // dropped before interpolation, so the warning string can never carry
+    // attacker-controlled bytes through the unwrapped channel.
+    expect(payload.extracted.warnings[0]).toMatch(/cl_currencies_id="USD"/);
+    expect(payload.extracted.warnings[0]).not.toMatch(/[<>{}]/);
+  });
+
+  it("does not emit a foreign-currency warning for EUR invoices", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/invoice.pdf" });
+    mockedParseDocument.mockResolvedValue({
+      text: "Acme Ltd\nInvoice number INV-9002\nDate of issue April 10, 2026\nSubtotal €18.00\nTotal €18.00 EUR",
+      pageCount: 1,
+      result: { text: "", pages: [] } as any,
+    });
+
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice");
+    const response = await handler({ file_path: "/tmp/invoice.pdf" });
+    const payload = parseMcpResponse(response.content[0]!.text);
+
+    expect(payload.extracted.warnings).toBeUndefined();
+  });
+
   it("prefers supplier-side tax id before the bill-to block", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/invoice.pdf" });
     mockedParseDocument.mockResolvedValue({

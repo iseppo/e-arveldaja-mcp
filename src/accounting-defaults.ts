@@ -30,5 +30,11 @@ export const CURRENT_YEAR_PROFIT_ACCOUNT = 2970;
 /** Other financial expenses (Muud finantskulud) */
 export const DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT = 8610;
 
+/** Exchange rate gain (Kasum valuutakursi muutusest) */
+export const DEFAULT_FX_GAIN_ACCOUNT = 8500;
+
+/** Exchange rate loss (Kahjum valuutakursi muutusest) */
+export const DEFAULT_FX_LOSS_ACCOUNT = 8600;
+
 /** Default debt-check accounts for compute_client_debt */
 export const DEFAULT_DEBT_CHECK_ACCOUNTS = [DEFAULT_OWNER_PAYABLE_ACCOUNT, DEFAULT_LIABILITY_ACCOUNT, DEFAULT_ACCOUNTS_RECEIVABLE];

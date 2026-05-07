@@ -81,12 +81,57 @@ describe("recommend_workflow", () => {
     expect(JSON.stringify(payload.workflow)).not.toContain("<describe the user's accounting goal>");
   });
 
-  it("recommends the registered apply transaction classifications tool for receipt batches", async () => {
+  it("recommends accounting_inbox as the merged entry point for workspace triage", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+
+    const result = await handler({ goal: "scan this workspace and triage accounting inbox files" });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+
+    expect(payload.recommended_workflow).toMatchObject({
+      id: "accounting-inbox",
+    });
+    expect(payload.raw.primary_tools).toContain("accounting_inbox");
+    expect(payload.raw.primary_tools).toContain("continue_accounting_workflow");
+    expect(payload.next_actions[0]).toMatchObject({
+      tool: "accounting_inbox",
+      args: { mode: "dry_run" },
+    });
+    expect(payload.workflow.recommended_next_action).toMatchObject({
+      kind: "tool_call",
+      tool: "accounting_inbox",
+      args: { mode: "dry_run" },
+    });
+  });
+
+  it("recommends reconcile_bank_transactions as the merged bank reconciliation entry point", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+
+    const result = await handler({ goal: "reconcile unmatched bank transactions and match payments" });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+
+    expect(payload.recommended_workflow).toMatchObject({
+      id: "reconcile-bank",
+    });
+    expect(payload.raw.primary_tools).toContain("reconcile_bank_transactions");
+    expect(payload.raw.primary_tools).toContain("reconcile_transactions");
+    expect(payload.next_actions[0]).toMatchObject({
+      tool: "reconcile_bank_transactions",
+      args: { mode: "suggest", min_confidence: 30 },
+    });
+    expect(payload.workflow.recommended_next_action).toMatchObject({
+      kind: "tool_call",
+      tool: "reconcile_bank_transactions",
+      args: { mode: "suggest", min_confidence: 30 },
+    });
+  });
+
+  it("recommends the merged classification wrapper while keeping compatibility tools visible", async () => {
     const { handler } = getRecommendWorkflowHarness();
 
     const result = await handler({ goal: "process a folder of receipts and classify expenses" });
     const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
 
+    expect(payload.raw.primary_tools).toContain("classify_bank_transactions");
     expect(payload.raw.primary_tools).toContain("apply_transaction_classifications");
     expect(payload.raw.primary_tools).not.toContain("apply_unmatched_transaction_classifications");
   });

@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
+import { isRecord } from "../record-utils.js";
 import type { ClientsApi } from "../api/clients.api.js";
 import type { ProductsApi } from "../api/products.api.js";
 import type { JournalsApi } from "../api/journals.api.js";
@@ -25,6 +26,7 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { toolResponse } from "../tool-response.js";
 import { applyListView, viewParam } from "../list-views.js";
 import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
+import { registerReferenceDataTools } from "./reference-data-tools.js";
 
 export interface ApiContext {
   clients: ClientsApi;
@@ -53,10 +55,6 @@ export function safeJsonParse(input: string, label: string): unknown {
   } catch {
     throw new Error(`Invalid JSON in "${label}"`);
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function parseJsonObject(input: unknown, label: string): Record<string, unknown> {
@@ -1268,7 +1266,9 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "create_purchase_invoice",
-    "Create a draft purchase invoice with line items. Requires cl_purchase_articles_id (use list_purchase_articles). Pass EXACT vat_price and gross_price from the original invoice.",
+    "Create a draft purchase invoice with line items. Requires cl_purchase_articles_id (use list_purchase_articles). Pass EXACT vat_price and gross_price from the original invoice. " +
+    "For non-EUR invoices pass cl_currencies_id and currency_rate (EUR per 1 foreign unit). " +
+    "Optionally pass base_net_price/base_vat_price/base_gross_price to lock the EUR settlement values to the actual payment (e.g. Wise card-payment exchange) and avoid PARTIALLY_PAID rounding.",
     {
       clients_id: coerceId.describe("Supplier client ID"),
       client_name: z.string().describe("Supplier name"),
@@ -1279,6 +1279,10 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       vat_price: z.number().describe("Total VAT amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       gross_price: z.number().describe("Total gross amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
+      currency_rate: z.number().positive().optional().describe("Exchange rate as EUR per 1 foreign currency unit. Required when cl_currencies_id != EUR. For Wise card payments use Source amount (after fees) / Target amount."),
+      base_net_price: z.number().optional().describe("EUR equivalent of net_price (foreign-currency invoices). Auto-derived from currency_rate when omitted."),
+      base_vat_price: z.number().optional().describe("EUR equivalent of vat_price (foreign-currency invoices). Auto-derived from currency_rate when omitted."),
+      base_gross_price: z.number().optional().describe("EUR equivalent of gross_price (foreign-currency invoices). Pass the actual settled EUR amount (Wise Source amount after fees) to avoid PARTIALLY_PAID jääk. Auto-derived from currency_rate when omitted."),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
       items: jsonObjectArrayInput.describe(
         "Array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. Legacy callers may still pass a JSON array string. " +
@@ -1303,6 +1307,13 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         return toolError({ error: "Account validation failed", details: dimErrors });
       }
 
+      const currencyCode = (params.cl_currencies_id ?? "EUR").toUpperCase();
+      if (currencyCode !== "EUR" && (params.currency_rate === undefined || params.currency_rate === null)) {
+        return toolError({
+          error: `currency_rate is required when cl_currencies_id="${currencyCode}". Pass EUR per 1 ${currencyCode} (Wise: Source amount / Target amount).`,
+        });
+      }
+
       const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.clients_id,
         client_name: params.client_name,
@@ -1310,7 +1321,11 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
         create_date: params.create_date,
         journal_date: params.journal_date,
         term_days: params.term_days,
-        cl_currencies_id: params.cl_currencies_id ?? "EUR",
+        cl_currencies_id: currencyCode,
+        currency_rate: params.currency_rate,
+        base_net_price: params.base_net_price,
+        base_vat_price: params.base_vat_price,
+        base_gross_price: params.base_gross_price,
         liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
         bank_ref_number: params.bank_ref_number,
         bank_account_no: params.bank_account_no,
@@ -1390,113 +1405,5 @@ export function registerCrudTools(server: McpServer, api: ApiContext): void {
       return { content: [{ type: "text", text: toMcpJson(result) }] };
     });
 
-  // =====================
-  // REFERENCE DATA (read-only)
-  // =====================
-
-  registerTool(server, "list_accounts", "Get chart of accounts (kontoplaani kontod)", {}, { ...readOnly, title: "List Accounts" }, async () => {
-    const result = await api.readonly.getAccounts();
-    const compact = result.map(a => ({
-      id: a.id,
-      balance_type: a.balance_type,
-      account_type_est: a.account_type_est,
-      name_est: a.name_est,
-      name_eng: a.name_eng,
-      is_valid: a.is_valid,
-      allows_dimensions: a.allows_dimensions,
-      is_vat_account: a.is_vat_account,
-      is_fixed_asset: a.is_fixed_asset,
-      transaction_in_bindable: a.transaction_in_bindable,
-      transaction_out_bindable: a.transaction_out_bindable,
-      cl_account_groups: a.cl_account_groups,
-    }));
-    return { content: [{ type: "text", text: toMcpJson(compact) }] };
-  });
-
-  registerTool(server, "list_account_dimensions", "Get account dimensions (alamkontod)", {}, { ...readOnly, title: "List Account Dimensions" }, async () => {
-    const result = await api.readonly.getAccountDimensions();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  registerTool(server, "list_currencies", "Get available currencies", {}, { ...readOnly, title: "List Currencies" }, async () => {
-    const result = await api.readonly.getCurrencies();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  registerTool(server, "list_sale_articles", "Get sales articles (müügiartiklid)", {}, { ...readOnly, title: "List Sale Articles" }, async () => {
-    const result = await api.readonly.getSaleArticles();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  registerTool(server, "list_purchase_articles", "Get purchase articles (ostuartiklid)", {}, { ...readOnly, title: "List Purchase Articles" }, async () => {
-    const result = await api.readonly.getPurchaseArticles();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  registerTool(server, "list_templates", "Get sales invoice templates", {}, { ...readOnly, title: "List Invoice Templates" }, async () => {
-    const result = await api.readonly.getTemplates();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  registerTool(server, "list_projects", "Get cost/profit centers (projektid)", {}, { ...readOnly, title: "List Projects" }, async () => {
-    const result = await api.readonly.getProjects();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  registerTool(server, "get_invoice_info", "Get company invoice settings", {}, { ...readOnly, title: "Get Invoice Settings" }, async () => {
-    const result = await api.readonly.getInvoiceInfo();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  registerTool(server, "get_vat_info", "Get company VAT information (KMKR)", {}, { ...readOnly, title: "Get VAT Info" }, async () => {
-    const result = await api.readonly.getVatInfo();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  // Invoice series CRUD
-  registerTool(server, "list_invoice_series", "Get invoice numbering series", {}, { ...readOnly, title: "List Invoice Series" }, async () => {
-    const result = await api.readonly.getInvoiceSeries();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  registerTool(server, "create_invoice_series", "Create an invoice series", {
-    number_prefix: z.string().describe("Invoice number prefix"),
-    number_start_value: z.number().describe("Starting number"),
-    term_days: z.number().describe("Default payment term"),
-    is_active: z.boolean().describe("Is active"),
-    is_default: z.boolean().describe("Is default series"),
-    overdue_charge: z.number().optional().describe("Delinquency charge per day"),
-  }, { ...create, title: "Create Invoice Series" }, async (params) => {
-    const result = await api.readonly.createInvoiceSeries(params);
-    logAudit({
-      tool: "create_invoice_series", action: "CREATED", entity_type: "invoice_series",
-      entity_id: result.created_object_id,
-      summary: `Created invoice series "${params.number_prefix}"`,
-      details: { number_prefix: params.number_prefix, number_start_value: params.number_start_value },
-    });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  // Bank accounts CRUD
-  registerTool(server, "list_bank_accounts", "Get company bank accounts", {}, { ...readOnly, title: "List Bank Accounts" }, async () => {
-    const result = await api.readonly.getBankAccounts();
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
-
-  registerTool(server, "create_bank_account", "Create a bank account", {
-    account_name_est: z.string().describe("Account name"),
-    account_no: z.string().describe("Account number (IBAN)"),
-    cl_banks_id: z.number().optional().describe("Bank ID"),
-    swift_code: z.string().optional().describe("SWIFT/BIC code"),
-    show_in_sale_invoices: z.boolean().optional().describe("Show on invoices"),
-  }, { ...create, title: "Create Bank Account" }, async (params) => {
-    const result = await api.readonly.createBankAccount(params);
-    logAudit({
-      tool: "create_bank_account", action: "CREATED", entity_type: "bank_account",
-      entity_id: result.created_object_id,
-      summary: `Created bank account "${params.account_name_est}" (${params.account_no})`,
-      details: { account_name: params.account_name_est, account_no: params.account_no },
-    });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
-  });
+  registerReferenceDataTools(server, api);
 }

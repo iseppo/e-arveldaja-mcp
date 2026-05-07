@@ -20,6 +20,19 @@ export const roundMoney = (v: number): number => {
   return (v < 0 ? -rounded : rounded) || 0;
 };
 
+/**
+ * Round to N decimals. Use for non-money quantities (exchange rates, ratios)
+ * where 2dp would lose meaningful precision. Currency conversion uses 6dp
+ * to match what most APIs accept and Wise's published precision.
+ */
+export const roundTo = (value: number, decimals: number): number => {
+  if (value === 0) return 0;
+  if (Number.isNaN(value)) throw new Error("roundTo received NaN");
+  if (!Number.isFinite(value)) throw new Error("roundTo received a non-finite value");
+  const factor = Math.pow(10, decimals);
+  return Math.round(value * factor) / factor;
+};
+
 /** Parse a vat_rate_dropdown string (e.g. "9", "24", "-", "9,5") to a numeric rate or 0 for "-". */
 export function parseVatRateDropdown(value: string | number | null | undefined): number {
   if (value == null) return 0;
