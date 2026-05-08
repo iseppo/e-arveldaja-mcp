@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { readFileSync, readdirSync } from "fs";
 import { z } from "zod";
 import {
   safeJsonParse,
@@ -11,6 +12,12 @@ import {
   MAX_JSON_INPUT_SIZE,
   registerCrudTools,
 } from "./crud-tools.js";
+import { registerClientTools } from "./crud/clients.js";
+import { registerJournalTools } from "./crud/journals.js";
+import { registerProductTools } from "./crud/products.js";
+import { registerPurchaseInvoiceTools } from "./crud/purchase-invoices.js";
+import { registerSaleInvoiceTools } from "./crud/sale-invoices.js";
+import { registerTransactionTools } from "./crud/transactions.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
 function getCrudToolHarness(toolName: string, overrides?: {
@@ -97,6 +104,23 @@ describe("safeJsonParse", () => {
 });
 
 describe("registerCrudTools", () => {
+  it("exposes focused domain registrars for CRUD tool groups", () => {
+    expect(registerClientTools).toEqual(expect.any(Function));
+    expect(registerProductTools).toEqual(expect.any(Function));
+    expect(registerJournalTools).toEqual(expect.any(Function));
+    expect(registerTransactionTools).toEqual(expect.any(Function));
+    expect(registerSaleInvoiceTools).toEqual(expect.any(Function));
+    expect(registerPurchaseInvoiceTools).toEqual(expect.any(Function));
+  });
+
+  it("keeps domain registrars independent from the aggregate CRUD module", () => {
+    const crudDir = new URL("./crud/", import.meta.url);
+    for (const fileName of readdirSync(crudDir).filter(name => name.endsWith(".ts") && name !== "shared.ts")) {
+      const source = readFileSync(new URL(fileName, crudDir), "utf-8");
+      expect(source, fileName).not.toContain('from "../crud-tools.js"');
+    }
+  });
+
   it("keeps the public CRUD and reference tool surface registered", () => {
     const server = { registerTool: vi.fn() };
     const api = {
