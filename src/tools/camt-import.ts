@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { Client, Transaction } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
@@ -795,8 +796,32 @@ function transactionTypeForDirection(direction: ParsedCamtEntry["direction"]): "
 const isoDateString = (description: string) =>
   z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe(description);
 
+interface CamtToolResponse {
+  content: Array<{ type: "text"; text: string }>;
+}
+type CamtToolHandler = (args: Record<string, unknown>) => Promise<CamtToolResponse>;
+
 export function registerCamtImportTools(server: McpServer, api: ApiContext): void {
-  registerTool(server, 
+  const handlers = new Map<string, CamtToolHandler>();
+
+  function registerCapturedTool<Args extends z.ZodRawShape>(
+    name: string,
+    description: string,
+    paramsSchema: Args,
+    annotations: ToolAnnotations,
+    cb: (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown,
+  ): void {
+    handlers.set(name, cb as unknown as CamtToolHandler);
+    registerTool(server, name, description, paramsSchema, annotations, cb);
+  }
+
+  async function invokeCapturedTool(name: string, args: Record<string, unknown>): Promise<CamtToolResponse> {
+    const handler = handlers.get(name);
+    if (!handler) throw new Error(`Internal error: handler "${name}" is not registered`);
+    return handler(args);
+  }
+
+  registerCapturedTool(
     "parse_camt053",
     "Parse a CAMT.053 bank statement XML file and preview statement metadata, entries, summary, and duplicate matches against existing transactions.",
     {
@@ -833,7 +858,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     }
   );
 
-  registerTool(server,
+  registerCapturedTool(
     "import_camt053",
     "Parse a CAMT.053 bank statement XML file and create bank transactions in e-arveldaja. Skips existing duplicates by AcctSvcrRef bank reference and exact duplicate rows within the same file. DRY RUN by default.",
     {
