@@ -525,11 +525,10 @@ export function getClientCountryFromIban(iban?: string | null): string | undefin
   return IBAN_COUNTRY_TO_CLIENT_COUNTRY[countryCode] ?? countryCode;
 }
 
-export function inferSupplierCountry(fields: Pick<ExtractedReceiptFields, "supplier_iban" | "supplier_vat_no" | "raw_text">): string {
+export function inferSupplierCountry(fields: Pick<ExtractedReceiptFields, "supplier_iban" | "supplier_vat_no" | "raw_text">): string | undefined {
   return getClientCountryFromIban(fields.supplier_iban) ??
     getClientCountryFromVatNumber(fields.supplier_vat_no) ??
-    getClientCountryFromText(fields.raw_text) ??
-    "EST";
+    getClientCountryFromText(fields.raw_text);
 }
 
 // Phrases an invoice/receipt prints when VAT is shifted to the recipient

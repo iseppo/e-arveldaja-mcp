@@ -259,6 +259,12 @@ interface ReceiptProcessingContext {
   isVatRegistered: boolean;
 }
 
+export function supplierCountryNeedsReview(supplierResolution: SupplierResolution): boolean {
+  return !supplierResolution.client &&
+    !!supplierResolution.preview_client &&
+    !supplierResolution.preview_client.cl_code_country;
+}
+
 interface TransactionGroup {
   normalized_counterparty: string;
   display_counterparty: string;
@@ -1780,6 +1786,28 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
           if (!supplierResolution.client && !supplierResolution.preview_client) {
             const fallback = summarize();
             notes.push("Supplier could not be resolved or prepared for creation.");
+            maybeAddLlmFallbackNote(notes, fallback);
+            results.push({
+              file,
+              classification,
+              status: "needs_review",
+              extracted,
+              llm_fallback: fallback,
+              supplier_resolution: supplierResolution,
+              review_guidance: buildReceiptReviewGuidance({
+                classification,
+                notes,
+                extracted,
+                llmFallback: fallback,
+              }),
+              notes,
+            });
+            continue;
+          }
+
+          if (supplierCountryNeedsReview(supplierResolution)) {
+            const fallback = summarize();
+            notes.push("Supplier country could not be inferred from IBAN, VAT number, or OCR country text. Manual review required before booking.");
             maybeAddLlmFallbackNote(notes, fallback);
             results.push({
               file,

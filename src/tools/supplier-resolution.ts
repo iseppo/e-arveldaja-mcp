@@ -228,7 +228,9 @@ export async function resolveSupplierInternal(
 
   const overrides = options?._resolveSupplierOverrides;
   const supplierCountry = overrides?.country ?? inferSupplierCountry(fields);
-  const registryData = await fetchRegistryData(fields.supplier_reg_code, supplierCountry, fields.supplier_name);
+  const registryData = supplierCountry
+    ? await fetchRegistryData(fields.supplier_reg_code, supplierCountry, fields.supplier_name)
+    : null;
   const clientName = registryData?.name ?? fields.supplier_name;
   if (!clientName) {
     return {
@@ -278,6 +280,16 @@ export async function resolveSupplierInternal(
   };
 
   if (!execute) {
+    return {
+      found: false,
+      created: false,
+      preview_client: previewClient,
+      registry_data: registryData,
+      ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
+    };
+  }
+
+  if (!supplierCountry) {
     return {
       found: false,
       created: false,

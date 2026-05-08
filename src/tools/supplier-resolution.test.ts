@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
@@ -374,5 +374,34 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
     expect(result.match_type).toBe("vat_no");
     expect(result.client?.id).toBe(200);
     expect(result.self_match_blocked).toBeUndefined();
+  });
+
+  it("does not create a supplier when country cannot be inferred", async () => {
+    const api = {
+      clients: {
+        create: vi.fn().mockResolvedValue({ created_object_id: 300 }),
+        get: vi.fn().mockResolvedValue(makeClient({ id: 300, name: "Acme GmbH" })),
+      },
+    } as unknown as ApiContext;
+
+    const result = await resolveSupplierInternal(
+      api,
+      [],
+      {
+        supplier_name: "Acme GmbH",
+        raw_text: "Acme GmbH\nInvoice 123\nTotal 10.00",
+      },
+      true,
+    );
+
+    expect(result).toMatchObject({
+      found: false,
+      created: false,
+      preview_client: {
+        name: "Acme GmbH",
+        cl_code_country: undefined,
+      },
+    });
+    expect(api.clients.create).not.toHaveBeenCalled();
   });
 });

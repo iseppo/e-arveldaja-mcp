@@ -34,6 +34,7 @@ import {
   resolveSupplierFromTransaction,
   revalidateReceiptFilePath,
   sanitizeReceiptResultForOutput,
+  supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
 
 vi.mock("../file-validation.js", async (importOriginal) => ({
@@ -828,6 +829,30 @@ describe("inferSupplierCountry", () => {
       supplier_vat_no: "FI32738114",
       raw_text: "",
     })).toBe("FIN");
+  });
+
+  it("does not silently default to Estonia when no country signal is present", () => {
+    expect(inferSupplierCountry({
+      raw_text: "Acme GmbH\nInvoice 123\nTotal 10.00",
+    })).toBeUndefined();
+  });
+});
+
+describe("supplierCountryNeedsReview", () => {
+  it("requires review for a preview supplier with no inferred country", () => {
+    expect(supplierCountryNeedsReview({
+      found: false,
+      created: false,
+      preview_client: { name: "Acme GmbH" },
+    })).toBe(true);
+  });
+
+  it("does not require review when an existing client resolved", () => {
+    expect(supplierCountryNeedsReview({
+      found: true,
+      created: false,
+      client: { id: 1, name: "Acme GmbH", cl_code_country: "DEU" } as any,
+    })).toBe(false);
   });
 });
 
