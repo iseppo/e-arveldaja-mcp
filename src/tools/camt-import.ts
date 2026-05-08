@@ -4,7 +4,7 @@ import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
-import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { Client, Transaction } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
 import { resolveFileInput } from "../file-validation.js";
@@ -16,6 +16,7 @@ import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
+import { arrayAt, isRecord, recordAt } from "../record-utils.js";
 
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -801,6 +802,47 @@ interface CamtToolResponse {
 }
 type CamtToolHandler = (args: Record<string, unknown>) => Promise<CamtToolResponse>;
 
+function processCamtExecuteArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const { execute: _execute, ...rest } = args;
+  return { mode: "execute", ...rest };
+}
+
+function remapProcessCamtWorkflowAction(action: unknown): unknown {
+  if (!isRecord(action) || action.tool !== "import_camt053") return action;
+  const args = recordAt(action, "args") ?? {};
+  return {
+    ...action,
+    tool: "process_camt053",
+    args: processCamtExecuteArgs(args),
+  };
+}
+
+function remapProcessCamtApprovalPreview(preview: unknown): unknown {
+  if (!isRecord(preview) || preview.execute_tool !== "import_camt053") return preview;
+  const executeArgs = recordAt(preview, "execute_args") ?? {};
+  return {
+    ...preview,
+    source_tool: "process_camt053",
+    execute_tool: "process_camt053",
+    execute_args: processCamtExecuteArgs(executeArgs),
+  };
+}
+
+function remapProcessCamtWorkflow(result: Record<string, unknown>): Record<string, unknown> {
+  const workflow = recordAt(result, "workflow");
+  if (!workflow) return result;
+
+  return {
+    ...result,
+    workflow: {
+      ...workflow,
+      recommended_next_action: remapProcessCamtWorkflowAction(workflow.recommended_next_action),
+      available_actions: arrayAt(workflow, "available_actions").map(remapProcessCamtWorkflowAction),
+      approval_previews: arrayAt(workflow, "approval_previews").map(remapProcessCamtApprovalPreview),
+    },
+  };
+}
+
 export function registerCamtImportTools(server: McpServer, api: ApiContext): void {
   const handlers = new Map<string, CamtToolHandler>();
 
@@ -815,10 +857,17 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
 
-  async function invokeCapturedTool(name: string, args: Record<string, unknown>): Promise<CamtToolResponse> {
+  async function invokeCapturedTool(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const handler = handlers.get(name);
     if (!handler) throw new Error(`Internal error: handler "${name}" is not registered`);
-    return handler(args);
+    const result = await handler(args);
+    const text = result.content[0]?.text;
+    if (!text) throw new Error(`CAMT wrapper received no text payload from ${name}`);
+
+    const parsed = parseMcpResponse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : { value: parsed };
   }
 
   registerCapturedTool(
@@ -1190,5 +1239,57 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         }],
       };
     }
+  );
+
+  registerTool(server,
+    "process_camt053",
+    "Merged CAMT.053 entry point. Use mode='parse' to inspect a bank statement, mode='dry_run' to preview transaction import, or mode='execute' to create transactions after approval.",
+    {
+      mode: z.enum(["parse", "dry_run", "execute"]).optional().describe("Workflow phase to run. Defaults to parse."),
+      file_path: z.string().describe("Absolute path to the CAMT.053 XML file. Also accepts a base64 payload (\"base64:<data>\" or \"base64:xml:<data>\") for cross-system file transfer from remote MCP clients."),
+      accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID in e-arveldaja. Required for dry_run and execute modes."),
+      date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
+      date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
+    },
+    { ...batch, openWorldHint: true, title: "Process CAMT.053" },
+    async ({ mode, file_path, accounts_dimensions_id, date_from, date_to }) => {
+      const selectedMode = mode ?? "parse";
+      let delegatedTool: string;
+      let delegatedArgs: Record<string, unknown>;
+
+      if (selectedMode === "parse") {
+        delegatedTool = "parse_camt053";
+        delegatedArgs = { file_path };
+      } else {
+        if (accounts_dimensions_id === undefined) {
+          throw new Error("accounts_dimensions_id is required when mode is dry_run or execute");
+        }
+        delegatedTool = "import_camt053";
+        delegatedArgs = {
+          file_path,
+          accounts_dimensions_id,
+          execute: selectedMode === "execute",
+          ...(date_from !== undefined ? { date_from } : {}),
+          ...(date_to !== undefined ? { date_to } : {}),
+        };
+      }
+
+      const delegatedResult = await invokeCapturedTool(delegatedTool, delegatedArgs);
+      const result = selectedMode === "dry_run"
+        ? remapProcessCamtWorkflow(delegatedResult)
+        : delegatedResult;
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            recommended_entry_point: "process_camt053",
+            mode: selectedMode,
+            delegated_tool: delegatedTool,
+            delegated_args: delegatedArgs,
+            result,
+          }),
+        }],
+      };
+    },
   );
 }

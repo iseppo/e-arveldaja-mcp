@@ -191,9 +191,9 @@ Expected: pass.
 - Modify: `src/tools/bank-reconciliation.ts`
 - Modify: `src/tools/bank-reconciliation.test.ts`
 
-**Current baseline:** `reconcile_bank_transactions` is already registered and covered by wrapper tests. The remaining merged-wrapper work in this slice is `process_camt053` and `receipt_batch`; keep the existing reconciliation wrapper tests passing while adding those wrappers.
+**Current baseline:** `reconcile_bank_transactions` is already registered and covered by wrapper tests. `process_camt053` is now registered and covered for parse, dry-run, and execute modes. The remaining merged-wrapper work in this slice is `receipt_batch`; keep the existing CAMT and reconciliation wrapper tests passing while adding it.
 
-- [ ] **Step 1: Add tests for `process_camt053`**
+- [x] **Step 1: Add tests for `process_camt053`**
 
 Modes: `parse`, `dry_run`, `execute`.
 
@@ -205,7 +205,7 @@ Modes: `scan`, `dry_run`, `create`, `create_and_confirm`.
 
 Modes: `suggest`, `dry_run_auto_confirm`, `execute_auto_confirm`, and `inter_account_dry_run`.
 
-- [ ] **Step 4: Verify RED for the remaining wrappers**
+- [ ] **Step 4: Verify RED for the remaining wrapper**
 
 Run:
 
@@ -213,9 +213,9 @@ Run:
 npm test -- src/tools/camt-import-tools.test.ts src/tools/receipt-inbox-tools.test.ts src/tools/bank-reconciliation.test.ts
 ```
 
-Expected: fail only for the missing `process_camt053` and `receipt_batch` wrappers. Existing `reconcile_bank_transactions` tests should remain green.
+Expected: fail only for the missing `receipt_batch` wrapper. Existing `process_camt053` and `reconcile_bank_transactions` tests should remain green.
 
-- [ ] **Step 5: Implement remaining wrappers without deleting old tools**
+- [ ] **Step 5: Implement remaining wrapper without deleting old tools**
 
 Each wrapper calls the same internal service path as the existing tool. The old tool names remain the stable primitive API.
 

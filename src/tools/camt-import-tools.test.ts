@@ -64,6 +64,7 @@ function setupCamtTool(options: {
   findByCodeResult?: unknown;
   findByNameResult?: unknown[];
   findByNameImpl?: (name: string) => unknown[] | Promise<unknown[]>;
+  toolName?: string;
 } = {}) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
@@ -86,7 +87,7 @@ function setupCamtTool(options: {
 
   registerCamtImportTools(server, api);
 
-  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "import_camt053");
+  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === (options.toolName ?? "import_camt053"));
   if (!registration) throw new Error("Tool was not registered");
 
   return {
@@ -96,6 +97,111 @@ function setupCamtTool(options: {
 }
 
 describe("camt import tool", () => {
+  describe("process_camt053 wrapper", () => {
+    it("runs CAMT parsing through the merged entry point", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(singleEntryXml);
+
+      const { handler } = setupCamtTool({ toolName: "process_camt053" });
+
+      const result = await handler({ mode: "parse", file_path: "/tmp/camt.xml" });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload).toMatchObject({
+        recommended_entry_point: "process_camt053",
+        mode: "parse",
+        delegated_tool: "parse_camt053",
+        delegated_args: {
+          file_path: "/tmp/camt.xml",
+        },
+      });
+      expect(payload.result.summary.entry_count).toBe(1);
+      expect(payload.result.entries[0]!.description).toEqual(expect.stringMatching(wrapped("Test payment")));
+    });
+
+    it("dry-runs CAMT import through the merged entry point", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(singleEntryXml);
+
+      const { api, handler } = setupCamtTool({ toolName: "process_camt053" });
+
+      const result = await handler({
+        mode: "dry_run",
+        file_path: "/tmp/camt.xml",
+        accounts_dimensions_id: 7,
+        date_from: "2026-02-01",
+        date_to: "2026-02-28",
+      });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload).toMatchObject({
+        recommended_entry_point: "process_camt053",
+        mode: "dry_run",
+        delegated_tool: "import_camt053",
+        delegated_args: {
+          file_path: "/tmp/camt.xml",
+          accounts_dimensions_id: 7,
+          date_from: "2026-02-01",
+          date_to: "2026-02-28",
+          execute: false,
+        },
+      });
+      expect(api.transactions.create).not.toHaveBeenCalled();
+      expect(payload.result.mode).toBe("DRY_RUN");
+      expect(payload.result.sample[0]!.status).toBe("would_create");
+      expect(payload.result.workflow.recommended_next_action).toMatchObject({
+        kind: "approve_tool_call",
+        tool: "process_camt053",
+        args: {
+          mode: "execute",
+          file_path: "/tmp/camt.xml",
+          accounts_dimensions_id: 7,
+          date_from: "2026-02-01",
+          date_to: "2026-02-28",
+        },
+      });
+      expect(payload.result.workflow.approval_previews[0]).toMatchObject({
+        source_tool: "process_camt053",
+        execute_tool: "process_camt053",
+        execute_args: {
+          mode: "execute",
+          file_path: "/tmp/camt.xml",
+          accounts_dimensions_id: 7,
+          date_from: "2026-02-01",
+          date_to: "2026-02-28",
+        },
+      });
+    });
+
+    it("executes CAMT import only in execute mode", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(singleEntryXml);
+
+      const { api, handler } = setupCamtTool({ toolName: "process_camt053" });
+
+      const result = await handler({
+        mode: "execute",
+        file_path: "/tmp/camt.xml",
+        accounts_dimensions_id: 7,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload).toMatchObject({
+        recommended_entry_point: "process_camt053",
+        mode: "execute",
+        delegated_tool: "import_camt053",
+        delegated_args: {
+          file_path: "/tmp/camt.xml",
+          accounts_dimensions_id: 7,
+          execute: true,
+        },
+      });
+      expect(api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(payload.result.mode).toBe("EXECUTED");
+      expect(payload.result.sample[0]!.status).toBe("created");
+    });
+  });
+
   it("does not treat VOID transactions as duplicates", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
