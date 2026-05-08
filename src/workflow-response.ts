@@ -56,7 +56,9 @@ type MaterializingDryRunTool =
   | "import_camt053"
   | "import_wise_transactions"
   | "process_receipt_batch"
-  | "apply_transaction_classifications";
+  | "apply_transaction_classifications"
+  | "auto_confirm_exact_matches"
+  | "reconcile_inter_account_transfers";
 
 function actionFromQuestion(question: unknown): WorkflowAction | undefined {
   if (!isRecord(question)) return undefined;
@@ -122,6 +124,10 @@ function blockedDryRunLabel(tool: MaterializingDryRunTool): string {
       return "Review blocked receipt batch dry run";
     case "apply_transaction_classifications":
       return "Review blocked transaction classification dry run";
+    case "auto_confirm_exact_matches":
+      return "Review blocked exact-match confirmation dry run";
+    case "reconcile_inter_account_transfers":
+      return "Review blocked inter-account reconciliation dry run";
   }
 }
 
@@ -129,7 +135,9 @@ function isMaterializingDryRunTool(tool: string): tool is MaterializingDryRunToo
   return tool === "import_camt053"
     || tool === "import_wise_transactions"
     || tool === "process_receipt_batch"
-    || tool === "apply_transaction_classifications";
+    || tool === "apply_transaction_classifications"
+    || tool === "auto_confirm_exact_matches"
+    || tool === "reconcile_inter_account_transfers";
 }
 
 function doneAction(): WorkflowAction {
@@ -304,6 +312,53 @@ export function approvalPreviewFromDryRunStep(step: unknown): ApprovalPreview | 
     };
   }
 
+  if (tool === "auto_confirm_exact_matches") {
+    const autoConfirmed = numberAt(preview, "auto_confirmed") ?? 0;
+    const skipped = numberAt(preview, "skipped") ?? 0;
+    const errorCount = numberAt(preview, "error_count") ?? 0;
+    if (autoConfirmed <= 0 || skipped > 0 || errorCount > 0) return undefined;
+    return {
+      title: "Approve exact-match transaction confirmations",
+      summary: stringAt(step, "summary") ?? `Exact-match dry run would confirm ${autoConfirmed} bank transaction(s).`,
+      approval_required: true,
+      source_tool: tool,
+      execute_tool: tool,
+      execute_args: withExecuteTrue(args),
+      accounting_impact: [
+        impactLine(autoConfirmed, "bank transaction confirmation"),
+        impactLine(skipped, "skipped transaction"),
+        errorCount > 0 ? `${errorCount} confirmation error(s) must be reviewed before approval` : undefined,
+      ].filter((line): line is string => line !== undefined),
+      duplicate_risk: "Review invoice and transaction matches before approving confirmation.",
+      source_documents: sourceDocuments(args),
+    };
+  }
+
+  if (tool === "reconcile_inter_account_transfers") {
+    const matchedPairs = numberAt(preview, "matched_pairs") ?? 0;
+    const matchedOneSided = numberAt(preview, "matched_one_sided") ?? 0;
+    const skippedAmbiguous = numberAt(preview, "skipped_ambiguous") ?? 0;
+    const errorCount = numberAt(preview, "error_count") ?? 0;
+    if ((matchedPairs + matchedOneSided) <= 0 || skippedAmbiguous > 0 || errorCount > 0) return undefined;
+    return {
+      title: "Approve inter-account transfer reconciliation",
+      summary: stringAt(step, "summary") ?? `Inter-account dry run would reconcile ${matchedPairs + matchedOneSided} transfer(s).`,
+      approval_required: true,
+      source_tool: tool,
+      execute_tool: tool,
+      execute_args: withExecuteTrue(args),
+      accounting_impact: [
+        impactLine(matchedPairs, "inter-account transfer pair"),
+        impactLine(matchedOneSided, "one-sided inter-account transfer"),
+        impactLine(numberAt(preview, "skipped_already_handled"), "already handled transfer"),
+        skippedAmbiguous > 0 ? `${skippedAmbiguous} ambiguous transfer(s) must be reviewed before approval` : undefined,
+        errorCount > 0 ? `${errorCount} reconciliation error(s) must be reviewed before approval` : undefined,
+      ].filter((line): line is string => line !== undefined),
+      duplicate_risk: "Existing inter-account journals are checked before approval; review already-handled and ambiguous transfers.",
+      source_documents: sourceDocuments(args),
+    };
+  }
+
   return undefined;
 }
 
@@ -343,6 +398,22 @@ function blockedDryRunReasons(tool: MaterializingDryRunTool, preview: Record<str
       const failed = numberAt(preview, "failed") ?? 0;
       return [
         impactLine(failed, "failed classification group"),
+      ].filter((line): line is string => line !== undefined);
+    }
+    case "auto_confirm_exact_matches": {
+      const skipped = numberAt(preview, "skipped") ?? 0;
+      const errors = numberAt(preview, "error_count") ?? 0;
+      return [
+        impactLine(skipped, "skipped transaction"),
+        impactLine(errors, "confirmation error"),
+      ].filter((line): line is string => line !== undefined);
+    }
+    case "reconcile_inter_account_transfers": {
+      const ambiguous = numberAt(preview, "skipped_ambiguous") ?? 0;
+      const errors = numberAt(preview, "error_count") ?? 0;
+      return [
+        impactLine(ambiguous, "ambiguous transfer"),
+        impactLine(errors, "reconciliation error"),
       ].filter((line): line is string => line !== undefined);
     }
   }

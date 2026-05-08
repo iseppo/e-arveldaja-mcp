@@ -8,6 +8,7 @@ import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js"
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
+import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
@@ -17,6 +18,17 @@ const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
 type BankReconciliationToolResult = Promise<{ content: Array<{ text: string }> }>;
 type BankReconciliationToolHandler = (args: Record<string, unknown>) => BankReconciliationToolResult;
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function numberValue(record: Record<string, unknown>, key: string): number {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
 
 function validateInterAccountDateGap(maxDateGap: number | undefined): number {
   const value = maxDateGap ?? 1;
@@ -1484,6 +1496,23 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
       }
 
       const result = await invokeCapturedTool(delegatedTool, delegatedArgs);
+      const resultSummary = recordValue(result.summary);
+      const workflowSummary = selectedMode === "dry_run_auto_confirm"
+        ? `Exact-match dry run would confirm ${numberValue(resultSummary, "auto_confirmed")} bank transaction(s), skip ${numberValue(resultSummary, "skipped")}, and report ${numberValue(resultSummary, "error_count")} error(s).`
+        : selectedMode === "inter_account_dry_run"
+          ? `Inter-account dry run would reconcile ${numberValue(resultSummary, "matched_pairs")} transfer pair(s), ${numberValue(resultSummary, "matched_one_sided")} one-sided transfer(s), skip ${numberValue(resultSummary, "skipped_ambiguous")} ambiguous transfer(s), and report ${numberValue(resultSummary, "error_count")} error(s).`
+          : undefined;
+      const workflow = workflowSummary
+        ? buildWorkflowEnvelope({
+            summary: workflowSummary,
+            dry_run_steps: [{
+              tool: delegatedTool,
+              summary: workflowSummary,
+              suggested_args: delegatedArgs,
+              preview: resultSummary,
+            }],
+          })
+        : undefined;
       return {
         content: [{
           type: "text",
@@ -1492,6 +1521,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
             mode: selectedMode,
             delegated_tool: delegatedTool,
             delegated_args: delegatedArgs,
+            ...(workflow ? { workflow } : {}),
             result,
           }),
         }],

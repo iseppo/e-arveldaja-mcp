@@ -168,6 +168,96 @@ describe("reconcile_transactions", () => {
       expect(payload.result.results[0]!.status).toBe("would_confirm");
     });
 
+    it("exposes an approval action after exact-match confirmation dry run", async () => {
+      const handler = setupReconciliationTool({
+        toolName: "reconcile_bank_transactions",
+        transactions: [{
+          id: 2,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 100,
+          date: "2026-03-20",
+          bank_account_name: "Acme OU",
+          ref_number: "RF123",
+        }],
+        sales: [{
+          id: 11,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+          number: "ARV-11",
+          clients_id: 21,
+          client_name: "Acme OU",
+          gross_price: 100,
+          bank_ref_number: "RF123",
+        }],
+      });
+
+      const result = await handler({ mode: "dry_run_auto_confirm", min_confidence: 90 });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.workflow).toMatchObject({
+        contract: "workflow_action_v1",
+        recommended_next_action: {
+          kind: "approve_tool_call",
+          tool: "auto_confirm_exact_matches",
+          args: {
+            execute: true,
+            min_confidence: 90,
+          },
+        },
+        approval_previews: [
+          expect.objectContaining({
+            title: "Approve exact-match transaction confirmations",
+            accounting_impact: expect.arrayContaining(["1 bank transaction confirmation"]),
+          }),
+        ],
+      });
+    });
+
+    it("blocks exact-match approval when dry run reports manual review errors", async () => {
+      const handler = setupReconciliationTool({
+        toolName: "reconcile_bank_transactions",
+        transactions: [{
+          id: 18,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 1000,
+          base_amount: 92,
+          cl_currencies_id: "SEK",
+          date: "2026-03-21",
+          bank_account_name: "Acme OU",
+          ref_number: "RF-BASE-92",
+        }],
+        sales: [{
+          id: 27,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+          number: "ARV-27",
+          clients_id: 37,
+          client_name: "Acme OU",
+          gross_price: 100,
+          base_gross_price: 92,
+          cl_currencies_id: "USD",
+          bank_ref_number: "RF-BASE-92",
+        }],
+      });
+
+      const result = await handler({ mode: "dry_run_auto_confirm", min_confidence: 90 });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.workflow).toMatchObject({
+        contract: "workflow_action_v1",
+        approval_previews: [],
+        recommended_next_action: {
+          kind: "review_item",
+          label: "Review blocked exact-match confirmation dry run",
+          approval_required: false,
+        },
+      });
+    });
+
     it("executes exact-match confirmation only in execute_auto_confirm mode", async () => {
       const server = { registerTool: vi.fn() } as any;
       const api = {
@@ -224,6 +314,71 @@ describe("reconcile_transactions", () => {
       expect(payload.mode).toBe("inter_account_dry_run");
       expect(payload.result.mode).toBe("DRY_RUN");
       expect(payload.result.matched_pairs).toBe(1);
+    });
+
+    it("exposes an approval action after inter-account transfer dry run", async () => {
+      const { handler } = setupInterAccountTool({
+        transactions: [
+          { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", description: "Ülekanne SEB kontole" },
+          { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", description: "Ülekanne LHV kontolt" },
+        ],
+        bankAccounts: [
+          { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+          { id: 2, account_name_est: "SEB", account_no: "EE987654321098765432", iban_code: "EE987654321098765432", accounts_dimensions_id: 200 },
+        ],
+        toolName: "reconcile_bank_transactions",
+      });
+
+      const result = await handler({ mode: "inter_account_dry_run", max_date_gap: 1 });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.workflow).toMatchObject({
+        contract: "workflow_action_v1",
+        recommended_next_action: {
+          kind: "approve_tool_call",
+          tool: "reconcile_inter_account_transfers",
+          args: {
+            execute: true,
+            max_date_gap: 1,
+          },
+        },
+        approval_previews: [
+          expect.objectContaining({
+            title: "Approve inter-account transfer reconciliation",
+            accounting_impact: expect.arrayContaining(["1 inter-account transfer pair"]),
+          }),
+        ],
+      });
+    });
+
+    it("blocks inter-account approval when dry run reports ambiguous matches", async () => {
+      const { handler } = setupInterAccountTool({
+        transactions: [
+          { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE88888888888888", bank_account_name: "Transfer" },
+          { id: 26, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Transfer" },
+          { id: 27, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 300, bank_account_name: "Transfer" },
+        ],
+        bankAccounts: [
+          { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+          { id: 2, account_name_est: "SEB", account_no: "EE987654321098765432", iban_code: "EE987654321098765432", accounts_dimensions_id: 200 },
+          { id: 3, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+          { id: 4, account_name_est: "Savings", account_no: "EE88888888888888", iban_code: "EE88888888888888", accounts_dimensions_id: 400 },
+        ],
+        toolName: "reconcile_bank_transactions",
+      });
+
+      const result = await handler({ mode: "inter_account_dry_run" });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.workflow).toMatchObject({
+        contract: "workflow_action_v1",
+        approval_previews: [],
+        recommended_next_action: {
+          kind: "review_item",
+          label: "Review blocked inter-account reconciliation dry run",
+          approval_required: false,
+        },
+      });
     });
   });
 

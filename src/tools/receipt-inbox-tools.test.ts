@@ -78,6 +78,59 @@ function setupReceiptTool(
 }
 
 describe("receipt inbox tool status handling", () => {
+  it("receipt_batch scans receipt folders through the merged entry point", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "receipt-batch-wrapper-"));
+    try {
+      writeFileSync(join(tempDir, "receipt.pdf"), "%PDF-1.4\n", "utf-8");
+      const { handler } = setupReceiptTool("receipt_batch");
+
+      const result = await handler({ mode: "scan", folder_path: tempDir });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload).toMatchObject({
+        recommended_entry_point: "receipt_batch",
+        mode: "scan",
+        delegated_tool: "scan_receipt_folder",
+        delegated_args: { folder_path: tempDir },
+      });
+      expect(payload.result.files[0]!.name).toBe("receipt.pdf");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("receipt_batch delegates processing modes to process_receipt_batch", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "receipt-batch-wrapper-"));
+    try {
+      const { handler } = setupReceiptTool("receipt_batch");
+
+      for (const mode of ["dry_run", "create", "create_and_confirm"] as const) {
+        const result = await handler({
+          mode,
+          folder_path: tempDir,
+          accounts_dimensions_id: 100,
+        });
+        const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+        expect(payload).toMatchObject({
+          recommended_entry_point: "receipt_batch",
+          mode,
+          delegated_tool: "process_receipt_batch",
+          delegated_args: {
+            folder_path: tempDir,
+            accounts_dimensions_id: 100,
+            execution_mode: mode,
+          },
+          result: {
+            execution_mode: mode,
+          },
+        });
+      }
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("classify_bank_transactions classifies unmatched transactions through the merged entry point", async () => {
     const { handler } = setupReceiptTool("classify_bank_transactions", {
       transactions: [{

@@ -1624,7 +1624,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     },
   );
 
-  registerTool(server,
+  registerCapturedTool(
     "process_receipt_batch",
     "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback (with a confidence: low|medium|high score, see #20) for model/manual review. Use execution_mode='create' to create/upload PROJECT invoices, or execution_mode='create_and_confirm' only after approval for high-confidence rows. Legacy execute=true maps to execution_mode='create' (#19).",
     {
@@ -2073,6 +2073,61 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
               errors: sanitizedResults.filter(result => result.status === "failed"),
               needs_review: sanitizedResults.filter(result => result.status === "needs_review"),
             }),
+          }),
+        }],
+      };
+    },
+  );
+
+  registerTool(server,
+    "receipt_batch",
+    "Merged receipt batch entry point. Use mode='scan' to inspect supported files, mode='dry_run' to preview purchase invoice creation, mode='create' to create/upload PROJECT invoices after approval, or mode='create_and_confirm' only after explicit approval for high-confidence rows.",
+    {
+      mode: z.enum(["scan", "dry_run", "create", "create_and_confirm"]).optional().describe("Workflow phase to run. Defaults to scan."),
+      folder_path: z.string().describe("Folder path with receipts"),
+      accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID used when matching bank transactions. Required except in scan mode."),
+      date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
+      date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
+      file_types: z.array(z.enum(["pdf", "jpg", "png"])).optional().describe("Optional file type filter for scan mode"),
+    },
+    { ...batch, openWorldHint: true, title: "Receipt Batch" },
+    async ({ mode, folder_path, accounts_dimensions_id, date_from, date_to, file_types }) => {
+      const selectedMode = mode ?? "scan";
+      let delegatedTool: string;
+      let delegatedArgs: Record<string, unknown>;
+      let result: unknown;
+
+      if (selectedMode === "scan") {
+        delegatedTool = "scan_receipt_folder";
+        delegatedArgs = {
+          folder_path,
+          ...(file_types !== undefined ? { file_types } : {}),
+        };
+        result = await scanReceiptFolderInternal(folder_path, file_types);
+      } else {
+        if (accounts_dimensions_id === undefined) {
+          throw new Error("accounts_dimensions_id is required when mode is dry_run, create, or create_and_confirm");
+        }
+        delegatedTool = "process_receipt_batch";
+        delegatedArgs = {
+          folder_path,
+          accounts_dimensions_id,
+          execution_mode: selectedMode,
+          ...(date_from !== undefined ? { date_from } : {}),
+          ...(date_to !== undefined ? { date_to } : {}),
+        };
+        result = await invokeCapturedTool(delegatedTool, delegatedArgs);
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            recommended_entry_point: "receipt_batch",
+            mode: selectedMode,
+            delegated_tool: delegatedTool,
+            delegated_args: delegatedArgs,
+            result,
           }),
         }],
       };
