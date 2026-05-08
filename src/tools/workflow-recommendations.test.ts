@@ -39,9 +39,11 @@ describe("recommend_workflow", () => {
         default_mode: "dry_run",
       },
     });
+    expect(payload.raw.primary_tools).toContain("process_camt053");
+    expect(payload.raw.primary_tools).toContain("import_camt053");
     expect(payload.next_actions[0]).toMatchObject({
-      tool: "import_camt053",
-      args: { execute: false },
+      tool: "process_camt053",
+      args: { mode: "dry_run" },
     });
     expect(payload.workflow).toMatchObject({
       contract: "workflow_action_v1",
@@ -50,13 +52,13 @@ describe("recommend_workflow", () => {
       needs_review: [],
       recommended_next_action: {
         kind: "tool_call",
-        tool: "import_camt053",
+        tool: "process_camt053",
         approval_required: false,
       },
     });
     expect(payload.workflow.available_actions[0]).toMatchObject({
       kind: "tool_call",
-      tool: "import_camt053",
+      tool: "process_camt053",
     });
   });
 
@@ -134,5 +136,27 @@ describe("recommend_workflow", () => {
     expect(payload.raw.primary_tools).toContain("classify_bank_transactions");
     expect(payload.raw.primary_tools).toContain("apply_transaction_classifications");
     expect(payload.raw.primary_tools).not.toContain("apply_unmatched_transaction_classifications");
+  });
+
+  it("recommends receipt_batch as the merged receipt workflow entry point", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+
+    const result = await handler({ goal: "process a folder of receipts and book expenses" });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+
+    expect(payload.recommended_workflow).toMatchObject({
+      id: "receipt-batch",
+    });
+    expect(payload.raw.primary_tools).toContain("receipt_batch");
+    expect(payload.raw.primary_tools).toContain("process_receipt_batch");
+    expect(payload.next_actions[0]).toMatchObject({
+      tool: "receipt_batch",
+      args: { mode: "dry_run" },
+    });
+    expect(payload.workflow.recommended_next_action).toMatchObject({
+      kind: "tool_call",
+      tool: "receipt_batch",
+      args: { mode: "dry_run" },
+    });
   });
 });

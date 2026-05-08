@@ -498,24 +498,28 @@ ${date_to ? `Date to: ${date_to}` : ""}
 
 Follow these steps in order:
 
-1. Call \`scan_receipt_folder\` with:
+1. Call \`receipt_batch\` with:
+   - mode: "scan"
    - folder_path: "${folder_path}"
    ${date_from || date_to ? "- If the user asked for date filtering, mention that the scan itself does not apply date filters; the processing step does." : ""}
 
 2. Present the scan results before doing anything else:
+   - use \`result\` as the delegated scan payload
    - folder_path
    - total valid files found
    - skipped entries and their reasons
    - if there are zero valid files, stop here
 
-3. Call \`process_receipt_batch\` with:
+3. Call \`receipt_batch\` with:
+   - mode: "dry_run"
    - folder_path: "${folder_path}"
    - accounts_dimensions_id: ${accounts_dimensions_id}
-   - execution_mode: "dry_run"
    ${date_from ? `- date_from: "${date_from}"` : ""}
    ${date_to ? `- date_to: "${date_to}"` : ""}
 
 4. Review the dry run output carefully:
+   - \`receipt_batch\` is the preferred merged workflow tool; \`scan_receipt_folder\` and \`process_receipt_batch\` remain compatibility primitives.
+   - Use \`result\` as the delegated \`process_receipt_batch\` payload.
    - Treat \`execution\` as the canonical batch payload when present.
    - Prefer \`execution.summary\`, \`execution.results\`, \`execution.skipped\`, \`execution.needs_review\`, \`execution.errors\`, and \`execution.audit_reference\`.
    - Fall back to legacy top-level \`summary\`, \`skipped\`, and \`results\` only if \`execution\` is absent.
@@ -527,23 +531,23 @@ Follow these steps in order:
    - \`execution.errors\`: show the file and exact error.
 
 6. Make the approval checkpoint explicit:
-   - Say that \`execution_mode: "dry_run"\` was only a preview.
+   - Say that \`mode: "dry_run"\` was only a preview.
    - Do not imply that any invoice already exists.
-   - Ask whether to proceed with \`execution_mode: "create"\` to create and upload draft PROJECT invoices.
-   - Do not use \`execution_mode: "create_and_confirm"\` unless the user separately approves confirming the created invoices after reviewing them.
+   - Ask whether to proceed with \`mode: "create"\` to create and upload draft PROJECT invoices.
+   - Do not use \`mode: "create_and_confirm"\` unless the user separately approves confirming the created invoices after reviewing them.
 
 7. If the user does not explicitly approve execution, stop here.
 
-8. After approval, call \`process_receipt_batch\` again with:
+8. After approval, call \`receipt_batch\` again with:
+   - mode: "create"
    - folder_path: "${folder_path}"
    - accounts_dimensions_id: ${accounts_dimensions_id}
-   - execution_mode: "create"
    ${date_from ? `- date_from: "${date_from}"` : ""}
    ${date_to ? `- date_to: "${date_to}"` : ""}
 
 9. Report the execution summary:
    - \`execution.summary.created\`
-   - \`execution.summary.matched\` (normally 0 in \`execution_mode: "create"\` because invoices are left unconfirmed)
+   - \`execution.summary.matched\` (normally 0 in \`mode: "create"\` because invoices are left unconfirmed)
    - \`execution.summary.skipped_duplicate\`
    - \`execution.summary.needs_review\`
    - \`execution.summary.failed\`
@@ -555,7 +559,7 @@ ${INLINE_CONFIRMATION_RAIL}
         },
       }],
     }), {
-      offlineTools: ["scan_receipt_folder"],
+      offlineTools: ["receipt_batch", "scan_receipt_folder"],
       note: "Full receipt processing, supplier resolution, duplicate checks, bank matching, and invoice creation all require configured credentials.",
     })
   );
@@ -584,10 +588,12 @@ ${EXTERNAL_FILE_DATA_RAIL}
 
 Follow these steps in order:
 
-1. Call \`parse_camt053\` with:
+1. Call \`process_camt053\` with:
+   - mode: "parse"
    - file_path: "${file_path}"
 
 2. Present the parsed statement preview:
+   - use \`result\` as the delegated \`parse_camt053\` payload
    - statement_metadata
    - summary.entry_count
    - summary.credit_count and summary.credit_total
@@ -595,14 +601,16 @@ Follow these steps in order:
    - summary.duplicate_count
    - any duplicate hints already found in the parsed entries
 
-3. Call \`import_camt053\` with:
+3. Call \`process_camt053\` with:
+   - mode: "dry_run"
    - file_path: "${file_path}"
    - accounts_dimensions_id: ${accounts_dimensions_id}
-   - execute: false
    ${date_from ? `- date_from: "${date_from}"` : ""}
    ${date_to ? `- date_to: "${date_to}"` : ""}
 
 4. Review the import dry run:
+   - \`process_camt053\` is the preferred merged workflow tool; \`parse_camt053\` and \`import_camt053\` remain compatibility primitives.
+   - Use \`result\` as the delegated \`import_camt053\` payload.
    - Treat \`execution\` as the canonical batch payload when present.
    - Prefer \`execution.summary.total_statement_entries\`, \`execution.summary.eligible_entries\`, \`execution.summary.filtered_out\`, \`execution.summary.created_count\`, \`execution.summary.skipped_count\`, \`execution.summary.error_count\`, \`execution.results\`, \`execution.skipped\`, \`execution.errors\`, and \`execution.audit_reference\`.
    - Also inspect \`execution.needs_review\` for possible duplicates against older manual transactions that lack CAMT bank references.
@@ -624,10 +632,10 @@ Follow these steps in order:
 6. Ask for approval before creating anything.
    If the user does not explicitly approve, stop here.
 
-7. After approval, call \`import_camt053\` again with:
+7. After approval, call \`process_camt053\` again with:
+   - mode: "execute"
    - file_path: "${file_path}"
    - accounts_dimensions_id: ${accounts_dimensions_id}
-   - execute: true
    ${date_from ? `- date_from: "${date_from}"` : ""}
    ${date_to ? `- date_to: "${date_to}"` : ""}
 
@@ -648,7 +656,7 @@ ${INLINE_CONFIRMATION_RAIL}
         },
       }],
     }), {
-      offlineTools: ["parse_camt053"],
+      offlineTools: ["process_camt053", "parse_camt053"],
       note: "Parsing the CAMT file can be done locally, but dry-run imports and transaction creation require configured e-arveldaja credentials.",
     })
   );

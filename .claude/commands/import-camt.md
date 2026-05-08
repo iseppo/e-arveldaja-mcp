@@ -12,10 +12,12 @@ Parse a CAMT.053 statement, preview the import, and only create bank transaction
 
 ### Step 1: Parse the statement
 
-Call `parse_camt053`:
+Call `process_camt053`:
+- `mode`: `parse`
 - `file_path`: the provided file
 
 Show:
+- `result` as the delegated `parse_camt053` payload
 - `statement_metadata`
 - `summary.entry_count`
 - `summary.credit_count` and `summary.credit_total`
@@ -24,13 +26,15 @@ Show:
 
 ### Step 2: Dry-run the import
 
-Call `import_camt053`:
+Call `process_camt053`:
+- `mode`: `dry_run`
 - `file_path`: the provided file
 - `accounts_dimensions_id`: the provided dimension ID
-- execute: false
 - include `date_from` / `date_to` when provided
 
 Review:
+- `process_camt053` is the preferred merged workflow tool; `parse_camt053` and `import_camt053` remain compatibility primitives.
+- Use `result` as the delegated `import_camt053` payload.
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary.total_statement_entries`, `execution.summary.eligible_entries`, `execution.summary.filtered_out`, `execution.summary.created_count`, `execution.summary.skipped_count`, `execution.summary.error_count`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
 - Also inspect `execution.needs_review` for possible duplicates against older manual transactions that lack CAMT bank references.
@@ -58,10 +62,10 @@ If the user does not explicitly approve, stop.
 
 ### Step 4: Execute
 
-Call `import_camt053` again:
+Call `process_camt053` again:
+- `mode`: `execute`
 - `file_path`: the provided file
 - `accounts_dimensions_id`: the provided dimension ID
-- execute: true
 - include `date_from` / `date_to` when provided
 
 Report:

@@ -12,10 +12,12 @@ Scan a folder of receipts, preview what can be auto-booked, and only create purc
 
 ### Step 1: Scan the folder
 
-Call `scan_receipt_folder`:
+Call `receipt_batch`:
+- `mode`: `scan`
 - `folder_path`: the provided folder
 
 Show:
+- `result` as the delegated scan payload
 - valid files found
 - skipped entries and their reasons
 
@@ -23,13 +25,15 @@ If there are no valid files, stop.
 
 ### Step 2: Preview the batch
 
-Call `process_receipt_batch`:
+Call `receipt_batch`:
+- `mode`: `dry_run`
 - `folder_path`: the provided folder
 - `accounts_dimensions_id`: the provided dimension ID
-- `execution_mode`: `dry_run`
 - include `date_from` / `date_to` when provided
 
 Review:
+- `receipt_batch` is the preferred merged workflow tool; `scan_receipt_folder` and `process_receipt_batch` remain compatibility primitives.
+- Use `result` as the delegated `process_receipt_batch` payload.
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.needs_review`, `execution.errors`, and `execution.audit_reference`.
 - Fall back to legacy top-level `summary`, `skipped`, and `results` only if `execution` is absent.
@@ -42,25 +46,25 @@ Group the preview by status:
 
 ### Step 3: Approval gate
 
-State clearly that `execution_mode: "dry_run"` is only a preview.
+State clearly that `mode: "dry_run"` is only a preview.
 
-Ask for approval before running `process_receipt_batch` with `execution_mode: "create"`.
+Ask for approval before running `receipt_batch` with `mode: "create"`.
 
-`execution_mode: "create"` creates and uploads PROJECT purchase invoices, but leaves them unconfirmed for review. Do not use `execution_mode: "create_and_confirm"` unless the user separately approves confirming the created invoices after reviewing them.
+`mode: "create"` creates and uploads PROJECT purchase invoices, but leaves them unconfirmed for review. Do not use `mode: "create_and_confirm"` unless the user separately approves confirming the created invoices after reviewing them.
 
 If the user does not explicitly approve, stop.
 
 ### Step 4: Execute
 
-Call `process_receipt_batch` again:
+Call `receipt_batch` again:
+- `mode`: `create`
 - `folder_path`: the provided folder
 - `accounts_dimensions_id`: the provided dimension ID
-- `execution_mode`: `create`
 - include `date_from` / `date_to` when provided
 
 Report:
 - `execution.summary.created`
-- `execution.summary.matched` (normally 0 in `execution_mode: "create"` because invoices are left unconfirmed)
+- `execution.summary.matched` (normally 0 in `mode: "create"` because invoices are left unconfirmed)
 - `execution.summary.skipped_duplicate`
 - `execution.summary.needs_review`
 - `execution.summary.failed`

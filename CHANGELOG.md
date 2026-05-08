@@ -3,7 +3,8 @@
 ## [Unreleased]
 
 ### Changed
-- **Workflow tool surface cleanup** — extracted reference-data registrations from `crud-tools.ts` into a focused module with registration snapshot coverage, and updated shipped workflow docs to prefer the merged `accounting_inbox` / `continue_accounting_workflow` entry points while keeping older focused tools documented as compatibility primitives. (#39)
+- **Workflow tool surface cleanup** — extracted reference-data registrations from `crud-tools.ts` into a focused module with registration snapshot coverage, and updated shipped workflow docs to prefer the merged `accounting_inbox` / `continue_accounting_workflow` / `receipt_batch` entry points while keeping older focused tools documented as compatibility primitives. (#39)
+- **CAMT and receipt entry points** — added `process_camt053` and `receipt_batch` as mode-based wrappers over the existing parse/import/receipt tools. Existing focused CAMT and receipt tools stay registered for compatibility. (#36)
 - **Bank workflow entry points** — added `reconcile_bank_transactions` and `classify_bank_transactions` as mode-based wrappers over the existing reconciliation, auto-confirm, inter-account transfer, and unmatched classification tools. Existing focused tool names stay registered for compatibility. (#38)
 
 ## [0.13.1] - 2026-05-03

@@ -248,11 +248,13 @@ describe("registerPrompts", () => {
       accounts_dimensions_id: 123,
     });
 
+    expect(text).toContain("receipt_batch");
     expect(text).toContain("scan_receipt_folder");
     expect(text).toContain("process_receipt_batch");
-    expect(text).toContain('execution_mode: "dry_run"');
-    expect(text).toContain('execution_mode: "create"');
-    expect(text).toContain('execution_mode: "create_and_confirm"');
+    expect(text).toContain('mode: "dry_run"');
+    expect(text).toContain('mode: "create"');
+    expect(text).toContain('mode: "create_and_confirm"');
+    expect(text).toContain("compatibility primitives");
     expect(text).toContain("Treat `execution` as the canonical batch payload when present.");
     expect(text).toContain("execution.results");
     expect(text).toContain("execution.needs_review");
@@ -270,11 +272,14 @@ describe("registerPrompts", () => {
       accounts_dimensions_id: 77,
     });
 
+    expect(text).toContain("process_camt053");
     expect(text).toContain("parse_camt053");
     expect(text).toContain("import_camt053");
     expect(text).toContain("statement_metadata");
-    expect(text).toContain("execute: false");
-    expect(text).toContain("execute: true");
+    expect(text).toContain('mode: "parse"');
+    expect(text).toContain('mode: "dry_run"');
+    expect(text).toContain('mode: "execute"');
+    expect(text).toContain("compatibility primitives");
     expect(text).toContain("execution.summary");
     expect(text).toContain("execution.results");
     expect(text).toContain("execution.audit_reference");
@@ -471,9 +476,12 @@ describe("registerPrompts", () => {
   it("keeps shipped receipt-batch markdown prompts aligned with preview-only batch processing", () => {
     for (const relativePath of ["workflows/receipt-batch.md", ".claude/commands/receipt-batch.md"]) {
       const text = readPromptSurface(relativePath);
+      expect(text).toContain("receipt_batch");
       expect(text).toContain("scan_receipt_folder");
       expect(text).toContain("process_receipt_batch");
-      expect(text).toContain("execution_mode");
+      expect(text).toContain("compatibility primitives");
+      expect(text).toContain("`mode`: `dry_run`");
+      expect(text).toContain("`mode`: `create`");
       expect(text).toContain("create_and_confirm");
       expect(text).toContain("Treat `execution` as the canonical batch payload when present.");
       expect(text).toContain("execution.results");
@@ -537,12 +545,18 @@ describe("registerPrompts", () => {
   });
 
   it("keeps shipped import markdown prompts aligned with approval-first execution", () => {
-    for (const relativePath of [
-      "workflows/import-camt.md",
-      ".claude/commands/import-camt.md",
-      "workflows/import-wise.md",
-      ".claude/commands/import-wise.md",
-    ]) {
+    for (const relativePath of ["workflows/import-camt.md", ".claude/commands/import-camt.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("process_camt053");
+      expect(text).toContain("compatibility primitives");
+      expect(text).toContain("`mode`: `dry_run`");
+      expect(text).toContain("`mode`: `execute`");
+      expect(text).toContain("execution.summary");
+      expect(text).toContain("execution.audit_reference");
+      expect(text.toLowerCase()).toContain("approval");
+    }
+
+    for (const relativePath of ["workflows/import-wise.md", ".claude/commands/import-wise.md"]) {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("execute: false");
       expect(text).toContain("execute: true");
