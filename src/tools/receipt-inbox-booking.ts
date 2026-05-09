@@ -67,9 +67,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
   const supplierId = supplier?.id;
   const supplierName = supplier?.name ?? supplierResolution.preview_client?.name;
   const invoiceCurrency = extracted.currency ?? "EUR";
-  const invoiceNotes = extracted.currency && extracted.currency !== "EUR" && extracted.total_gross !== undefined
-    ? `Receipt inbox import from ${file.name} | Original receipt amount: ${roundMoney(extracted.total_gross).toFixed(2)} ${extracted.currency}`
-    : `Receipt inbox import from ${file.name}`;
+  const invoiceNotes = `Receipt inbox import from ${file.name}`;
 
   if (!supplierName) {
     notes.push("Supplier resolution did not return a concrete client ID.");
@@ -118,13 +116,16 @@ export async function createAndMaybeMatchPurchaseInvoice(
     bank_ref_number: extracted.ref_number,
   };
 
-  const candidate = dryRun
+  const dryRunMatch = dryRun
     ? findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds)
     : undefined;
+  const candidate = dryRunMatch?.candidate;
 
   if (dryRun) {
     if (candidate) {
       notes.push(`Dry run: matched candidate transaction ${candidate.transaction_id} at confidence ${candidate.confidence}.`);
+    } else if (dryRunMatch?.ambiguous) {
+      notes.push(`Dry run: ${dryRunMatch.tiedCount} bank transactions tied at confidence ${dryRunMatch.topConfidence}; no candidate auto-selected.`);
     }
     notes.push("Dry run: purchase invoice document was not uploaded and the invoice was not confirmed.");
     return {
@@ -289,9 +290,13 @@ export async function createAndMaybeMatchPurchaseInvoice(
     base_gross_price: createdInvoice.base_gross_price,
     bank_ref_number: createdInvoice.bank_ref_number,
   };
-  const matchedCandidate = findBestTransactionMatch(bankTransactions, matchedInvoice, consumedTransactionIds);
+  const matchResult = findBestTransactionMatch(bankTransactions, matchedInvoice, consumedTransactionIds);
+  const matchedCandidate = matchResult.candidate;
   const canAutoLink = matchedCandidate !== undefined && matchedCandidate.confidence >= EXACT_MATCH_THRESHOLD;
   let linked = false;
+  if (matchResult.ambiguous) {
+    notes.push(`Skipped bank match because ${matchResult.tiedCount} candidate transactions tied at confidence ${matchResult.topConfidence}; invoice was created without bank link.`);
+  }
   if (createdInvoice.id && matchedCandidate && canAutoLink) {
     try {
       const freshMatch = await api.transactions.get(matchedCandidate.transaction_id);

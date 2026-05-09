@@ -6,11 +6,18 @@ import type { InvoiceDuplicateMatch, TransactionMatchCandidate } from "./receipt
 
 const POSSIBLE_MATCH_THRESHOLD = 70;
 
+export interface TransactionMatchResult {
+  candidate?: TransactionMatchCandidate;
+  ambiguous: boolean;
+  topConfidence?: number;
+  tiedCount: number;
+}
+
 export function findBestTransactionMatch(
   transactions: Transaction[],
   invoice: InvoiceSummaryForMatching,
   consumedTransactionIds: Set<number>,
-): TransactionMatchCandidate | undefined {
+): TransactionMatchResult {
   const candidates = transactions
     .filter(transaction => transaction.id !== undefined && !consumedTransactionIds.has(transaction.id))
     .map(transaction => {
@@ -29,14 +36,16 @@ export function findBestTransactionMatch(
     .sort((a, b) => b.confidence - a.confidence);
 
   const best = candidates[0];
-  if (!best) return undefined;
+  if (!best) {
+    return { ambiguous: false, tiedCount: 0 };
+  }
 
   const tiedTopCandidates = candidates.filter(candidate => candidate.confidence === best.confidence);
   if (tiedTopCandidates.length > 1) {
-    return undefined;
+    return { ambiguous: true, topConfidence: best.confidence, tiedCount: tiedTopCandidates.length };
   }
 
-  return best;
+  return { candidate: best, ambiguous: false, topConfidence: best.confidence, tiedCount: 1 };
 }
 
 export function findDuplicateInvoice(

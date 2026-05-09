@@ -127,7 +127,55 @@ describe("findBestTransactionMatch", () => {
       },
     ];
 
-    expect(findBestTransactionMatch(transactions as any, invoice, new Set())).toBeUndefined();
+    const result = findBestTransactionMatch(transactions as any, invoice, new Set());
+    expect(result.candidate).toBeUndefined();
+    expect(result.ambiguous).toBe(true);
+    expect(result.tiedCount).toBe(2);
+    expect(result.topConfidence).toBeGreaterThanOrEqual(70);
+  });
+
+  it("returns the single top candidate when there is no tie", () => {
+    const invoice = {
+      clients_id: 7,
+      client_name: "OpenAI Ireland Limited",
+      cl_currencies_id: "EUR",
+      number: "INV-42",
+      create_date: "2026-03-22",
+      gross_price: 25,
+      bank_ref_number: "RF42",
+    };
+    const transactions = [
+      {
+        id: 10,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        accounts_dimensions_id: 100,
+        bank_account_name: "OpenAI Ireland Limited",
+        description: "Invoice INV-42",
+        ref_number: "RF42",
+        cl_currencies_id: "EUR",
+      },
+      {
+        id: 11,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 25,
+        date: "2026-04-15",
+        accounts_dimensions_id: 100,
+        bank_account_name: "Unrelated payee",
+        description: "Different payment",
+        cl_currencies_id: "EUR",
+      },
+    ];
+
+    const result = findBestTransactionMatch(transactions as any, invoice, new Set());
+    expect(result.ambiguous).toBe(false);
+    expect(result.candidate?.transaction_id).toBe(10);
+    expect(result.tiedCount).toBe(1);
   });
 });
 

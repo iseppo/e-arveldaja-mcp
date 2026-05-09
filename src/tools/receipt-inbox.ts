@@ -69,7 +69,7 @@ import {
   type ReceiptProcessingContext,
 } from "./receipt-inbox-types.js";
 import { readValidatedReceiptFile, revalidateReceiptFilePath, scanReceiptFolderInternal } from "./receipt-inbox-files.js";
-import { findBestTransactionMatch, findDuplicateInvoice } from "./receipt-inbox-matching.js";
+import { findDuplicateInvoice } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import {
   buildDryRunCreatedInvoicePreview,
@@ -957,10 +957,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     {
       folder_path: z.string().describe("Folder path to scan"),
       file_types: z.array(z.enum(["pdf", "jpg", "png"])).optional().describe("Optional file type filter"),
+      date_from: z.string().optional().describe("Optional file modified-date lower bound (YYYY-MM-DD)"),
+      date_to: z.string().optional().describe("Optional file modified-date upper bound (YYYY-MM-DD)"),
     },
     { ...readOnly, openWorldHint: true, title: "Scan Receipt Folder" },
-    async ({ folder_path, file_types }) => {
-      const result = await scanReceiptFolderInternal(folder_path, file_types);
+    async ({ folder_path, file_types, date_from, date_to }) => {
+      const result = await scanReceiptFolderInternal(folder_path, file_types, date_from, date_to);
       return {
         content: [{
           type: "text",
@@ -1734,10 +1736,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
             if (
               transactionCurrency !== "EUR" &&
-              (transactionCurrencyRate === undefined ||
-                transactionCurrencyRate === null ||
-                !Number.isFinite(transactionCurrencyRate) ||
-                transactionCurrencyRate <= 0)
+              (!Number.isFinite(transactionCurrencyRate) || (transactionCurrencyRate ?? 0) <= 0)
             ) {
               notes.push(
                 `Non-EUR transaction ${transaction.id} uses ${transactionCurrency} but has no currency_rate. Review manually or retry after the transaction exposes a valid EUR conversion rate.`
@@ -1856,11 +1855,17 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
           const status = dryRun
             ? (wouldCreateCount > 0 ? "dry_run_preview" : "skipped")
-            : (createdInvoiceIds.length > 0 && createdInvoiceIds.length === freshTransactions.length
+            : (attemptedCreateCount > 0 && createdInvoiceIds.length === attemptedCreateCount
                 ? "applied"
                 : attemptedCreateCount > 0
                   ? "failed"
                   : "skipped");
+
+          if (status === "failed" && linkedTransactionIds.length > 0) {
+            notes.push(
+              `Group reported as failed; the following transactions were already booked successfully and were left in place: ${linkedTransactionIds.join(", ")}.`
+            );
+          }
 
           results.push({
             category: group.category,
