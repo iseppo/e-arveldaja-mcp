@@ -1,3 +1,5 @@
+<!-- Generated from workflows/setup-credentials.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Setup e-arveldaja Credentials
 
 Inspect the current credential setup, import credentials from an `apikey*.txt` file when available, and explain the required restart and next steps.

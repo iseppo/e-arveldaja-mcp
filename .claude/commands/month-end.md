@@ -1,3 +1,5 @@
+<!-- Generated from workflows/month-end.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Month-End Close Checklist
 
 Run the month-end close checklist, compute financial statements, and flag issues.

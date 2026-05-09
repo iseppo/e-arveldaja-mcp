@@ -1,3 +1,5 @@
+<!-- Generated from workflows/accounting-inbox.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Accounting Inbox
 
 Start from one workspace-level scan, propose only the next safe dry-run steps, and ask the fewest possible follow-up questions.

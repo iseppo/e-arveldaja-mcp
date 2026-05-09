@@ -1,3 +1,5 @@
+<!-- Generated from workflows/reconcile-bank.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Reconcile Bank Transactions
 
 Match unconfirmed bank transactions to open invoices and confirm the matches.
@@ -30,6 +32,8 @@ Show a summary grouped by confidence level from `result.matches`:
 - Transaction: date, amount, description, and raw `type` if helpful
 - Do not infer incoming vs outgoing direction from `type` alone; bank transactions are commonly stored as `C` regardless of direction in e-arveldaja
 - Matched invoice: number, client, gross amount, confidence, match reasons
+- For cross-currency matches, prefer `match_reasons` such as `exact_base_amount`.
+- do NOT derive `distribution.amount` from `tx.amount` when base and source currencies differ; use the invoice open balance and the tool-provided distribution.
 
 **MEDIUM (50-79):** Review recommended.
 

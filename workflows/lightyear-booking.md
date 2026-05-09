@@ -60,5 +60,5 @@ Report:
 - trades booked
 - distributions booked
 - skipped entries and reasons
-- current portfolio carrying value / remaining cost basis from step 3
+- Current portfolio carrying value / remaining cost basis from step 3
 - suggested `compute_account_balance` check for the investment account

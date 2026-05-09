@@ -1,3 +1,5 @@
+<!-- Generated from workflows/resolve-accounting-review.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Resolve Accounting Review
 
 Take one accounting review item and turn it into the next concrete step with the fewest possible user questions.

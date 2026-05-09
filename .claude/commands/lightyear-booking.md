@@ -1,3 +1,5 @@
+<!-- Generated from workflows/lightyear-booking.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Lightyear Booking
 
 Book Lightyear investment activity from CSV exports after explicit dry-run review.
@@ -60,5 +62,5 @@ Report:
 - trades booked
 - distributions booked
 - skipped entries and reasons
-- current portfolio carrying value / remaining cost basis from step 3
+- Current portfolio carrying value / remaining cost basis from step 3
 - suggested `compute_account_balance` check for the investment account

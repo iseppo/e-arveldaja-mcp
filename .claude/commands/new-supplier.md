@@ -1,3 +1,5 @@
+<!-- Generated from workflows/new-supplier.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Create New Supplier
 
 Create a new supplier (client) in e-arveldaja with proper fields and optional business registry lookup.
@@ -28,7 +30,7 @@ Call `resolve_supplier`:
 - `country`: `"EST"` (default)
 
 For Estonian codes, the tool queries the business registry (äriregister.rik.ee) for the official company name and address. Show this data to the user for review.
-Name-only lookup does not provide Estonian Business Registry data.
+name-only lookup does not fetch Estonian Business Registry data.
 `resolve_supplier` also does not fetch a VAT number from the registry lookup, so ask for `invoice_vat_no` separately if needed.
 
 ## Step 4: Gather additional information

@@ -1,3 +1,5 @@
+<!-- Generated from workflows/receipt-batch.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Receipt Batch
 
 Scan a folder of receipts, preview what can be auto-booked, and only create purchase invoices after approval.

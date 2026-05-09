@@ -128,7 +128,7 @@ describe("registerPrompts", () => {
 
     expect(text).toContain("accounting_inbox");
     expect(text).toContain('mode: "dry_run"');
-    expect(text).toContain('workspace_path: "/tmp/accounting"');
+    expect(text).toContain('"workspace_path": "/tmp/accounting"');
     expect(text).toContain("prepared_inbox");
     expect(text).toContain("autopilot.executed_steps");
     expect(text).toContain("autopilot.needs_one_decision");
@@ -189,12 +189,12 @@ describe("registerPrompts", () => {
     expect(text).toContain("hints.raw_text");
     expect(text).toContain("llm_fallback");
     expect(text).toContain("source of truth");
-    expect(text).toContain("clients_id: supplier_client_id");
+    expect(text).toContain("`clients_id`: supplier_client_id");
     expect(text).toContain("supplier_client_id");
     expect(text).toContain("term_days");
     expect(text).toContain("api_response.created_object_id");
-    expect(text).toContain("invoice_number: extracted invoice number");
-    expect(text).toContain("gross_price: extracted gross total");
+    expect(text).toContain("`invoice_number`: extracted invoice number");
+    expect(text).toContain("`gross_price`: extracted gross total");
     expect(text).toContain("candidate_invoice_number_matches");
     expect(text).toContain("ask for approval before creating anything");
     expect(text).toContain("If the user has not explicitly approved the preview, stop here and wait.");
@@ -202,7 +202,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("vat_accounts_dimensions_id");
     expect(text).toContain("cl_vat_articles_id");
     expect(text).toContain("auto-uploads the source document");
-    expect(text).toContain("Do NOT infer reverse charge from supplier country alone");
+    expect(text).toContain("Do not infer reverse charge from supplier country alone");
     expect(text).toContain("EU B2B services");
     expect(text).toContain("intra-community acquisitions of goods");
     expect(text).toContain("stop and ask the user");
@@ -265,6 +265,20 @@ describe("registerPrompts", () => {
     expect(text).toContain("The invoice has NOT been confirmed yet.");
   });
 
+  it("uses the canonical workflow source as the MCP workflow prompt body", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "receipt-batch", {
+      folder_path: "/tmp/receipts",
+      accounts_dimensions_id: 123,
+    });
+
+    expect(text).toContain('"folder_path": "/tmp/receipts"');
+    expect(text).toContain('"accounts_dimensions_id": 123');
+    expect(text).toContain("Canonical workflow source: workflows/receipt-batch.md");
+    expect(text).toContain(readPromptSurface("workflows/receipt-batch.md").trimEnd());
+    expect(text).not.toContain("Process a receipt batch from: /tmp/receipts");
+  });
+
   it("keeps import-camt aligned with parse and dry-run import details", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "import-camt", {
@@ -276,9 +290,9 @@ describe("registerPrompts", () => {
     expect(text).toContain("parse_camt053");
     expect(text).toContain("import_camt053");
     expect(text).toContain("statement_metadata");
-    expect(text).toContain('mode: "parse"');
-    expect(text).toContain('mode: "dry_run"');
-    expect(text).toContain('mode: "execute"');
+    expect(text).toContain("`mode`: `parse`");
+    expect(text).toContain("`mode`: `dry_run`");
+    expect(text).toContain("`mode`: `execute`");
     expect(text).toContain("compatibility primitives");
     expect(text).toContain("execution.summary");
     expect(text).toContain("execution.results");
@@ -324,8 +338,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("apply_transaction_classifications");
     expect(text).toContain('mode: "dry_run_apply"');
     expect(text).toContain('mode: "execute_apply"');
-    expect(text).toContain("classifications_json: JSON.stringify(the result payload from step 1)");
-    expect(text).not.toContain("classifications_json: JSON.stringify(the full response from step 1)");
+    expect(text).toContain("`classifications_json`: `JSON.stringify(the result payload from step 1)`");
+    expect(text).not.toContain("JSON.stringify(the full response from step 1)");
     expect(text).toContain("result.total_unconfirmed");
     expect(text).toContain("result.execution.results");
     expect(text).toContain("result.execution.skipped");
@@ -344,7 +358,7 @@ describe("registerPrompts", () => {
 
     expect(monthEndText).toContain('date_from: "2026-03-01"');
     expect(monthEndText).toContain('date_to: "2026-03-31"');
-    expect(monthEndText).toContain("compute_balance_sheet` with:");
+    expect(monthEndText).toContain("Call `compute_balance_sheet`:");
     expect(overviewText).toContain("compute_balance_sheet` with date_to:");
     expect(overviewText).toContain("date_from:");
     expect(overviewText).toContain("as_of_date:");
@@ -356,10 +370,10 @@ describe("registerPrompts", () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "new-supplier", { identifier: "Acme OU" });
 
-    expect(text).toContain('search_client` with name: "Acme OU"');
+    expect(text).toContain('Use `search_client` with name: "Acme OU"');
     expect(text).toContain("bank_account_no");
-    expect(text).toContain("is_client: false");
-    expect(text).toContain("is_supplier: true");
+    expect(text).toContain("`is_client`: `false`");
+    expect(text).toContain("`is_supplier`: `true`");
     expect(text).toContain("name-only lookup does not fetch Estonian Business Registry data");
     expect(text).toContain("does not fetch a VAT number from the registry lookup");
     expect(text).not.toContain("query:");
@@ -378,7 +392,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("ask the user for it before booking sells");
     expect(text).toContain("gain_loss_account");
     expect(text).toContain("tax_account");
-    expect(text).toContain("If there are distributions in the statement, ask the user for an income_account number");
+    expect(text).toContain("If there are distributions in the statement and no `income_account` is known, ask the user for an income_account number");
     expect(text).toContain("current accounting carrying value / cost basis");
     expect(text).toContain("Current portfolio carrying value / remaining cost basis");
     expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);

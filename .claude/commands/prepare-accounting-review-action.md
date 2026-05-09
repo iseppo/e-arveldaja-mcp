@@ -1,3 +1,5 @@
+<!-- Generated from workflows/prepare-accounting-review-action.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Prepare Accounting Review Action
 
 Turn a resolved accounting review item into the next concrete action, such as cleaning up a duplicate transaction or saving a stable auto-booking rule.

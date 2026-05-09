@@ -1,3 +1,5 @@
+<!-- Generated from workflows/setup-e-arveldaja.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
 # Setup e-arveldaja
 
 Explain how to configure e-arveldaja MCP credentials for the current working directory.

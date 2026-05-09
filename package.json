@@ -40,6 +40,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "sync:workflow-prompts": "node scripts/sync-workflow-prompts.mjs",
     "validate:release": "node scripts/validate-release-metadata.mjs",
     "prepublishOnly": "npm run validate:release && npm run build && npm test && npm run test:integration",
     "registry:login": "mcp-publisher login github",

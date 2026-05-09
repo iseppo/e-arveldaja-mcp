@@ -1,9 +1,16 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const REQUIRED_PACKAGE_FILES = ["CHANGELOG.md", "server.json"];
+const REQUIRED_PACKAGE_FILES = ["workflows/", ".claude/commands/", "CHANGELOG.md", "server.json"];
+
+export function generatedClaudeCommandText(slug, workflowText) {
+  return `<!-- Generated from workflows/${slug}.md. Edit that source file, then run npm run sync:workflow-prompts. -->
+
+${workflowText.trimEnd()}
+`;
+}
 
 function firstPackage(serverJson) {
   return Array.isArray(serverJson?.packages) ? serverJson.packages[0] : undefined;
@@ -50,6 +57,45 @@ export function validateReleaseMetadata(packageJson, packageLock, serverJson) {
   return errors;
 }
 
+async function readDirNames(path) {
+  try {
+    return await readdir(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+export async function validateWorkflowPromptSurfaces(root) {
+  const errors = [];
+  const workflowsDir = resolve(root, "workflows");
+  const commandsDir = resolve(root, ".claude", "commands");
+  const workflowFiles = (await readDirNames(workflowsDir)).filter((name) => name.endsWith(".md")).sort();
+
+  for (const fileName of workflowFiles) {
+    const slug = fileName.replace(/\.md$/, "");
+    const workflowPath = resolve(workflowsDir, fileName);
+    const commandPath = resolve(commandsDir, fileName);
+    const workflowText = await readFile(workflowPath, "utf8");
+    let commandText;
+    try {
+      commandText = await readFile(commandPath, "utf8");
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        errors.push(`.claude/commands/${fileName} must exist for workflows/${fileName}`);
+        continue;
+      }
+      throw error;
+    }
+
+    if (commandText !== generatedClaudeCommandText(slug, workflowText)) {
+      errors.push(`.claude/commands/${fileName} must be regenerated from workflows/${fileName}`);
+    }
+  }
+
+  return errors;
+}
+
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
@@ -61,6 +107,7 @@ async function main() {
     await readJson(resolve(root, "package-lock.json")),
     await readJson(resolve(root, "server.json")),
   );
+  errors.push(...await validateWorkflowPromptSurfaces(root));
 
   if (errors.length > 0) {
     console.error("Release metadata validation failed:");

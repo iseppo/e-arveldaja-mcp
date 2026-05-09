@@ -76,7 +76,7 @@ Inspect `candidate_invoice_number_matches` and `candidate_same_amount_date_match
 ## Step 7: Reuse the best booking setup
 
 Call `suggest_booking`:
-- `clients_id`: supplier client ID
+- `clients_id`: supplier_client_id
 - `description`: first line item description
 
 Review `past_invoices` and reuse the most relevant:
@@ -103,7 +103,7 @@ If there is no suitable history, call `list_purchase_articles` or ask the user i
 - `term_days`: the calendar-day difference between `invoice_date` and `due_date`
 - If `due_date` is missing, use `term_days: 0` and mention that assumption in the final summary
 
-## Step 10: Preview the booking and ask for approval
+## Step 10: Preview the booking and ask for approval before creating anything
 
 Before creating anything, present:
 - Supplier name and supplier client ID

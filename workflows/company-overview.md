@@ -4,8 +4,9 @@ Prepare a compact financial overview for the active e-arveldaja connection.
 
 Follow these steps:
 
-1. Call `compute_balance_sheet`.
-2. Call `compute_profit_and_loss`.
+1. Call `compute_balance_sheet` with date_to: the selected as_of_date (or today's date when no date is requested).
+   - as_of_date: selected reporting date
+2. Call `compute_profit_and_loss` with date_from: the selected period start and date_to: the selected as_of_date.
 3. Call `compute_receivables_aging`.
 4. Call `compute_payables_aging`.
 5. Summarize the company state using the returned figures:
