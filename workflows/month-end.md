@@ -19,11 +19,13 @@ Present in priority order:
 3. Unconfirmed journal entries — adjustments not posted
 4. Unconfirmed bank transactions — cash not reconciled
 
-For each blocker, show ID, date, amount/title. Suggested fixes:
-- Purchase invoices: `confirm_purchase_invoice` or delete if duplicate
-- Sale invoices: `confirm_sale_invoice`
-- Journals: `confirm_journal`
-- Transactions: use the **Reconcile Bank** workflow to match and confirm
+For each blocker, show ID, date, amount/title, then offer the next inline action as a yes/no question per item — do NOT close the workflow with "go fix these in the e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
+
+Inline actions per blocker type:
+- Purchase invoices: offer `confirm_purchase_invoice`, or `delete_purchase_invoice` if the user confirms it is a duplicate
+- Sale invoices: offer `confirm_sale_invoice`
+- Journals: offer `confirm_journal`
+- Transactions: prefer the **Reconcile Bank** workflow for unmatched rows; for already-matched single rows offer `confirm_transaction` directly
 
 **WARNINGS (review but may not block close):**
 - Overdue receivables — may need follow-up or doubtful debt provision
@@ -51,7 +53,7 @@ Call `compute_trial_balance`:
 - `date_from`: YYYY-MM-01
 - `date_to`: last day of the month
 
-Verify total debits = total credits (difference should be 0.00).
+Verify total debits = total credits. Treat sub-cent rounding deltas (under 0.01 EUR) as acceptable in multi-currency books; anything larger is a blocker that needs investigation.
 
 Call `compute_profit_and_loss`:
 - `date_from`: YYYY-01-01 (fiscal year start)

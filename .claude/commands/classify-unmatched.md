@@ -42,6 +42,7 @@ For each group in `result.groups`, show:
 - `apply_mode="purchase_invoice"` groups are auto-bookable
 - review-only categories are reported back as skipped
 - for review-only categories, start with `review_guidance.recommendation`, explain the compliance basis briefly, and ask only the listed follow-up questions that are still unresolved
+- when a review-only group already exposes `review_guidance.resolver_input` with concrete IDs, do NOT close the workflow with "handle this manually in e-arveldaja". Offer to chain into `continue_accounting_workflow` with `action="prepare_action"` (or the `prepare-accounting-review-action` workflow) so the user can approve the next concrete tool call inline.
 
 ### Step 3: Dry-run the application
 
@@ -57,6 +58,8 @@ Group the result by status:
 - `result.execution.results` entries with `status="dry_run_preview"`: would create purchase invoices and link transactions, but nothing has been created yet
 - `result.execution.skipped`: review-only or no longer applicable
 - `result.execution.errors`: exact blocking errors
+- a per-row note like "Non-EUR transaction X uses USD but has no currency_rate" means that single row was skipped because no EUR conversion rate is available; the rest of the group can still proceed. Suggest fixing the underlying transaction (e.g. via `update_transaction`) before retrying.
+- a per-group note "Group reported as failed; the following transactions were already booked successfully and were left in place: …" means the listed transactions ARE confirmed and their auto-created invoices are NOT rolled back, even though the group status is `failed`. Surface that explicitly to the user — never imply the whole group was reversed.
 
 If the user wants only some groups applied:
 - build a filtered JSON object from the step 1 result payload that preserves the top-level metadata and only the approved `groups`

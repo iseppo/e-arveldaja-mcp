@@ -72,6 +72,7 @@ For approved matches, call `confirm_transaction`:
 Only do this when a `distribution` key is present.
 - If no `distribution` key is present or the invoice is partially paid, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
 - Only confirm one explicitly approved match at a time; do not auto-confirm ambiguous transactions.
+- When `result.matches` shows two or more candidates tied at the same top confidence for one transaction, skip auto-confirmation and ask the user which candidate is correct, mirroring the inter-account ambiguity handling.
 
 ### Single transaction mode
 
@@ -105,10 +106,12 @@ Ask for approval. If approved, call `reconcile_inter_account_transfers` with `ex
 
 ## Step 5: Unmatched transactions
 
-List transactions with no matches and suggest actions:
-- Small amounts (<1 EUR): likely bank fees or interest — need a manual journal entry
-- Description contains "teenustasu", "intress", "service fee": bank charges
-- Larger amounts: check if the corresponding invoice exists in the system
+List transactions with no matches and offer the next inline action per item — do NOT close the workflow with "create the journal entry yourself in e-arveldaja". That is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
+
+Inline actions:
+- Small amounts (<1 EUR): likely bank fees or interest. Offer to book a journal via `create_journal` with the appropriate contra-account (e.g. 5510 "Bank charges" for fees, 6080 "Interest income" for interest credits) and ask the user to approve the proposed contra before executing.
+- Description contains "teenustasu", "intress", "service fee": same as above; pre-fill the contra account based on the keyword and ask for approval.
+- Larger amounts: check if the corresponding invoice exists in the system; if it does, offer `confirm_transaction` against that invoice; if it does not, ask whether to book to a suggested expense/income account via `create_journal`.
 
 ## Step 6: Summary
 

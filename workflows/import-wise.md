@@ -66,3 +66,10 @@ Report:
 - fee transactions created
 - any rows still needing manual follow-up
 - mention that side effects can be reviewed via `execution.audit_reference`
+
+For each created PROJECT bank transaction the user is happy with, offer the next inline action per item — do NOT close the workflow with "confirm them in e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action.
+
+Inline actions:
+- For rows that match an open invoice, suggest running the **Reconcile Bank** workflow or offer `confirm_transaction` directly when the distribution is unambiguous.
+- For rows where `bank_ref_number` is missing or stale, offer `update_transaction` with the corrected reference before confirming.
+- For skipped duplicates the user explicitly wants to discard, offer `delete_transaction`.

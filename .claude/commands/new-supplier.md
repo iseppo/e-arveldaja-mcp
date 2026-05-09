@@ -19,7 +19,9 @@ If registry code provided: call `find_client_by_code`:
 If name provided: call `search_client`:
 - `name`: the supplier name
 
-If a clear match is found, show the existing client details and stop. Do not create a duplicate.
+For registry-code lookups, a hit is authoritative — show the existing client details and stop. Do not create a duplicate.
+
+For name-based search, treat any hit as a candidate, not a decision: show the matched client(s) to the user and ask whether one of them is the same supplier. If the user confirms the match, stop and do not create a duplicate. Otherwise continue to step 3 to register the new supplier.
 
 ## Step 3: Resolve supplier details
 
@@ -30,8 +32,8 @@ Call `resolve_supplier`:
 - `country`: `"EST"` (default)
 
 For Estonian codes, the tool queries the business registry (äriregister.rik.ee) for the official company name and address. Show this data to the user for review.
-name-only lookup does not fetch Estonian Business Registry data.
-`resolve_supplier` also does not fetch a VAT number from the registry lookup, so ask for `invoice_vat_no` separately if needed.
+
+A name-only lookup does not fetch Estonian Business Registry data, and `resolve_supplier` does not fetch a VAT number from the registry lookup — ask for `invoice_vat_no` separately when needed.
 
 ## Step 4: Gather additional information
 

@@ -50,7 +50,8 @@ If there are distributions in the statement and no `income_account` is known, as
 If the parsed distributions include withheld tax and no `tax_account` is known, ask the user for `tax_account` before booking them.
 
 When the required accounts are known, call `book_lightyear_distributions` with `dry_run: true`.
-- Include `broker_account`, `income_account`, optional `tax_account`, optional `fee_account`, optional `broker_dimension_id`, and `reward_account: 8600` for platform rewards.
+- Include `broker_account`, `income_account`, optional `tax_account`, optional `fee_account`, and optional `broker_dimension_id`.
+- The tool defaults `reward_account` to 8600 ("Muud äritulud") for platform rewards. Only pass `reward_account` explicitly when the user wants to override the default.
 - Present dividends, interest, platform rewards, withheld tax, skipped entries, duplicate-detection basis, and warnings.
 - Ask for explicit approval before re-running with `dry_run: false`.
 
