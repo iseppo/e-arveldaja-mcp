@@ -347,6 +347,53 @@ describe("lightyear investments tools", () => {
     ]);
   });
 
+  it("is idempotent on re-import: a foreign-currency trade with a paired FX conversion is skipped on the second pass", async () => {
+    // CLAUDE.md guarantees that re-importing the same Lightyear export does
+    // not double-book trades or their FX conversion. This pins that contract:
+    // first run creates the journal, second run sees the LY:{ref} document
+    // number and skips. Without the duplicate guard, a foreign-currency Buy
+    // would post both the trade and the conversion twice.
+    const csvBytes = buildStatementCsv([
+      ["10/11/2025 13:40:29", "CN-GZUJLSKLL2", "", "", "Conversion", "", "EUR", "", "-1307.80", "1.15709", "", "-1307.80", ""],
+      ["10/11/2025 13:40:29", "CN-GZUJLSKLL2", "", "", "Conversion", "", "USD", "", "1131.92", "0.86423", "0.00", "1131.92", ""],
+      ["10/11/2025 13:50:00", "OR-USDBUY1", "AAPL", "US0378331005", "Buy", "5.000000000", "USD", "226.384000000", "1131.92", "", "0.00", "1131.92", ""],
+    ]);
+
+    // First pass — no journals yet, expect the trade to book.
+    mockedReadFile.mockResolvedValue(csvBytes);
+    const firstRun = setupLightyearTool("book_lightyear_trades");
+    const firstResult = await firstRun.handler({
+      file_path: "/tmp/lightyear.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      dry_run: false,
+    });
+    const firstPayload = parseMcpResponse(firstResult.content[0]!.text) as any;
+    expect(firstPayload.created).toBe(1);
+    expect(firstPayload.duplicates_skipped).toBe(0);
+    expect(firstRun.api.journals.create).toHaveBeenCalledTimes(1);
+
+    // Second pass — the LY:OR-USDBUY1 journal already exists. Same CSV.
+    mockedReadFile.mockResolvedValue(csvBytes);
+    const secondRun = setupLightyearTool("book_lightyear_trades", {
+      journals: [{
+        is_deleted: false,
+        document_number: "LY:OR-USDBUY1",
+        effective_date: "2025-11-10",
+      }],
+    });
+    const secondResult = await secondRun.handler({
+      file_path: "/tmp/lightyear.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      dry_run: false,
+    });
+    const secondPayload = parseMcpResponse(secondResult.content[0]!.text) as any;
+    expect(secondPayload.created).toBe(0);
+    expect(secondPayload.duplicates_skipped).toBe(1);
+    expect(secondRun.api.journals.create).not.toHaveBeenCalled();
+  });
+
   it("does NOT treat a hand-entered journal sharing a raw OR reference as a duplicate when the date differs", async () => {
     // Scenario: user previously pasted "OR-VUAA-BUY" as the document_number
     // on an unrelated journal dated 2023-01-01. Importing the real Lightyear

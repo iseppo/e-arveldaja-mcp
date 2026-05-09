@@ -321,4 +321,51 @@ describe("dimension validators", () => {
     expect(errors[0]).toContain("Distribution 1 account 1360");
     expect(errors[0]).toContain("inactive");
   });
+
+  it("requires related_sub_id when the account has multiple dimensions and none was passed", () => {
+    // Without a pre-flight, the API returns a cryptic
+    // "Entry cannot be made directly to the account ... since it has dimensions"
+    // error; the validator catches this client-side with a clearer hint.
+    const distributions: TransactionDistribution[] = [{
+      related_table: "accounts",
+      related_id: 1360,
+      amount: 1620.7,
+    }];
+
+    const errors = validateTransactionDistributionDimensions(
+      distributions,
+      [dimensionalAccount(1360, "Arveldused aruandvate isikutega")],
+      [
+        dimension(60, 1360, "Employee A"),
+        dimension(61, 1360, "Employee B"),
+      ],
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("related_sub_id is required");
+    expect(errors[0]).toContain("Employee A");
+    expect(errors[0]).toContain("Employee B");
+    expect(distributions[0]!.related_sub_id).toBeUndefined();
+  });
+
+  it("rejects an invalid related_sub_id that does not belong to the account", () => {
+    const distributions: TransactionDistribution[] = [{
+      related_table: "accounts",
+      related_id: 1360,
+      related_sub_id: 999, // not a valid dimension for this account
+      amount: 1620.7,
+    }];
+
+    const errors = validateTransactionDistributionDimensions(
+      distributions,
+      [dimensionalAccount(1360, "Arveldused aruandvate isikutega")],
+      [
+        dimension(60, 1360, "Employee A"),
+        dimension(61, 1360, "Employee B"),
+      ],
+    );
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("related_sub_id 999 is not a valid dimension");
+  });
 });

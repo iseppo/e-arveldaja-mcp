@@ -375,6 +375,26 @@ describe("prepare_accounting_inbox", () => {
     expect(payload.user_summary).toContain("credentials are not configured yet");
   });
 
+  it("propagates non-setup-mode API errors instead of silently using empty defaults", async () => {
+    // The setup-mode catch only swallows errors with `mode === "setup"`.
+    // A real upstream failure (HTTP 500, network error, etc.) lacks that
+    // marker and must not be downgraded into a "live defaults unavailable"
+    // soft path, otherwise operators would think credentials are missing
+    // when the API is actually broken.
+    const workspace = await createAccountingWorkflowWorkspace({ includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    const apiError = new Error("Upstream 500: backend exploded");
+    const { handler } = setupAccountingInboxTool({
+      readonly: {
+        getBankAccounts: vi.fn().mockRejectedValue(apiError),
+        getAccountDimensions: vi.fn().mockRejectedValue(apiError),
+      },
+    });
+
+    await expect(handler({ workspace_path: workspace })).rejects.toThrow("Upstream 500: backend exploded");
+  });
+
   it("runs the safe automatic dry-run first pass and returns one consolidated preview", async () => {
     const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
