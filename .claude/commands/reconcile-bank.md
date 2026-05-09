@@ -4,6 +4,8 @@
 
 Match unconfirmed bank transactions to open invoices and confirm the matches.
 
+Start by showing matches. Nothing is confirmed, deleted, or journalized until the user approves the exact action.
+
 **Input:** One of:
 - `auto` or empty — dry run first, then confirm high-confidence matches with user approval
 - `review` — show all matches for manual review without confirming
@@ -11,11 +13,11 @@ Match unconfirmed bank transactions to open invoices and confirm the matches.
 
 ## Step 1: Get matches
 
-- Preferred: call `reconcile_bank_transactions`:
+Preferred: call `reconcile_bank_transactions`:
 - mode: "suggest"
 - min_confidence: 30 (to see all potential matches including low-confidence ones)
 
-`reconcile_transactions` remains available as a compatibility primitive.
+Fallback compatibility primitive: `reconcile_transactions` remains available, but only use it if the preferred mode-based tool is unavailable. Do not mention fallback tool names to the user.
 
 Review the output:
 - `result.total_unconfirmed`: bank transactions needing attention
@@ -51,11 +53,17 @@ Call `reconcile_bank_transactions`:
 - mode: "dry_run_auto_confirm"
 - min_confidence: 90
 
-`auto_confirm_exact_matches` remains available as a compatibility primitive.
+Fallback compatibility primitive: `auto_confirm_exact_matches` remains available, but prefer `reconcile_bank_transactions`.
 
 Treat `result.execution` as the canonical batch payload when present. Prefer `result.execution.summary`, `result.execution.results`, `result.execution.errors`, and `result.execution.audit_reference`.
 
 Show what would be confirmed. Ask user for approval.
+The approval card must include:
+- how many bank transactions would be confirmed
+- invoice numbers and counterparties
+- source confidence and match reasons
+- side effect: confirmed bank transaction distributions
+- audit reference when available
 
 If approved, call again with `mode: "execute_auto_confirm"`.
 
@@ -88,7 +96,7 @@ For transfers between your own bank accounts (counterparty matches company name 
 Call `reconcile_bank_transactions`:
 - mode: "inter_account_dry_run" (dry run first)
 
-`reconcile_inter_account_transfers` remains available as a compatibility primitive.
+Fallback compatibility primitive: `reconcile_inter_account_transfers` remains available, but prefer the mode-based dry run through `reconcile_bank_transactions` before execution.
 
 Review the results:
 - Treat `result.execution.summary` as the canonical source for counts, and use `result.pairs`, `result.one_sided`, `result.already_handled`, and `result.ambiguous_pairs` for detailed breakdown.

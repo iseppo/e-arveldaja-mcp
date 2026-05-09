@@ -2,6 +2,13 @@
 
 Classify unmatched bank transactions, preview the auto-bookable purchase-invoice groups, and only apply them after approval.
 
+User-facing phases:
+1. Classify unmatched rows.
+2. Explain which groups can be auto-booked and which need review.
+3. Preview the approved groups.
+4. Ask for one apply approval.
+5. Apply and report created invoices/linked transactions.
+
 ## Arguments
 
 - `accounts_dimensions_id`: bank account dimension ID
@@ -18,7 +25,7 @@ Call `classify_bank_transactions`:
 - `accounts_dimensions_id`: the provided dimension ID
 - include `date_from` / `date_to` when provided
 
-`classify_unmatched_transactions` remains available as a compatibility primitive.
+Fallback compatibility primitive: `classify_unmatched_transactions` remains available, but prefer `classify_bank_transactions`. Do not mention fallback tool names to the user.
 
 Show:
 - `result.total_unconfirmed`
@@ -48,7 +55,7 @@ Call `classify_bank_transactions`:
 - mode: "dry_run_apply"
 - `classifications_json`: `JSON.stringify(the result payload from step 1)`
 
-`apply_transaction_classifications` remains available as a compatibility primitive.
+Fallback compatibility primitive: `apply_transaction_classifications` remains available, but prefer `classify_bank_transactions` when it supports the requested mode.
 
 Group the result by status:
 - Treat `result.execution` as the canonical batch payload when present.
@@ -66,6 +73,13 @@ If the user wants only some groups applied:
 ### Step 4: Approval gate
 
 Ask for approval before executing.
+The approval card must include:
+- transaction groups that would be applied
+- purchase invoices that would be created
+- bank transactions that would be linked or confirmed
+- review-only groups that will remain untouched
+- failed/skipped rows from the dry run
+- side effects and audit reference
 
 If the user does not explicitly approve, stop.
 

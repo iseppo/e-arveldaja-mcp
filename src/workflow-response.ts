@@ -60,6 +60,136 @@ type MaterializingDryRunTool =
   | "auto_confirm_exact_matches"
   | "reconcile_inter_account_transfers";
 
+function humanizeToolName(name: string): string {
+  return name
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map(segment => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function questionLabel(prompt: string): string {
+  const normalized = prompt.toLowerCase();
+  if (normalized.includes("bank account dimension") || normalized.includes("bank dimension")) {
+    return "Choose bank account dimension";
+  }
+  if (normalized.includes("fee") && normalized.includes("dimension")) {
+    return "Choose fee expense dimension";
+  }
+  if (normalized.includes("storage_scope") || (normalized.includes("local") && normalized.includes("global"))) {
+    return "Choose credential storage scope";
+  }
+  if (normalized.includes("apikey") || normalized.includes("which file") || normalized.includes("file should be imported")) {
+    return "Choose credential file";
+  }
+  if (normalized.includes("supplier")) {
+    return "Confirm supplier choice";
+  }
+  if (normalized.includes("account")) {
+    return "Choose account";
+  }
+  return "Answer next workflow question";
+}
+
+function actionLabelForTool(tool: string, args: Record<string, unknown>): string {
+  const mode = typeof args.mode === "string" ? args.mode : undefined;
+  const action = typeof args.action === "string" ? args.action : undefined;
+  const execute = typeof args.execute === "boolean" ? args.execute : undefined;
+  const dryRun = typeof args.dry_run === "boolean" ? args.dry_run : undefined;
+
+  switch (tool) {
+    case "accounting_inbox":
+      return "Scan accounting inbox";
+    case "continue_accounting_workflow":
+      if (action === "resolve_review") return "Resolve accounting review item";
+      if (action === "prepare_action") return "Prepare review action for approval";
+      return "Continue accounting workflow";
+    case "extract_pdf_invoice":
+      return "Extract invoice data";
+    case "validate_invoice_data":
+      return "Validate invoice totals";
+    case "resolve_supplier":
+      return "Resolve supplier";
+    case "detect_duplicate_purchase_invoice":
+      return "Check duplicate invoice risk";
+    case "suggest_booking":
+      return "Suggest invoice booking";
+    case "create_purchase_invoice_from_pdf":
+      return "Create purchase invoice";
+    case "confirm_purchase_invoice":
+      return "Confirm purchase invoice";
+    case "receipt_batch":
+      if (mode === "scan") return "Scan receipt folder";
+      if (mode === "dry_run") return "Preview receipt batch booking";
+      if (mode === "create") return "Create receipt batch invoices";
+      if (mode === "create_and_confirm") return "Create and confirm receipt batch";
+      return "Process receipt batch";
+    case "process_camt053":
+      if (mode === "parse") return "Parse CAMT statement";
+      if (mode === "dry_run") return "Preview CAMT statement import";
+      if (mode === "execute") return "Import CAMT bank transactions";
+      return "Process CAMT statement";
+    case "import_camt053":
+      return execute ? "Import CAMT bank transactions" : "Preview CAMT statement import";
+    case "import_wise_transactions":
+      return execute ? "Import Wise transactions" : "Preview Wise transaction import";
+    case "classify_bank_transactions":
+      if (mode === "classify") return "Classify unmatched bank transactions";
+      if (mode === "dry_run_apply") return "Preview transaction classification booking";
+      if (mode === "execute_apply") return "Apply transaction classifications";
+      return "Classify bank transactions";
+    case "apply_transaction_classifications":
+      return execute ? "Apply transaction classifications" : "Preview transaction classification booking";
+    case "reconcile_bank_transactions":
+      if (mode === "suggest") return "Find bank transaction matches";
+      if (mode === "dry_run_auto_confirm") return "Preview exact-match confirmations";
+      if (mode === "execute_auto_confirm") return "Confirm exact bank matches";
+      if (mode === "inter_account_dry_run") return "Preview inter-account transfer reconciliation";
+      return "Reconcile bank transactions";
+    case "auto_confirm_exact_matches":
+      return execute ? "Confirm exact bank matches" : "Preview exact-match confirmations";
+    case "reconcile_inter_account_transfers":
+      return execute ? "Reconcile inter-account transfers" : "Preview inter-account transfer reconciliation";
+    case "month_end_close_checklist":
+      return "Check month-end blockers";
+    case "find_missing_documents":
+      return "Find missing source documents";
+    case "compute_trial_balance":
+      return "Compute trial balance";
+    case "compute_profit_and_loss":
+      return "Compute profit and loss";
+    case "compute_balance_sheet":
+      return "Compute balance sheet";
+    case "compute_receivables_aging":
+      return "Compute receivables aging";
+    case "compute_payables_aging":
+      return "Compute payables aging";
+    case "find_client_by_code":
+    case "search_client":
+      return "Check existing supplier";
+    case "create_client":
+      return "Create supplier";
+    case "parse_lightyear_statement":
+      return "Parse Lightyear statement";
+    case "parse_lightyear_capital_gains":
+      return "Parse Lightyear capital gains";
+    case "lightyear_portfolio_summary":
+      return "Preview Lightyear cost basis";
+    case "book_lightyear_trades":
+      return dryRun === false ? "Book Lightyear trades" : "Preview Lightyear trade bookings";
+    case "book_lightyear_distributions":
+      return dryRun === false ? "Book Lightyear distributions" : "Preview Lightyear distribution bookings";
+    case "get_setup_instructions":
+      return "Inspect credential setup";
+    case "import_apikey_credentials":
+      return "Import API credentials";
+    case "list_connections":
+      return "List configured connections";
+    default:
+      return humanizeToolName(tool);
+  }
+}
+
 function actionFromQuestion(question: unknown): WorkflowAction | undefined {
   if (!isRecord(question)) return undefined;
   const prompt = stringAt(question, "summary") ?? stringAt(question, "question");
@@ -67,7 +197,7 @@ function actionFromQuestion(question: unknown): WorkflowAction | undefined {
 
   return {
     kind: "answer_question",
-    label: "Answer the next setup question",
+    label: questionLabel(prompt),
     question: prompt,
     recommendation: stringAt(question, "recommendation"),
     why: "This missing input blocks the next safe workflow step.",
@@ -93,11 +223,12 @@ export function actionFromRecommendedStep(step: unknown): WorkflowAction | undef
   if (!isRecord(step)) return undefined;
   const tool = stringAt(step, "tool");
   if (!tool) return undefined;
+  const args = recordAt(step, "suggested_args") ?? recordAt(step, "args") ?? {};
   return {
     kind: "tool_call",
-    label: `Run ${tool}`,
+    label: actionLabelForTool(tool, args),
     tool,
-    args: recordAt(step, "suggested_args") ?? recordAt(step, "args") ?? {},
+    args,
     why: stringAt(step, "reason") ?? stringAt(step, "why") ?? stringAt(step, "purpose") ?? "Run the next safe workflow step.",
     approval_required: false,
   };

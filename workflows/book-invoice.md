@@ -4,6 +4,17 @@ Book a purchase invoice from a source document. Extract the data, validate it, r
 
 **Input:** Absolute path to the invoice document (`.pdf`, `.jpg`, `.jpeg`, `.png`).
 
+## User-facing flow
+
+Think in five phases, even though the tool work below is more detailed:
+1. Read the document.
+2. Validate amounts and supplier identity.
+3. Check duplicate risk and reuse a safe booking basis.
+4. Show one approval card.
+5. Create, upload, confirm, and report only after approval.
+
+Keep the user's view compact. Do not show every extracted field unless it changes the booking decision.
+
 ## Step 1: Check VAT registration
 
 Call `get_vat_info` first to confirm whether this company is currently VAT-registered.
@@ -106,12 +117,15 @@ If there is no suitable history, call `list_purchase_articles` or ask the user i
 
 ## Step 10: Preview the booking and ask for approval before creating anything
 
-Before creating anything, present:
+Before creating anything, present one approval card:
 - Supplier name and supplier client ID
 - Invoice number, invoice date, due date, journal date, and term days
 - Net / VAT / gross amounts
 - The exact item-level booking you intend to send, including article IDs, account IDs, `purchase_accounts_dimensions_id`, VAT fields, `vat_accounts_dimensions_id`, and any `reversed_vat_id`
 - The booking basis used and any assumptions
+- Duplicate-check result
+- Source document path
+- Side effects after approval: create purchase invoice, upload the source document, and confirm the invoice
 
 If the user has not explicitly approved the preview, stop here and wait.
 

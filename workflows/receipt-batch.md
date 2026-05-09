@@ -2,6 +2,13 @@
 
 Scan a folder of receipts, preview what can be auto-booked, and only create purchase invoices after approval.
 
+User-facing phases:
+1. Scan the folder.
+2. Preview auto-bookable receipts, duplicates, review items, and errors.
+3. Ask for one create approval.
+4. Create/upload PROJECT invoices.
+5. Offer confirmation and bank-linking as separate follow-up approvals.
+
 ## Arguments
 
 - `folder_path`: absolute path to the receipt folder
@@ -33,7 +40,8 @@ Call `receipt_batch`:
 - include `date_from` / `date_to` when provided
 
 Review:
-- `receipt_batch` is the preferred merged workflow tool; `scan_receipt_folder` and `process_receipt_batch` remain compatibility primitives.
+- `receipt_batch` is the preferred merged workflow tool.
+- Fallback compatibility primitives: `scan_receipt_folder` and `process_receipt_batch` remain available, but only use them if the preferred tool is unavailable. Do not mention fallback tool names to the user.
 - Use `result` as the delegated `process_receipt_batch` payload.
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.needs_review`, `execution.errors`, and `execution.audit_reference`.
@@ -54,6 +62,13 @@ Recurring `needs_review` reasons to recognize and explain plainly:
 State clearly that `mode: "dry_run"` is only a preview.
 
 Ask for approval before running `receipt_batch` with `mode: "create"`.
+The approval card must include:
+- source folder
+- files that would create PROJECT purchase invoices
+- skipped duplicates
+- files still needing review or failed OCR
+- side effect: create and upload PROJECT purchase invoices only
+- what is explicitly not included yet: invoice confirmation and bank transaction confirmation
 
 `mode: "create"` creates and uploads PROJECT purchase invoices, but leaves them unconfirmed for review. Do not use `mode: "create_and_confirm"` unless the user separately approves confirming the created invoices after reviewing them.
 

@@ -42,7 +42,19 @@ Ask the user for any details to add:
 - Phone number
 - Address (if not found from registry)
 
-## Step 5: Create the supplier
+## Step 5: Preview and ask for approval
+
+Before creating anything, present one approval card:
+- supplier name
+- registry code and country
+- duplicate-check result
+- registry/address data being used
+- bank account, VAT number, email, phone, and address fields that will be stored
+- side effect: create one supplier client record in e-arveldaja
+
+If the user does not explicitly approve, stop.
+
+## Step 6: Create the supplier
 
 Call `create_client`:
 - `name`: official name from registry, or user-provided name
@@ -57,7 +69,7 @@ Call `create_client`:
 - `telephone`: (if provided)
 - `address_text`: from registry or user input
 
-## Step 6: Report
+## Step 7: Report
 
 Show created supplier: client ID, name, registry code, country, and any additional fields set.
 

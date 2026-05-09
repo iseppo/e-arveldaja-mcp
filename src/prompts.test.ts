@@ -69,6 +69,7 @@ describe("registerPrompts", () => {
     const names = server.registerPrompt.mock.calls.map(([name]) => name);
     expect(names).toEqual([
       "setup-credentials",
+      "setup-e-arveldaja",
       "accounting-inbox",
       "resolve-accounting-review",
       "prepare-accounting-review-action",
@@ -277,6 +278,28 @@ describe("registerPrompts", () => {
     expect(text).toContain("Canonical workflow source: workflows/receipt-batch.md");
     expect(text).toContain(readPromptSurface("workflows/receipt-batch.md").trimEnd());
     expect(text).not.toContain("Process a receipt batch from: /tmp/receipts");
+  });
+
+  it("wraps workflow sources with user-facing response guidance", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "book-invoice", { file_path: "/tmp/invoice.pdf" });
+
+    expect(text).toContain("Use this workflow source as an internal runbook.");
+    expect(text).toContain("Do not dump raw tool fields or compatibility-tool details to the user unless they are needed for a concrete choice.");
+    expect(text).toContain("User-facing response contract:");
+    expect(text).toContain("Done");
+    expect(text).toContain("Needs approval");
+    expect(text).toContain("Needs one decision");
+    expect(text).toContain("Needs accountant review");
+    expect(text).toContain("Next recommended action");
+  });
+
+  it("registers setup-e-arveldaja from the canonical workflow source", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "setup-e-arveldaja");
+
+    expect(text).toContain("Canonical workflow source: workflows/setup-e-arveldaja.md");
+    expect(text).toContain(readPromptSurface("workflows/setup-e-arveldaja.md").trimEnd());
   });
 
   it("keeps import-camt aligned with parse and dry-run import details", async () => {
@@ -617,6 +640,8 @@ describe("registerPrompts", () => {
       ".claude/commands/import-wise.md": "If the user does not explicitly approve, stop.",
       "workflows/classify-unmatched.md": "If the user does not explicitly approve, stop.",
       ".claude/commands/classify-unmatched.md": "If the user does not explicitly approve, stop.",
+      "workflows/new-supplier.md": "If the user does not explicitly approve, stop.",
+      ".claude/commands/new-supplier.md": "If the user does not explicitly approve, stop.",
     };
 
     for (const [relativePath, stopPhrase] of Object.entries(expectedStops)) {

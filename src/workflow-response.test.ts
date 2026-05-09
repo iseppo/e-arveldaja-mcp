@@ -2,6 +2,32 @@ import { describe, expect, it } from "vitest";
 import { approvalPreviewFromDryRunStep, buildWorkflowEnvelope } from "./workflow-response.js";
 
 describe("workflow response helpers", () => {
+  it("uses domain labels for next tool calls and questions", () => {
+    const workflow = buildWorkflowEnvelope({
+      summary: "Prepared CAMT import.",
+      needs_decision: [{
+        summary: "Which bank account dimension should be used?",
+        recommendation: "Use the LHV EUR account.",
+      }],
+      recommended_step: {
+        tool: "process_camt053",
+        suggested_args: { mode: "dry_run", file_path: "/tmp/statement.xml" },
+        purpose: "Preview the CAMT statement before creating transactions.",
+      },
+    });
+
+    expect(workflow.recommended_next_action).toMatchObject({
+      kind: "tool_call",
+      tool: "process_camt053",
+      label: "Preview CAMT statement import",
+    });
+    expect(workflow.available_actions[1]).toMatchObject({
+      kind: "answer_question",
+      label: "Choose bank account dimension",
+      question: "Which bank account dimension should be used?",
+    });
+  });
+
   it("prioritizes the next safe tool call before asking blocking questions", () => {
     const workflow = buildWorkflowEnvelope({
       summary: "Prepared inbox.",

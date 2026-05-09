@@ -2,6 +2,12 @@
 
 Parse a CAMT.053 statement, preview the import, and only create bank transactions after approval.
 
+User-facing phases:
+1. Parse the statement.
+2. Preview creates, skips, and possible duplicates.
+3. Ask for one approval decision.
+4. Import and offer reconciliation.
+
 ## Arguments
 
 - `file_path`: absolute path to the CAMT.053 XML file
@@ -35,7 +41,8 @@ Call `process_camt053`:
 - include `date_from` / `date_to` when provided
 
 Review:
-- `process_camt053` is the preferred merged workflow tool; `parse_camt053` and `import_camt053` remain compatibility primitives.
+- `process_camt053` is the preferred merged workflow tool.
+- Fallback compatibility primitives: `parse_camt053` and `import_camt053` remain available, but only use them if the preferred tool is unavailable. Do not mention fallback tool names to the user.
 - Use `result` as the delegated `import_camt053` payload.
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary.total_statement_entries`, `execution.summary.eligible_entries`, `execution.summary.filtered_out`, `execution.summary.created_count`, `execution.summary.skipped_count`, `execution.summary.error_count`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
@@ -59,6 +66,13 @@ Do not suggest overwriting curated manual fields like description or reference w
 ### Step 3: Approval gate
 
 Ask for approval before creating anything.
+The approval card must include:
+- source CAMT file
+- number of bank transactions that would be created
+- rows skipped as exact duplicates
+- possible duplicate review items
+- side effect: PROJECT bank transactions created in e-arveldaja
+- audit reference when available
 
 If the user does not explicitly approve, stop.
 

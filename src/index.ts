@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { registerPrompt, registerTool } from "./mcp-compat.js";
+import { registerTool } from "./mcp-compat.js";
 import {
   loadDotenvFiles,
   loadAllConfigs,
@@ -1012,35 +1012,6 @@ Reporting:
 
   // Register prompts
   registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined });
-  registerPrompt(
-    server,
-    "setup-e-arveldaja",
-    "Explain how to configure e-arveldaja API credentials when the MCP server is running in setup mode.",
-    async () => ({
-      messages: [{
-        role: "user",
-        content: {
-          type: "text",
-          text: `Explain how to configure e-arveldaja MCP credentials using this exact guidance:
-- Working directory: ${setupInfo.working_directory}
-- Searched directories: ${setupInfo.searched_directories.join(", ")}
-- Shared config directory used when the configuration should work from any folder: ${setupInfo.global_config_directory}
-- Shared env file: ${setupInfo.global_env_file}
-- Import tool: import_apikey_credentials
-- Required environment variables: ${setupInfo.env_vars.join(", ")}
-- Optional direct credential file env var: ${setupInfo.credential_file_env_var}
-- Alternatively, place ${setupInfo.credential_file_pattern} in this folder and run import_apikey_credentials to verify it and choose whether it should work only in this folder or whenever the MCP server is started from any folder.
-- File format:
-  ${setupInfo.file_format_example.join("\n  ")}
-- ${setupInfo.next_steps.join("\n- ")}
-
-Current server mode: ${setupMode ? "setup" : "configured"}.
-If the server is currently in setup mode, say so explicitly and tell the user to restart the MCP server after adding credentials.
-If the server is already configured, say that explicitly and treat this as reconfiguration guidance only.`,
-        },
-      }],
-    }),
-  );
 
   // Start server
   const transport = new StdioServerTransport();

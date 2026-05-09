@@ -69,9 +69,23 @@ describe("recommend_workflow", () => {
     const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
 
     expect(payload.ok).toBe(true);
-    expect(payload.available_workflows.map((workflow: any) => workflow.id)).toEqual(
-      expect.arrayContaining(["accounting-inbox", "book-invoice", "import-wise", "reconcile-bank"]),
-    );
+    expect(payload.available_workflows.map((workflow: any) => workflow.id)).toEqual([
+      "setup-credentials",
+      "setup-e-arveldaja",
+      "accounting-inbox",
+      "resolve-accounting-review",
+      "prepare-accounting-review-action",
+      "book-invoice",
+      "receipt-batch",
+      "import-camt",
+      "import-wise",
+      "classify-unmatched",
+      "reconcile-bank",
+      "month-end-close",
+      "new-supplier",
+      "company-overview",
+      "lightyear-booking",
+    ]);
     expect(payload.workflow).toMatchObject({
       contract: "workflow_action_v1",
       recommended_next_action: {
@@ -81,6 +95,25 @@ describe("recommend_workflow", () => {
     });
     expect(payload.workflow.recommended_next_action.tool).toBeUndefined();
     expect(JSON.stringify(payload.workflow)).not.toContain("<describe the user's accounting goal>");
+  });
+
+  it.each([
+    ["close March month end", "month-end-close"],
+    ["book Lightyear CSV dividends and trades", "lightyear-booking"],
+    ["set up API credentials from apikey file", "setup-credentials"],
+    ["create a new supplier from registry code", "new-supplier"],
+    ["resolve accountant review item", "resolve-accounting-review"],
+    ["prepare approved review action", "prepare-accounting-review-action"],
+  ])("recommends %s as %s", async (goal, expectedWorkflowId) => {
+    const { handler } = getRecommendWorkflowHarness();
+
+    const result = await handler({ goal });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+
+    expect(payload.recommended_workflow).toMatchObject({
+      id: expectedWorkflowId,
+    });
+    expect(payload.workflow.recommended_next_action.label).not.toMatch(/^Run /);
   });
 
   it("recommends accounting_inbox as the merged entry point for workspace triage", async () => {

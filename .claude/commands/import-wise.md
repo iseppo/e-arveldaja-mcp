@@ -4,6 +4,12 @@
 
 Preview Wise transaction import results, including fee rows and skipped duplicates, before creating anything.
 
+User-facing phases:
+1. Preview the Wise CSV import.
+2. Resolve fee-dimension or transfer questions only when needed.
+3. Ask for one approval decision.
+4. Import and offer reconciliation/confirmation follow-up.
+
 ## Arguments
 
 - `file_path`: absolute path to the regular Wise `transaction-history.csv`
@@ -52,6 +58,13 @@ Show:
 Do not disable Jar skipping unless the user explicitly wants those internal Wise movements imported.
 
 Ask for approval before running with `execute: true`.
+The approval card must include:
+- source Wise CSV
+- number of main transactions and fee rows that would be created
+- skipped duplicates and Jar-transfer handling
+- selected fee account dimension, if any
+- side effect: PROJECT bank transactions created in e-arveldaja
+- audit reference when available
 
 If the user does not explicitly approve, stop.
 

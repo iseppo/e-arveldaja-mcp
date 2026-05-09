@@ -4,6 +4,7 @@ import { getProjectRoot } from "./paths.js";
 
 export const WORKFLOW_PROMPT_SOURCE_BY_PROMPT = {
   "setup-credentials": "setup-credentials",
+  "setup-e-arveldaja": "setup-e-arveldaja",
   "accounting-inbox": "accounting-inbox",
   "resolve-accounting-review": "resolve-accounting-review",
   "prepare-accounting-review-action": "prepare-accounting-review-action",
@@ -96,7 +97,15 @@ function formatRunArguments(args: unknown): string {
 }
 
 export function buildWorkflowPromptSourceText(slug: WorkflowPromptSlug, args: unknown): string {
-  return `Use the canonical workflow source below as the workflow instructions.
+  return `Use this workflow source as an internal runbook.
+Follow the tool order, safety rails, and approval gates below, but keep the user-facing response focused on the accounting task. Do not dump raw tool fields or compatibility-tool details to the user unless they are needed for a concrete choice.
+
+User-facing response contract:
+- Done: work already completed automatically.
+- Needs approval: show the exact accounting impact, source documents, duplicate risk, and next tool call before any mutation.
+- Needs one decision: ask one recommendation-first question with the default first.
+- Needs accountant review: present the recommendation, compliance basis, unresolved questions, and the suggested next workflow.
+- Next recommended action: end with one concrete next step whenever the workflow is not finished.
 
 Run-specific arguments:
 ${formatRunArguments(args)}

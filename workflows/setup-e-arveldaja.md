@@ -2,6 +2,8 @@
 
 Explain how to configure e-arveldaja MCP credentials for the current working directory.
 
+For actual importing, prefer the `setup-credentials` workflow because it covers storage scope, append/overwrite behavior, removal, and restart verification.
+
 Follow these steps:
 
 1. Call `get_setup_instructions`.

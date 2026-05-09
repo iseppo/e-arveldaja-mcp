@@ -116,6 +116,13 @@ export function registerPrompts(
     },
   );
 
+  registerWorkflowPromptWithoutArgs(
+    server,
+    undefined,
+    "setup-e-arveldaja",
+    "Explain how to configure e-arveldaja API credentials, including supported environment variables, apikey import, storage scope, restart, and first verification.",
+  );
+
   registerWorkflowPrompt(
     server,
     undefined,

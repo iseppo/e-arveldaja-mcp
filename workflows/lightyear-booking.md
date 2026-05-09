@@ -2,6 +2,13 @@
 
 Book Lightyear investment activity from CSV exports after explicit dry-run review.
 
+User-facing phases:
+1. Parse statements and required capital-gains files.
+2. Show accounting carrying value / cost basis.
+3. Preview trade bookings.
+4. Preview distribution bookings after required accounts are known.
+5. Book only approved categories.
+
 ## Arguments
 
 - `statement_path`: absolute path to the Lightyear AccountStatement CSV
@@ -40,6 +47,7 @@ Call `book_lightyear_trades` with `dry_run: true`.
 - Include `capital_gains_file`, `gain_loss_account`, `loss_account`, `fee_account`, `investment_dimension_id`, and `broker_dimension_id` when available.
 - Present trades that would be booked, skipped entries, duplicate-detection basis, and warnings.
 - Ask for explicit approval before re-running with `dry_run: false`.
+- The trade approval card must include source CSV, journals that would be created, skipped duplicates, gain/loss account choices, dimensions, and side effects.
 
 ### Step 5: Preview distributions only after required accounts are known
 
@@ -52,6 +60,7 @@ When the required accounts are known, call `book_lightyear_distributions` with `
 - The tool defaults `reward_account` to 8600 ("Muud äritulud") for platform rewards. Only pass `reward_account` explicitly when the user wants to override the default.
 - Present dividends, interest, platform rewards, withheld tax, skipped entries, duplicate-detection basis, and warnings.
 - Ask for explicit approval before re-running with `dry_run: false`.
+- The distribution approval card must include source CSV, income/tax/reward accounts, journals that would be created, skipped duplicates, and side effects.
 
 ### Step 6: Execute after approval
 

@@ -4,6 +4,12 @@ Run the month-end close checklist, compute financial statements, and flag issues
 
 **Input:** Month in YYYY-MM format (e.g. `2026-02`).
 
+User-facing phases:
+1. Identify close blockers.
+2. Check missing documents and duplicate invoices.
+3. Compute statements.
+4. Show READY TO CLOSE or HAS BLOCKERS with concrete inline next actions.
+
 ## Step 1: Run the checklist
 
 Call `month_end_close_checklist`:
