@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- **Accounting workflow test fixtures** — added shared typed MCP server/API fixture builders for workflow tests and migrated accounting inbox, CAMT import, and receipt wrapper setup code away from repeated inline mocks. (#30)
 - **Workflow prompt source of truth** — MCP workflow prompts now append the canonical packaged `workflows/*.md` source, Claude command prompts are generated from those workflow files, and release validation fails if generated command prompt artifacts drift. (#31)
 - **Workflow tool surface cleanup** — extracted reference-data registrations from `crud-tools.ts` into a focused module with registration snapshot coverage, and updated shipped workflow docs to prefer the merged `accounting_inbox` / `continue_accounting_workflow` / `receipt_batch` entry points while keeping older focused tools documented as compatibility primitives. (#39)
 - **CAMT and receipt entry points** — added `process_camt053` and `receipt_batch` as mode-based wrappers over the existing parse/import/receipt tools. Existing focused CAMT and receipt tools stay registered for compatibility. (#36)

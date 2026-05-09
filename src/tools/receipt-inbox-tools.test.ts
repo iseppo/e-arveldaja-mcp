@@ -5,6 +5,13 @@ import { tmpdir } from "os";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
+import {
+  createAccountingWorkflowApi,
+  createReceiptFolder,
+  createMockToolServer,
+  getRegisteredToolHandler,
+  type AccountingWorkflowApiOptions,
+} from "../__fixtures__/accounting-workflow.js";
 
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
 
@@ -31,57 +38,33 @@ function setupReceiptTool(
     purchaseInvoiceDetails?: Record<number, unknown>;
   } = {},
 ) {
-  const server = { registerTool: vi.fn() } as any;
-  const api = {
-    clients: {
-      listAll: vi.fn().mockResolvedValue(options.clients ?? []),
-    },
-    saleInvoices: {
-      listAll: vi.fn().mockResolvedValue(options.saleInvoices ?? []),
-    },
-    purchaseInvoices: {
-      listAll: vi.fn().mockResolvedValue(options.purchaseInvoices ?? []),
-      get: vi.fn().mockImplementation(async (id: number) => {
-        const detail = options.purchaseInvoiceDetails?.[id];
-        if (!detail) throw new Error(`Missing purchase invoice ${id}`);
-        return detail;
-      }),
-      createAndSetTotals: vi.fn().mockResolvedValue({ id: 9001 }),
-      confirmWithTotals: vi.fn().mockResolvedValue({}),
-      invalidate: vi.fn().mockResolvedValue({}),
-    },
-    transactions: {
-      listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
-      get: options.getImpl ?? vi.fn().mockImplementation(async (id: number) => {
-        const detail = options.transactionDetails?.[id];
-        if (detail) return detail;
-        return (options.transactions ?? []).find((transaction: any) => transaction.id === id);
-      }),
-      confirm: vi.fn().mockResolvedValue({}),
-    },
-    readonly: {
-      getPurchaseArticles: vi.fn().mockResolvedValue(options.purchaseArticles ?? []),
-      getAccounts: vi.fn().mockResolvedValue(options.accounts ?? []),
-      getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-    },
-  } as any;
+  const server = createMockToolServer();
+  const apiOptions: AccountingWorkflowApiOptions = {
+    clientRows: options.clients,
+    saleInvoiceRows: options.saleInvoices,
+    purchaseInvoiceRows: options.purchaseInvoices,
+    purchaseInvoiceDetails: options.purchaseInvoiceDetails,
+    transactionRows: options.transactions,
+    transactionDetails: options.transactionDetails,
+    missingTransactionDetail: "undefined",
+    purchaseArticles: options.purchaseArticles,
+    accounts: options.accounts,
+    transactions: options.getImpl ? { get: options.getImpl } : undefined,
+  };
+  const api = createAccountingWorkflowApi(apiOptions);
 
   registerReceiptInboxTools(server, api);
 
-  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === toolName);
-  if (!registration) throw new Error(`Tool '${toolName}' was not registered`);
-
   return {
-    handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+    handler: getRegisteredToolHandler(server, toolName),
     api,
   };
 }
 
 describe("receipt inbox tool status handling", () => {
   it("receipt_batch scans receipt folders through the merged entry point", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "receipt-batch-wrapper-"));
+    const tempDir = createReceiptFolder();
     try {
-      writeFileSync(join(tempDir, "receipt.pdf"), "%PDF-1.4\n", "utf-8");
       const { handler } = setupReceiptTool("receipt_batch");
 
       const result = await handler({ mode: "scan", folder_path: tempDir });
@@ -100,7 +83,7 @@ describe("receipt inbox tool status handling", () => {
   });
 
   it("receipt_batch delegates processing modes to process_receipt_batch", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "receipt-batch-wrapper-"));
+    const tempDir = createReceiptFolder({});
     try {
       const { handler } = setupReceiptTool("receipt_batch");
 

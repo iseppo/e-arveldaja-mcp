@@ -3,6 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { resolveFileInput } from "../file-validation.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import {
+  createAccountingWorkflowApi,
+  createMockToolServer,
+  fixtureAccountDimension,
+  fixtureCamtXml,
+  getRegisteredToolHandler,
+} from "../__fixtures__/accounting-workflow.js";
 
 // CAMT free-form text is wrapped with a per-call OCR-sandbox nonce when
 // returned to MCP. These helpers check the plain value inside the wrap.
@@ -24,40 +31,7 @@ vi.mock("../progress.js", () => ({
 const mockedReadFile = vi.mocked(readFile);
 const mockedResolveFileInput = vi.mocked(resolveFileInput);
 
-const singleEntryXml = `<?xml version="1.0" encoding="UTF-8"?>
-<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
-  <BkToCstmrStmt>
-    <Stmt>
-      <Id>stmt-1</Id>
-      <Acct>
-        <Id><IBAN>EE637700771011212909</IBAN></Id>
-        <Ccy>EUR</Ccy>
-      </Acct>
-      <Ntry>
-        <Amt Ccy="EUR">10.00</Amt>
-        <CdtDbtInd>DBIT</CdtDbtInd>
-        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
-        <AcctSvcrRef>REF-VOID-1</AcctSvcrRef>
-        <NtryDtls>
-          <TxDtls>
-            <Refs>
-              <AcctSvcrRef>REF-VOID-1</AcctSvcrRef>
-            </Refs>
-            <AmtDtls>
-              <TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt>
-            </AmtDtls>
-            <RltdPties>
-              <Cdtr><Nm>Vendor OÜ</Nm></Cdtr>
-            </RltdPties>
-            <RmtInf>
-              <Ustrd>Test payment</Ustrd>
-            </RmtInf>
-          </TxDtls>
-        </NtryDtls>
-      </Ntry>
-    </Stmt>
-  </BkToCstmrStmt>
-</Document>`;
+const singleEntryXml = fixtureCamtXml();
 
 function setupCamtTool(options: {
   existingTransactions?: unknown[];
@@ -66,33 +40,23 @@ function setupCamtTool(options: {
   findByNameImpl?: (name: string) => unknown[] | Promise<unknown[]>;
   toolName?: string;
 } = {}) {
-  const server = { registerTool: vi.fn() } as any;
-  const api = {
-    readonly: {
-      getAccountDimensions: vi.fn().mockResolvedValue([
-        { id: 7, accounts_id: 1020, is_deleted: false },
-      ]),
-    },
-    transactions: {
-      listAll: vi.fn().mockResolvedValue(options.existingTransactions ?? []),
-      create: vi.fn().mockResolvedValue({ created_object_id: 9001 }),
-    },
+  const server = createMockToolServer();
+  const api = createAccountingWorkflowApi({
+    accountDimensions: [fixtureAccountDimension({ id: 7 })],
+    transactionRows: options.existingTransactions ?? [],
     clients: {
       findByCode: vi.fn().mockResolvedValue(options.findByCodeResult),
       findByName: options.findByNameImpl
         ? vi.fn().mockImplementation(options.findByNameImpl)
         : vi.fn().mockResolvedValue(options.findByNameResult ?? []),
     },
-  } as any;
+  });
 
   registerCamtImportTools(server, api);
 
-  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === (options.toolName ?? "import_camt053"));
-  if (!registration) throw new Error("Tool was not registered");
-
   return {
     api,
-    handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+    handler: getRegisteredToolHandler(server, options.toolName ?? "import_camt053"),
   };
 }
 

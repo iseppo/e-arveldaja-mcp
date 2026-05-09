@@ -1,107 +1,36 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
+import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { join } from "path";
-import { tmpdir } from "os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import { parseDocument } from "../document-parser.js";
 import { registerAccountingInboxTools } from "./accounting-inbox.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import * as auditLogModule from "../audit-log.js";
+import {
+  createAccountingWorkflowApi,
+  createAccountingWorkflowWorkspace,
+  createMockToolServer,
+  fixtureAccountDimension,
+  fixtureBankAccount,
+  getRegisteredToolHandler,
+  type AccountingWorkflowApiOptions,
+} from "../__fixtures__/accounting-workflow.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
 
 const mockedParseDocument = vi.mocked(parseDocument);
 
-function setupAccountingInboxTool(apiOverrides: Record<string, unknown> = {}, toolName = "prepare_accounting_inbox") {
-  const server = { registerTool: vi.fn() } as any;
-  const api = {
-    clients: {
-      findByCode: vi.fn().mockResolvedValue(undefined),
-      findByName: vi.fn().mockResolvedValue([]),
-      listAll: vi.fn().mockResolvedValue([]),
-    },
-    journals: {
-      listAllWithPostings: vi.fn().mockResolvedValue([]),
-    },
-    products: {},
-    saleInvoices: {
-      listAll: vi.fn().mockResolvedValue([]),
-    },
-    purchaseInvoices: {
-      listAll: vi.fn().mockResolvedValue([]),
-    },
-    transactions: {
-      listAll: vi.fn().mockResolvedValue([]),
-      get: vi.fn().mockImplementation(async (id: number) => ({ id, status: "CONFIRMED", is_deleted: false })),
-      update: vi.fn().mockResolvedValue({}),
-      delete: vi.fn().mockResolvedValue({}),
-    },
-    readonly: {
-      getBankAccounts: vi.fn().mockResolvedValue([]),
-      getAccountDimensions: vi.fn().mockResolvedValue([]),
-      getAccounts: vi.fn().mockResolvedValue([]),
-      getPurchaseArticles: vi.fn().mockResolvedValue([]),
-      getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-    },
-    ...apiOverrides,
-  } as any;
+function setupAccountingInboxTool(apiOptions: AccountingWorkflowApiOptions = {}, toolName = "prepare_accounting_inbox") {
+  const server = createMockToolServer();
+  const api = createAccountingWorkflowApi(apiOptions);
 
   registerAccountingInboxTools(server, api);
-  const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
-  if (!registration) throw new Error("Tool was not registered");
 
   return {
     api,
-    handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+    handler: getRegisteredToolHandler(server, toolName),
   };
-}
-
-async function createWorkspace(options: {
-  includeCamt?: boolean;
-  includeWise?: boolean;
-  includeReceipts?: boolean;
-  camtIban?: string;
-} = {}): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "accounting-inbox-"));
-
-  if (options.includeCamt !== false) {
-    await writeFile(
-      join(root, "statement.xml"),
-      `<?xml version="1.0" encoding="UTF-8"?>
-<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
-  <BkToCstmrStmt>
-    <Stmt>
-      <Acct>
-        <Id><IBAN>${options.camtIban ?? "EE637700771011212909"}</IBAN></Id>
-      </Acct>
-    </Stmt>
-  </BkToCstmrStmt>
-</Document>`,
-    );
-  }
-
-  if (options.includeWise !== false) {
-    const wiseDir = join(root, "wise");
-    await mkdir(wiseDir, { recursive: true });
-    await writeFile(
-      join(wiseDir, "transaction-history.csv"),
-      [
-        "Source amount (after fees),Target amount (after fees),Exchange rate",
-        "10,10,1",
-      ].join("\n"),
-    );
-  }
-
-  if (options.includeReceipts !== false) {
-    const receiptsDir = join(root, "receipts");
-    await mkdir(receiptsDir, { recursive: true });
-    await writeFile(join(receiptsDir, "receipt-1.pdf"), "fake pdf");
-    await writeFile(join(receiptsDir, "receipt-2.jpg"), "fake jpg");
-  }
-
-  return root;
 }
 
 const workspacesToClean: string[] = [];
@@ -113,28 +42,12 @@ afterEach(async () => {
 
 describe("prepare_accounting_inbox", () => {
   it("exposes accounting_inbox scan mode as the merged scan entry point", async () => {
-    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
 
     const { handler } = setupAccountingInboxTool({
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          {
-            accounts_dimensions_id: 101,
-            account_name_est: "LHV põhikonto",
-            account_no: "EE637700771011212909",
-            iban_code: "EE637700771011212909",
-          },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          {
-            id: 101,
-            accounts_id: 1020,
-            title_est: "LHV põhikonto",
-            is_deleted: false,
-          },
-        ]),
-      },
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
     }, "accounting_inbox");
 
     const result = await handler({ mode: "scan", workspace_path: workspace });
@@ -150,35 +63,13 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("exposes accounting_inbox dry_run mode as the merged autopilot entry point", async () => {
-    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
 
     const { handler } = setupAccountingInboxTool({
-      transactions: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          {
-            accounts_dimensions_id: 101,
-            account_name_est: "LHV põhikonto",
-            account_no: "EE637700771011212909",
-            iban_code: "EE637700771011212909",
-          },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          {
-            id: 101,
-            accounts_id: 1020,
-            title_est: "LHV põhikonto",
-            is_deleted: false,
-          },
-        ]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
+      transactionRows: [],
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
     }, "accounting_inbox");
 
     const result = await handler({ mode: "dry_run", workspace_path: workspace });
@@ -194,34 +85,26 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("detects likely accounting inputs and suggests the first dry-run flow with defaults", async () => {
-    const workspace = await createWorkspace();
+    const workspace = await createAccountingWorkflowWorkspace();
     workspacesToClean.push(workspace);
 
     const { handler } = setupAccountingInboxTool({
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          {
-            accounts_dimensions_id: 101,
-            account_name_est: "LHV arvelduskonto",
-            account_no: "EE637700771011212909",
-            iban_code: "EE637700771011212909",
-          },
-          {
-            accounts_dimensions_id: 202,
-            account_name_est: "Wise konto",
-            account_no: "BE62510007547061",
-            iban_code: "BE62510007547061",
-          },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          {
-            id: 303,
-            accounts_id: 8610,
-            title_est: "Muud finantskulud",
-            is_deleted: false,
-          },
-        ]),
-      },
+      bankAccounts: [
+        fixtureBankAccount({ account_name_est: "LHV arvelduskonto" }),
+        fixtureBankAccount({
+          accounts_dimensions_id: 202,
+          account_name_est: "Wise konto",
+          account_no: "BE62510007547061",
+          iban_code: "BE62510007547061",
+        }),
+      ],
+      accountDimensions: [
+        fixtureAccountDimension({
+          id: 303,
+          accounts_id: 8610,
+          title_est: "Muud finantskulud",
+        }),
+      ],
     });
 
     const result = await handler({ workspace_path: workspace });
@@ -263,7 +146,7 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("uses CAMT statement IBAN to avoid unnecessary bank-dimension questions", async () => {
-    const workspace = await createWorkspace({ includeWise: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false });
     workspacesToClean.push(workspace);
 
     const { handler } = setupAccountingInboxTool({
@@ -319,7 +202,7 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("still asks for CAMT bank dimension when ambiguous accounts cannot be matched by IBAN", async () => {
-    const workspace = await createWorkspace({ includeWise: false, camtIban: "EE001234567890123456" });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, camtIban: "EE001234567890123456" });
     workspacesToClean.push(workspace);
 
     const { handler } = setupAccountingInboxTool({
@@ -359,7 +242,7 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("does not classify unmatched transactions while a prior CAMT import step is still unresolved", async () => {
-    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false, camtIban: "EE001234567890123456" });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false, camtIban: "EE001234567890123456" });
     workspacesToClean.push(workspace);
 
     const server = { registerTool: vi.fn() } as any;
@@ -459,7 +342,7 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("still provides a usable scan plan when live defaults are unavailable in setup mode", async () => {
-    const workspace = await createWorkspace({ includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeReceipts: false });
     workspacesToClean.push(workspace);
 
     const setupError = Object.assign(new Error("setup"), { mode: "setup" });
@@ -493,7 +376,7 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("runs the safe automatic dry-run first pass and returns one consolidated preview", async () => {
-    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
 
     const server = { registerTool: vi.fn() } as any;
@@ -570,7 +453,7 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("does not classify unmatched transactions while receipt dry-run invoices are waiting for approval", async () => {
-    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
     const receiptsDir = join(workspace, "receipts");
     await mkdir(receiptsDir, { recursive: true });
@@ -690,7 +573,7 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("keeps each CAMT possible duplicate as a separate review follow-up with its own resolver payload", async () => {
-    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
 
     await writeFile(
@@ -849,7 +732,7 @@ describe("prepare_accounting_inbox", () => {
   });
 
   it("does not truncate CAMT possible duplicate review items when there are more than five", async () => {
-    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
 
     const entryXml = Array.from({ length: 6 }, (_, index) => {
@@ -963,7 +846,7 @@ ${entryXml}
   });
 
   it("keeps autopilot useful in setup mode by running only the local preview step", async () => {
-    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
 
     const setupError = Object.assign(new Error("setup"), { mode: "setup" });
@@ -1022,7 +905,7 @@ ${entryXml}
   });
 
   it("surfaces standards-aware review guidance for unmatched groups that still need judgement", async () => {
-    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
 
     const server = { registerTool: vi.fn() } as any;
@@ -1416,7 +1299,7 @@ ${entryXml}
   });
 
   it("save_auto_booking_rule upserts a local rule into the configured markdown file", async () => {
-    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
     const rulesPath = join(workspace, "accounting-rules.md");
     await writeFile(rulesPath, "# Accounting Rules\n\n## Auto Booking\n", "utf8");
@@ -1547,7 +1430,7 @@ ${entryXml}
     // but no purchase_article_id / purchase_account_id, so hasConcreteAutoBookingRuleBookingTarget = false.
     // classify_unmatched_transactions should thread the VAT fields into suggested_booking
     // even in review-only mode so reviewers see the reverse-charge hint.
-    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
     const rulesPath = join(workspace, "accounting-rules.md");
     await writeFile(
@@ -1670,7 +1553,7 @@ ${entryXml}
 
   it("classify_unmatched_transactions skip reason distinguishes pending_materialization from earlier_step_failed", async () => {
     // Branch 1: import_camt053 ran but has pending changes → "pending changes" wording
-    const workspace1 = await createWorkspace({ includeWise: false, includeReceipts: false });
+    const workspace1 = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace1);
 
     const server1 = { registerTool: vi.fn() } as any;
@@ -1706,7 +1589,7 @@ ${entryXml}
     }
 
     // Branch 2: setup mode → import_camt053 is skipped → classify gets "failed" wording
-    const workspace2 = await createWorkspace({ includeWise: false, includeReceipts: false });
+    const workspace2 = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace2);
 
     const setupError = Object.assign(new Error("setup"), { mode: "setup" });
@@ -1740,7 +1623,7 @@ ${entryXml}
   });
 
   it("CAMT followup summary truncates more than 5 existing IDs with +N more suffix", async () => {
-    const workspace = await createWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
 
     await writeFile(
@@ -1897,7 +1780,7 @@ ${entryXml}
   it("pickNextAutopilotRecommendedAction never re-recommends a step that already failed", async () => {
     // parse_camt053 fails (bad XML) → its step number goes into executedSteps with status=failed
     // → next_recommended_action must not be parse_camt053
-    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
     const { join: pathJoin } = await import("path");
     await writeFile(pathJoin(workspace, "statement.xml"), "NOT VALID XML AT ALL");
@@ -1945,7 +1828,7 @@ ${entryXml}
   });
 
   it("run_accounting_inbox_dry_runs does not recommend classify_unmatched_transactions while materialization is still pending", async () => {
-    const workspace = await createWorkspace({ includeWise: false, includeReceipts: false });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
     await writeFile(
       join(workspace, "statement.xml"),
