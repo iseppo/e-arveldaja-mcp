@@ -30,12 +30,12 @@ import {
   buildReferencedInvoiceForPaymentReceipt,
   deriveOwnCompanyRegistryCode,
   detectSelfVatOnly,
-  readValidatedReceiptFile,
   resolveSupplierFromTransaction,
-  revalidateReceiptFilePath,
-  sanitizeReceiptResultForOutput,
   supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
+import { readValidatedReceiptFile, revalidateReceiptFilePath } from "./receipt-inbox-files.js";
+import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
+import { buildReceiptBatchSummary } from "./receipt-inbox-summary.js";
 
 vi.mock("../file-validation.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../file-validation.js")>()),
@@ -81,6 +81,40 @@ describe("buildDryRunCreatedInvoicePreview", () => {
       status: "would_create",
       confirmed: false,
       uploaded_document: false,
+    });
+  });
+});
+
+describe("buildReceiptBatchSummary", () => {
+  it("uses the same status counters for dry-run and create-mode receipt batch results", () => {
+    const summary = buildReceiptBatchSummary({
+      executionMode: "dry_run",
+      legacyExecuteCreate: false,
+      dryRun: true,
+      scannedFiles: 6,
+      skippedInvalidFiles: 1,
+      results: [
+        { status: "dry_run_preview" },
+        { status: "created" },
+        { status: "matched" },
+        { status: "skipped_duplicate" },
+        { status: "needs_review" },
+        { status: "failed" },
+      ],
+    });
+
+    expect(summary).toEqual({
+      execution_mode: "dry_run",
+      legacy_execute_create: false,
+      dry_run: true,
+      scanned_files: 6,
+      skipped_invalid_files: 1,
+      created: 1,
+      matched: 1,
+      skipped_duplicate: 1,
+      failed: 1,
+      needs_review: 1,
+      dry_run_preview: 1,
     });
   });
 });

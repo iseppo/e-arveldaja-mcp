@@ -1,12 +1,9 @@
-import { readFile, readdir, realpath, stat } from "fs/promises";
-import { extname, join } from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
-import { validateFilePath, getAllowedRoots, resolveFilePath, isPathWithinRoot } from "../file-validation.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { readOnly, batch } from "../annotations.js";
@@ -26,14 +23,12 @@ import {
   type BookingSuggestion,
   type ClassificationApplyMode,
   type ExtractedReceiptFields,
-  type InvoiceSummaryForMatching,
   type ReceiptClassification,
   type TransactionClassificationCategory,
   type TransactionGroupClassification,
   buildKeywordSuggestion,
   categorizeTransactionGroup,
   classifyReceiptDocument,
-  computeTermDays,
   deriveAutoBookedNetAmount,
   deriveAutoBookedVatPrice,
   detectReverseChargeFromText,
@@ -63,172 +58,33 @@ import {
   buildReceiptReviewGuidance,
 } from "../estonian-accounting-guidance.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
-
-const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
-const FILE_TYPE_EXTENSIONS = {
-  pdf: [".pdf"],
-  jpg: [".jpg", ".jpeg"],
-  png: [".png"],
-} as const;
-const SUPPORTED_EXTENSIONS = [...FILE_TYPE_EXTENSIONS.pdf, ...FILE_TYPE_EXTENSIONS.jpg, ...FILE_TYPE_EXTENSIONS.png];
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
-const EXACT_MATCH_THRESHOLD = 90;
+import {
+  RECEIPT_BATCH_EXECUTION_MODES,
+  type ReceiptBatchExecutionMode,
+  type ReceiptBatchFileResult,
+  type ReceiptFileInfo,
+  type ReceiptInboxToolHandler,
+  type ReceiptInboxToolResult,
+  type ReceiptProcessingContext,
+} from "./receipt-inbox-types.js";
+import { readValidatedReceiptFile, revalidateReceiptFilePath, scanReceiptFolderInternal } from "./receipt-inbox-files.js";
+import { findBestTransactionMatch, findDuplicateInvoice } from "./receipt-inbox-matching.js";
+import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
+import {
+  buildDryRunCreatedInvoicePreview,
+  createAndMaybeMatchPurchaseInvoice,
+} from "./receipt-inbox-booking.js";
+import {
+  buildReceiptBatchExecution,
+  buildReceiptBatchSummary,
+  buildReceiptBatchWorkflow,
+  buildReceiptBatchWorkflowSummary,
+} from "./receipt-inbox-summary.js";
+
 const POSSIBLE_MATCH_THRESHOLD = 70;
-const RECEIPT_BATCH_EXECUTION_MODES = ["dry_run", "create", "create_and_confirm"] as const;
 
-type FileType = keyof typeof FILE_TYPE_EXTENSIONS;
-type ReceiptBatchExecutionMode = typeof RECEIPT_BATCH_EXECUTION_MODES[number];
-
-type ReceiptInboxToolResult = Promise<{ content: Array<{ text: string }> }>;
-type ReceiptInboxToolHandler = (args: Record<string, unknown>) => ReceiptInboxToolResult;
-type ReceiptBatchStatus =
-  | "matched"
-  | "created"
-  | "skipped_duplicate"
-  | "needs_review"
-  | "failed"
-  | "dry_run_preview";
-
-interface ReceiptFileInfo {
-  name: string;
-  path: string;
-  extension: string;
-  file_type: FileType;
-  size_bytes: number;
-  modified_at: string;
-}
-
-interface ReceiptScanResult {
-  files: ReceiptFileInfo[];
-  skipped: Array<{ name: string; reason: string }>;
-  folder_path: string;
-  total_candidates: number;
-}
-
-interface ReceiptBatchFileResult {
-  file: ReceiptFileInfo;
-  classification: ReceiptClassification;
-  status: ReceiptBatchStatus;
-  extracted?: ExtractedReceiptFields;
-  llm_fallback?: InvoiceExtractionFallback;
-  supplier_resolution?: SupplierResolution;
-  booking_suggestion?: BookingSuggestion;
-  duplicate_match?: InvoiceDuplicateMatch;
-  created_invoice?: {
-    id?: number;
-    number: string;
-    status?: string;
-    confirmed?: boolean;
-    uploaded_document?: boolean;
-  };
-  bank_match?: {
-    candidate?: TransactionMatchCandidate;
-    linked?: boolean;
-    confirmed_transaction_id?: number;
-  };
-  /**
-   * Set on `classification === "payment_receipt"` results to expose the
-   * underlying invoice the receipt confirms payment for. Surfaced as a
-   * typed field rather than parsing back out of `notes` so downstream
-   * tooling (auto-attach via upload_invoice_document, reconciliation) has
-   * a stable cross-reference (#23).
-   */
-  referenced_invoice?: {
-    invoice_number: string;
-    matched: boolean;
-    matched_invoice_id?: number;
-  };
-  notes: string[];
-  error?: string;
-  review_guidance?: ReviewGuidance;
-}
-
-// Wrap free-form OCR-derived fields with untrusted-OCR delimiters at MCP
-// output time so a downstream LLM cannot be tricked into executing
-// instructions embedded in a scanned receipt. Anything touched or seeded
-// by OCR text goes through the nonce boundary:
-//   - extracted.raw_text / .description / .supplier_name
-//   - supplier_resolution.preview_client.name (derived from OCR supplier)
-//   - booking_suggestion.item.custom_title (often = description)
-// Short structured fields (invoice_number, dates, amounts) are left
-// as-is — their length and format limit realistic attack surface.
-export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): ReceiptBatchFileResult {
-  let next = result;
-
-  if (next.extracted) {
-    const { raw_text, description, supplier_name } = next.extracted;
-    if (raw_text !== undefined || description !== undefined || supplier_name !== undefined) {
-      next = {
-        ...next,
-        extracted: {
-          ...next.extracted,
-          ...(raw_text !== undefined && { raw_text: wrapUntrustedOcr(raw_text) }),
-          ...(description !== undefined && { description: wrapUntrustedOcr(description) }),
-          ...(supplier_name !== undefined && { supplier_name: wrapUntrustedOcr(supplier_name) }),
-        },
-      };
-    }
-  }
-
-  // preview_client (client not yet persisted) was seeded from OCR supplier
-  // name; its `name` field is the vector. If an attacker-crafted OCR
-  // supplier line ever reaches here, the wrap ensures a downstream LLM
-  // can't mistake it for an instruction.
-  if (next.supplier_resolution?.preview_client?.name !== undefined) {
-    next = {
-      ...next,
-      supplier_resolution: {
-        ...next.supplier_resolution,
-        preview_client: {
-          ...next.supplier_resolution.preview_client,
-          name: wrapUntrustedOcr(next.supplier_resolution.preview_client.name),
-        },
-      },
-    };
-  }
-
-  // booking_suggestion.item.custom_title typically mirrors `description`
-  // (or an article name derived from one); treat as OCR-origin.
-  if (next.booking_suggestion?.item?.custom_title !== undefined) {
-    next = {
-      ...next,
-      booking_suggestion: {
-        ...next.booking_suggestion,
-        item: {
-          ...next.booking_suggestion.item,
-          custom_title: wrapUntrustedOcr(next.booking_suggestion.item.custom_title) ?? next.booking_suggestion.item.custom_title,
-        },
-      },
-    };
-  }
-
-  // error and notes are built from exception messages during invoice
-  // creation / upload / confirmation / linking. Upstream API errors can
-  // echo invoice_number / supplier_name / notes the operator just
-  // submitted — wrap so any echoed OCR-origin bytes reach the LLM
-  // sandboxed.
-  if (next.error !== undefined) {
-    next = { ...next, error: wrapUntrustedOcr(next.error) ?? next.error };
-  }
-  if (next.notes.length > 0) {
-    next = {
-      ...next,
-      notes: next.notes.map(note => wrapUntrustedOcr(note) ?? note),
-    };
-  }
-
-  return next;
-}
-
-interface TransactionMatchCandidate {
-  transaction_id: number;
-  amount: number;
-  date: string;
-  bank_account_name?: string | null;
-  description?: string | null;
-  confidence: number;
-  reasons: string[];
-}
+export { buildDryRunCreatedInvoicePreview };
 
 function resolveReceiptBatchExecutionMode(
   execute: boolean | undefined,
@@ -241,22 +97,6 @@ function resolveReceiptBatchExecutionMode(
     return { mode: "create", legacyExecuteCreate: true };
   }
   return { mode: "dry_run", legacyExecuteCreate: false };
-}
-
-interface InvoiceDuplicateMatch {
-  reason: "supplier_invoice_number" | "supplier_amount_date";
-  invoice_id: number;
-  invoice_number: string;
-  create_date: string;
-  gross_price?: number;
-}
-
-interface ReceiptProcessingContext {
-  clients: Client[];
-  purchaseInvoices: PurchaseInvoice[];
-  purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>;
-  accounts: Account[];
-  isVatRegistered: boolean;
 }
 
 export function supplierCountryNeedsReview(supplierResolution: SupplierResolution): boolean {
@@ -310,70 +150,9 @@ interface ClassifiedTransactionGroupResult {
   }>;
 }
 
-export function buildDryRunCreatedInvoicePreview(invoiceNumber: string) {
-  return {
-    number: invoiceNumber,
-    status: "would_create",
-    confirmed: false,
-    uploaded_document: false,
-  };
-}
-
-export async function revalidateReceiptFilePath(file: ReceiptFileInfo): Promise<string> {
-  return validateFilePath(file.path, [file.extension], MAX_RECEIPT_SIZE);
-}
-
-export async function readValidatedReceiptFile(file: ReceiptFileInfo): Promise<Buffer> {
-  const validatedPath = await revalidateReceiptFilePath(file);
-  return readFile(validatedPath);
-}
-
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-async function validateFolderPath(folderPath: string): Promise<string> {
-  const resolved = resolveFilePath(folderPath);
-  const real = await realpath(resolved);
-  const roots = getAllowedRoots();
-
-  if (!roots.some(root => isPathWithinRoot(real, root))) {
-    throw new Error(
-      `Folder path outside allowed directories. Allowed roots: ${roots.join(", ")}. ` +
-      `Set EARVELDAJA_ALLOWED_PATHS to override.`,
-    );
-  }
-
-  const info = await stat(real);
-  if (!info.isDirectory()) {
-    throw new Error("Not a directory");
-  }
-
-  return real;
-}
-
-function extensionsForTypes(fileTypes?: FileType[]): string[] {
-  if (!fileTypes || fileTypes.length === 0) {
-    return SUPPORTED_EXTENSIONS;
-  }
-
-  const expanded = new Set<string>();
-  for (const fileType of fileTypes) {
-    for (const extension of FILE_TYPE_EXTENSIONS[fileType]) {
-      expanded.add(extension);
-    }
-  }
-
-  return [...expanded];
-}
-
-function extensionToFileType(extension: string): FileType | undefined {
-  const normalized = extension.toLowerCase();
-  if (normalized === ".pdf") return "pdf";
-  if (normalized === ".jpg" || normalized === ".jpeg") return "jpg";
-  if (normalized === ".png") return "png";
-  return undefined;
-}
 
 function maybeAddLlmFallbackNote(notes: string[], fallback: InvoiceExtractionFallback): void {
   if (!fallback.recommended) return;
@@ -390,26 +169,6 @@ function maybeAddLlmFallbackNote(notes: string[], fallback: InvoiceExtractionFal
       : fallback.reason;
     notes.push(`Deterministic extraction confidence is ${fallback.confidence} (${detail}). Use extracted.raw_text and llm_fallback guidance to verify before booking.`);
   }
-}
-
-function buildSyntheticItem(
-  suggestion: BookingSuggestion,
-  description: string,
-  amount: number,
-  purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
-  isVatRegistered: boolean,
-  vatRateDropdown?: string,
-): PurchaseInvoiceItem {
-  return applyPurchaseVatDefaults(
-    purchaseArticlesWithVat,
-    {
-      ...suggestion.item,
-      total_net_price: amount,
-      custom_title: description,
-      vat_rate_dropdown: vatRateDropdown ?? suggestion.item.vat_rate_dropdown ?? "-",
-    },
-    isVatRegistered,
-  );
 }
 
 function shouldProcessExpenseAsPurchaseInvoice(classification: TransactionClassificationCategory): boolean {
@@ -865,58 +624,6 @@ async function resolveClassificationSuggestion(
   return { applyMode: classification.apply_mode, suggestion: defaultSuggestion };
 }
 
-async function scanReceiptFolderInternal(folderPath: string, fileTypes?: FileType[], dateFrom?: string, dateTo?: string): Promise<ReceiptScanResult> {
-  const resolvedFolder = await validateFolderPath(folderPath);
-  const allowedExtensions = extensionsForTypes(fileTypes);
-  const entries = await readdir(resolvedFolder, { withFileTypes: true });
-  const files: ReceiptFileInfo[] = [];
-  const skipped: Array<{ name: string; reason: string }> = [];
-
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isFile()) continue;
-
-    const extension = extname(entry.name).toLowerCase();
-    if (!allowedExtensions.includes(extension)) continue;
-
-    const fileType = extensionToFileType(extension);
-    if (!fileType) continue;
-
-    const candidatePath = join(resolvedFolder, entry.name);
-
-    try {
-      const validatedPath = await validateFilePath(candidatePath, allowedExtensions, MAX_RECEIPT_SIZE);
-      const info = await stat(validatedPath);
-      const modifiedAt = info.mtime.toISOString();
-      const modifiedDate = modifiedAt.slice(0, 10);
-
-      if ((dateFrom && modifiedDate < dateFrom) || (dateTo && modifiedDate > dateTo)) {
-        continue;
-      }
-
-      files.push({
-        name: entry.name,
-        path: validatedPath,
-        extension,
-        file_type: fileType,
-        size_bytes: info.size,
-        modified_at: modifiedAt,
-      });
-    } catch (error) {
-      skipped.push({
-        name: entry.name,
-        reason: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  return {
-    files,
-    skipped,
-    folder_path: resolvedFolder,
-    total_candidates: files.length,
-  };
-}
-
 async function extractReceiptFields(
   file: ReceiptFileInfo,
   ownCompanyVat?: string,
@@ -1104,373 +811,6 @@ export function buildReferencedInvoiceForPaymentReceipt(
     return { invoice_number: trimmed, matched: true, matched_invoice_id: found.id };
   }
   return { invoice_number: trimmed, matched: false };
-}
-
-function findBestTransactionMatch(
-  transactions: Transaction[],
-  invoice: InvoiceSummaryForMatching,
-  consumedTransactionIds: Set<number>,
-): TransactionMatchCandidate | undefined {
-  const candidates = transactions
-    .filter(transaction => transaction.id !== undefined && !consumedTransactionIds.has(transaction.id))
-    .map(transaction => {
-      const { confidence, reasons } = scoreTransactionToInvoice(transaction, invoice);
-      return {
-        transaction_id: transaction.id!,
-        amount: transaction.amount,
-        date: transaction.date,
-        bank_account_name: wrapUntrustedOcr(transaction.bank_account_name ?? undefined),
-        description: wrapUntrustedOcr(transaction.description ?? undefined),
-        confidence,
-        reasons,
-      };
-    })
-    .filter(candidate => candidate.confidence >= POSSIBLE_MATCH_THRESHOLD)
-    .sort((a, b) => b.confidence - a.confidence);
-
-  return candidates[0];
-}
-
-function findDuplicateInvoice(
-  invoices: PurchaseInvoice[],
-  clientsId: number,
-  invoiceNumber: string,
-  createDate: string,
-  grossPrice: number,
-): InvoiceDuplicateMatch | undefined {
-  const normalizedNumber = invoiceNumber.trim().toLowerCase();
-
-  const sameNumber = invoices.find(invoice =>
-    invoice.clients_id === clientsId &&
-    invoice.status !== "DELETED" &&
-    invoice.status !== "INVALIDATED" &&
-    invoice.number.trim().toLowerCase() === normalizedNumber
-  );
-  if (sameNumber?.id) {
-    return {
-      reason: "supplier_invoice_number",
-      invoice_id: sameNumber.id,
-      invoice_number: sameNumber.number,
-      create_date: sameNumber.create_date,
-      gross_price: sameNumber.gross_price,
-    };
-  }
-
-  const sameAmountDate = invoices.find(invoice =>
-    invoice.clients_id === clientsId &&
-    invoice.status !== "DELETED" &&
-    invoice.status !== "INVALIDATED" &&
-    invoice.create_date === createDate &&
-    Math.abs((invoice.gross_price ?? 0) - grossPrice) < 0.01
-  );
-  if (sameAmountDate?.id) {
-    return {
-      reason: "supplier_amount_date",
-      invoice_id: sameAmountDate.id,
-      invoice_number: sameAmountDate.number,
-      create_date: sameAmountDate.create_date,
-      gross_price: sameAmountDate.gross_price,
-    };
-  }
-
-  return undefined;
-}
-
-async function createAndMaybeMatchPurchaseInvoice(
-  api: ApiContext,
-  context: ReceiptProcessingContext,
-  file: ReceiptFileInfo,
-  extracted: ExtractedReceiptFields,
-  supplierResolution: SupplierResolution,
-  bookingSuggestion: BookingSuggestion,
-  bankTransactions: Transaction[],
-  executionMode: ReceiptBatchExecutionMode,
-  legacyExecuteCreate: boolean,
-  consumedTransactionIds: Set<number>,
-): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error">> {
-  const notes: string[] = [];
-  const dryRun = executionMode === "dry_run";
-  const shouldConfirm = executionMode === "create_and_confirm";
-  const supplier = supplierResolution.client;
-  const supplierId = supplier?.id;
-  const supplierName = supplier?.name ?? supplierResolution.preview_client?.name;
-  const invoiceCurrency = extracted.currency ?? "EUR";
-  const invoiceNotes = extracted.currency && extracted.currency !== "EUR" && extracted.total_gross !== undefined
-    ? `Receipt inbox import from ${file.name} | Original receipt amount: ${roundMoney(extracted.total_gross).toFixed(2)} ${extracted.currency}`
-    : `Receipt inbox import from ${file.name}`;
-
-  if (!supplierName) {
-    notes.push("Supplier resolution did not return a concrete client ID.");
-    return { notes, status: "needs_review" };
-  }
-  if (!extracted.invoice_number || !extracted.invoice_date) {
-    notes.push("Missing a confident supplier invoice number required for auto-booking.");
-    return { notes, status: "needs_review" };
-  }
-
-  const itemNetAmount = extracted.total_net
-    ?? (extracted.total_gross !== undefined && extracted.total_vat !== undefined
-      ? roundMoney(extracted.total_gross - extracted.total_vat)
-      : undefined);
-  if (itemNetAmount === undefined || extracted.total_gross === undefined) {
-    notes.push("Could not derive reliable net/gross totals for invoice creation.");
-    return { notes, status: "needs_review" };
-  }
-
-  const item = buildSyntheticItem(
-    bookingSuggestion,
-    extracted.description ?? `Expense from ${supplierName}`,
-    itemNetAmount,
-    context.purchaseArticlesWithVat,
-    context.isVatRegistered,
-    // Only treat total_vat === 0 as "no VAT" when the OCR explicitly said so; a structurally-
-    // derived zero (e.g. extractAmounts fallback when the VAT line could not be read) should
-    // fall through to the booking suggestion's default VAT rate instead of silently stripping VAT.
-    extracted.total_vat === 0 && extracted.vat_explicit
-      ? "-"
-      : extracted.total_vat !== undefined
-        ? bookingSuggestion.item.vat_rate_dropdown
-        : undefined,
-  );
-
-  const invoiceDraft: InvoiceSummaryForMatching = {
-    clients_id: supplierId,
-    client_name: supplierName,
-    cl_currencies_id: invoiceCurrency,
-    number: extracted.invoice_number,
-    create_date: extracted.invoice_date,
-    gross_price: extracted.total_gross,
-    bank_ref_number: extracted.ref_number,
-  };
-
-  const candidate = dryRun
-    ? findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds)
-    : undefined;
-
-  if (invoiceCurrency !== "EUR") {
-    notes.push(`Detected non-EUR receipt currency ${invoiceCurrency}; invoice will use the source currency amount.`);
-  }
-
-  if (dryRun) {
-    if (candidate) {
-      notes.push(`Dry run: matched candidate transaction ${candidate.transaction_id} at confidence ${candidate.confidence}.`);
-    } else if (invoiceCurrency !== "EUR") {
-      notes.push("Dry run: non-EUR bank matching is conservative until the created invoice exposes base_gross_price.");
-    }
-    notes.push("Dry run: purchase invoice document was not uploaded and the invoice was not confirmed.");
-    return {
-      notes,
-      status: "dry_run_preview",
-      created_invoice: buildDryRunCreatedInvoicePreview(extracted.invoice_number!),
-      bank_match: candidate ? { candidate, linked: false } : undefined,
-    };
-  }
-
-  if (!supplierId || !supplier) {
-    notes.push("Supplier resolution did not return a concrete client ID.");
-    return { notes, status: "needs_review" };
-  }
-
-  if (legacyExecuteCreate) {
-    notes.push('Legacy execute=true maps to execution_mode="create"; invoice will be created and uploaded but left unconfirmed (#19).');
-  }
-
-  let createdInvoice: PurchaseInvoice;
-  try {
-    createdInvoice = await api.purchaseInvoices.createAndSetTotals(
-      {
-        clients_id: supplierId,
-        client_name: supplier.name,
-        number: extracted.invoice_number!,
-        create_date: extracted.invoice_date!,
-        journal_date: extracted.invoice_date!,
-        term_days: computeTermDays(extracted.invoice_date, extracted.due_date),
-        cl_currencies_id: invoiceCurrency,
-        liability_accounts_id: bookingSuggestion.suggested_liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
-        bank_ref_number: extracted.ref_number,
-        bank_account_no: extracted.supplier_iban,
-        notes: tagNotes(invoiceNotes),
-        items: [item],
-      },
-      extracted.total_vat,
-      extracted.total_gross,
-      context.isVatRegistered,
-    );
-    logAudit({
-      tool: "process_receipt_batch", action: "CREATED", entity_type: "purchase_invoice",
-      entity_id: createdInvoice.id,
-      summary: `Receipt batch: created invoice "${extracted.invoice_number}" from ${supplier.name}`,
-      details: {
-        supplier_name: supplier.name, invoice_number: extracted.invoice_number,
-        invoice_date: extracted.invoice_date, total_vat: extracted.total_vat, total_gross: extracted.total_gross,
-        file_name: file.name,
-      },
-    });
-  } catch (error) {
-    return {
-      notes,
-      status: "failed",
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-
-  let uploadedDocument = false;
-  const rollbackCreatedInvoice = async (reason: string, error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
-
-    if (!createdInvoice.id) {
-      return {
-        notes,
-        status: "failed" as const,
-        error: message,
-      };
-    }
-
-    try {
-      await api.purchaseInvoices.invalidate(createdInvoice.id);
-      notes.push(`Invalidated created purchase invoice ${createdInvoice.id} because ${reason}: ${message}.`);
-      return {
-        notes,
-        status: "failed" as const,
-        error: message,
-      };
-    } catch (invalidateError) {
-      const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
-      notes.push(
-        `Created purchase invoice ${createdInvoice.id} could not be invalidated after ${reason}: ${message}. ` +
-        `Automatic invalidation also failed: ${invalidateMessage}.`
-      );
-      // Don't push the invoice into context on double-failure — let the next run detect it fresh
-      return {
-        notes,
-        status: "failed" as const,
-        error: `${message}; automatic invalidation failed: ${invalidateMessage}`,
-        created_invoice: {
-          id: createdInvoice.id,
-          number: createdInvoice.number,
-          status: createdInvoice.status,
-          confirmed: false,
-          uploaded_document: uploadedDocument,
-        },
-      };
-    }
-  };
-
-  if (createdInvoice.id) {
-    try {
-      const contents = (await readValidatedReceiptFile(file)).toString("base64");
-      await api.purchaseInvoices.uploadDocument(createdInvoice.id, file.name, contents);
-      uploadedDocument = true;
-      notes.push("Uploaded source document to created purchase invoice.");
-      logAudit({
-        tool: "process_receipt_batch", action: "UPLOADED", entity_type: "purchase_invoice",
-        entity_id: createdInvoice.id,
-        summary: `Uploaded document "${file.name}" to purchase invoice ${createdInvoice.id}`,
-        details: { file_name: file.name },
-      });
-    } catch (error) {
-      return rollbackCreatedInvoice("source document upload failed", error);
-    }
-  }
-
-  if (!shouldConfirm) {
-    notes.push("Created purchase invoice was left unconfirmed. Review it and call confirm_purchase_invoice after approval (#19).");
-    context.purchaseInvoices.push(createdInvoice);
-    return {
-      notes,
-      status: "created",
-      created_invoice: {
-        id: createdInvoice.id,
-        number: createdInvoice.number,
-        status: createdInvoice.status,
-        confirmed: false,
-        uploaded_document: uploadedDocument,
-      },
-    };
-  }
-
-  if (createdInvoice.id) {
-    try {
-      await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered, {
-        preserveExistingTotals: true,
-      });
-      createdInvoice = {
-        ...createdInvoice,
-        status: "CONFIRMED",
-      };
-      notes.push("Confirmed created purchase invoice for booking and bank matching.");
-      logAudit({
-        tool: "process_receipt_batch", action: "CONFIRMED", entity_type: "purchase_invoice",
-        entity_id: createdInvoice.id,
-        summary: `Confirmed purchase invoice ${createdInvoice.id} (${createdInvoice.number ?? ""})`,
-        details: { invoice_number: createdInvoice.number, file_name: file.name },
-      });
-    } catch (error) {
-      return rollbackCreatedInvoice("invoice confirmation failed", error);
-    }
-  }
-
-  const matchedInvoice: InvoiceSummaryForMatching = {
-    id: createdInvoice.id,
-    clients_id: createdInvoice.clients_id,
-    client_name: createdInvoice.client_name,
-    cl_currencies_id: createdInvoice.cl_currencies_id,
-    number: createdInvoice.number,
-    create_date: createdInvoice.create_date,
-    gross_price: createdInvoice.gross_price,
-    base_gross_price: createdInvoice.base_gross_price,
-    bank_ref_number: createdInvoice.bank_ref_number,
-  };
-  const matchedCandidate = findBestTransactionMatch(bankTransactions, matchedInvoice, consumedTransactionIds);
-  const canAutoLink = matchedCandidate !== undefined && matchedCandidate.confidence >= EXACT_MATCH_THRESHOLD;
-  let linked = false;
-  if (createdInvoice.id && matchedCandidate && canAutoLink) {
-    try {
-      const freshMatch = await api.transactions.get(matchedCandidate.transaction_id);
-      if (isProjectTransaction(freshMatch)) {
-        await api.transactions.confirm(matchedCandidate.transaction_id, [{
-          related_table: "purchase_invoices",
-          related_id: createdInvoice.id,
-          amount: createdInvoice.base_gross_price ?? createdInvoice.gross_price ?? matchedCandidate.amount,
-        }]);
-        logAudit({
-          tool: "process_receipt_batch", action: "CONFIRMED", entity_type: "transaction",
-          entity_id: matchedCandidate.transaction_id,
-          summary: `Receipt batch: confirmed transaction ${matchedCandidate.transaction_id} against invoice ${createdInvoice.id}`,
-          details: { amount: matchedCandidate.amount, invoice_id: createdInvoice.id },
-        });
-        consumedTransactionIds.add(matchedCandidate.transaction_id);
-        linked = true;
-        notes.push(`Linked transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}.`);
-      } else {
-        notes.push(`Matched transaction ${matchedCandidate.transaction_id} is no longer bookable (status ${freshMatch.status ?? "UNKNOWN"}); invoice was created without bank link.`);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      notes.push(`Could not link matched transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}: ${message}. Invoice was kept without bank link.`);
-    }
-  } else if (matchedCandidate) {
-    notes.push(`Found transaction candidate ${matchedCandidate.transaction_id}, but confidence ${matchedCandidate.confidence} was below auto-link threshold ${EXACT_MATCH_THRESHOLD}.`);
-  }
-
-  context.purchaseInvoices.push(createdInvoice);
-
-  return {
-    notes,
-    status: linked ? "matched" : "created",
-    created_invoice: {
-      id: createdInvoice.id,
-      number: createdInvoice.number,
-      status: createdInvoice.status,
-      confirmed: true,
-      uploaded_document: uploadedDocument,
-    },
-    bank_match: matchedCandidate ? {
-      candidate: matchedCandidate,
-      linked,
-      confirmed_transaction_id: linked ? matchedCandidate.transaction_id : undefined,
-    } : undefined,
-  };
 }
 
 function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): boolean {
@@ -2039,19 +1379,14 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         }
       }
 
-      const summary = {
-        execution_mode: executionMode,
-        legacy_execute_create: legacyExecuteCreate,
-        dry_run: dryRun,
-        scanned_files: scan.files.length,
-        skipped_invalid_files: scan.skipped.length,
-        created: results.filter(result => result.status === "created").length,
-        matched: results.filter(result => result.status === "matched").length,
-        skipped_duplicate: results.filter(result => result.status === "skipped_duplicate").length,
-        failed: results.filter(result => result.status === "failed").length,
-        needs_review: results.filter(result => result.status === "needs_review").length,
-        dry_run_preview: results.filter(result => result.status === "dry_run_preview").length,
-      };
+      const summary = buildReceiptBatchSummary({
+        executionMode,
+        legacyExecuteCreate,
+        dryRun,
+        scannedFiles: scan.files.length,
+        skippedInvalidFiles: scan.skipped.length,
+        results,
+      });
       const mode = dryRun ? "DRY_RUN" : "EXECUTED";
       const sanitizedResults = results.map(sanitizeReceiptResultForOutput);
       const workflowArgs = {
@@ -2061,20 +1396,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         ...(date_to ? { date_to } : {}),
         execution_mode: "create",
       };
-      const workflowSummary = dryRun
-        ? `Receipt dry run would create ${summary.dry_run_preview} purchase invoice(s), match ${summary.matched}, skip ${summary.skipped_duplicate} duplicate(s), leave ${summary.needs_review} in review, and fail ${summary.failed}.`
-        : `Receipt batch created ${summary.created} purchase invoice(s), matched ${summary.matched}, skipped ${summary.skipped_duplicate} duplicate(s), left ${summary.needs_review} in review, and failed ${summary.failed}.`;
-      const workflow = buildWorkflowEnvelope({
-        summary: workflowSummary,
-        needs_review: sanitizedResults.filter(result => result.status === "needs_review"),
-        dry_run_steps: dryRun
-          ? [{
-              tool: "process_receipt_batch",
-              summary: workflowSummary,
-              suggested_args: workflowArgs,
-              preview: summary,
-            }]
-          : [],
+      const workflowSummary = buildReceiptBatchWorkflowSummary(summary);
+      const workflow = buildReceiptBatchWorkflow({
+        summary,
+        workflowSummary,
+        sanitizedResults,
+        workflowArgs,
       });
 
       return {
@@ -2089,17 +1416,10 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             workflow,
             skipped: scan.skipped,
             results: sanitizedResults,
-            execution: buildBatchExecutionContract({
+            execution: buildReceiptBatchExecution({
               mode,
               summary,
-              results: sanitizedResults.filter(result =>
-                result.status === "created" ||
-                result.status === "matched" ||
-                result.status === "dry_run_preview"
-              ),
-              skipped: sanitizedResults.filter(result => result.status === "skipped_duplicate"),
-              errors: sanitizedResults.filter(result => result.status === "failed"),
-              needs_review: sanitizedResults.filter(result => result.status === "needs_review"),
+              sanitizedResults,
             }),
           }),
         }],
