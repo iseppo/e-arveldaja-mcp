@@ -75,6 +75,12 @@ export async function createAndMaybeMatchPurchaseInvoice(
     notes.push("Supplier resolution did not return a concrete client ID.");
     return { notes, status: "needs_review" };
   }
+  if (invoiceCurrency !== "EUR") {
+    notes.push(
+      `Non-EUR receipt currency ${invoiceCurrency} requires an explicit currency_rate before automatic invoice creation. Review manually or create the invoice with the correct EUR conversion rate.`
+    );
+    return { notes, status: "needs_review" };
+  }
   if (!extracted.invoice_number || !extracted.invoice_date) {
     notes.push("Missing a confident supplier invoice number required for auto-booking.");
     return { notes, status: "needs_review" };
@@ -116,15 +122,9 @@ export async function createAndMaybeMatchPurchaseInvoice(
     ? findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds)
     : undefined;
 
-  if (invoiceCurrency !== "EUR") {
-    notes.push(`Detected non-EUR receipt currency ${invoiceCurrency}; invoice will use the source currency amount.`);
-  }
-
   if (dryRun) {
     if (candidate) {
       notes.push(`Dry run: matched candidate transaction ${candidate.transaction_id} at confidence ${candidate.confidence}.`);
-    } else if (invoiceCurrency !== "EUR") {
-      notes.push("Dry run: non-EUR bank matching is conservative until the created invoice exposes base_gross_price.");
     }
     notes.push("Dry run: purchase invoice document was not uploaded and the invoice was not confirmed.");
     return {

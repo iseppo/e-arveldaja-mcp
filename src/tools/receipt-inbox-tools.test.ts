@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
@@ -77,6 +77,35 @@ describe("receipt inbox tool status handling", () => {
         delegated_args: { folder_path: tempDir },
       });
       expect(payload.result.files[0]!.name).toBe("receipt.pdf");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("receipt_batch scan mode applies modified-date filters", async () => {
+    const tempDir = createReceiptFolder({
+      "old.pdf": "%PDF-1.4\n",
+      "new.pdf": "%PDF-1.4\n",
+    });
+    try {
+      utimesSync(join(tempDir, "old.pdf"), new Date("2026-02-01T00:00:00.000Z"), new Date("2026-02-01T00:00:00.000Z"));
+      utimesSync(join(tempDir, "new.pdf"), new Date("2026-03-01T00:00:00.000Z"), new Date("2026-03-01T00:00:00.000Z"));
+      const { handler } = setupReceiptTool("receipt_batch");
+
+      const result = await handler({
+        mode: "scan",
+        folder_path: tempDir,
+        date_from: "2026-03-01",
+        date_to: "2026-03-31",
+      });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(payload.delegated_args).toEqual({
+        folder_path: tempDir,
+        date_from: "2026-03-01",
+        date_to: "2026-03-31",
+      });
+      expect(payload.result.files.map((file: { name: string }) => file.name)).toEqual(["new.pdf"]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -801,6 +830,126 @@ describe("receipt inbox tool status handling", () => {
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
+  it("apply_transaction_classifications blocks non-EUR dry-run approval when no currency rate is available", async () => {
+    const { handler, api } = setupReceiptTool("apply_transaction_classifications", {
+      clients: [
+        {
+          id: 7,
+          name: "OpenAI Ireland Limited",
+          is_supplier: true,
+          is_client: false,
+          cl_code_country: "IE",
+          is_member: false,
+          send_invoice_to_email: false,
+          send_invoice_to_accounting_email: false,
+          is_deleted: false,
+        },
+      ],
+      transactionDetails: {
+        45: {
+          id: 45,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 25,
+          date: "2026-03-22",
+          accounts_dimensions_id: 100,
+          bank_account_name: "OpenAI",
+          description: "ChatGPT subscription",
+          cl_currencies_id: "USD",
+          clients_id: 7,
+        },
+      },
+      purchaseInvoices: [{
+        id: 88,
+        status: "CONFIRMED",
+        payment_status: "PAID",
+        clients_id: 7,
+        client_name: "OpenAI Ireland Limited",
+        create_date: "2026-02-22",
+      }],
+      purchaseInvoiceDetails: {
+        88: {
+          id: 88,
+          number: "OST-88",
+          liability_accounts_id: 2310,
+          items: [{
+            custom_title: "ChatGPT subscription",
+            cl_purchase_articles_id: 501,
+            purchase_accounts_id: 5230,
+            purchase_accounts_dimensions_id: null,
+            vat_rate_dropdown: "24",
+            vat_accounts_id: 1510,
+            cl_vat_articles_id: 1,
+            reversed_vat_id: 1,
+          }],
+        },
+      },
+      purchaseArticles: [{
+        id: 501,
+        name_est: "Software",
+        name_eng: "Software",
+        accounts_id: 5230,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        is_disabled: false,
+        priority: 1,
+      }],
+      accounts: [{
+        id: 5230,
+        name_est: "Software expense",
+        name_eng: "Software expense",
+        account_type_est: "Kulud",
+        account_type_eng: "Expenses",
+      }],
+    });
+
+    const classificationsJson = JSON.stringify([{
+      category: "saas_subscriptions",
+      apply_mode: "purchase_invoice",
+      normalized_counterparty: "openai",
+      display_counterparty: "OpenAI",
+      recurring: true,
+      similar_amounts: true,
+      total_amount: 25,
+      suggested_booking: {
+        purchase_article_id: 501,
+        purchase_article_name: "Software",
+        purchase_account_id: 5230,
+        purchase_account_name: "Software expense",
+        liability_account_id: 2310,
+        reason: "Recurring SaaS",
+      },
+      reasons: ["keyword"],
+      transactions: [{
+        id: 45,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        description: "ChatGPT subscription",
+        bank_account_name: "OpenAI",
+        accounts_dimensions_id: 100,
+        clients_id: 7,
+      }],
+    }]);
+
+    const result = await handler({ classifications_json: classificationsJson });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.summary).toMatchObject({
+      dry_run_preview: 0,
+      skipped: 1,
+      failed: 0,
+    });
+    expect(payload.workflow.approval_previews).toEqual([]);
+    expect(payload.workflow.recommended_next_action.kind).not.toBe("approve_tool_call");
+    expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
+      expect.stringContaining("Non-EUR transaction 45 uses USD but has no currency_rate"),
+    ]));
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
   it("apply_transaction_classifications reports failed when a draft invoice is invalidated after stale transaction detection", async () => {
     const getImpl = vi.fn()
       .mockResolvedValueOnce({
@@ -932,5 +1081,146 @@ describe("receipt inbox tool status handling", () => {
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
     expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9001);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("apply_transaction_classifications reports a group as failed when only part of it executes", async () => {
+    const getCounts = new Map<number, number>();
+    const getImpl = vi.fn().mockImplementation(async (id: number) => {
+      const count = getCounts.get(id) ?? 0;
+      getCounts.set(id, count + 1);
+      const base = {
+        id,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 25,
+        date: id === 44 ? "2026-03-22" : "2026-03-23",
+        accounts_dimensions_id: 100,
+        bank_account_name: "OpenAI",
+        description: "ChatGPT subscription",
+        cl_currencies_id: "EUR",
+        clients_id: 7,
+      };
+      return id === 45 && count > 0
+        ? { ...base, status: "VOID" }
+        : base;
+    });
+
+    const { handler, api } = setupReceiptTool("apply_transaction_classifications", {
+      clients: [
+        {
+          id: 7,
+          name: "OpenAI Ireland Limited",
+          is_supplier: true,
+          is_client: false,
+          cl_code_country: "IE",
+          is_member: false,
+          send_invoice_to_email: false,
+          send_invoice_to_accounting_email: false,
+          is_deleted: false,
+        },
+      ],
+      getImpl,
+      purchaseInvoices: [{
+        id: 88,
+        status: "CONFIRMED",
+        payment_status: "PAID",
+        clients_id: 7,
+        client_name: "OpenAI Ireland Limited",
+        create_date: "2026-02-22",
+      }],
+      purchaseInvoiceDetails: {
+        88: {
+          id: 88,
+          number: "OST-88",
+          liability_accounts_id: 2310,
+          items: [{
+            custom_title: "ChatGPT subscription",
+            cl_purchase_articles_id: 501,
+            purchase_accounts_id: 5230,
+            purchase_accounts_dimensions_id: null,
+            vat_rate_dropdown: "24",
+            vat_accounts_id: 1510,
+            cl_vat_articles_id: 1,
+            reversed_vat_id: 1,
+          }],
+        },
+      },
+      purchaseArticles: [{
+        id: 501,
+        name_est: "Software",
+        name_eng: "Software",
+        accounts_id: 5230,
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+        is_disabled: false,
+        priority: 1,
+      }],
+      accounts: [{
+        id: 5230,
+        name_est: "Software expense",
+        name_eng: "Software expense",
+        account_type_est: "Kulud",
+        account_type_eng: "Expenses",
+      }],
+    });
+
+    const classificationsJson = JSON.stringify([{
+      category: "saas_subscriptions",
+      apply_mode: "purchase_invoice",
+      normalized_counterparty: "openai",
+      display_counterparty: "OpenAI",
+      recurring: true,
+      similar_amounts: true,
+      total_amount: 50,
+      suggested_booking: {
+        purchase_article_id: 501,
+        purchase_article_name: "Software",
+        purchase_account_id: 5230,
+        purchase_account_name: "Software expense",
+        liability_account_id: 2310,
+        reason: "Recurring SaaS",
+      },
+      reasons: ["keyword"],
+      transactions: [
+        {
+          id: 44,
+          type: "C",
+          amount: 25,
+          date: "2026-03-22",
+          description: "ChatGPT subscription",
+          bank_account_name: "OpenAI",
+          accounts_dimensions_id: 100,
+          clients_id: 7,
+        },
+        {
+          id: 45,
+          type: "C",
+          amount: 25,
+          date: "2026-03-23",
+          description: "ChatGPT subscription",
+          bank_account_name: "OpenAI",
+          accounts_dimensions_id: 100,
+          clients_id: 7,
+        },
+      ],
+    }]);
+
+    const result = await handler({ classifications_json: classificationsJson, execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.summary).toMatchObject({
+      applied: 0,
+      failed: 1,
+    });
+    expect(payload.results[0]!.status).toBe("failed");
+    expect(payload.results[0]!.created_invoice_ids).toEqual([9001]);
+    expect(payload.results[0]!.linked_transaction_ids).toEqual([44]);
+    expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
+      expect.stringContaining("Invalidated auto-created purchase invoice 9001 because transaction 45 is no longer bookable (status VOID)."),
+    ]));
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(2);
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9001);
   });
 });

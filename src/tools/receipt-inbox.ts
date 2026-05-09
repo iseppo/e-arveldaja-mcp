@@ -1450,8 +1450,10 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
         delegatedArgs = {
           folder_path,
           ...(file_types !== undefined ? { file_types } : {}),
+          ...(date_from !== undefined ? { date_from } : {}),
+          ...(date_to !== undefined ? { date_to } : {}),
         };
-        result = await scanReceiptFolderInternal(folder_path, file_types);
+        result = await scanReceiptFolderInternal(folder_path, file_types, date_from, date_to);
       } else {
         if (accounts_dimensions_id === undefined) {
           throw new Error("accounts_dimensions_id is required when mode is dry_run, create, or create_and_confirm");
@@ -1699,6 +1701,8 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
             const supplierId = supplier?.id;
             const supplierMetadata = supplierResolution.client ?? supplierResolution.preview_client;
             const grossAmount = roundMoney(Math.abs(transaction.amount));
+            const transactionCurrency = (transaction.cl_currencies_id ?? "EUR").toUpperCase();
+            const transactionCurrencyRate = transaction.currency_rate;
             const transactionGroup: TransactionGroup = {
               normalized_counterparty: group.normalized_counterparty,
               display_counterparty: group.display_counterparty,
@@ -1725,6 +1729,19 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
             if (resolved.applyMode !== "purchase_invoice") {
               notes.push(`Transaction ${transaction.id} requires manual review before booking. ${resolved.suggestion.reason}`);
+              continue;
+            }
+
+            if (
+              transactionCurrency !== "EUR" &&
+              (transactionCurrencyRate === undefined ||
+                transactionCurrencyRate === null ||
+                !Number.isFinite(transactionCurrencyRate) ||
+                transactionCurrencyRate <= 0)
+            ) {
+              notes.push(
+                `Non-EUR transaction ${transaction.id} uses ${transactionCurrency} but has no currency_rate. Review manually or retry after the transaction exposes a valid EUR conversion rate.`
+              );
               continue;
             }
 
@@ -1770,7 +1787,8 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
                 create_date: transaction.date,
                 journal_date: transaction.date,
                 term_days: 0,
-                cl_currencies_id: transaction.cl_currencies_id ?? "EUR",
+                cl_currencies_id: transactionCurrency,
+                ...(transactionCurrency !== "EUR" ? { currency_rate: transactionCurrencyRate } : {}),
                 liability_accounts_id: resolved.suggestion.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
                 notes: tagNotes(`Auto-created from classified bank transaction ${transaction.id}`),
                 items: [purchaseItem],
@@ -1838,7 +1856,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
           const status = dryRun
             ? (wouldCreateCount > 0 ? "dry_run_preview" : "skipped")
-            : (createdInvoiceIds.length > 0
+            : (createdInvoiceIds.length > 0 && createdInvoiceIds.length === freshTransactions.length
                 ? "applied"
                 : attemptedCreateCount > 0
                   ? "failed"

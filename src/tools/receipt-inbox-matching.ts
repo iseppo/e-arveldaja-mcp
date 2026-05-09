@@ -28,7 +28,15 @@ export function findBestTransactionMatch(
     .filter(candidate => candidate.confidence >= POSSIBLE_MATCH_THRESHOLD)
     .sort((a, b) => b.confidence - a.confidence);
 
-  return candidates[0];
+  const best = candidates[0];
+  if (!best) return undefined;
+
+  const tiedTopCandidates = candidates.filter(candidate => candidate.confidence === best.confidence);
+  if (tiedTopCandidates.length > 1) {
+    return undefined;
+  }
+
+  return best;
 }
 
 export function findDuplicateInvoice(

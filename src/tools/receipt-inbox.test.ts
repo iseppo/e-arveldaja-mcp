@@ -33,7 +33,9 @@ import {
   resolveSupplierFromTransaction,
   supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
+import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
 import { readValidatedReceiptFile, revalidateReceiptFilePath } from "./receipt-inbox-files.js";
+import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import { buildReceiptBatchSummary } from "./receipt-inbox-summary.js";
 
@@ -82,6 +84,120 @@ describe("buildDryRunCreatedInvoicePreview", () => {
       confirmed: false,
       uploaded_document: false,
     });
+  });
+});
+
+describe("findBestTransactionMatch", () => {
+  it("returns no match when multiple bank transactions tie at top confidence", () => {
+    const invoice = {
+      clients_id: 7,
+      client_name: "OpenAI Ireland Limited",
+      cl_currencies_id: "EUR",
+      number: "INV-42",
+      create_date: "2026-03-22",
+      gross_price: 25,
+      bank_ref_number: "RF42",
+    };
+    const transactions = [
+      {
+        id: 10,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        accounts_dimensions_id: 100,
+        bank_account_name: "OpenAI Ireland Limited",
+        description: "Invoice INV-42",
+        ref_number: "RF42",
+        cl_currencies_id: "EUR",
+      },
+      {
+        id: 11,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        accounts_dimensions_id: 100,
+        bank_account_name: "OpenAI Ireland Limited",
+        description: "Invoice INV-42 duplicate",
+        ref_number: "RF42",
+        cl_currencies_id: "EUR",
+      },
+    ];
+
+    expect(findBestTransactionMatch(transactions as any, invoice, new Set())).toBeUndefined();
+  });
+});
+
+describe("createAndMaybeMatchPurchaseInvoice", () => {
+  it("keeps non-EUR receipts in review because receipt extraction has no currency rate", async () => {
+    const result = await createAndMaybeMatchPurchaseInvoice(
+      {} as any,
+      {
+        clients: [],
+        purchaseInvoices: [],
+        purchaseArticlesWithVat: [],
+        accounts: [],
+        isVatRegistered: true,
+      },
+      {
+        name: "openai.pdf",
+        path: "/tmp/openai.pdf",
+        extension: ".pdf",
+        file_type: "pdf",
+        size_bytes: 123,
+        modified_at: "2026-03-22T00:00:00.000Z",
+      },
+      {
+        supplier_name: "OpenAI Ireland Limited",
+        invoice_number: "INV-USD",
+        invoice_date: "2026-03-22",
+        total_net: 100,
+        total_vat: 0,
+        total_gross: 100,
+        currency: "USD",
+        description: "Subscription",
+      },
+      {
+        found: true,
+        created: false,
+        match_type: "exact_name",
+        client: {
+          id: 7,
+          name: "OpenAI Ireland Limited",
+          is_supplier: true,
+          is_client: false,
+          cl_code_country: "IE",
+          is_member: false,
+          send_invoice_to_email: false,
+          send_invoice_to_accounting_email: false,
+          is_deleted: false,
+        },
+      },
+      {
+        source: "supplier_history",
+        item: {
+          custom_title: "Subscription",
+          amount: 1,
+          total_net_price: 100,
+          cl_purchase_articles_id: 501,
+          purchase_accounts_id: 5230,
+          vat_rate_dropdown: "-",
+        },
+      },
+      [],
+      "dry_run",
+      false,
+      new Set(),
+    );
+
+    expect(result.status).toBe("needs_review");
+    expect(result.created_invoice).toBeUndefined();
+    expect(result.notes).toEqual(expect.arrayContaining([
+      expect.stringContaining("Non-EUR receipt currency USD requires an explicit currency_rate"),
+    ]));
   });
 });
 
