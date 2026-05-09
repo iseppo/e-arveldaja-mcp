@@ -300,20 +300,31 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
         inv.journal_date >= dateFrom && inv.journal_date <= dateTo
       );
 
-      // Overdue receivables (compare to month-end date for reproducibility)
-      const overdueReceivables = allSales.filter((inv: SaleInvoice) => {
-        if (inv.payment_status === "PAID" || inv.status !== "CONFIRMED") return false;
+      // Overdue receivables (compare to month-end date for reproducibility).
+      // term_days is typed as required but the upstream API occasionally serves
+      // it as null/undefined; treat missing as 0 so the invoice is still
+      // evaluated rather than silently dropped via NaN comparison.
+      const missingTermDays: Array<{ entity: "sale_invoice" | "purchase_invoice"; id: number | undefined; number: string }> = [];
+      const isOverdue = (
+        entity: "sale_invoice" | "purchase_invoice",
+        inv: SaleInvoice | PurchaseInvoice,
+      ): boolean => {
+        const term = inv.term_days;
+        if (term === undefined || term === null) {
+          missingTermDays.push({ entity, id: inv.id, number: inv.number ?? "" });
+        }
         const d = new Date(inv.create_date + "T12:00:00Z");
-        d.setUTCDate(d.getUTCDate() + inv.term_days);
+        d.setUTCDate(d.getUTCDate() + (term ?? 0));
         return d.toISOString().split("T")[0]! < dateTo;
-      });
+      };
 
-      const overduePayables = allPurchases.filter((inv: PurchaseInvoice) => {
-        if (inv.payment_status === "PAID" || inv.status !== "CONFIRMED") return false;
-        const d = new Date(inv.create_date + "T12:00:00Z");
-        d.setUTCDate(d.getUTCDate() + inv.term_days);
-        return d.toISOString().split("T")[0]! < dateTo;
-      });
+      const overdueReceivables = allSales.filter((inv: SaleInvoice) =>
+        inv.payment_status !== "PAID" && inv.status === "CONFIRMED" && isOverdue("sale_invoice", inv)
+      );
+
+      const overduePayables = allPurchases.filter((inv: PurchaseInvoice) =>
+        inv.payment_status !== "PAID" && inv.status === "CONFIRMED" && isOverdue("purchase_invoice", inv)
+      );
 
       const partiallyPaidReceivables = overdueReceivables.filter((inv: SaleInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
       const partiallyPaidPayables = overduePayables.filter((inv: PurchaseInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
@@ -323,6 +334,13 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       }
       if (partiallyPaidPayables > 0) {
         warnings.push(`${partiallyPaidPayables} overdue payable(s) are PARTIALLY_PAID and shown at full invoice amount; remaining balance may be lower.`);
+      }
+      if (missingTermDays.length > 0) {
+        warnings.push(
+          `${missingTermDays.length} invoice(s) had no term_days; treated as 0-day terms for the overdue check. Affected: ` +
+          missingTermDays.slice(0, 5).map(item => `${item.entity}#${item.id ?? "?"} (${item.number})`).join(", ") +
+          (missingTermDays.length > 5 ? `, +${missingTermDays.length - 5} more` : "")
+        );
       }
 
       return {

@@ -2,7 +2,7 @@ import { readFile } from "fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveFileInput } from "../file-validation.js";
 import { parseMcpResponse } from "../mcp-json.js";
-import { registerLightyearTools } from "./lightyear-investments.js";
+import { registerLightyearTools, tradeFeeInEur } from "./lightyear-investments.js";
 
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
@@ -374,5 +374,30 @@ describe("lightyear investments tools", () => {
 
     expect(payload.duplicates_skipped).toBe(0);
     expect(api.journals.create).toHaveBeenCalled();
+  });
+});
+
+describe("tradeFeeInEur", () => {
+  it("returns 0 when fee_eur is non-positive", () => {
+    expect(tradeFeeInEur({ fee_eur: 0, fx_rate: 0.92 })).toBe(0);
+    expect(tradeFeeInEur({ fee_eur: -1, fx_rate: 0.92 })).toBe(0);
+  });
+
+  it("returns the source fee unchanged when no fx_rate is available", () => {
+    expect(tradeFeeInEur({ fee_eur: 1.5, fx_rate: null })).toBe(1.5);
+  });
+
+  it("converts via fx_rate for valid foreign-currency trades", () => {
+    expect(tradeFeeInEur({ fee_eur: 0.92, fx_rate: 0.92 })).toBeCloseTo(1, 6);
+  });
+
+  it("rejects implausible fx_rate (NaN, Infinity, near zero) instead of producing huge phantom fees", () => {
+    // Without the guard, fee/0.00001 would yield a 5-figure phantom EUR fee
+    // that would silently inflate the booked cost basis.
+    expect(tradeFeeInEur({ fee_eur: 0.5, fx_rate: 1e-6 })).toBe(0.5);
+    expect(tradeFeeInEur({ fee_eur: 0.5, fx_rate: 0 })).toBe(0.5);
+    expect(tradeFeeInEur({ fee_eur: 0.5, fx_rate: NaN })).toBe(0.5);
+    expect(tradeFeeInEur({ fee_eur: 0.5, fx_rate: Infinity })).toBe(0.5);
+    expect(tradeFeeInEur({ fee_eur: 0.5, fx_rate: -1 })).toBe(0.5);
   });
 });

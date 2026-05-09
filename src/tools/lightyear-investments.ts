@@ -206,6 +206,18 @@ function fxFeeToEur(eurConv: AccountStatementRow, fgnConv: AccountStatementRow):
   return 0;
 }
 
+// fee_eur on a foreign-currency trade is recorded in source currency; convert
+// to EUR via fx_rate. Reject implausible fx_rate values (NaN, ±Infinity, near
+// zero) so a corrupted CSV row cannot produce a multi-thousand-euro phantom
+// fee that silently rounds through and inflates the booking.
+const MIN_FX_RATE = 1e-4;
+export function tradeFeeInEur(trade: { fee_eur: number; fx_rate: number | null }): number {
+  if (!(trade.fee_eur > 0)) return 0;
+  const rate = trade.fx_rate;
+  if (rate === null || !Number.isFinite(rate) || rate < MIN_FX_RATE) return trade.fee_eur;
+  return trade.fee_eur / rate;
+}
+
 function getStatementRowCashDelta(row: AccountStatementRow): { currency: string; amount: number } | null {
   if (!row.ccy) return null;
 
@@ -678,8 +690,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           buys: buys.length,
           sells: sells.length,
           total_invested_eur: roundMoney(buys.reduce((s, t) => {
-            const tradeFeeEur = t.fee_eur > 0 && t.fx_rate ? t.fee_eur / t.fx_rate : t.fee_eur;
-            return s + t.eur_amount + tradeFeeEur; // FX fee excluded (matches Lightyear CG report)
+            return s + t.eur_amount + tradeFeeInEur(t); // FX fee excluded (matches Lightyear CG report)
           }, 0)),
           total_sold_eur: roundMoney(sells.reduce((s, t) => s + t.eur_amount, 0)),
         };
@@ -929,9 +940,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
         // eur_amount is the EUR conversion net (after FX fee deduction).
         // fx_fee_eur is the FX conversion fee. trade.fee_eur is the trade platform fee.
-        const tradeFeeEur = trade.fee_eur > 0 && trade.fx_rate
-          ? roundMoney(trade.fee_eur / trade.fx_rate)
-          : trade.fee_eur;
+        const tradeFeeEur = roundMoney(tradeFeeInEur(trade));
         const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
 
         if (trade.type === "Buy") {
@@ -1424,18 +1433,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         if (trade.type === "Buy") {
           // Investment cost = eur_amount (conversion net) + trade fee.
           // FX fee is expensed, not part of cost basis (matches Lightyear CG report).
-          const tradeFeeEur = trade.fee_eur > 0 && trade.fx_rate
-            ? trade.fee_eur / trade.fx_rate
-            : trade.fee_eur;
-          h.total_cost_eur += trade.eur_amount + tradeFeeEur;
+          h.total_cost_eur += trade.eur_amount + tradeFeeInEur(trade);
           h.quantity += trade.quantity;
           h.buy_count++;
         } else {
           // Sell: remove proportional cost basis using weighted average cost
-          const tradeFeeEur = trade.fee_eur > 0 && trade.fx_rate
-            ? trade.fee_eur / trade.fx_rate
-            : trade.fee_eur;
-          const proceeds = trade.eur_amount - tradeFeeEur;
+          const proceeds = trade.eur_amount - tradeFeeInEur(trade);
           h.total_proceeds_eur += proceeds;
           h.sell_count++;
 

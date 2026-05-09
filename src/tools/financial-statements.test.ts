@@ -784,4 +784,46 @@ describe("month_end_close_checklist", () => {
 
     expect(payload.overdue_receivables.total).toBe(100); // uses base_gross_price
   });
+
+  it("treats invoices with missing term_days as 0-day terms instead of silently dropping them", async () => {
+    // The upstream API occasionally serves term_days as null/undefined despite
+    // the type declaring it required. Without the guard, `getUTCDate() + null`
+    // coerces to today and `+ undefined` produces NaN — both regressions
+    // dropped genuinely overdue invoices from the report.
+    const handler = setupTool("month_end_close_checklist", {
+      saleInvoices: [
+        makeSaleInvoice({
+          id: 99,
+          number: "ARV-99",
+          create_date: "2024-02-01",
+          journal_date: "2024-02-01",
+          term_days: null as unknown as number,
+          gross_price: 250,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+        }),
+      ],
+      purchaseInvoices: [
+        makePurchaseInvoice({
+          id: 100,
+          number: "OST-100",
+          create_date: "2024-02-15",
+          journal_date: "2024-02-15",
+          term_days: undefined as unknown as number,
+          gross_price: 75,
+          status: "CONFIRMED",
+          payment_status: "NOT_PAID",
+        }),
+      ],
+    });
+
+    const result = await handler({ month: "2024-03" });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.overdue_receivables.count).toBe(1);
+    expect(payload.overdue_payables.count).toBe(1);
+    expect(payload.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("had no term_days"),
+    ]));
+  });
 });
