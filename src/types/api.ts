@@ -133,7 +133,7 @@ export interface Journal {
   operation_type?: string;
   document_number?: string | null;
   cl_currencies_id?: string;
-  currency_rate?: number;
+  currency_rate?: number | null;
   base_document_files_id?: number | null;
   is_xls_imported?: boolean;
   is_deleted?: boolean;
@@ -152,7 +152,7 @@ export interface TransactionItem {
   relation_id?: number;
   amount?: number;
   base_amount?: number;
-  currency_rate?: number;
+  currency_rate?: number | null;
   cl_currencies_id?: string;
 }
 
@@ -173,7 +173,7 @@ export interface Transaction {
   ref_number?: string | null;
   amount: number;
   base_amount?: number;
-  currency_rate?: number;
+  currency_rate?: number | null;
   cl_currencies_id: string;
   description?: string | null;
   date: string;
@@ -264,7 +264,7 @@ export interface SaleInvoice {
   invoice_info?: string | null;
   payment_description?: string | null;
   cl_currencies_id: string;
-  currency_rate?: number;
+  currency_rate?: number | null;
   base_gross_price?: number;
   base_net_price?: number;
   base_vat5_price?: number;
@@ -369,7 +369,7 @@ export interface PurchaseInvoice {
   liability_accounts_id?: number;
   liability_accounts_dimensions_id?: number | null;
   cl_currencies_id: string;
-  currency_rate?: number;
+  currency_rate?: number | null;
   base_net_price?: number;
   base_vat_price?: number;
   base_gross_price?: number;

@@ -175,7 +175,7 @@ function hasMeaningfulComparableAmount(tx: Transaction): boolean {
 
 export function matchScore(
   tx: Transaction,
-  invoice: { gross_price?: number; base_gross_price?: number; currency_rate?: number; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
+  invoice: { gross_price?: number; base_gross_price?: number; currency_rate?: number | null; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
   txAmount: number
 ): { confidence: number; reasons: string[]; partiallyPaidWarning: boolean } {
   let confidence = 0;
