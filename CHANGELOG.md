@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-05-09
+
+### Changed
+- **Workflow prompt UX** — expanded `recommend_workflow` to cover all 15 workflow prompts, including setup, review continuation, month-end, supplier creation, company overview, and Lightyear booking. Workflow action labels now use accounting-language next steps instead of generic `Run <tool>` labels, and MCP workflow prompts include a shared user-facing response contract for done items, approval cards, one-decision questions, accountant-review items, and next recommended actions.
+- **Prompt approval guidance** — refreshed the shipped workflow prompts and generated Claude commands with clearer user-facing phases, approval-card contents, fallback-tool wording, and an explicit approval gate before creating new supplier records. `setup-e-arveldaja` now comes from the same canonical workflow prompt source as the other shipped prompts.
+
 ## [0.14.0] - 2026-05-09
 
 ### Added

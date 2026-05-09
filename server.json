@@ -6,12 +6,12 @@
     "url": "https://github.com/iseppo/e-arveldaja-mcp",
     "source": "github"
   },
-  "version": "0.14.0",
+  "version": "0.14.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "e-arveldaja-mcp",
-      "version": "0.14.0",
+      "version": "0.14.1",
       "transport": {
         "type": "stdio"
       },
