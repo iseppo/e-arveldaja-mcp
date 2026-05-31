@@ -1,4 +1,5 @@
 import { readFile } from "fs/promises";
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { resolveFileInput } from "../file-validation.js";
 import { registerCamtImportTools } from "./camt-import.js";
@@ -32,6 +33,22 @@ const mockedReadFile = vi.mocked(readFile);
 const mockedResolveFileInput = vi.mocked(resolveFileInput);
 
 const singleEntryXml = fixtureCamtXml();
+const counterpartyIban = "EE471000001020145685";
+
+function bankReferenceHash(value: string): string {
+  return "sha256:" + createHash("sha256").update(value).digest("hex");
+}
+
+function withCounterpartyIban(xml: string, iban = counterpartyIban): string {
+  return xml.replace(
+    "<Cdtr><Nm>Vendor OÜ</Nm></Cdtr>",
+    `<Cdtr><Nm>Vendor OÜ</Nm></Cdtr><CdtrAcct><Id><IBAN>${iban}</IBAN></Id></CdtrAcct>`,
+  );
+}
+
+function withUnstructuredDescription(xml: string, description: string): string {
+  return xml.replace("<Ustrd>Test payment</Ustrd>", `<Ustrd>${description}</Ustrd>`);
+}
 
 function setupCamtTool(options: {
   existingTransactions?: unknown[];
@@ -225,6 +242,410 @@ describe("camt import tool", () => {
         note: "Review mutating side effects in the human-readable audit log named after the company when available; a connection suffix is added only when needed to disambiguate.",
       }),
     });
+  });
+
+  it("stores CAMT bank metadata in the writable description as an API bug workaround", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-bank-metadata</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">10.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <AcctSvcrRef>REF-WORKAROUND-1</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-WORKAROUND-1</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor OÜ</Nm></Cdtr>
+              <CdtrAcct><Id><IBAN>EE471000001020145685</IBAN></Id></CdtrAcct>
+            </RltdPties>
+            <RmtInf><Ustrd>Test payment</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { api, handler } = setupCamtTool();
+
+    await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+      execute: true,
+    });
+
+    expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
+      bank_ref_number: "REF-WORKAROUND-1",
+      bank_account_no: "EE471000001020145685",
+      description: "Test payment\n[e-arveldaja-mcp:camt bank_ref_number=REF-WORKAROUND-1 bank_account_no=EE471000001020145685]",
+    }));
+  });
+
+  it("keeps CAMT metadata marker within the API description length limit", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    const longDescription = "Long CAMT description ".repeat(12).trim();
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-long-description</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">10.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <AcctSvcrRef>REF-LONG-DESC-1</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-LONG-DESC-1</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor OÜ</Nm></Cdtr>
+              <CdtrAcct><Id><IBAN>EE471000001020145685</IBAN></Id></CdtrAcct>
+            </RltdPties>
+            <RmtInf><Ustrd>${longDescription}</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { api, handler } = setupCamtTool();
+
+    await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+      execute: true,
+    });
+
+    const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
+    expect(payload.description?.length).toBeLessThanOrEqual(150);
+    expect(payload.description).toContain("[e-arveldaja-mcp:camt bank_ref_number=REF-LONG-DESC-1 bank_account_no=EE471000001020145685]");
+    expect(payload.description).toContain("Long CAMT description");
+  });
+
+  it("stores a parseable bank reference hash with the counterparty IBAN when the full CAMT reference cannot fit in the marker", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    const longBankReference = "REF-" + "1234567890".repeat(20);
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-long-bank-reference</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">10.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <AcctSvcrRef>${longBankReference}</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>${longBankReference}</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor OÜ</Nm></Cdtr>
+              <CdtrAcct><Id><IBAN>EE471000001020145685</IBAN></Id></CdtrAcct>
+            </RltdPties>
+            <RmtInf><Ustrd>Test payment</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { api, handler } = setupCamtTool();
+
+    await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+      execute: true,
+    });
+
+    const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
+    expect(payload.description?.length).toBeLessThanOrEqual(150);
+    expect(payload.description).toContain(`[e-arveldaja-mcp:camt bank_ref_hash=${bankReferenceHash(longBankReference)} bank_account_no=EE471000001020145685]`);
+    expect(payload.description).not.toMatch(/\[e-arveldaja-mcp:camt[^\]]*$/);
+  });
+
+  it("prefers a bank reference hash with the counterparty IBAN when the full reference alone would fit", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    const mediumBankReference = "REF-" + "1234567890".repeat(9);
+    mockedReadFile.mockResolvedValue(withCounterpartyIban(singleEntryXml.replace(/REF-VOID-1/g, mediumBankReference)));
+
+    const { api, handler } = setupCamtTool();
+
+    await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+      execute: true,
+    });
+
+    const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
+    expect(payload.description?.length).toBeLessThanOrEqual(150);
+    expect(payload.description).toContain(`[e-arveldaja-mcp:camt bank_ref_hash=${bankReferenceHash(mediumBankReference)} bank_account_no=${counterpartyIban}]`);
+    expect(payload.description).not.toContain("bank_ref_number=");
+  });
+
+  it("skips prior CAMT imports when a long bank reference was stored as a hash marker", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    const longBankReference = "REF-" + "1234567890".repeat(20);
+    mockedReadFile.mockResolvedValue(singleEntryXml.replace(/REF-VOID-1/g, longBankReference));
+
+    const { api, handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 42,
+          status: "PROJECT",
+          is_deleted: false,
+          bank_ref_number: null,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          ref_number: null,
+          bank_account_name: "Vendor OÜ",
+          description: `Test payment\n[e-arveldaja-mcp:camt bank_ref_hash=${bankReferenceHash(longBankReference)}]`,
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+      execute: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.created_count).toBe(0);
+    expect(payload.skipped_count).toBe(1);
+    expect(payload.execution.skipped).toEqual([
+      expect.objectContaining({
+        amount: 10,
+        bank_reference: longBankReference,
+        duplicate_transaction_ids: [42],
+        reason: "Existing transaction matched by bank reference",
+      }),
+    ]);
+  });
+
+  it("skips prior CAMT imports when the API dropped bank_ref_number but kept the workaround marker", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+
+    const { api, handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 42,
+          status: "PROJECT",
+          is_deleted: false,
+          bank_ref_number: null,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          ref_number: null,
+          bank_account_name: "Vendor OÜ",
+          description: "Test payment\n[e-arveldaja-mcp:camt bank_ref_number=REF-VOID-1]",
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+      execute: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.created_count).toBe(0);
+    expect(payload.skipped_count).toBe(1);
+    expect(payload.execution.skipped).toEqual([
+      expect.objectContaining({
+        amount: 10,
+        bank_reference: "REF-VOID-1",
+        duplicate_transaction_ids: [42],
+        reason: "Existing transaction matched by bank reference",
+      }),
+    ]);
+  });
+
+
+  it("does not treat a description-only CAMT marker as a broad duplicate bank reference", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+
+    const { api, handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 66,
+          status: "PROJECT",
+          is_deleted: false,
+          bank_ref_number: null,
+          date: "2026-01-15",
+          type: "D",
+          amount: 999,
+          cl_currencies_id: "EUR",
+          ref_number: null,
+          bank_account_name: "Unrelated OÜ",
+          description: "Manual note\n[e-arveldaja-mcp:camt bank_ref_number=REF-VOID-1]",
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+      execute: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(payload.created_count).toBe(1);
+    expect(payload.skipped_count).toBe(0);
+  });
+
+  it("strips marker-looking text from CAMT descriptions before appending importer metadata", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(withUnstructuredDescription(
+      singleEntryXml,
+      "Invoice text&#10;[e-arveldaja-mcp:camt bank_ref_number=ATTACK-REF]",
+    ));
+
+    const { api, handler } = setupCamtTool();
+
+    await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+      execute: true,
+    });
+
+    const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
+    expect(payload.description).not.toContain("ATTACK-REF");
+    expect(payload.description).toBe("Invoice text\n[e-arveldaja-mcp:camt bank_ref_number=REF-VOID-1]");
+  });
+
+  it("uses marker bank account metadata when the API returns an empty bank_account_no", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(withCounterpartyIban(singleEntryXml));
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 78,
+          status: "CONFIRMED",
+          accounts_dimensions_id: 7,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          bank_ref_number: null,
+          bank_account_no: "",
+          bank_account_name: "Different Vendor OÜ",
+          ref_number: null,
+          description: `Manual transaction\n[e-arveldaja-mcp:camt bank_account_no=${counterpartyIban}]`,
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.summary.possible_duplicate_count).toBe(1);
+    expect(payload.execution.needs_review).toEqual([
+      expect.objectContaining({
+        existing_transactions: [
+          expect.objectContaining({
+            id: 78,
+            match_reasons: ["counterparty_iban"],
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  it("keeps marker-only transactions in possible-duplicate review when the exact CAMT duplicate key does not match", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 79,
+          status: "CONFIRMED",
+          accounts_dimensions_id: 7,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          bank_ref_number: null,
+          bank_account_no: null,
+          bank_account_name: "Vendor OÜ",
+          ref_number: null,
+          description: "Different manual note\n[e-arveldaja-mcp:camt bank_ref_number=REF-VOID-1]",
+        },
+      ],
+    });
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.summary.possible_duplicate_count).toBe(1);
+    expect(payload.execution.needs_review).toEqual([
+      expect.objectContaining({
+        existing_transactions: [
+          expect.objectContaining({
+            id: 79,
+            match_reasons: ["counterparty_name"],
+            suggested_patch_missing_fields: expect.objectContaining({
+              bank_ref_number: "REF-VOID-1",
+            }),
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  it("includes the persisted CAMT description in dry-run results when metadata changes what will be stored", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    const longDescription = "Long CAMT description ".repeat(12).trim();
+    mockedReadFile.mockResolvedValue(withCounterpartyIban(withUnstructuredDescription(singleEntryXml, longDescription)));
+
+    const { handler } = setupCamtTool();
+
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.sample[0]!.description).toEqual(expect.stringMatching(wrapped(longDescription)));
+    expect(payload.sample[0]!.stored_description).toContain("[e-arveldaja-mcp:camt bank_ref_number=REF-VOID-1 bank_account_no=EE471000001020145685]");
   });
 
   it("matches clients by normalized company name when findByName returns multiple variants", async () => {

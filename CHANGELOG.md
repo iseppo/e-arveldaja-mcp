@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-05-31
+
+### Fixed
+- **CAMT duplicate detection survives dropped bank metadata** — `import_camt053` now stores a compact CAMT metadata marker in the writable transaction description when the e-arveldaja API drops `bank_ref_number` or `bank_account_no`. Long bank references are stored as a stable SHA-256 lookup key, and the marker preserves the counterparty IBAN when both full values cannot fit inside the API's 150-character description limit. Re-importing the same CAMT statement now skips the prior transaction instead of creating a duplicate.
+- **CAMT possible-duplicate review keeps marker-only candidates visible** — marker metadata is no longer treated as a broad bank-reference duplicate on its own. If a marker-bearing existing transaction fails the exact CAMT duplicate key, it remains in `needs_review` when amount/date/counterparty signals still match, so operators can link or clean it up instead of silently creating a second PROJECT row.
+- **TOON 2.3 response compatibility** — MCP responses still prefer TOON for compact output, but now fall back to JSON when the current TOON encoder produces text its decoder rejects, such as sandboxed multiline OCR/CAMT marker strings. This keeps downstream wrappers and tests parseable while preserving untrusted OCR delimiters verbatim.
+
+### Changed
+- **Dependency refresh for the release** — updated direct runtime and dev dependencies to current npm latest versions, including LiteParse 2.0.4, MCP SDK 1.29.0, TOON 2.3.0, Zod 4.4.3, TypeScript 6.0.3, Vitest 4.1.7, dotenv 17.4.2, fast-xml-parser 5.8.0, and tsx 4.22.4. LiteParse parsing now uses the v2 single-argument `parse(input)` API, and Zod record schemas use the v4 two-argument form.
+
 ## [0.14.1] - 2026-05-09
 
 ### Changed

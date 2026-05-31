@@ -59,7 +59,6 @@ export function buildDocumentParserConfig(): Partial<LiteParseConfig> {
     ocrLanguage: process.env.EARVELDAJA_LITEPARSE_OCR_LANGUAGE ?? "eng+est",
     ocrServerUrl: validateOcrUrl(process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL),
     outputFormat: "text",
-    preciseBoundingBox: false,
     preserveVerySmallText: true,
   };
 
@@ -80,7 +79,7 @@ export function getDocumentParser(): LiteParse {
 }
 
 export async function parseDocument(filePath: string): Promise<ParsedDocument> {
-  const result = await getDocumentParser().parse(filePath, true);
+  const result = await getDocumentParser().parse(filePath);
   return {
     text: result.text,
     pageCount: result.pages.length,

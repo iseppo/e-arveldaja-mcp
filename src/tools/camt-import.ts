@@ -1,4 +1,5 @@
 import { readFile } from "fs/promises";
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
@@ -21,6 +22,8 @@ import { arrayAt, isRecord, recordAt } from "../record-utils.js";
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const XML_DTD_PATTERN = /<!(?:DOCTYPE|ENTITY)/i;
+const CAMT_DESCRIPTION_METADATA_PREFIX = "[e-arveldaja-mcp:camt";
+const TRANSACTION_DESCRIPTION_MAX_LENGTH = 150;
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
@@ -190,6 +193,130 @@ function normalizeOptionalReference(value: string | undefined): string | undefin
   return normalized;
 }
 
+function encodeCamtMetadataValue(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function bankReferenceHash(value: string): string {
+  return "sha256:" + createHash("sha256").update(value).digest("hex");
+}
+
+function bankReferenceLookupKey(value: string | undefined): string | undefined {
+  const normalized = normalizeOptionalReference(value);
+  return normalized ? bankReferenceHash(normalized) : undefined;
+}
+
+function decodeCamtMetadataValue(value: string): string | undefined {
+  try {
+    const decoded = decodeURIComponent(value);
+    return decoded.trim() || undefined;
+  } catch {
+    return value.trim() || undefined;
+  }
+}
+
+function normalizeCamtDescriptionLineBreaks(description: string): string {
+  return description.replace(/&#(?:10|x0*a);/gi, "\n");
+}
+
+function stripCamtDescriptionMetadata(description: string | undefined): string | undefined {
+  if (!description) return undefined;
+  const stripped = normalizeCamtDescriptionLineBreaks(description)
+    .replace(/(?:^|\n)\[e-arveldaja-mcp:camt\s+[^\]\r\n]+\]/g, "")
+    .trim();
+  return stripped || undefined;
+}
+
+function normalizeStoredBankReferenceHash(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized && /^sha256:[a-f0-9]{64}$/i.test(normalized)
+    ? normalized.toLowerCase()
+    : undefined;
+}
+
+function extractCamtDescriptionMetadata(description: string | null | undefined): {
+  bank_ref_number?: string;
+  bank_ref_hash?: string;
+  bank_account_no?: string;
+} {
+  if (!description) return {};
+  const normalizedDescription = normalizeCamtDescriptionLineBreaks(description).trimEnd();
+  const match = normalizedDescription.match(/(?:^|\n)\[e-arveldaja-mcp:camt\s+([^\]\r\n]+)\]$/);
+  if (!match) return {};
+
+  const metadata: { bank_ref_number?: string; bank_ref_hash?: string; bank_account_no?: string } = {};
+  for (const [, key, value] of match[1]!.matchAll(/(bank_ref_number|bank_ref_hash|bank_account_no)=([^\s\]]+)/g)) {
+    const decoded = decodeCamtMetadataValue(value);
+    if (!decoded) continue;
+    if (key === "bank_ref_number") metadata.bank_ref_number = decoded;
+    if (key === "bank_ref_hash") metadata.bank_ref_hash = normalizeStoredBankReferenceHash(decoded);
+    if (key === "bank_account_no") metadata.bank_account_no = decoded;
+  }
+  return metadata;
+}
+
+function buildCamtDescriptionMarkerFromParts(parts: string[]): string | undefined {
+  return parts.length > 0
+    ? `${CAMT_DESCRIPTION_METADATA_PREFIX} ${parts.join(" ")}]`
+    : undefined;
+}
+
+function buildCamtDescriptionMarker(entry: ParsedCamtEntry): string | undefined {
+  const bankReference = normalizeOptionalReference(entry.bank_reference);
+  if (!bankReference && !entry.counterparty_iban) return undefined;
+
+  const bankReferencePart = bankReference
+    ? `bank_ref_number=${encodeCamtMetadataValue(bankReference)}`
+    : undefined;
+  const bankReferenceHashPart = bankReference
+    ? `bank_ref_hash=${bankReferenceHash(bankReference)}`
+    : undefined;
+  const bankAccountPart = entry.counterparty_iban
+    ? `bank_account_no=${encodeCamtMetadataValue(entry.counterparty_iban)}`
+    : undefined;
+
+  const markerCandidates = [
+    buildCamtDescriptionMarkerFromParts([bankReferencePart, bankAccountPart].filter((part): part is string => Boolean(part))),
+    buildCamtDescriptionMarkerFromParts([bankReferenceHashPart, bankAccountPart].filter((part): part is string => Boolean(part))),
+    buildCamtDescriptionMarkerFromParts([bankReferencePart].filter((part): part is string => Boolean(part))),
+    buildCamtDescriptionMarkerFromParts([bankReferenceHashPart].filter((part): part is string => Boolean(part))),
+    buildCamtDescriptionMarkerFromParts([bankAccountPart].filter((part): part is string => Boolean(part))),
+  ];
+
+  return markerCandidates.find((marker) => marker !== undefined && marker.length <= TRANSACTION_DESCRIPTION_MAX_LENGTH);
+}
+
+function buildCamtDescriptionWithMetadata(description: string | undefined, entry: ParsedCamtEntry): string | undefined {
+  const marker = buildCamtDescriptionMarker(entry);
+  const cleanDescription = stripCamtDescriptionMetadata(description);
+  if (!marker) return cleanDescription;
+
+  const separatorLength = cleanDescription ? 1 : 0;
+  const descriptionBudget = TRANSACTION_DESCRIPTION_MAX_LENGTH - marker.length - separatorLength;
+  if (!cleanDescription || descriptionBudget <= 0) return marker.slice(0, TRANSACTION_DESCRIPTION_MAX_LENGTH);
+
+  const trimmedDescription = cleanDescription.length > descriptionBudget
+    ? cleanDescription.slice(0, descriptionBudget).trimEnd()
+    : cleanDescription;
+  return trimmedDescription ? `${trimmedDescription}\n${marker}` : marker;
+}
+
+function storedBankReferenceLookupKey(transaction: Pick<Transaction, "bank_ref_number" | "description">): string | undefined {
+  const metadata = extractCamtDescriptionMetadata(transaction.description);
+  return bankReferenceLookupKey(transaction.bank_ref_number ?? undefined) ??
+    bankReferenceLookupKey(metadata.bank_ref_number) ??
+    metadata.bank_ref_hash;
+}
+
+function directBankReferenceLookupKey(transaction: Pick<Transaction, "bank_ref_number">): string | undefined {
+  return bankReferenceLookupKey(transaction.bank_ref_number ?? undefined);
+}
+
+function storedBankAccountNo(transaction: Pick<Transaction, "bank_account_no" | "description">): string | undefined {
+  return normalizeOptionalReference(transaction.bank_account_no ?? undefined) ??
+    extractCamtDescriptionMetadata(transaction.description).bank_account_no;
+}
+
 function parseAmountNode(node: unknown, fallbackCurrency?: string): { amount: number; currency: string } | undefined {
   const amountText = textOf(node);
   if (!amountText) return undefined;
@@ -290,18 +417,20 @@ function buildDuplicateLookup(transactions: Transaction[]): DuplicateLookup {
 
   for (const transaction of transactions) {
     if (!transaction.id) continue;
-    const bankRef = normalizeOptionalReference(transaction.bank_ref_number ?? undefined);
-    if (!bankRef) continue;
-    const existing = byBankRef.get(bankRef) ?? [];
+
+    const entryKey = buildExistingTransactionDuplicateKey(transaction);
+    if (entryKey) {
+      const exactExisting = byEntryKey.get(entryKey) ?? [];
+      exactExisting.push(transaction.id);
+      byEntryKey.set(entryKey, exactExisting);
+    }
+
+    const directBankRefKey = directBankReferenceLookupKey(transaction);
+    if (!directBankRefKey) continue;
+
+    const existing = byBankRef.get(directBankRefKey) ?? [];
     existing.push(transaction.id);
-    byBankRef.set(bankRef, existing);
-
-    const entryKey = buildExistingTransactionDuplicateKey(transaction, bankRef);
-    if (!entryKey) continue;
-
-    const exactExisting = byEntryKey.get(entryKey) ?? [];
-    exactExisting.push(transaction.id);
-    byEntryKey.set(entryKey, exactExisting);
+    byBankRef.set(directBankRefKey, existing);
   }
 
   return { byBankRef, byEntryKey };
@@ -341,20 +470,20 @@ function buildExistingTransactionDuplicateKey(
     "bank_account_name" |
     "description"
   >,
-  normalizedBankReference = normalizeOptionalReference(transaction.bank_ref_number ?? undefined),
+  bankReferenceKey = storedBankReferenceLookupKey(transaction),
 ): string | undefined {
-  if (!normalizedBankReference || !transaction.date || !transaction.type || !Number.isFinite(transaction.amount)) {
+  if (!bankReferenceKey || !transaction.date || !transaction.type || !Number.isFinite(transaction.amount)) {
     return undefined;
   }
 
   return [
-    normalizedBankReference,
+    bankReferenceKey,
     transaction.date,
     transaction.type,
     transaction.cl_currencies_id ?? "",
     roundMoney(transaction.amount).toFixed(2),
     normalizeBatchDuplicateKeyPart(transaction.ref_number ?? undefined),
-    normalizeBatchDuplicateKeyPart(transaction.bank_account_no ?? undefined),
+    normalizeBatchDuplicateKeyPart(storedBankAccountNo(transaction)),
     normalizeBatchDuplicateKeyPart(transaction.bank_account_name ?? undefined),
     normalizeBatchDuplicateKeyPart(transaction.description ?? undefined),
   ].join("|");
@@ -362,10 +491,11 @@ function buildExistingTransactionDuplicateKey(
 
 function buildExistingDuplicateKeyForEntry(entry: ParsedCamtEntry): string | undefined {
   const bankReference = normalizeOptionalReference(entry.bank_reference);
-  if (!bankReference) return undefined;
+  const bankReferenceKey = bankReferenceLookupKey(bankReference);
+  if (!bankReference || !bankReferenceKey) return undefined;
 
   return [
-    bankReference,
+    bankReferenceKey,
     entry.date,
     transactionTypeForDirection(entry.direction),
     entry.currency,
@@ -373,7 +503,7 @@ function buildExistingDuplicateKeyForEntry(entry: ParsedCamtEntry): string | und
     normalizeBatchDuplicateKeyPart(entry.reference_number),
     normalizeBatchDuplicateKeyPart(entry.counterparty_iban),
     normalizeBatchDuplicateKeyPart(entry.counterparty_name),
-    normalizeBatchDuplicateKeyPart(entry.description),
+    normalizeBatchDuplicateKeyPart(buildCamtDescriptionWithMetadata(entry.description, entry)),
   ].join("|");
 }
 
@@ -391,11 +521,12 @@ function findDuplicateTransactionIds(
   }
 
   const bankReference = normalizeOptionalReference(entry.bank_reference);
-  if (!bankReference || repeatedBankReferences.has(bankReference)) return [];
+  const bankReferenceKey = bankReferenceLookupKey(bankReference);
+  if (!bankReference || !bankReferenceKey || repeatedBankReferences.has(bankReference)) return [];
 
   const matches = new Set<number>();
 
-  for (const id of lookup.byBankRef.get(bankReference) ?? []) {
+  for (const id of lookup.byBankRef.get(bankReferenceKey) ?? []) {
     matches.add(id);
   }
 
@@ -403,7 +534,7 @@ function findDuplicateTransactionIds(
 }
 
 function normalizeBatchDuplicateKeyPart(value: string | undefined): string {
-  return value?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+  return stripCamtDescriptionMetadata(value)?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
 }
 
 function normalizePossibleDuplicateIban(value: string | undefined): string {
@@ -453,13 +584,14 @@ function findPossibleDuplicateMatches(
   const entryIban = normalizePossibleDuplicateIban(entry.counterparty_iban);
 
   return candidates
-    .filter((transaction) => !normalizeOptionalReference(transaction.bank_ref_number ?? undefined))
+    .filter((transaction) => !directBankReferenceLookupKey(transaction))
     .map((transaction) => {
+      const existingBankAccountNo = storedBankAccountNo(transaction);
       const matchReasons: string[] = [];
       if (entryReference && entryReference === normalizeBatchDuplicateKeyPart(transaction.ref_number ?? undefined)) {
         matchReasons.push("reference_number");
       }
-      if (entryIban && entryIban === normalizePossibleDuplicateIban(transaction.bank_account_no ?? undefined)) {
+      if (entryIban && entryIban === normalizePossibleDuplicateIban(existingBankAccountNo)) {
         matchReasons.push("counterparty_iban");
       }
       if (entryCounterparty && entryCounterparty === normalizedCounterpartyName(transaction.bank_account_name ?? undefined)) {
@@ -476,13 +608,13 @@ function findPossibleDuplicateMatches(
         ref_number: transaction.ref_number,
         match_reasons: matchReasons,
         suggested_patch_missing_fields: {
-          ...(!normalizeOptionalReference(transaction.bank_ref_number ?? undefined) && entry.bank_reference
+          ...(!directBankReferenceLookupKey(transaction) && entry.bank_reference
             ? { bank_ref_number: entry.bank_reference }
             : {}),
           ...(!normalizeOptionalReference(transaction.ref_number ?? undefined) && entry.reference_number
             ? { ref_number: entry.reference_number }
             : {}),
-          ...(!normalizePossibleDuplicateIban(transaction.bank_account_no ?? undefined) && entry.counterparty_iban
+          ...(!normalizePossibleDuplicateIban(existingBankAccountNo) && entry.counterparty_iban
             ? { bank_account_no: entry.counterparty_iban }
             : {}),
           ...(!normalizedCounterpartyName(transaction.bank_account_name ?? undefined) && entry.counterparty_name
@@ -958,6 +1090,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         clients_id?: number;
         client_match?: string;
         api_id?: number;
+        stored_description?: string;
       }> = [];
       const skippedDuplicates: Array<{
         date: string;
@@ -1024,13 +1157,14 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
         const clientResolution = await resolveClientForEntry(api, entry, clientCache);
         const transactionType = transactionTypeForDirection(entry.direction);
         const possibleDuplicateMatches = findPossibleDuplicateMatches(entry, possibleDuplicateLookup);
+        const storedDescription = buildCamtDescriptionWithMetadata(entry.description, entry);
         const payload: CreateTransactionPayload = {
           accounts_dimensions_id,
           type: transactionType,
           amount: entry.amount,
           cl_currencies_id: entry.currency || "EUR",
           date: entry.date,
-          description: entry.description,
+          description: storedDescription,
           bank_account_name: entry.counterparty_name,
           bank_account_no: entry.counterparty_iban,
           clients_id: clientResolution.clients_id,
@@ -1051,6 +1185,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             ref_number: entry.reference_number,
             clients_id: clientResolution.clients_id,
             client_match: clientResolution.match_type,
+            ...(storedDescription !== entry.description ? { stored_description: storedDescription } : {}),
           });
           if (possibleDuplicateMatches.length > 0) {
             const recommendedDefaultAction = determinePossibleDuplicateAction(possibleDuplicateMatches);
@@ -1092,6 +1227,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
             clients_id: clientResolution.clients_id,
             client_match: clientResolution.match_type,
             api_id: response.created_object_id,
+            ...(storedDescription !== entry.description ? { stored_description: storedDescription } : {}),
           });
           if (possibleDuplicateMatches.length > 0) {
             const recommendedDefaultAction = determinePossibleDuplicateAction(possibleDuplicateMatches);
@@ -1148,6 +1284,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
       const sanitizedResults = results.map(r => ({
         ...r,
         description: wrapUntrustedOcr(r.description),
+        stored_description: wrapUntrustedOcr(r.stored_description),
         counterparty: wrapUntrustedOcr(r.counterparty),
       }));
       const sanitizedPossibleDuplicates = possibleDuplicates.map(d => ({

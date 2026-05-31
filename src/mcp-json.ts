@@ -18,20 +18,37 @@ export function wrapUntrustedOcr(text: string | undefined | null): string | unde
   return `${UNTRUSTED_OCR_START_PREFIX}${nonce}>>\n${text}\n${UNTRUSTED_OCR_END_PREFIX}${nonce}>>`;
 }
 
-/** Strip undefined fields recursively, then encode as TOON for minimal token usage. */
+/** Strip undefined fields recursively, then encode as TOON when it round-trips losslessly. */
 export function toMcpJson(obj: unknown): string {
   let stripped: unknown;
+  let json: string;
   try {
-    stripped = JSON.parse(JSON.stringify(obj, (_key, val) =>
+    json = JSON.stringify(obj, (_key, val) =>
       val === undefined ? undefined : val
-    ));
+    );
+    stripped = JSON.parse(json);
   } catch (e) {
     throw new Error(`Failed to serialize MCP response: ${e instanceof Error ? e.message : String(e)}`);
   }
-  return encode(stripped);
+
+  const encoded = encode(stripped);
+  try {
+    decode(encoded);
+    return encoded;
+  } catch {
+    // TOON is an optimization for LLM-facing responses, not the source of truth.
+    // If the encoder produces text that its current decoder rejects (notably some
+    // multiline strings containing bracket-like lines), fall back to JSON so MCP
+    // responses remain parseable and untrusted OCR can still be sandboxed verbatim.
+    return json;
+  }
 }
 
-/** Parse a TOON-encoded MCP response back into an object. For use in tests. */
+/** Parse a TOON- or JSON-encoded MCP response back into an object. For use in tests and wrappers. */
 export function parseMcpResponse(text: string): unknown {
-  return decode(text);
+  try {
+    return decode(text);
+  } catch {
+    return JSON.parse(text);
+  }
 }

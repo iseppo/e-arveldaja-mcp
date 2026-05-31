@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { win32 } from "path";
 import { parseMcpResponse } from "../mcp-json.js";
+import type { registerReceiptInboxTools as registerReceiptInboxToolsType } from "./receipt-inbox.js";
 
 vi.mock("fs/promises", () => ({
   realpath: vi.fn().mockResolvedValue("C:\\Allowed\\Receipts"),
@@ -20,9 +21,12 @@ vi.mock("../file-validation.js", async () => {
   };
 });
 
+const { registerReceiptInboxTools } = await import("./receipt-inbox.js") as {
+  registerReceiptInboxTools: typeof registerReceiptInboxToolsType;
+};
+
 describe("receipt inbox folder path validation", () => {
   it("accepts Windows-style child folders under an allowed root", async () => {
-    const { registerReceiptInboxTools } = await import("./receipt-inbox.js");
     const server = { registerTool: vi.fn() } as any;
     registerReceiptInboxTools(server, {} as any);
 

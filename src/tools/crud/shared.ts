@@ -187,16 +187,16 @@ export const pageParam = z.object({
 export const coerceId = z.coerce.number().int().positive();
 export const idParam = z.object({ id: coerceId.describe("Object ID") });
 export const jsonObjectInput = z.union([
-  z.record(z.unknown()),
+  z.record(z.string(), z.unknown()),
   z.string(),
 ]);
 export const jsonObjectArrayInput = z.union([
-  z.array(z.record(z.unknown())),
+  z.array(z.record(z.string(), z.unknown())),
   z.string(),
 ]);
 export const jsonObjectOrArrayInput = z.union([
-  z.record(z.unknown()),
-  z.array(z.record(z.unknown())),
+  z.record(z.string(), z.unknown()),
+  z.array(z.record(z.string(), z.unknown())),
   z.string(),
 ]);
 

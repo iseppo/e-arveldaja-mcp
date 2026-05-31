@@ -70,4 +70,15 @@ describe("toMcpJson", () => {
       },
     });
   });
+
+  it("falls back to JSON when TOON cannot round-trip sandboxed multiline text", () => {
+    const encoded = toMcpJson({
+      description: "<<UNTRUSTED_OCR_START:abc>>\nManual transaction\n[e-arveldaja-mcp:camt bank_account_no=EE471000001020145685]\n<<UNTRUSTED_OCR_END:abc>>",
+    });
+
+    expect(encoded.trim().startsWith("{")).toBe(true);
+    expect(parseMcpResponse(encoded)).toEqual({
+      description: "<<UNTRUSTED_OCR_START:abc>>\nManual transaction\n[e-arveldaja-mcp:camt bank_account_no=EE471000001020145685]\n<<UNTRUSTED_OCR_END:abc>>",
+    });
+  });
 });
