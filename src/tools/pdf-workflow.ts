@@ -479,7 +479,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       vat_price: z.number().optional().describe("EXACT total VAT from the original invoice. Optional because OCR may not extract reliably; pass when known."),
       gross_price: z.number().optional().describe("EXACT total gross from the original invoice. Optional because OCR may not extract reliably; pass when known."),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
-      notes: z.string().optional().describe("Notes (e.g. PDF filename)"),
+      notes: z.string().optional().describe("Optional notes for genuinely useful context such as assumptions made or manual adjustments. Do NOT use the source document filename — the document is already uploaded and attached to the invoice."),
       ref_number: z.string().optional().describe("Reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
       currency: z.string().optional().describe("Currency code (default EUR). Use the original invoice currency (e.g. USD) and supply currency_rate."),

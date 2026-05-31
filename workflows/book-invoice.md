@@ -118,7 +118,7 @@ If there is no suitable history, call `list_purchase_articles` or ask the user i
 ## Step 10: Preview the booking and ask for approval before creating anything
 
 Before creating anything, present one approval card:
-- Supplier name and supplier client ID
+- Supplier name and supplier client ID — explicitly flag when this is a newly created supplier record (auto-created in step 6) so the user sees the new client before approving the booking
 - Invoice number, invoice date, due date, journal date, and term days
 - Net / VAT / gross amounts
 - The exact item-level booking you intend to send, including article IDs, account IDs, `purchase_accounts_dimensions_id`, VAT fields, `vat_accounts_dimensions_id`, and any `reversed_vat_id`
@@ -142,7 +142,7 @@ Call `create_purchase_invoice_from_pdf`:
 - `gross_price`: exact value from the invoice
 - `ref_number`
 - `bank_account_no`
-- `notes`: source filename and any assumptions
+- `notes`: leave empty by default; use it only for genuinely useful context such as assumptions made or manual adjustments. Do NOT put the source document filename here — the document is auto-uploaded and attached via `file_path` below.
 - `file_path`: the original file path (auto-uploads the source document)
 
 Use the exact `vat_price` and `gross_price` from the invoice. Do not recalculate them.
