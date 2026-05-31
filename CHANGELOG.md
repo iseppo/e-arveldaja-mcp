@@ -10,7 +10,7 @@
 - **TOON 2.3 response compatibility** — MCP responses still prefer TOON for compact output, but now fall back to JSON when the current TOON encoder produces text its decoder rejects, such as sandboxed multiline OCR/CAMT marker strings. This keeps downstream wrappers and tests parseable while preserving untrusted OCR delimiters verbatim.
 
 ### Changed
-- **Dependency refresh for the release** — updated direct runtime and dev dependencies to current npm latest versions, including LiteParse 2.0.4, MCP SDK 1.29.0, TOON 2.3.0, Zod 4.4.3, TypeScript 6.0.3, Vitest 4.1.7, dotenv 17.4.2, fast-xml-parser 5.8.0, and tsx 4.22.4. LiteParse parsing now uses the v2 single-argument `parse(input)` API, and Zod record schemas use the v4 two-argument form.
+- **Dependency refresh for the release** — updated direct runtime and dev dependencies, including LiteParse 2.0.4, MCP SDK 1.29.0, TOON 2.3.0, Zod 4.4.3, TypeScript 6.0.3, dotenv 17.4.2, fast-xml-parser 5.8.0, and tsx 4.22.4. The Vitest/Vite test stack is pinned to Node-18-compatible versions (Vitest 3.2.4, Vite 6.4.2) so the locked toolchain honours the advertised `engines.node >=18.0.0` instead of silently requiring Node 20. LiteParse parsing now uses the v2 single-argument `parse(input)` API, and Zod record schemas use the v4 two-argument form.
 
 ## [0.14.1] - 2026-05-09
 

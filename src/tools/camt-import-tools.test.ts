@@ -39,6 +39,35 @@ function bankReferenceHash(value: string): string {
   return "sha256:" + createHash("sha256").update(value).digest("hex");
 }
 
+function normalizedSignaturePart(value: string | undefined): string {
+  return value?.trim().replace(/\s+/g, " ").toLowerCase() ?? "";
+}
+
+function camtEntrySignature(options: {
+  bankReference?: string;
+  bankReferenceHash?: string;
+  bankAccountNo?: string;
+  bankAccountName?: string;
+  description?: string;
+  refNumber?: string;
+  date?: string;
+  type?: string;
+  currency?: string;
+  amount?: number;
+}): string {
+  return createHash("sha256").update(JSON.stringify([
+    options.bankReferenceHash ?? bankReferenceHash(options.bankReference!),
+    options.date ?? "2026-02-01",
+    options.type ?? "C",
+    options.currency ?? "EUR",
+    (options.amount ?? 10).toFixed(2),
+    normalizedSignaturePart(options.refNumber),
+    normalizedSignaturePart(options.bankAccountNo),
+    normalizedSignaturePart(options.bankAccountName ?? "Vendor OÜ"),
+    normalizedSignaturePart(options.description ?? "Test payment"),
+  ])).digest("hex").slice(0, 16);
+}
+
 function withCounterpartyIban(xml: string, iban = counterpartyIban): string {
   return xml.replace(
     "<Cdtr><Nm>Vendor OÜ</Nm></Cdtr>",
@@ -287,7 +316,7 @@ describe("camt import tool", () => {
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
       bank_ref_number: "REF-WORKAROUND-1",
       bank_account_no: "EE471000001020145685",
-      description: "Test payment\n[e-arveldaja-mcp:camt bank_ref_number=REF-WORKAROUND-1 bank_account_no=EE471000001020145685]",
+      description: expect.stringMatching(/Test payment\n\[e-arveldaja-mcp:camt br=REF-WORKAROUND-1 iban=EE471000001020145685 sig=[a-f0-9]{16}\]$/),
     }));
   });
 
@@ -334,7 +363,7 @@ describe("camt import tool", () => {
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
     expect(payload.description?.length).toBeLessThanOrEqual(150);
-    expect(payload.description).toContain("[e-arveldaja-mcp:camt bank_ref_number=REF-LONG-DESC-1 bank_account_no=EE471000001020145685]");
+    expect(payload.description).toMatch(/\[e-arveldaja-mcp:camt br=REF-LONG-DESC-1 iban=EE471000001020145685 sig=[a-f0-9]{16}\]/);
     expect(payload.description).toContain("Long CAMT description");
   });
 
@@ -381,7 +410,8 @@ describe("camt import tool", () => {
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
     expect(payload.description?.length).toBeLessThanOrEqual(150);
-    expect(payload.description).toContain(`[e-arveldaja-mcp:camt bank_ref_hash=${bankReferenceHash(longBankReference)} bank_account_no=EE471000001020145685]`);
+    expect(payload.description).toContain(`brh=${bankReferenceHash(longBankReference)} iban=EE471000001020145685`);
+    expect(payload.description).toMatch(/sig=[a-f0-9]{16}\]/);
     expect(payload.description).not.toMatch(/\[e-arveldaja-mcp:camt[^\]]*$/);
   });
 
@@ -400,7 +430,8 @@ describe("camt import tool", () => {
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
     expect(payload.description?.length).toBeLessThanOrEqual(150);
-    expect(payload.description).toContain(`[e-arveldaja-mcp:camt bank_ref_hash=${bankReferenceHash(mediumBankReference)} bank_account_no=${counterpartyIban}]`);
+    expect(payload.description).toContain(`brh=${bankReferenceHash(mediumBankReference)} iban=${counterpartyIban}`);
+    expect(payload.description).toMatch(/sig=[a-f0-9]{16}\]/);
     expect(payload.description).not.toContain("bank_ref_number=");
   });
 
@@ -416,13 +447,14 @@ describe("camt import tool", () => {
           status: "PROJECT",
           is_deleted: false,
           bank_ref_number: null,
+          accounts_dimensions_id: 7,
           date: "2026-02-01",
           type: "C",
           amount: 10,
           cl_currencies_id: "EUR",
           ref_number: null,
           bank_account_name: "Vendor OÜ",
-          description: `Test payment\n[e-arveldaja-mcp:camt bank_ref_hash=${bankReferenceHash(longBankReference)}]`,
+          description: `Test payment\n[e-arveldaja-mcp:camt brh=${bankReferenceHash(longBankReference)} sig=${camtEntrySignature({ bankReferenceHash: bankReferenceHash(longBankReference) })}]`,
         },
       ],
     });
@@ -447,7 +479,7 @@ describe("camt import tool", () => {
     ]);
   });
 
-  it("skips prior CAMT imports when the API dropped bank_ref_number but kept the workaround marker", async () => {
+  it("does not auto-skip prior transactions that only have an unsigned CAMT marker", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
@@ -458,6 +490,7 @@ describe("camt import tool", () => {
           status: "PROJECT",
           is_deleted: false,
           bank_ref_number: null,
+          accounts_dimensions_id: 7,
           date: "2026-02-01",
           type: "C",
           amount: 10,
@@ -476,15 +509,19 @@ describe("camt import tool", () => {
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
-    expect(api.transactions.create).not.toHaveBeenCalled();
-    expect(payload.created_count).toBe(0);
-    expect(payload.skipped_count).toBe(1);
-    expect(payload.execution.skipped).toEqual([
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(payload.created_count).toBe(1);
+    expect(payload.skipped_count).toBe(0);
+    expect(payload.execution.needs_review).toEqual([
       expect.objectContaining({
         amount: 10,
         bank_reference: "REF-VOID-1",
-        duplicate_transaction_ids: [42],
-        reason: "Existing transaction matched by bank reference",
+        existing_transactions: [
+          expect.objectContaining({
+            id: 42,
+            match_reasons: expect.arrayContaining(["counterparty_name", "description"]),
+          }),
+        ],
       }),
     ]);
   });
@@ -524,7 +561,7 @@ describe("camt import tool", () => {
     expect(payload.skipped_count).toBe(0);
   });
 
-  it("strips marker-looking text from CAMT descriptions before appending importer metadata", async () => {
+  it("preserves marker-looking CAMT descriptions as inert text before appending importer metadata", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(withUnstructuredDescription(
       singleEntryXml,
@@ -540,11 +577,11 @@ describe("camt import tool", () => {
     });
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
-    expect(payload.description).not.toContain("ATTACK-REF");
-    expect(payload.description).toBe("Invoice text\n[e-arveldaja-mcp:camt bank_ref_number=REF-VOID-1]");
+    expect(payload.description).toContain("\\[e-arveldaja-mcp:camt bank_ref_number=ATTACK-REF]");
+    expect(payload.description).toMatch(/\[e-arveldaja-mcp:camt br=REF-VOID-1 sig=[a-f0-9]{16}\]/);
   });
 
-  it("uses marker bank account metadata when the API returns an empty bank_account_no", async () => {
+  it("does not use marker-only bank account metadata as a possible-duplicate match reason", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(withCounterpartyIban(singleEntryXml));
 
@@ -573,17 +610,8 @@ describe("camt import tool", () => {
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
-    expect(payload.summary.possible_duplicate_count).toBe(1);
-    expect(payload.execution.needs_review).toEqual([
-      expect.objectContaining({
-        existing_transactions: [
-          expect.objectContaining({
-            id: 78,
-            match_reasons: ["counterparty_iban"],
-          }),
-        ],
-      }),
-    ]);
+    expect(payload.summary.possible_duplicate_count).toBe(0);
+    expect(payload.execution.needs_review).toEqual([]);
   });
 
   it("keeps marker-only transactions in possible-duplicate review when the exact CAMT duplicate key does not match", async () => {
@@ -645,7 +673,8 @@ describe("camt import tool", () => {
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.sample[0]!.description).toEqual(expect.stringMatching(wrapped(longDescription)));
-    expect(payload.sample[0]!.stored_description).toContain("[e-arveldaja-mcp:camt bank_ref_number=REF-VOID-1 bank_account_no=EE471000001020145685]");
+    expect(payload.sample[0]!.stored_description).toContain("br=REF-VOID-1 iban=EE471000001020145685");
+    expect(payload.sample[0]!.stored_description).toMatch(/sig=[a-f0-9]{16}\]/);
   });
 
   it("matches clients by normalized company name when findByName returns multiple variants", async () => {
