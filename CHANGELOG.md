@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-06-01
+
+### Added
+- **Manual cache refresh controls** — added `clear_cache` for clearing cached e-arveldaja API/reference data after changes made directly in the web UI. Balance and reporting tools now also accept `fresh: true` to clear runtime caches before computing account balances, client positions, trial balances, balance sheets, profit/loss reports, and month-end checklist data.
+
+### Changed
+- **Workflow guidance for fresh reporting data** — updated company-overview and month-end workflow prompts to call `clear_cache` or pass `fresh: true` when the user asks for fresh numbers after editing data in e-arveldaja.
+
 ## [0.14.2] - 2026-05-31
 
 ### Fixed
