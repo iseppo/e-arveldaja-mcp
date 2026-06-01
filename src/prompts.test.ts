@@ -62,6 +62,18 @@ function getPromptText(
   return handler(args).then(result => result.messages[0]!.content.text);
 }
 
+function getPromptArgsSchema(
+  server: { registerPrompt: ReturnType<typeof vi.fn> },
+  name: string,
+): Record<string, { safeParse: (value: unknown) => { success: boolean } }> {
+  const registration = server.registerPrompt.mock.calls.find(([promptName]) => promptName === name);
+  if (!registration) {
+    throw new Error(`Prompt ${name} was not registered`);
+  }
+
+  return ((registration[1] as { argsSchema?: Record<string, { safeParse: (value: unknown) => { success: boolean } }> }).argsSchema ?? {});
+}
+
 describe("registerPrompts", () => {
   it("registers the current prompt set without a VAT filing workflow", () => {
     const server = setupPromptServer();
@@ -209,6 +221,18 @@ describe("registerPrompts", () => {
     expect(text).toContain("stop and ask the user");
     expect(text).not.toContain("upload_invoice_document");
     expect(text).not.toContain("client_id: the supplier's client_id");
+  });
+
+  it("keeps new supplier creation behind the book-invoice approval gate", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "book-invoice", { file_path: "/tmp/invoice.pdf" });
+
+    const approvalStop = text.indexOf("If the user has not explicitly approved the preview, stop here and wait.");
+    const creationCall = text.indexOf("auto_create: true");
+
+    expect(approvalStop).toBeGreaterThan(-1);
+    expect(creationCall).toBeGreaterThan(approvalStop);
+    expect(text).toContain("new supplier record will be created after approval");
   });
 
   it("uses the real reconciliation execution flags and confirm_transaction payload", async () => {
@@ -384,9 +408,22 @@ describe("registerPrompts", () => {
     expect(monthEndText).toContain("Call `compute_balance_sheet`:");
     expect(overviewText).toContain("compute_balance_sheet` with date_to:");
     expect(overviewText).toContain("date_from:");
-    expect(overviewText).toContain("as_of_date:");
+    expect(overviewText).not.toContain("as_of_date:");
     expect(overviewText).not.toContain("start_date:");
     expect(overviewText).not.toContain("end_date:");
+  });
+
+  it("lets common bank workflows discover account dimensions before asking the user", async () => {
+    const server = setupPromptServer();
+
+    for (const promptName of ["receipt-batch", "import-camt", "import-wise", "classify-unmatched"]) {
+      const schema = getPromptArgsSchema(server, promptName);
+      expect(schema.accounts_dimensions_id.safeParse(undefined).success).toBe(true);
+
+      const text = await getPromptText(server, promptName, {});
+      expect(text).toContain("list_account_dimensions");
+      expect(text).toContain("recommendation-first confirmation");
+    }
   });
 
   it("keeps new-supplier honest about what registry and VAT data is actually available", async () => {

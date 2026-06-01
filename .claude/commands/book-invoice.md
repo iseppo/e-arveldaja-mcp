@@ -81,11 +81,11 @@ Inspect `candidate_invoice_number_matches` and `candidate_same_amount_date_match
 - Also review `exact_duplicates` and `suspicious_same_amount_date` as warning context.
 - If a candidate looks like the same invoice, stop and report it before creating anything.
 
-## Step 6: Ensure the supplier client exists
+## Step 6: Prepare the supplier client decision
 
 - If step 4 returned `found=true`, use `client.id` as `supplier_client_id`.
-- Otherwise call `resolve_supplier` again with the same identifiers and `auto_create: true`.
-- Use `api_response.created_object_id` as `supplier_client_id`. If no client ID is returned, stop and report the failure.
+- If no existing supplier was found, do NOT create the supplier yet. Treat the new supplier as part of the approval card and keep the extracted name, registry code, VAT number, IBAN, country, and registry data ready for the post-approval call.
+- For a new supplier, say clearly in the approval card that the new supplier record will be created after approval before the invoice is created.
 
 ## Step 7: Reuse the best booking setup
 
@@ -120,18 +120,22 @@ If there is no suitable history, call `list_purchase_articles` or ask the user i
 ## Step 10: Preview the booking and ask for approval before creating anything
 
 Before creating anything, present one approval card:
-- Supplier name and supplier client ID — explicitly flag when this is a newly created supplier record (auto-created in step 6) so the user sees the new client before approving the booking
+- Supplier name and supplier client ID when an existing supplier was found
+- For a new supplier: supplier name, registry code, VAT number, IBAN, country, and registry/address data, plus the explicit note that a new supplier record will be created after approval before the invoice is created
 - Invoice number, invoice date, due date, journal date, and term days
 - Net / VAT / gross amounts
 - The exact item-level booking you intend to send, including article IDs, account IDs, `purchase_accounts_dimensions_id`, VAT fields, `vat_accounts_dimensions_id`, and any `reversed_vat_id`
 - The booking basis used and any assumptions
 - Duplicate-check result
 - Source document path
-- Side effects after approval: create purchase invoice, upload the source document, and confirm the invoice
+- Side effects after approval: create the supplier record if needed, create the purchase invoice, upload the source document, and confirm the invoice
 
 If the user has not explicitly approved the preview, stop here and wait.
 
-## Step 11: Create the purchase invoice
+## Step 11: Create the supplier if needed, then the purchase invoice
+
+If step 4 did not return `found=true`, call `resolve_supplier` with the same identifiers and `auto_create: true` only after the approval above.
+- Use `api_response.created_object_id` as `supplier_client_id`. If no client ID is returned, stop and report the failure.
 
 Call `create_purchase_invoice_from_pdf`:
 - `supplier_client_id`

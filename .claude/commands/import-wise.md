@@ -13,7 +13,7 @@ User-facing phases:
 ## Arguments
 
 - `file_path`: absolute path to the regular Wise `transaction-history.csv`
-- `accounts_dimensions_id`: bank account dimension ID for the Wise account
+- Optional `accounts_dimensions_id`: bank account dimension ID for the Wise account
 - Optional `fee_account_dimensions_id`: expense dimension used for Wise fees
 - Optional `date_from` / `date_to`: transaction-date filter in `YYYY-MM-DD`
 - Optional `skip_jar_transfers`: defaults to `true`
@@ -24,9 +24,11 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 ### Step 1: Dry-run the import
 
+If `accounts_dimensions_id` was not provided, call `list_account_dimensions` before the dry run. Choose the most likely Wise bank account dimension from the account number, title, or user context, then ask one recommendation-first confirmation. Do not run the import preview until a Wise bank dimension ID is chosen.
+
 Call `import_wise_transactions`:
 - `file_path`: the provided file
-- `accounts_dimensions_id`: the provided dimension ID
+- `accounts_dimensions_id`: the confirmed or provided dimension ID
 - `fee_account_dimensions_id`: include it when available
 - execute: false
 - include `date_from` / `date_to` when provided
@@ -82,7 +84,7 @@ Report:
 - any rows still needing manual follow-up
 - mention that side effects can be reviewed via `execution.audit_reference`
 
-For each created PROJECT bank transaction the user is happy with, offer the next inline action per item — do NOT close the workflow with "confirm them in e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action.
+For created PROJECT bank transactions, keep follow-up decisions compact: group low-risk identical confirmations, show the first 10 items plus counts, and ask one batch approval with exceptions instead of one yes/no question per row. Offer the next inline action for the approved group — do NOT close the workflow with "confirm them in e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action.
 
 Inline actions:
 - For rows that match an open invoice, suggest running the **Reconcile Bank** workflow or offer `confirm_transaction` directly when the distribution is unambiguous.

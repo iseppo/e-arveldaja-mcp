@@ -14,7 +14,7 @@ User-facing phases:
 ## Arguments
 
 - `folder_path`: absolute path to the receipt folder
-- `accounts_dimensions_id`: bank account dimension ID used for bank transaction matching
+- Optional `accounts_dimensions_id`: bank account dimension ID used for bank transaction matching
 - Optional `date_from` / `date_to`: receipt modified-date filter in `YYYY-MM-DD`
 
 ## Workflow
@@ -35,10 +35,12 @@ If there are no valid files, stop.
 
 ### Step 2: Preview the batch
 
+If `accounts_dimensions_id` was not provided, call `list_account_dimensions` before the dry run. Choose the most likely active bank account dimension from the account number, title, or user context, then ask one recommendation-first confirmation. Do not run `mode: "dry_run"` until a bank dimension ID is chosen.
+
 Call `receipt_batch`:
 - `mode`: `dry_run`
 - `folder_path`: the provided folder
-- `accounts_dimensions_id`: the provided dimension ID
+- `accounts_dimensions_id`: the confirmed or provided dimension ID
 - include `date_from` / `date_to` when provided
 
 Review:
@@ -81,7 +83,7 @@ If the user does not explicitly approve, stop.
 Call `receipt_batch` again:
 - `mode`: `create`
 - `folder_path`: the provided folder
-- `accounts_dimensions_id`: the provided dimension ID
+- `accounts_dimensions_id`: the confirmed or provided dimension ID
 - include `date_from` / `date_to` when provided
 
 Report:
@@ -93,4 +95,4 @@ Report:
 - which files still need manual follow-up
 - mention that side effects can be reviewed via `execution.audit_reference`
 
-For each PROJECT purchase invoice the user is happy with, offer inline confirmation via `confirm_purchase_invoice` (and bank-link via `confirm_transaction` for any tied/ambiguous bank match the user resolves). Do not close the workflow with "review them in e-arveldaja UI" as the default — that is a last-resort fallback only when the user explicitly wants to review in the web UI or when the API rejects every retry.
+For follow-up confirmations, keep the interaction compact: group low-risk identical actions, show the first 10 items plus counts, and ask one batch approval with clear exceptions instead of one yes/no question per receipt. For each PROJECT purchase invoice the user is happy with, offer inline confirmation via `confirm_purchase_invoice` (and bank-link via `confirm_transaction` for any tied/ambiguous bank match the user resolves). Do not close the workflow with "review them in e-arveldaja UI" as the default — that is a last-resort fallback only when the user explicitly wants to review in the web UI or when the API rejects every retry.

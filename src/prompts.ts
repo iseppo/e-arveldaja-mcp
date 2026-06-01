@@ -174,7 +174,7 @@ export function registerPrompts(
     "Scan a receipt folder, preview auto-bookable results, and only create purchase invoices after explicit approval.",
     {
       folder_path: z.string().describe("Absolute path to the receipt folder"),
-      accounts_dimensions_id: z.number().describe("Bank account dimension ID used for bank transaction matching"),
+      accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID used for bank transaction matching; if omitted, list account dimensions and ask the user to confirm the best match"),
       date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
     },
@@ -191,7 +191,7 @@ export function registerPrompts(
     "Parse a CAMT.053 statement, preview imported bank transactions, and only create them after approval.",
     {
       file_path: z.string().describe("Absolute path to the CAMT.053 XML file"),
-      accounts_dimensions_id: z.number().describe("Bank account dimension ID in e-arveldaja"),
+      accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID in e-arveldaja; if omitted, list account dimensions and ask the user to confirm the bank account"),
       date_from: z.string().optional().describe("Optional statement-entry lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional statement-entry upper bound (YYYY-MM-DD)"),
     },
@@ -208,7 +208,7 @@ export function registerPrompts(
     "Preview Wise transaction import results, including fees and skipped duplicates, before creating any bank transactions.",
     {
       file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export"),
-      accounts_dimensions_id: z.number().describe("Bank account dimension ID for the Wise account"),
+      accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID for the Wise account; if omitted, list account dimensions and ask the user to confirm the Wise bank account"),
       fee_account_dimensions_id: z.number().optional().describe("Optional Wise fee expense account dimension ID"),
       date_from: z.string().optional().describe("Optional transaction-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional transaction-date upper bound (YYYY-MM-DD)"),
@@ -225,7 +225,7 @@ export function registerPrompts(
     "classify-unmatched",
     "Classify unmatched bank transactions, preview generated purchase-invoice bookings, and only apply them after approval.",
     {
-      accounts_dimensions_id: z.number().describe("Bank account dimension ID used for transaction classification"),
+      accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID used for transaction classification; if omitted, list account dimensions and ask the user to confirm the bank account"),
       date_from: z.string().optional().describe("Optional transaction-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional transaction-date upper bound (YYYY-MM-DD)"),
     },

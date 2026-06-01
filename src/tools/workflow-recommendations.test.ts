@@ -97,6 +97,27 @@ describe("recommend_workflow", () => {
     expect(JSON.stringify(payload.workflow)).not.toContain("<describe the user's accounting goal>");
   });
 
+  it("recommends company overview with the real balance-sheet date argument", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+
+    const result = await handler({ goal: "financial overview dashboard" });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+
+    expect(payload.recommended_workflow).toMatchObject({
+      id: "company-overview",
+    });
+    expect(payload.next_actions[0]).toMatchObject({
+      tool: "compute_balance_sheet",
+      args: { date_to: "<YYYY-MM-DD>" },
+    });
+    expect(payload.next_actions[0].args).not.toHaveProperty("as_of_date");
+    expect(payload.workflow.recommended_next_action).toMatchObject({
+      kind: "tool_call",
+      tool: "compute_balance_sheet",
+      args: { date_to: "<YYYY-MM-DD>" },
+    });
+  });
+
   it.each([
     ["close March month end", "month-end-close"],
     ["book Lightyear CSV dividends and trades", "lightyear-booking"],

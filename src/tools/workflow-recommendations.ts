@@ -156,8 +156,8 @@ const WORKFLOWS: WorkflowGuide[] = [
     title: "Process Receipt Batch",
     summary: "OCR a folder of receipts/invoices, preview auto-bookable items, and leave confirmation behind explicit approval.",
     when_to_use: ["folder of receipts", "many PDFs/images", "expense receipts", "batch booking"],
-    required_inputs: ["absolute receipt folder path", "bank account dimension id"],
-    primary_tools: ["receipt_batch", "process_receipt_batch", "scan_receipt_folder", "classify_bank_transactions", "classify_unmatched_transactions", "apply_transaction_classifications"],
+    required_inputs: ["absolute receipt folder path", "optional bank account dimension id (discover with list_account_dimensions when omitted)"],
+    primary_tools: ["receipt_batch", "list_account_dimensions", "process_receipt_batch", "scan_receipt_folder", "classify_bank_transactions", "classify_unmatched_transactions", "apply_transaction_classifications"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["new supplier", "OCR uncertainty", "missing VAT/account treatment", "owner expense ambiguity"],
@@ -179,8 +179,8 @@ const WORKFLOWS: WorkflowGuide[] = [
     title: "Import CAMT Bank Statement",
     summary: "Parse ISO 20022 CAMT.053 bank statements, detect duplicates, and import bank transactions.",
     when_to_use: ["LHV/Swedbank/SEB/Coop/Luminor CAMT XML", "bank statement import", "bank transactions"],
-    required_inputs: ["absolute CAMT.053 XML path", "bank account dimension id"],
-    primary_tools: ["process_camt053", "parse_camt053", "import_camt053", "reconcile_inter_account_transfers"],
+    required_inputs: ["absolute CAMT.053 XML path", "optional bank account dimension id (discover with list_account_dimensions when omitted)"],
+    primary_tools: ["process_camt053", "list_account_dimensions", "parse_camt053", "import_camt053", "reconcile_inter_account_transfers"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["possible duplicate", "unknown bank dimension", "inter-account transfer ambiguity"],
@@ -198,8 +198,8 @@ const WORKFLOWS: WorkflowGuide[] = [
     title: "Import Wise Transactions",
     summary: "Import regular Wise transaction-history CSV exports with fee splitting and transfer safeguards.",
     when_to_use: ["Wise CSV", "transaction-history.csv", "Wise fees", "Wise bank account"],
-    required_inputs: ["absolute Wise transaction-history.csv path", "Wise bank account dimension id", "optional fee expense dimension id"],
-    primary_tools: ["import_wise_transactions", "reconcile_inter_account_transfers"],
+    required_inputs: ["absolute Wise transaction-history.csv path", "optional Wise bank account dimension id (discover with list_account_dimensions when omitted)", "optional fee expense dimension id"],
+    primary_tools: ["import_wise_transactions", "list_account_dimensions", "reconcile_inter_account_transfers"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["missing fee dimension", "ambiguous transfer target", "unsupported CSV export"],
@@ -217,8 +217,8 @@ const WORKFLOWS: WorkflowGuide[] = [
     title: "Classify Unmatched Transactions",
     summary: "Group unmatched bank transactions, preview purchase-invoice bookings, and apply approved groups only.",
     when_to_use: ["unmatched expenses", "classify bank transactions", "auto-book bank rows", "expense groups"],
-    required_inputs: ["bank account dimension id", "optional date range"],
-    primary_tools: ["classify_bank_transactions", "classify_unmatched_transactions", "apply_transaction_classifications", "continue_accounting_workflow"],
+    required_inputs: ["optional bank account dimension id (discover with list_account_dimensions when omitted)", "optional date range"],
+    primary_tools: ["classify_bank_transactions", "list_account_dimensions", "classify_unmatched_transactions", "apply_transaction_classifications", "continue_accounting_workflow"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["review-only category", "missing currency rate", "new booking treatment", "failed group"],
@@ -301,7 +301,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     },
     next_actions: [{
       tool: "compute_balance_sheet",
-      args: { as_of_date: "<YYYY-MM-DD>" },
+      args: { date_to: "<YYYY-MM-DD>" },
       why: "Start with the balance sheet for the requested reporting date.",
     }],
     keywords: ["overview", "dashboard", "report", "balance", "profit", "loss", "aging", "financial"],

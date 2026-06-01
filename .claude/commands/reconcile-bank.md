@@ -71,7 +71,7 @@ Report: how many confirmed, how many skipped, any errors.
 
 ### Review mode
 
-Show all matches. For each, ask user to confirm or skip.
+Show matches grouped by confidence and counterparty. If there are many similar high-confidence matches, show the first 10 plus counts and ask for one batch approval with exceptions; otherwise ask the user to confirm or skip one match at a time.
 
 For approved matches, call `confirm_transaction`:
 - `id`: transaction ID
@@ -114,7 +114,7 @@ Ask for approval. If approved, call `reconcile_inter_account_transfers` with `ex
 
 ## Step 5: Unmatched transactions
 
-List transactions with no matches and offer the next inline action per item — do NOT close the workflow with "create the journal entry yourself in e-arveldaja". That is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
+List transactions with no matches and offer inline actions in compact groups — do NOT close the workflow with "create the journal entry yourself in e-arveldaja". Show the first 10 plus counts, group obvious fees/interest together, and ask for one batch approval with exceptions when the proposed contra account is the same. Manual e-arveldaja UI work is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
 
 Inline actions:
 - Small amounts (<1 EUR): likely bank fees or interest. Offer to book a journal via `create_journal` with the appropriate contra-account (e.g. 5510 "Bank charges" for fees, 6080 "Interest income" for interest credits) and ask the user to approve the proposed contra before executing.
