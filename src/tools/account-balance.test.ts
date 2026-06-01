@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import type { Journal } from "../types/api.js";
+import { clearRuntimeCaches } from "../cache-control.js";
 
 // ---------------------------------------------------------------------------
 // The module registers MCP tools but also exports computeAccountBalance via
@@ -35,6 +36,18 @@ vi.mock("../mcp-compat.js", () => ({
 
 vi.mock("../annotations.js", () => ({ readOnly: {} }));
 
+vi.mock("../cache-control.js", () => ({
+  clearRuntimeCaches: vi.fn(() => ({
+    scope: "all",
+    caches_cleared: ["api_responses", "reference_data", "vat_warning_dedupe"],
+  })),
+  cacheClearMetadata: (result: { scope: string } | undefined) => result
+    ? { cache: { fresh: true, cleared: true, scope: result.scope } }
+    : {},
+}));
+
+const clearRuntimeCachesMock = vi.mocked(clearRuntimeCaches);
+
 // ---------------------------------------------------------------------------
 // Build a minimal ApiContext factory
 // ---------------------------------------------------------------------------
@@ -60,6 +73,7 @@ let registerAccountBalanceTools: typeof import("./account-balance.js").registerA
 beforeEach(async () => {
   // Reset captured handlers between describe blocks
   for (const key of Object.keys(capturedHandlers)) delete capturedHandlers[key];
+  clearRuntimeCachesMock.mockClear();
   ({ registerAccountBalanceTools } = await import("./account-balance.js"));
 });
 
@@ -137,6 +151,19 @@ describe("compute_account_balance tool", () => {
     expect(data.debit_total).toBe(100);
     expect(data.credit_total).toBe(700);
     expect(data.balance_type).toBe("C");
+  });
+
+  it("clears runtime caches before computing when fresh is true", async () => {
+    const handler = setup([], D_ACCOUNT);
+    const result = await handler({ account_id: ACCOUNT_ID, fresh: true });
+    const data = parse((result.content[0] as { text: string }).text);
+
+    expect(clearRuntimeCachesMock).toHaveBeenCalledOnce();
+    expect(data.cache).toEqual({
+      fresh: true,
+      cleared: true,
+      scope: "all",
+    });
   });
 
   it("returns zero balance for empty postings", async () => {

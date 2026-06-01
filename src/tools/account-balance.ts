@@ -8,6 +8,7 @@ import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { DEFAULT_DEBT_CHECK_ACCOUNTS } from "../accounting-defaults.js";
 import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
+import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 
 interface BalanceDetail {
   journal_id: number;
@@ -113,9 +114,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
       include_entries: z.boolean().optional().describe("Include individual entries in response (default false)"),
+      fresh: z.boolean().optional().describe("Clear cached API/reference data before computing this balance (use after web UI changes)."),
     },
     { ...readOnly, title: "Compute Account Balance" },
-    async ({ account_id, client_id, date_from, date_to, include_entries }) => {
+    async ({ account_id, client_id, date_from, date_to, include_entries, fresh }) => {
+      const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const result = await computeAccountBalance(api, account_id, client_id, date_from, date_to);
 
       const summary = {
@@ -129,6 +132,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(client_id !== undefined && { client_id }),
         ...(date_from && { date_from }),
         ...(date_to && { date_to }),
+        ...cacheClearMetadata(cacheClear),
         // Journal titles are operator-entered and may echo OCR-seeded
         // supplier / client names — wrap at MCP output, keep internal
         // entries[] plain for in-process computation.
@@ -147,9 +151,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     {
       client_id: coerceId.describe("Client ID"),
       account_ids: z.string().optional().describe("Comma-separated account IDs to check (default: 2110,2310,1210)"),
+      fresh: z.boolean().optional().describe("Clear cached API/reference data before computing this client position (use after web UI changes)."),
     },
     { ...readOnly, title: "Compute Client Net Position" },
-    async ({ client_id, account_ids }) => {
+    async ({ client_id, account_ids, fresh }) => {
+      const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const ids = account_ids
         ? account_ids.split(",").map(s => parseInt(s.trim(), 10))
         : DEFAULT_DEBT_CHECK_ACCOUNTS;
@@ -192,6 +198,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
               total_receivable_from_client: roundMoney(totalReceivable),
               net_position: roundMoney(totalReceivable - totalDebt),
             },
+            ...cacheClearMetadata(cacheClear),
           }),
         }],
       };

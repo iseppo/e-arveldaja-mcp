@@ -25,6 +25,10 @@ export function clearVatWarnings(scope?: string): void {
   }
 }
 
+export function clearAllVatWarnings(): void {
+  warnedFallbackKeys.clear();
+}
+
 type PurchaseArticleWithVat = PurchaseArticle & {
   vat_accounts_id?: number | null;
   cl_vat_articles_id?: number | null;

@@ -14,8 +14,11 @@ User-facing phases:
 
 ## Step 1: Run the checklist
 
+If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` before running the checklist and statements.
+
 Call `month_end_close_checklist`:
 - `month`: YYYY-MM value
+- `fresh`: true if the user asked for fresh data and you did not already call `clear_cache`
 
 ## Step 2: Flag blocking issues
 
@@ -60,17 +63,20 @@ Report exact duplicates (same supplier + invoice number) and suspicious matches 
 Call `compute_trial_balance`:
 - `date_from`: YYYY-MM-01
 - `date_to`: last day of the month
+- `fresh`: true if the user asked for fresh data and you did not already call `clear_cache`
 
 Verify total debits = total credits. Treat sub-cent rounding deltas (under 0.01 EUR) as acceptable in multi-currency books; anything larger is a blocker that needs investigation.
 
 Call `compute_profit_and_loss`:
 - `date_from`: YYYY-01-01 (fiscal year start)
 - `date_to`: last day of the month
+- `fresh`: true if the user asked for fresh data and you did not already call `clear_cache`
 
 Show YTD P&L: total revenue, total expenses, net profit.
 
 Call `compute_balance_sheet`:
 - `date_to`: last day of the month
+- `fresh`: true if the user asked for fresh data and you did not already call `clear_cache`
 
 Verify balanced (assets = liabilities + equity).
 

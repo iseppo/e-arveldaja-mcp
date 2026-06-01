@@ -29,9 +29,7 @@ import { JournalsApi } from "./api/journals.api.js";
 import { TransactionsApi } from "./api/transactions.api.js";
 import { SaleInvoicesApi } from "./api/sale-invoices.api.js";
 import { PurchaseInvoicesApi } from "./api/purchase-invoices.api.js";
-import { ReferenceDataApi, readonlyCache } from "./api/readonly.api.js";
-import { cache } from "./api/base-resource.js";
-import { clearVatWarnings } from "./tools/purchase-vat-defaults.js";
+import { ReferenceDataApi } from "./api/readonly.api.js";
 import { registerCrudTools, type ApiContext } from "./tools/crud-tools.js";
 import { registerAccountBalanceTools } from "./tools/account-balance.js";
 import { registerPdfWorkflowTools } from "./tools/pdf-workflow.js";
@@ -50,6 +48,7 @@ import { registerCamtImportTools } from "./tools/camt-import.js";
 import { registerAccountingInboxTools } from "./tools/accounting-inbox.js";
 import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js";
 import { registerWorkflowRecommendationTools } from "./tools/workflow-recommendations.js";
+import { clearConnectionCaches, registerCacheControlTool } from "./cache-control.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
 import { registerPrompts } from "./prompts.js";
@@ -170,13 +169,6 @@ function getResourceUri(args: unknown[]): string {
     if (typeof href === "string") return href;
   }
   return "earveldaja://setup";
-}
-
-function clearAllCaches(connectionIndex: number): void {
-  const connectionPrefix = `connection:${connectionIndex}:`;
-  cache.invalidate(connectionPrefix);
-  readonlyCache.invalidate(connectionPrefix);
-  clearVatWarnings(connectionPrefix);
 }
 
 function createScopedApiContext(
@@ -749,8 +741,8 @@ Reporting:
 
       connectionState.generation += 1;
       connectionState.activeIndex = index;
-      clearAllCaches(previousIndex);
-      clearAllCaches(index);
+      clearConnectionCaches(previousIndex);
+      clearConnectionCaches(index);
 
       const snapshot = captureSnapshot(connectionState);
 
@@ -767,6 +759,10 @@ Reporting:
       };
     }
   );
+
+  registerCacheControlTool(server, {
+    getActiveConnectionIndex: () => allConfigs.length > 0 ? connectionState.activeIndex : undefined,
+  });
 
   // --- Audit log tools ---
 

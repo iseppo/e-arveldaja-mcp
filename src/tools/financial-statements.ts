@@ -8,6 +8,7 @@ import { roundMoney, effectiveGross } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
+import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 
 export interface AccountBalance {
   account_id: number;
@@ -126,9 +127,11 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     {
       date_from: z.string().optional().describe("Period start (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Period end (YYYY-MM-DD)"),
+      fresh: z.boolean().optional().describe("Clear cached API/reference data before computing this report (use after web UI changes)."),
     },
     { ...readOnly, title: "Compute Trial Balance" },
-    async ({ date_from, date_to }) => {
+    async ({ date_from, date_to, fresh }) => {
+      const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const balances = await computeAllBalances(api, date_from, date_to);
 
       const totalDebit = balances.reduce((s, b) => s + b.debit_total, 0);
@@ -146,6 +149,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               difference: roundMoney(totalDebit - totalCredit),
             },
             account_count: balances.length,
+            ...cacheClearMetadata(cacheClear),
             warnings: withOpeningBalanceApiLimitation(),
           }),
         }],
@@ -158,9 +162,11 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     "Groups accounts into Varad (Assets) and Kohustused+Omakapital (Liabilities+Equity).",
     {
       date_to: z.string().optional().describe("Balance sheet date (YYYY-MM-DD, default: today)"),
+      fresh: z.boolean().optional().describe("Clear cached API/reference data before computing this report (use after web UI changes)."),
     },
     { ...readOnly, title: "Compute Balance Sheet" },
-    async ({ date_to }) => {
+    async ({ date_to, fresh }) => {
+      const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const balances = await computeAllBalances(api, undefined, date_to);
 
       const assets = balances.filter(b => b.account_type_est === "Varad");
@@ -215,6 +221,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               liabilities_plus_equity: roundMoney(totalLiabilities + totalEquityWithCurrentYearPL),
               balanced: Math.abs(totalAssets - totalLiabilities - totalEquityWithCurrentYearPL) < 0.01,
             },
+            ...cacheClearMetadata(cacheClear),
             warnings: withOpeningBalanceApiLimitation(warnings),
           }),
         }],
@@ -228,9 +235,11 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     {
       date_from: z.string().describe("Period start (YYYY-MM-DD)"),
       date_to: z.string().describe("Period end (YYYY-MM-DD)"),
+      fresh: z.boolean().optional().describe("Clear cached API/reference data before computing this report (use after web UI changes)."),
     },
     { ...readOnly, title: "Compute Profit and Loss" },
-    async ({ date_from, date_to }) => {
+    async ({ date_from, date_to, fresh }) => {
+      const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const balances = await computeAllBalances(api, date_from, date_to);
 
       const revenue = balances.filter(b => b.account_type_est === "Tulud");
@@ -253,6 +262,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               total: roundMoney(totalExpenses),
             },
             net_profit: roundMoney(totalRevenue - totalExpenses),
+            ...cacheClearMetadata(cacheClear),
             warnings: withOpeningBalanceApiLimitation(),
           }),
         }],
@@ -266,9 +276,11 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
     "Month-end due-date checks use UTC calendar dates. Borderline local-midnight cases may need manual review.",
     {
       month: z.string().regex(monthRegex, "Expected YYYY-MM").describe("Month to check (YYYY-MM, e.g. 2026-02)"),
+      fresh: z.boolean().optional().describe("Clear cached API/reference data before running the checklist (use after web UI changes)."),
     },
     { ...readOnly, title: "Month-End Close Checklist" },
-    async ({ month }) => {
+    async ({ month, fresh }) => {
+      const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const dateFrom = `${month}-01`;
       const lastDay = getMonthLastDay(month);
       const dateTo = `${month}-${String(lastDay).padStart(2, "0")}`;
@@ -405,6 +417,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               ready_to_close: unconfirmedJournals.length === 0 && unconfirmedTx.length === 0 &&
                 unconfirmedSales.length === 0 && unconfirmedPurchases.length === 0,
             },
+            ...cacheClearMetadata(cacheClear),
             ...(warnings.length > 0 && { warnings }),
           }),
         }],

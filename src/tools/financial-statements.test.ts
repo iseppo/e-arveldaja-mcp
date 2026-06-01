@@ -1,9 +1,26 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Account, Journal, Posting, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { computeAllBalances, registerFinancialStatementTools } from "./financial-statements.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
+import { clearRuntimeCaches } from "../cache-control.js";
+
+vi.mock("../cache-control.js", () => ({
+  clearRuntimeCaches: vi.fn(() => ({
+    scope: "all",
+    caches_cleared: ["api_responses", "reference_data", "vat_warning_dedupe"],
+  })),
+  cacheClearMetadata: (result: { scope: string } | undefined) => result
+    ? { cache: { fresh: true, cleared: true, scope: result.scope } }
+    : {},
+}));
+
+const clearRuntimeCachesMock = vi.mocked(clearRuntimeCaches);
+
+beforeEach(() => {
+  clearRuntimeCachesMock.mockClear();
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -269,6 +286,23 @@ describe("compute_trial_balance", () => {
 
     expect(payload.period.from).toBe("2024-01-01");
     expect(payload.period.to).toBe("2024-12-31");
+  });
+
+  it("clears runtime caches before computing when fresh is true", async () => {
+    const handler = setupTool("compute_trial_balance", {
+      accounts: [],
+      journals: [],
+    });
+
+    const result = await handler({ fresh: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(clearRuntimeCachesMock).toHaveBeenCalledOnce();
+    expect(payload.cache).toEqual({
+      fresh: true,
+      cleared: true,
+      scope: "all",
+    });
   });
 
   it("reports difference when journals are unbalanced (data integrity check)", async () => {
