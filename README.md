@@ -102,7 +102,12 @@ This file is human-editable Markdown, not JSON. It is meant for:
 - owner-expense VAT deduction defaults or account-specific overrides
 - annual-report overrides for liability maturity and cash-flow category classification
 
-The server reads this file from the project root by default. You can point to another location with `EARVELDAJA_RULES_FILE=/path/to/accounting-rules.md`.
+By default these rules are stored as an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) bundle — a directory of Markdown files (one concept per file). If you already keep rules next to the project (an `accounting-rules/` folder or a legacy `accounting-rules.md`), that location is used as-is; on a fresh install the bundle defaults to your per-user config directory (`~/.config/e-arveldaja-mcp/accounting-rules`, or the platform equivalent) — the same place credentials live — so it survives reinstalls and is shared across MCP clients. Two environment variables override the location:
+
+- `EARVELDAJA_RULES_DIR=/path/to/bundle` — point the bundle at a stable per-company path (e.g. `~/.config/e-arveldaja-mcp/<company>/accounting-rules`). Recommended when you run several companies.
+- `EARVELDAJA_RULES_FILE=/path/to/accounting-rules.md` — opt into the legacy single-file format: rules stay in that one file (no bundle, no migration). In the default bundle mode, an existing `accounting-rules.md` next to the bundle is instead migrated into it non-destructively on first write.
+
+The bundle is also browsable as MCP resources under `earveldaja://accounting_knowledge`. When several MCP clients share one bundle directory, concurrent rule writes are serialized with a lock file so the index never drifts out of sync with the concepts.
 
 Confirmed supplier history still wins over local rules for purchase booking defaults.
 

@@ -1446,7 +1446,7 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
 
   registerTool(server,
     "save_auto_booking_rule",
-    "Save or update one stable counterparty auto-booking default in accounting-rules.md. Use only after the treatment has been confirmed and approved.",
+    "Save or update one stable counterparty auto-booking default in the accounting knowledge store (Open Knowledge Format bundle). Use only after the treatment has been confirmed and approved.",
     {
       match: z.string().min(1).describe("Counterparty match text, usually the supplier or counterparty name stem"),
       category: z.enum(AUTO_BOOKING_CATEGORIES).optional().describe("Optional classification category such as saas_subscriptions or bank_fees"),
@@ -1501,7 +1501,7 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
             action: result.action,
             match: result.match,
             category: result.category,
-            note: "The local accounting-rules.md file was updated. Review the diff if you want to fine-tune the wording or IDs.",
+            note: "The accounting knowledge store was updated (see 'path'). Review the diff if you want to fine-tune the wording or IDs.",
           }),
         }],
       };

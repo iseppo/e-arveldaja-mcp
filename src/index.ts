@@ -51,6 +51,7 @@ import { registerWorkflowRecommendationTools } from "./tools/workflow-recommenda
 import { clearConnectionCaches, registerCacheControlTool } from "./cache-control.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
+import { registerAccountingKnowledgeResources } from "./resources/accounting-knowledge-resources.js";
 import { registerPrompts } from "./prompts.js";
 import { toolError } from "./tool-error.js";
 import { toMcpJson, wrapUntrustedOcr } from "./mcp-json.js";
@@ -1005,6 +1006,7 @@ Reporting:
   // Register resources via scopedServer so reads stay pinned to the selected connection
   registerResources(scopedServer, api);
   registerDynamicResources(scopedServer, api);
+  registerAccountingKnowledgeResources(scopedServer);
 
   // Register prompts
   registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined });

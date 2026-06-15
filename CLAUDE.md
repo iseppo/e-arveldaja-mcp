@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-121 tools, 15 workflow prompts, 12 resources across 12 modules. Supports multiple companies/accounts.
+121 tools, 15 workflow prompts, 14 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -38,6 +38,34 @@ Use `list_connections` to see all available accounts and `switch_connection` to 
 Switching clears all cached data to prevent cross-company data leaks.
 
 **NEVER commit `.env` or `apikey.txt` to git.** The `.gitignore` is configured to exclude them.
+
+### Accounting-knowledge storage location
+
+Company-specific booking rules (see `src/accounting-rules.ts`) are stored as an
+Open Knowledge Format bundle. Two env vars control where it lives:
+
+- **`EARVELDAJA_RULES_DIR`** — points to the bundle directory (OKF: one concept
+  per `.md` file + reserved `index.md`/`log.md`). This is the recommended override.
+  In this (default) bundle mode, a legacy `accounting-rules.md` found in the
+  bundle's parent dir is migrated non-destructively into the bundle on first write.
+- **`EARVELDAJA_RULES_FILE`** — opts into legacy single-file mode: rules stay in
+  that one `accounting-rules.md` (no bundle, no migration). For people who want
+  the old behaviour byte-for-byte.
+
+Without either var the default location is chosen by `chooseDefaultBundleStorage()`:
+
+- If rules already live next to the project (an initialized `accounting-rules/`
+  bundle or a legacy `accounting-rules.md` at `getProjectRoot()`), that location
+  is kept in place — existing setups never move.
+- Otherwise (a fresh / packaged install) the bundle defaults to the per-user
+  global config dir — `getGlobalConfigDir()` (`~/.config/e-arveldaja-mcp/accounting-rules`
+  or the platform equivalent), the **same convention credentials use** — so the
+  knowledge survives reinstalls and is shared across MCP clients.
+
+Set `EARVELDAJA_RULES_DIR` explicitly for a stable per-company path
+(e.g. `~/.config/e-arveldaja-mcp/<firma>/accounting-rules`) when running several
+companies. Concurrent writes from multiple MCP clients sharing one bundle dir are
+serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
 
 ## Authentication
 
@@ -222,6 +250,13 @@ fields with a per-call random nonce sandbox via `wrapUntrustedOcr` in
 - MCP resources in `src/resources/static-resources.ts` follow the same
   policy: they expose configured reference data (accounts, articles,
   templates), not imported content.
+- MCP resources in `src/resources/accounting-knowledge-resources.ts`
+  (`earveldaja://accounting_knowledge` and `…/{path}`) expose the OKF
+  accounting-rules bundle. This is operator-curated configuration entering
+  only through the approval-gated `save_auto_booking_rule` path, so it is
+  treated as trusted and emitted unwrapped, same as static reference data.
+  Concept reads are path-traversal-guarded (resolved/realpath must stay
+  inside the bundle, `.md` only).
 
 **When adding a new tool:** if it emits text from OCR/CAMT/CSV, upstream API
 errors, or fields known to be populated by import flows (journal title
