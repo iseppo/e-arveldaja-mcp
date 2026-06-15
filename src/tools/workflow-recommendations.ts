@@ -73,7 +73,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Start here when the user has a mixed workspace and wants the server to detect likely accounting inputs.",
     when_to_use: ["mixed folder", "not sure what to do first", "month of documents", "workspace triage"],
     required_inputs: ["optional workspace path"],
-    primary_tools: ["accounting_inbox", "continue_accounting_workflow", "run_accounting_inbox_dry_runs", "resolve_accounting_review_item", "prepare_accounting_review_action"],
+    primary_tools: ["accounting_inbox", "continue_accounting_workflow"],
     risk_policy: {
       default_mode: "automatic",
       interrupt_when: ["missing bank dimension", "new accounting treatment", "duplicate cleanup", "accountant judgment"],
@@ -126,11 +126,12 @@ const WORKFLOWS: WorkflowGuide[] = [
   {
     id: "book-invoice",
     prompt: "book-invoice",
-    title: "Book Purchase Invoice",
+    title: "Book Purchase Invoice from Document",
     summary: "Extract, validate, duplicate-check, book, upload, and confirm a purchase invoice from a PDF/image.",
     when_to_use: ["purchase invoice PDF", "supplier invoice", "book one invoice", "attach source document"],
     required_inputs: ["absolute invoice PDF/image path"],
     primary_tools: [
+      "get_vat_info",
       "extract_pdf_invoice",
       "validate_invoice_data",
       "resolve_supplier",
@@ -143,11 +144,18 @@ const WORKFLOWS: WorkflowGuide[] = [
       default_mode: "confirm_once",
       interrupt_when: ["OCR missing required fields", "new supplier", "duplicate risk", "new VAT/account treatment"],
     },
-    next_actions: [{
-      tool: "extract_pdf_invoice",
-      args: { file_path: "<absolute invoice PDF/image path>" },
-      why: "Start with extraction so the user can review source-derived fields before booking.",
-    }],
+    next_actions: [
+      {
+        tool: "get_vat_info",
+        args: {},
+        why: "Check current VAT-registration status before deciding VAT treatment.",
+      },
+      {
+        tool: "extract_pdf_invoice",
+        args: { file_path: "<absolute invoice PDF/image path>" },
+        why: "Extract the document after VAT status is known so the user can review source-derived fields before booking.",
+      },
+    ],
     keywords: ["invoice", "pdf", "supplier invoice", "purchase invoice", "book invoice", "book one invoice", "arve", "attach document"],
   },
   {
@@ -157,7 +165,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "OCR a folder of receipts/invoices, preview auto-bookable items, and leave confirmation behind explicit approval.",
     when_to_use: ["folder of receipts", "many PDFs/images", "expense receipts", "batch booking"],
     required_inputs: ["absolute receipt folder path", "optional bank account dimension id (discover with list_account_dimensions when omitted)"],
-    primary_tools: ["receipt_batch", "list_account_dimensions", "process_receipt_batch", "scan_receipt_folder", "classify_bank_transactions", "classify_unmatched_transactions", "apply_transaction_classifications"],
+    primary_tools: ["receipt_batch"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["new supplier", "OCR uncertainty", "missing VAT/account treatment", "owner expense ambiguity"],
@@ -180,7 +188,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Parse ISO 20022 CAMT.053 bank statements, detect duplicates, and import bank transactions.",
     when_to_use: ["LHV/Swedbank/SEB/Coop/Luminor CAMT XML", "bank statement import", "bank transactions"],
     required_inputs: ["absolute CAMT.053 XML path", "optional bank account dimension id (discover with list_account_dimensions when omitted)"],
-    primary_tools: ["process_camt053", "list_account_dimensions", "parse_camt053", "import_camt053", "reconcile_inter_account_transfers"],
+    primary_tools: ["process_camt053"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["possible duplicate", "unknown bank dimension", "inter-account transfer ambiguity"],
@@ -199,7 +207,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Import regular Wise transaction-history CSV exports with fee splitting and transfer safeguards.",
     when_to_use: ["Wise CSV", "transaction-history.csv", "Wise fees", "Wise bank account"],
     required_inputs: ["absolute Wise transaction-history.csv path", "optional Wise bank account dimension id (discover with list_account_dimensions when omitted)", "optional fee expense dimension id"],
-    primary_tools: ["import_wise_transactions", "list_account_dimensions", "reconcile_inter_account_transfers"],
+    primary_tools: ["import_wise_transactions"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["missing fee dimension", "ambiguous transfer target", "unsupported CSV export"],
@@ -218,7 +226,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Group unmatched bank transactions, preview purchase-invoice bookings, and apply approved groups only.",
     when_to_use: ["unmatched expenses", "classify bank transactions", "auto-book bank rows", "expense groups"],
     required_inputs: ["optional bank account dimension id (discover with list_account_dimensions when omitted)", "optional date range"],
-    primary_tools: ["classify_bank_transactions", "list_account_dimensions", "classify_unmatched_transactions", "apply_transaction_classifications", "continue_accounting_workflow"],
+    primary_tools: ["classify_bank_transactions", "continue_accounting_workflow"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["review-only category", "missing currency rate", "new booking treatment", "failed group"],
@@ -237,7 +245,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Match unconfirmed bank transactions to invoices, transfers, or accounts.",
     when_to_use: ["unmatched bank transactions", "match payments", "confirm transactions", "reconcile"],
     required_inputs: ["optional mode", "optional transaction id"],
-    primary_tools: ["reconcile_bank_transactions", "reconcile_transactions", "auto_confirm_exact_matches", "reconcile_inter_account_transfers"],
+    primary_tools: ["reconcile_bank_transactions"],
     risk_policy: {
       default_mode: "confirm_once",
       interrupt_when: ["partial payment", "cross-currency match", "multiple candidates", "inter-account transfer"],

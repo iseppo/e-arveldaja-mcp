@@ -129,9 +129,22 @@ describe("workflow response helpers", () => {
         },
         {
           tool: "import_wise_transactions",
-          summary: "Wise dry run would create 2 bank transactions.",
+          summary: "Wise dry run would create 2 bank transactions and update 1 invoice FX settlement.",
           suggested_args: { file_path: "/tmp/wise.csv", accounts_dimensions_id: 8, execute: false },
-          preview: { created: 2, skipped: 0, error_count: 0 },
+          preview: {
+            created: 2,
+            skipped: 0,
+            error_count: 0,
+            invoice_currency_fixes: {
+              foreign_currency_lock: 1,
+              candidates: [{
+                invoice_id: 42,
+                invoice_number: "INV-42",
+                category: "foreign_currency_lock",
+                result: "would_update",
+              }],
+            },
+          },
         },
         {
           tool: "process_receipt_batch",
@@ -165,6 +178,14 @@ describe("workflow response helpers", () => {
       "approve_tool_call",
       "approve_tool_call",
     ]);
+    expect(workflow.approval_previews[1]).toMatchObject({
+      execute_tool: "import_wise_transactions",
+      accounting_impact: expect.arrayContaining([
+        "2 bank transactions",
+        "1 invoice FX update",
+      ]),
+      duplicate_risk: expect.stringContaining("confirms or links source bank transactions"),
+    });
   });
 
   it("blocks follow-up tool calls when materializing dry runs still need review", () => {

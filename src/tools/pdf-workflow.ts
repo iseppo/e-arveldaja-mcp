@@ -111,8 +111,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const detectedCurrency = rawCurrency && /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : undefined;
         if (detectedCurrency && detectedCurrency !== "EUR") {
           warnings.push(
-            `Invoice in ${detectedCurrency}. When booking, pass cl_currencies_id="${detectedCurrency}" plus currency_rate (EUR per 1 ${detectedCurrency}). ` +
-            `For Wise card payments take the rate from the Wise CSV "Source amount (after fees)" / "Target amount (after fees)" — that locks the EUR base_* values to the actual conversion and avoids PARTIALLY_PAID rounding jääk.`
+            `Invoice in ${detectedCurrency}. Extraction and validation use cl_currencies_id="${detectedCurrency}"; booking with create_purchase_invoice_from_pdf uses currency="${detectedCurrency}" plus currency_rate (EUR per 1 ${detectedCurrency}). ` +
+            `For Wise card payments take the rate from the Wise CSV "Source amount (after fees)" / "Target amount (after fees)" and pass base_gross_price when known — that locks the EUR base_* values to the actual conversion and avoids a PARTIALLY_PAID residual balance (jääk).`
           );
         }
 
@@ -462,10 +462,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     "Create a draft purchase invoice from extracted and validated PDF/JPG/PNG data and attach the source document to it. " +
     "The source file is required and upload is mandatory; if upload fails after invoice creation, the draft invoice is invalidated. " +
     "Pass EXACT vat_price and gross_price from the original invoice for payment matching. " +
-    "These are OPTIONAL here (unlike create_purchase_invoice which requires them) because OCR may not reliably extract invoice-level totals; " +
-    "confirm_purchase_invoice / confirmWithTotals will self-heal from item-level figures at confirmation time when invoice-level values are missing. " +
+    "They are optional only when genuinely unknown; when present on the invoice, pass the exact original totals and never recalculate. " +
+    "If invoice-level values are genuinely missing, confirm_purchase_invoice / confirmWithTotals can self-heal from item-level figures at confirmation time. " +
     "For non-EUR invoices pass currency + currency_rate (EUR per 1 foreign unit). " +
-    "Optionally pass base_net_price/base_vat_price/base_gross_price to lock the EUR settlement values to the actual payment (e.g. Wise card-payment exchange) so the invoice reconciles without a PARTIALLY_PAID jääk.",
+    "Optionally pass base_net_price/base_vat_price/base_gross_price to lock the EUR settlement values to the actual payment (e.g. Wise card-payment exchange) so the invoice reconciles without a PARTIALLY_PAID residual balance (jääk).",
     {
       supplier_client_id: coerceId.describe("Supplier client ID (from resolve_supplier)"),
       invoice_number: z.string().describe("Invoice number"),
@@ -476,8 +476,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         "Array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. Legacy callers may still pass a JSON array string. " +
         "purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts). Same rule applies to vat_accounts_dimensions_id when the VAT account has dimensions. Use list_account_dimensions to look up dimension IDs."
       ),
-      vat_price: z.number().optional().describe("EXACT total VAT from the original invoice. Optional because OCR may not extract reliably; pass when known."),
-      gross_price: z.number().optional().describe("EXACT total gross from the original invoice. Optional because OCR may not extract reliably; pass when known."),
+      vat_price: z.number().optional().describe("EXACT total VAT from the original invoice. Optional only when genuinely unknown; when present on the invoice, pass the exact original total and never recalculate."),
+      gross_price: z.number().optional().describe("EXACT total gross from the original invoice. Optional only when genuinely unknown; when present on the invoice, pass the exact original total and never recalculate."),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
       notes: z.string().optional().describe("Optional notes for genuinely useful context such as assumptions made or manual adjustments. Do NOT use the source document filename — the document is already uploaded and attached to the invoice."),
       ref_number: z.string().optional().describe("Reference number"),
@@ -486,7 +486,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       currency_rate: z.number().positive().optional().describe("Exchange rate as EUR per 1 foreign currency unit. Required when currency != EUR. For Wise card payments use Source amount (after fees) / Target amount."),
       base_net_price: z.number().optional().describe("EUR equivalent of net_price. Auto-derived from currency_rate when omitted."),
       base_vat_price: z.number().optional().describe("EUR equivalent of vat_price. Auto-derived from currency_rate when omitted."),
-      base_gross_price: z.number().optional().describe("EUR equivalent of gross_price. Pass the actual settled EUR amount (Wise Source amount after fees) to avoid PARTIALLY_PAID jääk. Auto-derived from currency_rate when omitted."),
+      base_gross_price: z.number().optional().describe("EUR equivalent of gross_price. Pass the actual settled EUR amount (Wise Source amount after fees) to avoid a PARTIALLY_PAID residual balance (jääk). Auto-derived from currency_rate when omitted."),
       file_path: z.string().describe("Absolute path to the source invoice document (PDF/JPG/PNG) — uploaded to the invoice during creation. Also accepts a base64 payload (\"base64:<data>\") for cross-system file transfer from remote MCP clients."),
     },
     { ...create, openWorldHint: true, title: "Create Purchase Invoice from PDF" },

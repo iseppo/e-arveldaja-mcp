@@ -340,6 +340,14 @@ function impactLine(count: number | undefined, singular: string, plural = `${sin
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+function invoiceCurrencyFixImpact(preview: Record<string, unknown>): string | undefined {
+  const fixes = recordAt(preview, "invoice_currency_fixes");
+  if (!fixes) return undefined;
+  const candidates = arrayAt(fixes, "candidates");
+  const count = numberAt(fixes, "total") ?? candidates?.length;
+  return impactLine(count, "invoice FX update");
+}
+
 export function approvalPreviewFromDryRunStep(step: unknown): ApprovalPreview | undefined {
   if (!isRecord(step)) return undefined;
   const tool = stringAt(step, "tool");
@@ -385,9 +393,10 @@ export function approvalPreviewFromDryRunStep(step: unknown): ApprovalPreview | 
       accounting_impact: [
         impactLine(created, "bank transaction"),
         impactLine(numberAt(preview, "skipped"), "skipped row"),
+        invoiceCurrencyFixImpact(preview),
         errorCount > 0 ? `${errorCount} import error(s) must be reviewed before approval` : undefined,
       ].filter((line): line is string => line !== undefined),
-      duplicate_risk: "Review skipped rows and transfer handling before approval.",
+      duplicate_risk: "Review skipped rows, transfer handling, and invoice_currency_fixes before approval. Execution confirms or links source bank transactions where the dry run shows fee or inter-account handling.",
       source_documents: sourceDocuments(args),
     };
   }

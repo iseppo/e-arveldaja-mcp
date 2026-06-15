@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Prompt guidance quality pass** — tightened LLM-facing workflow instructions for Wise import approvals, purchase-invoice currency booking, bank reconciliation distribution payloads, prompt-injection boundaries, CAMT duplicate cleanup, reverse-charge evidence, and merged workflow entry points.
+
 ## [0.15.0] - 2026-06-15
 
 ### Added

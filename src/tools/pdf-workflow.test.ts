@@ -196,13 +196,15 @@ describe("pdf workflow tools", () => {
 
     expect(payload.extracted.currency).toBe("USD");
     expect(payload.extracted.warnings).toEqual([
-      expect.stringMatching(/^Invoice in USD\. When booking, pass cl_currencies_id="USD"/),
+      expect.stringMatching(/^Invoice in USD\. Extraction and validation use cl_currencies_id="USD"; booking with create_purchase_invoice_from_pdf uses currency="USD"/),
     ]);
     // Hardening proof: the interpolated currency is exactly the 3-letter
     // ISO code, never raw OCR text. Anything that fails /^[A-Z]{3}$/ is
     // dropped before interpolation, so the warning string can never carry
     // attacker-controlled bytes through the unwrapped channel.
     expect(payload.extracted.warnings[0]).toMatch(/cl_currencies_id="USD"/);
+    expect(payload.extracted.warnings[0]).toMatch(/currency="USD"/);
+    expect(payload.extracted.warnings[0]).toContain("base_gross_price");
     expect(payload.extracted.warnings[0]).not.toMatch(/[<>{}]/);
   });
 

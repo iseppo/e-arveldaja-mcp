@@ -362,7 +362,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
     "Parse the regular Wise transactions CSV export and create bank transactions in e-arveldaja. " +
     "Does not support the special statement/report CSV exports. " +
     "Skips REFUNDED, NEUTRAL, and zero-amount entries. " +
-    "Uses type D for incoming rows and type C for outgoing rows. " +
+    "When creating rows, preserves the import direction as type D for incoming rows and type C for outgoing rows; do not infer accounting treatment from an existing transaction's type. " +
     "Wise fees are created as separate transactions (for correct VAT/expense treatment). " +
     "Inter-account transfers (TRANSFER-*, BANK_DETAILS_PAYMENT_RETURN-*) are auto-reconciled: " +
     "if the other bank account already has a confirmed journal entry, the Wise transaction is left " +
@@ -1031,6 +1031,16 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         error_count: executionErrors.length,
         inter_account_total: interAccountResults.length,
       };
+      const invoiceCurrencyFixes = invoiceFixCandidates.length > 0
+        ? {
+            total: invoiceFixCandidates.length,
+            foreign_currency_lock: invoiceFixCandidates.filter(f => f.category === "foreign_currency_lock").length,
+            eur_legacy_autofix: invoiceFixCandidates.filter(f => f.category === "eur_legacy_autofix").length,
+            updated: invoiceFixCandidates.filter(f => f.result === "updated").length,
+            errors: invoiceFixCandidates.filter(f => f.result === "error").length,
+            candidates: invoiceFixCandidates,
+          }
+        : undefined;
 
       // `reason` is built from raw exception text (err.message) which can
       // echo upstream API content. Wrap at MCP output so any CSV-origin
@@ -1067,7 +1077,10 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               tool: "import_wise_transactions",
               summary: workflowSummary,
               suggested_args: workflowArgs,
-              preview: summary,
+              preview: {
+                ...summary,
+                ...(invoiceCurrencyFixes ? { invoice_currency_fixes: invoiceCurrencyFixes } : {}),
+              },
             }]
           : [],
       });
@@ -1099,16 +1112,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 details: interAccountResults,
               },
             } : {}),
-            ...(invoiceFixCandidates.length > 0 ? {
-              invoice_currency_fixes: {
-                total: invoiceFixCandidates.length,
-                foreign_currency_lock: invoiceFixCandidates.filter(f => f.category === "foreign_currency_lock").length,
-                eur_legacy_autofix: invoiceFixCandidates.filter(f => f.category === "eur_legacy_autofix").length,
-                updated: invoiceFixCandidates.filter(f => f.result === "updated").length,
-                errors: invoiceFixCandidates.filter(f => f.result === "error").length,
-                candidates: invoiceFixCandidates,
-              },
-            } : {}),
+            ...(invoiceCurrencyFixes ? { invoice_currency_fixes: invoiceCurrencyFixes } : {}),
             results: created.map(({ description: _desc, ...rest }) => rest),
             skipped_details: sanitizedSkippedDetails,
             execution: buildBatchExecutionContract({

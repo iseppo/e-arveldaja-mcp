@@ -109,7 +109,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
 
   registerTool(server, "create_transaction", "Create a bank transaction", {
     accounts_dimensions_id: coerceId.describe("Bank account dimension ID"),
-    type: z.string().describe("Transaction type: D (incoming) or C (outgoing)"),
+    type: z.string().describe("Transaction type to create: D for incoming/import-provided debit rows or C for outgoing/import-provided credit rows. Preserve tool-provided values; do not infer accounting treatment from an existing transaction's type."),
     amount: z.number().describe("Transaction amount"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
     date: isoDateString("Transaction date (YYYY-MM-DD)"),

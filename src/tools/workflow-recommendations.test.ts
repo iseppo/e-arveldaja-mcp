@@ -40,7 +40,8 @@ describe("recommend_workflow", () => {
       },
     });
     expect(payload.raw.primary_tools).toContain("process_camt053");
-    expect(payload.raw.primary_tools).toContain("import_camt053");
+    expect(payload.raw.primary_tools).not.toContain("import_camt053");
+    expect(payload.raw.primary_tools).not.toContain("parse_camt053");
     expect(payload.next_actions[0]).toMatchObject({
       tool: "process_camt053",
       args: { mode: "dry_run" },
@@ -147,7 +148,7 @@ describe("recommend_workflow", () => {
       id: "accounting-inbox",
     });
     expect(payload.raw.primary_tools).toContain("accounting_inbox");
-    expect(payload.raw.primary_tools).toContain("continue_accounting_workflow");
+    expect(payload.raw.primary_tools).not.toContain("run_accounting_inbox_dry_runs");
     expect(payload.next_actions[0]).toMatchObject({
       tool: "accounting_inbox",
       args: { mode: "dry_run" },
@@ -169,7 +170,8 @@ describe("recommend_workflow", () => {
       id: "reconcile-bank",
     });
     expect(payload.raw.primary_tools).toContain("reconcile_bank_transactions");
-    expect(payload.raw.primary_tools).toContain("reconcile_transactions");
+    expect(payload.raw.primary_tools).not.toContain("reconcile_transactions");
+    expect(payload.raw.primary_tools).not.toContain("auto_confirm_exact_matches");
     expect(payload.next_actions[0]).toMatchObject({
       tool: "reconcile_bank_transactions",
       args: { mode: "suggest", min_confidence: 30 },
@@ -181,14 +183,14 @@ describe("recommend_workflow", () => {
     });
   });
 
-  it("recommends the merged classification wrapper while keeping compatibility tools visible", async () => {
+  it("recommends the merged classification wrapper without legacy primitives as primary tools", async () => {
     const { handler } = getRecommendWorkflowHarness();
 
-    const result = await handler({ goal: "process a folder of receipts and classify expenses" });
+    const result = await handler({ goal: "classify unmatched bank transactions into expense groups" });
     const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
 
     expect(payload.raw.primary_tools).toContain("classify_bank_transactions");
-    expect(payload.raw.primary_tools).toContain("apply_transaction_classifications");
+    expect(payload.raw.primary_tools).not.toContain("apply_transaction_classifications");
     expect(payload.raw.primary_tools).not.toContain("apply_unmatched_transaction_classifications");
   });
 
@@ -202,7 +204,8 @@ describe("recommend_workflow", () => {
       id: "receipt-batch",
     });
     expect(payload.raw.primary_tools).toContain("receipt_batch");
-    expect(payload.raw.primary_tools).toContain("process_receipt_batch");
+    expect(payload.raw.primary_tools).not.toContain("process_receipt_batch");
+    expect(payload.raw.primary_tools).not.toContain("scan_receipt_folder");
     expect(payload.next_actions[0]).toMatchObject({
       tool: "receipt_batch",
       args: { mode: "dry_run" },
@@ -211,6 +214,26 @@ describe("recommend_workflow", () => {
       kind: "tool_call",
       tool: "receipt_batch",
       args: { mode: "dry_run" },
+    });
+  });
+
+  it("starts book-invoice recommendations with current VAT status before extraction", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+
+    const result = await handler({ goal: "book this supplier invoice PDF" });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+
+    expect(payload.recommended_workflow).toMatchObject({
+      id: "book-invoice",
+    });
+    expect(payload.raw.primary_tools[0]).toBe("get_vat_info");
+    expect(payload.next_actions[0]).toMatchObject({
+      tool: "get_vat_info",
+      args: {},
+    });
+    expect(payload.next_actions[1]).toMatchObject({
+      tool: "extract_pdf_invoice",
+      args: { file_path: "<absolute invoice PDF/image path>" },
     });
   });
 });
