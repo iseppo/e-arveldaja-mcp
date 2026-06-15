@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-06-15
+
 ### Changed
 - **Prompt guidance quality pass** — tightened LLM-facing workflow instructions for Wise import approvals, purchase-invoice currency booking, bank reconciliation distribution payloads, prompt-injection boundaries, CAMT duplicate cleanup, reverse-charge evidence, and merged workflow entry points.
+
+### Fixed
+- **Shipped `.claude/commands/*.md` prompts re-synced with their `workflows/*.md` sources** — the prompt-quality pass updated the workflow sources but left the five generated command mirrors (book-invoice, import-camt, import-wise, receipt-batch, reconcile-bank) stale; they are regenerated so both prompt surfaces ship identical guidance, and the mirror-sync test guard was restored.
 
 ## [0.15.0] - 2026-06-15
 
