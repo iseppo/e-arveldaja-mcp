@@ -8,13 +8,14 @@ User-facing phases:
 1. Preview the Wise CSV import.
 2. Resolve fee-dimension or transfer questions only when needed.
 3. Ask for one approval decision.
-4. Import and offer reconciliation/confirmation follow-up.
+4. Execute the approved mutations and report what was created, confirmed, linked, skipped, or updated.
 
 ## Arguments
 
 - `file_path`: absolute path to the regular Wise `transaction-history.csv`
 - Optional `accounts_dimensions_id`: bank account dimension ID for the Wise account
 - Optional `fee_account_dimensions_id`: expense dimension used for Wise fees
+- Optional `inter_account_dimension_id`: other bank account dimension for Wise inter-account transfers; required when there are 3+ bank accounts and auto-detection cannot pick one
 - Optional `date_from` / `date_to`: transaction-date filter in `YYYY-MM-DD`
 - Optional `skip_jar_transfers`: defaults to `true`
 
@@ -30,6 +31,7 @@ Call `import_wise_transactions`:
 - `file_path`: the provided file
 - `accounts_dimensions_id`: the confirmed or provided dimension ID
 - `fee_account_dimensions_id`: include it when available
+- `inter_account_dimension_id`: include it when provided or when the user selected it
 - execute: false
 - include `date_from` / `date_to` when provided
 - include `skip_jar_transfers: false` only when the user explicitly wants Jar transfers imported
@@ -47,6 +49,7 @@ Review:
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
 - Use top-level `skipped_details` only as a grouped convenience summary for `execution.skipped` + `execution.errors`.
+- Review top-level `invoice_currency_fixes` when present; each candidate is a dry-run invoice FX update that execution may apply.
 - Fall back to top-level `total_csv_rows`, `eligible`, `filtered_out`, `created`, `skipped`, and `results` only if `execution` is absent.
 
 Show:
@@ -54,6 +57,8 @@ Show:
 - fee rows that would be created
 - exact duplicate / skip reasons from `execution.skipped` / `execution.errors` or `skipped_details`
 - whether fees will be auto-confirmed to the chosen dimension
+- inter-account transfer confirmations or skips (`inter_account_reconciliation` when present)
+- invoice FX updates from `invoice_currency_fixes`, including each invoice number, category, and proposed action
 
 ### Step 3: Approval gate
 
@@ -62,11 +67,17 @@ Do not disable Jar skipping unless the user explicitly wants those internal Wise
 Ask for approval before running with `execute: true`.
 The approval card must include:
 - source Wise CSV
-- number of main transactions and fee rows that would be created
+- number of main transactions and fee rows that would be created as PROJECT (draft/unconfirmed) bank transactions
+- fee confirmations that will be posted automatically to `fee_account_dimensions_id`
+- inter-account confirmations or skips, including selected `inter_account_dimension_id` when used
+- each invoice FX update from `invoice_currency_fixes`, including whether it locks a foreign-currency rate or fixes a legacy EUR settlement
 - skipped duplicates and Jar-transfer handling
 - selected fee account dimension, if any
-- side effect: PROJECT bank transactions created in e-arveldaja
+- source bank transactions that execution confirms or links while applying fee and inter-account handling
+- side effects: PROJECT bank rows, fee confirmations, inter-account confirmations/skips, and invoice FX updates
 - audit reference when available
+
+State that approval authorizes all listed categories. If the user does not approve every listed mutation category, stop and ask which category should be excluded or reviewed; do not run `execute: true`.
 
 If the user does not explicitly approve, stop.
 
@@ -82,6 +93,7 @@ Report:
 - `execution.summary.error_count`
 - fee transactions created
 - any rows still needing manual follow-up
+- any `invoice_currency_fixes` updated, skipped, or errored
 - mention that side effects can be reviewed via `execution.audit_reference`
 
 For created PROJECT bank transactions, keep follow-up decisions compact: group low-risk identical confirmations, show the first 10 items plus counts, and ask one batch approval with exceptions instead of one yes/no question per row. Offer the next inline action for the approved group — do NOT close the workflow with "confirm them in e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action.
