@@ -102,9 +102,15 @@ Review `past_invoices` and reuse the most relevant:
 
 If there is no suitable history, call `list_purchase_articles` or ask the user instead of inventing IDs.
 
+`suggest_booking` may also return `tax_notes`: server-detected Estonian tax restrictions for this supplier or description. Each note has `code`, `severity`, `title`, `detail`, and `basis`. Treat them as advisory checks, not auto-applied settings:
+- For a `KMS § 30` entertainment/representation note, do not mark input VAT deductible — book the cost gross — and flag the `TuMS § 49 lg 4` representation-limit aspect to the user.
+- For a `KMS § 30 lg 4` passenger-car note, deduct at most 50% input VAT unless the user confirms a documented exception.
+- Surface every `tax_notes` entry verbatim (title + basis) in the Step 10 approval card so the user can confirm or override; never silently apply a restriction.
+
 ## Step 8: Determine VAT treatment
 
 - Take the VAT-registration status from step 1 into account.
+- Honor any `tax_notes` from step 7 here: an entertainment note means input VAT is non-deductible; a passenger-car note caps deduction at 50%.
 - For normal domestic invoices, keep the VAT treatment shown on the document.
 - Do not infer reverse charge from country alone; use explicit invoice wording or confirmed same-kind supplier history, otherwise ask.
 - Estonian reverse-charge rules cover several distinct cases, including EU B2B services with place of supply in Estonia, non-EU services with place of supply in Estonia, intra-community acquisitions of goods, and certain domestic construction/scrap schemes.
@@ -131,6 +137,7 @@ Before creating anything, present one approval card:
 - Net / VAT / gross amounts
 - Currency, `currency_rate`, and any `base_gross_price` / other `base_*` EUR totals for non-EUR invoices
 - The exact item-level booking you intend to send, including article IDs, account IDs, `purchase_accounts_dimensions_id`, VAT fields, `vat_accounts_dimensions_id`, and any `reversed_vat_id`
+- Any `tax_notes` returned by `suggest_booking` (title + statutory basis), with how you applied each one
 - The booking basis used and any assumptions
 - Duplicate-check result
 - Source document path

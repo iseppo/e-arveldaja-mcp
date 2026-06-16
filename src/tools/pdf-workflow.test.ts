@@ -297,6 +297,37 @@ describe("pdf workflow tools", () => {
         cl_vat_articles_id: 1,
       }),
     ]);
+    // Ordinary supplier/description → no tax restriction notes.
+    expect(payload.tax_notes).toEqual([]);
+  });
+
+  it("surfaces Estonian input-VAT deduction restrictions in tax_notes", async () => {
+    const { handler } = setupPdfWorkflowTool("suggest_booking", {
+      clients: { get: vi.fn().mockResolvedValue({ id: 7, name: "Restoran Tabac OÜ" }) },
+    });
+
+    const result = await handler({ clients_id: 7, description: "ärilõuna kliendiga" });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.tax_notes).toEqual([
+      expect.objectContaining({
+        code: "KMS § 30",
+        severity: "warning",
+        basis: expect.stringContaining("TuMS § 49 lg 4"),
+      }),
+    ]);
+  });
+
+  it("still returns suggestions when the supplier lookup fails", async () => {
+    const { handler } = setupPdfWorkflowTool("suggest_booking", {
+      clients: { get: vi.fn().mockRejectedValue(new Error("boom")) },
+    });
+
+    const result = await handler({ clients_id: 7, description: "internet" });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.supplier_id).toBe(7);
+    expect(payload.tax_notes).toEqual([]);
   });
 
   it("uploads the source document when creating a purchase invoice from a file", async () => {

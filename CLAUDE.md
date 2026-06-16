@@ -289,6 +289,7 @@ API data remains raw.
 - **CIT on dividends**: 22/78 from 2025-01-01; 20/80 before (date-gated via `getCitRateForDate` in `src/tools/estonian-tax.ts`)
 - **ÄS § 157 net-assets block**: `prepare_dividend_package` hard-blocks distributions that lack retained earnings OR would push net assets below share capital. `force=true` overrides both checks (use only alongside a legitimate action such as a capital reduction).
 - **Capital gains**: Securities taxed at 22% income tax
+- **Input-VAT deduction restrictions** (`src/estonian-tax-rules.ts`): single date-gated source for the standard VAT-rate timeline (20→22%→24%), current reduced rates, and the deduction detectors. `suggest_booking` returns these as `tax_notes` — `KMS § 30` (külaliste vastuvõtt / esinduskulu: input VAT non-deductible; also `TuMS § 49 lg 4` representation limit 50 €/month + 2% of payroll) and `KMS § 30 lg 4` (M1 passenger car: 50% cap). Notes are advisory; `workflows/book-invoice.md` requires surfacing each on the approval card. Update the figures in this module when the law changes.
 
 ## Development
 

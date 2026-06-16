@@ -19,6 +19,7 @@ import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNum
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { extractReceiptFieldsFromText } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
+import { detectVatDeductionNotes } from "../estonian-tax-rules.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];
@@ -428,12 +429,26 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         })),
       }));
 
+      // Surface deterministic Estonian input-VAT deduction restrictions
+      // (KMS § 30 entertainment, § 30 lg 4 passenger car) for this supplier.
+      // Detection runs on plain strings (supplier name, the description arg,
+      // and past-invoice titles) — the resulting note text is server-authored.
+      const supplier = await api.clients.get(clients_id).catch(() => null);
+      const tax_notes = detectVatDeductionNotes({
+        supplierName: supplier?.name,
+        descriptions: [
+          description,
+          ...detailed.flatMap(inv => inv.items?.map(item => item.custom_title) ?? []),
+        ],
+      });
+
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             supplier_id: clients_id,
             past_invoices: sanitizedDetailed,
+            tax_notes,
             suggestion: detailed.length > 0
               ? "Use the purchase article, account, and VAT settings from the most recent similar invoice."
               : "No past invoices found for this supplier. Use list_purchase_articles to find appropriate articles.",
