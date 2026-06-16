@@ -34,6 +34,7 @@ import { ReferenceDataApi } from "./api/readonly.api.js";
 import { registerCrudTools, type ApiContext } from "./tools/crud-tools.js";
 import { registerAccountBalanceTools } from "./tools/account-balance.js";
 import { registerPdfWorkflowTools } from "./tools/pdf-workflow.js";
+import { registerDocumentAttachmentTools } from "./tools/document-attachments.js";
 import { registerCurrencyRoundingTools } from "./tools/currency-rounding.js";
 import { registerBankReconciliationTools } from "./tools/bank-reconciliation.js";
 import { registerFinancialStatementTools } from "./tools/financial-statements.js";
@@ -966,6 +967,7 @@ async function main() {
   registerCrudTools(scopedServer, api);
   registerAccountBalanceTools(scopedServer, api);
   registerPdfWorkflowTools(scopedServer, api);
+  registerDocumentAttachmentTools(scopedServer, api);
   registerCurrencyRoundingTools(scopedServer, api);
   registerBankReconciliationTools(scopedServer, api);
   registerFinancialStatementTools(scopedServer, api);

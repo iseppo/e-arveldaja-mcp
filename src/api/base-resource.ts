@@ -1,5 +1,5 @@
 import type { HttpClient } from "../http-client.js";
-import type { ApiResponse, PaginatedResponse } from "../types/api.js";
+import type { ApiFile, ApiResponse, PaginatedResponse } from "../types/api.js";
 import { Cache } from "../cache.js";
 import { log } from "../logger.js";
 import { reportProgress } from "../progress.js";
@@ -129,6 +129,31 @@ export class BaseResource<T> {
 
   async delete(id: number): Promise<ApiResponse> {
     const result = await this.client.delete<ApiResponse>(`${this.basePath}/${id}`);
+    this.invalidateCache();
+    return result;
+  }
+
+  // === User-uploaded source document (document_user) ===
+  // Supported by purchase_invoices, sale_invoices, journals, and transactions
+  // (PUT to upload/replace, GET to read back, DELETE to remove). Calling these
+  // on a resource whose API has no /{id}/document_user endpoint returns a 404 —
+  // only the document-capable resources are wired to tools.
+
+  async getDocument(id: number): Promise<ApiFile> {
+    return this.client.get<ApiFile>(`${this.basePath}/${id}/document_user`);
+  }
+
+  async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
+    const result = await this.client.request<ApiResponse>(`${this.basePath}/${id}/document_user`, {
+      method: "PUT",
+      body: { name, contents },
+    });
+    this.invalidateCache();
+    return result;
+  }
+
+  async deleteDocument(id: number): Promise<ApiResponse> {
+    const result = await this.client.delete<ApiResponse>(`${this.basePath}/${id}/document_user`);
     this.invalidateCache();
     return result;
   }

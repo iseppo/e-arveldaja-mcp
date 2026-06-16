@@ -186,6 +186,59 @@ describe("BaseResource", () => {
     });
   });
 
+  // ── document_user (getDocument / uploadDocument / deleteDocument) ─────────
+
+  describe("document_user methods", () => {
+    it("getDocument GETs /{basePath}/{id}/document_user", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/journals");
+      const file = { name: "receipt.pdf", contents: "YmFzZTY0" };
+      vi.mocked(client.get).mockResolvedValueOnce(file);
+
+      const result = await resource.getDocument(7);
+      expect(result).toEqual(file);
+      expect(client.get).toHaveBeenCalledWith("/journals/7/document_user");
+    });
+
+    it("uploadDocument PUTs {name, contents} and invalidates the cache", async () => {
+      const client = makeClient();
+      (client as unknown as { request: ReturnType<typeof vi.fn> }).request = vi.fn().mockResolvedValue(apiResponse());
+      const resource = new BaseResource<Item>(client, "/transactions");
+
+      // Prime the cache, then upload should clear it.
+      vi.mocked(client.get).mockResolvedValueOnce({ id: 9, name: "x" });
+      await resource.get(9);
+      expect(client.get).toHaveBeenCalledTimes(1);
+
+      await resource.uploadDocument(9, "scan.png", "Zm9v");
+      expect((client as unknown as { request: ReturnType<typeof vi.fn> }).request).toHaveBeenCalledWith(
+        "/transactions/9/document_user",
+        { method: "PUT", body: { name: "scan.png", contents: "Zm9v" } },
+      );
+
+      // Cache cleared — next get hits the API again.
+      vi.mocked(client.get).mockResolvedValueOnce({ id: 9, name: "x" });
+      await resource.get(9);
+      expect(client.get).toHaveBeenCalledTimes(2);
+    });
+
+    it("deleteDocument DELETEs the document_user path and invalidates the cache", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/sale_invoices");
+
+      vi.mocked(client.get).mockResolvedValueOnce({ id: 4, name: "y" });
+      await resource.get(4);
+
+      vi.mocked(client.delete).mockResolvedValueOnce(apiResponse());
+      await resource.deleteDocument(4);
+      expect(client.delete).toHaveBeenCalledWith("/sale_invoices/4/document_user");
+
+      vi.mocked(client.get).mockResolvedValueOnce({ id: 4, name: "y" });
+      await resource.get(4);
+      expect(client.get).toHaveBeenCalledTimes(2);
+    });
+  });
+
   // ── listAll() pagination ──────────────────────────────────────────────────
 
   describe("listAll()", () => {

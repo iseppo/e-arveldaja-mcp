@@ -11,7 +11,7 @@ import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase
 import { validateItemDimensions } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
-import { readOnly, create, mutate } from "../annotations.js";
+import { readOnly, create } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
@@ -32,7 +32,7 @@ function sanitizeInvoiceDocumentFileName(resolvedPath: string): string {
   return (resolvedPath.split(/[\\/]/).pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255);
 }
 
-async function prepareInvoiceDocumentUpload(filePath: string): Promise<{
+export async function prepareInvoiceDocumentUpload(filePath: string): Promise<{
   resolvedPath: string;
   fileName: string;
   contentsBase64: string;
@@ -631,30 +631,6 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           }),
         }],
       };
-      } finally {
-        if (documentUpload.cleanup) await documentUpload.cleanup();
-      }
-    }
-  );
-
-  registerTool(server, "upload_invoice_document",
-    "Upload a source invoice document (PDF/JPG/PNG) to an existing purchase invoice",
-    {
-      invoice_id: coerceId.describe("Purchase invoice ID"),
-      file_path: z.string().describe("Absolute path to the invoice document (PDF/JPG/PNG)."),
-    },
-    { ...mutate, openWorldHint: true, title: "Upload Purchase Invoice Document" },
-    async ({ invoice_id, file_path }) => {
-      const documentUpload = await prepareInvoiceDocumentUpload(file_path);
-      try {
-        const result = await api.purchaseInvoices.uploadDocument(invoice_id, documentUpload.fileName, documentUpload.contentsBase64);
-        logAudit({
-          tool: "upload_invoice_document", action: "UPLOADED", entity_type: "purchase_invoice",
-          entity_id: invoice_id,
-          summary: `Uploaded document "${documentUpload.fileName}" to purchase invoice ${invoice_id}`,
-          details: { file_name: documentUpload.fileName },
-        });
-        return { content: [{ type: "text", text: toMcpJson(result) }] };
       } finally {
         if (documentUpload.cleanup) await documentUpload.cleanup();
       }

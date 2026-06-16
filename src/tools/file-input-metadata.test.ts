@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { registerAccountingInboxTools } from "./accounting-inbox.js";
 import { registerCamtImportTools } from "./camt-import.js";
+import { registerDocumentAttachmentTools } from "./document-attachments.js";
 import { registerLightyearTools } from "./lightyear-investments.js";
 import { registerPdfWorkflowTools } from "./pdf-workflow.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
@@ -29,7 +30,7 @@ describe("file input tool metadata", () => {
       getToolConfig(registerAccountingInboxTools, "accounting_inbox"),
       getToolConfig(registerPdfWorkflowTools, "extract_pdf_invoice"),
       getToolConfig(registerPdfWorkflowTools, "create_purchase_invoice_from_pdf"),
-      getToolConfig(registerPdfWorkflowTools, "upload_invoice_document"),
+      getToolConfig(registerDocumentAttachmentTools, "attach_document"),
       getToolConfig(registerLightyearTools, "parse_lightyear_statement"),
       getToolConfig(registerLightyearTools, "book_lightyear_trades"),
       getToolConfig(registerLightyearTools, "book_lightyear_distributions"),
@@ -44,6 +45,20 @@ describe("file input tool metadata", () => {
     for (const config of toolConfigs) {
       expect(config.annotations?.openWorldHint).toBe(true);
     }
+  });
+
+  it("exposes the entity-agnostic document tools and drops the old upload_invoice_document", () => {
+    const collectNames = (register: (server: any, api: any) => void): string[] => {
+      const names: string[] = [];
+      register({ registerTool: vi.fn((name: string) => { names.push(name); }) } as any, {} as any);
+      return names;
+    };
+
+    const docNames = collectNames(registerDocumentAttachmentTools);
+    expect(docNames).toEqual(expect.arrayContaining(["attach_document", "get_document", "delete_document"]));
+
+    // The purchase-only predecessor must be gone (subsumed by attach_document).
+    expect(collectNames(registerPdfWorkflowTools)).not.toContain("upload_invoice_document");
   });
 
   it("keeps file-input workflow metadata free of relocatable implementation notes", () => {

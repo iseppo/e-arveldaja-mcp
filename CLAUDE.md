@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-121 tools (116 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
+123 tools (118 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -79,7 +79,7 @@ optional feature group that can be dropped when unused (see
   `lightyear_portfolio_summary`). Use when the company does not track
   investments. Default: Lightyear is enabled.
 
-The default surface is 121 tools; `DISABLE_LIGHTYEAR` drops it to 116. (The
+The default surface is 123 tools; `DISABLE_LIGHTYEAR` drops it to 118. (The
 former `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
@@ -104,7 +104,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - **Deliver sale invoice**: `PATCH /sale_invoices/{id}/deliver` (not `/send_einvoice`)
 
 ### Document endpoints
-- **User-uploaded docs**: `GET/PUT/DELETE /{entity}/{id}/document_user` (PUT to upload, not POST)
+- **User-uploaded docs**: `GET/PUT/DELETE /{entity}/{id}/document_user` (PUT to upload, not POST). Implemented generically on `BaseResource` (`getDocument`/`uploadDocument`/`deleteDocument`, keyed on `basePath`) and exposed by the entity-agnostic tools `attach_document` / `get_document` / `delete_document` (`entity_type` ∈ purchase_invoice, sale_invoice, journal, transaction) in `src/tools/document-attachments.ts`. RPS requires a source document on every entry, so manual journals and directly-booked bank transactions can carry one too — `find_missing_documents` flags those that don't.
 - **System-generated sale invoice PDF**: `GET /sale_invoices/{id}/pdf_system`
 
 ### Transaction registration
@@ -313,5 +313,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 121 tools
+const { tools } = await client.listTools(); // 123 tools
 ```

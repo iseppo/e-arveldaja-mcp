@@ -1,5 +1,5 @@
 import type { HttpClient } from "../http-client.js";
-import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse, ApiFile } from "../types/api.js";
+import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
 import { roundMoney, parseVatRateDropdown } from "../money.js";
 
@@ -236,22 +236,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     return result;
   }
 
-  async getDocument(id: number): Promise<ApiFile> {
-    return this.client.get<ApiFile>(`/purchase_invoices/${id}/document_user`);
-  }
-
-  async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    const result = await this.client.request<ApiResponse>(`/purchase_invoices/${id}/document_user`, {
-      method: "PUT",
-      body: { name, contents },
-    });
-    this.invalidateCache();
-    return result;
-  }
-
-  async deleteDocument(id: number): Promise<ApiResponse> {
-    const result = await this.client.delete<ApiResponse>(`/purchase_invoices/${id}/document_user`);
-    this.invalidateCache();
-    return result;
-  }
+  // getDocument / uploadDocument / deleteDocument are inherited from BaseResource
+  // (document_user is generic across purchase_invoices, sale_invoices, journals,
+  // and transactions).
 }

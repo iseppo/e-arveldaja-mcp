@@ -881,7 +881,7 @@ export function applyReverseChargeAutoDetection(
  * a reference to the underlying invoice they confirm. The deterministic
  * extractor's `invoice_number` is the receipt's best guess at that
  * reference. We expose the value as a typed field so downstream callers
- * (auto-attach via upload_invoice_document, manual review UIs) don't have
+ * (auto-attach via attach_document, manual review UIs) don't have
  * to parse it back out of the human note.
  *
  * `matched: true` AND `matched_invoice_id` are populated when the receipt's

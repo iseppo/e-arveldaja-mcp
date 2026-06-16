@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Source-document attachment on journals, transactions, and sale invoices** — the `document_user` upload/download/delete capability that previously existed only for purchase invoices is now available across all four document-capable resources via three entity-agnostic tools: `attach_document`, `get_document`, and `delete_document` (each takes `entity_type` ∈ purchase_invoice, sale_invoice, journal, transaction). Estonian RPS law requires a source document on every accounting entry — manual journals (accruals, depreciation, reclassifications, year-end adjustments) and directly-booked bank transactions (card payments, fees) are exactly the entries auditors scrutinise, and `find_missing_documents` already flagged the ones lacking a document but offered no way to attach one. The methods are hoisted onto `BaseResource` (keyed on `basePath`) so coverage is uniform, and `get_document` / `delete_document` also close the previously-unwired read-back and removal of purchase-invoice documents. `get_document` caps the inline base64 payload (~5 MB) and supports `metadata_only=true`, returning name + size instead of the blob for large scans so the MCP transport is not overwhelmed.
+
+### Changed
+- **`upload_invoice_document` replaced by `attach_document`** — the purchase-invoice-only upload tool is superseded by the entity-agnostic `attach_document` (use `entity_type="purchase_invoice"` for the same effect). The internal PDF/receipt booking flows are unaffected (they call the API layer directly). Default tool surface is now 123 (118 with Lightyear disabled).
+
 ## [0.16.1] - 2026-06-16
 
 ### Changed
