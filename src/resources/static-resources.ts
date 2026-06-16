@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import { registerResource } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
+import { buildTaxRulesReference } from "../estonian-tax-rules.js";
 
 export function registerResources(server: McpServer, api: ApiContext): void {
 
@@ -96,6 +97,24 @@ export function registerResources(server: McpServer, api: ApiContext): void {
           uri: uri.href,
           mimeType: "text/plain",
           text: toMcpJson(info),
+        }],
+      };
+    }
+  );
+
+  // Server-authored statutory reference (trusted operator data, not OCR) — the
+  // standard VAT-rate timeline, current reduced rates, and the deduction /
+  // tax-free-limit rules the booking flow draws its tax_notes from.
+  registerResource(server,
+    "tax_rules",
+    "earveldaja://tax_rules",
+    { description: "Estonian VAT / income-tax reference: standard VAT-rate timeline, reduced rates, and input-VAT deduction & tax-free-limit rules (KMS § 30, § 30 lg 4; TuMS § 49)", mimeType: "text/plain" },
+    async (uri) => {
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: "text/plain",
+          text: toMcpJson(buildTaxRulesReference()),
         }],
       };
     }

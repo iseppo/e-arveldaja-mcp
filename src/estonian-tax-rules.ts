@@ -57,6 +57,73 @@ export const REDUCED_VAT_RATES: readonly ReducedVatRate[] = [
   { rate: 0, applies: "eksport, ühendusesisene käive jms", from: null, basis: "KMS § 15 lg 3–4" },
 ];
 
+export interface TaxRuleReference {
+  /** Statutory code, e.g. "TuMS § 49 lg 4". */
+  code: string;
+  /** Short headline. */
+  title: string;
+  /** Plain-language summary of the rule and the figures. */
+  summary: string;
+  /** Statutory / EMTA basis. */
+  basis: string;
+}
+
+/**
+ * Reference catalogue of the deterministic deduction restrictions and the
+ * tax-free limits an Estonian micro-company hits most often. Surfaced read-only
+ * via the `earveldaja://tax_rules` resource. Figures verified against EMTA
+ * (no 2026 changes to VAT rates, representation or donation limits).
+ */
+export const DEDUCTION_AND_LIMIT_RULES: readonly TaxRuleReference[] = [
+  {
+    code: "KMS § 30",
+    title: "Külaliste vastuvõtt / esinduskulu — sisendkäibemaks ei ole mahaarvatav",
+    summary:
+      "Külaliste või koostööpartnerite vastuvõtu kulude (toitlustus, meelelahutus) sisendkäibemaksu üldjuhul maha ei arvata. Oma töötajate toitlustus/majutus võib olla erisoodustus (v.a töölähetuse majutus).",
+    basis: "KMS § 30",
+  },
+  {
+    code: "KMS § 30 lg 4",
+    title: "Sõiduauto (M1) sisendkäibemaksu 50% piirang",
+    summary:
+      "M1-kategooria sõiduauto soetuse ja kasutuse sisendkäibemaksust võib üldjuhul maha arvata 50%. 100% eeldab erandit (tõendatud 100% ärikasutus EMTA teavitusega, takso, õppesõit, edasimüük/rent).",
+    basis: "KMS § 30 lg 4; KMS § 29 lg 1",
+  },
+  {
+    code: "TuMS § 49 lg 4",
+    title: "Vastuvõtukulude maksuvaba piirmäär",
+    summary:
+      "Vastuvõtukulud on tulumaksuvabad kuni 50 € kalendrikuus + 2% samal kalendriaastal sotsiaalmaksuga maksustatud väljamaksetest (arvestatakse kalendriaasta algusest kasvavalt). Piirmäära ületav osa maksustatakse tulumaksuga 22/78.",
+    basis: "TuMS § 49 lg 4",
+  },
+  {
+    code: "TuMS § 49 lg 2",
+    title: "Kingituste ja annetuste maksuvaba piirmäär",
+    summary:
+      "Tulumaksusoodustusega nimekirja kantud ühingutele tehtud kingitused/annetused on maksuvabad kuni 3% kalendriaasta sotsiaalmaksuga maksustatud väljamaksetest VÕI 10% eelmise majandusaasta kasumist (maksumaksja valib ühe piirmäära). Ületav osa maksustatakse 22/78. Soodustust on pikendatud kuni 31.12.2027.",
+    basis: "TuMS § 49 lg 2",
+  },
+];
+
+export interface TaxRulesReference {
+  note: string;
+  standard_vat_rate_timeline: readonly VatRatePeriod[];
+  reduced_vat_rates: readonly ReducedVatRate[];
+  deduction_and_limit_rules: readonly TaxRuleReference[];
+}
+
+/** Bundle the full Estonian tax reference dataset for the pull resource. */
+export function buildTaxRulesReference(): TaxRulesReference {
+  return {
+    note:
+      "Estonian VAT / income-tax reference for booking. Figures verified against EMTA / Riigi Teataja. " +
+      "Notes are advisory — confirm with the user before applying a restriction; the cumulative TuMS § 49 limits require the company's year-to-date payroll/profit to compute the taxable excess.",
+    standard_vat_rate_timeline: STANDARD_VAT_RATE_TIMELINE,
+    reduced_vat_rates: REDUCED_VAT_RATES,
+    deduction_and_limit_rules: DEDUCTION_AND_LIMIT_RULES,
+  };
+}
+
 export type TaxNoteSeverity = "warning" | "info";
 
 export interface EstonianTaxNote {

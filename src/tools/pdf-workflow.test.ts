@@ -330,6 +330,60 @@ describe("pdf workflow tools", () => {
     expect(payload.tax_notes).toEqual([]);
   });
 
+  it("warns when a standard VAT rate does not match the invoice date", async () => {
+    const { handler } = setupPdfWorkflowTool("validate_invoice_data");
+
+    const result = await handler({
+      total_net: 100,
+      total_vat: 22,
+      total_gross: 122,
+      items: JSON.stringify([{ total_net_price: 100, vat_rate_dropdown: "22" }]),
+      invoice_date: "2025-08-01", // standard rate is 24% from 1.07.2025
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.valid).toBe(true);
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("does not match the standard VAT rate in force on 2025-08-01 (24%)")]),
+    );
+  });
+
+  it("does not warn when the standard rate matches the date, or for reduced rates", async () => {
+    const { handler } = setupPdfWorkflowTool("validate_invoice_data");
+
+    const matching = parseMcpResponse((await handler({
+      total_net: 100,
+      total_vat: 24,
+      total_gross: 124,
+      items: JSON.stringify([{ total_net_price: 100, vat_rate_dropdown: "24" }]),
+      invoice_date: "2025-08-01",
+    })).content[0]!.text);
+    expect(matching.warnings.some((w: string) => w.includes("standard VAT rate in force"))).toBe(false);
+
+    const reduced = parseMcpResponse((await handler({
+      total_net: 100,
+      total_vat: 9,
+      total_gross: 109,
+      items: JSON.stringify([{ total_net_price: 100, vat_rate_dropdown: "9" }]),
+      invoice_date: "2025-08-01",
+    })).content[0]!.text);
+    expect(reduced.warnings.some((w: string) => w.includes("standard VAT rate in force"))).toBe(false);
+    expect(reduced.warnings.some((w: string) => w.includes("unusual VAT rate"))).toBe(false);
+  });
+
+  it("skips the date-aware rate check when no invoice date is given", async () => {
+    const { handler } = setupPdfWorkflowTool("validate_invoice_data");
+
+    const payload = parseMcpResponse((await handler({
+      total_net: 100,
+      total_vat: 22,
+      total_gross: 122,
+      items: JSON.stringify([{ total_net_price: 100, vat_rate_dropdown: "22" }]),
+    })).content[0]!.text);
+
+    expect(payload.warnings.some((w: string) => w.includes("standard VAT rate in force"))).toBe(false);
+  });
+
   it("uploads the source document when creating a purchase invoice from a file", async () => {
     const filePath = createTempInvoiceFile("invoice-upload.pdf", "pdf-bytes");
     mockedResolveFileInput.mockResolvedValue({ path: filePath });

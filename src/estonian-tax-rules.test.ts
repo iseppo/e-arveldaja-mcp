@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   standardVatRateOn,
   detectVatDeductionNotes,
+  buildTaxRulesReference,
   STANDARD_VAT_RATE_TIMELINE,
   REDUCED_VAT_RATES,
 } from "./estonian-tax-rules.js";
@@ -77,5 +78,29 @@ describe("detectVatDeductionNotes", () => {
     expect(detectVatDeductionNotes({ supplierName: "Microsoft Ireland", descriptions: ["Cloud subscription"] })).toEqual([]);
     expect(detectVatDeductionNotes({})).toEqual([]);
     expect(detectVatDeductionNotes({ descriptions: [null, undefined, ""] })).toEqual([]);
+  });
+});
+
+describe("buildTaxRulesReference", () => {
+  it("bundles the VAT timeline, reduced rates, and the limit rules", () => {
+    const ref = buildTaxRulesReference();
+    expect(ref.standard_vat_rate_timeline).toBe(STANDARD_VAT_RATE_TIMELINE);
+    expect(ref.reduced_vat_rates).toBe(REDUCED_VAT_RATES);
+
+    const codes = ref.deduction_and_limit_rules.map(r => r.code);
+    expect(codes).toEqual(
+      expect.arrayContaining(["KMS § 30", "KMS § 30 lg 4", "TuMS § 49 lg 4", "TuMS § 49 lg 2"]),
+    );
+  });
+
+  it("states the verified representation and donation figures", () => {
+    const ref = buildTaxRulesReference();
+    const representation = ref.deduction_and_limit_rules.find(r => r.code === "TuMS § 49 lg 4");
+    expect(representation?.summary).toContain("50 €");
+    expect(representation?.summary).toContain("2%");
+
+    const donations = ref.deduction_and_limit_rules.find(r => r.code === "TuMS § 49 lg 2");
+    expect(donations?.summary).toContain("3%");
+    expect(donations?.summary).toContain("10%");
   });
 });

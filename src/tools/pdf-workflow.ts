@@ -19,7 +19,7 @@ import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNum
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { extractReceiptFieldsFromText } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
-import { detectVatDeductionNotes } from "../estonian-tax-rules.js";
+import { detectVatDeductionNotes, standardVatRateOn } from "../estonian-tax-rules.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];
@@ -191,13 +191,29 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         }
       }
 
-      // Check VAT rate consistency
+      // Check VAT rate consistency. Reduced/zero rates are date-independent;
+      // the standard rate changed over time (20→22%→24%), so a line carrying a
+      // *standard-looking* rate that does not match the rate in force on the
+      // invoice date is flagged as a likely period/OCR mismatch.
+      const KNOWN_REDUCED_RATES = [0, 5, 9, 13];
+      const KNOWN_STANDARD_RATES = [20, 22, 24];
+      const expectedStandardRate = standardVatRateOn(invoice_date);
       for (let idx = 0; idx < parsedItems.length; idx++) {
         const item = parsedItems[idx]!;
         const rate = parseVatRate(item.vat_rate_dropdown);
         if (rate !== undefined) {
-          if (![0, 5, 9, 13, 22, 24].includes(rate)) {
+          const isKnownRate = KNOWN_REDUCED_RATES.includes(rate) || KNOWN_STANDARD_RATES.includes(rate);
+          if (!isKnownRate) {
             warnings.push(`Item ${idx + 1} "${item.custom_title ?? ""}": unusual VAT rate ${rate}%`);
+          } else if (
+            expectedStandardRate !== null &&
+            KNOWN_STANDARD_RATES.includes(rate) &&
+            rate !== expectedStandardRate
+          ) {
+            warnings.push(
+              `Item ${idx + 1} "${item.custom_title ?? ""}": ${rate}% does not match the standard VAT rate in force on ${invoice_date} (${expectedStandardRate}%). ` +
+              `A reduced rate (0/9/13%) would be fine; confirm this is not an OCR misread or a wrong booking period.`
+            );
           }
         }
         if (item.total_net_price !== undefined && item.total_net_price < 0) {
