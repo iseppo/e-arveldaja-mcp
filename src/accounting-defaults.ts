@@ -21,6 +21,17 @@ export const DIVIDEND_PAYABLE_ACCOUNT = 2370;
 /** Corporate income tax payable (Tulumaksu kohustus) */
 export const CIT_PAYABLE_ACCOUNT = 2540;
 
+/**
+ * EMTA prepayment account (EMTA ettemaksukonto) — the single tax-authority
+ * prepayment account all taxes are drawn from (post-2021). A bank transfer to
+ * EMTA is a top-up of this asset account (Debit 1516 / Credit bank); the
+ * tax-expense entries that draw it down are created by e-arveldaja itself from
+ * the EMTA prepayment-account statement (Aruandlus → EMTA ettemaksukonto kanded),
+ * not from the bank payment. So tax-payment transfers default their contra
+ * account here, never to a tax-expense account or a purchase invoice.
+ */
+export const EMTA_PREPAYMENT_ACCOUNT = 1516;
+
 /** Share capital (Osakapital) */
 export const SHARE_CAPITAL_ACCOUNT = 3000;
 

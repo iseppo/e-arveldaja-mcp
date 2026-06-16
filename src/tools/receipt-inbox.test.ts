@@ -26,6 +26,7 @@ import {
 } from "./receipt-extraction.js";
 import {
   applyReverseChargeAutoDetection,
+  buildClassificationSuggestion,
   buildDryRunCreatedInvoicePreview,
   buildReferencedInvoiceForPaymentReceipt,
   deriveOwnCompanyRegistryCode,
@@ -1291,6 +1292,37 @@ describe("categorizeTransactionGroup", () => {
 
     expect(result.category).toBe("card_purchases");
     expect(result.apply_mode).toBe("purchase_invoice");
+  });
+});
+
+describe("buildClassificationSuggestion — EMTA tax payments", () => {
+  const chart = [
+    { id: 1516, name_est: "EMTA ettemaksukonto", name_eng: "ETCB prepayment account", account_type_est: "Varad", account_type_eng: "Assets" },
+    { id: 5230, name_est: "Maksukulu", name_eng: "Tax expense", account_type_est: "Kulud", account_type_eng: "Expenses" },
+  ] as any;
+  const articles = [
+    { id: 9, name_est: "Maksud", name_eng: "Taxes", accounts_id: 5230, is_disabled: false, priority: 1 },
+  ] as any;
+
+  it("books EMTA transfers to the EMTA prepayment account (1516), not a tax-expense account, and suggests no purchase article", () => {
+    const suggestion = buildClassificationSuggestion(articles, chart, "tax_payments", "emta");
+
+    expect(suggestion.purchase_account_id).toBe(1516);
+    expect(suggestion.purchase_account_name).toBe("1516 EMTA ettemaksukonto");
+    expect(suggestion.purchase_article_id).toBeUndefined();
+    expect(suggestion.reason).toContain("ettemaksukonto");
+    expect(suggestion.reason).toContain("EMTA ettemaksukonto kanded");
+  });
+
+  it("falls back to a name match when account 1516 is not in this company's chart", () => {
+    const altChart = [
+      { id: 2999, name_est: "EMTA ettemaksukonto", name_eng: "ETCB prepayment account", account_type_est: "Varad", account_type_eng: "Assets" },
+    ] as any;
+
+    const suggestion = buildClassificationSuggestion(articles, altChart, "tax_payments", "emta");
+
+    expect(suggestion.purchase_account_id).toBe(2999);
+    expect(suggestion.purchase_article_id).toBeUndefined();
   });
 });
 

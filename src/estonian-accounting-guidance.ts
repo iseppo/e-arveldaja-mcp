@@ -245,14 +245,14 @@ export function buildClassificationReviewGuidance(params: {
   switch (params.category) {
     case "tax_payments":
       return {
-        recommendation: "Soovitus: ära tee sellest ostuarvet. Kajasta makse olemasoleva maksukohustuse, ettemaksu või viivise/intiressina alles pärast seda, kui makse liik on kinnitatud.",
+        recommendation: "Soovitus: ära tee sellest ostuarvet. Ülekanne EMTA-le on EMTA ettemaksukonto täiendamine — kajasta makse EMTA ettemaksukontole (deebet ettemaksukonto / kreedit pank). Konkreetsed maksukulud (käibemaks, tööjõumaksud, tulumaks jne) tekib e-arveldaja ise ettemaksukonto väljavõtte põhjal (Aruandlus → EMTA ettemaksukonto kanded).",
         compliance_basis: [
           BASIS_RPS_DOCUMENT,
           BASIS_RPS_SUBSTANCE,
         ],
         follow_up_questions: [
-          `Millise maksu või maksuotsuse kohta ${params.displayCounterparty} makse tegelikult käib?`,
-          "Kas see tasub olemasolevat maksukohustust, ettemaksu, viivist või trahvi?",
+          `Kas ${params.displayCounterparty} makse on EMTA ettemaksukonto täiendamine või mõni muu maksega seotud liikumine?`,
+          "Kas EMTA ettemaksukonto väljavõte on e-arveldajasse sisse loetud, et tekiks vastavad maksukulu kanded?",
         ],
       };
     case "salary_payroll":

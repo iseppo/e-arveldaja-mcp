@@ -58,7 +58,7 @@ import {
   buildReceiptReviewGuidance,
 } from "../estonian-accounting-guidance.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
-import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
+import { DEFAULT_LIABILITY_ACCOUNT, EMTA_PREPAYMENT_ACCOUNT } from "../accounting-defaults.js";
 import {
   RECEIPT_BATCH_EXECUTION_MODES,
   type ReceiptBatchExecutionMode,
@@ -450,7 +450,7 @@ function applyReceiptAutoBookingRule(
   );
 }
 
-function buildClassificationSuggestion(
+export function buildClassificationSuggestion(
   purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
   accounts: Account[],
   category: TransactionClassificationCategory,
@@ -468,6 +468,12 @@ function buildClassificationSuggestion(
   let articleKeywords = ["muu", "other", "general"];
   let accountKeywords = ["muu", "general", "kulud"];
   let reason = "Fallback booking suggestion from generic expense keywords.";
+  // When set, the contra account is fixed to a specific GL account rather than
+  // resolved from a purchase article / keyword search (used for tax payments).
+  let forcedAccountId: number | undefined;
+  // When true, no purchase article is suggested (the booking is a direct GL
+  // entry against the bank, not a purchase).
+  let suppressArticle = false;
 
   if (category === "saas_subscriptions") {
     articleKeywords = ["software", "subscription", "internet", "it", "sideteenus"];
@@ -478,9 +484,19 @@ function buildClassificationSuggestion(
     accountKeywords = ["bank", "fee", "teenus"];
     reason = "Counterparty and description patterns match bank service fees.";
   } else if (category === "tax_payments") {
-    articleKeywords = ["maks", "tax"];
-    accountKeywords = ["maks", "tax"];
-    reason = "Counterparty matches EMTA / Maksu- ja Tolliamet.";
+    // A transfer to EMTA is a top-up of the EMTA prepayment account
+    // (ettemaksukonto, an asset) — Debit 1516 / Credit bank — not a tax
+    // expense and not a purchase. e-arveldaja itself creates the tax-expense
+    // entries that draw the prepayment account down, from the EMTA
+    // prepayment-account statement (Aruandlus → EMTA ettemaksukonto kanded).
+    forcedAccountId = EMTA_PREPAYMENT_ACCOUNT;
+    accountKeywords = ["ettemaksukonto", "emta ettemaks"];
+    suppressArticle = true;
+    reason =
+      "Transfer to EMTA — book to the EMTA prepayment account (ettemaksukonto). " +
+      "The tax-expense entries that draw it down are created separately in e-arveldaja " +
+      "from the EMTA prepayment-account statement (Aruandlus → EMTA ettemaksukonto kanded). " +
+      "Do not create a purchase invoice for this payment.";
   } else if (category === "salary_payroll") {
     articleKeywords = ["salary", "palk", "payroll"];
     accountKeywords = ["salary", "palk", "payroll"];
@@ -509,16 +525,24 @@ function buildClassificationSuggestion(
     reason = "Incoming payment without a sale invoice needs manual sales-side follow-up.";
   }
 
-  const article = findPurchaseArticleByKeywords(purchaseArticlesWithVat, articleKeywords)
-    ?? findPurchaseArticleByKeywords(purchaseArticlesWithVat, ["muu", "other", "general"]);
-  const account = article?.accounts_id
-    ? accounts.find(candidate => candidate.id === article.accounts_id)
-    : findAccountByKeywords(accounts, accountKeywords);
+  const article = suppressArticle
+    ? undefined
+    : findPurchaseArticleByKeywords(purchaseArticlesWithVat, articleKeywords)
+      ?? findPurchaseArticleByKeywords(purchaseArticlesWithVat, ["muu", "other", "general"]);
+  // A forced account id (e.g. the EMTA prepayment account) wins over any
+  // article/keyword resolution; if that exact id is not in this company's
+  // chart, fall back to a name match (e.g. "ettemaksukonto") before giving up.
+  const account = forcedAccountId !== undefined
+    ? (accounts.find(candidate => candidate.id === forcedAccountId)
+        ?? findAccountByKeywords(accounts, accountKeywords))
+    : article?.accounts_id
+      ? accounts.find(candidate => candidate.id === article.accounts_id)
+      : findAccountByKeywords(accounts, accountKeywords);
 
   const defaultSuggestion: ClassifiedTransactionSuggestion = {
     purchase_article_id: article?.id,
     purchase_article_name: article?.name_est ?? article?.name_eng,
-    purchase_account_id: account?.id ?? article?.accounts_id,
+    purchase_account_id: account?.id ?? forcedAccountId ?? article?.accounts_id,
     purchase_account_name: account ? `${account.id} ${account.name_est}` : undefined,
     liability_account_id: DEFAULT_LIABILITY_ACCOUNT,
     source: article ? "keyword_match" : "fallback",
