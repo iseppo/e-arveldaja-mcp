@@ -359,23 +359,14 @@ function resolveOwnCompanyClientId(
 export function registerWiseImportTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "import_wise_transactions",
-    "Parse the regular Wise transactions CSV export and create bank transactions in e-arveldaja. " +
-    "Does not support the special statement/report CSV exports. " +
-    "Skips REFUNDED, NEUTRAL, and zero-amount entries. " +
-    "When creating rows, preserves the import direction as type D for incoming rows and type C for outgoing rows; do not infer accounting treatment from an existing transaction's type. " +
-    "Wise fees are created as separate transactions (for correct VAT/expense treatment). " +
-    "Inter-account transfers (TRANSFER-*, BANK_DETAILS_PAYMENT_RETURN-*) are auto-reconciled: " +
-    "if the other bank account already has a confirmed journal entry, the Wise transaction is left " +
-    "unconfirmed to avoid double-counting. Otherwise it is confirmed against the other bank account. " +
-    "DRY RUN by default — set execute=true to actually create transactions.",
+    "Import Wise transaction-history CSV rows. Direct-call contract: DRY RUN by default; execute=true creates rows; preserve import direction as type D incoming / type C outgoing; fees use separate transactions; inter-account transfers avoid double-counting confirmed counterpart journals.",
     {
       file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions."),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID for the Wise account in e-arveldaja"),
-      fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account. Use list_account_dimensions to find it."),
+      fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account."),
       fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),
       inter_account_dimension_id: z.number().optional().describe(
-        "Bank account dimension ID for the other bank account (e.g. LHV) used for inter-account transfers. " +
-        "Auto-detected if only one other bank account exists. Required when there are 3+ bank accounts."
+        "Other bank account dimension ID for inter-account transfers. Auto-detected if only one other bank account exists; required with 3+ bank accounts."
       ),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import transactions from this date (YYYY-MM-DD)"),

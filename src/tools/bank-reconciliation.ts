@@ -578,15 +578,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
   );
 
   registerCapturedTool("reconcile_inter_account_transfers",
-    "Match and confirm inter-account transfers (own bank account to own bank account). " +
-    "DUPLICATE-SAFE: checks existing journal entries before confirming — skips transfers already " +
-    "journalized from the other account side (e.g. confirmed via CAMT import). " +
-    "Phase 1: finds reciprocal transaction pairs across different bank accounts with matching amounts, dates, and own-account evidence, including mislabelled same-type bank rows. " +
-    "Phase 2: detects one-sided transfers where counterparty name matches the company name or " +
-    "counterparty IBAN matches another own bank account — confirms them with the target account. " +
-    "If there are 2+ other bank accounts and IBAN is missing, provide target_accounts_dimensions_id. " +
-    "DRY RUN by default — set execute=true to confirm. " +
-    "Already-handled transfers are reported in the output for review/deletion.",
+    "Match own-account bank transfers. DUPLICATE-SAFE: skips transfers already journalized from the other side. DRY RUN by default; execute=true confirms. For one-sided transfers with 2+ possible targets, pass target_accounts_dimensions_id.",
     {
       execute: z.boolean().optional().describe("Actually confirm matched pairs (default false = dry run)"),
       max_date_gap: z.number().int().min(0).max(MAX_INTER_ACCOUNT_DATE_GAP_DAYS).optional()

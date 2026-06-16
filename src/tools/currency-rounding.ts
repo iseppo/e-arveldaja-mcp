@@ -61,14 +61,10 @@ function categorizeDiff(diff: number): "small_rounding" | "fx_difference" | "rev
 
 export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "reconcile_currency_rounding",
-    "Scan PARTIALLY_PAID purchase invoices for small EUR/booking-vs-payment differences caused by Wise card-payment exchange-rate jääk. " +
-    "Buckets each candidate by diff size: <0.10 EUR → in-place fix (rewrites base_gross_price / currency_rate or gross_price for EUR invoices); " +
-    "0.10–1.00 EUR → books an FX journal posting to 8500 (gain) or 8600 (loss) against the supplier liability; " +
-    ">1.00 EUR → flagged for manual review (likely not a kursivahe). " +
-    "DRY RUN by default — set execute=true to apply.",
+    "Reconcile small PARTIALLY_PAID purchase-invoice currency residuals. DRY RUN by default; execute=true applies in-place fixes for <0.10 EUR or FX journals for 0.10-1.00 EUR.",
     {
       execute: z.boolean().optional().describe("Apply the proposed fixes (default false = dry run)"),
-      max_candidates: z.number().int().positive().optional().describe("Limit to first N PARTIALLY_PAID invoices (debug)"),
+      max_candidates: z.number().int().positive().optional().describe("Limit to first N PARTIALLY_PAID invoices"),
       liability_accounts_id: z.number().int().positive().optional().describe(`Liability account for the supplier balance side of the FX posting (default ${DEFAULT_LIABILITY_ACCOUNT})`),
       fx_gain_account_id: z.number().int().positive().optional().describe(`Account for FX gains (diff < 0, paid less than booked) — default ${DEFAULT_FX_GAIN_ACCOUNT}`),
       fx_loss_account_id: z.number().int().positive().optional().describe(`Account for FX losses (diff > 0, paid more than booked) — default ${DEFAULT_FX_LOSS_ACCOUNT}`),

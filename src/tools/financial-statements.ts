@@ -271,9 +271,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
   );
 
   registerTool(server, "month_end_close_checklist",
-    "Generate month-end close checklist: unconfirmed journals/invoices, " +
-    "unreconciled bank transactions, overdue receivables/payables. " +
-    "Month-end due-date checks use UTC calendar dates. Borderline local-midnight cases may need manual review.",
+    "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables.",
     {
       month: z.string().regex(monthRegex, "Expected YYYY-MM").describe("Month to check (YYYY-MM, e.g. 2026-02)"),
       fresh: z.boolean().optional().describe("Clear cached API/reference data before running the checklist (use after web UI changes)."),

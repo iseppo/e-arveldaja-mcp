@@ -1198,9 +1198,9 @@ function buildReviewActionResponse(
 export function registerAccountingInboxTools(server: McpServer, api: ApiContext): void {
   registerTool(server,
     "accounting_inbox",
-    "Merged accounting inbox entry point. Use mode='scan' to detect likely CAMT/Wise/receipt inputs and recommend safe next steps, or mode='dry_run' to run the safe recommended dry-run steps and return one consolidated preview.",
+    "Merged accounting inbox. mode='scan' recommends safe next steps; mode='dry_run' also runs safe dry-run steps.",
     {
-      mode: z.enum(["scan", "dry_run"]).optional().describe("Workflow phase to run. scan returns only the prepared workflow plan; dry_run also runs safe dry-run steps."),
+      mode: z.enum(["scan", "dry_run"]).optional().describe("Workflow phase. scan plans; dry_run runs safe dry-run steps."),
       ...accountingInboxInputShape,
     },
     { ...readOnly, openWorldHint: true, title: "Accounting Inbox" },
@@ -1213,7 +1213,7 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
 
   registerTool(server,
     "prepare_accounting_inbox",
-    "Scan a workspace for likely CAMT statements, Wise CSV exports, and receipt folders, then recommend the next dry-run steps with sensible defaults and the fewest necessary questions.",
+    "Scan workspace inputs and recommend next dry-run accounting steps.",
     accountingInboxInputShape,
     { ...readOnly, openWorldHint: true, title: "Prepare Accounting Inbox" },
     async (params) => buildAccountingInboxScanResponse(api, params),
@@ -1221,7 +1221,7 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
 
   registerTool(server,
     "run_accounting_inbox_dry_runs",
-    "Scan a workspace, then automatically run the safe recommended dry-run accounting steps and return one consolidated preview for a non-accountant-friendly first pass.",
+    "Scan workspace inputs, run safe recommended dry runs, and return one consolidated preview.",
     accountingInboxInputShape,
     { ...readOnly, openWorldHint: true, title: "Run Accounting Inbox Dry Runs" },
     async (params) => buildAccountingInboxDryRunResponse(api, params),
@@ -1229,13 +1229,13 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
 
   registerTool(server,
     "continue_accounting_workflow",
-    "Read a previous accounting inbox or workflow response and return the next user-facing action. Also supports action='resolve_review' and action='prepare_action' for review-item state-machine steps.",
+    "Continue an accounting workflow response, resolve a review item, or prepare an approval action.",
     {
-      action: z.enum(["next", "resolve_review", "prepare_action"]).optional().describe("Workflow action to perform. next returns the recommended next action from workflow_state_json. resolve_review turns review_item_json into a plan. prepare_action turns review_item_json into a concrete approval action."),
-      workflow_state_json: jsonObjectInput.optional().describe("Previous response from accounting_inbox, prepare_accounting_inbox, run_accounting_inbox_dry_runs, continue_accounting_workflow, or an object containing a workflow field. Required for action='next'."),
+      action: z.enum(["next", "resolve_review", "prepare_action"]).optional().describe("next reads workflow_state_json; resolve_review/prepare_action read review_item_json."),
+      workflow_state_json: jsonObjectInput.optional().describe("Previous workflow response; required for action='next'."),
       review_item_json: jsonObjectInput.optional().describe("Review item object for action='resolve_review' or action='prepare_action'."),
-      save_as_rule: z.boolean().optional().describe("For action='prepare_action', prefer preparing a save_auto_booking_rule action when the review item represents a stable recurring treatment."),
-      rule_override_json: jsonObjectInput.optional().describe("For action='prepare_action', optional object with explicit rule fields such as purchase_article_id, purchase_account_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason, match, or category."),
+      save_as_rule: z.boolean().optional().describe("For action='prepare_action', prepare save_auto_booking_rule when appropriate."),
+      rule_override_json: jsonObjectInput.optional().describe("Optional explicit rule fields for action='prepare_action'."),
     },
     { ...readOnly, title: "Continue Accounting Workflow" },
     async ({ action, workflow_state_json, review_item_json, save_as_rule, rule_override_json }) => {
@@ -1282,7 +1282,7 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
 
   registerTool(server,
     "resolve_accounting_review_item",
-    "Turn one accounting review item into a concrete next-step plan: default handling, unresolved questions, and the safest follow-up workflow or tool.",
+    "Resolve one accounting review item into recommendation, questions, and next workflow/tool.",
     {
       review_item_json: jsonObjectInput.describe("Object from autopilot.needs_accountant_review[*].resolver_input or from a direct execution.needs_review / groups review item."),
     },
@@ -1295,11 +1295,11 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
 
   registerTool(server,
     "prepare_accounting_review_action",
-    "Prepare the concrete next action for one resolved accounting review item, such as deleting a duplicate transaction or saving a stable auto-booking rule.",
+    "Prepare the concrete approval action for one resolved accounting review item.",
     {
       review_item_json: jsonObjectInput.describe("Object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload."),
-      save_as_rule: z.boolean().optional().describe("When true, prefer preparing a save_auto_booking_rule action when the review item represents a stable recurring treatment."),
-      rule_override_json: jsonObjectInput.optional().describe("Optional object with explicit rule fields such as purchase_article_id, purchase_account_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason, match, or category."),
+      save_as_rule: z.boolean().optional().describe("Prefer preparing save_auto_booking_rule when appropriate."),
+      rule_override_json: jsonObjectInput.optional().describe("Optional explicit rule fields for save_auto_booking_rule."),
     },
     { ...readOnly, title: "Prepare Accounting Review Action" },
     async ({ review_item_json, save_as_rule, rule_override_json }) => {

@@ -27,7 +27,7 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
   // =====================
 
   registerTool(server, "list_sale_invoices",
-    "List sales invoices. Paginated. Returns brief view (id, number, clients_id, client_name, dates, status/payment_status, gross/net price, currency, term_days) by default; pass view='full' or call get_sale_invoice for items, deliveries, and remaining detail.",
+    "List sales invoices. Paginated. Brief view by default; use view='full' or get_sale_invoice for detail.",
     { ...pageParam.shape, ...viewParam },
     { ...readOnly, title: "List Sale Invoices" }, async (params) => {
     const result = await api.saleInvoices.list(params);
@@ -86,7 +86,7 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "update_sale_invoice", "Update a sales invoice. Server-managed fields (id, status, registered, register_date) are rejected — use the dedicated confirm/invalidate tools. Once CONFIRMED, create_date and journal_date are audit-locked; invalidate_sale_invoice first to edit them.", {
+  registerTool(server, "update_sale_invoice", "Update draft sales-invoice fields. Server-managed fields are rejected; confirmed invoice dates require invalidate_sale_invoice first.", {
     id: coerceId.describe("Invoice ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {

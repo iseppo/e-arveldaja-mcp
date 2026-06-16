@@ -31,7 +31,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
   // =====================
 
   registerTool(server, "list_purchase_invoices",
-    "List purchase invoices. Paginated. Returns brief view (id, number, clients_id, client_name, dates, status/payment_status, gross/net/vat price, currency, term_days, bank_ref_number) by default; pass view='full' or call get_purchase_invoice for items and remaining detail.",
+    "List purchase invoices. Paginated. Brief view by default; use view='full' or get_purchase_invoice for detail.",
     { ...pageParam.shape, ...viewParam },
     { ...readOnly, title: "List Purchase Invoices" }, async (params) => {
     const result = await api.purchaseInvoices.list(params);
@@ -127,7 +127,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       return { content: [{ type: "text", text: toMcpJson(result) }] };
     });
 
-  registerTool(server, "update_purchase_invoice", "Update a purchase invoice. Server-managed fields (id, status, registered, register_date, payment_status) are rejected — use the dedicated confirm/invalidate tools. Once CONFIRMED, create_date and journal_date are audit-locked; invalidate_purchase_invoice first to edit them.", {
+  registerTool(server, "update_purchase_invoice", "Update draft purchase-invoice fields. Server-managed fields are rejected; confirmed invoice dates require invalidate_purchase_invoice first.", {
     id: coerceId.describe("Invoice ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {

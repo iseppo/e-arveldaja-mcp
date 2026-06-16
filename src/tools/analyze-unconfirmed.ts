@@ -58,10 +58,7 @@ function buildBankJournalDuplicateKey(
 export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "analyze_unconfirmed_transactions",
-    "Analyze all unconfirmed bank transactions and suggest actions: " +
-    "duplicate detection (journal already exists), invoice matching, " +
-    "inter-account transfer detection, and expense pattern recognition. " +
-    "Read-only — does not modify any data.",
+    "Read-only analysis of unconfirmed bank transactions: duplicates, invoice matches, own-account transfers, and expense patterns.",
     {
       min_confidence: z.number().optional().describe("Minimum confidence for invoice matches 0-100 (default 40)"),
       accounts_dimensions_id: z.number().optional().describe("Filter to a specific bank account dimension ID"),

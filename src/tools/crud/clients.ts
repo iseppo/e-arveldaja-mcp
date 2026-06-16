@@ -23,7 +23,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
   // =====================
 
   registerTool(server, "list_clients",
-    "List all clients (buyers/suppliers). Paginated. Returns brief view (id, name, code, email, vat_no, is_client/is_supplier flags) by default; pass view='full' or call get_client for full detail.",
+    "List clients. Paginated. Brief view by default; use view='full' or get_client for detail.",
     { ...pageParam.shape, ...viewParam },
     { ...readOnly, title: "List Clients" }, async (params) => {
     const result = await api.clients.list(params);
@@ -67,7 +67,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "update_client", "Update an existing client. Server-managed fields (id, is_active, deactivated_date) are rejected — use the dedicated deactivate/restore tools.", {
+  registerTool(server, "update_client", "Update client fields. Server-managed activation fields are rejected; use deactivate/restore tools.", {
     id: coerceId.describe("Client ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Client" }, async ({ id, data }) => {

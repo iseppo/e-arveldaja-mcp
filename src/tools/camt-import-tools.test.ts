@@ -1,6 +1,7 @@
 import { readFile } from "fs/promises";
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { resolveFileInput } from "../file-validation.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
@@ -102,11 +103,35 @@ function setupCamtTool(options: {
 
   return {
     api,
+    server,
     handler: getRegisteredToolHandler(server, options.toolName ?? "import_camt053"),
   };
 }
 
+function getToolMetadataText(server: { registerTool: ReturnType<typeof vi.fn> }, toolName: string): string {
+  const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
+  if (!registration) throw new Error(`Tool was not registered: ${toolName}`);
+  const options = registration[1] as { description?: string; inputSchema?: Record<string, unknown> };
+  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
+  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
+}
+
 describe("camt import tool", () => {
+  it("keeps CAMT metadata compact while retaining dry-run and execute approval semantics", () => {
+    const { server } = setupCamtTool();
+
+    const importMetadata = getToolMetadataText(server, "import_camt053");
+    expect(importMetadata).toContain("DRY RUN by default");
+    expect(importMetadata).toContain("Actually create transactions");
+    expect(importMetadata).not.toContain("AcctSvcrRef");
+    expect(importMetadata).not.toContain("base64 payload");
+
+    const processMetadata = getToolMetadataText(server, "process_camt053");
+    expect(processMetadata).toContain("mode");
+    expect(processMetadata).toContain("execute");
+    expect(processMetadata).toContain("after approval");
+  });
+
   describe("process_camt053 wrapper", () => {
     it("runs CAMT parsing through the merged entry point", async () => {
       mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });

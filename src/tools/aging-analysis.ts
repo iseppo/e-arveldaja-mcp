@@ -63,9 +63,7 @@ function bucketLabel(days: number): string {
 export function registerAgingTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "compute_receivables_aging",
-    "Compute receivables aging report (nõuete vanusanalüüs). " +
-    "Groups unpaid sale invoices into aging buckets by client. " +
-    "Default as_of_date uses the server's UTC calendar date. Pass as_of_date explicitly if you need a local cutoff.",
+    "Compute receivables aging by client from unpaid sale invoices. Pass as_of_date for a specific cutoff.",
     {
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },
@@ -159,9 +157,7 @@ export function registerAgingTools(server: McpServer, api: ApiContext): void {
   );
 
   registerTool(server, "compute_payables_aging",
-    "Compute payables aging report (kohustuste vanusanalüüs). " +
-    "Groups unpaid purchase invoices into aging buckets by supplier. " +
-    "Default as_of_date uses the server's UTC calendar date. Pass as_of_date explicitly if you need a local cutoff.",
+    "Compute payables aging by supplier from unpaid purchase invoices. Pass as_of_date for a specific cutoff.",
     {
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },

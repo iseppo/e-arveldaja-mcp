@@ -1094,7 +1094,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
 
 export function registerAnnualReportTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "prepare_year_end_close",
-    "Analyze the fiscal year and prepare a dry-run year-end close package: unresolved items, accrual review, balance check, and draft P&L closing entries.",
+    "Prepare a dry-run year-end close package with unresolved items, balance check, and draft P&L closing entries.",
     yearShape,
     { ...readOnly, title: "Prepare Year-End Close" },
     async ({ year }) => {
@@ -1112,7 +1112,7 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
   );
 
   registerTool(server, "generate_annual_report_data",
-    "Generate structured annual report data for the Estonian RTJ micro/small-entity format: balance sheet, income statement (Schema 1), cash-flow data, ratios, and note inputs.",
+    "Generate Estonian RTJ micro/small-entity annual-report data: statements, cash-flow data, ratios, and notes.",
     yearShape,
     { ...readOnly, title: "Generate Annual Report Data" },
     async ({ year }) => {
@@ -1127,7 +1127,7 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
   );
 
   registerTool(server, "execute_year_end_close",
-    "Create the executable closing journal entries proposed by prepare_year_end_close. Requires confirm=true. Creates draft journals only; review and register them separately.",
+    "Create draft closing journals from prepare_year_end_close. Requires confirm=true; review/register separately.",
     {
       ...yearShape,
       confirm: z.boolean().describe("Must be true to create the closing journal entries"),

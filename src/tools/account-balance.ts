@@ -107,14 +107,14 @@ export async function computeAccountBalance(
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "compute_account_balance",
-    "Compute an account balance from journal postings, with optional client and date filters. Applies the account's debit/credit direction automatically.",
+    "Compute account balance from journal postings with optional client/date filters.",
     {
       account_id: z.number().describe("Account number (e.g. 2110 for short-term loans)"),
       client_id: z.number().optional().describe("Filter by client ID"),
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
       include_entries: z.boolean().optional().describe("Include individual entries in response (default false)"),
-      fresh: z.boolean().optional().describe("Clear cached API/reference data before computing this balance (use after web UI changes)."),
+      fresh: z.boolean().optional().describe("Clear cached API/reference data first."),
     },
     { ...readOnly, title: "Compute Account Balance" },
     async ({ account_id, client_id, date_from, date_to, include_entries, fresh }) => {
@@ -147,11 +147,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
   );
 
   registerTool(server, "compute_client_debt",
-    "Compute how much the company owes the client and vice versa across selected accounts (default: 2110, 2310, 1210). Uses journal D/C postings.",
+    "Compute net position against a client across selected accounts.",
     {
       client_id: coerceId.describe("Client ID"),
       account_ids: z.string().optional().describe("Comma-separated account IDs to check (default: 2110,2310,1210)"),
-      fresh: z.boolean().optional().describe("Clear cached API/reference data before computing this client position (use after web UI changes)."),
+      fresh: z.boolean().optional().describe("Clear cached API/reference data first."),
     },
     { ...readOnly, title: "Compute Client Net Position" },
     async ({ client_id, account_ids, fresh }) => {

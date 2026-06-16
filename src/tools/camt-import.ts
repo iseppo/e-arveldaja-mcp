@@ -1169,10 +1169,10 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
 
   registerCapturedTool(
     "import_camt053",
-    "Parse a CAMT.053 bank statement XML file and create bank transactions in e-arveldaja. Skips existing duplicates by AcctSvcrRef bank reference and exact duplicate rows within the same file. DRY RUN by default.",
+    "Import CAMT.053 bank-statement XML. DRY RUN by default; execute=true creates non-duplicate transactions.",
     {
       file_path: z.string().describe("Absolute path to the CAMT.053 XML file."),
-      accounts_dimensions_id: coerceId.describe("Bank account dimension ID in e-arveldaja. Use list_account_dimensions to find it."),
+      accounts_dimensions_id: coerceId.describe("Bank account dimension ID in e-arveldaja."),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),

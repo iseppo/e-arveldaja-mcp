@@ -592,10 +592,7 @@ function matchSellsToCapitalGains(
 export function registerLightyearTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "parse_lightyear_statement",
-    "Parse a Lightyear account statement CSV. Extracts investment trades (Buy/Sell), " +
-    "distributions, deposits, withdrawals, and cash reconciliation gaps. " +
-    "Pairs foreign currency trades with their FX conversion entries. " +
-    "Returns summary by default — set include_rows=true for individual trade/distribution details.",
+    "Parse a Lightyear account statement CSV. Returns summary by default; set include_rows=true for trade/distribution details.",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
       date_from: z.string().optional().describe("Only include entries from this date (YYYY-MM-DD)"),
@@ -840,10 +837,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   );
 
   registerTool(server, "book_lightyear_trades",
-    "Create journal entries for Lightyear stock Buy/Sell trades. " +
-    "Checks for duplicates using Lightyear reference IDs (stored as LY:{ref} in document_number). " +
-    "For sells: requires capital_gains_file to determine cost basis and recognized gain/loss. " +
-    "Without it, sells are skipped with a warning.",
+    "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss.",
     {
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
       capital_gains_file: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sell entries)"),

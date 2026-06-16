@@ -23,7 +23,7 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
   // =====================
 
   registerTool(server, "list_products",
-    "List all products/services. Paginated. Returns brief view (id, name, code, sales_price, unit) by default; pass view='full' or call get_product for full detail.",
+    "List products/services. Paginated. Brief view by default; use view='full' or get_product for detail.",
     { ...pageParam.shape, ...viewParam },
     { ...readOnly, title: "List Products" }, async (params) => {
     const result = await api.products.list(params);
@@ -65,7 +65,7 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
     });
   });
 
-  registerTool(server, "update_product", "Update a product. Server-managed fields (id, is_active, deactivated_date) are rejected — use the dedicated deactivate/restore tools.", {
+  registerTool(server, "update_product", "Update product fields. Server-managed activation fields are rejected; use deactivate/restore tools.", {
     id: coerceId.describe("Product ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Product" }, async ({ id, data }) => {

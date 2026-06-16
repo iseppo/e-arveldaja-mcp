@@ -228,13 +228,10 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
   });
 
   registerTool(server, "batch_delete_transactions",
-    "Delete multiple unconfirmed (PROJECT) transactions in one call. IRREVERSIBLE. " +
-    "Runs sequentially; CONFIRMED transactions are skipped with a clear reason (they must be invalidated first). " +
-    "Transient API errors on the pre-delete lookup are surfaced as `lookup_failed` so they can be retried, " +
-    "distinct from `skipped_missing` (the transaction no longer exists).",
+    "Delete multiple PROJECT transactions. IRREVERSIBLE. CONFIRMED rows are skipped; lookup failures are reported per ID.",
     {
       ids: z.array(z.number().int().positive()).min(1).max(500).describe("Transaction IDs (positive integers, 1-500 entries)"),
-      reason: z.string().min(1).max(500).describe("Short audit note explaining why this batch is being deleted (e.g. 're-import duplicates of confirmed journals'). Required — max 500 chars."),
+      reason: z.string().min(1).max(500).describe("Short audit note for the batch delete. Required, max 500 chars."),
     },
     { ...destructive, title: "Batch Delete Transactions" },
     async ({ ids, reason }) => {

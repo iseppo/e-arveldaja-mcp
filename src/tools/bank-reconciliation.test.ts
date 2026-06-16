@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { registerBankReconciliationTools, matchScore } from "./bank-reconciliation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
@@ -37,6 +38,27 @@ function setupReconciliationTool(options: {
   }
 
   return registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+}
+
+function getReconciliationToolOptions(toolName: string): { description?: string; inputSchema?: Record<string, unknown> } {
+  const server = { registerTool: vi.fn() } as any;
+  const api = {
+    transactions: { listAll: vi.fn(), confirm: vi.fn() },
+    saleInvoices: { listAll: vi.fn() },
+    purchaseInvoices: { listAll: vi.fn() },
+    readonly: {
+      getBankAccounts: vi.fn(),
+      getAccountDimensions: vi.fn(),
+      getInvoiceInfo: vi.fn(),
+    },
+    journals: { listAllWithPostings: vi.fn() },
+    clients: { findByName: vi.fn() },
+  } as any;
+
+  registerBankReconciliationTools(server, api);
+  const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
+  if (!registration) throw new Error(`Tool was not registered: ${toolName}`);
+  return registration[1] as { description?: string; inputSchema?: Record<string, unknown> };
 }
 
 function setupInterAccountTool(options: {
@@ -94,12 +116,31 @@ function setupInterAccountTool(options: {
   }
 
   return {
+    options: registration[1] as { description?: string; inputSchema?: Record<string, unknown> },
     handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
     api,
   };
 }
 
+function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
+  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
+  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
+}
+
 describe("reconcile_transactions", () => {
+  it("keeps reconciliation metadata compact while retaining approval and duplicate-safe contracts", () => {
+    const interAccount = toolMetadataText(setupInterAccountTool().options);
+    expect(interAccount).toContain("DUPLICATE-SAFE");
+    expect(interAccount).toContain("execute=true");
+    expect(interAccount).toContain("target_accounts_dimensions_id");
+    expect(interAccount).not.toContain("e.g.");
+
+    const merged = toolMetadataText(getReconciliationToolOptions("reconcile_bank_transactions"));
+    expect(merged).toContain("dry_run_auto_confirm");
+    expect(merged).toContain("execute_auto_confirm");
+    expect(merged).toContain("inter_account_dry_run");
+  });
+
   describe("reconcile_bank_transactions wrapper", () => {
     it("runs invoice-match suggestions through the merged entry point", async () => {
       const handler = setupReconciliationTool({

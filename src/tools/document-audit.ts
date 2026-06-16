@@ -9,8 +9,7 @@ import { readOnly } from "../annotations.js";
 export function registerDocumentAuditTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "find_missing_documents",
-    "Find journals, transactions, and invoices without attached base documents. " +
-    "Important for audit trail compliance.",
+    "Find journals, transactions, and invoices without attached base documents.",
     {
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
@@ -90,8 +89,7 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
   );
 
   registerTool(server, "detect_duplicate_purchase_invoice",
-    "Check for duplicate purchase invoices by supplier + invoice number, and by supplier + amount + date. " +
-    "Can also test an incoming invoice candidate against existing invoices.",
+    "Check duplicate purchase invoices by supplier, invoice number, amount, and date.",
     {
       clients_id: z.number().optional().describe("Filter by supplier ID"),
       date_from: z.string().optional().describe("Start date"),

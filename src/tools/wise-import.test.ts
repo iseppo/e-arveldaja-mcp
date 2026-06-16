@@ -1,5 +1,6 @@
 import { readFile } from "fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { resolveFileInput } from "../file-validation.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
@@ -89,14 +90,32 @@ function setupWiseTool(
 
   return {
     api,
+    options: registration[1] as { description?: string; inputSchema?: Record<string, unknown> },
     handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
   };
+}
+
+function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
+  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
+  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("wise import tool", () => {
   beforeEach(() => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
     mockedReadFile.mockReset();
+  });
+
+  it("keeps Wise import metadata compact while retaining dry-run and direction invariants", () => {
+    const metadata = toolMetadataText(setupWiseTool([]).options);
+
+    expect(metadata).toContain("DRY RUN");
+    expect(metadata).toContain("type D");
+    expect(metadata).toContain("type C");
+    expect(metadata).toContain("fee_account_dimensions_id");
+    expect(metadata).toContain("inter_account_dimension_id");
+    expect(metadata).not.toContain("Does not support the special statement/report CSV exports");
+    expect(metadata).not.toContain("base64 payload");
   });
 
   it("does not treat VOID transactions as duplicates", async () => {

@@ -29,8 +29,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
   // =====================
 
   registerTool(server, "list_journals",
-    "List journal entries. Paginated. Returns brief view (id, effective_date, number, title, document_number, registered, clients_id, operation_type) by default — postings always omitted at this surface; pass view='full' for the remaining header fields, or call get_journal for postings. " +
-    "Optional filters are applied client-side after fetching journals.",
+    "List journal entries. Paginated. Brief view omits postings; use view='full' for headers or get_journal for postings.",
     {
       ...pageParam.shape,
       ...viewParam,
@@ -160,7 +159,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     });
   });
 
-  registerTool(server, "update_journal", "Update a journal entry. Server-managed fields (id, registered, register_date, status) are rejected — use the dedicated confirm/invalidate tools. Once the journal is registered, effective_date is audit-locked; invalidate_journal first to edit it.", {
+  registerTool(server, "update_journal", "Update draft journal fields. Server-managed fields are rejected; registered effective_date requires invalidate_journal first.", {
     id: coerceId.describe("Journal ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
@@ -200,12 +199,10 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "batch_confirm_journals",
-    "Confirm/register multiple journal entries in one call. IRREVERSIBLE for each success. " +
-    "Runs sequentially; already-registered journals are skipped (checked up-front via /journals/:id); " +
-    "continues past individual failures and returns per-ID results so partial progress is visible.",
+    "Confirm/register multiple journals. IRREVERSIBLE per success; already-registered rows are skipped and failures are reported per ID.",
     {
       ids: z.array(z.number().int().positive()).min(1).max(500).describe("Journal IDs (positive integers, 1-500 entries)"),
-      reason: z.string().min(1).max(500).describe("Short audit note explaining why this batch is being confirmed (e.g. 'Lightyear trades batch — Q1 2026'). Required — max 500 chars."),
+      reason: z.string().min(1).max(500).describe("Short audit note for the batch confirmation. Required, max 500 chars."),
     },
     { ...destructive, title: "Batch Confirm Journals" },
     async ({ ids, reason }) => {

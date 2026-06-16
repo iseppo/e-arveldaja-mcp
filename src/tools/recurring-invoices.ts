@@ -29,9 +29,7 @@ function appendRecurringCloneMarker(notes: string | null | undefined, marker: st
 export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "create_recurring_sale_invoices",
-    "Clone sale invoices from a previous month for recurring monthly billing. " +
-    "Copies items, client, template from source invoices and creates DRAFT invoices. " +
-    "Use dry_run=true to preview without creating. Invoice numbers are auto-assigned by the configured invoice series.",
+    "Clone previous-month sale invoices into DRAFT recurring invoices. dry_run=true previews; invoice numbers are auto-assigned.",
     {
       source_month: z.string().regex(MONTH_REGEX, "Expected YYYY-MM").describe("Source month to copy from (YYYY-MM)"),
       target_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New invoice date (YYYY-MM-DD)"),

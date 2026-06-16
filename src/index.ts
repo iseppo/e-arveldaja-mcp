@@ -502,13 +502,11 @@ async function main() {
   );
 
   registerTool(server, "import_apikey_credentials",
-    "Verify credentials from an apikey*.txt file and write them into a .env file. " +
-    "If the target .env already has a default connection and overwrite is false, different credentials are appended as an additional stored connection instead of replacing the default. " +
-    "If storage_scope is omitted and the client supports form elicitation, asks whether the configuration should work only in this folder or whenever you start the MCP server from any folder.",
+    "Verify apikey*.txt credentials and store them in local/global .env. overwrite=false appends different credentials as another connection.",
     {
-      file_path: z.string().optional().describe("Absolute path to an apikey*.txt file. Defaults to the only secure apikey*.txt in the current folder."),
-      storage_scope: z.enum(["local", "global"]).optional().describe("Use `local` to keep the configuration only for this folder, or `global` to make it available when starting the MCP server from any folder. Omit to use an interactive choice prompt when supported."),
-      overwrite: z.boolean().optional().describe("Replace the default stored connection in the target .env file instead of appending a new additional connection. Default false."),
+      file_path: z.string().optional().describe("Absolute path to apikey*.txt; defaults to the only secure apikey*.txt in cwd."),
+      storage_scope: z.enum(["local", "global"]).optional().describe("local = this folder; global = any folder. Omit for interactive choice when supported."),
+      overwrite: z.boolean().optional().describe("Replace the default stored connection instead of appending. Default false."),
     },
     { ...mutate, openWorldHint: true, title: "Import API Key Credentials" },
     async ({ file_path, storage_scope, overwrite = false }) => {
@@ -582,8 +580,7 @@ async function main() {
   );
 
   registerTool(server, "list_stored_credentials",
-    "Inspect e-arveldaja credentials stored in local/global .env files. " +
-    "This does not include shell env vars, EARVELDAJA_API_KEY_FILE, or raw apikey*.txt files.",
+    "Inspect credentials stored in local/global .env files.",
     {
       storage_scope: z.enum(["local", "global"]).optional().describe("Optional scope filter."),
     },
@@ -611,11 +608,10 @@ async function main() {
   );
 
   registerTool(server, "remove_stored_credentials",
-    "Remove one stored e-arveldaja credential block from a local/global .env file. " +
-    "This only affects credentials previously stored in .env files by the setup flow; it does not remove shell env vars, EARVELDAJA_API_KEY_FILE, or raw apikey*.txt files.",
+    "Remove one stored credential block from a local/global .env file.",
     {
       storage_scope: z.enum(["local", "global"]).describe("Which .env file to modify."),
-      target: z.string().regex(/^(primary|connection_\d+)$/, "Must be 'primary' or 'connection_N'").describe("Stored credential target from list_stored_credentials, for example primary or connection_1."),
+      target: z.string().regex(/^(primary|connection_\d+)$/, "Must be 'primary' or 'connection_N'").describe("Stored target from list_stored_credentials, e.g. primary or connection_1."),
     },
     { ...destructive, openWorldHint: true, title: "Remove Stored Credentials" },
     async ({ storage_scope, target }) => {
@@ -645,8 +641,7 @@ async function main() {
   );
 
   registerTool(server, "list_connections",
-    "List all available e-arveldaja connections (API key files). " +
-    "Shows which connection is currently active.",
+    "List configured e-arveldaja connections and the active index.",
     {},
     { ...readOnly, title: "List Connections" },
     async () => {
@@ -680,10 +675,7 @@ async function main() {
   );
 
   registerTool(server, "switch_connection",
-    "Switch to a different e-arveldaja connection (company). " +
-    "Clears cached data atomically. Use list_connections to see available indices. " +
-    "New tool calls use the new connection immediately. Interrupted in-flight tools are blocked from making further API requests, " +
-    "but a request already in flight may still finish, so inspect mutating tools before retrying.",
+    "Switch active e-arveldaja connection. Clears caches; interrupted in-flight tools are blocked from further API requests.",
     {
       index: z.number().int().describe("Connection index from list_connections"),
     },
@@ -755,12 +747,9 @@ async function main() {
   // --- Audit log tools ---
 
   registerTool(server, "get_session_log",
-    "Retrieve the audit log of all mutating operations. " +
-    "Returns human-readable Markdown. By default shows the current connection's log. " +
-    "Use 'connection' to view another connection's or audit-log label's file, or list_audit_logs to see available logs. " +
-    "When a raw connection name differs from the displayed audit-log label, use the prefix 'connection:' for the raw connection name.",
+    "Retrieve mutating-operation audit log Markdown for the current connection, another audit-log label, or connection:<raw name>.",
     {
-      connection: z.string().optional().describe("Audit-log label from list_audit_logs, or prefix a raw connection name with 'connection:' (default: current connection)."),
+      connection: z.string().optional().describe("Audit-log label, or connection:<raw connection name>; default current connection."),
       entity_type: z.string().optional().describe("Filter by entity type (client, product, journal, transaction, sale_invoice, purchase_invoice)"),
       action: z.string().optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT)"),
       date_from: z.string().optional().describe("Return entries from this date (YYYY-MM-DD or ISO 8601)"),
@@ -798,7 +787,7 @@ async function main() {
   );
 
   registerTool(server, "list_audit_logs",
-    "List all available human-readable audit log files. Names follow the company when known and add a connection suffix only when needed to disambiguate.",
+    "List available human-readable audit log files.",
     {},
     { ...readOnly, title: "List Audit Logs" },
     async () => {

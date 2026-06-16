@@ -1,5 +1,6 @@
 import { readFile } from "fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { resolveFileInput } from "../file-validation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { registerLightyearTools, tradeFeeInEur } from "./lightyear-investments.js";
@@ -51,7 +52,7 @@ function buildCapitalGainsCsv(rows: string[][], header = CAPITAL_GAINS_HEADER_WI
 }
 
 function setupLightyearTool(
-  toolName: "parse_lightyear_statement" | "parse_lightyear_capital_gains" | "book_lightyear_trades",
+  toolName: "parse_lightyear_statement" | "parse_lightyear_capital_gains" | "book_lightyear_trades" | "book_lightyear_distributions" | "lightyear_portfolio_summary",
   options: {
     journals?: unknown[];
     createImpl?: ReturnType<typeof vi.fn>;
@@ -81,14 +82,33 @@ function setupLightyearTool(
 
   return {
     api,
+    options: registration[1] as { description?: string; inputSchema?: Record<string, unknown> },
     handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
   };
+}
+
+function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
+  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
+  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("lightyear investments tools", () => {
   beforeEach(() => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/lightyear.csv" });
     mockedReadFile.mockReset();
+  });
+
+  it("keeps Lightyear trading metadata compact while retaining FIFO and dry-run invariants", () => {
+    const trades = toolMetadataText(setupLightyearTool("book_lightyear_trades").options);
+    expect(trades).toContain("capital_gains_file");
+    expect(trades).toContain("cost basis");
+    expect(trades).toContain("dry_run");
+    expect(trades).not.toContain("base64 payload");
+    expect(trades).not.toContain("stored as LY");
+
+    const statement = toolMetadataText(setupLightyearTool("parse_lightyear_statement").options);
+    expect(statement).toContain("include_rows");
+    expect(statement).not.toContain("Pairs foreign currency trades");
   });
 
   it("parses Lightyear capital gains exports that include Asset Class", async () => {

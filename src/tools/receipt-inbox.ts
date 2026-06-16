@@ -1431,7 +1431,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
   registerTool(server,
     "receipt_batch",
-    "Merged receipt batch entry point. Use mode='scan' to inspect supported files, mode='dry_run' to preview purchase invoice creation, mode='create' to create/upload PROJECT invoices after approval, or mode='create_and_confirm' only after explicit approval for high-confidence rows.",
+    "Merged receipt batch. scan inspects files; dry_run previews; create/create_and_confirm require explicit approval.",
     {
       mode: z.enum(["scan", "dry_run", "create", "create_and_confirm"]).optional().describe("Workflow phase to run. Defaults to scan."),
       folder_path: z.string().describe("Folder path with receipts"),
@@ -1961,7 +1961,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
   registerTool(server,
     "classify_bank_transactions",
-    "Merged unmatched bank transaction classification entry point. Use mode='classify' to group unmatched transactions, mode='dry_run_apply' to preview applying classifications, or mode='execute_apply' to create and link purchase invoices after approval.",
+    "Merged unmatched-bank classification. classify groups; dry_run_apply previews; execute_apply requires approval.",
     {
       mode: z.enum(["classify", "dry_run_apply", "execute_apply"]).optional().describe("Workflow phase to run. Defaults to classify."),
       accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID. Required for mode='classify'."),
