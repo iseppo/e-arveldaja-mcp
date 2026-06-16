@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 121 tools, 15 workflow prompts, 12 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 121 tools, 15 workflow prompts, 13 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 > **v0.14.2 — safer CAMT re-imports.** `import_camt053` now preserves CAMT bank-reference and counterparty-account metadata in the writable transaction description when the e-arveldaja API drops the dedicated fields. Long bank references are stored as stable hashes, marker-only prior imports still surface in duplicate review when the exact key does not match, and repeated CAMT imports are less likely to create duplicate PROJECT rows. See the [changelog](CHANGELOG.md) for full details.
 >

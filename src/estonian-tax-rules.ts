@@ -1,3 +1,5 @@
+import { roundMoney } from "./money.js";
+
 // Date-gated Estonian tax reference data + deterministic detectors.
 //
 // This is the "knowledge as data" layer: a single, maintainable source for the
@@ -122,6 +124,110 @@ export function buildTaxRulesReference(): TaxRulesReference {
     reduced_vat_rates: REDUCED_VAT_RATES,
     deduction_and_limit_rules: DEDUCTION_AND_LIMIT_RULES,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Cumulative tax-free limit calculators (TuMS § 49).
+//
+// Pure functions over caller-supplied figures — they do NOT guess account
+// mappings from the ledger. The calling tool/agent provides the year-to-date
+// payroll, costs, and prior-year profit (e.g. from the TSD declaration and
+// compute_profit_and_loss), and these return the limit, headroom, and the
+// taxable excess base. Income tax on the excess (22/78) is applied by the
+// caller via getCitRateForDate, since the rate is itself date-gated.
+// ---------------------------------------------------------------------------
+
+export interface TaxFreeLimitResult {
+  /** Cumulative tax-free limit for the period. */
+  limit: number;
+  /** Amount used (the caller-supplied year-to-date cost/donation). */
+  used: number;
+  /** Remaining tax-free headroom, never below zero. */
+  remaining: number;
+  /** Taxable excess base (used − limit), never below zero. */
+  excess: number;
+  /** Human-readable formula actually applied. */
+  formula: string;
+  /** Statutory basis. */
+  basis: string;
+}
+
+function assertFinite(label: string, ...values: number[]): void {
+  for (const v of values) {
+    if (typeof v !== "number" || !Number.isFinite(v)) {
+      throw new Error(`${label} must be a finite number, got ${JSON.stringify(v)}`);
+    }
+  }
+}
+
+function buildLimitResult(limit: number, used: number, formula: string, basis: string): TaxFreeLimitResult {
+  const roundedLimit = roundMoney(limit);
+  const roundedUsed = roundMoney(used);
+  return {
+    limit: roundedLimit,
+    used: roundedUsed,
+    remaining: roundMoney(Math.max(0, roundedLimit - roundedUsed)),
+    excess: roundMoney(Math.max(0, roundedUsed - roundedLimit)),
+    formula,
+    basis,
+  };
+}
+
+/**
+ * Representation/entertainment cost tax-free limit (TuMS § 49 lg 4):
+ * 50 € per calendar month (cumulative from the start of the year) plus 2% of
+ * the year-to-date payroll subject to social tax. The excess is taxed 22/78.
+ */
+export function computeRepresentationCostLimit(input: {
+  ytdSocialTaxedPayroll: number;
+  monthsElapsed: number;
+  ytdRepresentationCosts: number;
+}): TaxFreeLimitResult {
+  assertFinite("ytdSocialTaxedPayroll", input.ytdSocialTaxedPayroll);
+  assertFinite("ytdRepresentationCosts", input.ytdRepresentationCosts);
+  assertFinite("monthsElapsed", input.monthsElapsed);
+  const months = Math.min(12, Math.max(0, Math.trunc(input.monthsElapsed)));
+  const payroll = Math.max(0, input.ytdSocialTaxedPayroll);
+  const limit = 50 * months + 0.02 * payroll;
+  return buildLimitResult(
+    limit,
+    input.ytdRepresentationCosts,
+    `50 € × ${months} kuud + 2% × ${roundMoney(payroll)} € palgafondist`,
+    "TuMS § 49 lg 4",
+  );
+}
+
+/**
+ * Gift/donation tax-free limit (TuMS § 49 lg 2): donations to listed
+ * associations are tax-free up to 3% of year-to-date social-taxed payroll OR
+ * 10% of the prior financial year's profit — the taxpayer picks one. Defaults
+ * to the more favourable of the two. The excess is taxed 22/78.
+ */
+export function computeDonationLimit(input: {
+  ytdSocialTaxedPayroll: number;
+  priorYearProfit: number;
+  ytdDonations: number;
+  basisChoice?: "payroll" | "profit" | "max";
+}): TaxFreeLimitResult {
+  assertFinite("ytdSocialTaxedPayroll", input.ytdSocialTaxedPayroll);
+  assertFinite("priorYearProfit", input.priorYearProfit);
+  assertFinite("ytdDonations", input.ytdDonations);
+  const byPayroll = 0.03 * Math.max(0, input.ytdSocialTaxedPayroll);
+  const byProfit = 0.10 * Math.max(0, input.priorYearProfit);
+  const choice = input.basisChoice ?? "max";
+  let limit: number;
+  let formula: string;
+  if (choice === "payroll") {
+    limit = byPayroll;
+    formula = `3% × ${roundMoney(Math.max(0, input.ytdSocialTaxedPayroll))} € palgafondist`;
+  } else if (choice === "profit") {
+    limit = byProfit;
+    formula = `10% × ${roundMoney(Math.max(0, input.priorYearProfit))} € eelmise aasta kasumist`;
+  } else {
+    limit = Math.max(byPayroll, byProfit);
+    formula = `soodsam: max(3% × palgafond = ${roundMoney(byPayroll)} €, 10% × eelmise aasta kasum = ${roundMoney(byProfit)} €)`;
+  }
+  return buildLimitResult(limit, input.ytdDonations, formula, "TuMS § 49 lg 2");
 }
 
 export type TaxNoteSeverity = "warning" | "info";

@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-120 tools (115 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 14 resources across 12 modules. Supports multiple companies/accounts.
+121 tools (116 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -79,7 +79,7 @@ optional feature group that can be dropped when unused (see
   `lightyear_portfolio_summary`). Use when the company does not track
   investments. Default: Lightyear is enabled.
 
-The default surface is 120 tools; `DISABLE_LIGHTYEAR` drops it to 115. (The
+The default surface is 121 tools; `DISABLE_LIGHTYEAR` drops it to 116. (The
 former `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
@@ -289,7 +289,7 @@ API data remains raw.
 - **CIT on dividends**: 22/78 from 2025-01-01; 20/80 before (date-gated via `getCitRateForDate` in `src/tools/estonian-tax.ts`)
 - **ÄS § 157 net-assets block**: `prepare_dividend_package` hard-blocks distributions that lack retained earnings OR would push net assets below share capital. `force=true` overrides both checks (use only alongside a legitimate action such as a capital reduction).
 - **Capital gains**: Securities taxed at 22% income tax
-- **Input-VAT deduction restrictions** (`src/estonian-tax-rules.ts`): single date-gated source for the standard VAT-rate timeline (20→22%→24%), current reduced rates, and the deduction detectors. `suggest_booking` returns these as `tax_notes` — `KMS § 30` (külaliste vastuvõtt / esinduskulu: input VAT non-deductible; also `TuMS § 49 lg 4` representation limit 50 €/month + 2% of payroll) and `KMS § 30 lg 4` (M1 passenger car: 50% cap). Notes are advisory; `workflows/book-invoice.md` requires surfacing each on the approval card. `validate_invoice_data` also uses the rate timeline to warn when a line's standard rate (20/22/24%) does not match the invoice date. The full dataset is browsable read-only at `earveldaja://tax_rules` (also lists the `TuMS § 49` representation 50 €+2% and donation 3%/10% limits). Update the figures in this module when the law changes.
+- **Input-VAT deduction restrictions** (`src/estonian-tax-rules.ts`): single date-gated source for the standard VAT-rate timeline (20→22%→24%), current reduced rates, and the deduction detectors. `suggest_booking` returns these as `tax_notes` — `KMS § 30` (külaliste vastuvõtt / esinduskulu: input VAT non-deductible; also `TuMS § 49 lg 4` representation limit 50 €/month + 2% of payroll) and `KMS § 30 lg 4` (M1 passenger car: 50% cap). Notes are advisory; `workflows/book-invoice.md` requires surfacing each on the approval card. `validate_invoice_data` also uses the rate timeline to warn when a line's standard rate (20/22/24%) does not match the invoice date. The full dataset is browsable read-only at `earveldaja://tax_rules` (also lists the `TuMS § 49` representation 50 €+2% and donation 3%/10% limits). `check_tax_free_limits` computes the cumulative `TuMS § 49` representation/donation limits and the 22/78 tax on any excess from caller-supplied year-to-date figures (it does not read the ledger). Update the figures in this module when the law changes.
 
 ## Development
 

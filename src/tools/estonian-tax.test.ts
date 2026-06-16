@@ -975,3 +975,47 @@ describe("roundMoney CIT precision", () => {
     expect(roundMoney(gross)).toBe(gross); // already rounded
   });
 });
+
+describe("check_tax_free_limits", () => {
+  function getHandler() {
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, {} as ApiContext);
+    return mock.tools.get("check_tax_free_limits") as ToolCallback;
+  }
+
+  it("computes representation and donation limits with 22/78 tax on the excess", async () => {
+    const handler = getHandler();
+    const payload = parseResult(await handler({
+      as_of_date: "2026-06-16",
+      ytd_social_taxed_payroll: 10000,
+      months_elapsed: 6,
+      ytd_representation_costs: 700,
+      ytd_donations: 6000,
+      prior_year_profit: 50000,
+    }));
+
+    expect(payload.cit_rate).toBe("22/78");
+    const rep = payload.representation as Record<string, number>;
+    expect(rep.limit).toBe(500);            // 50*6 + 2% of 10000
+    expect(rep.excess).toBe(200);
+    expect(rep.income_tax_on_excess).toBe(roundMoney(200 * 22 / 78)); // 56.41
+
+    const don = payload.donations as Record<string, number>;
+    expect(don.limit).toBe(5000);           // max(3% of 10000, 10% of 50000)
+    expect(don.excess).toBe(1000);
+    expect(don.income_tax_on_excess).toBe(roundMoney(1000 * 22 / 78));
+  });
+
+  it("omits a section when its inputs are not supplied and derives months from the date", async () => {
+    const handler = getHandler();
+    const payload = parseResult(await handler({
+      as_of_date: "2025-03-31",
+      ytd_social_taxed_payroll: 10000,
+      ytd_representation_costs: 0,
+    }));
+
+    expect(payload.donations).toBeUndefined();
+    const rep = payload.representation as Record<string, number>;
+    expect(rep.limit).toBe(350); // months derived from "03" → 50*3 + 200
+  });
+});

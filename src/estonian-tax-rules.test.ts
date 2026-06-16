@@ -3,6 +3,8 @@ import {
   standardVatRateOn,
   detectVatDeductionNotes,
   buildTaxRulesReference,
+  computeRepresentationCostLimit,
+  computeDonationLimit,
   STANDARD_VAT_RATE_TIMELINE,
   REDUCED_VAT_RATES,
 } from "./estonian-tax-rules.js";
@@ -102,5 +104,51 @@ describe("buildTaxRulesReference", () => {
     const donations = ref.deduction_and_limit_rules.find(r => r.code === "TuMS § 49 lg 2");
     expect(donations?.summary).toContain("3%");
     expect(donations?.summary).toContain("10%");
+  });
+});
+
+describe("computeRepresentationCostLimit", () => {
+  it("is 50 € per month plus 2% of YTD payroll", () => {
+    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: 500 });
+    expect(r.limit).toBe(500); // 50*6 + 0.02*10000 = 300 + 200
+    expect(r.remaining).toBe(0);
+    expect(r.excess).toBe(0);
+    expect(r.basis).toBe("TuMS § 49 lg 4");
+  });
+
+  it("reports the taxable excess when costs exceed the limit", () => {
+    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: 700 });
+    expect(r.limit).toBe(500);
+    expect(r.excess).toBe(200);
+    expect(r.remaining).toBe(0);
+  });
+
+  it("clamps months to 0..12 and floors negative payroll at 0", () => {
+    expect(computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 0, monthsElapsed: 13, ytdRepresentationCosts: 0 }).limit).toBe(600);
+    expect(computeRepresentationCostLimit({ ytdSocialTaxedPayroll: -5000, monthsElapsed: 1, ytdRepresentationCosts: 0 }).limit).toBe(50);
+  });
+});
+
+describe("computeDonationLimit", () => {
+  it("defaults to the more favourable of 3% payroll vs 10% prior-year profit", () => {
+    const r = computeDonationLimit({ ytdSocialTaxedPayroll: 10000, priorYearProfit: 50000, ytdDonations: 1000 });
+    expect(r.limit).toBe(5000); // max(300, 5000)
+    expect(r.remaining).toBe(4000);
+    expect(r.excess).toBe(0);
+  });
+
+  it("honours an explicit basis choice", () => {
+    const byPayroll = computeDonationLimit({ ytdSocialTaxedPayroll: 10000, priorYearProfit: 50000, ytdDonations: 1000, basisChoice: "payroll" });
+    expect(byPayroll.limit).toBe(300);
+    expect(byPayroll.excess).toBe(700);
+
+    const byProfit = computeDonationLimit({ ytdSocialTaxedPayroll: 10000, priorYearProfit: 50000, ytdDonations: 1000, basisChoice: "profit" });
+    expect(byProfit.limit).toBe(5000);
+  });
+
+  it("treats a prior-year loss as zero profit headroom", () => {
+    const r = computeDonationLimit({ ytdSocialTaxedPayroll: 0, priorYearProfit: -20000, ytdDonations: 100, basisChoice: "profit" });
+    expect(r.limit).toBe(0);
+    expect(r.excess).toBe(100);
   });
 });

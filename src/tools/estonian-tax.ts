@@ -5,7 +5,8 @@ import { toMcpJson } from "../mcp-json.js";
 import { type ApiContext, isCompanyVatRegistered, coerceId } from "./crud-tools.js";
 import { computeAllBalances, sumCategory, type AccountBalance } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
-import { create } from "../annotations.js";
+import { create, readOnly } from "../annotations.js";
+import { computeRepresentationCostLimit, computeDonationLimit } from "../estonian-tax-rules.js";
 import { logAudit } from "../audit-log.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
@@ -553,6 +554,58 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               : `Expense booked. Company is not VAT-registered, so the full gross amount was debited to expense account ${expense_account}. Owner debt increased by ${total} EUR on account ${payAcc}.`,
             ...(suggestions.length > 0 ? { suggestions } : {}),
           }),
+        }],
+      };
+    }
+  );
+
+  registerTool(server, "check_tax_free_limits",
+    "Compute the cumulative TuMS § 49 tax-free limits (representation costs 50 €/month + 2% of payroll; donations 3% of payroll or 10% of prior-year profit) and the income tax (22/78) on any excess. Pure calculator over caller-supplied year-to-date figures — get payroll from the TSD declaration and prior-year profit from compute_profit_and_loss; it does not read the ledger.",
+    {
+      as_of_date: isoDateSchema("Date the cumulative figures are taken as of (YYYY-MM-DD). Sets the 22/78 rate and the default months elapsed."),
+      ytd_social_taxed_payroll: z.number().describe("Year-to-date payments subject to social tax (the 2%/3% base)."),
+      months_elapsed: z.number().int().min(1).max(12).optional().describe("Calendar months elapsed for the representation 50 €/month accrual. Defaults to the month of as_of_date."),
+      ytd_representation_costs: z.number().optional().describe("Year-to-date representation/entertainment costs booked. Omit to skip the representation limit."),
+      ytd_donations: z.number().optional().describe("Year-to-date gifts/donations to listed associations. Omit to skip the donation limit."),
+      prior_year_profit: z.number().optional().describe("Prior financial year's profit (for the donation 10% alternative). Defaults to 0."),
+      donation_basis: z.enum(["payroll", "profit", "max"]).optional().describe("Which donation limit to apply: 3% payroll, 10% prior-year profit, or the more favourable (default max)."),
+    },
+    { ...readOnly, title: "Check Tax-Free Limits" },
+    async ({ as_of_date, ytd_social_taxed_payroll, months_elapsed, ytd_representation_costs, ytd_donations, prior_year_profit, donation_basis }) => {
+      const citRate = getCitRateForDate(as_of_date);
+      const incomeTaxOnExcess = (excess: number) => roundMoney(excess * citRate.num / citRate.den);
+      const months = months_elapsed ?? Number(as_of_date.slice(5, 7));
+
+      const result: Record<string, unknown> = {
+        as_of_date,
+        cit_rate: citRate.formatted,
+      };
+
+      if (ytd_representation_costs !== undefined) {
+        const rep = computeRepresentationCostLimit({
+          ytdSocialTaxedPayroll: ytd_social_taxed_payroll,
+          monthsElapsed: months,
+          ytdRepresentationCosts: ytd_representation_costs,
+        });
+        result.representation = { ...rep, income_tax_on_excess: incomeTaxOnExcess(rep.excess) };
+      }
+
+      if (ytd_donations !== undefined) {
+        const don = computeDonationLimit({
+          ytdSocialTaxedPayroll: ytd_social_taxed_payroll,
+          priorYearProfit: prior_year_profit ?? 0,
+          ytdDonations: ytd_donations,
+          basisChoice: donation_basis,
+        });
+        result.donations = { ...don, income_tax_on_excess: incomeTaxOnExcess(don.excess) };
+      }
+
+      result.note = "Cumulative (year-to-date) view. Excess is taxed at the CIT rate 22/78 and declared on the TSD. Confirm the payroll/profit figures with the company's actual declarations.";
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson(result),
         }],
       };
     }
