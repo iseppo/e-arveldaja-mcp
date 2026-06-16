@@ -201,23 +201,29 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       for (let idx = 0; idx < parsedItems.length; idx++) {
         const item = parsedItems[idx]!;
         const rate = parseVatRate(item.vat_rate_dropdown);
+        // Warnings reference the item by position only — item.custom_title is
+        // OCR/LLM-derived and must not be echoed unwrapped into server-authored
+        // text (see the untrusted-OCR policy in CLAUDE.md).
         if (rate !== undefined) {
           const isKnownRate = KNOWN_REDUCED_RATES.includes(rate) || KNOWN_STANDARD_RATES.includes(rate);
           if (!isKnownRate) {
-            warnings.push(`Item ${idx + 1} "${item.custom_title ?? ""}": unusual VAT rate ${rate}%`);
+            warnings.push(`Item ${idx + 1}: unusual VAT rate ${rate}%`);
           } else if (
             expectedStandardRate !== null &&
             KNOWN_STANDARD_RATES.includes(rate) &&
             rate !== expectedStandardRate
           ) {
             warnings.push(
-              `Item ${idx + 1} "${item.custom_title ?? ""}": ${rate}% does not match the standard VAT rate in force on ${invoice_date} (${expectedStandardRate}%). ` +
+              // Only the strict-validated 10-char prefix (standardVatRateOn
+              // returned non-null) is echoed — never the raw arg, which could
+              // carry an injected suffix after a valid date.
+              `Item ${idx + 1}: ${rate}% does not match the standard VAT rate in force on ${invoice_date?.slice(0, 10) ?? ""} (${expectedStandardRate}%). ` +
               `A reduced rate (0/9/13%) would be fine; confirm this is not an OCR misread or a wrong booking period.`
             );
           }
         }
         if (item.total_net_price !== undefined && item.total_net_price < 0) {
-          warnings.push(`Item ${idx + 1} "${item.custom_title ?? ""}": negative net price ${item.total_net_price}`);
+          warnings.push(`Item ${idx + 1}: negative net price ${item.total_net_price}`);
         }
         if (item.total_net_price !== undefined && rate !== undefined) {
           computedItemVat += item.total_net_price * (rate / 100);

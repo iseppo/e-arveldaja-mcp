@@ -600,7 +600,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         result.donations = { ...don, income_tax_on_excess: incomeTaxOnExcess(don.excess) };
       }
 
-      result.note = "Cumulative (year-to-date) view. Excess is taxed at the CIT rate 22/78 and declared on the TSD. Confirm the payroll/profit figures with the company's actual declarations.";
+      result.note = `Cumulative (year-to-date) view. Excess is taxed at the CIT rate ${citRate.formatted} and declared on the TSD. Confirm the payroll/profit figures with the company's actual declarations.`;
 
       return {
         content: [{

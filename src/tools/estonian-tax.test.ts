@@ -1018,4 +1018,20 @@ describe("check_tax_free_limits", () => {
     const rep = payload.representation as Record<string, number>;
     expect(rep.limit).toBe(350); // months derived from "03" → 50*3 + 200
   });
+
+  it("uses the 20/80 rate and says so for pre-2025 dates", async () => {
+    const handler = getHandler();
+    const payload = parseResult(await handler({
+      as_of_date: "2024-12-31",
+      ytd_social_taxed_payroll: 10000,
+      months_elapsed: 12,
+      ytd_representation_costs: 1400, // limit = 600 + 200 = 800 → excess 600
+    }));
+
+    expect(payload.cit_rate).toBe("20/80");
+    expect(payload.note).toContain("20/80");
+    expect(payload.note).not.toContain("22/78");
+    const rep = payload.representation as Record<string, number>;
+    expect(rep.income_tax_on_excess).toBe(roundMoney(600 * 20 / 80)); // 150
+  });
 });

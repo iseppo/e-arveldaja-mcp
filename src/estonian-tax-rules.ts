@@ -32,10 +32,17 @@ export const STANDARD_VAT_RATE_TIMELINE: readonly VatRatePeriod[] = [
   { from: "2025-07-01", to: null, rate: 24 },
 ];
 
-/** Standard VAT rate (%) in force on the given ISO date, or null if unparseable. */
+/** True for a strict, real calendar date in YYYY-MM-DD (rejects 2025-13-99, 2025-02-31). */
+function isStrictIsoDate(d: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  const parsed = new Date(`${d}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === d;
+}
+
+/** Standard VAT rate (%) in force on the given ISO date, or null if not a valid calendar date. */
 export function standardVatRateOn(dateISO: string | undefined | null): number | null {
   const d = dateISO?.slice(0, 10);
-  if (!d || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  if (!d || !isStrictIsoDate(d)) return null;
   const period = STANDARD_VAT_RATE_TIMELINE.find(p => d >= p.from && (p.to === null || d <= p.to));
   return period ? period.rate : null;
 }
@@ -161,8 +168,10 @@ function assertFinite(label: string, ...values: number[]): void {
 }
 
 function buildLimitResult(limit: number, used: number, formula: string, basis: string): TaxFreeLimitResult {
-  const roundedLimit = roundMoney(limit);
-  const roundedUsed = roundMoney(used);
+  const roundedLimit = roundMoney(Math.max(0, limit));
+  // A negative year-to-date cost/donation is not meaningful for a tax-free
+  // headroom calculation; floor it so it cannot inflate `remaining`.
+  const roundedUsed = roundMoney(Math.max(0, used));
   return {
     limit: roundedLimit,
     used: roundedUsed,

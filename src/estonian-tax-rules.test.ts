@@ -30,6 +30,12 @@ describe("standardVatRateOn", () => {
     expect(standardVatRateOn(null)).toBeNull();
   });
 
+  it("rejects well-formatted but impossible calendar dates", () => {
+    expect(standardVatRateOn("2025-13-99")).toBeNull();
+    expect(standardVatRateOn("2025-02-31")).toBeNull();
+    expect(standardVatRateOn("2025-00-10")).toBeNull();
+  });
+
   it("keeps the timeline contiguous with no gaps or open middle periods", () => {
     for (let i = 1; i < STANDARD_VAT_RATE_TIMELINE.length; i++) {
       const prev = STANDARD_VAT_RATE_TIMELINE[i - 1];
@@ -127,6 +133,13 @@ describe("computeRepresentationCostLimit", () => {
     expect(computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 0, monthsElapsed: 13, ytdRepresentationCosts: 0 }).limit).toBe(600);
     expect(computeRepresentationCostLimit({ ytdSocialTaxedPayroll: -5000, monthsElapsed: 1, ytdRepresentationCosts: 0 }).limit).toBe(50);
   });
+
+  it("floors a negative used amount so it cannot inflate remaining headroom", () => {
+    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: -100 });
+    expect(r.used).toBe(0);
+    expect(r.remaining).toBe(500);
+    expect(r.excess).toBe(0);
+  });
 });
 
 describe("computeDonationLimit", () => {
@@ -150,5 +163,11 @@ describe("computeDonationLimit", () => {
     const r = computeDonationLimit({ ytdSocialTaxedPayroll: 0, priorYearProfit: -20000, ytdDonations: 100, basisChoice: "profit" });
     expect(r.limit).toBe(0);
     expect(r.excess).toBe(100);
+  });
+
+  it("floors a negative donations amount", () => {
+    const r = computeDonationLimit({ ytdSocialTaxedPayroll: 10000, priorYearProfit: 50000, ytdDonations: -200 });
+    expect(r.used).toBe(0);
+    expect(r.excess).toBe(0);
   });
 });
