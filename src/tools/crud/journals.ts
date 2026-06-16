@@ -30,7 +30,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "list_journals",
     "List journal entries. Paginated. Returns brief view (id, effective_date, number, title, document_number, registered, clients_id, operation_type) by default — postings always omitted at this surface; pass view='full' for the remaining header fields, or call get_journal for postings. " +
-    "Optional filters are applied client-side after listAll() when any filter is provided, which avoids repeated page-by-page walks.",
+    "Optional filters are applied client-side after fetching journals.",
     {
       ...pageParam.shape,
       ...viewParam,
@@ -112,8 +112,8 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     document_number: z.string().optional().describe("Document number"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
     postings: jsonObjectArrayInput.describe(
-      "Array of postings: [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, base_amount?, projects_project_id?, projects_location_id?, projects_person_id?}]. Legacy callers may still pass a JSON array string. " +
-      "accounts_dimensions_id is REQUIRED when accounts_id refers to an account with sub-accounts (use list_account_dimensions to look it up). " +
+      "Postings [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, base_amount?, projects_project_id?, projects_location_id?, projects_person_id?}]. " +
+      "accounts_dimensions_id is REQUIRED when accounts_id has sub-accounts. " +
       "base_amount is the EUR equivalent for multi-currency entries (when cl_currencies_id is not EUR). " +
       "projects_project_id / projects_location_id / projects_person_id link the posting to project tracking dimensions."
     ),
@@ -162,7 +162,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "update_journal", "Update a journal entry. Server-managed fields (id, registered, register_date, status) are rejected — use the dedicated confirm/invalidate tools. Once the journal is registered, effective_date is audit-locked; invalidate_journal first to edit it.", {
     id: coerceId.describe("Journal ID"),
-    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
+    data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const current = await api.journals.get(id);

@@ -1134,7 +1134,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     "parse_camt053",
     "Parse a CAMT.053 bank statement XML file and preview statement metadata, entries, summary, and duplicate matches against existing transactions.",
     {
-      file_path: z.string().describe("Absolute path to the CAMT.053 XML file. Also accepts a base64 payload (\"base64:<data>\" or \"base64:xml:<data>\") for cross-system file transfer from remote MCP clients."),
+      file_path: z.string().describe("Absolute path to the CAMT.053 XML file."),
     },
     { ...readOnly, openWorldHint: true, title: "Parse CAMT.053" },
     async ({ file_path }) => {
@@ -1171,7 +1171,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     "import_camt053",
     "Parse a CAMT.053 bank statement XML file and create bank transactions in e-arveldaja. Skips existing duplicates by AcctSvcrRef bank reference and exact duplicate rows within the same file. DRY RUN by default.",
     {
-      file_path: z.string().describe("Absolute path to the CAMT.053 XML file. Also accepts a base64 payload (\"base64:<data>\" or \"base64:xml:<data>\") for cross-system file transfer from remote MCP clients."),
+      file_path: z.string().describe("Absolute path to the CAMT.053 XML file."),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID in e-arveldaja. Use list_account_dimensions to find it."),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
@@ -1511,7 +1511,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     "Merged CAMT.053 entry point. Use mode='parse' to inspect a bank statement, mode='dry_run' to preview transaction import, or mode='execute' to create transactions after approval.",
     {
       mode: z.enum(["parse", "dry_run", "execute"]).optional().describe("Workflow phase to run. Defaults to parse."),
-      file_path: z.string().describe("Absolute path to the CAMT.053 XML file. Also accepts a base64 payload (\"base64:<data>\" or \"base64:xml:<data>\") for cross-system file transfer from remote MCP clients."),
+      file_path: z.string().describe("Absolute path to the CAMT.053 XML file."),
       accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID in e-arveldaja. Required for dry_run and execute modes."),
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),

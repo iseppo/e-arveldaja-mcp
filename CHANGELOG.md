@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Leaner tool metadata (smaller per-session token cost)** — trimmed duplicated and relocatable prose from the always-loaded `tools/list` surface (tool descriptions and Zod property descriptions) without changing any tool behavior or schema constraints. Workflow-sequencing/rationale narrative moved to the on-demand workflow prompts; compact direct-call invariants (exact invoice `vat_price`/`gross_price`, `currency_rate` direction, dimensioned-account `related_sub_id`, dry-run/execute semantics) stay on the tools themselves. Reduces the `tools/list` payload by ~5% (117.7 KB → 111.9 KB) with the full test suite green and new tests asserting the retained direct-call invariants.
+
 ## [0.15.1] - 2026-06-15
 
 ### Changed

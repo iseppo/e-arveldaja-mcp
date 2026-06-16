@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { z } from "zod";
 import type { Account, Journal, Posting } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { registerEstonianTaxTools } from "./estonian-tax.js";
@@ -33,12 +34,19 @@ type ToolCallback = (args: Record<string, unknown>) => Promise<unknown>;
 
 function makeMockServer() {
   const tools = new Map<string, ToolCallback>();
+  const configs = new Map<string, { description?: string; inputSchema?: Record<string, unknown> }>();
   const server = {
-    registerTool: vi.fn((name: string, _config: unknown, callback: ToolCallback) => {
+    registerTool: vi.fn((name: string, config: unknown, callback: ToolCallback) => {
+      configs.set(name, config as { description?: string; inputSchema?: Record<string, unknown> });
       tools.set(name, callback);
     }),
   };
-  return { server: server as unknown as import("@modelcontextprotocol/sdk/server/mcp.js").McpServer, tools };
+  return { server: server as unknown as import("@modelcontextprotocol/sdk/server/mcp.js").McpServer, tools, configs };
+}
+
+function toolMetadataText(config: { description?: string; inputSchema?: Record<string, unknown> }): string {
+  const schema = config.inputSchema ? z.object(config.inputSchema as z.ZodRawShape).toJSONSchema() : {};
+  return `${config.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 // Convenience: parse the JSON text from a tool result
@@ -618,6 +626,18 @@ describe("create_owner_expense_reimbursement", () => {
     registerEstonianTaxTools(mock.server, api);
     tools = mock.tools;
   }
+
+  it("keeps direct-call VAT invariants in tool metadata", () => {
+    const accounts = makeStandardAccounts();
+    const { server, configs } = makeMockServer();
+    registerEstonianTaxTools(server, makeApi([], accounts));
+
+    const metadata = toolMetadataText(configs.get("create_owner_expense_reimbursement")!);
+    expect(metadata).toContain("VAT rate as decimal");
+    expect(metadata).toContain("NOT a percentage");
+    expect(metadata).toContain("deductible_vat_amount");
+    expect(metadata).not.toContain("restricted categories ask for confirmation");
+  });
 
   // -------------------------------------------------------------------------
   // VAT-registered company: splits input VAT

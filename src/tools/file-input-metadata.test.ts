@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { registerAccountingInboxTools } from "./accounting-inbox.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerLightyearTools } from "./lightyear-investments.js";
@@ -14,7 +15,12 @@ function getToolConfig(
   register(server, {} as any);
   const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
   if (!registration) throw new Error(`Missing tool registration for ${toolName}`);
-  return registration[1] as { annotations?: { openWorldHint?: boolean } };
+  return registration[1] as { description?: string; inputSchema?: Record<string, unknown>; annotations?: { openWorldHint?: boolean } };
+}
+
+function toolMetadataText(config: { description?: string; inputSchema?: Record<string, unknown> }): string {
+  const schema = config.inputSchema ? z.object(config.inputSchema as z.ZodRawShape).toJSONSchema() : {};
+  return `${config.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("file input tool metadata", () => {
@@ -39,5 +45,18 @@ describe("file input tool metadata", () => {
     for (const config of toolConfigs) {
       expect(config.annotations?.openWorldHint).toBe(true);
     }
+  });
+
+  it("keeps file-input workflow metadata free of relocatable implementation notes", () => {
+    const receiptBatch = toolMetadataText(getToolConfig(registerReceiptInboxTools, "process_receipt_batch"));
+    expect(receiptBatch).toContain("DRY RUN by default");
+    expect(receiptBatch).toContain("explicit approval");
+    expect(receiptBatch).not.toContain("#19");
+    expect(receiptBatch).not.toContain("#20");
+    expect(receiptBatch).not.toContain("Legacy execute=true");
+
+    const autoRule = toolMetadataText(getToolConfig(registerAccountingInboxTools, "save_auto_booking_rule"));
+    expect(autoRule).toContain("confirmed and approved");
+    expect(autoRule).not.toContain("Open Knowledge Format bundle");
   });
 });

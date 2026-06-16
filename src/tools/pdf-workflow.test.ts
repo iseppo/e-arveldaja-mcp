@@ -7,6 +7,7 @@ import { resolveFileInput } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import { registerPdfWorkflowTools } from "./pdf-workflow.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { z } from "zod";
 
 vi.mock("../file-validation.js", () => ({
   resolveFileInput: vi.fn(),
@@ -133,8 +134,14 @@ function setupPdfWorkflowTool(
 
   return {
     handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>,
+    options: registration[1] as { description?: string; inputSchema?: Record<string, unknown> },
     api,
   };
+}
+
+function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
+  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
+  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 afterEach(() => {
@@ -147,6 +154,19 @@ afterEach(() => {
 });
 
 describe("pdf workflow tools", () => {
+  it("keeps PDF invoice creation metadata to direct-call invariants", () => {
+    const { options } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
+    const metadata = toolMetadataText(options);
+
+    expect(metadata).toContain("EXACT total VAT");
+    expect(metadata).toContain("EXACT total gross");
+    expect(metadata).toContain("EUR per 1 foreign currency unit");
+    expect(metadata).toContain("purchase_accounts_dimensions_id is REQUIRED");
+    expect(metadata).not.toContain("self-heal");
+    expect(metadata).not.toContain("Legacy callers may still pass");
+    expect(metadata).not.toContain("base64 payload");
+  });
+
   it("extract_pdf_invoice uses LiteParse output for raw text and page count", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/invoice.pdf" });
     mockedParseDocument.mockResolvedValue({

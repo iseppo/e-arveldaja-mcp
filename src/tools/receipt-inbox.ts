@@ -974,12 +974,12 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
 
   registerCapturedTool(
     "process_receipt_batch",
-    "Process receipt PDFs and images from a folder. DRY RUN by default. OCR text is returned for all supported files, and incomplete deterministic extraction is surfaced through llm_fallback (with a confidence: low|medium|high score, see #20) for model/manual review. Use execution_mode='create' to create/upload PROJECT invoices, or execution_mode='create_and_confirm' only after approval for high-confidence rows. Legacy execute=true maps to execution_mode='create' (#19).",
+    "Process receipt PDFs/images from a folder. DRY RUN by default. Returns OCR/extraction review data. Use execution_mode='create' to create/upload PROJECT invoices, or create_and_confirm only after explicit approval.",
     {
       folder_path: z.string().describe("Folder path with receipts"),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID used when matching bank transactions"),
       execution_mode: z.enum(RECEIPT_BATCH_EXECUTION_MODES).optional().describe("Execution phase: dry_run (default), create (create/upload PROJECT invoices only), or create_and_confirm (create, upload, confirm, and exact-match bank transactions after explicit approval)"),
-      execute: z.boolean().optional().describe("Deprecated compatibility flag. true maps to execution_mode='create'; false maps to dry_run when execution_mode is omitted."),
+      execute: z.boolean().optional().describe("Deprecated boolean alias for execution_mode."),
       date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
     },
@@ -1594,7 +1594,7 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     "apply_transaction_classifications",
     "Apply the output of classify_unmatched_transactions. DRY RUN by default. Only expense-like categories are auto-booked as purchase invoices; review-only categories are reported back.",
     {
-      classifications_json: jsonObjectOrArrayInput.describe("Structured output from classify_unmatched_transactions. Legacy callers may still pass a JSON string."),
+      classifications_json: jsonObjectOrArrayInput.describe("Structured output from classify_unmatched_transactions."),
       execute: z.boolean().optional().describe("Actually create invoices and link transactions (default false = dry run)"),
     },
     { ...batch, title: "Apply Transaction Classifications" },

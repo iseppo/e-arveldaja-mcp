@@ -369,7 +369,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
     "unconfirmed to avoid double-counting. Otherwise it is confirmed against the other bank account. " +
     "DRY RUN by default — set execute=true to actually create transactions.",
     {
-      file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
+      file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions."),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID for the Wise account in e-arveldaja"),
       fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account. Use list_account_dimensions to find it."),
       fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),

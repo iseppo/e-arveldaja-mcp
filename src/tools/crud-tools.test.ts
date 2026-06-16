@@ -74,9 +74,14 @@ function getCrudToolHarness(toolName: string, overrides?: {
 
   return {
     api,
-    options: call[1] as { inputSchema?: Record<string, unknown> },
+    options: call[1] as { description?: string; inputSchema?: Record<string, unknown> },
     handler: call[2] as (args: Record<string, unknown>, extra?: unknown) => Promise<unknown>,
   };
+}
+
+function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
+  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
+  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("safeJsonParse", () => {
@@ -197,6 +202,25 @@ describe("registerCrudTools", () => {
       "list_bank_accounts",
       "create_bank_account",
     ]);
+  });
+
+  it("keeps compact direct-call invariants in heavy CRUD tool metadata", () => {
+    const purchaseInvoice = toolMetadataText(getCrudToolHarness("create_purchase_invoice").options);
+    expect(purchaseInvoice).toContain("EXACT");
+    expect(purchaseInvoice).toContain("EUR per 1 foreign currency unit");
+    expect(purchaseInvoice).toContain("purchase_accounts_dimensions_id is REQUIRED");
+    expect(purchaseInvoice).not.toContain("Legacy callers may still pass");
+
+    const transaction = toolMetadataText(getCrudToolHarness("confirm_transaction").options);
+    expect(transaction).toContain("Array of distribution rows");
+    expect(transaction).toContain("related_sub_id is REQUIRED");
+    expect(transaction).toContain("Client ID to set on the transaction before confirming");
+    expect(transaction).not.toContain("Legacy callers may still pass");
+
+    const transactionsList = toolMetadataText(getCrudToolHarness("list_transactions").options);
+    expect(transactionsList).toContain("brief view");
+    expect(transactionsList).not.toContain("listAll()");
+    expect(transactionsList).not.toContain("dozens of pages");
   });
 });
 

@@ -47,7 +47,7 @@ export type ListView = "brief" | "full";
 
 export const viewParam = {
   view: z.enum(["brief", "full"]).optional().describe(
-    "Response detail level. 'brief' (default) returns triage fields only — sufficient to pick a row by ID; call the matching get_* tool for full detail. 'full' returns every field the API exposes (much larger)."
+    "Response detail: brief (default) returns triage fields; full returns every API field."
   ),
 };
 

@@ -162,6 +162,7 @@ Call `create_purchase_invoice_from_pdf`:
 - `file_path`: the original file path (auto-uploads the source document)
 
 Use the exact `vat_price` and `gross_price` from the invoice. Do not recalculate them. Optional only when genuinely unknown; when present on the invoice, pass the exact original totals.
+If source document upload fails after invoice creation, the draft invoice is invalidated.
 
 ## Step 12: Confirm and report
 

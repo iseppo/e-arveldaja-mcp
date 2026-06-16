@@ -28,8 +28,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
   // =====================
 
   registerTool(server, "list_transactions",
-    "List bank transactions. Paginated. Returns brief view (id, date, amount, currency, status, type, clients_id, accounts_dimensions_id, bank_ref_number, description) by default; pass view='full' or call get_transaction for full detail (including items). " +
-    "Optional filters are applied client-side after listAll() when any filter is provided, so callers don't need to paginate through dozens of pages to find matching rows.",
+    "List bank transactions. Paginated. Returns brief view by default; pass view='full' or call get_transaction for full detail.",
     {
       ...pageParam.shape,
       ...viewParam,
@@ -139,13 +138,12 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     {
     id: coerceId.describe("Transaction ID"),
       distributions: jsonObjectArrayInput.optional().describe(
-        "Array of distribution rows: [{related_table, related_id, related_sub_id?, amount}]. Legacy callers may still pass a JSON array string. " +
+        "Array of distribution rows: [{related_table, related_id, related_sub_id?, amount}]. " +
       "related_table values: 'accounts' (book to a GL account), 'purchase_invoices', 'sale_invoices'. " +
       "related_id is REQUIRED for all three related_table values (the account ID, purchase-invoice ID, or sale-invoice ID). " +
       "related_sub_id is REQUIRED when related_table='accounts' and the account has dimensions — " +
       "pass the dimension ID there (e.g. 1360 'Arveldused aruandvate isikutega' with sub-account per person). " +
-      "Without related_sub_id the API rejects with 'Entry cannot be made directly to the account ... since it has dimensions'. " +
-      "Use list_account_dimensions to look up dimension IDs for an account."
+      "Without related_sub_id the API rejects dimensioned-account postings."
     ),
     clients_id: coerceId.optional().describe("Client ID to set on the transaction before confirming (required when transaction has no clients_id and distribution is against accounts, not invoices)"),
   }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions, clients_id }) => {
@@ -191,7 +189,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
 
   registerTool(server, "update_transaction", "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference.", {
     id: coerceId.describe("Transaction ID"),
-    data: jsonObjectInput.describe("Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description, ref_number. Legacy callers may still pass a JSON object string."),
+    data: jsonObjectInput.describe("Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description, ref_number."),
   }, { ...mutate, title: "Update Transaction" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const validationErrors = validateTransactionUpdateData(parsed);

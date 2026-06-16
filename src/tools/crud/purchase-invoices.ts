@@ -45,9 +45,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
   });
 
   registerTool(server, "create_purchase_invoice",
-    "Create a draft purchase invoice with line items. Requires cl_purchase_articles_id (use list_purchase_articles). Pass EXACT vat_price and gross_price from the original invoice. " +
-    "For non-EUR invoices pass cl_currencies_id and currency_rate (EUR per 1 foreign unit). " +
-    "Optionally pass base_net_price/base_vat_price/base_gross_price to lock the EUR settlement values to the actual payment (e.g. Wise card-payment exchange) and avoid PARTIALLY_PAID rounding.",
+    "Create a draft purchase invoice. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (EUR per 1 foreign unit); base_* may lock actual EUR settlement.",
     {
       clients_id: coerceId.describe("Supplier client ID"),
       client_name: z.string().describe("Supplier name"),
@@ -58,14 +56,13 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       vat_price: z.number().describe("Total VAT amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       gross_price: z.number().describe("Total gross amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
-      currency_rate: z.number().positive().optional().describe("Exchange rate as EUR per 1 foreign currency unit. Required when cl_currencies_id != EUR. For Wise card payments use Source amount (after fees) / Target amount."),
-      base_net_price: z.number().optional().describe("EUR equivalent of net_price (foreign-currency invoices). Auto-derived from currency_rate when omitted."),
-      base_vat_price: z.number().optional().describe("EUR equivalent of vat_price (foreign-currency invoices). Auto-derived from currency_rate when omitted."),
-      base_gross_price: z.number().optional().describe("EUR equivalent of gross_price (foreign-currency invoices). Pass the actual settled EUR amount (Wise Source amount after fees) to avoid PARTIALLY_PAID jääk. Auto-derived from currency_rate when omitted."),
+      currency_rate: z.number().positive().optional().describe("Exchange rate as EUR per 1 foreign currency unit. Required when cl_currencies_id != EUR."),
+      base_net_price: z.number().optional().describe("EUR equivalent of net_price; auto-derived from currency_rate when omitted."),
+      base_vat_price: z.number().optional().describe("EUR equivalent of vat_price; auto-derived from currency_rate when omitted."),
+      base_gross_price: z.number().optional().describe("Actual settled EUR gross total; auto-derived from currency_rate when omitted."),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
       items: jsonObjectArrayInput.describe(
-        "Array of items: [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. Legacy callers may still pass a JSON array string. " +
-        "purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions (sub-accounts). Same rule applies to vat_accounts_dimensions_id when the VAT account has dimensions. Use list_account_dimensions to look up dimension IDs."
+        "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts."
       ),
       notes: z.string().optional().describe("Notes"),
       bank_ref_number: z.string().optional().describe("Payment reference number"),
@@ -132,7 +129,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
 
   registerTool(server, "update_purchase_invoice", "Update a purchase invoice. Server-managed fields (id, status, registered, register_date, payment_status) are rejected — use the dedicated confirm/invalidate tools. Once CONFIRMED, create_date and journal_date are audit-locked; invalidate_purchase_invoice first to edit them.", {
     id: coerceId.describe("Invoice ID"),
-    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
+    data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const current = await api.purchaseInvoices.get(id);

@@ -597,7 +597,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     "Pairs foreign currency trades with their FX conversion entries. " +
     "Returns summary by default — set include_rows=true for individual trade/distribution details.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
+      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
       date_from: z.string().optional().describe("Only include entries from this date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only include entries up to this date (YYYY-MM-DD)"),
       include_rows: z.boolean().optional().describe("Include individual trade/distribution rows (default false — summary only)"),
@@ -845,7 +845,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     "For sells: requires capital_gains_file to determine cost basis and recognized gain/loss. " +
     "Without it, sells are skipped with a warning.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
+      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
       capital_gains_file: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sell entries)"),
       investment_account: z.number().describe("Investment/securities account (e.g. 1550 Finantsinvesteeringud)"),
       investment_dimension_id: z.number().optional().describe("Dimension ID for investment account (accounts_dimensions_id)"),
@@ -1233,7 +1233,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   registerTool(server, "book_lightyear_distributions",
     "Create journal entries for Lightyear dividend, interest, and reward distributions, including withheld tax. DRY RUN by default.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
+      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
       broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
       income_account: z.number().describe("Investment income account (e.g. 8320 Tulu fondiosakutelt, 8400 Intressitulu)"),
@@ -1387,7 +1387,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   registerTool(server, "lightyear_portfolio_summary",
     "Compute current holdings and cost basis from a Lightyear account statement. Useful for verifying investment account balance.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file. Also accepts a base64 payload (\"base64:csv:<data>\") for cross-system file transfer from remote MCP clients."),
+      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
     },
     { ...readOnly, openWorldHint: true, title: "Lightyear Portfolio Summary" },
     async ({ file_path }) => {

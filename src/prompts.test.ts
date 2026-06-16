@@ -499,6 +499,7 @@ describe("registerPrompts", () => {
       expect(text).toContain("Extraction and validation use `cl_currencies_id`; booking uses `currency`");
       expect(text).toContain("For non-EUR invoices, include `currency`, `currency_rate`, and, when known, `base_gross_price`");
       expect(text).toContain("candidate_invoice_number_matches");
+      expect(text).toContain("If source document upload fails after invoice creation, the draft invoice is invalidated.");
       expect(text).toContain("auto_create: false");
       expect(text).toContain("auto_create: true");
       expect(text).toContain("calendar-day difference between `invoice_date` and `due_date`");
@@ -620,6 +621,7 @@ describe("registerPrompts", () => {
       expect(text).toContain("resolve_accounting_review_item");
       expect(text).toContain("recommendation");
       expect(text).toContain("compliance_basis");
+      expect(text).toContain("Ordinary business VAT defaults to deductible, while likely restricted categories need confirmation unless local rules define the policy.");
       expect(text).toContain("unresolved_questions");
       expect(text).toContain("suggested_workflow");
       expect(text).not.toContain("suggested_rule_markdown");

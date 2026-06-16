@@ -337,7 +337,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "create_owner_expense_reimbursement",
-    "Create a journal for a business expense paid personally by the owner. Ordinary business VAT defaults to deductible, while likely restricted categories ask for confirmation unless local rules define the policy.",
+    "Create a journal for a business expense paid personally by the owner.",
     {
       owner_client_id: coerceId.describe("Owner/shareholder client ID"),
       effective_date: isoDateSchema("Expense date (YYYY-MM-DD)"),
@@ -345,7 +345,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       net_amount: z.number().describe("Net amount (without VAT)"),
       vat_rate: z.number().describe("VAT rate as decimal (e.g. 0.24 for 24%, 0.13, 0.09, 0.05, or 0 for no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),
       vat_amount: z.number().optional().describe("Exact VAT amount (overrides vat_rate if provided)"),
-      vat_deduction_mode: z.enum(["none", "full", "partial"]).optional().describe("How much of the receipt VAT is deductible. Defaults to full for ordinary VAT-registered expenses, while restricted categories ask for confirmation unless local accounting rules define a policy."),
+      vat_deduction_mode: z.enum(["none", "full", "partial"]).optional().describe("VAT deduction mode. Use partial with deductible_vat_amount."),
       deductible_vat_amount: z.number().optional().describe("Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default or configured ratio."),
       expense_account: z.number().describe("Expense account number (e.g. 5000, 6000)"),
       vat_account: z.number().optional().describe("Input VAT account (default 1510)"),

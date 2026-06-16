@@ -52,8 +52,8 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     sale_invoice_type: z.string().optional().describe("Type: INVOICE or CREDIT_INVOICE"),
     show_client_balance: z.boolean().optional().describe("Show client balance on invoice"),
       items: jsonObjectArrayInput.describe(
-        "Array of invoice items: [{products_id, custom_title, amount, unit_net_price, sale_accounts_id?, sale_accounts_dimensions_id?, vat_accounts_id?, cl_sale_articles_id?, discount_percent?, projects_project_id?, projects_location_id?, projects_person_id?}]. Legacy callers may still pass a JSON array string. " +
-      "sale_accounts_dimensions_id is REQUIRED when the revenue account has dimensions (sub-accounts). Use list_account_dimensions to look up dimension IDs. " +
+        "Invoice items [{products_id, custom_title, amount, unit_net_price, sale_accounts_id?, sale_accounts_dimensions_id?, vat_accounts_id?, cl_sale_articles_id?, discount_percent?, projects_project_id?, projects_location_id?, projects_person_id?}]. " +
+      "sale_accounts_dimensions_id is REQUIRED when the revenue account has dimensions. " +
       "Note: SaleInvoicesItems schema has no vat_accounts_dimensions_id field — only the purchase side does."
     ),
     notes: z.string().optional().describe("Internal notes"),
@@ -88,7 +88,7 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
 
   registerTool(server, "update_sale_invoice", "Update a sales invoice. Server-managed fields (id, status, registered, register_date) are rejected — use the dedicated confirm/invalidate tools. Once CONFIRMED, create_date and journal_date are audit-locked; invalidate_sale_invoice first to edit them.", {
     id: coerceId.describe("Invoice ID"),
-    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
+    data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const current = await api.saleInvoices.get(id);

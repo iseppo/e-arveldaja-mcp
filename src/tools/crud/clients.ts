@@ -69,7 +69,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "update_client", "Update an existing client. Server-managed fields (id, is_active, deactivated_date) are rejected — use the dedicated deactivate/restore tools.", {
     id: coerceId.describe("Client ID"),
-    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
+    data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Client" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const updateErrors = validateUpdateFields(parsed, "client");

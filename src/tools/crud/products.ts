@@ -41,7 +41,7 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
     code: z.string().describe("Product code"),
     cl_sale_articles_id: coerceId.optional().describe("Sales article ID"),
     sale_accounts_id: coerceId.optional().describe("Sales account ID"),
-    cl_sale_accounts_dimensions_id: coerceId.optional().describe("Sales account dimension ID (use list_account_dimensions to find valid IDs)"),
+    cl_sale_accounts_dimensions_id: coerceId.optional().describe("Sales account dimension ID"),
     sale_accounts_dimensions_id: coerceId.optional().describe("Sales account dimension ID"),
     cl_purchase_articles_id: coerceId.optional().describe("Purchase article ID"),
     purchase_accounts_id: coerceId.optional().describe("Purchase account ID"),
@@ -67,7 +67,7 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "update_product", "Update a product. Server-managed fields (id, is_active, deactivated_date) are rejected — use the dedicated deactivate/restore tools.", {
     id: coerceId.describe("Product ID"),
-    data: jsonObjectInput.describe("Object with fields to update. Legacy callers may still pass a JSON object string."),
+    data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Product" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const updateErrors = validateUpdateFields(parsed, "product");
