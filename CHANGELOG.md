@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-06-16
+
 ### Added
 - **Estonian input-VAT deduction notes in `suggest_booking`** — the purchase-booking suggestion now returns a `tax_notes` array that flags deterministic deduction restrictions for the supplier/description: `KMS § 30` (külaliste vastuvõtt / esinduskulu — input VAT not deductible, plus the `TuMS § 49 lg 4` representation limit of 50 €/month + 2% of payroll) and `KMS § 30 lg 4` (M1 passenger-car costs — input VAT capped at 50%). Each note carries `code`, `severity`, `title`, `detail`, and statutory `basis`; the booking workflow prompt now requires surfacing every note on the approval card rather than silently applying or ignoring it. Rules live in a new date-gated `src/estonian-tax-rules.ts` dataset (standard VAT-rate timeline 20→22%→24% with effective dates, current reduced rates, and the deduction detectors) so the figures have a single, maintainable source verified against EMTA/Riigi Teataja. Detection runs only over plain strings, so OCR-derived input is never followed as instructions.
 - **Date-aware standard-VAT-rate check in `validate_invoice_data`** — a line carrying a standard-looking rate (20/22/24%) that does not match the standard rate in force on the invoice date (via the new rate timeline) now raises a warning, catching OCR misreads and wrong-period bookings around the 1.01.2024 and 1.07.2025 rate changes. Reduced/zero rates (0/9/13%) are unaffected, and the check no-ops when no invoice date is supplied.
