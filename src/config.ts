@@ -136,6 +136,32 @@ export function getBaseUrlForServer(server = process.env.EARVELDAJA_SERVER || "l
 }
 
 /**
+ * Controls which optional tools are registered into `tools/list` (which is
+ * loaded into the client context on every session). Disabling a feature group
+ * here removes its tools from the list without affecting the rest of the server.
+ */
+export interface ToolExposureConfig {
+  /**
+   * Register the Lightyear investment tool group (`book_lightyear_*`,
+   * `parse_lightyear_*`, `lightyear_portfolio_summary`). Enabled by default;
+   * set `EARVELDAJA_DISABLE_LIGHTYEAR=1` to drop it when the company does not
+   * track investments.
+   */
+  enableLightyear: boolean;
+}
+
+function envFlagEnabled(value: string | undefined): boolean {
+  return value === "1" || value === "true";
+}
+
+/** Resolve the tool-exposure policy from environment variables. */
+export function getToolExposureConfig(env: NodeJS.ProcessEnv = process.env): ToolExposureConfig {
+  return {
+    enableLightyear: !envFlagEnabled(env.EARVELDAJA_DISABLE_LIGHTYEAR),
+  };
+}
+
+/**
  * Strip/escape control characters before interpolating a filename into a
  * log line. Filenames legally can contain \n, \r, ANSI escapes, etc.,
  * which would corrupt terminal output or spoof extra log lines.

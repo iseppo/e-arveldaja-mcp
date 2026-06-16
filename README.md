@@ -109,6 +109,12 @@ By default these rules are stored as an [Open Knowledge Format](https://github.c
 
 The bundle is also browsable as MCP resources under `earveldaja://accounting_knowledge`. When several MCP clients share one bundle directory, concurrent rule writes are serialized with a lock file so the index never drifts out of sync with the concepts.
 
+### Trimming the tool surface
+
+The tool list is sent into the model's context on every session, so it is a fixed per-session token cost. The Lightyear investment tools are an optional feature group:
+
+- `EARVELDAJA_DISABLE_LIGHTYEAR=1` — drops the Lightyear investment tools (`book_lightyear_*`, `parse_lightyear_*`, `lightyear_portfolio_summary`). Use it when the company does not track investments.
+
 Confirmed supplier history still wins over local rules for purchase booking defaults.
 
 <details>

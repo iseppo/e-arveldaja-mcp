@@ -1196,6 +1196,10 @@ function buildReviewActionResponse(
 }
 
 export function registerAccountingInboxTools(server: McpServer, api: ApiContext): void {
+  // accounting_inbox is the single inbox entry point: mode="scan" plans,
+  // mode="dry_run" runs the safe dry-run pipeline. (The former
+  // prepare_accounting_inbox / run_accounting_inbox_dry_runs tools were exact
+  // aliases of these two modes and have been removed.)
   registerTool(server,
     "accounting_inbox",
     "Merged accounting inbox. mode='scan' recommends safe next steps; mode='dry_run' also runs safe dry-run steps.",
@@ -1209,22 +1213,6 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
         ? buildAccountingInboxDryRunResponse(api, params)
         : buildAccountingInboxScanResponse(api, params);
     },
-  );
-
-  registerTool(server,
-    "prepare_accounting_inbox",
-    "Scan workspace inputs and recommend next dry-run accounting steps.",
-    accountingInboxInputShape,
-    { ...readOnly, openWorldHint: true, title: "Prepare Accounting Inbox" },
-    async (params) => buildAccountingInboxScanResponse(api, params),
-  );
-
-  registerTool(server,
-    "run_accounting_inbox_dry_runs",
-    "Scan workspace inputs, run safe recommended dry runs, and return one consolidated preview.",
-    accountingInboxInputShape,
-    { ...readOnly, openWorldHint: true, title: "Run Accounting Inbox Dry Runs" },
-    async (params) => buildAccountingInboxDryRunResponse(api, params),
   );
 
   registerTool(server,

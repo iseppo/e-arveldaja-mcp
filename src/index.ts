@@ -18,6 +18,7 @@ import {
   getCredentialSetupInfo,
   findImportableApiKeyFiles,
   importApiKeyCredentials,
+  getToolExposureConfig,
   type CredentialStorageScope,
   type Config,
 } from "./config.js";
@@ -470,7 +471,7 @@ async function main() {
   }, {
     instructions: setupMode ? `Setup mode:
 - No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.
-- Local file-analysis tools such as prepare_accounting_inbox, extract_pdf_invoice, validate_invoice_data, scan_receipt_folder, parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
+- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, scan_receipt_folder, parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
 - Call get_setup_instructions for the exact credential setup steps.
 - list_connections returns the currently configured connections (0 until credentials are added).
 - Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.
@@ -959,7 +960,9 @@ async function main() {
     },
   }) as McpServer;
 
-  // Register all tools (via scopedServer so handlers get connection-pinned)
+  // Register all tools (via scopedServer so handlers get connection-pinned).
+  // toolExposure decides which optional/redundant tools enter tools/list.
+  const toolExposure = getToolExposureConfig();
   registerCrudTools(scopedServer, api);
   registerAccountBalanceTools(scopedServer, api);
   registerPdfWorkflowTools(scopedServer, api);
@@ -972,7 +975,7 @@ async function main() {
   registerAnnualReportTools(scopedServer, api);
   registerDocumentAuditTools(scopedServer, api);
   registerReceiptInboxTools(scopedServer, api);
-  registerLightyearTools(scopedServer, api);
+  if (toolExposure.enableLightyear) registerLightyearTools(scopedServer, api);
   registerWiseImportTools(scopedServer, api);
   registerCamtImportTools(scopedServer, api);
   registerAccountingInboxTools(scopedServer, api);

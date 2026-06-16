@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-121 tools, 15 workflow prompts, 14 resources across 12 modules. Supports multiple companies/accounts.
+120 tools (115 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 14 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -66,6 +66,23 @@ Set `EARVELDAJA_RULES_DIR` explicitly for a stable per-company path
 (e.g. `~/.config/e-arveldaja-mcp/<firma>/accounting-rules`) when running several
 companies. Concurrent writes from multiple MCP clients sharing one bundle dir are
 serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
+
+### Tool exposure (per-session token cost)
+
+`tools/list` is loaded into the client context on every session, so the tool
+surface is a fixed per-session token cost. The Lightyear investment tools are an
+optional feature group that can be dropped when unused (see
+`getToolExposureConfig()` in `src/config.ts`):
+
+- **`EARVELDAJA_DISABLE_LIGHTYEAR=1`** — do not register the Lightyear
+  investment tools (`book_lightyear_*`, `parse_lightyear_*`,
+  `lightyear_portfolio_summary`). Use when the company does not track
+  investments. Default: Lightyear is enabled.
+
+The default surface is 120 tools; `DISABLE_LIGHTYEAR` drops it to 115. (The
+former `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
+exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
+been removed — use `accounting_inbox` with the matching `mode`.)
 
 ## Authentication
 

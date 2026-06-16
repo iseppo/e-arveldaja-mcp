@@ -26,8 +26,7 @@ function toolMetadataText(config: { description?: string; inputSchema?: Record<s
 describe("file input tool metadata", () => {
   it("marks file and folder based tools as open-world", () => {
     const toolConfigs = [
-      getToolConfig(registerAccountingInboxTools, "prepare_accounting_inbox"),
-      getToolConfig(registerAccountingInboxTools, "run_accounting_inbox_dry_runs"),
+      getToolConfig(registerAccountingInboxTools, "accounting_inbox"),
       getToolConfig(registerPdfWorkflowTools, "extract_pdf_invoice"),
       getToolConfig(registerPdfWorkflowTools, "create_purchase_invoice_from_pdf"),
       getToolConfig(registerPdfWorkflowTools, "upload_invoice_document"),

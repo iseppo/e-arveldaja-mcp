@@ -21,7 +21,7 @@ vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
 
 const mockedParseDocument = vi.mocked(parseDocument);
 
-function setupAccountingInboxTool(apiOptions: AccountingWorkflowApiOptions = {}, toolName = "prepare_accounting_inbox") {
+function setupAccountingInboxTool(apiOptions: AccountingWorkflowApiOptions = {}, toolName = "accounting_inbox") {
   const server = createMockToolServer();
   const api = createAccountingWorkflowApi(apiOptions);
 
@@ -40,7 +40,7 @@ afterEach(async () => {
   mockedParseDocument.mockReset();
 });
 
-describe("prepare_accounting_inbox", () => {
+describe("accounting_inbox (scan mode)", () => {
   it("exposes accounting_inbox scan mode as the merged scan entry point", async () => {
     const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
@@ -309,9 +309,10 @@ describe("prepare_accounting_inbox", () => {
       },
     } as any);
 
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({
       workspace_path: workspace,
@@ -442,9 +443,10 @@ describe("prepare_accounting_inbox", () => {
         getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
       },
     } as any);
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({ workspace_path: workspace });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
@@ -565,9 +567,10 @@ describe("prepare_accounting_inbox", () => {
       },
     } as any);
 
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({ workspace_path: workspace });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
@@ -714,9 +717,10 @@ describe("prepare_accounting_inbox", () => {
       },
     } as any);
 
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({ workspace_path: workspace });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
@@ -853,9 +857,10 @@ ${entryXml}
       },
     } as any);
 
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({ workspace_path: workspace });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
@@ -899,9 +904,10 @@ ${entryXml}
         getInvoiceInfo: vi.fn().mockResolvedValue({}),
       },
     } as any);
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({ workspace_path: workspace });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
@@ -993,9 +999,10 @@ ${entryXml}
       },
     } as any);
 
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({ workspace_path: workspace });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
@@ -1597,9 +1604,9 @@ ${entryXml}
         getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
       },
     } as any);
-    const reg1 = server1.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    const reg1 = server1.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     const handler1 = reg1![2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
-    const result1 = await handler1({ workspace_path: workspace1, bank_account_dimension_id: 101 });
+    const result1 = await handler1({ mode: "dry_run", workspace_path: workspace1, bank_account_dimension_id: 101 });
     const payload1 = parseMcpResponse(result1.content[0]!.text) as any;
     const classifySkip1 = payload1.autopilot.skipped_steps?.find((s: any) => s.tool === "classify_unmatched_transactions");
     // import_camt053 ran and would create transactions → pending_materialization
@@ -1630,9 +1637,9 @@ ${entryXml}
         getInvoiceInfo: vi.fn().mockResolvedValue({}),
       },
     } as any);
-    const reg2 = server2.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    const reg2 = server2.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     const handler2 = reg2![2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
-    const result2 = await handler2({ workspace_path: workspace2 });
+    const result2 = await handler2({ mode: "dry_run", workspace_path: workspace2 });
     const payload2 = parseMcpResponse(result2.content[0]!.text) as any;
     const classifySkip2 = payload2.autopilot.skipped_steps?.find((s: any) => s.tool === "classify_unmatched_transactions");
     if (classifySkip2) {
@@ -1716,9 +1723,10 @@ ${entryXml}
       },
     } as any);
 
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     if (!registration) throw new Error("Tool not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({ workspace_path: workspace });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
@@ -1833,9 +1841,10 @@ ${entryXml}
       },
     } as any);
 
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     if (!registration) throw new Error("Tool not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({ workspace_path: workspace });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
@@ -1847,7 +1856,7 @@ ${entryXml}
     expect(nextAction?.tool).not.toBe("parse_camt053");
   });
 
-  it("run_accounting_inbox_dry_runs does not recommend classify_unmatched_transactions while materialization is still pending", async () => {
+  it("accounting_inbox dry_run does not recommend classify_unmatched_transactions while materialization is still pending", async () => {
     const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
     await writeFile(
@@ -1901,9 +1910,10 @@ ${entryXml}
       },
     } as any);
 
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "run_accounting_inbox_dry_runs");
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     if (!registration) throw new Error("Tool not registered");
-    const autopilotHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
 
     const result = await autopilotHandler({ workspace_path: workspace, bank_account_dimension_id: 101 });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
