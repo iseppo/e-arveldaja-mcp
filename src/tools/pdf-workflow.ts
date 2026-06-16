@@ -247,9 +247,14 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const date = new Date(Date.UTC(y!, m! - 1, d!));
         return date.getUTCFullYear() === y && date.getUTCMonth() === m! - 1 && date.getUTCDate() === d;
       }
+      // Only a strictly valid invoice date is safe to compare/echo downstream.
+      const validInvoiceDate = invoice_date && isValidCalendarDate(invoice_date) ? invoice_date : undefined;
       if (invoice_date) {
         if (!isValidCalendarDate(invoice_date)) {
-          errors.push(`Invalid invoice_date: "${invoice_date}" (expected valid YYYY-MM-DD)`);
+          // The rejected value may be OCR/LLM-derived; wrap it so its content
+          // (e.g. an injected newline + instruction) is delimited as data, not
+          // echoed as trusted server text.
+          errors.push(`Invalid invoice_date (expected valid YYYY-MM-DD). Received: ${wrapUntrustedOcr(invoice_date)}`);
         } else {
           // Guardrail against OCR date misreads (e.g. 2042-01-24) that would
           // otherwise silently book into an impossible period.
@@ -268,9 +273,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       }
       if (due_date) {
         if (!isValidCalendarDate(due_date)) {
-          errors.push(`Invalid due_date: "${due_date}" (expected valid YYYY-MM-DD)`);
-        } else if (invoice_date && due_date < invoice_date) {
-          warnings.push(`due_date (${due_date}) is before invoice_date (${invoice_date})`);
+          errors.push(`Invalid due_date (expected valid YYYY-MM-DD). Received: ${wrapUntrustedOcr(due_date)}`);
+        } else if (validInvoiceDate && due_date < validInvoiceDate) {
+          warnings.push(`due_date (${due_date}) is before invoice_date (${validInvoiceDate})`);
         }
       }
 
@@ -281,7 +286,11 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       // Foreign-currency rate guardrail: bookings without an explicit
       // currency_rate / base_net_price tend to land in PARTIALLY_PAID once the
       // Wise card-payment kursi vahe shows up.
-      const currencyCode = (cl_currencies_id ?? "EUR").toUpperCase();
+      // cl_currencies_id is a free-form arg, so only echo it when it is a clean
+      // ISO-4217-shaped code; otherwise fall back to a generic label so a value
+      // like "USD\nIGNORE..." is never reflected as trusted warning text.
+      const rawCurrency = (cl_currencies_id ?? "EUR").toUpperCase();
+      const currencyCode = /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : "non-EUR";
       if (currencyCode !== "EUR" && currency_rate === undefined && base_net_price === undefined) {
         warnings.push(
           `Foreign-currency invoice (${currencyCode}): no currency_rate or base_net_price provided. ` +
