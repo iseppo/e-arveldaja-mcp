@@ -6,7 +6,7 @@ import { type ApiContext, isCompanyVatRegistered, coerceId } from "./crud-tools.
 import { computeAllBalances, sumCategory, type AccountBalance } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { create, readOnly } from "../annotations.js";
-import { computeRepresentationCostLimit, computeDonationLimit } from "../estonian-tax-rules.js";
+import { computeRepresentationCostLimit, computeDonationLimit, classifyExpenseForVat } from "../estonian-tax-rules.js";
 import { logAudit } from "../audit-log.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
@@ -21,8 +21,8 @@ import {
 import { buildOwnerExpenseVatReviewGuidance } from "../estonian-accounting-guidance.js";
 
 function requiresOwnerExpenseVatReview(accountName: string | undefined, description: string): boolean {
-  const text = `${accountName ?? ""} ${description}`.toLowerCase();
-  return /\b(sõiduauto|auto|vehicle|fuel|kütus|parking|parkim|liising|leasing|representation|esindus|entertainment)\b/.test(text);
+  const { isPassengerCar, isEntertainmentOrHospitality } = classifyExpenseForVat(`${accountName ?? ""} ${description}`);
+  return isPassengerCar || isEntertainmentOrHospitality;
 }
 
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;

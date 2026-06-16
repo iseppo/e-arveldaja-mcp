@@ -253,10 +253,33 @@ export interface EstonianTaxNote {
   basis: string;
 }
 
-// Deterministic keyword triggers. Kept deliberately conservative — a match
-// raises a note to confirm, it does not auto-apply anything.
-const ENTERTAINMENT_RE = /(restoran|restaurant|cafe|caf[eé]|kohvik|baar\b|pub\b|catering|toitlust|meelelahut|vastuvõt|esinduskulu|entertainment|reception|banquet|banket)/iu;
-const CAR_RE = /(sõiduauto|\bauto\b|vehicle|kütus|bensiin|diisel|\bfuel\b|tankla|parkim|parking|liising|leasing|rehvi|\btyre\b|\btire\b)/iu;
+// Single source of truth for the keyword classification of an expense as a
+// passenger-car cost or an entertainment/hospitality cost. Consumed here by
+// detectVatDeductionNotes and (to remove near-duplicate regexes) by
+// buildOwnerExpenseVatReviewGuidance and requiresOwnerExpenseVatReview.
+// Kept deliberately conservative — a match raises a note/review to confirm, it
+// does not auto-apply anything. Estonian stems are left unbounded so inflected
+// forms match; short ambiguous tokens are word-bounded.
+const PASSENGER_CAR_RE = /(sõiduauto|\bauto\b|vehicle|kütus|bensiin|diisel|\bfuel\b|tankla|parkim|parking|liising|leasing|rehvi|\btyre\b|\btire\b)/iu;
+const ENTERTAINMENT_HOSPITALITY_RE = /(restoran|restaurant|caf[eé]|kohvik|baar\b|pub\b|catering|toitlust|meelelahut|vastuvõt|esindus|representation|entertainment|reception|banquet|banket|\bfood\b|majutus|accommodation)/iu;
+
+export interface ExpenseVatClassification {
+  isPassengerCar: boolean;
+  isEntertainmentOrHospitality: boolean;
+}
+
+/**
+ * Classify free text (supplier name, line description, account name) against the
+ * two deterministic input-VAT deduction restrictions. Detection only reads the
+ * text — never follows it — so it is safe to run over OCR-derived input.
+ */
+export function classifyExpenseForVat(text: string | undefined | null): ExpenseVatClassification {
+  const hay = typeof text === "string" ? text : "";
+  return {
+    isPassengerCar: PASSENGER_CAR_RE.test(hay),
+    isEntertainmentOrHospitality: ENTERTAINMENT_HOSPITALITY_RE.test(hay),
+  };
+}
 
 /**
  * Detect deterministic input-VAT deduction restrictions for a purchase booking
@@ -275,9 +298,10 @@ export function detectVatDeductionNotes(input: {
     .join(" • ");
   if (!haystack) return [];
 
+  const { isPassengerCar, isEntertainmentOrHospitality } = classifyExpenseForVat(haystack);
   const notes: EstonianTaxNote[] = [];
 
-  if (ENTERTAINMENT_RE.test(haystack)) {
+  if (isEntertainmentOrHospitality) {
     notes.push({
       code: "KMS § 30",
       severity: "warning",
@@ -285,12 +309,13 @@ export function detectVatDeductionNotes(input: {
       detail:
         "Kui tegu on külaliste või koostööpartnerite vastuvõtu kuluga (toitlustus, meelelahutus), siis sisendkäibemaksu maha ei arvata — broneeri kulu koos käibemaksuga (bruto) kulukontole. " +
         "Sama kulu kuulub ka tulumaksu vastuvõtukulude piirmäära alla: maksuvaba 50 € kalendrikuus + 2% palgafondist (kasvavalt), ületav osa maksustatakse 22/78. " +
-        "Kui kulu on tegelikult oma töötajate jaoks, võib tegu olla erisoodustusega (TuMS § 48). Küsi kasutajalt kulu eesmärki, kui see pole selge.",
+        "Erand: töötaja töölähetuse majutuse sisendkäibemaks on mahaarvatav (KMS § 30). " +
+        "Kui kulu on tegelikult oma töötajate jaoks (toitlustus/majutus), võib tegu olla erisoodustusega (TuMS § 48). Küsi kasutajalt kulu eesmärki, kui see pole selge.",
       basis: "KMS § 30; TuMS § 49 lg 4",
     });
   }
 
-  if (CAR_RE.test(haystack)) {
+  if (isPassengerCar) {
     notes.push({
       code: "KMS § 30 lg 4",
       severity: "warning",

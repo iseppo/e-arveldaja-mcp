@@ -1,4 +1,5 @@
 import type { InvoiceExtractionFallback } from "./invoice-extraction-fallback.js";
+import { classifyExpenseForVat } from "./estonian-tax-rules.js";
 import type {
   ExtractedReceiptFields,
   ReceiptClassification,
@@ -84,8 +85,9 @@ export function buildOwnerExpenseVatReviewGuidance(params: {
   accountName?: string;
 }): ReviewGuidance {
   const text = normalizedText(params.accountName, params.description);
+  const expenseClass = classifyExpenseForVat(text);
 
-  if (hasAnyKeyword(text, /\b(sõiduauto|auto|vehicle|fuel|kütus|parking|parkim|liising|leasing)\b/u)) {
+  if (expenseClass.isPassengerCar) {
     return {
       recommendation: "Soovitus: ära eelda täismahaarvamist. Kui tegu on tavalise M1 sõiduauto või selle kuluga ja erasõidud ei ole välistatud, kasuta konservatiivse vaikimisi lahendusena osalist mahaarvamist ning alusta 50% piirangust.",
       compliance_basis: [
@@ -101,7 +103,7 @@ export function buildOwnerExpenseVatReviewGuidance(params: {
     };
   }
 
-  if (hasAnyKeyword(text, /\b(representation|esindus|entertainment|restaurant|restoran|cafe|kohvik|food|toitlust|majutus|accommodation)\b/u)) {
+  if (expenseClass.isEntertainmentOrHospitality) {
     return {
       recommendation: "Soovitus: käsitle sisendkäibemaks vaikimisi mitte-mahaarvatavana, välja arvatud juhul, kui tegemist on töötaja tõendatud töölähetuse majutusega või muu selgelt mahaarvatava erandiga.",
       compliance_basis: [

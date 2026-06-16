@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Unified the expense VAT-restriction keyword detector** — the passenger-car and entertainment/hospitality keyword matching used for input-VAT deduction decisions now lives in a single `classifyExpenseForVat` in `src/estonian-tax-rules.ts`, consumed by `detectVatDeductionNotes` (`suggest_booking` tax_notes), `buildOwnerExpenseVatReviewGuidance` (receipt/owner-expense review), and `requiresOwnerExpenseVatReview` (`create_owner_expense_reimbursement`). Previously these were three near-duplicate regexes that could drift apart; the shared detector uses the union of their keywords, so detection is slightly broader (e.g. catering, meelelahutus, banquet, inflected accommodation). The `KMS § 30` note now also states the deductible business-trip (lähetus) accommodation exception. (The separate food/representation keyword lists used for purchase-article suggestion are a different concern and left unchanged.)
+
 ## [0.16.0] - 2026-06-16
 
 ### Added

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   standardVatRateOn,
   detectVatDeductionNotes,
+  classifyExpenseForVat,
   buildTaxRulesReference,
   computeRepresentationCostLimit,
   computeDonationLimit,
@@ -82,10 +83,37 @@ describe("detectVatDeductionNotes", () => {
     expect(codes).toEqual(["KMS § 30", "KMS § 30 lg 4"]);
   });
 
+  it("flags accommodation but states the business-trip exception in the note", () => {
+    const notes = detectVatDeductionNotes({ supplierName: "Hotell Viru", descriptions: ["majutus"] });
+    expect(notes).toHaveLength(1);
+    expect(notes[0].code).toBe("KMS § 30");
+    expect(notes[0].detail).toContain("töölähetuse majutuse sisendkäibemaks on mahaarvatav");
+  });
+
   it("returns nothing for ordinary, unrestricted purchases", () => {
     expect(detectVatDeductionNotes({ supplierName: "Microsoft Ireland", descriptions: ["Cloud subscription"] })).toEqual([]);
     expect(detectVatDeductionNotes({})).toEqual([]);
     expect(detectVatDeductionNotes({ descriptions: [null, undefined, ""] })).toEqual([]);
+  });
+});
+
+describe("classifyExpenseForVat (shared single-source detector)", () => {
+  it("classifies passenger-car expenses", () => {
+    expect(classifyExpenseForVat("Sõiduauto liising")).toEqual({ isPassengerCar: true, isEntertainmentOrHospitality: false });
+    expect(classifyExpenseForVat("Fuel and parking for company car")).toMatchObject({ isPassengerCar: true });
+  });
+
+  it("classifies entertainment / hospitality expenses, including the keywords inherited from the guidance detector", () => {
+    for (const t of ["restoran", "esindus", "majutus", "accommodation", "food", "catering", "meelelahutus"]) {
+      expect(classifyExpenseForVat(t).isEntertainmentOrHospitality).toBe(true);
+    }
+  });
+
+  it("does not flag ordinary expenses or coincidental substrings", () => {
+    expect(classifyExpenseForVat("Office supplies")).toEqual({ isPassengerCar: false, isEntertainmentOrHospitality: false });
+    // \\bauto\\b must not fire on "automaatika"; \\bpub\\b must not fire on "publication"
+    expect(classifyExpenseForVat("Automaatika ja publication teenus")).toEqual({ isPassengerCar: false, isEntertainmentOrHospitality: false });
+    expect(classifyExpenseForVat(undefined)).toEqual({ isPassengerCar: false, isEntertainmentOrHospitality: false });
   });
 });
 
