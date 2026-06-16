@@ -2,9 +2,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
-import { create, readOnly } from "../annotations.js";
+import { create, readOnly, mutate, destructive } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
+import { toolError } from "../tool-error.js";
+import { coerceId } from "./crud/shared.js";
 import type { ApiContext } from "./crud-tools.js";
+
+/** Drop keys whose value is undefined, leaving only the fields the caller set. */
+function pruneUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined)) as Partial<T>;
+}
 
 export function registerReferenceDataTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "list_accounts", "Get chart of accounts (kontoplaani kontod)", {}, { ...readOnly, title: "List Accounts" }, async () => {
@@ -61,6 +68,33 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
+  registerTool(server, "update_invoice_info", "Update company invoice settings (contact details, default template, invoice/balance email text, footer). Pass only the fields to change.", {
+    address: z.string().optional().describe("Company address shown on invoices"),
+    email: z.string().optional().describe("Contact email"),
+    phone: z.string().optional().describe("Contact phone"),
+    fax: z.string().optional().describe("Contact fax"),
+    webpage: z.string().optional().describe("Company web page"),
+    cl_templates_id: z.number().optional().describe("Default sale-invoice template ID"),
+    invoice_company_name: z.string().nullable().optional().describe("Company name shown on invoices (pass null to clear)"),
+    invoice_email_subject: z.string().optional().describe("Default subject for invoice emails"),
+    invoice_email_body: z.string().optional().describe("Default body for invoice emails"),
+    balance_email_subject: z.string().optional().describe("Default subject for balance-reminder emails"),
+    balance_email_body: z.string().optional().describe("Default body for balance-reminder emails"),
+    balance_document_footer: z.string().optional().describe("Footer text on balance documents"),
+  }, { ...mutate, title: "Update Invoice Settings" }, async (fields) => {
+    const patch = pruneUndefined(fields);
+    if (Object.keys(patch).length === 0) {
+      return toolError({ error: "Provide at least one invoice-settings field to update." });
+    }
+    const result = await api.readonly.updateInvoiceInfo(patch);
+    logAudit({
+      tool: "update_invoice_info", action: "UPDATED", entity_type: "invoice_info",
+      summary: "Updated company invoice settings",
+      details: { fields: Object.keys(patch) },
+    });
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
   registerTool(server, "get_vat_info", "Get company VAT information (KMKR)", {}, { ...readOnly, title: "Get VAT Info" }, async () => {
     const result = await api.readonly.getVatInfo();
     return { content: [{ type: "text", text: toMcpJson(result) }] };
@@ -89,6 +123,42 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
+  registerTool(server, "update_invoice_series", "Update an invoice numbering series (fix the prefix, start value, payment term, overdue charge, or the active/default flags). Pass only the fields to change.", {
+    id: coerceId.describe("Invoice series ID"),
+    number_prefix: z.string().optional().describe("Invoice number prefix"),
+    number_start_value: z.number().optional().describe("Starting number"),
+    term_days: z.number().optional().describe("Default payment term (days)"),
+    is_active: z.boolean().optional().describe("Is active"),
+    is_default: z.boolean().optional().describe("Is the default series"),
+    overdue_charge: z.number().optional().describe("Delinquency charge per day"),
+  }, { ...mutate, title: "Update Invoice Series" }, async ({ id, ...fields }) => {
+    const patch = pruneUndefined(fields);
+    if (Object.keys(patch).length === 0) {
+      return toolError({ error: "Provide at least one invoice-series field to update." });
+    }
+    const result = await api.readonly.updateInvoiceSeries(id, patch);
+    logAudit({
+      tool: "update_invoice_series", action: "UPDATED", entity_type: "invoice_series",
+      entity_id: id,
+      summary: `Updated invoice series ${id}`,
+      details: { fields: Object.keys(patch) },
+    });
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
+  registerTool(server, "delete_invoice_series", "Delete an invoice numbering series. Fails if the series is already in use.", {
+    id: coerceId.describe("Invoice series ID"),
+  }, { ...destructive, title: "Delete Invoice Series" }, async ({ id }) => {
+    const result = await api.readonly.deleteInvoiceSeries(id);
+    logAudit({
+      tool: "delete_invoice_series", action: "DELETED", entity_type: "invoice_series",
+      entity_id: id,
+      summary: `Deleted invoice series ${id}`,
+      details: {},
+    });
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
   registerTool(server, "list_bank_accounts", "Get company bank accounts", {}, { ...readOnly, title: "List Bank Accounts" }, async () => {
     const result = await api.readonly.getBankAccounts();
     return { content: [{ type: "text", text: toMcpJson(result) }] };
@@ -107,6 +177,41 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
       entity_id: result.created_object_id,
       summary: `Created bank account "${params.account_name_est}" (${params.account_no})`,
       details: { account_name: params.account_name_est, account_no: params.account_no },
+    });
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
+  registerTool(server, "update_bank_account", "Update a company bank account (rename it, fix the account number/SWIFT/bank, or toggle whether it shows on sale invoices). Pass only the fields to change.", {
+    id: coerceId.describe("Bank account ID"),
+    account_name_est: z.string().optional().describe("Account name"),
+    account_no: z.string().optional().describe("Account number (IBAN)"),
+    cl_banks_id: z.number().optional().describe("Bank ID"),
+    swift_code: z.string().optional().describe("SWIFT/BIC code"),
+    show_in_sale_invoices: z.boolean().optional().describe("Show on invoices"),
+  }, { ...mutate, title: "Update Bank Account" }, async ({ id, ...fields }) => {
+    const patch = pruneUndefined(fields);
+    if (Object.keys(patch).length === 0) {
+      return toolError({ error: "Provide at least one bank-account field to update." });
+    }
+    const result = await api.readonly.updateBankAccount(id, patch);
+    logAudit({
+      tool: "update_bank_account", action: "UPDATED", entity_type: "bank_account",
+      entity_id: id,
+      summary: `Updated bank account ${id}`,
+      details: { fields: Object.keys(patch) },
+    });
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
+  registerTool(server, "delete_bank_account", "Delete a company bank account. Fails if the account is referenced by existing transactions.", {
+    id: coerceId.describe("Bank account ID"),
+  }, { ...destructive, title: "Delete Bank Account" }, async ({ id }) => {
+    const result = await api.readonly.deleteBankAccount(id);
+    logAudit({
+      tool: "delete_bank_account", action: "DELETED", entity_type: "bank_account",
+      entity_id: id,
+      summary: `Deleted bank account ${id}`,
+      details: {},
     });
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });

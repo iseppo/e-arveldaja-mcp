@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-123 tools (118 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
+128 tools (123 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -79,7 +79,7 @@ optional feature group that can be dropped when unused (see
   `lightyear_portfolio_summary`). Use when the company does not track
   investments. Default: Lightyear is enabled.
 
-The default surface is 123 tools; `DISABLE_LIGHTYEAR` drops it to 118. (The
+The default surface is 128 tools; `DISABLE_LIGHTYEAR` drops it to 123. (The
 former `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
@@ -313,5 +313,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 123 tools
+const { tools } = await client.listTools(); // 128 tools
 ```

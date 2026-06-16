@@ -196,11 +196,16 @@ describe("registerCrudTools", () => {
       "list_templates",
       "list_projects",
       "get_invoice_info",
+      "update_invoice_info",
       "get_vat_info",
       "list_invoice_series",
       "create_invoice_series",
+      "update_invoice_series",
+      "delete_invoice_series",
       "list_bank_accounts",
       "create_bank_account",
+      "update_bank_account",
+      "delete_bank_account",
     ]);
   });
 
