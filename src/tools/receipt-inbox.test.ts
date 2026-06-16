@@ -1310,8 +1310,49 @@ describe("buildClassificationSuggestion — EMTA tax payments", () => {
     expect(suggestion.purchase_account_id).toBe(1516);
     expect(suggestion.purchase_account_name).toBe("1516 EMTA ettemaksukonto");
     expect(suggestion.purchase_article_id).toBeUndefined();
+    expect(suggestion.source).toBe("category_default");
     expect(suggestion.reason).toContain("ettemaksukonto");
     expect(suggestion.reason).toContain("EMTA ettemaksukonto kanded");
+  });
+
+  it("is a HARD override: supplier history for EMTA cannot re-book it to a tax-expense account", () => {
+    const bookingSuggestion = {
+      item: { cl_purchase_articles_id: 9, purchase_accounts_id: 5230 },
+      source: "supplier_history",
+      suggested_account: { id: 5230, name_est: "Maksukulu" },
+      suggested_purchase_article: { id: 9, name: "Maksud" },
+    } as any;
+
+    const suggestion = buildClassificationSuggestion(articles, chart, "tax_payments", "emta", { bookingSuggestion });
+
+    expect(suggestion.purchase_account_id).toBe(1516);
+    expect(suggestion.purchase_article_id).toBeUndefined();
+    expect(suggestion.source).toBe("category_default");
+  });
+
+  it("is a HARD override: a saved auto-booking rule cannot re-book it to another account", () => {
+    const autoBookingRule = {
+      match: "emta",
+      category: "tax_payments",
+      purchase_account_id: 5230,
+      purchase_article_id: 9,
+      reason: "stale rule",
+    } as any;
+
+    const suggestion = buildClassificationSuggestion(articles, chart, "tax_payments", "emta", { autoBookingRule });
+
+    expect(suggestion.purchase_account_id).toBe(1516);
+    expect(suggestion.purchase_article_id).toBeUndefined();
+    expect(suggestion.source).toBe("category_default");
+  });
+
+  it("appends a manual-review reason while keeping the EMTA default", () => {
+    const suggestion = buildClassificationSuggestion(articles, chart, "tax_payments", "emta", {
+      manualReviewReason: "Confirm which tax period this top-up covers.",
+    });
+
+    expect(suggestion.purchase_account_id).toBe(1516);
+    expect(suggestion.reason).toContain("Confirm which tax period this top-up covers.");
   });
 
   it("falls back to a name match when account 1516 is not in this company's chart", () => {
@@ -1322,7 +1363,69 @@ describe("buildClassificationSuggestion — EMTA tax payments", () => {
     const suggestion = buildClassificationSuggestion(articles, altChart, "tax_payments", "emta");
 
     expect(suggestion.purchase_account_id).toBe(2999);
+    expect(suggestion.purchase_account_name).toBe("2999 EMTA ettemaksukonto");
     expect(suggestion.purchase_article_id).toBeUndefined();
+  });
+
+  it("does not mis-match a non-asset clearing account that merely contains 'ettemaks'", () => {
+    const misleadingChart = [
+      // Customer prepayments (liability) — must NOT be picked as the EMTA prepayment account.
+      { id: 2210, name_est: "Ostjate ettemaksed", name_eng: "Customer prepayments", account_type_est: "Kohustused", account_type_eng: "Liabilities" },
+      // A clearing account that contains the word but is not an asset and not EMTA-named.
+      { id: 2900, name_est: "Ettemaksukonto vahekonto", name_eng: "Prepayment account clearing", account_type_est: "Kohustused", account_type_eng: "Liabilities" },
+    ] as any;
+
+    const suggestion = buildClassificationSuggestion(articles, misleadingChart, "tax_payments", "emta");
+
+    expect(suggestion.purchase_account_id).toBeUndefined();
+    expect(suggestion.purchase_account_name).toBeUndefined();
+    expect(suggestion.reason).toContain("Could not locate the EMTA prepayment account");
+  });
+
+  it("emits no account id and a warning when the EMTA prepayment account is absent entirely", () => {
+    const noPrepaymentChart = [
+      { id: 5230, name_est: "Maksukulu", name_eng: "Tax expense", account_type_est: "Kulud", account_type_eng: "Expenses" },
+    ] as any;
+
+    const suggestion = buildClassificationSuggestion(articles, noPrepaymentChart, "tax_payments", "emta");
+
+    expect(suggestion.purchase_account_id).toBeUndefined();
+    expect(suggestion.reason).toContain("expected id 1516");
+  });
+
+  it("rejects an EMTA-named clearing/intermediate (vahekonto) account even though it names the tax authority", () => {
+    const clearingChart = [
+      { id: 2901, name_est: "EMTA ettemaksukonto vahekonto", name_eng: "EMTA prepayment account clearing", account_type_est: "Kohustused", account_type_eng: "Liabilities" },
+    ] as any;
+
+    const suggestion = buildClassificationSuggestion(articles, clearingChart, "tax_payments", "emta");
+
+    expect(suggestion.purchase_account_id).toBeUndefined();
+    expect(suggestion.reason).toContain("Could not locate the EMTA prepayment account");
+  });
+
+  it("prefers the EMTA-named prepayment account over a generic one regardless of chart order", () => {
+    const mixedChart = [
+      // Generic prepayment asset appears first in chart order ...
+      { id: 1500, name_est: "Ettemaksukonto", name_eng: "Prepayment account", account_type_est: "Varad", account_type_eng: "Assets" },
+      // ... but the EMTA-named one must still win.
+      { id: 1599, name_est: "Maksu- ja Tolliameti ettemaksukonto", name_eng: "Tax authority prepayment account", account_type_est: "Varad", account_type_eng: "Assets" },
+    ] as any;
+
+    const suggestion = buildClassificationSuggestion(articles, mixedChart, "tax_payments", "emta");
+
+    expect(suggestion.purchase_account_id).toBe(1599);
+  });
+
+  it("does not guess between two ambiguous generic prepayment accounts", () => {
+    const ambiguousChart = [
+      { id: 1500, name_est: "Ettemaksukonto A", name_eng: "Prepayment account A", account_type_est: "Varad", account_type_eng: "Assets" },
+      { id: 1501, name_est: "Ettemaksukonto B", name_eng: "Prepayment account B", account_type_est: "Varad", account_type_eng: "Assets" },
+    ] as any;
+
+    const suggestion = buildClassificationSuggestion(articles, ambiguousChart, "tax_payments", "emta");
+
+    expect(suggestion.purchase_account_id).toBeUndefined();
   });
 });
 

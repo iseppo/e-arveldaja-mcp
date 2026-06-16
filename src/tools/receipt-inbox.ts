@@ -120,7 +120,7 @@ interface ClassifiedTransactionSuggestion {
   liability_account_id?: number;
   vat_rate_dropdown?: string;
   reversed_vat_id?: number;
-  source?: "supplier_history" | "keyword_match" | "fallback" | "local_rules";
+  source?: "supplier_history" | "keyword_match" | "fallback" | "local_rules" | "category_default";
   matched_invoice_id?: number;
   matched_invoice_number?: string;
   reason: string;
@@ -450,6 +450,102 @@ function applyReceiptAutoBookingRule(
   );
 }
 
+/**
+ * Resolve the EMTA prepayment account (ettemaksukonto) in a company's chart.
+ * The exact id wins; otherwise we look for an account that specifically names
+ * the prepayment account, but never a known non-asset account (liability/
+ * equity/revenue/expense) and never a clearing/intermediate ("vahekonto")
+ * account — so we never fall onto a customer/supplier prepayment or a
+ * tax-liability/clearing account that merely contains the word "ettemaks".
+ * Among the survivors an EMTA/tolliamet-named account is preferred over chart
+ * order; a generic prepayment account is only accepted when it is the single
+ * unambiguous candidate.
+ */
+function findEmtaPrepaymentAccount(accounts: Account[]): Account | undefined {
+  const byId = accounts.find(candidate => candidate.id === EMTA_PREPAYMENT_ACCOUNT);
+  if (byId) {
+    return byId;
+  }
+
+  const candidates = accounts.filter(candidate => {
+    if (candidate.is_fixed_asset) {
+      return false;
+    }
+    const name = `${candidate.name_est ?? ""} ${candidate.name_eng ?? ""}`.toLowerCase();
+    if (!/ettemaksukonto|prepayment account/.test(name)) {
+      return false;
+    }
+    // Never a clearing / intermediate account.
+    if (/vahekonto|clearing|suspense/.test(name)) {
+      return false;
+    }
+    // Reject known non-asset account types; an empty/unknown type is allowed
+    // through (it might be an asset whose type label is localised differently).
+    const type = `${candidate.account_type_est ?? ""} ${candidate.account_type_eng ?? ""}`.toLowerCase();
+    if (/kohustus|liabilit|omakapital|equity|tulu|revenue|income|kulu|expense/.test(type)) {
+      return false;
+    }
+    return true;
+  });
+
+  const namesTaxAuthority = (account: Account) =>
+    /emta|tolliamet|tax authority|etcb/.test(`${account.name_est ?? ""} ${account.name_eng ?? ""}`.toLowerCase());
+
+  const emtaNamed = candidates.filter(namesTaxAuthority);
+  if (emtaNamed.length > 0) {
+    return emtaNamed[0];
+  }
+  // Only trust a generic prepayment account when there is exactly one.
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+/**
+ * Some transaction categories must always post to one specific GL account,
+ * regardless of supplier history or saved auto-booking rules — otherwise a past
+ * (mis-)booking or a saved rule for the same counterparty could silently
+ * re-book the payment to the wrong account. A transfer to EMTA is the canonical
+ * case: it tops up the EMTA prepayment account (ettemaksukonto, an asset) and
+ * the tax-expense entries that draw it down are created by e-arveldaja from the
+ * EMTA prepayment-account statement, so the payment must never be booked as a
+ * tax expense or a purchase invoice. Returns undefined for categories that have
+ * no fixed account.
+ */
+function buildForcedCategorySuggestion(
+  category: TransactionClassificationCategory,
+  accounts: Account[],
+  manualReviewReason?: string,
+): ClassifiedTransactionSuggestion | undefined {
+  if (category !== "tax_payments") {
+    return undefined;
+  }
+
+  const account = findEmtaPrepaymentAccount(accounts);
+  const reasonParts = [
+    "Transfer to EMTA — book to the EMTA prepayment account (ettemaksukonto). " +
+      "The tax-expense entries that draw it down are created separately in e-arveldaja " +
+      "from the EMTA prepayment-account statement (Aruandlus → EMTA ettemaksukonto kanded). " +
+      "Do not create a purchase invoice for this payment.",
+  ];
+  if (!account) {
+    reasonParts.push(
+      `Could not locate the EMTA prepayment account (expected id ${EMTA_PREPAYMENT_ACCOUNT}) in this company's chart — set the contra account manually.`,
+    );
+  }
+  if (manualReviewReason) {
+    reasonParts.push(manualReviewReason);
+  }
+
+  return {
+    purchase_article_id: undefined,
+    purchase_article_name: undefined,
+    purchase_account_id: account?.id,
+    purchase_account_name: account ? `${account.id} ${account.name_est}` : undefined,
+    liability_account_id: DEFAULT_LIABILITY_ACCOUNT,
+    source: "category_default",
+    reason: reasonParts.join(" "),
+  };
+}
+
 export function buildClassificationSuggestion(
   purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
   accounts: Account[],
@@ -461,6 +557,13 @@ export function buildClassificationSuggestion(
     manualReviewReason?: string;
   },
 ): ClassifiedTransactionSuggestion {
+  // Statutory fixed-account categories (e.g. EMTA tax payments) take precedence
+  // over supplier history AND saved auto-booking rules.
+  const forced = buildForcedCategorySuggestion(category, accounts, options?.manualReviewReason);
+  if (forced) {
+    return forced;
+  }
+
   if (options?.bookingSuggestion?.source === "supplier_history") {
     return buildSuggestionFromBookingHistory(options.bookingSuggestion);
   }
@@ -468,12 +571,6 @@ export function buildClassificationSuggestion(
   let articleKeywords = ["muu", "other", "general"];
   let accountKeywords = ["muu", "general", "kulud"];
   let reason = "Fallback booking suggestion from generic expense keywords.";
-  // When set, the contra account is fixed to a specific GL account rather than
-  // resolved from a purchase article / keyword search (used for tax payments).
-  let forcedAccountId: number | undefined;
-  // When true, no purchase article is suggested (the booking is a direct GL
-  // entry against the bank, not a purchase).
-  let suppressArticle = false;
 
   if (category === "saas_subscriptions") {
     articleKeywords = ["software", "subscription", "internet", "it", "sideteenus"];
@@ -483,20 +580,6 @@ export function buildClassificationSuggestion(
     articleKeywords = ["bank", "fee", "teenus"];
     accountKeywords = ["bank", "fee", "teenus"];
     reason = "Counterparty and description patterns match bank service fees.";
-  } else if (category === "tax_payments") {
-    // A transfer to EMTA is a top-up of the EMTA prepayment account
-    // (ettemaksukonto, an asset) — Debit 1516 / Credit bank — not a tax
-    // expense and not a purchase. e-arveldaja itself creates the tax-expense
-    // entries that draw the prepayment account down, from the EMTA
-    // prepayment-account statement (Aruandlus → EMTA ettemaksukonto kanded).
-    forcedAccountId = EMTA_PREPAYMENT_ACCOUNT;
-    accountKeywords = ["ettemaksukonto", "emta ettemaks"];
-    suppressArticle = true;
-    reason =
-      "Transfer to EMTA — book to the EMTA prepayment account (ettemaksukonto). " +
-      "The tax-expense entries that draw it down are created separately in e-arveldaja " +
-      "from the EMTA prepayment-account statement (Aruandlus → EMTA ettemaksukonto kanded). " +
-      "Do not create a purchase invoice for this payment.";
   } else if (category === "salary_payroll") {
     articleKeywords = ["salary", "palk", "payroll"];
     accountKeywords = ["salary", "palk", "payroll"];
@@ -525,24 +608,16 @@ export function buildClassificationSuggestion(
     reason = "Incoming payment without a sale invoice needs manual sales-side follow-up.";
   }
 
-  const article = suppressArticle
-    ? undefined
-    : findPurchaseArticleByKeywords(purchaseArticlesWithVat, articleKeywords)
-      ?? findPurchaseArticleByKeywords(purchaseArticlesWithVat, ["muu", "other", "general"]);
-  // A forced account id (e.g. the EMTA prepayment account) wins over any
-  // article/keyword resolution; if that exact id is not in this company's
-  // chart, fall back to a name match (e.g. "ettemaksukonto") before giving up.
-  const account = forcedAccountId !== undefined
-    ? (accounts.find(candidate => candidate.id === forcedAccountId)
-        ?? findAccountByKeywords(accounts, accountKeywords))
-    : article?.accounts_id
-      ? accounts.find(candidate => candidate.id === article.accounts_id)
-      : findAccountByKeywords(accounts, accountKeywords);
+  const article = findPurchaseArticleByKeywords(purchaseArticlesWithVat, articleKeywords)
+    ?? findPurchaseArticleByKeywords(purchaseArticlesWithVat, ["muu", "other", "general"]);
+  const account = article?.accounts_id
+    ? accounts.find(candidate => candidate.id === article.accounts_id)
+    : findAccountByKeywords(accounts, accountKeywords);
 
   const defaultSuggestion: ClassifiedTransactionSuggestion = {
     purchase_article_id: article?.id,
     purchase_article_name: article?.name_est ?? article?.name_eng,
-    purchase_account_id: account?.id ?? forcedAccountId ?? article?.accounts_id,
+    purchase_account_id: account?.id ?? article?.accounts_id,
     purchase_account_name: account ? `${account.id} ${account.name_est}` : undefined,
     liability_account_id: DEFAULT_LIABILITY_ACCOUNT,
     source: article ? "keyword_match" : "fallback",
