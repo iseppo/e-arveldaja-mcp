@@ -164,4 +164,11 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     const result = await api.saleInvoices.getSystemPdf(id);
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
+
+  registerTool(server, "get_sale_invoice_xml",
+    "Download the system-generated machine-readable e-invoice XML (base64) for a sales invoice. This is the structured Estonian e-arve document used for e-invoice exchange/archival — distinct from get_sale_invoice_document (the human-readable PDF).",
+    idParam.shape, { ...readOnly, title: "Download Invoice XML" }, async ({ id }) => {
+    const result = await api.saleInvoices.getSystemXml(id);
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
 }

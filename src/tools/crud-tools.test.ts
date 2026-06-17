@@ -181,6 +181,7 @@ describe("registerCrudTools", () => {
       "get_sale_invoice_delivery_options",
       "send_sale_invoice",
       "get_sale_invoice_document",
+      "get_sale_invoice_xml",
       "list_purchase_invoices",
       "get_purchase_invoice",
       "create_purchase_invoice",
@@ -646,6 +647,24 @@ describe("server-side list filters", () => {
 
     expect(api.journals.listAllCached).toHaveBeenCalledTimes(1);
     expect(api.journals.listAll).not.toHaveBeenCalled();
+  });
+});
+
+describe("get_sale_invoice_xml", () => {
+  it("downloads the system-generated e-invoice XML via getSystemXml", async () => {
+    const { api, handler } = getCrudToolHarness("get_sale_invoice_xml", {
+      saleInvoices: {
+        getSystemXml: vi.fn().mockResolvedValue({ name: "invoice-42.xml", contents: "PGludm9pY2U+" }),
+        getSystemPdf: vi.fn(),
+      },
+    });
+
+    const res = await handler({ id: 42 }) as { content: Array<{ text: string }> };
+
+    expect(api.saleInvoices.getSystemXml).toHaveBeenCalledWith(42);
+    expect(api.saleInvoices.getSystemPdf).not.toHaveBeenCalled(); // distinct from the PDF download
+    expect(res.content[0]!.text).toContain("invoice-42.xml");
+    expect(res.content[0]!.text).toContain("PGludm9pY2U+");
   });
 });
 

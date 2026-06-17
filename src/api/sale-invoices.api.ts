@@ -32,6 +32,10 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
     return this.client.get<ApiFile>(`/sale_invoices/${id}/pdf_system`);
   }
 
+  async getSystemXml(id: number): Promise<ApiFile> {
+    return this.client.get<ApiFile>(`/sale_invoices/${id}/xml`);
+  }
+
   async sendEinvoice(id: number, request: SaleInvoiceDeliveryRequest): Promise<ApiResponse> {
     const result = await this.client.patch<ApiResponse>(`/sale_invoices/${id}/deliver`, request);
     this.invalidateCache();
