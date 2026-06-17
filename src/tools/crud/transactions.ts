@@ -32,39 +32,60 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     {
       ...pageParam.shape,
       ...viewParam,
-      date_from: z.string().optional().describe("Only transactions with date >= this (YYYY-MM-DD)"),
-      date_to: z.string().optional().describe("Only transactions with date <= this (YYYY-MM-DD)"),
-      status: z.string().optional().describe("Filter by status: PROJECT, CONFIRMED, or VOID"),
-      accounts_dimensions_id: z.number().int().positive().optional().describe("Filter by bank account dimension ID"),
+      date_from: isoDateString("Only transactions with date >= this (YYYY-MM-DD). Narrowed server-side.").optional(),
+      date_to: isoDateString("Only transactions with date <= this (YYYY-MM-DD). Narrowed server-side.").optional(),
+      status: z.enum(["PROJECT", "CONFIRMED", "VOID"]).optional().describe("Filter by status: PROJECT, CONFIRMED, or VOID. Narrowed server-side."),
+      type: z.enum(["C", "D"]).optional().describe("Filter by transaction type: C or D. Narrowed server-side."),
+      accounts_dimensions_id: z.number().int().positive().optional().describe("Filter by bank account dimension ID (client-side)"),
       amount_min: z.number().optional().describe("Only transactions whose EUR-equivalent amount (base_amount ?? amount) >= this"),
       amount_max: z.number().optional().describe("Only transactions whose EUR-equivalent amount (base_amount ?? amount) <= this"),
       has_bank_ref: z.boolean().optional().describe("true = only transactions with a bank_ref_number; false = only without"),
-      bank_ref_contains: z.string().optional().describe("Case-insensitive substring match on bank_ref_number"),
-      clients_id: z.number().int().positive().optional().describe("Filter by clients_id"),
-      per_page: z.number().int().min(1).max(500).optional().describe("Items per page when filtering (default 100, max 500)"),
+      bank_ref_contains: z.string().optional().describe("Case-insensitive substring match on bank_ref_number (client-side)"),
+      clients_id: z.number().int().positive().optional().describe("Filter by clients_id. Narrowed server-side."),
+      per_page: z.number().int().min(1).max(500).optional().describe("Items per page (default 100, max 500). Applies only when a client-side filter (amount/bank-ref/dimension) is active; otherwise the API's native pagination is used."),
     },
     { ...readOnly, title: "List Transactions" },
     async (params) => {
-      const hasFilter = params.date_from !== undefined
-        || params.date_to !== undefined
-        || params.status !== undefined
-        || params.accounts_dimensions_id !== undefined
+      // Split filters: the API natively supports date range / status / type /
+      // client (narrowed server-side); amount, bank-ref and account-dimension
+      // have no API equivalent and are applied client-side over the narrowed set.
+      const hasClientOnlyFilter = params.accounts_dimensions_id !== undefined
         || params.amount_min !== undefined
         || params.amount_max !== undefined
         || params.has_bank_ref !== undefined
-        || params.bank_ref_contains !== undefined
+        || params.bank_ref_contains !== undefined;
+      const serverFilter = {
+        modified_since: params.modified_since,
+        start_date: params.date_from,
+        end_date: params.date_to,
+        status: params.status,
+        type: params.type,
+        clients_id: params.clients_id,
+      };
+      const hasServerFilter = params.modified_since !== undefined
+        || params.date_from !== undefined
+        || params.date_to !== undefined
+        || params.status !== undefined
+        || params.type !== undefined
         || params.clients_id !== undefined;
-      if (!hasFilter) {
-        const result = await api.transactions.list(params);
+      if (!hasClientOnlyFilter) {
+        // The API filters AND paginates — no client-side page-walking needed.
+        const result = await api.transactions.list({ page: params.page, ...serverFilter });
         const compact = { ...result, items: applyListView("transaction", result.items, params.view) };
         return { content: [{ type: "text", text: toMcpJson(compact) }] };
       }
-      const all = await api.transactions.listAllCached();
+      // A client-side filter is active, so we need the full set. Narrow it
+      // server-side first when any API-native filter is present; otherwise fall
+      // back to the cached full walk.
+      const all = hasServerFilter
+        ? await api.transactions.listAll(serverFilter)
+        : await api.transactions.listAllCached();
       const bankRefContains = params.bank_ref_contains?.toLowerCase();
       const filtered = all.filter((tx) => {
         if (params.date_from && (!tx.date || tx.date < params.date_from)) return false;
         if (params.date_to && (!tx.date || tx.date > params.date_to)) return false;
         if (params.status && tx.status !== params.status) return false;
+        if (params.type && tx.type !== params.type) return false;
         if (params.accounts_dimensions_id !== undefined && tx.accounts_dimensions_id !== params.accounts_dimensions_id) return false;
         // Mirror the rest of the codebase (analyze-unconfirmed, reconciliation):
         // EUR-equivalent comparison, not nominal — otherwise a USD 1000 / 920-EUR

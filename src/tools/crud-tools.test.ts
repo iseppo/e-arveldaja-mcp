@@ -490,6 +490,165 @@ describe("list_journals", () => {
   });
 });
 
+describe("server-side list filters", () => {
+  const emptyPage = { current_page: 1, total_pages: 1, items: [] };
+
+  it("list_purchase_invoices passes the API-native filters server-side and strips view", async () => {
+    const { api, handler } = getCrudToolHarness("list_purchase_invoices", {
+      purchaseInvoices: { list: vi.fn().mockResolvedValue(emptyPage) },
+    });
+
+    await handler({
+      page: 2, start_date: "2026-01-01", end_date: "2026-03-31",
+      status: "CONFIRMED", payment_status: "NOT_PAID", clients_id: 42, view: "full",
+    });
+
+    expect(api.purchaseInvoices.list).toHaveBeenCalledTimes(1);
+    const arg = (api.purchaseInvoices.list as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(arg).toEqual({
+      page: 2, start_date: "2026-01-01", end_date: "2026-03-31",
+      status: "CONFIRMED", payment_status: "NOT_PAID", clients_id: 42,
+    });
+    expect(arg).not.toHaveProperty("view"); // view is a presentation concern, never sent to the API
+  });
+
+  it("list_sale_invoices passes the API-native filters server-side", async () => {
+    const { api, handler } = getCrudToolHarness("list_sale_invoices", {
+      saleInvoices: { list: vi.fn().mockResolvedValue(emptyPage) },
+    });
+
+    await handler({ start_date: "2026-04-01", status: "PROJECT", clients_id: 7, view: "brief" });
+
+    expect(api.saleInvoices.list).toHaveBeenCalledTimes(1);
+    expect((api.saleInvoices.list as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      start_date: "2026-04-01", status: "PROJECT", clients_id: 7,
+    });
+  });
+
+  it("list_transactions uses server-side pagination when only API-native filters are set", async () => {
+    const { api, handler } = getCrudToolHarness("list_transactions", {
+      transactions: {
+        list: vi.fn().mockResolvedValue(emptyPage),
+        listAll: vi.fn(),
+        listAllCached: vi.fn(),
+      },
+    });
+
+    await handler({ date_from: "2026-01-01", status: "CONFIRMED", type: "C", clients_id: 9 });
+
+    expect(api.transactions.list).toHaveBeenCalledTimes(1);
+    expect((api.transactions.list as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      start_date: "2026-01-01", status: "CONFIRMED", type: "C", clients_id: 9,
+    });
+    expect(api.transactions.listAll).not.toHaveBeenCalled();
+    expect(api.transactions.listAllCached).not.toHaveBeenCalled();
+  });
+
+  it("list_transactions narrows server-side then filters client-side when both kinds of filter are set", async () => {
+    const rows = [
+      { id: 1, date: "2026-02-01", amount: 100, base_amount: 100, status: "CONFIRMED", type: "C", bank_ref_number: "REF1" },
+      { id: 2, date: "2026-02-02", amount: 5, base_amount: 5, status: "CONFIRMED", type: "C", bank_ref_number: "REF2" },
+    ];
+    const { api, handler } = getCrudToolHarness("list_transactions", {
+      transactions: {
+        list: vi.fn(),
+        listAll: vi.fn().mockResolvedValue(rows),
+        listAllCached: vi.fn(),
+      },
+    });
+
+    const res = await handler({ date_from: "2026-01-01", amount_min: 50 }) as { content: Array<{ text: string }> };
+
+    expect(api.transactions.listAll).toHaveBeenCalledTimes(1);
+    expect((api.transactions.listAll as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ start_date: "2026-01-01" });
+    expect(api.transactions.listAllCached).not.toHaveBeenCalled();
+    const payload = parseMcpResponse(res.content[0]!.text) as { total_items: number; filtered_client_side: boolean };
+    expect(payload.filtered_client_side).toBe(true);
+    expect(payload.total_items).toBe(1); // only the 100-amount row clears amount_min=50
+  });
+
+  it("list_transactions falls back to the cached full walk when only a client-side filter is set", async () => {
+    const { api, handler } = getCrudToolHarness("list_transactions", {
+      transactions: {
+        list: vi.fn(),
+        listAll: vi.fn(),
+        listAllCached: vi.fn().mockResolvedValue([]),
+      },
+    });
+
+    await handler({ amount_min: 50 });
+
+    expect(api.transactions.listAllCached).toHaveBeenCalledTimes(1);
+    expect(api.transactions.listAll).not.toHaveBeenCalled();
+    expect(api.transactions.list).not.toHaveBeenCalled();
+  });
+
+  it("list_transactions honours modified_since (server-side narrow) even when only a client-side filter is also set", async () => {
+    const { api, handler } = getCrudToolHarness("list_transactions", {
+      transactions: {
+        list: vi.fn(),
+        listAll: vi.fn().mockResolvedValue([]),
+        listAllCached: vi.fn(),
+      },
+    });
+
+    await handler({ modified_since: "2026-01-01T00:00:00Z", amount_min: 50 });
+
+    // modified_since is a server-native filter on every endpoint, so it must
+    // route to the narrowed listAll, not the params-blind cached full walk.
+    expect(api.transactions.listAll).toHaveBeenCalledTimes(1);
+    expect((api.transactions.listAll as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ modified_since: "2026-01-01T00:00:00Z" });
+    expect(api.transactions.listAllCached).not.toHaveBeenCalled();
+  });
+
+  it("list_journals honours modified_since even when only a client-side filter is also set", async () => {
+    const { api, handler } = getCrudToolHarness("list_journals", {
+      journals: {
+        list: vi.fn(),
+        listAll: vi.fn().mockResolvedValue([]),
+        listAllCached: vi.fn(),
+      },
+    });
+
+    await handler({ modified_since: "2026-01-01T00:00:00Z", registered: true });
+
+    expect(api.journals.listAll).toHaveBeenCalledTimes(1);
+    expect((api.journals.listAll as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ modified_since: "2026-01-01T00:00:00Z" });
+    expect(api.journals.listAllCached).not.toHaveBeenCalled();
+  });
+
+  it("list_journals narrows server-side by effective-date range, then filters client-side", async () => {
+    const { api, handler } = getCrudToolHarness("list_journals", {
+      journals: {
+        list: vi.fn(),
+        listAll: vi.fn().mockResolvedValue([{ id: 1, effective_date: "2026-02-01", registered: true, postings: [] }]),
+        listAllCached: vi.fn(),
+      },
+    });
+
+    await handler({ effective_date_from: "2026-01-01", registered: true });
+
+    expect(api.journals.listAll).toHaveBeenCalledTimes(1);
+    expect((api.journals.listAll as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ start_date: "2026-01-01" });
+    expect(api.journals.listAllCached).not.toHaveBeenCalled();
+  });
+
+  it("list_journals uses the cached full walk when no server-side (date) filter is set", async () => {
+    const { api, handler } = getCrudToolHarness("list_journals", {
+      journals: {
+        list: vi.fn(),
+        listAll: vi.fn(),
+        listAllCached: vi.fn().mockResolvedValue([]),
+      },
+    });
+
+    await handler({ registered: true });
+
+    expect(api.journals.listAllCached).toHaveBeenCalledTimes(1);
+    expect(api.journals.listAll).not.toHaveBeenCalled();
+  });
+});
+
 describe("structured JSON-compatible inputs", () => {
   it("update_client accepts an object instead of a JSON string", async () => {
     const { api, handler } = getCrudToolHarness("update_client", {

@@ -11,6 +11,7 @@ import type { ApiContext } from "./shared.js";
 import {
   coerceId,
   idParam,
+  invoiceListFilterParams,
   isoDateString,
   jsonObjectArrayInput,
   jsonObjectInput,
@@ -27,11 +28,11 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
   // =====================
 
   registerTool(server, "list_sale_invoices",
-    "List sales invoices. Paginated. Brief view by default; use view='full' or get_sale_invoice for detail.",
-    { ...pageParam.shape, ...viewParam },
-    { ...readOnly, title: "List Sale Invoices" }, async (params) => {
-    const result = await api.saleInvoices.list(params);
-    const compact = { ...result, items: applyListView("sale_invoice", result.items, params.view) };
+    "List sales invoices. Paginated, with server-side filters (date range, status, payment status, customer) applied by the API. Brief view by default; use view='full' or get_sale_invoice for detail.",
+    { ...pageParam.shape, ...viewParam, ...invoiceListFilterParams({ dateLabel: "revenue date", clientLabel: "customer" }) },
+    { ...readOnly, title: "List Sale Invoices" }, async ({ view, ...listParams }) => {
+    const result = await api.saleInvoices.list(listParams);
+    const compact = { ...result, items: applyListView("sale_invoice", result.items, view) };
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 

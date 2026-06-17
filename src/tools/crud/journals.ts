@@ -33,8 +33,8 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     {
       ...pageParam.shape,
       ...viewParam,
-      effective_date_from: z.string().optional().describe("Only journals with effective_date >= this (YYYY-MM-DD)"),
-      effective_date_to: z.string().optional().describe("Only journals with effective_date <= this (YYYY-MM-DD)"),
+      effective_date_from: isoDateString("Only journals with effective_date >= this (YYYY-MM-DD). Narrowed server-side.").optional(),
+      effective_date_to: isoDateString("Only journals with effective_date <= this (YYYY-MM-DD). Narrowed server-side.").optional(),
       registered: z.boolean().optional().describe("Only registered (true) or unregistered (false) journals"),
       operation_type: z.string().optional().describe("Filter by operation_type (e.g. ENTRY, TRANSACTION, SALE_INVOICE, PURCHASE_INVOICE)"),
       document_number_contains: z.string().optional().describe("Case-insensitive substring match on document_number"),
@@ -59,7 +59,19 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
         };
         return { content: [{ type: "text", text: toMcpJson(compact) }] };
       }
-      const all = await api.journals.listAllCached();
+      // The /journals endpoint supports only a server-side effective-date range
+      // (no status / client filter); registered / operation_type / clients_id /
+      // document_number are applied client-side below over the narrowed set.
+      const hasServerFilter = params.modified_since !== undefined
+        || params.effective_date_from !== undefined
+        || params.effective_date_to !== undefined;
+      const all = hasServerFilter
+        ? await api.journals.listAll({
+            modified_since: params.modified_since,
+            start_date: params.effective_date_from,
+            end_date: params.effective_date_to,
+          })
+        : await api.journals.listAllCached();
       const docContains = params.document_number_contains?.toLowerCase();
       const filtered = all.filter((j) => {
         if (params.effective_date_from && (!j.effective_date || j.effective_date < params.effective_date_from)) return false;

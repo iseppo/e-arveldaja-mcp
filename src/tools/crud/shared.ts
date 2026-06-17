@@ -211,6 +211,23 @@ const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 export const isoDateString = (description: string) =>
   z.string().regex(isoDateRegex, "Expected YYYY-MM-DD").describe(description);
 
+/**
+ * Server-side filter params shared by the purchase/sale invoice list tools.
+ * These map 1:1 to RIK API query parameters, so the API does the filtering AND
+ * pagination — no client-side page-walking. `dateLabel` names what
+ * start_date/end_date bound (invoice date vs. revenue date); `clientLabel` names
+ * the counterparty (supplier vs. customer).
+ */
+export function invoiceListFilterParams(opts: { dateLabel: string; clientLabel: string }) {
+  return {
+    start_date: isoDateString(`Only invoices with ${opts.dateLabel} on or after this date (YYYY-MM-DD). Server-side filter.`).optional(),
+    end_date: isoDateString(`Only invoices with ${opts.dateLabel} on or before this date (YYYY-MM-DD). Server-side filter.`).optional(),
+    status: z.enum(["PROJECT", "CONFIRMED"]).optional().describe("Filter by status (server-side): PROJECT (draft) or CONFIRMED."),
+    payment_status: z.enum(["PAID", "PARTIALLY_PAID", "NOT_PAID"]).optional().describe("Filter by payment status (server-side): PAID, PARTIALLY_PAID, or NOT_PAID."),
+    clients_id: coerceId.optional().describe(`Filter by ${opts.clientLabel} (clients_id, server-side).`),
+  };
+}
+
 const TRANSACTION_METADATA_FIELDS = new Set([
   "bank_ref_number",
   "bank_account_name",
