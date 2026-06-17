@@ -19,6 +19,9 @@ import { registerPurchaseInvoiceTools } from "./crud/purchase-invoices.js";
 import { registerSaleInvoiceTools } from "./crud/sale-invoices.js";
 import { registerTransactionTools } from "./crud/transactions.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { logAudit } from "../audit-log.js";
+
+vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
 function getCrudToolHarness(toolName: string, overrides?: {
   transactions?: Record<string, unknown>;
@@ -147,6 +150,7 @@ describe("registerCrudTools", () => {
       "update_client",
       "deactivate_client",
       "restore_client",
+      "delete_client",
       "search_client",
       "find_client_by_code",
       "list_products",
@@ -155,6 +159,7 @@ describe("registerCrudTools", () => {
       "update_product",
       "deactivate_product",
       "restore_product",
+      "delete_product",
       "list_journals",
       "get_journal",
       "create_journal",
@@ -200,10 +205,12 @@ describe("registerCrudTools", () => {
       "update_invoice_info",
       "get_vat_info",
       "list_invoice_series",
+      "get_invoice_series",
       "create_invoice_series",
       "update_invoice_series",
       "delete_invoice_series",
       "list_bank_accounts",
+      "get_bank_account",
       "create_bank_account",
       "update_bank_account",
       "delete_bank_account",
@@ -647,6 +654,41 @@ describe("server-side list filters", () => {
 
     expect(api.journals.listAllCached).toHaveBeenCalledTimes(1);
     expect(api.journals.listAll).not.toHaveBeenCalled();
+  });
+});
+
+describe("hard-delete master data", () => {
+  const annotationsOf = (options: unknown) =>
+    (options as { annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } }).annotations;
+
+  it("delete_client routes to api.clients.delete (DELETE /clients/{id}), is destructive, and audits DELETED", async () => {
+    const { api, handler, options } = getCrudToolHarness("delete_client", {
+      clients: { delete: vi.fn().mockResolvedValue({ code: 200, messages: [] }) },
+    });
+
+    const res = await handler({ id: 55 }) as { content: Array<{ text: string }> };
+
+    expect(api.clients.delete).toHaveBeenCalledWith(55);
+    expect(res.content[0]!.text).toBeTruthy();
+    // Safety contract: a hard delete must stay annotated destructive (never silently downgraded to mutate).
+    expect(annotationsOf(options)).toMatchObject({ destructiveHint: true, readOnlyHint: false });
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "delete_client", action: "DELETED", entity_type: "client", entity_id: 55,
+    }));
+  });
+
+  it("delete_product routes to api.products.delete (DELETE /products/{id}), is destructive, and audits DELETED", async () => {
+    const { api, handler, options } = getCrudToolHarness("delete_product", {
+      products: { delete: vi.fn().mockResolvedValue({ code: 200, messages: [] }) },
+    });
+
+    await handler({ id: 88 });
+
+    expect(api.products.delete).toHaveBeenCalledWith(88);
+    expect(annotationsOf(options)).toMatchObject({ destructiveHint: true, readOnlyHint: false });
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "delete_product", action: "DELETED", entity_type: "product", entity_id: 88,
+    }));
   });
 });
 

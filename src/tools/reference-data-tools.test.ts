@@ -26,10 +26,12 @@ describe("registerReferenceDataTools", () => {
       "update_invoice_info",
       "get_vat_info",
       "list_invoice_series",
+      "get_invoice_series",
       "create_invoice_series",
       "update_invoice_series",
       "delete_invoice_series",
       "list_bank_accounts",
+      "get_bank_account",
       "create_bank_account",
       "update_bank_account",
       "delete_bank_account",
@@ -40,8 +42,10 @@ describe("registerReferenceDataTools", () => {
 function makeReadonly() {
   return {
     updateInvoiceInfo: vi.fn().mockResolvedValue({ code: 200 }),
+    getInvoiceSeriesOne: vi.fn().mockResolvedValue({ id: 3, number_prefix: "2026-" }),
     updateInvoiceSeries: vi.fn().mockResolvedValue({ code: 200 }),
     deleteInvoiceSeries: vi.fn().mockResolvedValue({ code: 200 }),
+    getBankAccount: vi.fn().mockResolvedValue({ id: 5, account_name_est: "LHV" }),
     updateBankAccount: vi.fn().mockResolvedValue({ code: 200 }),
     deleteBankAccount: vi.fn().mockResolvedValue({ code: 200 }),
   };
@@ -93,6 +97,26 @@ describe("reference-data edit tools", () => {
     expect(readonly.updateInvoiceInfo).not.toHaveBeenCalled();
     expect(res.content[0].text).toContain("at least one");
     expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it("get_invoice_series fetches a single series by id", async () => {
+    const readonly = makeReadonly();
+    const handlers = register(readonly);
+
+    const res = await handlers.get_invoice_series({ id: 3 }) as { content: Array<{ text: string }> };
+
+    expect(readonly.getInvoiceSeriesOne).toHaveBeenCalledWith(3);
+    expect(res.content[0]!.text).toContain("2026-");
+  });
+
+  it("get_bank_account fetches a single bank account by id", async () => {
+    const readonly = makeReadonly();
+    const handlers = register(readonly);
+
+    const res = await handlers.get_bank_account({ id: 5 }) as { content: Array<{ text: string }> };
+
+    expect(readonly.getBankAccount).toHaveBeenCalledWith(5);
+    expect(res.content[0]!.text).toContain("LHV");
   });
 
   it("update_invoice_series patches by id and audits with the entity id", async () => {

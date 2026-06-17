@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
-import { readOnly, create, mutate } from "../../annotations.js";
+import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
@@ -106,6 +106,18 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     logAudit({
       tool: "restore_client", action: "UPDATED", entity_type: "client", entity_id: id,
       summary: `Restored client ${id}`,
+      details: {},
+    });
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
+  registerTool(server, "delete_client",
+    "Permanently delete a client. Fails if the client is referenced by invoices, journals, transactions, or other accounting records — use deactivate_client to hide an in-use client instead. Intended for removing mistakenly-created master data with no history.",
+    idParam.shape, { ...destructive, title: "Delete Client" }, async ({ id }) => {
+    const result = await api.clients.delete(id);
+    logAudit({
+      tool: "delete_client", action: "DELETED", entity_type: "client", entity_id: id,
+      summary: `Deleted client ${id}`,
       details: {},
     });
     return { content: [{ type: "text", text: toMcpJson(result) }] };

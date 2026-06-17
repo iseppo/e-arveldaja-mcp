@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
-import { readOnly, create, mutate } from "../../annotations.js";
+import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
@@ -98,6 +98,18 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
     logAudit({
       tool: "restore_product", action: "UPDATED", entity_type: "product", entity_id: id,
       summary: `Restored product ${id}`,
+      details: {},
+    });
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
+  registerTool(server, "delete_product",
+    "Permanently delete a product/service. Fails if the product is referenced by invoices or other accounting records — use deactivate_product to hide an in-use product instead. Intended for removing mistakenly-created master data with no history.",
+    idParam.shape, { ...destructive, title: "Delete Product" }, async ({ id }) => {
+    const result = await api.products.delete(id);
+    logAudit({
+      tool: "delete_product", action: "DELETED", entity_type: "product", entity_id: id,
+      summary: `Deleted product ${id}`,
       details: {},
     });
     return { content: [{ type: "text", text: toMcpJson(result) }] };

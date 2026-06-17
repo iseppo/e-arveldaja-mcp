@@ -105,6 +105,13 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
+  registerTool(server, "get_invoice_series", "Get a single invoice numbering series by ID", {
+    id: coerceId.describe("Invoice series ID"),
+  }, { ...readOnly, title: "Get Invoice Series" }, async ({ id }) => {
+    const result = await api.readonly.getInvoiceSeriesOne(id);
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
   registerTool(server, "create_invoice_series", "Create an invoice series", {
     number_prefix: z.string().describe("Invoice number prefix"),
     number_start_value: z.number().describe("Starting number"),
@@ -161,6 +168,13 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
 
   registerTool(server, "list_bank_accounts", "Get company bank accounts", {}, { ...readOnly, title: "List Bank Accounts" }, async () => {
     const result = await api.readonly.getBankAccounts();
+    return { content: [{ type: "text", text: toMcpJson(result) }] };
+  });
+
+  registerTool(server, "get_bank_account", "Get a single company bank account by ID", {
+    id: coerceId.describe("Bank account ID"),
+  }, { ...readOnly, title: "Get Bank Account" }, async ({ id }) => {
+    const result = await api.readonly.getBankAccount(id);
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
