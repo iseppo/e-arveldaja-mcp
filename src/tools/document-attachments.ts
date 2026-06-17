@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { readOnly, mutate, destructive } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { coerceId } from "./crud/shared.js";
@@ -89,9 +89,11 @@ export function registerDocumentAttachmentTools(server: McpServer, api: ApiConte
       const file = await resource.getDocument(id);
       const sizeBytes = decodedByteEstimate(file.contents ?? "");
       const tooLarge = sizeBytes > MAX_INLINE_DOCUMENT_BYTES;
+      // The stored filename originates from the uploaded document and is
+      // attacker-controllable — wrap it so it is never echoed as trusted text.
       if (metadata_only || tooLarge) {
         return { content: [{ type: "text", text: toMcpJson({
-          name: file.name,
+          name: wrapUntrustedOcr(file.name),
           size_bytes: sizeBytes,
           contents_included: false,
           note: metadata_only
@@ -99,7 +101,7 @@ export function registerDocumentAttachmentTools(server: McpServer, api: ApiConte
             : `Document is ~${sizeBytes} bytes, above the inline limit — base64 contents omitted to protect the MCP transport. Open it directly in e-arveldaja if you need the file.`,
         }) }] };
       }
-      return { content: [{ type: "text", text: toMcpJson(file) }] };
+      return { content: [{ type: "text", text: toMcpJson({ ...file, name: wrapUntrustedOcr(file.name) }) }] };
     }
   );
 

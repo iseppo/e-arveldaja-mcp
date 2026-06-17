@@ -966,7 +966,10 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       for (const fix of invoiceFixCandidates) {
         if ((candidatesByWiseId.get(fix.wise_id) ?? 0) > 1) {
           fix.result = "ambiguous_skipped";
-          fix.proposed_action = `Ambiguous match — multiple unpaid invoices for ${fix.supplier_name} match Wise row ${fix.wise_id}; resolve manually before applying.`;
+          // `supplier_name` is the raw Wise counterparty — wrap it here too so
+          // this prose field cannot relay attacker text the way the structured
+          // `supplier_name` field is wrapped at the output map below.
+          fix.proposed_action = `Ambiguous match — multiple unpaid invoices for ${wrapUntrustedOcr(fix.supplier_name) ?? ""} match Wise row ${fix.wise_id}; resolve manually before applying.`;
         }
       }
 
@@ -1029,7 +1032,17 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             eur_legacy_autofix: invoiceFixCandidates.filter(f => f.category === "eur_legacy_autofix").length,
             updated: invoiceFixCandidates.filter(f => f.result === "updated").length,
             errors: invoiceFixCandidates.filter(f => f.result === "error").length,
-            candidates: invoiceFixCandidates,
+            // `supplier_name` is the raw Wise counterparty (targetName/sourceName)
+            // CSV column — sandbox-wrap it at the output boundary so a tampered
+            // statement cannot inject through the dry-run preview or the
+            // top-level result. Every other candidate field is a number, a
+            // trusted RIK invoice value, or a server-built string. Wrapping here
+            // covers both emit paths (this object feeds the top-level result and
+            // the workflow-envelope preview).
+            candidates: invoiceFixCandidates.map(c => ({
+              ...c,
+              supplier_name: wrapUntrustedOcr(c.supplier_name) ?? c.supplier_name,
+            })),
           }
         : undefined;
 

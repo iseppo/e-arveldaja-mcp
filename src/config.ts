@@ -63,6 +63,7 @@ export interface StoredCredentialSummary {
   target: "primary" | `connection_${number}`;
   name: string;
   server: "live" | "demo";
+  /** Masked key id for display only (see maskApiKeyId) — never the raw identifier. */
   apiKeyId: string;
   isDefault: boolean;
 }
@@ -1067,6 +1068,23 @@ export function loadAllConfigs(): NamedConfig[] {
   return configs;
 }
 
+/**
+ * Mask a stored API key id for display. The key id is the cleartext identifier
+ * component of the HMAC message (not the secret), but it is still a stable
+ * tenant/account identifier that should not be echoed verbatim into MCP output
+ * (which may be relayed to and logged by a third-party LLM). We reveal only the
+ * first/last few characters so an operator can recognise which block a row
+ * refers to; target/name/server/isDefault provide the disambiguation needed for
+ * remove_stored_credentials.
+ */
+export function maskApiKeyId(apiKeyId: string): string {
+  if (!apiKeyId) return "";
+  if (apiKeyId.length <= 8) {
+    return `${apiKeyId.slice(0, 1)}${"*".repeat(Math.max(apiKeyId.length - 1, 3))}`;
+  }
+  return `${apiKeyId.slice(0, 4)}…${apiKeyId.slice(-4)}`;
+}
+
 export function listStoredCredentials(
   options: { workingDir?: string; globalConfigDir?: string } = {},
 ): StoredCredentialInventory[] {
@@ -1093,7 +1111,7 @@ export function listStoredCredentials(
         target: block.target,
         name: block.name,
         server: block.server,
-        apiKeyId: block.apiKeyId,
+        apiKeyId: maskApiKeyId(block.apiKeyId),
         isDefault: index === 0,
       }));
 

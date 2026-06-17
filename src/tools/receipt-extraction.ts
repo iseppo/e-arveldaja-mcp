@@ -205,6 +205,10 @@ export interface ExtractedReceiptFields {
   currency?: string;
   description?: string;
   raw_text?: string;
+  /** Output-only: set when raw_text was capped for MCP output (see capUntrustedText). */
+  raw_text_truncated?: boolean;
+  /** Output-only: original raw_text length, present only when truncated. */
+  raw_text_length?: number;
 }
 
 export interface TransactionGroupClassificationInput {

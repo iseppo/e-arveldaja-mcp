@@ -38,6 +38,7 @@ import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
 import { readValidatedReceiptFile, revalidateReceiptFilePath } from "./receipt-inbox-files.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
+import { MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
 import { buildReceiptBatchSummary } from "./receipt-inbox-summary.js";
 
 vi.mock("../file-validation.js", async (importOriginal) => ({
@@ -1484,6 +1485,42 @@ describe("sanitizeReceiptResultForOutput OCR trust boundary", () => {
 
     // Structured non-OCR fields stay untouched.
     expect(out.extracted!.invoice_number).toBe("INV-1");
+  });
+
+  it("caps an oversized raw_text and flags the truncation", () => {
+    const huge = "RECEIPT START\n" + "z".repeat(MAX_UNTRUSTED_TEXT_CHARS + 3000);
+    const input = {
+      file: { path: "/x.pdf" } as any,
+      classification: { category: "purchase_invoice" } as any,
+      status: "ok" as any,
+      extracted: { raw_text: huge, invoice_number: "INV-2" },
+      notes: [],
+    } as any;
+
+    const out = sanitizeReceiptResultForOutput(input);
+
+    expect(out.extracted!.raw_text_truncated).toBe(true);
+    expect(out.extracted!.raw_text_length).toBe(huge.length);
+    expect(out.extracted!.raw_text).toMatch(WRAP_START);
+    // Wrapped value carries at most the budget plus the nonce delimiters.
+    expect((out.extracted!.raw_text as string).length).toBeLessThan(MAX_UNTRUSTED_TEXT_CHARS + 200);
+    expect(out.extracted!.invoice_number).toBe("INV-2");
+  });
+
+  it("does not flag truncation for a normal-sized raw_text", () => {
+    const input = {
+      file: { path: "/x.pdf" } as any,
+      classification: { category: "purchase_invoice" } as any,
+      status: "ok" as any,
+      extracted: { raw_text: "Acme GmbH\nInvoice 123\nTotal 10.00", invoice_number: "INV-3" },
+      notes: [],
+    } as any;
+
+    const out = sanitizeReceiptResultForOutput(input);
+
+    expect(out.extracted!.raw_text_truncated).toBeUndefined();
+    expect(out.extracted!.raw_text_length).toBeUndefined();
+    expect(out.extracted!.raw_text).toMatch(WRAP_START);
   });
 
   it("wraps supplier_resolution.preview_client.name (OCR-seeded)", () => {

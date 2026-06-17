@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { maskApiKeyId } from "./config.js";
 
 const CONFIG_ENV_KEYS = [
   "EARVELDAJA_SERVER",
@@ -70,6 +71,27 @@ afterEach(() => {
   }
   vi.doUnmock("./paths.js");
   vi.resetModules();
+});
+
+describe("maskApiKeyId", () => {
+  it("returns empty string unchanged", () => {
+    expect(maskApiKeyId("")).toBe("");
+  });
+
+  it("fully masks short ids (<= 8 chars), revealing only the first character", () => {
+    expect(maskApiKeyId("key-id")).toBe("k*****");
+    expect(maskApiKeyId("ab")).toBe("a***");
+    expect(maskApiKeyId("12345678")).toBe("1*******");
+  });
+
+  it("reveals first four and last four characters of longer ids", () => {
+    expect(maskApiKeyId("first-id-1234567")).toBe("firs…4567");
+  });
+
+  it("never echoes the full key id", () => {
+    const id = "abcdefghijklmnop";
+    expect(maskApiKeyId(id)).not.toContain(id);
+  });
 });
 
 describe("getConfigSearchDirs", () => {

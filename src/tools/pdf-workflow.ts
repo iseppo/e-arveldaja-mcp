@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
@@ -109,11 +109,20 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           );
         }
 
+        // Cap the OCR blob to a fixed budget before wrapping so a pathological
+        // or maliciously oversized document cannot flood the consuming LLM's
+        // context; surface `raw_text_truncated`/`raw_text_length` when cut.
+        const hintsRaw = capUntrustedText(hints.raw_text);
+        const extractedRaw = capUntrustedText(extracted.raw_text);
         return {
           content: [{
             type: "text",
             text: toMcpJson({
-              hints: { ...hints, raw_text: wrapUntrustedOcr(hints.raw_text) ?? "" },
+              hints: {
+                ...hints,
+                raw_text: wrapUntrustedOcr(hintsRaw.text) ?? "",
+                ...(hintsRaw.truncated ? { raw_text_truncated: true, raw_text_length: hintsRaw.original_length } : {}),
+              },
               // Wrap every OCR-origin free-form field, not just raw_text.
               // `description` (line 1 of the receipt body) and `supplier_name`
               // are both derived from unsanitized OCR text and can carry
@@ -121,7 +130,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
               // per-call nonce boundary the raw_text gets.
               extracted: {
                 ...extracted,
-                raw_text: wrapUntrustedOcr(extracted.raw_text),
+                raw_text: wrapUntrustedOcr(extractedRaw.text),
+                ...(extractedRaw.truncated ? { raw_text_truncated: true, raw_text_length: extractedRaw.original_length } : {}),
                 description: wrapUntrustedOcr(extracted.description),
                 supplier_name: wrapUntrustedOcr(extracted.supplier_name),
                 ...(warnings.length > 0 ? { warnings } : {}),

@@ -245,7 +245,10 @@ fields with a per-call random nonce sandbox via `wrapUntrustedOcr` in
 **Wrapped at MCP output:**
 - Direct processing tools: `extract_pdf_invoice`, `parse_camt053`,
   `import_camt053`, `process_receipt_batch`, `parse_lightyear_capital_gains`,
-  `import_wise_transactions`, etc.
+  `parse_lightyear_statement`, `import_wise_transactions`, etc.
+- `get_document`: the stored/uploaded-document filename (`name`) — it is
+  user-supplied content, so it is wrapped in both the metadata-only and
+  full-payload branches.
 - Review/analysis tools consuming imported data: `reconcile_transactions`,
   `reconcile_inter_account_transfers`, `analyze_unconfirmed_transactions`,
   `classify_unmatched_transactions`, `suggest_booking`,
@@ -256,6 +259,13 @@ fields with a per-call random nonce sandbox via `wrapUntrustedOcr` in
   `create_recurring_sale_invoices`.
 - Upstream API errors: `HttpError.upstream_detail` (forwarded to MCP via
   `toolError`).
+
+**Length cap on OCR blobs:** the OCR `raw_text` inlined by `extract_pdf_invoice`
+and the receipt-batch output is truncated to `MAX_UNTRUSTED_TEXT_CHARS` (~20k
+chars) via `capUntrustedText` before wrapping, with `raw_text_truncated` /
+`raw_text_length` markers when cut — booking uses the structured `extracted`
+fields, so a pathological/oversized document cannot flood the consuming LLM's
+context.
 
 **Intentionally NOT wrapped — conscious architectural decision:**
 - Generic CRUD read handlers (`get_journal`, `list_journals`, `get_client`,

@@ -406,10 +406,12 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
       }
 
       if (candidates.length > 1) {
+        // `reference` / `ref` are unvalidated CSV columns — wrap them so the
+        // warning string cannot smuggle attacker prose into the LLM's stream.
         fxWarnings.push(
-          `${row.reference} (${row.ticker} ${row.ccy} ${Math.abs(row.gross_amount)}): ` +
+          `${wrapUntrustedOcr(row.reference) ?? ""} (${row.ticker} ${row.ccy} ${Math.abs(row.gross_amount)}): ` +
           `${candidates.length} FX conversions match by date+amount — SKIPPED (ambiguous). ` +
-          `Refs: ${candidates.map(c => c.ref).join(", ")}`
+          `Refs: ${candidates.map(c => wrapUntrustedOcr(c.ref) ?? "").join(", ")}`
         );
         // Do NOT pick a candidate — leave eur_amount = 0 so trade is flagged as unmatched
       } else if (candidates.length === 1) {
@@ -426,7 +428,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
       }
 
       if (!fxMatched) {
-        fxWarnings.push(`${trade.reference}: no FX conversion found for ${trade.ccy} trade`);
+        fxWarnings.push(`${wrapUntrustedOcr(trade.reference) ?? ""}: no FX conversion found for ${trade.ccy} trade`);
       }
     }
 
@@ -652,7 +654,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         else if (r.type === "Buy" || r.type === "Sell") suggestion = `${r.type} of ${r.ticker} — missing FX pairing or unsupported trade flow. Check if intentional.`;
         return {
           date: parseLightyearDate(r.date),
-          reference: r.reference,
+          // Security: `reference` is the free-form CSV column an attacker can
+          // control (parseCSV honours quoted embedded newlines), so it is
+          // sandbox-wrapped before it reaches MCP output — same treatment as the
+          // sibling parse_lightyear_capital_gains `name`. ticker/ccy are
+          // structurally bounded tokens and are left raw.
+          reference: wrapUntrustedOcr(r.reference),
           type: r.type,
           ticker: r.ticker || undefined,
           ccy: r.ccy,
@@ -704,7 +711,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       if (unmatchedFx.length > 0) {
         warnings.push(
           `${unmatchedFx.length} foreign currency trade(s) could not be matched to FX conversion entries: ` +
-          unmatchedFx.map(t => `${t.reference} (${t.ticker} ${t.ccy})`).join(", ")
+          unmatchedFx.map(t => `${wrapUntrustedOcr(t.reference) ?? ""} (${t.ticker} ${t.ccy})`).join(", ")
         );
       }
       if (!cashReconciliation.is_balanced) {
@@ -767,11 +774,11 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
       // Compact markdown tables for LLM-friendly output
       const tradesTable = bookableTrades.length > 0
-        ? `## Trades (${bookableTrades.length})\n\n| Date | Ref | Ticker | Type | Qty | CCY | EUR | Fee |\n|------|-----|--------|------|-----|-----|-----|-----|\n${bookableTrades.map(t => `| ${t.date} | ${t.reference} | ${t.ticker} | ${t.type} | ${t.quantity} | ${t.ccy} | ${t.eur_amount.toFixed(2)} | ${t.fee_eur.toFixed(2)} |`).join("\n")}`
+        ? `## Trades (${bookableTrades.length})\n\n| Date | Ref | Ticker | Type | Qty | CCY | EUR | Fee |\n|------|-----|--------|------|-----|-----|-----|-----|\n${bookableTrades.map(t => `| ${t.date} | ${wrapUntrustedOcr(t.reference) ?? ""} | ${t.ticker} | ${t.type} | ${t.quantity} | ${t.ccy} | ${t.eur_amount.toFixed(2)} | ${t.fee_eur.toFixed(2)} |`).join("\n")}`
         : "";
 
       const distRows = distributions.map(d =>
-        `| ${d.date} | ${d.reference} | ${d.ticker || "—"} | ${d.gross_amount.toFixed(2)} | ${d.tax_amount.toFixed(2)} | ${d.net_amount.toFixed(2)} |`
+        `| ${d.date} | ${wrapUntrustedOcr(d.reference) ?? ""} | ${d.ticker || "—"} | ${d.gross_amount.toFixed(2)} | ${d.tax_amount.toFixed(2)} | ${d.net_amount.toFixed(2)} |`
       );
       const distTable = distributions.length > 0
         ? `## Distributions (${distributions.length})\n\n| Date | Ref | Ticker | Gross | Tax | Net |\n|------|-----|--------|-------|-----|-----|\n${distRows.join("\n")}`

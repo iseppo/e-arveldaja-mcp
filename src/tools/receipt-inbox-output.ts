@@ -1,4 +1,4 @@
-import { wrapUntrustedOcr } from "../mcp-json.js";
+import { wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import type { ReceiptBatchFileResult } from "./receipt-inbox-types.js";
 
 // Wrap free-form OCR-derived fields with untrusted-OCR delimiters at MCP
@@ -10,11 +10,15 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
   if (next.extracted) {
     const { raw_text, description, supplier_name } = next.extracted;
     if (raw_text !== undefined || description !== undefined || supplier_name !== undefined) {
+      // Cap the OCR blob before wrapping so an oversized/pathological document
+      // cannot flood the consuming LLM's context; mark when it was truncated.
+      const cappedRaw = capUntrustedText(raw_text);
       next = {
         ...next,
         extracted: {
           ...next.extracted,
-          ...(raw_text !== undefined && { raw_text: wrapUntrustedOcr(raw_text) }),
+          ...(raw_text !== undefined && { raw_text: wrapUntrustedOcr(cappedRaw.text) }),
+          ...(cappedRaw.truncated && { raw_text_truncated: true, raw_text_length: cappedRaw.original_length }),
           ...(description !== undefined && { description: wrapUntrustedOcr(description) }),
           ...(supplier_name !== undefined && { supplier_name: wrapUntrustedOcr(supplier_name) }),
         },

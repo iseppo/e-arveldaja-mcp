@@ -6,7 +6,7 @@ import { readFile } from "fs/promises";
 import { resolveFileInput } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import { registerPdfWorkflowTools } from "./pdf-workflow.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
 import { z } from "zod";
 
 vi.mock("../file-validation.js", () => ({
@@ -200,6 +200,32 @@ describe("pdf workflow tools", () => {
       recommended: true,
       missing_required_fields: expect.arrayContaining(["supplier_name", "invoice_date", "total_gross"]),
     }));
+  });
+
+  it("caps an oversized OCR raw_text and flags the truncation in both hints and extracted", async () => {
+    const huge = "INVOICE START\n" + "x".repeat(MAX_UNTRUSTED_TEXT_CHARS + 5000);
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/invoice.pdf" });
+    mockedParseDocument.mockResolvedValue({
+      text: huge,
+      pageCount: 1,
+      result: { text: "", pages: [] } as any,
+    });
+
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice");
+    const response = await handler({ file_path: "/tmp/invoice.pdf" });
+    const payload = parseMcpResponse(response.content[0]!.text) as any;
+
+    // Truncation flagged on both views so a consumer knows the blob was cut.
+    expect(payload.hints.raw_text_truncated).toBe(true);
+    expect(payload.hints.raw_text_length).toBe(huge.length);
+    expect(payload.extracted.raw_text_truncated).toBe(true);
+    expect(payload.extracted.raw_text_length).toBe(huge.length);
+
+    // The emitted (wrapped) raw_text carries at most the budget plus the nonce
+    // delimiters — never the full oversized blob.
+    expect(payload.hints.raw_text).toContain("UNTRUSTED_OCR_START:");
+    expect(payload.hints.raw_text.length).toBeLessThan(MAX_UNTRUSTED_TEXT_CHARS + 200);
+    expect(payload.extracted.raw_text.length).toBeLessThan(MAX_UNTRUSTED_TEXT_CHARS + 200);
   });
 
   it("emits a foreign-currency warning with an ISO-validated currency code", async () => {

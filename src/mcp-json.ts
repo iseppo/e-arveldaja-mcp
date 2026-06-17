@@ -18,6 +18,35 @@ export function wrapUntrustedOcr(text: string | undefined | null): string | unde
   return `${UNTRUSTED_OCR_START_PREFIX}${nonce}>>\n${text}\n${UNTRUSTED_OCR_END_PREFIX}${nonce}>>`;
 }
 
+/**
+ * Default character budget for OCR-derived free text inlined into an MCP
+ * response. Booking decisions use the structured `extracted` fields, not the
+ * raw blob — so a generous cap that still bounds a pathological or maliciously
+ * oversized document (which could otherwise flood the consuming LLM's context)
+ * is the right trade-off. ~20k chars covers a multi-page invoice.
+ */
+export const MAX_UNTRUSTED_TEXT_CHARS = 20_000;
+
+/**
+ * Cap OCR-derived free text to a fixed character budget before it is wrapped
+ * and emitted. Returns the (possibly truncated) text plus whether truncation
+ * happened and the original length; callers wrap `.text` with wrapUntrustedOcr
+ * and surface `.truncated` / `.original_length` as sibling fields so a consumer
+ * knows the blob was cut and can open the document directly for the remainder.
+ */
+export function capUntrustedText(
+  text: string | undefined | null,
+  maxChars: number = MAX_UNTRUSTED_TEXT_CHARS,
+): { text: string | undefined; truncated: boolean; original_length: number } {
+  if (text === undefined || text === null) {
+    return { text: undefined, truncated: false, original_length: 0 };
+  }
+  if (text.length <= maxChars) {
+    return { text, truncated: false, original_length: text.length };
+  }
+  return { text: text.slice(0, maxChars), truncated: true, original_length: text.length };
+}
+
 /** Strip undefined fields recursively, then encode as TOON when it round-trips losslessly. */
 export function toMcpJson(obj: unknown): string {
   let stripped: unknown;

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  capUntrustedText,
+  MAX_UNTRUSTED_TEXT_CHARS,
   parseMcpResponse,
   toMcpJson,
   UNTRUSTED_OCR_END_PREFIX,
@@ -50,6 +52,38 @@ describe("wrapUntrustedOcr", () => {
     expect(actualNonce).not.toBe("DEADBEEFDEADBEEF");
     const realEndCount = wrapped.split(`${UNTRUSTED_OCR_END_PREFIX}${actualNonce}>>`).length - 1;
     expect(realEndCount).toBe(1);
+  });
+});
+
+describe("capUntrustedText", () => {
+  it("passes undefined/null through without truncation", () => {
+    expect(capUntrustedText(undefined)).toEqual({ text: undefined, truncated: false, original_length: 0 });
+    expect(capUntrustedText(null)).toEqual({ text: undefined, truncated: false, original_length: 0 });
+  });
+
+  it("returns text unchanged when within the budget", () => {
+    const text = "short invoice text";
+    expect(capUntrustedText(text)).toEqual({ text, truncated: false, original_length: text.length });
+  });
+
+  it("returns text unchanged exactly at the budget boundary", () => {
+    const text = "x".repeat(MAX_UNTRUSTED_TEXT_CHARS);
+    const result = capUntrustedText(text);
+    expect(result.truncated).toBe(false);
+    expect(result.text).toBe(text);
+  });
+
+  it("truncates to the budget and reports the original length when over", () => {
+    const text = "y".repeat(MAX_UNTRUSTED_TEXT_CHARS + 500);
+    const result = capUntrustedText(text);
+    expect(result.truncated).toBe(true);
+    expect(result.text).toHaveLength(MAX_UNTRUSTED_TEXT_CHARS);
+    expect(result.original_length).toBe(MAX_UNTRUSTED_TEXT_CHARS + 500);
+  });
+
+  it("honours a custom budget", () => {
+    const result = capUntrustedText("abcdef", 4);
+    expect(result).toEqual({ text: "abcd", truncated: true, original_length: 6 });
   });
 });
 
