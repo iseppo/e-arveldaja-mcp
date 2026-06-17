@@ -1032,6 +1032,14 @@ function prepareReviewAction(
         match,
         ...(category ? { category } : {}),
       };
+      // The rule-override store uses the legacy singular field names, but the
+      // outbound args target the public save_auto_booking_rule tool, whose
+      // account params were pluralized (purchase_accounts_id / liability_accounts_id)
+      // in the 1.0 contract pass. Read internal, emit the public param name.
+      const PUBLIC_RULE_ARG_NAME: Record<string, string> = {
+        purchase_account_id: "purchase_accounts_id",
+        liability_account_id: "liability_accounts_id",
+      };
       for (const key of [
         "purchase_article_id",
         "purchase_account_id",
@@ -1043,7 +1051,7 @@ function prepareReviewAction(
       ]) {
         const value = (mergedRuleOverride ?? {})[key];
         if (value !== undefined) {
-          ruleArgs[key] = value;
+          ruleArgs[PUBLIC_RULE_ARG_NAME[key] ?? key] = value;
         }
       }
       const hasConcreteRuleField = hasConcreteRuleOverrideField(mergedRuleOverride);
@@ -1439,15 +1447,19 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
       match: z.string().min(1).describe("Counterparty match text, usually the supplier or counterparty name stem"),
       category: z.enum(AUTO_BOOKING_CATEGORIES).optional().describe("Optional classification category such as saas_subscriptions or bank_fees"),
       purchase_article_id: z.number().int().optional().describe("Optional purchase article ID"),
-      purchase_account_id: z.number().int().optional().describe("Optional purchase account ID"),
+      purchase_accounts_id: z.number().int().optional().describe("Optional purchase account ID"),
       purchase_account_dimensions_id: z.number().int().optional().describe("Optional purchase account dimension ID"),
-      liability_account_id: z.number().int().optional().describe("Optional liability account ID"),
+      liability_accounts_id: z.number().int().optional().describe("Optional liability account ID"),
       vat_rate_dropdown: z.string().optional().describe("Optional VAT rate dropdown value"),
       reversed_vat_id: z.number().int().optional().describe("Optional reverse-charge VAT flag"),
       reason: z.string().optional().describe("Optional short explanation for the rule"),
     },
     { ...mutate, title: "Save Auto-Booking Rule" },
-    async ({ match, category, purchase_article_id, purchase_account_id, purchase_account_dimensions_id, liability_account_id, vat_rate_dropdown, reversed_vat_id, reason }) => {
+    async ({ match, category, purchase_article_id, purchase_accounts_id, purchase_account_dimensions_id, liability_accounts_id, vat_rate_dropdown, reversed_vat_id, reason }) => {
+      // Public params use the plural FK convention; the persisted rule store and
+      // its downstream consumers keep the legacy singular field names.
+      const purchase_account_id = purchase_accounts_id;
+      const liability_account_id = liability_accounts_id;
       if (!hasConcreteRuleOverrideField({
         purchase_article_id,
         purchase_account_id,

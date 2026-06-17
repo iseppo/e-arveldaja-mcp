@@ -1338,8 +1338,8 @@ ${entryXml}
       match: "openai",
       category: "saas_subscriptions",
       purchase_article_id: 501,
-      purchase_account_id: 5230,
-      liability_account_id: 2315,
+      purchase_accounts_id: 5230,
+      liability_accounts_id: 2315,
       vat_rate_dropdown: "-",
       reversed_vat_id: 1,
       reason: "OpenAI default",
@@ -1410,8 +1410,8 @@ ${entryXml}
           match: "OpenAI",
           category: "saas_subscriptions",
           purchase_article_id: 501,
-          purchase_account_id: 5230,
-          liability_account_id: 2315,
+          purchase_accounts_id: 5230,
+          liability_accounts_id: 2315,
           vat_rate_dropdown: "-",
           reversed_vat_id: 1,
           reason: "Defaulted from the most recent confirmed supplier invoice.",
@@ -1570,11 +1570,12 @@ ${entryXml}
     const args = payload.proposed_action.args;
 
     expect(args.purchase_article_id).toBe(501);
-    expect(args.liability_account_id).toBe(2315);
+    // outbound args use the public (plural) save_auto_booking_rule param names
+    expect(args.liability_accounts_id).toBe(2315);
     expect(args.vat_rate_dropdown).toBe("-");
     expect(args.reversed_vat_id).toBe(1);
     // malformed fields are silently dropped
-    expect(args.purchase_account_id).toBeUndefined();
+    expect(args.purchase_accounts_id).toBeUndefined();
     expect(args.reason).toBeUndefined();
   });
 
@@ -1764,8 +1765,9 @@ ${entryXml}
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
     expect(payload.proposed_action.args.match).toBe("custom-match-stem");
-    // explicit purchase_account_id from override wins over suggested_booking value
-    expect(payload.proposed_action.args.purchase_account_id).toBe(5200);
+    // explicit purchase account from override wins over suggested_booking value;
+    // outbound arg uses the public (plural) save_auto_booking_rule param name
+    expect(payload.proposed_action.args.purchase_accounts_id).toBe(5200);
     // non-overridden fields from suggested_booking are still present
     expect(payload.proposed_action.args.purchase_article_id).toBe(501);
   });

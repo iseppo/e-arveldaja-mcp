@@ -5,6 +5,7 @@ import { toMcpJson } from "../../mcp-json.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
+import { toolResponse } from "../../tool-response.js";
 import { HttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
@@ -71,7 +72,21 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       if (!hasClientOnlyFilter) {
         // The API filters AND paginates — no client-side page-walking needed.
         const result = await api.transactions.list({ page: params.page, ...serverFilter });
-        const compact = { ...result, items: applyListView("transaction", result.items, params.view) };
+        const items = applyListView("transaction", result.items, params.view);
+        // Always emit the same superset shape as the client-side path so callers
+        // get a stable envelope regardless of which filter route was taken.
+        const perPage = params.per_page ?? result.items.length;
+        const compact = {
+          ...result,
+          current_page: result.current_page,
+          total_pages: result.total_pages,
+          total_items: (result as { total_items?: number }).total_items
+            ?? result.items.length,
+          per_page: (result as { per_page?: number }).per_page ?? perPage,
+          items,
+          filtered_client_side: false,
+          out_of_range: false,
+        };
         return { content: [{ type: "text", text: toMcpJson(compact) }] };
       }
       // A client-side filter is active, so we need the full set. Narrow it
@@ -148,7 +163,13 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       summary: `Created transaction ${params.amount} ${params.cl_currencies_id ?? "EUR"} on ${params.date}`,
       details: { date: params.date, amount: params.amount, type: params.type, description: params.description, accounts_dimensions_id: params.accounts_dimensions_id },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "created",
+      entity: "transaction",
+      id: result.created_object_id,
+      message: `Created transaction ${params.amount} ${params.cl_currencies_id ?? "EUR"} on ${params.date}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "confirm_transaction",
@@ -205,7 +226,13 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       summary: `Confirmed transaction ${id}`,
       details: { distributions: dist?.map(d => ({ related_table: d.related_table, related_id: d.related_id, related_sub_id: d.related_sub_id, amount: d.amount })) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "confirmed",
+      entity: "transaction",
+      id,
+      message: `Confirmed transaction ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "update_transaction", "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference.", {
@@ -223,7 +250,13 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       summary: `Updated transaction ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "updated",
+      entity: "transaction",
+      id,
+      message: `Updated transaction ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "invalidate_transaction",
@@ -235,7 +268,13 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         summary: `Invalidated transaction ${id}`,
         details: {},
       });
-      return { content: [{ type: "text", text: toMcpJson(result) }] };
+      return toolResponse({
+        action: "invalidated",
+        entity: "transaction",
+        id,
+        message: `Invalidated transaction ${id}.`,
+        raw: result,
+      });
     });
 
   registerTool(server, "delete_transaction", "Delete a transaction", idParam.shape, { ...destructive, title: "Delete Transaction" }, async ({ id }) => {
@@ -245,7 +284,13 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       summary: `Deleted transaction ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deleted",
+      entity: "transaction",
+      id,
+      message: `Deleted transaction ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "batch_delete_transactions",

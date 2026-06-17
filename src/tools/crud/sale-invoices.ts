@@ -5,6 +5,7 @@ import { toMcpJson } from "../../mcp-json.js";
 import { readOnly, create, mutate, destructive, send } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
+import { toolResponse } from "../../tool-response.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateSaleInvoiceItemDimensions } from "../../account-validation.js";
 import type { ApiContext } from "./shared.js";
@@ -30,8 +31,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
   registerTool(server, "list_sale_invoices",
     "List sales invoices. Paginated, with server-side filters (date range, status, payment status, customer) applied by the API. Brief view by default; use view='full' or get_sale_invoice for detail.",
     { ...pageParam.shape, ...viewParam, ...invoiceListFilterParams({ dateLabel: "revenue date", clientLabel: "customer" }) },
-    { ...readOnly, title: "List Sale Invoices" }, async ({ view, ...listParams }) => {
-    const result = await api.saleInvoices.list(listParams);
+    { ...readOnly, title: "List Sale Invoices" }, async ({ view, date_from, date_to, ...listParams }) => {
+    // Public params are canonical date_from/date_to; the API expects start_date/end_date.
+    const result = await api.saleInvoices.list({
+      ...listParams,
+      ...(date_from !== undefined && { start_date: date_from }),
+      ...(date_to !== undefined && { end_date: date_to }),
+    });
     const compact = { ...result, items: applyListView("sale_invoice", result.items, view) };
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
@@ -84,7 +90,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       summary: `Created sale invoice for client ${params.clients_id} on ${params.create_date}`,
       details: { clients_id: params.clients_id, date: params.create_date, items: items.map(i => ({ title: i.custom_title, amount: i.amount })) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "created",
+      entity: "sale_invoice",
+      id: result.created_object_id,
+      message: `Created sale invoice for client ${params.clients_id} on ${params.create_date}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "update_sale_invoice", "Update draft sales-invoice fields. Server-managed fields are rejected; confirmed invoice dates require invalidate_sale_invoice first.", {
@@ -103,7 +115,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       summary: `Updated sale invoice ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "updated",
+      entity: "sale_invoice",
+      id,
+      message: `Updated sale invoice ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "delete_sale_invoice", "Delete a sales invoice", idParam.shape, { ...destructive, title: "Delete Sale Invoice" }, async ({ id }) => {
@@ -113,7 +131,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       summary: `Deleted sale invoice ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deleted",
+      entity: "sale_invoice",
+      id,
+      message: `Deleted sale invoice ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "confirm_sale_invoice", "Confirm a sales invoice. Locks the invoice for editing. Reversible via invalidate_sale_invoice.", idParam.shape, { ...destructive, title: "Confirm Sale Invoice" }, async ({ id }) => {
@@ -123,7 +147,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       summary: `Confirmed sale invoice ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "confirmed",
+      entity: "sale_invoice",
+      id,
+      message: `Confirmed sale invoice ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "invalidate_sale_invoice",
@@ -135,7 +165,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
         summary: `Invalidated sale invoice ${id}`,
         details: {},
       });
-      return { content: [{ type: "text", text: toMcpJson(result) }] };
+      return toolResponse({
+        action: "invalidated",
+        entity: "sale_invoice",
+        id,
+        message: `Invalidated sale invoice ${id}.`,
+        raw: result,
+      });
     });
 
   registerTool(server, "get_sale_invoice_delivery_options", "Get available delivery methods for a sales invoice (e-invoice or email)", idParam.shape, { ...readOnly, title: "Get Sale Invoice Delivery Options" }, async ({ id }) => {
@@ -157,7 +193,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       summary: `Sent sale invoice ${id}`,
       details: { send_einvoice: request.send_einvoice, send_email: request.send_email },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "sent",
+      entity: "sale_invoice",
+      id,
+      message: `Sent sale invoice ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "get_sale_invoice_document", "Download sales invoice PDF (base64)", idParam.shape, { ...readOnly, title: "Download Invoice PDF" }, async ({ id }) => {

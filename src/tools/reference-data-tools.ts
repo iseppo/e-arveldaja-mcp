@@ -5,6 +5,7 @@ import { toMcpJson } from "../mcp-json.js";
 import { create, readOnly, mutate, destructive } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { toolError } from "../tool-error.js";
+import { toolResponse } from "../tool-response.js";
 import { coerceId } from "./crud/shared.js";
 import type { ApiContext } from "./crud-tools.js";
 
@@ -92,7 +93,12 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
       summary: "Updated company invoice settings",
       details: { fields: Object.keys(patch) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "updated",
+      entity: "invoice_info",
+      message: "Updated company invoice settings.",
+      raw: result,
+    });
   });
 
   registerTool(server, "get_vat_info", "Get company VAT information (KMKR)", {}, { ...readOnly, title: "Get VAT Info" }, async () => {
@@ -127,7 +133,13 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
       summary: `Created invoice series "${params.number_prefix}"`,
       details: { number_prefix: params.number_prefix, number_start_value: params.number_start_value },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "created",
+      entity: "invoice_series",
+      id: result.created_object_id,
+      message: `Created invoice series "${params.number_prefix}".`,
+      raw: result,
+    });
   });
 
   registerTool(server, "update_invoice_series", "Update an invoice numbering series (fix the prefix, start value, payment term, overdue charge, or the active/default flags). Pass only the fields to change.", {
@@ -150,7 +162,13 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
       summary: `Updated invoice series ${id}`,
       details: { fields: Object.keys(patch) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "updated",
+      entity: "invoice_series",
+      id,
+      message: `Updated invoice series ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "delete_invoice_series", "Delete an invoice numbering series. Fails if the series is already in use.", {
@@ -163,7 +181,13 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
       summary: `Deleted invoice series ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deleted",
+      entity: "invoice_series",
+      id,
+      message: `Deleted invoice series ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "list_bank_accounts", "Get company bank accounts", {}, { ...readOnly, title: "List Bank Accounts" }, async () => {
@@ -192,7 +216,13 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
       summary: `Created bank account "${params.account_name_est}" (${params.account_no})`,
       details: { account_name: params.account_name_est, account_no: params.account_no },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "created",
+      entity: "bank_account",
+      id: result.created_object_id,
+      message: `Created bank account "${params.account_name_est}" (${params.account_no}).`,
+      raw: result,
+    });
   });
 
   registerTool(server, "update_bank_account", "Update a company bank account (rename it, fix the account number/SWIFT/bank, or toggle whether it shows on sale invoices). Pass only the fields to change.", {
@@ -214,7 +244,13 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
       summary: `Updated bank account ${id}`,
       details: { fields: Object.keys(patch) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "updated",
+      entity: "bank_account",
+      id,
+      message: `Updated bank account ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "delete_bank_account", "Delete a company bank account. Fails if the account is referenced by existing transactions.", {
@@ -227,6 +263,12 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
       summary: `Deleted bank account ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deleted",
+      entity: "bank_account",
+      id,
+      message: `Deleted bank account ${id}.`,
+      raw: result,
+    });
   });
 }

@@ -16,7 +16,7 @@ interface BalanceDetail {
   title: string;
   type: "D" | "C";
   amount: number;
-  client_id?: number | null;
+  clients_id?: number | null;
 }
 
 interface AccountBalanceResult {
@@ -76,7 +76,7 @@ export async function computeAccountBalance(
         title: journal.title ?? "",
         type: type as "D" | "C",
         amount,
-        client_id: journal.clients_id,
+        clients_id: journal.clients_id,
       });
     }
   }
@@ -109,17 +109,17 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
   registerTool(server, "compute_account_balance",
     "Compute account balance from journal postings with optional client/date filters.",
     {
-      account_id: z.number().describe("Account number (e.g. 2110 for short-term loans)"),
-      client_id: z.number().optional().describe("Filter by client ID"),
+      account_id: coerceId.describe("Account database id (the integer `id` from list_accounts — NOT the account code like 2110)."),
+      clients_id: z.number().optional().describe("Filter by client ID"),
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
       include_entries: z.boolean().optional().describe("Include individual entries in response (default false)"),
       fresh: z.boolean().optional().describe("Clear cached API/reference data first."),
     },
     { ...readOnly, title: "Compute Account Balance" },
-    async ({ account_id, client_id, date_from, date_to, include_entries, fresh }) => {
+    async ({ account_id, clients_id, date_from, date_to, include_entries, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
-      const result = await computeAccountBalance(api, account_id, client_id, date_from, date_to);
+      const result = await computeAccountBalance(api, account_id, clients_id, date_from, date_to);
 
       const summary = {
         account_id,
@@ -129,7 +129,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         debit_total: roundMoney(result.debitTotal),
         credit_total: roundMoney(result.creditTotal),
         entry_count: result.entries.length,
-        ...(client_id !== undefined && { client_id }),
+        ...(clients_id !== undefined && { clients_id }),
         ...(date_from && { date_from }),
         ...(date_to && { date_to }),
         ...cacheClearMetadata(cacheClear),
@@ -149,12 +149,12 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
   registerTool(server, "compute_client_debt",
     "Compute net position against a client across selected accounts.",
     {
-      client_id: coerceId.describe("Client ID"),
+      clients_id: coerceId.describe("Client ID"),
       account_ids: z.string().optional().describe("Comma-separated account IDs to check (default: 2110,2310,1210)"),
       fresh: z.boolean().optional().describe("Clear cached API/reference data first."),
     },
     { ...readOnly, title: "Compute Client Net Position" },
-    async ({ client_id, account_ids, fresh }) => {
+    async ({ clients_id, account_ids, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const ids = account_ids
         ? account_ids.split(",").map(s => parseInt(s.trim(), 10))
@@ -166,7 +166,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       const results = [];
       for (const accountId of ids) {
         const r = await computeAccountBalance(
-          api, accountId, client_id, undefined, undefined, allJournals
+          api, accountId, clients_id, undefined, undefined, allJournals
         );
         results.push({
           account_id: accountId,
@@ -191,7 +191,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         content: [{
           type: "text",
           text: toMcpJson({
-            client_id,
+            clients_id,
             accounts: results,
             summary: {
               total_debt_to_client: roundMoney(totalDebt),

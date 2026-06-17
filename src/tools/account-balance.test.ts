@@ -215,14 +215,14 @@ describe("compute_account_balance tool", () => {
     expect(data.entry_count).toBe(2);
   });
 
-  it("filters by client_id", async () => {
+  it("filters by clients_id", async () => {
     const journals = [
       journal({ id: 1, clients_id: 42, postings: [posting(ACCOUNT_ID, "D", 1000)] }),
       journal({ id: 2, clients_id: 99, postings: [posting(ACCOUNT_ID, "D", 500)] }),
       journal({ id: 3, clients_id: null, postings: [posting(ACCOUNT_ID, "D", 250)] }),
     ];
     const handler = setup(journals);
-    const result = await handler({ account_id: ACCOUNT_ID, client_id: 42 });
+    const result = await handler({ account_id: ACCOUNT_ID, clients_id: 42 });
     const data = parse((result.content[0] as { text: string }).text);
     expect(data.debit_total).toBe(1000);
     expect(data.entry_count).toBe(1);

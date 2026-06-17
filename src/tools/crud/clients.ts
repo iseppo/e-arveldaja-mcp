@@ -42,8 +42,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     is_client: z.boolean().describe("Is a buyer"),
     is_supplier: z.boolean().describe("Is a supplier"),
     cl_code_country: z.string().optional().describe("Country code (default EST)"),
-    is_physical_entity: z.boolean().optional().describe("Natural person (true) or legal entity (false)"),
-    is_juridical_entity: z.boolean().optional().describe("Legal entity"),
+    is_physical_entity: z.boolean().describe("REQUIRED person-type: true = natural person (private individual); false = legal entity / company (a registry `code` is then also required). The API rejects creation without this."),
     email: z.string().optional().describe("Contact email"),
     telephone: z.string().optional().describe("Phone"),
     address_text: z.string().optional().describe("Address"),
@@ -54,6 +53,11 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     const result = await api.clients.create({
       ...params,
       cl_code_country: params.cl_code_country ?? "EST",
+      // The API treats the person-type flags as complements and requires one to be
+      // set; derive the juridical flag from the required is_physical_entity so this
+      // tool can never emit the avoidable 409 ("Please choose if it is a natural or
+      // a juridical person.").
+      is_juridical_entity: !params.is_physical_entity,
       is_member: false,
       send_invoice_to_email: false,
       send_invoice_to_accounting_email: false,
@@ -64,10 +68,16 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
       summary: `Created client "${params.name}"`,
       details: { name: params.name, code: params.code, is_client: params.is_client, is_supplier: params.is_supplier },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "created",
+      entity: "client",
+      id: result.created_object_id,
+      message: `Created client "${params.name}".`,
+      raw: result,
+    });
   });
 
-  registerTool(server, "update_client", "Update client fields. Server-managed activation fields are rejected; use deactivate/restore tools.", {
+  registerTool(server, "update_client", "Update client fields. Server-managed activation fields are rejected; use deactivate/reactivate tools.", {
     id: coerceId.describe("Client ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Client" }, async ({ id, data }) => {
@@ -91,24 +101,36 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     });
   });
 
-  registerTool(server, "deactivate_client", "Deactivate a client (can be restored with restore_client)", idParam.shape, { ...mutate, title: "Deactivate Client" }, async ({ id }) => {
+  registerTool(server, "deactivate_client", "Deactivate a client (can be restored with reactivate_client)", idParam.shape, { ...mutate, title: "Deactivate Client" }, async ({ id }) => {
     const result = await api.clients.deactivate(id);
     logAudit({
       tool: "deactivate_client", action: "DELETED", entity_type: "client", entity_id: id,
       summary: `Deactivated client ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deactivated",
+      entity: "client",
+      id,
+      message: `Deactivated client ${id}.`,
+      raw: result,
+    });
   });
 
-  registerTool(server, "restore_client", "Reactivate a deactivated client", idParam.shape, { ...mutate, title: "Restore Client" }, async ({ id }) => {
+  registerTool(server, "reactivate_client", "Reactivate a deactivated client", idParam.shape, { ...mutate, title: "Reactivate Client" }, async ({ id }) => {
     const result = await api.clients.restore(id);
     logAudit({
-      tool: "restore_client", action: "UPDATED", entity_type: "client", entity_id: id,
-      summary: `Restored client ${id}`,
+      tool: "reactivate_client", action: "UPDATED", entity_type: "client", entity_id: id,
+      summary: `Reactivated client ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "reactivated",
+      entity: "client",
+      id,
+      message: `Reactivated client ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "delete_client",
@@ -120,14 +142,26 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
       summary: `Deleted client ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deleted",
+      entity: "client",
+      id,
+      message: `Deleted client ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "search_client", "Search clients by name (fuzzy match)", {
     name: z.string().describe("Name to search for"),
   }, { ...readOnly, title: "Search Clients" }, async ({ name }) => {
     const results = await api.clients.findByName(name);
-    return { content: [{ type: "text", text: toMcpJson(results) }] };
+    return toolResponse({
+      action: "searched",
+      entity: "client",
+      message: `Found ${results.length} client(s) matching "${name}".`,
+      extra: { count: results.length },
+      raw: results,
+    });
   });
 
   registerTool(server, "find_client_by_code", "Find a client by business registry code or personal ID", {

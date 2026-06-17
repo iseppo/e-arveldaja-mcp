@@ -16,10 +16,53 @@ import {
   writeFileSync,
 } from "fs";
 import { join } from "path";
+import { z } from "zod";
 import {
   normalizeAuditLabel,
   sanitizeAuditLogName,
 } from "./audit-log-labels.js";
+
+// ---------------------------------------------------------------------------
+// Shared audit filter vocabularies (single source of truth)
+//
+// These are the canonical entity-type and action values the audit writer
+// (`logAudit`) emits for the core CRUD/mutation surface, and the only values
+// the get_session_log / list_audit_logs filters accept. The document-attachment
+// tools derive their 4-value entity enum from `AuditEntityType` so the two
+// stay in lockstep. Keep these in sync with ACTION_LABELS / ENTITY_LABELS below.
+// ---------------------------------------------------------------------------
+
+export const AUDIT_ENTITY_TYPES = [
+  // Core CRUD entities
+  "client",
+  "product",
+  "journal",
+  "transaction",
+  "sale_invoice",
+  "purchase_invoice",
+  // Reference-data entities
+  "invoice_series",
+  "bank_account",
+  "invoice_info",
+  // Meta (connection-switch-interrupted in-flight tool)
+  "tool_execution",
+] as const;
+
+export const AUDIT_ACTIONS = [
+  "CREATED",
+  "UPDATED",
+  "DELETED",
+  "CONFIRMED",
+  "INVALIDATED",
+  "UPLOADED",
+  "IMPORTED",
+  "SENT",
+  "DELETE_FAILED",
+  "CONNECTION_SWITCH_INTERRUPTED",
+] as const;
+
+export const AuditEntityType = z.enum(AUDIT_ENTITY_TYPES);
+export const AuditAction = z.enum(AUDIT_ACTIONS);
 
 export interface AuditEntry {
   timestamp: string;
@@ -327,13 +370,13 @@ function getLang(): Lang {
 }
 
 const ACTION_LABELS: Record<Lang, Record<string, string>> = {
-  et: { CREATED: "Loodud", UPDATED: "Muudetud", DELETED: "Kustutatud", CONFIRMED: "Kinnitatud", INVALIDATED: "Tühistatud", UPLOADED: "Üles laetud", IMPORTED: "Imporditud", SENT: "Saadetud" },
-  en: { CREATED: "Created", UPDATED: "Updated", DELETED: "Deleted", CONFIRMED: "Confirmed", INVALIDATED: "Invalidated", UPLOADED: "Uploaded", IMPORTED: "Imported", SENT: "Sent" },
+  et: { CREATED: "Loodud", UPDATED: "Muudetud", DELETED: "Kustutatud", CONFIRMED: "Kinnitatud", INVALIDATED: "Tühistatud", UPLOADED: "Üles laetud", IMPORTED: "Imporditud", SENT: "Saadetud", DELETE_FAILED: "Kustutamine ebaõnnestus", CONNECTION_SWITCH_INTERRUPTED: "Ühenduse vahetus katkestatud" },
+  en: { CREATED: "Created", UPDATED: "Updated", DELETED: "Deleted", CONFIRMED: "Confirmed", INVALIDATED: "Invalidated", UPLOADED: "Uploaded", IMPORTED: "Imported", SENT: "Sent", DELETE_FAILED: "Delete failed", CONNECTION_SWITCH_INTERRUPTED: "Connection switch interrupted" },
 };
 
 const ENTITY_LABELS: Record<Lang, Record<string, string>> = {
-  et: { client: "Klient", product: "Toode", journal: "Kanne", transaction: "Pangatehing", sale_invoice: "Müügiarve", purchase_invoice: "Ostuarve" },
-  en: { client: "Client", product: "Product", journal: "Journal", transaction: "Transaction", sale_invoice: "Sale invoice", purchase_invoice: "Purchase invoice" },
+  et: { client: "Klient", product: "Toode", journal: "Kanne", transaction: "Pangatehing", sale_invoice: "Müügiarve", purchase_invoice: "Ostuarve", invoice_series: "Arvete seeria", bank_account: "Pangakonto", invoice_info: "Arve seadistus", tool_execution: "Tööriista käivitus" },
+  en: { client: "Client", product: "Product", journal: "Journal", transaction: "Transaction", sale_invoice: "Sale invoice", purchase_invoice: "Purchase invoice", invoice_series: "Invoice series", bank_account: "Bank account", invoice_info: "Invoice settings", tool_execution: "Tool execution" },
 };
 
 const FIELD_LABELS: Record<Lang, Record<string, string>> = {

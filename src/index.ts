@@ -74,6 +74,8 @@ import {
   clearAuditLog,
   setAuditLogLabels,
   getCurrentAuditLogLabel,
+  AuditEntityType,
+  AuditAction,
 } from "./audit-log.js";
 import { buildAuditLogLabels } from "./audit-log-labels.js";
 
@@ -735,7 +737,7 @@ async function main() {
             message: `Switched to "${target.name}"`,
             server: target.config.baseUrl.includes("demo") ? "demo" : "live",
             generation: snapshot.generation,
-            note: "Caches cleared atomically. New tool calls use the new connection; interrupted in-flight tools cannot make further API requests, but a request already in flight may still have completed.",
+            note: "The previous and target connections' caches are cleared atomically, so one company's data is never served to another. New tool calls use the new connection; interrupted in-flight tools cannot make further API requests, but a request already in flight may still have completed.",
           }),
         }],
       };
@@ -752,8 +754,8 @@ async function main() {
     "Retrieve mutating-operation audit log Markdown for the current connection, another audit-log label, or connection:<raw name>.",
     {
       connection: z.string().optional().describe("Audit-log label, or connection:<raw connection name>; default current connection."),
-      entity_type: z.string().optional().describe("Filter by entity type (client, product, journal, transaction, sale_invoice, purchase_invoice)"),
-      action: z.string().optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT)"),
+      entity_type: AuditEntityType.optional().describe("Filter by entity type (client, product, journal, transaction, sale_invoice, purchase_invoice, invoice_series, bank_account, invoice_info, tool_execution)"),
+      action: AuditAction.optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT, DELETE_FAILED, CONNECTION_SWITCH_INTERRUPTED)"),
       date_from: z.string().optional().describe("Return entries from this date (YYYY-MM-DD or ISO 8601)"),
       date_to: z.string().optional().describe("Return entries up to this date (YYYY-MM-DD or ISO 8601)"),
       limit: z.number().int().min(1).optional().describe("Maximum entries to return (positive integer, default 100, returns most recent)"),
@@ -794,14 +796,17 @@ async function main() {
     { ...readOnly, title: "List Audit Logs" },
     async () => {
       const logs = listAuditLogs();
-      if (logs.length === 0) {
-        return { content: [{ type: "text", text: "No audit logs found." }] };
-      }
-      const lines = logs.map(l =>
-        `- **${l.connection}** — ${l.entries} entries${l.last_entry ? `, last: ${l.last_entry}` : ""}`
-      );
+      const items = logs.map(l => ({
+        connection: l.connection,
+        file: l.file,
+        entries: l.entries,
+        last_entry: l.last_entry,
+      }));
+      const hint = items.length === 0
+        ? "No audit logs found."
+        : `${items.length} audit log file(s) available.`;
       return {
-        content: [{ type: "text", text: `## Available audit logs\n\n${lines.join("\n")}` }],
+        content: [{ type: "text", text: toMcpJson({ items, count: items.length, hint }) }],
       };
     }
   );

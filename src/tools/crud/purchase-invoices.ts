@@ -5,6 +5,7 @@ import { toMcpJson } from "../../mcp-json.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
+import { toolResponse } from "../../tool-response.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "../purchase-vat-defaults.js";
@@ -34,8 +35,13 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
   registerTool(server, "list_purchase_invoices",
     "List purchase invoices. Paginated, with server-side filters (date range, status, payment status, supplier) applied by the API. Brief view by default; use view='full' or get_purchase_invoice for detail.",
     { ...pageParam.shape, ...viewParam, ...invoiceListFilterParams({ dateLabel: "invoice date", clientLabel: "supplier" }) },
-    { ...readOnly, title: "List Purchase Invoices" }, async ({ view, ...listParams }) => {
-    const result = await api.purchaseInvoices.list(listParams);
+    { ...readOnly, title: "List Purchase Invoices" }, async ({ view, date_from, date_to, ...listParams }) => {
+    // Public params are canonical date_from/date_to; the API expects start_date/end_date.
+    const result = await api.purchaseInvoices.list({
+      ...listParams,
+      ...(date_from !== undefined && { start_date: date_from }),
+      ...(date_to !== undefined && { end_date: date_to }),
+    });
     const compact = { ...result, items: applyListView("purchase_invoice", result.items, view) };
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
@@ -125,7 +131,13 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
           items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
         },
       });
-      return { content: [{ type: "text", text: toMcpJson(result) }] };
+      return toolResponse({
+        action: "created",
+        entity: "purchase_invoice",
+        id: result.id,
+        message: `Created purchase invoice "${params.number}" from ${params.client_name}.`,
+        raw: result,
+      });
     });
 
   registerTool(server, "update_purchase_invoice", "Update draft purchase-invoice fields. Server-managed fields are rejected; confirmed invoice dates require invalidate_purchase_invoice first.", {
@@ -144,7 +156,13 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       summary: `Updated purchase invoice ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "updated",
+      entity: "purchase_invoice",
+      id,
+      message: `Updated purchase invoice ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "delete_purchase_invoice", "Delete a purchase invoice", idParam.shape, { ...destructive, title: "Delete Purchase Invoice" }, async ({ id }) => {
@@ -154,7 +172,13 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       summary: `Deleted purchase invoice ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deleted",
+      entity: "purchase_invoice",
+      id,
+      message: `Deleted purchase invoice ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "confirm_purchase_invoice",
@@ -167,7 +191,13 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
         summary: `Confirmed purchase invoice ${id}`,
         details: {},
       });
-      return { content: [{ type: "text", text: toMcpJson(result) }] };
+      return toolResponse({
+        action: "confirmed",
+        entity: "purchase_invoice",
+        id,
+        message: `Confirmed purchase invoice ${id}.`,
+        raw: result,
+      });
     });
 
   registerTool(server, "invalidate_purchase_invoice",
@@ -179,6 +209,12 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
         summary: `Invalidated purchase invoice ${id}`,
         details: {},
       });
-      return { content: [{ type: "text", text: toMcpJson(result) }] };
+      return toolResponse({
+        action: "invalidated",
+        entity: "purchase_invoice",
+        id,
+        message: `Invalidated purchase invoice ${id}.`,
+        raw: result,
+      });
     });
 }

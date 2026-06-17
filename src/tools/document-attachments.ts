@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { readOnly, mutate, destructive } from "../annotations.js";
-import { logAudit } from "../audit-log.js";
+import { AUDIT_ENTITY_TYPES, logAudit } from "../audit-log.js";
 import { coerceId } from "./crud/shared.js";
 import type { ApiContext } from "./crud/shared.js";
 import { prepareInvoiceDocumentUpload } from "./pdf-workflow.js";
@@ -41,8 +41,15 @@ function decodedByteEstimate(base64: string): number {
   return Math.max(0, Math.floor((len * 3) / 4) - padding);
 }
 
+// Derive the document-entity enum from the shared audit vocabulary so the two
+// stay consistent: only the four record types that own a `document_user`
+// endpoint (everything except client/product master data).
+const DOCUMENT_ENTITY_TYPES = AUDIT_ENTITY_TYPES.filter(
+  (entity): entity is DocumentEntityType => entity in DOCUMENT_ENTITIES,
+);
+
 const entityTypeParam = z
-  .enum(["purchase_invoice", "sale_invoice", "journal", "transaction"])
+  .enum(DOCUMENT_ENTITY_TYPES)
   .describe("Which record the source document belongs to.");
 
 function resolveDocumentResource(api: ApiContext, entityType: DocumentEntityType): BaseResource<unknown> {

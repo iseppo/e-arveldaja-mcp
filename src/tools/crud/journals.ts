@@ -33,8 +33,8 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     {
       ...pageParam.shape,
       ...viewParam,
-      effective_date_from: isoDateString("Only journals with effective_date >= this (YYYY-MM-DD). Narrowed server-side.").optional(),
-      effective_date_to: isoDateString("Only journals with effective_date <= this (YYYY-MM-DD). Narrowed server-side.").optional(),
+      date_from: isoDateString("Only journals with effective_date >= this (YYYY-MM-DD). Filters by effective_date; narrowed server-side.").optional(),
+      date_to: isoDateString("Only journals with effective_date <= this (YYYY-MM-DD). Filters by effective_date; narrowed server-side.").optional(),
       registered: z.boolean().optional().describe("Only registered (true) or unregistered (false) journals"),
       operation_type: z.string().optional().describe("Filter by operation_type (e.g. ENTRY, TRANSACTION, SALE_INVOICE, PURCHASE_INVOICE)"),
       document_number_contains: z.string().optional().describe("Case-insensitive substring match on document_number"),
@@ -43,8 +43,8 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     },
     { ...readOnly, title: "List Journals" },
     async (params) => {
-      const hasFilter = params.effective_date_from !== undefined
-        || params.effective_date_to !== undefined
+      const hasFilter = params.date_from !== undefined
+        || params.date_to !== undefined
         || params.registered !== undefined
         || params.operation_type !== undefined
         || params.document_number_contains !== undefined
@@ -52,9 +52,19 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       if (!hasFilter) {
         const result = await api.journals.list(params);
         const stripped = result.items.map(({ postings: _postings, ...rest }) => rest);
+        // Always emit the same superset shape as the client-side path so callers
+        // get a stable envelope regardless of which filter route was taken.
+        const perPage = params.per_page ?? result.items.length;
         const compact = {
           ...result,
+          current_page: result.current_page,
+          total_pages: result.total_pages,
+          total_items: (result as { total_items?: number }).total_items
+            ?? result.items.length,
+          per_page: (result as { per_page?: number }).per_page ?? perPage,
           items: applyListView("journal", stripped, params.view),
+          filtered_client_side: false,
+          out_of_range: false,
           warnings: withOpeningBalanceApiLimitation(),
         };
         return { content: [{ type: "text", text: toMcpJson(compact) }] };
@@ -63,19 +73,19 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       // (no status / client filter); registered / operation_type / clients_id /
       // document_number are applied client-side below over the narrowed set.
       const hasServerFilter = params.modified_since !== undefined
-        || params.effective_date_from !== undefined
-        || params.effective_date_to !== undefined;
+        || params.date_from !== undefined
+        || params.date_to !== undefined;
       const all = hasServerFilter
         ? await api.journals.listAll({
             modified_since: params.modified_since,
-            start_date: params.effective_date_from,
-            end_date: params.effective_date_to,
+            start_date: params.date_from,
+            end_date: params.date_to,
           })
         : await api.journals.listAllCached();
       const docContains = params.document_number_contains?.toLowerCase();
       const filtered = all.filter((j) => {
-        if (params.effective_date_from && (!j.effective_date || j.effective_date < params.effective_date_from)) return false;
-        if (params.effective_date_to && (!j.effective_date || j.effective_date > params.effective_date_to)) return false;
+        if (params.date_from && (!j.effective_date || j.effective_date < params.date_from)) return false;
+        if (params.date_to && (!j.effective_date || j.effective_date > params.date_to)) return false;
         if (params.registered !== undefined && j.registered !== params.registered) return false;
         if (params.operation_type && j.operation_type !== params.operation_type) return false;
         if (params.clients_id !== undefined && j.clients_id !== params.clients_id) return false;
@@ -187,7 +197,13 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       summary: `Updated journal ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "updated",
+      entity: "journal",
+      id,
+      message: `Updated journal ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "delete_journal", "Delete a journal entry", idParam.shape, { ...destructive, title: "Delete Journal" }, async ({ id }) => {
@@ -197,7 +213,13 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       summary: `Deleted journal ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deleted",
+      entity: "journal",
+      id,
+      message: `Deleted journal ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "confirm_journal", "Confirm/register a journal entry. IRREVERSIBLE — use invalidate_journal to reverse if needed.", idParam.shape, { ...destructive, title: "Confirm Journal" }, async ({ id }) => {
@@ -207,7 +229,13 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       summary: `Confirmed journal ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "confirmed",
+      entity: "journal",
+      id,
+      message: `Confirmed journal ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "batch_confirm_journals",
@@ -303,6 +331,12 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
         summary: `Invalidated journal ${id}`,
         details: {},
       });
-      return { content: [{ type: "text", text: toMcpJson(result) }] };
+      return toolResponse({
+        action: "invalidated",
+        entity: "journal",
+        id,
+        message: `Invalidated journal ${id}.`,
+        raw: result,
+      });
     });
 }

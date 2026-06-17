@@ -214,14 +214,16 @@ export const isoDateString = (description: string) =>
 /**
  * Server-side filter params shared by the purchase/sale invoice list tools.
  * These map 1:1 to RIK API query parameters, so the API does the filtering AND
- * pagination — no client-side page-walking. `dateLabel` names what
- * start_date/end_date bound (invoice date vs. revenue date); `clientLabel` names
- * the counterparty (supplier vs. customer).
+ * pagination — no client-side page-walking. `dateLabel` names what the
+ * date_from/date_to range bounds (invoice date vs. revenue date); `clientLabel`
+ * names the counterparty (supplier vs. customer). The public params use the
+ * canonical date_from/date_to names; handlers remap them to the API's
+ * start_date/end_date before calling the api layer.
  */
 export function invoiceListFilterParams(opts: { dateLabel: string; clientLabel: string }) {
   return {
-    start_date: isoDateString(`Only invoices with ${opts.dateLabel} on or after this date (YYYY-MM-DD). Server-side filter.`).optional(),
-    end_date: isoDateString(`Only invoices with ${opts.dateLabel} on or before this date (YYYY-MM-DD). Server-side filter.`).optional(),
+    date_from: isoDateString(`Only invoices with ${opts.dateLabel} on or after this date (YYYY-MM-DD). Server-side filter.`).optional(),
+    date_to: isoDateString(`Only invoices with ${opts.dateLabel} on or before this date (YYYY-MM-DD). Server-side filter.`).optional(),
     status: z.enum(["PROJECT", "CONFIRMED"]).optional().describe("Filter by status (server-side): PROJECT (draft) or CONFIRMED."),
     payment_status: z.enum(["PAID", "PARTIALLY_PAID", "NOT_PAID"]).optional().describe("Filter by payment status (server-side): PAID, PARTIALLY_PAID, or NOT_PAID."),
     clients_id: coerceId.optional().describe(`Filter by ${opts.clientLabel} (clients_id, server-side).`),
@@ -273,9 +275,9 @@ export function validateTransactionUpdateData(data: Record<string, unknown>): st
  */
 const UPDATE_BLOCKED_FIELDS: Record<string, { fields: string[]; alt: string; post_confirm_fields?: string[] }> = {
   client:           { fields: ["id", "is_active", "deactivated_date"],
-                       alt: "use deactivate_client / restore_client to change activation state" },
+                       alt: "use deactivate_client / reactivate_client to change activation state" },
   product:          { fields: ["id", "is_active", "deactivated_date"],
-                       alt: "use deactivate_product / restore_product to change activation state" },
+                       alt: "use deactivate_product / reactivate_product to change activation state" },
   journal:          { fields: ["id", "registered", "register_date", "status"],
                        alt: "use confirm_journal / invalidate_journal to change registration state",
                        post_confirm_fields: ["effective_date"] },

@@ -149,7 +149,7 @@ describe("registerCrudTools", () => {
       "create_client",
       "update_client",
       "deactivate_client",
-      "restore_client",
+      "reactivate_client",
       "delete_client",
       "search_client",
       "find_client_by_code",
@@ -158,7 +158,7 @@ describe("registerCrudTools", () => {
       "create_product",
       "update_product",
       "deactivate_product",
-      "restore_product",
+      "reactivate_product",
       "delete_product",
       "list_journals",
       "get_journal",
@@ -495,6 +495,16 @@ describe("list_journals", () => {
     expect(payload.warnings).toEqual(expect.arrayContaining([
       expect.stringContaining("Algbilansi kanded"),
     ]));
+    // The native/server path emits the same superset envelope as the client-side path.
+    expect(payload).toMatchObject({
+      current_page: 1,
+      total_pages: 1,
+      filtered_client_side: false,
+      out_of_range: false,
+      items: [],
+    });
+    expect(payload).toHaveProperty("total_items");
+    expect(payload).toHaveProperty("per_page");
   });
 });
 
@@ -507,17 +517,19 @@ describe("server-side list filters", () => {
     });
 
     await handler({
-      page: 2, start_date: "2026-01-01", end_date: "2026-03-31",
+      page: 2, date_from: "2026-01-01", date_to: "2026-03-31",
       status: "CONFIRMED", payment_status: "NOT_PAID", clients_id: 42, view: "full",
     });
 
     expect(api.purchaseInvoices.list).toHaveBeenCalledTimes(1);
     const arg = (api.purchaseInvoices.list as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    // Public params are date_from/date_to; the handler remaps to the API's start_date/end_date.
     expect(arg).toEqual({
       page: 2, start_date: "2026-01-01", end_date: "2026-03-31",
       status: "CONFIRMED", payment_status: "NOT_PAID", clients_id: 42,
     });
     expect(arg).not.toHaveProperty("view"); // view is a presentation concern, never sent to the API
+    expect(arg).not.toHaveProperty("date_from"); // remapped, not forwarded raw
   });
 
   it("list_sale_invoices passes the API-native filters server-side", async () => {
@@ -525,9 +537,10 @@ describe("server-side list filters", () => {
       saleInvoices: { list: vi.fn().mockResolvedValue(emptyPage) },
     });
 
-    await handler({ start_date: "2026-04-01", status: "PROJECT", clients_id: 7, view: "brief" });
+    await handler({ date_from: "2026-04-01", status: "PROJECT", clients_id: 7, view: "brief" });
 
     expect(api.saleInvoices.list).toHaveBeenCalledTimes(1);
+    // Public date_from remaps to the API's start_date.
     expect((api.saleInvoices.list as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
       start_date: "2026-04-01", status: "PROJECT", clients_id: 7,
     });
@@ -542,7 +555,7 @@ describe("server-side list filters", () => {
       },
     });
 
-    await handler({ date_from: "2026-01-01", status: "CONFIRMED", type: "C", clients_id: 9 });
+    const res = await handler({ date_from: "2026-01-01", status: "CONFIRMED", type: "C", clients_id: 9 }) as { content: Array<{ text: string }> };
 
     expect(api.transactions.list).toHaveBeenCalledTimes(1);
     expect((api.transactions.list as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
@@ -550,6 +563,17 @@ describe("server-side list filters", () => {
     });
     expect(api.transactions.listAll).not.toHaveBeenCalled();
     expect(api.transactions.listAllCached).not.toHaveBeenCalled();
+    // The native/server path emits the same superset envelope as the client-side path.
+    const payload = parseMcpResponse(res.content[0]!.text) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      current_page: 1,
+      total_pages: 1,
+      filtered_client_side: false,
+      out_of_range: false,
+      items: [],
+    });
+    expect(payload).toHaveProperty("total_items");
+    expect(payload).toHaveProperty("per_page");
   });
 
   it("list_transactions narrows server-side then filters client-side when both kinds of filter are set", async () => {
@@ -634,9 +658,10 @@ describe("server-side list filters", () => {
       },
     });
 
-    await handler({ effective_date_from: "2026-01-01", registered: true });
+    await handler({ date_from: "2026-01-01", registered: true });
 
     expect(api.journals.listAll).toHaveBeenCalledTimes(1);
+    // Public date_from remaps to the API's start_date.
     expect((api.journals.listAll as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ start_date: "2026-01-01" });
     expect(api.journals.listAllCached).not.toHaveBeenCalled();
   });
@@ -777,6 +802,84 @@ describe("structured JSON-compatible inputs", () => {
   });
 });
 
+describe("search_client", () => {
+  it("returns a structured object envelope with count and raw results", async () => {
+    const { handler } = getCrudToolHarness("search_client", {
+      clients: {
+        findByName: vi.fn().mockResolvedValue([{ id: 1, name: "Acme OÜ" }, { id: 2, name: "Acme Trading" }]),
+      },
+    });
+
+    const result = await handler({ name: "Acme" }) as { content: Array<{ text: string }> };
+
+    expect(parseMcpResponse(result.content[0]!.text)).toEqual({
+      ok: true,
+      action: "searched",
+      entity: "client",
+      message: 'Found 2 client(s) matching "Acme".',
+      count: 2,
+      raw: [{ id: 1, name: "Acme OÜ" }, { id: 2, name: "Acme Trading" }],
+    });
+  });
+
+  it("returns count:0 and an empty array (still ok) when nothing matches", async () => {
+    const { handler } = getCrudToolHarness("search_client", {
+      clients: { findByName: vi.fn().mockResolvedValue([]) },
+    });
+
+    const result = await handler({ name: "Nonexistent" }) as { content: Array<{ text: string }> };
+
+    expect(parseMcpResponse(result.content[0]!.text)).toEqual({
+      ok: true,
+      action: "searched",
+      entity: "client",
+      message: 'Found 0 client(s) matching "Nonexistent".',
+      count: 0,
+      raw: [],
+    });
+  });
+});
+
+describe("reactivate tools", () => {
+  it("reactivate_client calls api.clients.restore and returns the reactivated envelope", async () => {
+    const { api, handler } = getCrudToolHarness("reactivate_client", {
+      clients: { restore: vi.fn().mockResolvedValue({ code: 200, messages: [] }) },
+    });
+
+    const result = await handler({ id: 12 }) as { content: Array<{ text: string }> };
+
+    expect(api.clients.restore).toHaveBeenCalledWith(12);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      ok: true,
+      action: "reactivated",
+      entity: "client",
+      id: 12,
+    });
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "reactivate_client", action: "UPDATED", entity_type: "client", entity_id: 12,
+    }));
+  });
+
+  it("reactivate_product calls api.products.restore and returns the reactivated envelope", async () => {
+    const { api, handler } = getCrudToolHarness("reactivate_product", {
+      products: { restore: vi.fn().mockResolvedValue({ code: 200, messages: [] }) },
+    });
+
+    const result = await handler({ id: 34 }) as { content: Array<{ text: string }> };
+
+    expect(api.products.restore).toHaveBeenCalledWith(34);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      ok: true,
+      action: "reactivated",
+      entity: "product",
+      id: 34,
+    });
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "reactivate_product", action: "UPDATED", entity_type: "product", entity_id: 34,
+    }));
+  });
+});
+
 describe("find_client_by_code", () => {
   it("returns a structured not-found envelope instead of plain text", async () => {
     const { handler } = getCrudToolHarness("find_client_by_code", {
@@ -913,8 +1016,11 @@ describe("update_transaction", () => {
       description: "CAMT import metadata",
     });
     expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
-      code: 1,
-      messages: ["ok"],
+      ok: true,
+      action: "updated",
+      entity: "transaction",
+      id: 1,
+      raw: { code: 1, messages: ["ok"] },
     });
   });
 });

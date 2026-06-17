@@ -65,7 +65,7 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
     });
   });
 
-  registerTool(server, "update_product", "Update product fields. Server-managed activation fields are rejected; use deactivate/restore tools.", {
+  registerTool(server, "update_product", "Update product fields. Server-managed activation fields are rejected; use deactivate/reactivate tools.", {
     id: coerceId.describe("Product ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Product" }, async ({ id, data }) => {
@@ -80,27 +80,45 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
       summary: `Updated product ${id}`,
       details: { fields_changed: Object.keys(parsed) },
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "updated",
+      entity: "product",
+      id,
+      message: `Updated product ${id}.`,
+      raw: result,
+    });
   });
 
-  registerTool(server, "deactivate_product", "Deactivate a product (can be restored with restore_product)", idParam.shape, { ...mutate, title: "Deactivate Product" }, async ({ id }) => {
+  registerTool(server, "deactivate_product", "Deactivate a product (can be restored with reactivate_product)", idParam.shape, { ...mutate, title: "Deactivate Product" }, async ({ id }) => {
     const result = await api.products.deactivate(id);
     logAudit({
       tool: "deactivate_product", action: "DELETED", entity_type: "product", entity_id: id,
       summary: `Deactivated product ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deactivated",
+      entity: "product",
+      id,
+      message: `Deactivated product ${id}.`,
+      raw: result,
+    });
   });
 
-  registerTool(server, "restore_product", "Reactivate a deactivated product", idParam.shape, { ...mutate, title: "Restore Product" }, async ({ id }) => {
+  registerTool(server, "reactivate_product", "Reactivate a deactivated product", idParam.shape, { ...mutate, title: "Reactivate Product" }, async ({ id }) => {
     const result = await api.products.restore(id);
     logAudit({
-      tool: "restore_product", action: "UPDATED", entity_type: "product", entity_id: id,
-      summary: `Restored product ${id}`,
+      tool: "reactivate_product", action: "UPDATED", entity_type: "product", entity_id: id,
+      summary: `Reactivated product ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "reactivated",
+      entity: "product",
+      id,
+      message: `Reactivated product ${id}.`,
+      raw: result,
+    });
   });
 
   registerTool(server, "delete_product",
@@ -112,6 +130,12 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
       summary: `Deleted product ${id}`,
       details: {},
     });
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return toolResponse({
+      action: "deleted",
+      entity: "product",
+      id,
+      message: `Deleted product ${id}.`,
+      raw: result,
+    });
   });
 }

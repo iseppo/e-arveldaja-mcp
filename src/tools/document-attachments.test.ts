@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("./pdf-workflow.js", () => ({ prepareInvoiceDocumentUpload: vi.fn() }));
-vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
+vi.mock("../audit-log.js", () => ({
+  logAudit: vi.fn(),
+  AUDIT_ENTITY_TYPES: ["client", "product", "journal", "transaction", "sale_invoice", "purchase_invoice"],
+}));
 
 import { registerDocumentAttachmentTools } from "./document-attachments.js";
 import { prepareInvoiceDocumentUpload } from "./pdf-workflow.js";

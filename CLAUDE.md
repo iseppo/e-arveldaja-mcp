@@ -302,6 +302,11 @@ API data remains raw.
 - **Capital gains**: Securities taxed at 22% income tax
 - **Input-VAT deduction restrictions** (`src/estonian-tax-rules.ts`): single date-gated source for the standard VAT-rate timeline (20→22%→24%), current reduced rates, and the deduction detectors. `suggest_booking` returns these as `tax_notes` — `KMS § 30` (külaliste vastuvõtt / esinduskulu: input VAT non-deductible; also `TuMS § 49 lg 4` representation limit 50 €/month + 2% of payroll) and `KMS § 30 lg 4` (M1 passenger car: 50% cap). Notes are advisory; `workflows/book-invoice.md` requires surfacing each on the approval card. `validate_invoice_data` also uses the rate timeline to warn when a line's standard rate (20/22/24%) does not match the invoice date. The full dataset is browsable read-only at `earveldaja://tax_rules` (also lists the `TuMS § 49` representation 50 €+2% and donation 3%/10% limits). `check_tax_free_limits` computes the cumulative `TuMS § 49` representation/donation limits and the 22/78 tax on any excess from caller-supplied year-to-date figures (it does not read the ledger). Update the figures in this module when the law changes.
 
+**Non-goals — do NOT reimplement in MCP (e-arveldaja does these natively; reimplementing risks double-booking):**
+- **No KMD/VAT return (käibedeklaratsioon)** — e-arveldaja generates it from the confirmed ledger and files it to EMTA. The tax-rules layer is advisory only.
+- **No EMTA prepayment-account tax-expense entries** — a bank transfer to EMTA is booked as a prepayment-account (ettemaksukonto, acct 1516) top-up; the draw-down tax entries come from e-arveldaja's EMTA prepayment-account statement.
+- **`update_transaction` is deliberately metadata-scoped** — bank-reference/description fields only; never amounts, postings, or distributions.
+
 ## Development
 
 ```bash
