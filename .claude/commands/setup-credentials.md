@@ -61,7 +61,7 @@ If the user wants to remove stored credentials instead of importing:
 - if the user confirms a specific stored target should be removed, call `remove_stored_credentials` with:
   - `storage_scope`
   - `target`
-- state clearly that removal is destructive and requires restart
+- state clearly that removal is destructive and requires a restart
 
 ## Step 5: Handle clients without interactive prompting
 

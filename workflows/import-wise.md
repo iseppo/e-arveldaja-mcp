@@ -47,7 +47,7 @@ Review:
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
 - Use top-level `skipped_details` only as a grouped convenience summary for `execution.skipped` + `execution.errors`.
-- Review top-level `invoice_currency_fixes` when present; each candidate is a dry-run invoice FX update that execution may apply.
+- Check top-level `invoice_currency_fixes` when present; each candidate is a dry-run invoice FX update that execution may apply.
 - Fall back to top-level `total_csv_rows`, `eligible`, `filtered_out`, `created`, `skipped`, and `results` only if `execution` is absent.
 
 Show:

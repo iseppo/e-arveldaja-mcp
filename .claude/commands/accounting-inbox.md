@@ -56,7 +56,7 @@ If there are no unresolved questions, continue immediately.
 If `autopilot.next_recommended_action` is present, treat it as the default next safe step.
 If `autopilot.next_question` is present, use it as the first follow-up question when no safer dry-run step should happen first.
 
-### Step 4: Run the recommended dry-run steps
+### Step 4: Continue with the recommended dry-run steps
 
 The autopilot already ran the safe default dry-run steps.
 - do not repeat them unless the user asks

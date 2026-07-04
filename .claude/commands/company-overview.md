@@ -13,7 +13,8 @@ This workflow is read-only. It should feel like a dashboard, not a ledger export
 - If the user asks for a specific period, use its first day as `date_from`.
 - If no period is requested, use the first day of the current year as `date_from`.
 - State the chosen `date_from` and reporting date in the summary.
-- If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` before reading reports.
+
+If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` before reading reports.
 
 Follow these steps:
 

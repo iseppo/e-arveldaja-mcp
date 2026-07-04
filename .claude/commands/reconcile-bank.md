@@ -34,16 +34,15 @@ Show a summary grouped by confidence level from `result.matches`:
 
 **HIGH (>=80):** Safe to auto-confirm.
 - Transaction: date, amount, description, and raw `type` if helpful
-- Keep the tool-provided `type` when importing or creating a transaction, but never infer accounting treatment from an existing transaction's `type`; bank transactions are commonly stored as `C` regardless of direction in e-arveldaja.
 - Matched invoice: number, client, gross amount, confidence, match reasons
-- For cross-currency matches, prefer `match_reasons` such as `exact_base_amount`.
-- do NOT derive `distribution.amount` from `tx.amount` when base and source currencies differ; use the invoice open balance and the tool-provided distribution.
+- Keep the tool-provided `type` when importing or creating a transaction, but never infer accounting treatment from an existing transaction's `type`; bank transactions are commonly stored as `C` regardless of direction in e-arveldaja.
+- For cross-currency matches, prefer `match_reasons` such as `exact_base_amount`, and do NOT derive `distribution.amount` from `tx.amount` when base and source currencies differ; use the invoice open balance and the tool-provided distribution.
 
 **MEDIUM (50-79):** Review recommended.
 
 **LOW (<50):** Unlikely matches, shown for reference only.
 
-If no `distribution` key is present or a partially paid warning is present, say clearly that no ready-to-use distribution is provided and the remaining open balance must be checked manually first.
+If no `distribution` key is present or there is a partially paid warning, say clearly that no ready-to-use distribution is provided and the remaining open balance must be checked manually first.
 
 ## Step 3: Handle based on mode
 
@@ -102,7 +101,7 @@ Call `reconcile_bank_transactions`:
 Fallback compatibility primitive: `reconcile_inter_account_transfers` remains available, but prefer the mode-based dry run through `reconcile_bank_transactions` before execution.
 
 Review the results:
-- Treat `result.execution.summary` as the canonical source for counts, and use `result.pairs`, `result.one_sided`, `result.already_handled`, and `result.ambiguous_pairs` for detailed breakdown.
+- Treat `result.execution.summary` as the canonical source for counts, and use `result.pairs`, `result.one_sided`, `result.already_handled`, and `result.ambiguous_pairs` for the detailed breakdown.
 - `already_handled`: transfers already journalized from the other side — safe to delete
 - `one_sided`: would confirm against the other bank account
 - `pairs`: would confirm the outgoing side and delete the duplicate incoming `PROJECT` (draft/unconfirmed) row (`incoming_action: "would_delete_duplicate"`)

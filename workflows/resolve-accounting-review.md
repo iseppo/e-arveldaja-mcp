@@ -30,7 +30,7 @@ Always present:
 - only the unresolved questions, if any
 - the next concrete workflow or tool step
 
-For owner-paid expense receipts, Ordinary business VAT defaults to deductible, while likely restricted categories need confirmation unless local rules define the policy.
+For owner-paid expense receipts: Ordinary business VAT defaults to deductible, while likely restricted categories need confirmation unless local rules define the policy.
 
 ### Step 3: Keep the interaction minimal
 
