@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { approvalPreviewFromDryRunStep, buildWorkflowEnvelope } from "./workflow-response.js";
+import {
+  approvalPreviewFromDryRunStep,
+  buildWorkflowEnvelope,
+  remapHiddenGranularTool,
+  remapHiddenGranularWorkflowEnvelope,
+} from "./workflow-response.js";
 
 describe("workflow response helpers", () => {
   it("uses domain labels for next tool calls and questions", () => {
@@ -241,5 +246,83 @@ describe("workflow response helpers", () => {
       kind: "tool_call",
       tool: "continue_accounting_workflow",
     });
+  });
+});
+
+describe("hidden-granular → merged entry-point remap", () => {
+  // Each granular constituent is hidden from tools/list by default; a workflow
+  // envelope must name the merged entry point (which is always registered) and
+  // express the execute/execution_mode flag as the merged tool's `mode`.
+  it.each([
+    ["reconcile_transactions", { min_confidence: 30 }, "reconcile_bank_transactions", { mode: "suggest", min_confidence: 30 }],
+    ["auto_confirm_exact_matches", { execute: true, min_confidence: 90 }, "reconcile_bank_transactions", { mode: "execute_auto_confirm", min_confidence: 90 }],
+    ["auto_confirm_exact_matches", { execute: false }, "reconcile_bank_transactions", { mode: "dry_run_auto_confirm" }],
+    ["parse_camt053", { file_path: "/tmp/s.xml" }, "process_camt053", { mode: "parse", file_path: "/tmp/s.xml" }],
+    ["import_camt053", { execute: true, file_path: "/tmp/s.xml", accounts_dimensions_id: 7 }, "process_camt053", { mode: "execute", file_path: "/tmp/s.xml", accounts_dimensions_id: 7 }],
+    ["import_camt053", { execute: false, file_path: "/tmp/s.xml" }, "process_camt053", { mode: "dry_run", file_path: "/tmp/s.xml" }],
+    ["scan_receipt_folder", { folder_path: "/tmp/r" }, "receipt_batch", { mode: "scan", folder_path: "/tmp/r" }],
+    ["process_receipt_batch", { execution_mode: "create", folder_path: "/tmp/r" }, "receipt_batch", { mode: "create", folder_path: "/tmp/r" }],
+    ["process_receipt_batch", { execution_mode: "create_and_confirm" }, "receipt_batch", { mode: "create_and_confirm" }],
+    ["process_receipt_batch", { execution_mode: "dry_run" }, "receipt_batch", { mode: "dry_run" }],
+    ["classify_unmatched_transactions", { accounts_dimensions_id: 9 }, "classify_bank_transactions", { mode: "classify", accounts_dimensions_id: 9 }],
+    ["apply_transaction_classifications", { execute: true, classifications_json: "[]" }, "classify_bank_transactions", { mode: "execute_apply", classifications_json: "[]" }],
+    ["apply_transaction_classifications", { execute: false }, "classify_bank_transactions", { mode: "dry_run_apply" }],
+  ])("maps granular %s(%o) to the merged entry point", (granular, args, mergedTool, mergedArgs) => {
+    const result = remapHiddenGranularTool(granular as string, args as Record<string, unknown>);
+    expect(result).toEqual({ tool: mergedTool, args: mergedArgs });
+    // The execute/execution_mode flag is never carried through — it is subsumed by mode.
+    expect(result!.args).not.toHaveProperty("execute");
+    expect(result!.args).not.toHaveProperty("execution_mode");
+  });
+
+  it.each([
+    "reconcile_inter_account_transfers",
+    "import_wise_transactions",
+    "continue_accounting_workflow",
+    "reconcile_bank_transactions",
+    "process_camt053",
+  ])("leaves non-hidden tool %s untouched", (tool) => {
+    expect(remapHiddenGranularTool(tool, { execute: true })).toBeUndefined();
+  });
+
+  it("rewrites every granular reference in a workflow envelope's actions and previews", () => {
+    const envelope = {
+      contract: "workflow_action_v1",
+      recommended_next_action: {
+        kind: "approve_tool_call",
+        tool: "auto_confirm_exact_matches",
+        args: { execute: true, min_confidence: 90 },
+      },
+      available_actions: [
+        { kind: "approve_tool_call", tool: "auto_confirm_exact_matches", args: { execute: true } },
+        { kind: "tool_call", tool: "reconcile_inter_account_transfers", args: { execute: false } },
+        { kind: "done", label: "Nothing pending" },
+      ],
+      approval_previews: [
+        { source_tool: "auto_confirm_exact_matches", execute_tool: "auto_confirm_exact_matches", execute_args: { execute: true } },
+      ],
+    };
+
+    const remapped = remapHiddenGranularWorkflowEnvelope(envelope) as Record<string, any>;
+
+    expect(remapped.recommended_next_action).toMatchObject({
+      tool: "reconcile_bank_transactions",
+      args: { mode: "execute_auto_confirm", min_confidence: 90 },
+    });
+    expect(remapped.available_actions[0]).toMatchObject({ tool: "reconcile_bank_transactions", args: { mode: "execute_auto_confirm" } });
+    // A non-hidden tool (never gated) is left exactly as-is.
+    expect(remapped.available_actions[1]).toEqual({ kind: "tool_call", tool: "reconcile_inter_account_transfers", args: { execute: false } });
+    // A terminal action with no tool is untouched.
+    expect(remapped.available_actions[2]).toEqual({ kind: "done", label: "Nothing pending" });
+    expect(remapped.approval_previews[0]).toMatchObject({
+      source_tool: "reconcile_bank_transactions",
+      execute_tool: "reconcile_bank_transactions",
+      execute_args: { mode: "execute_auto_confirm" },
+    });
+  });
+
+  it("returns non-envelope values unchanged", () => {
+    expect(remapHiddenGranularWorkflowEnvelope(undefined)).toBeUndefined();
+    expect(remapHiddenGranularWorkflowEnvelope("not an envelope")).toBe("not an envelope");
   });
 });

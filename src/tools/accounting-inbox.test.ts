@@ -594,7 +594,9 @@ describe("accounting_inbox (scan mode)", () => {
     ]));
     expect(payload.workflow.recommended_next_action).toMatchObject({
       kind: "approve_tool_call",
-      tool: "process_receipt_batch",
+      // Workflow envelope names the merged entry point (process_receipt_batch is
+      // hidden by default); autopilot.executed_steps above keeps the internal name.
+      tool: "receipt_batch",
       approval_required: true,
     });
   });
@@ -1940,19 +1942,21 @@ ${entryXml}
       needs_review: [],
       recommended_next_action: {
         kind: "approve_tool_call",
-        tool: "import_camt053",
+        // Merged entry point; granular import_camt053 is hidden by default. The
+        // execute flag is subsumed by mode="execute".
+        tool: "process_camt053",
         approval_required: true,
         args: expect.objectContaining({
           file_path: join(workspace, "statement.xml"),
           accounts_dimensions_id: 101,
-          execute: true,
+          mode: "execute",
         }),
       },
       approval_previews: [
         expect.objectContaining({
           title: "Approve CAMT transaction import",
-          execute_tool: "import_camt053",
-          execute_args: expect.objectContaining({ execute: true }),
+          execute_tool: "process_camt053",
+          execute_args: expect.objectContaining({ mode: "execute" }),
           accounting_impact: expect.arrayContaining([
             expect.stringContaining("1 bank transaction"),
           ]),
@@ -1963,7 +1967,7 @@ ${entryXml}
     expect(payload.workflow.available_actions[0]).toEqual(
       expect.objectContaining({
         kind: "approve_tool_call",
-        tool: "import_camt053",
+        tool: "process_camt053",
       }),
     );
   });
@@ -2025,11 +2029,13 @@ ${entryXml}
       contract: "workflow_action_v1",
       recommended_next_action: {
         kind: "approve_tool_call",
-        tool: "import_camt053",
+        // Rebuilt envelope names the merged entry point (import_camt053 hidden by
+        // default); execute:true is expressed as mode="execute".
+        tool: "process_camt053",
         args: {
+          mode: "execute",
           file_path: "/tmp/statement.xml",
           accounts_dimensions_id: 101,
-          execute: true,
         },
       },
     });
