@@ -223,7 +223,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         .filter(r => r.balance !== 0);
       const restrictedReserveTotal = roundMoney(restrictedReserveDetails.reduce((sum, r) => sum + r.balance, 0));
       // The § 157 net-assets floor: share capital + non-distributable reserves.
-      const legalCapitalFloor = roundMoney(roundedShareCapital + restrictedReserveTotal);
+      // Clamp each component to ≥ 0 — PER reserve account, not just the summed
+      // total — so a data anomaly (a debit balance on the share-capital or a
+      // reserve account, which should never happen on a clean ledger) can only
+      // make the floor, and therefore the distribution block, more conservative,
+      // never silently lower it. Clamping only the total would let a negative
+      // reserve balance offset a positive one and pull the floor down; summing
+      // max(0, balance) per account prevents that. The reported restricted_reserves
+      // echo keeps the raw signed total so the anomaly stays visible.
+      const restrictedReserveFloor = roundMoney(restrictedReserveDetails.reduce((sum, r) => sum + Math.max(0, r.balance), 0));
+      const legalCapitalFloor = roundMoney(Math.max(0, roundedShareCapital) + restrictedReserveFloor);
 
       // Cross-check: on a balanced ledger, Assets − Liabilities must equal
       // Equity + P&L. A mismatch indicates unbalanced or partially-deleted
@@ -256,7 +265,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // on either is implausible for a company actually distributing a dividend
       // and means the § 157 / retained-earnings checks are computed from
       // incomplete data — surface the limitation so the operator verifies in the UI.
-      if (roundedShareCapital === 0 || retainedBalance === 0) {
+      if (roundedShareCapital <= 0 || retainedBalance === 0) {
         warnings.push(OPENING_BALANCE_API_LIMITATION_WARNING);
       }
 
@@ -515,6 +524,23 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           error: `vat_rate=${vat_rate} looks like a percentage. Pass a decimal fraction instead (e.g. 0.24 for 24%).`,
         });
       }
+      // A reimbursement books a real expense against a payable to the owner, so
+      // the amounts must be positive. z.number().finite() alone admits 0 and
+      // negatives, which would post an empty or sign-reversed journal (crediting
+      // the expense, debiting the owner-payable) — reject them with a clear error
+      // instead of booking nonsense.
+      if (net_amount <= 0) {
+        return toolError({ error: `net_amount must be greater than 0 (got ${net_amount}). A reimbursement books a positive business expense.` });
+      }
+      if (vat_rate < 0) {
+        return toolError({ error: `vat_rate must not be negative (got ${vat_rate}). Use 0 for no/non-deductible VAT.` });
+      }
+      if (vat_amount !== undefined && vat_amount < 0) {
+        return toolError({ error: `vat_amount must not be negative (got ${vat_amount}).` });
+      }
+      if (deductible_vat_amount !== undefined && deductible_vat_amount < 0) {
+        return toolError({ error: `deductible_vat_amount must not be negative (got ${deductible_vat_amount}).` });
+      }
       const vatRegistered = await isCompanyVatRegistered(api);
       const vatAcc = vat_account ?? DEFAULT_VAT_ACCOUNT;
       const payAcc = payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT;
@@ -732,6 +758,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           ytdSocialTaxedPayroll: ytd_social_taxed_payroll,
           monthsElapsed: months,
           ytdRepresentationCosts: ytd_representation_costs,
+          asOfDate: as_of_date,
         });
         result.representation = { ...rep, income_tax_on_excess: incomeTaxOnExcess(rep.excess) };
       }
