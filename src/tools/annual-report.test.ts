@@ -489,4 +489,114 @@ Current year profit account: 2999
       expect.objectContaining({ account_id: 2900, amount: 50 }),
     ]);
   });
+
+  it("classifies a 21xx owner payable as a current liability instead of unclassified", async () => {
+    const report = await buildAnnualReportData(createApi([
+      ...baseJournals,
+      makeJournal("2025-12-31", [
+        makePosting(1000, "D", 40),
+        makePosting(2110, "C", 40),
+      ]),
+    ], {
+      extraAccounts: [
+        makeAccount({
+          id: 2110,
+          balance_type: "C",
+          account_type_est: "Kohustused",
+          account_type_eng: "Liabilities",
+          name_est: "Võlg omanikule",
+          name_eng: "Owner payable",
+        }),
+      ],
+    }), 2025);
+
+    const liabilities = (report.balance_sheet as {
+      liabilities: {
+        luhiajalised_kohustused: { amount: number; source_accounts: Array<{ account_id: number }> };
+        klassifitseerimata_kohustused: { amount: number; source_accounts: Array<{ account_id: number }> };
+      };
+    }).liabilities;
+
+    expect(liabilities.luhiajalised_kohustused.amount).toBe(40);
+    expect(liabilities.luhiajalised_kohustused.source_accounts).toEqual([
+      expect.objectContaining({ account_id: 2110, amount: 40 }),
+    ]);
+    expect(liabilities.klassifitseerimata_kohustused.amount).toBe(0);
+    expect(liabilities.klassifitseerimata_kohustused.source_accounts).toEqual([]);
+  });
+
+  it("classifies an 11xx short-term financial asset as current so the asset lines reconcile", async () => {
+    const report = await buildAnnualReportData(createApi([
+      ...baseJournals,
+      makeJournal("2025-12-31", [
+        makePosting(1120, "D", 30),
+        makePosting(1000, "C", 30),
+      ]),
+    ], {
+      extraAccounts: [
+        makeAccount({
+          id: 1120,
+          balance_type: "D",
+          account_type_est: "Varad",
+          account_type_eng: "Assets",
+          name_est: "Maakleri rahakonto",
+          name_eng: "Broker cash",
+        }),
+      ],
+    }), 2025);
+
+    const assets = (report.balance_sheet as {
+      assets: {
+        kaibevara: { amount: number; source_accounts: Array<{ account_id: number }> };
+        pohivara: { amount: number };
+        total_assets: number;
+      };
+    }).assets;
+
+    expect(assets.kaibevara.source_accounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ account_id: 1120, amount: 30 }),
+    ]));
+    // Bank 1000 (190) + broker cash 1120 (30) fully account for total assets.
+    expect(assets.kaibevara.amount).toBe(220);
+    expect(assets.pohivara.amount).toBe(0);
+    expect(assets.total_assets).toBe(220);
+    expect((report.warnings as string[]).some((w) => w.includes("neither asset line"))).toBe(false);
+  });
+
+  it("warns when an asset account falls outside the current/non-current balance-sheet ranges", async () => {
+    const report = await buildAnnualReportData(createApi([
+      ...baseJournals,
+      makeJournal("2025-12-31", [
+        makePosting(999, "D", 25),
+        makePosting(1000, "C", 25),
+      ]),
+    ], {
+      extraAccounts: [
+        makeAccount({
+          id: 999,
+          balance_type: "D",
+          account_type_est: "Varad",
+          account_type_eng: "Assets",
+          name_est: "Määramata vara",
+          name_eng: "Unclassified asset",
+        }),
+      ],
+    }), 2025);
+
+    const assets = (report.balance_sheet as {
+      assets: {
+        kaibevara: { amount: number };
+        pohivara: { amount: number };
+        total_assets: number;
+      };
+    }).assets;
+
+    // The mis-ranged 999 counts toward total assets but shows in neither line.
+    expect(assets.kaibevara.amount).toBe(195);
+    expect(assets.pohivara.amount).toBe(0);
+    expect(assets.total_assets).toBe(220);
+    const warning = (report.warnings as string[]).find((w) => w.includes("neither asset line"));
+    expect(warning).toBeDefined();
+    expect(warning).toContain("999");
+  });
 });
