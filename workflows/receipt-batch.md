@@ -56,7 +56,7 @@ Group the preview by status:
 - `execution.errors`: show the file and exact error
 
 Recurring `needs_review` reasons to recognize and explain plainly:
-- "Non-EUR receipt currency X requires an explicit currency_rate before automatic invoice creation": the receipt is in a foreign currency and OCR cannot derive a reliable EUR conversion rate. There is no auto-booking path; the user must create the purchase invoice manually with the correct rate, or update the receipt to EUR.
+- "Non-EUR receipt currency X requires an explicit currency_rate before automatic invoice creation": the receipt is in a foreign currency and OCR cannot derive a reliable EUR conversion rate, so the batch cannot auto-book it. This is NOT a dead end and does not require the e-arveldaja UI: ask the user for the correct rate (EUR per 1 foreign unit), then create the invoice inline via `create_purchase_invoice_from_pdf` with `currency` + `currency_rate` (or `create_purchase_invoice` for a non-PDF source). Only fall back to manual UI work if the user cannot supply a rate.
 - "N bank transactions tied at confidence X; no candidate auto-selected": the booking flow found multiple equally-good bank transaction matches and refused to auto-pick. The invoice will still be created (in `mode: "create"` / `mode: "create_and_confirm"`) but without a bank link. Show the tied transactions to the user and ask which one to confirm via `confirm_transaction`.
 
 ### Step 3: Approval gate

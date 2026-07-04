@@ -71,7 +71,7 @@ Group the result by status:
 - `result.execution.errors`: exact blocking errors
 
 Interpret skip and failure notes carefully:
-- a per-row note like "Non-EUR transaction X uses USD but has no currency_rate" means that single row was skipped because no EUR conversion rate is available; the rest of the group can still proceed. Suggest fixing the underlying transaction (e.g. via `update_transaction`) before retrying.
+- a per-row note like "Non-EUR transaction X uses USD but has no currency_rate" means that single row was skipped because no EUR conversion rate is available; the rest of the group can still proceed. This row is blocked for auto-apply: `update_transaction` is metadata-scoped (bank reference / counterparty / description only) and cannot set a currency rate, so do not point the user at it. Surface the blocked row and handle it through a currency-aware booking path instead — e.g. create the purchase invoice with an explicit `currency_rate` (`create_purchase_invoice` / `create_purchase_invoice_from_pdf`) and then confirm the bank transaction against it.
 - a per-group note "Group reported as failed; the following transactions were already booked successfully and were left in place: …" means the listed transactions ARE confirmed and their auto-created invoices are NOT rolled back, even though the group status is `failed`. Surface that explicitly to the user — never imply the whole group was reversed.
 
 If the user wants only some groups applied:

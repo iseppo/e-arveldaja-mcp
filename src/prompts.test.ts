@@ -629,7 +629,7 @@ describe("registerPrompts", () => {
       expect(text).toContain("resolve_accounting_review_item");
       expect(text).toContain("recommendation");
       expect(text).toContain("compliance_basis");
-      expect(text).toContain("Ordinary business VAT defaults to deductible, while likely restricted categories need confirmation unless local rules define the policy.");
+      expect(text).toContain("for VAT-registered companies, ordinary business input VAT normally defaults to deductible");
       expect(text).toContain("unresolved_questions");
       expect(text).toContain("suggested_workflow");
       expect(text).not.toContain("suggested_rule_markdown");
