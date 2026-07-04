@@ -467,9 +467,13 @@ describe("accounting_inbox (scan mode)", () => {
       expect.stringContaining("CAMT dry run would create"),
       expect.stringContaining("Classified 0 unmatched transaction"),
     ]));
+    // Granular tools are hidden by default, so the caller-facing recommended_steps
+    // name the merged entry point (classify_bank_transactions mode="classify"),
+    // while the past-tense executed_steps above keep the real internal delegate.
     expect(payload.prepared_inbox.recommended_steps).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        tool: "classify_unmatched_transactions",
+        tool: "classify_bank_transactions",
+        suggested_args: expect.objectContaining({ mode: "classify" }),
         recommended: true,
       }),
     ]));
@@ -2163,5 +2167,84 @@ ${entryXml}
     const actions = logAuditSpy.mock.calls.map(([entry]) => entry.action);
     expect(actions).toContain("UPDATED");
     expect(actions).toContain("DELETE_FAILED");
+  });
+
+  // --- PR B: workflow-contract residuals (never name an unregistered tool) ---
+
+  const DEFAULT_EXPOSURE = { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
+
+  function continueWorkflowHandler(exposure: typeof EXPOSE_GRANULAR) {
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({});
+    registerAccountingInboxTools(server, api, exposure);
+    return getRegisteredToolHandler(server, "continue_accounting_workflow");
+  }
+
+  const ownerExpenseReviewItem = {
+    review_type: "receipt_review",
+    item: {
+      classification: "owner_paid_expense_reimbursement",
+      file: { path: "/tmp/receipts/lunch.pdf" },
+      review_guidance: {
+        recommendation: "Book it as an owner reimbursement.",
+        compliance_basis: ["TuMS § 49"],
+        follow_up_questions: [],
+      },
+    },
+  };
+
+  it("resolve_review names create_owner_expense_reimbursement when the tax tools are enabled", async () => {
+    const handler = continueWorkflowHandler(DEFAULT_EXPOSURE);
+    const result = await handler({ action: "resolve_review", review_item_json: ownerExpenseReviewItem });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.suggested_tools).toEqual(["create_owner_expense_reimbursement"]);
+    expect(payload.next_step_summary).toContain("create_owner_expense_reimbursement");
+  });
+
+  it("resolve_review falls back to create_journal when the tax tools are disabled (DISABLE_TAX_TOOLS)", async () => {
+    const handler = continueWorkflowHandler({ ...DEFAULT_EXPOSURE, enableTaxTools: false });
+    const result = await handler({ action: "resolve_review", review_item_json: ownerExpenseReviewItem });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    // Must not name a tool that DISABLE_TAX_TOOLS has unregistered.
+    expect(payload.suggested_tools).toEqual(["create_journal"]);
+    expect(payload.suggested_tools).not.toContain("create_owner_expense_reimbursement");
+    expect(payload.next_step_summary).not.toContain("create_owner_expense_reimbursement");
+    expect(payload.next_step_summary).toContain("create_journal");
+    expect(payload.next_step_summary).toContain("2110");
+  });
+
+  it("prepare_action also honors DISABLE_TAX_TOOLS for the owner-expense fallback", async () => {
+    const handler = continueWorkflowHandler({ ...DEFAULT_EXPOSURE, enableTaxTools: false });
+    const result = await handler({ action: "prepare_action", review_item_json: ownerExpenseReviewItem });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.suggested_tools).toEqual(["create_journal"]);
+    expect(payload.suggested_tools).not.toContain("create_owner_expense_reimbursement");
+  });
+
+  it("scan recommended_steps name merged entry points when granular tools are hidden (default)", async () => {
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+    });
+    registerAccountingInboxTools(server, api, DEFAULT_EXPOSURE);
+    const handler = getRegisteredToolHandler(server, "accounting_inbox");
+
+    const result = await handler({ mode: "scan", workspace_path: workspace });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    const stepTools = payload.recommended_steps.map((step: any) => step.tool);
+    // Hidden granular CAMT tools are rewritten to the merged process_camt053.
+    expect(stepTools).toContain("process_camt053");
+    expect(stepTools).not.toContain("parse_camt053");
+    expect(stepTools).not.toContain("import_camt053");
+    const parseStep = payload.recommended_steps.find((s: any) => s.suggested_args?.mode === "parse");
+    expect(parseStep?.tool).toBe("process_camt053");
   });
 });

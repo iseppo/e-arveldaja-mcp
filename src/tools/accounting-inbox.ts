@@ -11,7 +11,7 @@ import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-vali
 import { logAudit } from "../audit-log.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import { jsonObjectInput, parseJsonObject, type ApiContext } from "./crud-tools.js";
-import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
+import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
@@ -23,7 +23,7 @@ import {
   normalizeAutoBookingRuleMatch,
   saveAutoBookingRule,
 } from "../accounting-rules.js";
-import { remapHiddenGranularWorkflowEnvelope, workflowFromAccountingInboxPayload } from "../workflow-response.js";
+import { remapHiddenGranularTool, remapHiddenGranularWorkflowEnvelope, workflowFromAccountingInboxPayload } from "../workflow-response.js";
 import {
   runAccountingInboxDryRunPipeline,
   type AutopilotInternalToolHandler,
@@ -653,7 +653,33 @@ function pickNextRecommendedAction(steps: RecommendedStep[]): RecommendedStep | 
   return steps.find(step => step.recommended && step.missing_inputs.length === 0);
 }
 
-function buildPreparedInboxPayload(prepared: PreparedInboxData): Record<string, unknown> {
+// The caller-facing "what to run next" fields — `recommended_steps[]` and
+// `next_recommended_action` — sit OUTSIDE the workflow_action_v1 envelope, so the
+// shared envelope remap (remapHiddenGranularWorkflowEnvelope) does not reach
+// them. When a step names a hidden granular constituent (parse_camt053,
+// import_camt053, process_receipt_batch, classify_unmatched_transactions) it
+// would point the caller at a tool absent from tools/list under the default
+// exposure. Rewrite such steps to the merged entry point + mode, mirroring the
+// envelope remap, but only when the granular tools are actually hidden: with
+// EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1 the granular names are valid and the
+// power-user mode prefers them. Past-tense `executed_steps` telemetry keeps the
+// real internal delegate (like the envelope's informational `delegated_tool`).
+function remapRecommendedStepTool<T extends { tool: string; suggested_args: Record<string, unknown> }>(step: T): T {
+  const remapped = remapHiddenGranularTool(step.tool, step.suggested_args);
+  return remapped ? { ...step, tool: remapped.tool, suggested_args: remapped.args } : step;
+}
+
+function buildPreparedInboxPayload(
+  prepared: PreparedInboxData,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
+): Record<string, unknown> {
+  // Rewrite hidden granular tool names in the caller-facing step list to their
+  // merged entry points unless the granular tools are exposed (see
+  // remapRecommendedStepTool). next_recommended_action is picked from the same
+  // rewritten list so the two stay consistent.
+  const steps = exposure.exposeGranularTools
+    ? prepared.steps
+    : prepared.steps.map(remapRecommendedStepTool);
   return {
     workspace_path: prepared.workspacePath,
     scan: prepared.scan,
@@ -670,10 +696,10 @@ function buildPreparedInboxPayload(prepared: PreparedInboxData): Record<string, 
       suggested_wise_fee_dimension_id: prepared.defaults.suggested_wise_fee_dimension_id,
       bank_dimension_candidates: prepared.defaults.candidates,
     },
-    recommended_steps: prepared.steps,
+    recommended_steps: steps,
     questions: prepared.questions,
     next_question: prepared.questions[0],
-    next_recommended_action: pickNextRecommendedAction(prepared.steps),
+    next_recommended_action: pickNextRecommendedAction(steps),
     assistant_guidance: [
       "Ask only the questions listed under questions, and always start with the recommendation.",
       "Run dry-run steps before any execute=true mutation.",
@@ -885,7 +911,10 @@ function mergeRuleOverrides(
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
-function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResolutionResult {
+function resolveReviewItemPlan(
+  reviewItem: Record<string, unknown>,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
+): ReviewResolutionResult {
   const reviewType = stringAt(reviewItem, "review_type");
   const item = recordAt(reviewItem, "item");
   const group = recordAt(reviewItem, "group");
@@ -896,6 +925,18 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
     const classification = stringAt(item, "classification") ?? "needs_review";
     const filePath = stringAt(file ?? {}, "path");
     const isOwnerExpense = classification === "owner_paid_expense_reimbursement";
+    // create_owner_expense_reimbursement is part of the tax-tool group and is
+    // unregistered when EARVELDAJA_DISABLE_TAX_TOOLS=1. Do not name a tool the
+    // caller cannot invoke (same contract rule as the merged/granular remap):
+    // fall back to a manual owner-payable journal via the always-registered
+    // create_journal, keeping the accounting treatment explicit.
+    const ownerReimbursementToolAvailable = exposure.enableTaxTools;
+    const ownerExpenseTools = ownerReimbursementToolAvailable
+      ? ["create_owner_expense_reimbursement"]
+      : ["create_journal"];
+    const ownerExpenseSummary = ownerReimbursementToolAvailable
+      ? "After the missing VAT/business-use answers are known, continue with create_owner_expense_reimbursement instead of forcing this through purchase-invoice booking."
+      : `After the missing VAT/business-use answers are known, book it as an owner reimbursement with create_journal — debit the business expense (net, plus non-deductible VAT) and credit the owner-payable account (default ${DEFAULT_OWNER_PAYABLE_ACCOUNT}). The Estonian tax helpers are disabled in this deployment (EARVELDAJA_DISABLE_TAX_TOOLS); do not force it through purchase-invoice booking.`;
     return {
       review_type: "receipt_review",
       status: (guidance?.follow_up_questions.length ?? 0) > 0 ? "needs_answers" : "ready_for_action",
@@ -905,10 +946,10 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
       policy_hint: guidance?.policy_hint,
       suggested_workflow: isOwnerExpense ? undefined : "book-invoice",
       suggested_tools: isOwnerExpense
-        ? ["create_owner_expense_reimbursement"]
+        ? ownerExpenseTools
         : ["receipt_batch"],
       next_step_summary: isOwnerExpense
-        ? "After the missing VAT/business-use answers are known, continue with create_owner_expense_reimbursement instead of forcing this through purchase-invoice booking."
+        ? ownerExpenseSummary
         : `Resolve the missing receipt facts first${filePath ? ` for ${filePath}` : ""}, then either book it via book-invoice for one document or rerun receipt_batch for the folder.`,
     };
   }
@@ -977,8 +1018,9 @@ function prepareReviewAction(
     saveAsRule?: boolean;
     ruleOverride?: Record<string, unknown>;
   } = {},
+  exposure: ToolExposureConfig = getToolExposureConfig(),
 ): ReviewActionPreparationResult {
-  const resolution = resolveReviewItemPlan(reviewItem);
+  const resolution = resolveReviewItemPlan(reviewItem, exposure);
   if (resolution.unresolved_questions.length > 0) {
     return {
       status: "needs_answers",
@@ -1111,9 +1153,10 @@ type AccountingInboxToolParams = {
 async function buildAccountingInboxScanResponse(
   api: ApiContext,
   params: AccountingInboxToolParams,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   const prepared = await prepareAccountingInbox(api, params);
-  const payload = buildPreparedInboxPayload(prepared);
+  const payload = buildPreparedInboxPayload(prepared, exposure);
 
   return {
     content: [{
@@ -1129,13 +1172,18 @@ async function buildAccountingInboxScanResponse(
 async function buildAccountingInboxDryRunResponse(
   api: ApiContext,
   params: AccountingInboxToolParams,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   const prepared = await prepareAccountingInbox(api, params);
   const handlers = captureInternalToolHandlers(api);
   const autopilot = await runAccountingInboxDryRunPipeline({ prepared, handlers });
-  const preparedPayload = buildPreparedInboxPayload(prepared);
+  const preparedPayload = buildPreparedInboxPayload(prepared, exposure);
   preparedPayload.next_question = autopilot.next_question;
-  preparedPayload.next_recommended_action = autopilot.next_recommended_action;
+  // Keep the caller-facing next step consistent with the scan payload: rewrite a
+  // hidden granular tool to its merged entry point unless granular tools are exposed.
+  preparedPayload.next_recommended_action = autopilot.next_recommended_action && !exposure.exposeGranularTools
+    ? remapRecommendedStepTool(autopilot.next_recommended_action)
+    : autopilot.next_recommended_action;
 
   const payload = {
     prepared_inbox: preparedPayload,
@@ -1175,8 +1223,9 @@ function parseRequiredJsonObject(input: unknown, label: string): Record<string, 
 
 function buildReviewResolutionResponse(
   reviewItem: Record<string, unknown>,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
 ): { content: Array<{ type: "text"; text: string }> } {
-  const resolution = resolveReviewItemPlan(reviewItem);
+  const resolution = resolveReviewItemPlan(reviewItem, exposure);
 
   return {
     content: [{
@@ -1195,8 +1244,9 @@ function buildReviewActionResponse(
     saveAsRule?: boolean;
     ruleOverride?: Record<string, unknown>;
   } = {},
+  exposure: ToolExposureConfig = getToolExposureConfig(),
 ): { content: Array<{ type: "text"; text: string }> } {
-  const prepared = prepareReviewAction(reviewItem, options);
+  const prepared = prepareReviewAction(reviewItem, options, exposure);
 
   return {
     content: [{
@@ -1228,8 +1278,8 @@ export function registerAccountingInboxTools(
     { ...readOnly, openWorldHint: true, title: "Accounting Inbox" },
     async ({ mode, ...params }) => {
       return mode === "dry_run"
-        ? buildAccountingInboxDryRunResponse(api, params)
-        : buildAccountingInboxScanResponse(api, params);
+        ? buildAccountingInboxDryRunResponse(api, params, exposure)
+        : buildAccountingInboxScanResponse(api, params, exposure);
     },
   );
 
@@ -1247,7 +1297,7 @@ export function registerAccountingInboxTools(
     async ({ action, workflow_state_json, review_item_json, save_as_rule, rule_override_json }) => {
       if (action === "resolve_review") {
         const reviewItem = parseRequiredJsonObject(review_item_json, "review_item_json");
-        return buildReviewResolutionResponse(reviewItem);
+        return buildReviewResolutionResponse(reviewItem, exposure);
       }
 
       if (action === "prepare_action") {
@@ -1258,7 +1308,7 @@ export function registerAccountingInboxTools(
         return buildReviewActionResponse(reviewItem, {
           saveAsRule: save_as_rule,
           ruleOverride,
-        });
+        }, exposure);
       }
 
       const workflowState = parseRequiredJsonObject(workflow_state_json, "workflow_state_json");
@@ -1299,7 +1349,7 @@ export function registerAccountingInboxTools(
     { ...readOnly, title: "Resolve Accounting Review Item" },
     async ({ review_item_json }) => {
       const reviewItem = parseJsonObject(review_item_json, "review_item_json");
-      return buildReviewResolutionResponse(reviewItem);
+      return buildReviewResolutionResponse(reviewItem, exposure);
     },
   );
 
@@ -1322,7 +1372,7 @@ export function registerAccountingInboxTools(
       return buildReviewActionResponse(reviewItem, {
         saveAsRule: save_as_rule,
         ruleOverride,
-      });
+      }, exposure);
     },
   );
 
