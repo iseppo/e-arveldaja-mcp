@@ -32,7 +32,7 @@ If `result.total_unconfirmed` is 0, everything is reconciled — stop here.
 
 Show a summary grouped by confidence level from `result.matches`:
 
-**HIGH (>=80):** Safe to auto-confirm.
+**HIGH (>=80):** Strong matches. In auto mode only confidence >= 90 is eligible for confirmation (Step 3, "Auto mode"), and even then only with user approval — never auto-confirm an 80-89 match without asking.
 - Transaction: date, amount, description, and raw `type` if helpful
 - Matched invoice: number, client, gross amount, confidence, match reasons
 - Keep the tool-provided `type` when importing or creating a transaction, but never infer accounting treatment from an existing transaction's `type`; bank transactions are commonly stored as `C` regardless of direction in e-arveldaja.
@@ -119,7 +119,7 @@ Ask for approval. If approved, call `reconcile_inter_account_transfers` with `ex
 List transactions with no matches and offer inline actions in compact groups — do NOT close the workflow with "create the journal entry yourself in e-arveldaja". Show the first 10 plus counts, group obvious fees/interest together, and ask for one batch approval with exceptions when the proposed contra account is the same. Manual e-arveldaja UI work is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
 
 Inline actions:
-- Small amounts (<1 EUR): likely bank fees or interest. Offer to book a journal via `create_journal` with the appropriate contra-account (e.g. 5510 "Bank charges" for fees, 6080 "Interest income" for interest credits) and ask the user to approve the proposed contra before executing.
+- Small amounts (<1 EUR): likely bank fees or interest. Offer to book a journal via `create_journal` with the appropriate contra-account (e.g. 8610 "Muud finantskulud" for bank/transfer fees — consistent with how Wise fees are booked — and 6080 "Interest income" for interest credits) and ask the user to approve the proposed contra before executing.
 - Description contains "teenustasu", "intress", "service fee": same as above; pre-fill the contra account based on the keyword and ask for approval.
 - Larger amounts: check if the corresponding invoice exists in the system; if it does, offer `confirm_transaction` against that invoice; if it does not, ask whether to book to a suggested expense/income account via `create_journal`.
 

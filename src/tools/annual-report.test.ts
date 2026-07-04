@@ -237,6 +237,57 @@ describe("buildAnnualReportData", () => {
     expect(equity.total_equity).toBe(220);
   });
 
+  it("maps 8xxx FX gain/loss into 'Finantstulud ja -kulud' as a net (income − expense), not into unmapped", async () => {
+    // The MCP books FX gain to 8500 (Tulud) and FX loss to 8600 (Kulud). Before
+    // the financial range widened to 8000-8899 these fell into unmapped_accounts
+    // and dropped out of net profit. They must now net into the financial line:
+    // gain adds, loss subtracts.
+    const fxAccounts: Account[] = [
+      makeAccount({
+        id: 8500, balance_type: "C", account_type_est: "Tulud", account_type_eng: "Revenue",
+        name_est: "Kasum valuutakursi muutustest", name_eng: "FX gain",
+      }),
+      makeAccount({
+        id: 8600, balance_type: "D", account_type_est: "Kulud", account_type_eng: "Expenses",
+        name_est: "Kahjum valuutakursi muutustest", name_eng: "FX loss",
+      }),
+    ];
+    const journals = [
+      ...baseJournals,
+      // FX gain 15 (income) and FX loss 6 (expense), both in the report year.
+      makeJournal("2025-07-01", [makePosting(1000, "D", 15), makePosting(8500, "C", 15)]),
+      makeJournal("2025-07-02", [makePosting(8600, "D", 6), makePosting(1000, "C", 6)]),
+    ];
+
+    const report = await buildAnnualReportData(
+      createApi(journals, { extraAccounts: fxAccounts }),
+      2025,
+    );
+    const is = report.income_statement_schema_1 as {
+      arikasum: { amount: number };
+      finantstulud_ja_kulud: { amount: number; source_accounts: Array<{ account_id: number; amount: number }> };
+      kasum_enne_tulumaksustamist: { amount: number };
+      aruandeaasta_puhaskasum: { amount: number };
+      unmapped_accounts: Array<{ account_id: number }>;
+    };
+
+    // Operating profit is unchanged (revenue 60 − operating expense 10 = 50);
+    // 8500/8600 are financial, not operating.
+    expect(is.arikasum.amount).toBe(50);
+    // Net financial result = 15 gain − 6 loss = 9.
+    expect(is.finantstulud_ja_kulud.amount).toBe(9);
+    expect(is.finantstulud_ja_kulud.source_accounts).toEqual(expect.arrayContaining([
+      { account_id: 8500, name: "Kasum valuutakursi muutustest", amount: 15 },
+      { account_id: 8600, name: "Kahjum valuutakursi muutustest", amount: -6 },
+    ]));
+    // Flows through to profit before tax and net profit.
+    expect(is.kasum_enne_tulumaksustamist.amount).toBe(59);
+    expect(is.aruandeaasta_puhaskasum.amount).toBe(59);
+    // No longer stranded in unmapped.
+    expect(is.unmapped_accounts.map((a) => a.account_id)).not.toContain(8500);
+    expect(is.unmapped_accounts.map((a) => a.account_id)).not.toContain(8600);
+  });
+
   it("prepare_year_end_close ignores VOID transactions in unresolved items", async () => {
     const handler = setupTool("prepare_year_end_close", {
       journals: baseJournals,

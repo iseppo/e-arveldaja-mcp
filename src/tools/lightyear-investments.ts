@@ -12,6 +12,7 @@ import { reportProgress } from "../progress.js";
 import { parseCSV } from "../csv.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
+import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT } from "../accounting-defaults.js";
 
 const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -648,7 +649,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const unhandledSuggestions = unhandled.map(r => {
         let suggestion = "Review manually";
         if (r.type === "Conversion") suggestion = "Unpaired FX conversion — likely matches a reward, deposit, withdrawal, or manual trade. Review before booking so broker cash stays reconciled; book FX gain/loss if material.";
-        else if (r.type === "Reward") suggestion = "Platform reward — book via book_lightyear_distributions (defaults to 8600 Muud äritulud).";
+        else if (r.type === "Reward") suggestion = `Platform reward — book via book_lightyear_distributions (defaults to ${DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT} Muud äritulud).`;
         else if (r.type === "Interest") suggestion = "Interest income — book via book_lightyear_distributions.";
         else if (r.type === "Dividend" || r.type === "Distribution") suggestion = "Distribution — book via book_lightyear_distributions.";
         else if (r.type === "Buy" || r.type === "Sell") suggestion = `${r.type} of ${r.ticker} — missing FX pairing or unsupported trade flow. Check if intentional.`;
@@ -949,7 +950,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           // expensed separately — Lightyear's capital gains report does NOT include FX fees
           // in cost basis, so including them in the investment account would leave a residual
           // balance on every sell.
-          const feeAcct = fee_account ?? 8610;
+          const feeAcct = fee_account ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
           const totalFees = roundMoney(trade.fx_fee_eur + tradeFeeEur);
           const investmentCostEur = roundMoney(trade.eur_amount + tradeFeeEur);
           const totalCashOutEur = roundMoney(trade.eur_amount + totalFees);
@@ -997,7 +998,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
             const sellTradeFees = tradeFeeEur;
             if (sellTradeFees > 0) {
-              const feeAcct = fee_account ?? 8610;
+              const feeAcct = fee_account ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
               postings.push({ accounts_id: feeAcct, type: "D", amount: sellTradeFees });
               postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: sellTradeFees });
             }
@@ -1091,7 +1092,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
           const sellFees = roundMoney(tradeFeeEur + trade.fx_fee_eur);
           if (sellFees > 0) {
-            const feeAcct = fee_account ?? 8610;
+            const feeAcct = fee_account ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
             if (trade.fx_fee_eur > 0) {
               postings.push({ accounts_id: feeAcct, type: "D", amount: trade.fx_fee_eur });
             }
@@ -1238,23 +1239,36 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
       broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
       income_account: z.number().describe("Investment income account (e.g. 8320 Tulu fondiosakutelt, 8400 Intressitulu)"),
-      reward_account: z.number().optional().describe("Account for platform rewards (default: 8600 Muud äritulud). Rewards are non-investment income."),
+      reward_account: z.number().optional().describe(`Account for platform rewards (default: ${DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT} Muud äritulud). Rewards are non-investment income.`),
       tax_account: z.number().optional().describe("Withheld tax receivable/expense account (for tax_amount from CSV)"),
-      fee_account: z.number().optional().describe("Platform fee expense account (default 8610 Muud finantskulud)"),
+      fee_account: z.number().optional().describe(`Platform fee expense account (default ${DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT} Muud finantskulud)`),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
     { ...batch, openWorldHint: true, title: "Book Lightyear Distributions" },
     async ({ file_path, broker_account, broker_dimension_id, income_account, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
-      const fee_account = fee_account_param ?? 8610;
-      const reward_account = reward_account_param ?? 8600;
+      const fee_account = fee_account_param ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
+      // Platform rewards are non-investment OTHER operating income (Muud äritulud),
+      // NOT a financial-loss expense. The previous 8600 default was the FX-loss
+      // account — crediting income there booked it to an expense line, wrong sign.
+      const reward_account = reward_account_param ?? DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT;
 
-      // Validate accounts exist and are active
+      const csv = await readCsvFile(file_path);
+      const rows = parseAccountStatement(csv);
+      const distributions = extractDistributions(rows);
+
+      // Validate accounts exist and are active. reward_account is only validated
+      // when a reward will actually be booked (or the caller pinned it): its
+      // default moved from 8600 to 3800, so a dividend/interest-only import must
+      // not start failing just because the chart lacks the reward income account.
+      const hasReward = distributions.some(dist => dist.type === "Reward");
       const accounts = await api.readonly.getAccounts();
       const errors = validateAccounts(accounts, [
         { id: broker_account, label: "Broker account" },
         { id: income_account, label: "Income account" },
-        { id: reward_account, label: "Reward account" },
+        ...((hasReward || reward_account_param !== undefined)
+          ? [{ id: reward_account, label: "Reward account" }]
+          : []),
         ...(tax_account ? [{ id: tax_account, label: "Tax account" }] : []),
         { id: fee_account, label: "Fee account" },
       ]);
@@ -1265,10 +1279,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           details: errors,
         });
       }
-
-      const csv = await readCsvFile(file_path);
-      const rows = parseAccountStatement(csv);
-      const distributions = extractDistributions(rows);
 
       if (!tax_account && distributions.some(dist => dist.tax_amount > 0)) {
         return toolError({

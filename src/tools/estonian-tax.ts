@@ -11,7 +11,8 @@ import { logAudit } from "../audit-log.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
-import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, INCOME_TAX_EXPENSE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
+import { OPENING_BALANCE_API_LIMITATION_WARNING } from "../opening-balance-limitations.js";
+import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, INCOME_TAX_EXPENSE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_RESTRICTED_RESERVE_ACCOUNTS, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
 import type { Account } from "../types/api.js";
 import {
   getDefaultOwnerExpenseVatDeductionMode,
@@ -41,7 +42,7 @@ const isoDateSchema = (description: string) =>
   z.string().refine(isValidIsoDate, { message: "Expected valid YYYY-MM-DD date" }).describe(description);
 
 /**
- * Estonian corporate income tax rate on distributed profits (KMS § 50).
+ * Estonian corporate income tax rate on distributed profits (TuMS § 50).
  * Rate changed from 20/80 to 22/78 on 2025-01-01. ISO-date string compare is
  * only safe for strict YYYY-MM-DD, so we reject anything else defensively —
  * a DD.MM.YYYY value would compare lexically wrong and silently pick 20/80
@@ -84,7 +85,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   registerTool(server, "prepare_dividend_package",
     "Calculate dividend tax (22/78 CIT from 2025-01-01, 20/80 before) and create draft journal entries. Only the NET dividend drains retained earnings (Jaotamata kasum); the CIT is booked as an income-tax expense (kasumiaruande 'Tulumaks' rida) with an equal tax liability — per Estonian GAAP the dividend income tax is a current-period expense, not a direct reduction of retained earnings. Hard-blocks distributions that lack retained earnings or would push net assets below share capital (ÄS § 157) unless force=true.",
     {
-      net_dividend: z.number().describe("Net dividend amount to shareholder (EUR)"),
+      net_dividend: z.number().finite().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: coerceId.describe("Shareholder client ID"),
       effective_date: isoDateSchema("Distribution date (YYYY-MM-DD)"),
       retained_earnings_account: z.number().optional().describe("Retained earnings account debited with the NET dividend (default 3020)"),
@@ -92,19 +93,32 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       tax_payable_account: z.number().optional().describe("CIT payable (liability) account (default 2540)"),
       income_tax_expense_account: z.number().optional().describe("Income-tax expense account debited with the CIT — the P&L 'Tulumaks' line (default: lowest Kulud account in 8900–8999, else 8900)"),
       share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default 3000)"),
+      restricted_reserve_accounts: z.array(z.number().int()).optional().describe("Accounts whose balances ÄS §157(2) makes non-distributable (net assets must stay above share capital + these reserves). Default: auto-detect reservkapital 3010."),
       force: z.boolean().optional().describe("Create journal even if retained earnings are insufficient (default false)"),
       dry_run: z.boolean().optional().describe("Preview calculation and postings without creating journal (default false)"),
     },
     { ...create, title: "Prepare Dividend Distribution" },
-    async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, income_tax_expense_account, share_capital_account, force, dry_run }) => {
+    async ({ net_dividend: rawNetDividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, income_tax_expense_account, share_capital_account, restricted_reserve_accounts, force, dry_run }) => {
       // Reject non-positive dividends up front — a zero or negative net
       // would otherwise compute gross=0 and book an empty journal with
       // zero-amount postings, which is noise on the ledger and passes
       // both legality checks vacuously.
-      if (!(net_dividend > 0)) {
+      if (!(rawNetDividend > 0)) {
         return toolError({
           error: "net_dividend must be > 0",
           hint: "Pass a positive EUR amount to distribute.",
+        });
+      }
+      // Round to cents once, up front: every downstream amount (CIT, gross,
+      // postings, journal title, legality checks, echoed calculation) derives
+      // from this value, so a sub-cent input can never leak an unrounded amount
+      // into the booked journal or make the reported gross disagree with the
+      // sum actually posted.
+      const net_dividend = roundMoney(rawNetDividend);
+      if (!(net_dividend > 0)) {
+        return toolError({
+          error: "net_dividend rounds to 0.00 EUR",
+          hint: "Pass a net dividend of at least 0.01 EUR.",
         });
       }
       const retainedAccount = retained_earnings_account ?? RETAINED_EARNINGS_ACCOUNT;
@@ -119,12 +133,24 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // caller's company actually uses (auto-detects the 8900-series "Tulumaks"
       // account) rather than assuming a fixed number.
       const incomeTaxExpenseAccount = resolveIncomeTaxExpenseAccount(accounts, income_tax_expense_account);
+      // Restricted reserves for the §157(2) floor. An explicit override is
+      // deduped and validated up front, so a mistyped or absent reserve account
+      // errors rather than silently reading a 0 balance and LOWERING the floor —
+      // which could let an unlawful dividend through. The default [3010]
+      // auto-detect path is intentionally not required to exist: an absent
+      // reservkapital simply means no reserve floor (the conservative direction).
+      const restrictedReserveAccounts = restricted_reserve_accounts
+        ? [...new Set(restricted_reserve_accounts)]
+        : DEFAULT_RESTRICTED_RESERVE_ACCOUNTS;
       const accountErrors = validateAccounts(accounts, [
         { id: retainedAccount, label: "Retained earnings account" },
         { id: payableAccount, label: "Dividend payable account" },
         { id: taxAccount, label: "Tax payable account" },
         { id: incomeTaxExpenseAccount, label: "Income-tax expense account" },
         { id: shareCapitalAccount, label: "Share capital account" },
+        ...(restricted_reserve_accounts
+          ? restrictedReserveAccounts.map(id => ({ id, label: "Restricted reserve account" }))
+          : []),
       ]);
       if (accountErrors.length > 0) {
         return toolError({
@@ -134,7 +160,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         });
       }
 
-      // Estonian CIT rate on dividends: date-keyed per KMS § 50
+      // Estonian CIT rate on dividends: date-keyed per TuMS § 50
       // (20/80 pre-2025, 22/78 from 2025-01-01).
       const citRate = getCitRateForDate(effective_date);
       const taxRate = citRate.num / citRate.den;
@@ -187,6 +213,18 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const netAssetsAfterDistribution = roundMoney(netAssetsBeforeDistribution - grossDividend);
       const roundedShareCapital = roundMoney(shareCapital);
 
+      // ÄS § 157(2): statutory/articles-mandated reserves (reservkapital) are not
+      // distributable — the net-assets floor is share capital PLUS these reserves,
+      // not share capital alone. restrictedReserveAccounts was resolved/validated
+      // above (default: auto-detect reservkapital 3010; override via
+      // restricted_reserve_accounts).
+      const restrictedReserveDetails = restrictedReserveAccounts
+        .map(id => ({ account: id, balance: roundMoney(balances.find(b => b.account_id === id)?.balance ?? 0) }))
+        .filter(r => r.balance !== 0);
+      const restrictedReserveTotal = roundMoney(restrictedReserveDetails.reduce((sum, r) => sum + r.balance, 0));
+      // The § 157 net-assets floor: share capital + non-distributable reserves.
+      const legalCapitalFloor = roundMoney(roundedShareCapital + restrictedReserveTotal);
+
       // Cross-check: on a balanced ledger, Assets − Liabilities must equal
       // Equity + P&L. A mismatch indicates unbalanced or partially-deleted
       // journals, which means the retained-earnings and §157 net-assets checks
@@ -206,7 +244,34 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       }
 
       const retainedShortfall = retainedBalance < grossDividend;
-      const netAssetsBreach = netAssetsAfterDistribution < roundedShareCapital - 0.01;
+      const netAssetsBreach = netAssetsAfterDistribution < legalCapitalFloor - 0.01;
+      // Report the same verdict the block uses (same 0.01 tolerance), so the
+      // echoed net_assets_check.sufficient never says "false" on a distribution
+      // the tool actually books, or vice versa.
+      const netAssetsSufficient = !netAssetsBreach;
+
+      // Opening-balance caveat: share capital and retained earnings are commonly
+      // entered as "Algbilansi kanded" (opening-balance entries), which the
+      // /journals API may omit (see opening-balance-limitations). A zero balance
+      // on either is implausible for a company actually distributing a dividend
+      // and means the § 157 / retained-earnings checks are computed from
+      // incomplete data — surface the limitation so the operator verifies in the UI.
+      if (roundedShareCapital === 0 || retainedBalance === 0) {
+        warnings.push(OPENING_BALANCE_API_LIMITATION_WARNING);
+      }
+
+      // Transparency: when reservkapital was auto-detected (no explicit override)
+      // and carries a balance, tell the operator the floor was raised above bare
+      // share capital — they may not realise reserves are being ring-fenced.
+      if (restricted_reserve_accounts === undefined && restrictedReserveTotal > 0) {
+        warnings.push(
+          `ÄS § 157(2) restricted-reserve floor applied: reservkapital ` +
+          `${restrictedReserveDetails.map(r => `${r.account} (${r.balance} EUR)`).join(", ")} ` +
+          `raises the minimum net-assets floor to ${legalCapitalFloor} EUR ` +
+          `(share capital ${roundedShareCapital} + reserves ${restrictedReserveTotal}). ` +
+          `Pass restricted_reserve_accounts to change which reserves are treated as non-distributable.`
+        );
+      }
       const violations: string[] = [];
       if (ledgerImbalance) violations.push("Ledger is imbalanced — legality checks cannot be trusted");
       if (retainedShortfall) violations.push("Insufficient retained earnings");
@@ -234,16 +299,24 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               net_assets_after_distribution: netAssetsAfterDistribution,
               share_capital: roundedShareCapital,
               share_capital_account: shareCapitalAccount,
-              shortfall: roundMoney(roundedShareCapital - netAssetsAfterDistribution),
+              restricted_reserves: restrictedReserveTotal,
+              restricted_reserve_accounts: restrictedReserveDetails,
+              minimum_net_assets: legalCapitalFloor,
+              shortfall: roundMoney(legalCapitalFloor - netAssetsAfterDistribution),
             },
           }),
           calculation: { net_dividend, cit_rate: citRate.formatted, cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
+          // Surface non-blocking warnings (esp. the opening-balance caveat) on the
+          // blocked path too: a "0 retained earnings" block is often exactly the
+          // symptom of opening balances the /journals API omits, so the operator
+          // must see that the check may have run on incomplete data.
+          ...(warnings.length > 0 && { warnings }),
           hint:
             retainedShortfall && netAssetsBreach
               ? "Both retained-earnings and § 157 net-assets clauses fail. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action)."
               : retainedShortfall
                 ? "Retained earnings are insufficient. Distribution may be unlawful per ÄS § 157. Set force=true to create the journal anyway."
-                : "Distribution would push net assets below share capital, which ÄS § 157 prohibits. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).",
+                : "Distribution would push net assets below the ÄS § 157 floor (share capital + restricted reserves). Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).",
         });
       }
 
@@ -255,7 +328,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       }
       if (netAssetsBreach) {
         warnings.push(
-          `Net assets after distribution (${netAssetsAfterDistribution} EUR) would fall below share capital (${roundedShareCapital} EUR on account ${shareCapitalAccount}). ` +
+          `Net assets after distribution (${netAssetsAfterDistribution} EUR) would fall below the ÄS § 157 floor of ${legalCapitalFloor} EUR ` +
+          `(share capital ${roundedShareCapital} EUR on account ${shareCapitalAccount}` +
+          `${restrictedReserveTotal > 0 ? ` + restricted reserves ${restrictedReserveTotal} EUR` : ""}). ` +
           `Journal created because force=true. Verify ÄS § 157 compliance through a separate legal action (e.g. capital reduction).`
         );
       }
@@ -329,7 +404,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
                 net_assets_after_distribution: netAssetsAfterDistribution,
                 share_capital_account: shareCapitalAccount,
                 share_capital: roundedShareCapital,
-                sufficient: netAssetsAfterDistribution >= roundedShareCapital,
+                restricted_reserves: restrictedReserveTotal,
+                restricted_reserve_accounts: restrictedReserveDetails,
+                minimum_net_assets: legalCapitalFloor,
+                sufficient: netAssetsSufficient,
               },
               ...(warnings.length > 0 && { warnings }),
               note: "No journal created. Set dry_run=false to execute.",
@@ -379,7 +457,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               net_assets_after_distribution: netAssetsAfterDistribution,
               share_capital_account: shareCapitalAccount,
               share_capital: roundedShareCapital,
-              sufficient: netAssetsAfterDistribution >= roundedShareCapital,
+              restricted_reserves: restrictedReserveTotal,
+              restricted_reserve_accounts: restrictedReserveDetails,
+              minimum_net_assets: legalCapitalFloor,
+              sufficient: netAssetsSufficient,
             },
             shareholder: { id: shareholder_client_id, name: shareholder.name },
             journal_entry: {
@@ -404,11 +485,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       owner_client_id: coerceId.describe("Owner/shareholder client ID"),
       effective_date: isoDateSchema("Expense date (YYYY-MM-DD)"),
       description: z.string().describe("Expense description"),
-      net_amount: z.number().describe("Net amount (without VAT)"),
-      vat_rate: z.number().describe("VAT rate as decimal (e.g. 0.24 for 24%, 0.13, 0.09, 0.05, or 0 for no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),
-      vat_amount: z.number().optional().describe("Exact VAT amount (overrides vat_rate if provided)"),
+      net_amount: z.number().finite().describe("Net amount (without VAT)"),
+      vat_rate: z.number().finite().describe("VAT rate as decimal (e.g. 0.24 for 24%, 0.13, 0.09, 0.05, or 0 for no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),
+      vat_amount: z.number().finite().optional().describe("Exact VAT amount (overrides vat_rate if provided)"),
       vat_deduction_mode: z.enum(["none", "full", "partial"]).optional().describe("VAT deduction mode. Use partial with deductible_vat_amount."),
-      deductible_vat_amount: z.number().optional().describe("Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default or configured ratio."),
+      deductible_vat_amount: z.number().finite().optional().describe("Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default or configured ratio."),
       expense_account: z.number().describe("Expense account number (e.g. 5000, 6000)"),
       vat_account: z.number().optional().describe("Input VAT account (default 1510)"),
       payable_account: z.number().optional().describe("Payable to owner account (default 2110)"),
@@ -437,7 +518,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const vatRegistered = await isCompanyVatRegistered(api);
       const vatAcc = vat_account ?? DEFAULT_VAT_ACCOUNT;
       const payAcc = payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT;
-      const grossVat = vat_amount ?? roundMoney(net_amount * vat_rate);
+      // Round the gross VAT whether it came from vat_rate or was supplied
+      // directly: an unrounded caller vat_amount would otherwise be posted
+      // verbatim while the balance guard below rounds only the sum, letting a
+      // sub-cent-unbalanced journal reach the API.
+      const grossVat = roundMoney(vat_amount ?? net_amount * vat_rate);
       const accounts = await api.readonly.getAccounts();
       const expenseAccountRecord = accounts.find(account => account.id === expense_account);
       const requiresReview = requiresOwnerExpenseVatReview(expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng, description);

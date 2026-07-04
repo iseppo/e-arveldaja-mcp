@@ -130,9 +130,20 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
             // invoices with multi-line / mixed-rate items.
             if (full.net_price !== undefined && full.net_price !== null) {
               proposedBaseNetPrice = roundMoney(full.net_price * proposedCurrencyRate);
-            }
-            if (full.vat_price !== undefined && full.vat_price !== null) {
+              // Derive base_vat as the residual against the pinned base_gross
+              // (paidEur) so base_net + base_vat == base_gross to the cent.
+              // Rounding net, vat, and gross independently could leave the trio
+              // off by 1 cent and re-trip this same rounding check next run.
+              if (full.vat_price !== undefined && full.vat_price !== null) {
+                proposedBaseVatPrice = roundMoney(proposedBaseGrossPrice - proposedBaseNetPrice);
+              }
+            } else if (full.vat_price !== undefined && full.vat_price !== null) {
               proposedBaseVatPrice = roundMoney(full.vat_price * proposedCurrencyRate);
+              // Mirror the net-present branch: pin base_net as the residual so the
+              // patched trio still reconciles (base_net + base_vat == base_gross).
+              // Without this, execute mode would patch base_gross/base_vat but
+              // leave a stale base_net, re-tripping this same rounding check.
+              proposedBaseNetPrice = roundMoney(proposedBaseGrossPrice - proposedBaseVatPrice);
             }
             proposedAction = `Update base_gross_price ${bookedEur.toFixed(2)} → ${paidEur.toFixed(2)} EUR and currency_rate to ${proposedCurrencyRate} (locks Wise actual conversion).`;
           } else {

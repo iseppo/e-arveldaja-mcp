@@ -535,6 +535,14 @@ describe("registerPrompts", () => {
       expect(text).toContain("never infer accounting treatment from an existing transaction's `type`");
       expect(text).toContain('incoming_action: "would_delete_duplicate"');
       expect(text).toContain("Never manually confirm both sides");
+      // Confidence guidance must match the auto-confirm bar (>= 90 + approval),
+      // not label an >= 80 match "safe to auto-confirm".
+      expect(text).toContain("only confidence >= 90 is eligible for confirmation");
+      expect(text).toContain("never auto-confirm an 80-89 match without asking");
+      expect(text).not.toContain("Safe to auto-confirm");
+      // Bank/transfer fees book to 8610 (consistent with Wise-side fees).
+      expect(text).toContain('8610 "Muud finantskulud" for bank/transfer fees');
+      expect(text).not.toContain('5510 "Bank charges" for fees');
       expect(text).not.toContain("`D`=incoming, `C`=outgoing");
       expect(text).not.toContain("would confirm both outgoing and incoming sides");
       expect(text).not.toContain("Call `get_transaction`");

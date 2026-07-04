@@ -150,7 +150,7 @@ export function applyPurchaseVatDefaults(
     if (defaults.vat_accounts_id === undefined || defaults.cl_vat_articles_id === undefined) {
       warnFallbackOnce(
         "vat-registered",
-        "Could not resolve purchase VAT defaults from purchase_articles; falling back to vat_accounts_id=1510 and cl_vat_articles_id=1."
+        `Could not resolve purchase VAT defaults from purchase_articles; falling back to vat_accounts_id=${VAT_REGISTERED_FALLBACK.vat_accounts_id} and cl_vat_articles_id=${VAT_REGISTERED_FALLBACK.cl_vat_articles_id}.`
       );
     }
     return merged;

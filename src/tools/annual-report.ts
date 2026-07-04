@@ -730,10 +730,36 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const otherOperatingExpensesLine = buildStatementLine("Muud ärikulud", yearProfitAndLossBalances, (balance) =>
     balance.account_type_est === "Kulud" && inRange(balance.account_id, 7800, 7899),
   );
-  const financialIncomeExpenseLine = buildStatementLine("Finantstulud ja -kulud", yearProfitAndLossBalances, (balance) =>
-    inRange(balance.account_id, 7200, 7699) &&
-    (balance.account_type_est === "Tulud" || balance.account_type_est === "Kulud"),
-  );
+  // "Finantstulud ja -kulud" is a NET line added to operating profit
+  // (profitBeforeTax = operatingProfit + amount), so financial EXPENSES must
+  // reduce it. statementAmount() returns a positive figure for both income
+  // (Tulud) and expense (Kulud) accounts, so build this line by hand and flip
+  // the sign of expense accounts — otherwise a booked FX loss (8600) or
+  // financial fee (8610) would *increase* reported profit. Covers the legacy
+  // 7200-7699 range plus the 8000-8899 block where the MCP actually books FX
+  // gain (8500), FX loss (8600) and other financial expense (8610); Tulumaks
+  // stays isolated at 8900-8999. Before this range widened, those 8xxx amounts
+  // fell into unmappedProfitAndLossAccounts and dropped out of net profit.
+  const financialSourceAccounts = yearProfitAndLossBalances
+    .filter((balance) =>
+      (inRange(balance.account_id, 7200, 7699) || inRange(balance.account_id, 8000, 8899)) &&
+      (balance.account_type_est === "Tulud" || balance.account_type_est === "Kulud"),
+    )
+    .map((balance) => ({
+      account_id: balance.account_id,
+      name: balance.name_est,
+      // Income (Tulud) adds; expense (Kulud) subtracts — the signed contribution
+      // to the net financial result.
+      amount: roundMoney(
+        balance.account_type_est === "Kulud" ? -statementAmount(balance) : statementAmount(balance),
+      ),
+    }))
+    .filter((account) => Math.abs(account.amount) >= 0.01);
+  const financialIncomeExpenseLine: StatementLine = {
+    label: "Finantstulud ja -kulud",
+    amount: roundMoney(financialSourceAccounts.reduce((sum, account) => sum + account.amount, 0)),
+    source_accounts: financialSourceAccounts,
+  };
   const incomeTaxLine = buildStatementLine("Tulumaks", yearProfitAndLossBalances, (balance) =>
     balance.account_type_est === "Kulud" && inRange(balance.account_id, 8900, 8999),
   );
