@@ -18,6 +18,8 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 ## Workflow
 
+`process_camt053` is the preferred merged workflow tool. Fallback compatibility primitives: `parse_camt053` and `import_camt053` remain available, but only use them if the preferred tool is unavailable. Do not mention fallback tool names to the user.
+
 ### Step 1: Parse the statement
 
 Call `process_camt053`:
@@ -43,8 +45,6 @@ Call `process_camt053`:
 - include `date_from` / `date_to` when provided
 
 Review:
-- `process_camt053` is the preferred merged workflow tool.
-- Fallback compatibility primitives: `parse_camt053` and `import_camt053` remain available, but only use them if the preferred tool is unavailable. Do not mention fallback tool names to the user.
 - Use `result` as the delegated `import_camt053` payload.
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary.total_statement_entries`, `execution.summary.eligible_entries`, `execution.summary.filtered_out`, `execution.summary.created_count`, `execution.summary.skipped_count`, `execution.summary.error_count`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
@@ -58,10 +58,9 @@ Present:
 - any `execution.needs_review` possible duplicates
 
 For possible duplicates, the default recommendation is:
-- if the older matched transaction is already confirmed, keep it by default
+- if the older matched transaction is already confirmed, keep it by default: avoid creating the new row, or if it was already created, delete the new `PROJECT` (draft/unconfirmed) transaction
 - when keep/delete IDs are known, prefer `cleanup_camt_possible_duplicate` to enrich the kept transaction and delete the newly imported duplicate
 - fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called
-- then avoid creating, or if already created, delete the new `PROJECT` (draft/unconfirmed) transaction
 - if the older match is PROJECT (unconfirmed), present its current state and offer to confirm it inline using `confirm_transaction` (or `reconcile_inter_account_transfers` for inter-account transfers). Do NOT defer it to manual UI work in e-arveldaja — the agent has the IDs and amounts loaded, so the natural next step is to ask the user yes/no for inline confirmation.
 
 Do not suggest overwriting curated manual fields like description or reference when they are already filled.
@@ -91,7 +90,10 @@ Report:
 - `execution.summary.created_count`
 - `execution.summary.skipped_count`
 - `execution.summary.error_count`
-- any `execution.needs_review` possible duplicates — group similar duplicate decisions, show the first 10 plus counts, then propose one batch-friendly inline action set with clear exceptions. Prefer `cleanup_camt_possible_duplicate` when the kept and deleted IDs are known; fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called. Use `confirm_transaction` or `reconcile_inter_account_transfers` for PROJECT matches that should be confirmed. Do not tell the user to "do this manually in e-arveldaja" — that is a last resort only when no MCP tool can perform the action and the API error has been shown to the user.
+- any `execution.needs_review` possible duplicates — group similar duplicate decisions, show the first 10 plus counts, then propose one batch-friendly inline action set with clear exceptions:
+  - Prefer `cleanup_camt_possible_duplicate` when the kept and deleted IDs are known; fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called.
+  - Use `confirm_transaction` or `reconcile_inter_account_transfers` for PROJECT matches that should be confirmed.
+  - Do not tell the user to "do this manually in e-arveldaja" — that is a last resort only when no MCP tool can perform the action and the API error has been shown to the user.
 - any transactions still needing attention
 - mention that side effects can be reviewed via `execution.audit_reference`
 

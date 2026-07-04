@@ -29,7 +29,7 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 Call `parse_lightyear_statement` for the account statement CSV.
 - Leave `include_rows` unset for the first pass.
-- Show buy/sell trades, distributions, deposits/withdrawals, FX pairing warnings, and cash-equivalent entries skipped by default.
+- Show buy/sell trades, distributions, deposits/withdrawals, FX pairing warnings, and the cash-equivalent entries skipped by default.
 
 ### Step 2: Parse capital gains when needed
 
@@ -69,8 +69,8 @@ When the required accounts are known, call `book_lightyear_distributions` with `
 After approval, re-run only the approved booking tools with `dry_run: false`.
 
 Report:
-- trades booked
-- distributions booked
-- skipped entries and reasons
+- Trades booked
+- Distributions booked
+- Skipped entries and reasons
 - Current portfolio carrying value / remaining cost basis from step 3
-- suggested `compute_account_balance` check for the investment account
+- Suggested `compute_account_balance` check for the investment account

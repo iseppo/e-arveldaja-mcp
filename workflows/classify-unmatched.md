@@ -59,12 +59,16 @@ Call `classify_bank_transactions`:
 
 Fallback compatibility primitive: `apply_transaction_classifications` remains available, but prefer `classify_bank_transactions` when it supports the requested mode.
 
-Group the result by status:
+Read the result:
 - Treat `result.execution` as the canonical batch payload when present.
 - Prefer `result.execution.summary`, `result.execution.results`, `result.execution.skipped`, `result.execution.errors`, and `result.execution.audit_reference`.
+
+Group the result by status:
 - `result.execution.results` entries with `status="dry_run_preview"`: would create purchase invoices and link transactions, but nothing has been created yet
 - `result.execution.skipped`: review-only or no longer applicable
 - `result.execution.errors`: exact blocking errors
+
+Interpret skip and failure notes carefully:
 - a per-row note like "Non-EUR transaction X uses USD but has no currency_rate" means that single row was skipped because no EUR conversion rate is available; the rest of the group can still proceed. Suggest fixing the underlying transaction (e.g. via `update_transaction`) before retrying.
 - a per-group note "Group reported as failed; the following transactions were already booked successfully and were left in place: …" means the listed transactions ARE confirmed and their auto-created invoices are NOT rolled back, even though the group status is `failed`. Surface that explicitly to the user — never imply the whole group was reversed.
 

@@ -76,15 +76,16 @@ Call `detect_duplicate_purchase_invoice` with:
 - `gross_price`: extracted gross total
 - `clients_id`: resolved client ID if step 4 returned `found=true`
 
-Inspect `candidate_invoice_number_matches` and `candidate_same_amount_date_matches` first.
-- Also review `exact_duplicates` and `suspicious_same_amount_date` as warning context.
+Inspect the result:
+- Check `candidate_invoice_number_matches` and `candidate_same_amount_date_matches` first.
+- Review `exact_duplicates` and `suspicious_same_amount_date` as warning context.
 - If a candidate looks like the same invoice, stop and report it before creating anything.
 
 ## Step 6: Prepare the supplier client decision
 
 - If step 4 returned `found=true`, use `client.id` as `supplier_client_id`.
 - If no existing supplier was found, do NOT create the supplier yet. Treat the new supplier as part of the approval card and keep the extracted name, registry code, VAT number, IBAN, country, and registry data ready for the post-approval call.
-- For a new supplier, say clearly in the approval card that the new supplier record will be created after approval before the invoice is created.
+- For a new supplier, say clearly in the approval card that the new supplier record will be created after approval, before the invoice is created.
 
 ## Step 7: Reuse the best booking setup
 
@@ -130,7 +131,7 @@ If there is no suitable history, call `list_purchase_articles` or ask the user i
 
 Before creating anything, present one approval card:
 - Supplier name and supplier client ID when an existing supplier was found
-- For a new supplier: supplier name, registry code, VAT number, IBAN, country, and registry/address data, plus the explicit note that a new supplier record will be created after approval before the invoice is created
+- For a new supplier: supplier name, registry code, VAT number, IBAN, country, and registry/address data, plus the explicit note that a new supplier record will be created after approval, before the invoice is created
 - Invoice number, invoice date, due date, journal date, and term days
 - Net / VAT / gross amounts
 - Currency, `currency_rate`, and any `base_gross_price` / other `base_*` EUR totals for non-EUR invoices
@@ -166,7 +167,7 @@ Call `create_purchase_invoice_from_pdf`:
 - `notes`: leave empty by default; use it only for genuinely useful context such as assumptions made or manual adjustments. Do NOT put the source document filename here — the document is auto-uploaded and attached via `file_path` below.
 - `file_path`: the original file path (auto-uploads the source document)
 
-Use the exact `vat_price` and `gross_price` from the invoice. Do not recalculate them. Optional only when genuinely unknown; when present on the invoice, pass the exact original totals.
+Use the exact `vat_price` and `gross_price` from the invoice; do not recalculate them. Omit them only when they are genuinely unknown.
 If source document upload fails after invoice creation, the draft invoice is invalidated.
 
 ## Step 12: Confirm and report

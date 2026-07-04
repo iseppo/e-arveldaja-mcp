@@ -30,7 +30,7 @@ Present in priority order:
 3. Unconfirmed journal entries — adjustments not posted
 4. Unconfirmed bank transactions — cash not reconciled
 
-For blockers, show ID, date, amount/title, then offer concrete inline actions. If there are many blockers of the same low-risk type, show the first 10 plus counts and ask one batch approval with exceptions instead of one yes/no question per item. Do NOT close the workflow with "go fix these in the e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
+For blockers, show ID, date, amount/title, then offer concrete inline actions. If there are many blockers of the same low-risk type, show the first 10 plus counts and ask for one batch approval with exceptions instead of one yes/no question per item. Do NOT close the workflow with "go fix these in the e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
 
 Inline actions per blocker type:
 - Purchase invoices: offer `confirm_purchase_invoice`, or `delete_purchase_invoice` if the user confirms it is a duplicate
