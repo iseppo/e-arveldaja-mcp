@@ -21,6 +21,8 @@ function makeStandardAccounts(): Account[] {
     makeAccount(3020, "C", "Omakapital", "Jaotamata kasum", "Retained earnings"),
     // Expenses
     makeAccount(5000, "D", "Kulud", "Kulud", "Expenses"),
+    // Income tax expense (RTJ Schema 1 "Tulumaks" line, 8900–8999)
+    makeAccount(8900, "D", "Kulud", "Tulumaks", "Income tax expense"),
     // VAT
     makeAccount(1510, "D", "Varad", "Sisendkäibemaks", "Input VAT"),
   ];
@@ -198,16 +200,18 @@ describe("prepare_dividend_package", () => {
     expect(isError(result)).toBe(false);
     const data = parseResult(result);
     const je = data.journal_entry as { postings: Array<{ account: number; type: string; amount: number }> };
-    // Retained earnings debited on two lines: one for net-to-shareholder, one for CIT.
-    // Both hit 3020 so audit trail can distinguish the two components.
+    // Two debit lines: NET dividend to retained earnings (3020), CIT to the
+    // income-tax expense account (8900) — the tax is a P&L expense, not a
+    // retained-earnings debit.
     const debitPostings = je.postings.filter(p => p.type === "D");
     expect(debitPostings).toHaveLength(2);
-    expect(debitPostings.every(p => p.account === 3020)).toBe(true);
-    const totalDebit = debitPostings.reduce((s, p) => s + p.amount, 0);
-    expect(totalDebit).toBeCloseTo(10000 + 2820.51, 2);
-    // One debit line should match net, the other should match CIT.
-    expect(debitPostings.some(p => Math.abs(p.amount - 10000) < 0.01)).toBe(true);
-    expect(debitPostings.some(p => Math.abs(p.amount - 2820.51) < 0.01)).toBe(true);
+    const retainedDebit = debitPostings.find(p => p.account === 3020);
+    expect(retainedDebit?.amount).toBe(10000);
+    const taxExpenseDebit = debitPostings.find(p => p.account === 8900);
+    expect(taxExpenseDebit?.amount).toBe(2820.51);
+    // Retained earnings must NOT be debited with the CIT — this is the exact
+    // bug the net-dividend rule fixes (gross was previously drained from equity).
+    expect(debitPostings.filter(p => p.account === 3020)).toHaveLength(1);
     // Net dividend credited to payable
     const creditDividend = je.postings.find(p => p.account === 2370);
     expect(creditDividend?.type).toBe("C");
@@ -216,6 +220,109 @@ describe("prepare_dividend_package", () => {
     const creditTax = je.postings.find(p => p.account === 2540);
     expect(creditTax?.type).toBe("C");
     expect(creditTax?.amount).toBe(2820.51);
+    // Journal balances: total debits == total credits
+    const totalDebit = debitPostings.reduce((s, p) => s + p.amount, 0);
+    const totalCredit = je.postings.filter(p => p.type === "C").reduce((s, p) => s + p.amount, 0);
+    expect(totalDebit).toBeCloseTo(totalCredit, 2);
+    expect(totalDebit).toBeCloseTo(10000 + 2820.51, 2);
+    // Booking summary is surfaced for operator verification
+    const booking = data.booking as { retained_earnings_account: number; income_tax_expense_account: number; income_tax_expense_debit: number };
+    expect(booking.retained_earnings_account).toBe(3020);
+    expect(booking.income_tax_expense_account).toBe(8900);
+    expect(booking.income_tax_expense_debit).toBe(2820.51);
+  });
+
+  it("books the CIT to a custom income_tax_expense_account when provided", async () => {
+    const accounts = [
+      ...makeStandardAccounts(),
+      makeAccount(8910, "D", "Kulud", "Ettevõtte tulumaks", "CIT expense"),
+    ];
+    api = makeApi(makeHealthyJournals(), accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+      income_tax_expense_account: 8910,
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const je = data.journal_entry as { postings: Array<{ account: number; type: string; amount: number }> };
+    const taxExpenseDebit = je.postings.find(p => p.type === "D" && p.account === 8910);
+    expect(taxExpenseDebit?.amount).toBe(2820.51);
+    // Retained earnings only carries the net dividend
+    const retainedDebit = je.postings.find(p => p.type === "D" && p.account === 3020);
+    expect(retainedDebit?.amount).toBe(10000);
+  });
+
+  it("auto-detects the lowest 8900-series Kulud account when 8900 itself is absent", async () => {
+    // Chart has no 8900 but has 8910 and 8950 — auto-detect must pick 8910
+    // (lowest in range), NOT fall back to the 8900 constant. Guards against a
+    // filter regression that the all-8900 fixtures would not catch.
+    const accounts = [
+      ...makeStandardAccounts().filter(a => a.id !== 8900),
+      makeAccount(8950, "D", "Kulud", "Tulumaks B", "Income tax expense B"),
+      makeAccount(8910, "D", "Kulud", "Tulumaks A", "Income tax expense A"),
+    ];
+    api = makeApi(makeHealthyJournals(), accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const booking = data.booking as { income_tax_expense_account: number };
+    expect(booking.income_tax_expense_account).toBe(8910);
+    const je = data.journal_entry as { postings: Array<{ account: number; type: string; amount: number }> };
+    expect(je.postings.find(p => p.type === "D" && p.account === 8910)?.amount).toBe(2820.51);
+  });
+
+  it("warns (non-blocking) when an override points the CIT at a non-expense account", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    // Override to retained earnings 3020 (an equity account) — the exact class
+    // of mistake the type guard catches. Journal is still created (warning only).
+    const result = await cb({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+      income_tax_expense_account: 3020,
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const warnings = (data.warnings ?? []) as string[];
+    expect(warnings.some(w => w.includes("not an expense (Kulud) account"))).toBe(true);
+  });
+
+  it("errors when no income-tax expense account exists in the chart and none is given", async () => {
+    // Chart without any 8900-series account: auto-detect falls back to the
+    // default 8900 constant, which is absent → account validation fails.
+    const accountsWithoutTaxExpense = makeStandardAccounts().filter(a => a.id !== 8900);
+    api = makeApi(makeHealthyJournals(), accountsWithoutTaxExpense);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(true);
+    const r = result as { content: Array<{ text: string }> };
+    expect(r.content[0].text).toContain("Account validation failed");
+    expect(r.content[0].text).toContain("Income-tax expense account");
   });
 
   // -------------------------------------------------------------------------

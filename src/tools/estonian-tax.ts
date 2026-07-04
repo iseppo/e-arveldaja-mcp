@@ -11,7 +11,8 @@ import { logAudit } from "../audit-log.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
-import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
+import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, INCOME_TAX_EXPENSE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
+import type { Account } from "../types/api.js";
 import {
   getDefaultOwnerExpenseVatDeductionMode,
   getDefaultOwnerExpenseVatDeductionRatio,
@@ -56,23 +57,42 @@ export function getCitRateForDate(effective_date: string): { num: number; den: n
   return { num: 22, den: 78, formatted: "22/78" };
 }
 
+/**
+ * Resolve the profit-and-loss income-tax-expense account (the "Tulumaks" line)
+ * for the dividend distribution tax. An explicit override always wins. Otherwise
+ * auto-detect the lowest Kulud account in the 8900–8999 range — the same range
+ * `annual-report.ts` maps to the RTJ Schema 1 "Tulumaks" line — so the booked
+ * tax lands on the income-statement line the annual report reads it from. Falls
+ * back to the INCOME_TAX_EXPENSE_ACCOUNT constant when the chart has no such
+ * account (account validation then surfaces a helpful error).
+ */
+export function resolveIncomeTaxExpenseAccount(accounts: Account[], override?: number): number {
+  if (override !== undefined) return override;
+  const candidate = accounts
+    .filter(a => a.account_type_est === "Kulud" && a.id >= 8900 && a.id <= 8999)
+    .map(a => a.id)
+    .sort((x, y) => x - y)[0];
+  return candidate ?? INCOME_TAX_EXPENSE_ACCOUNT;
+}
+
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "prepare_dividend_package",
-    "Calculate dividend tax (22/78 CIT from 2025-01-01, 20/80 before) and create draft journal entries for dividend payable and tax liability. Hard-blocks distributions that lack retained earnings or would push net assets below share capital (ÄS § 157) unless force=true.",
+    "Calculate dividend tax (22/78 CIT from 2025-01-01, 20/80 before) and create draft journal entries. Only the NET dividend drains retained earnings (Jaotamata kasum); the CIT is booked as an income-tax expense (kasumiaruande 'Tulumaks' rida) with an equal tax liability — per Estonian GAAP the dividend income tax is a current-period expense, not a direct reduction of retained earnings. Hard-blocks distributions that lack retained earnings or would push net assets below share capital (ÄS § 157) unless force=true.",
     {
       net_dividend: z.number().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: coerceId.describe("Shareholder client ID"),
       effective_date: isoDateSchema("Distribution date (YYYY-MM-DD)"),
-      retained_earnings_account: z.number().optional().describe("Retained earnings account (default 3020)"),
+      retained_earnings_account: z.number().optional().describe("Retained earnings account debited with the NET dividend (default 3020)"),
       dividend_payable_account: z.number().optional().describe("Dividend payable account (default 2370)"),
-      tax_payable_account: z.number().optional().describe("CIT payable account (default 2540)"),
+      tax_payable_account: z.number().optional().describe("CIT payable (liability) account (default 2540)"),
+      income_tax_expense_account: z.number().optional().describe("Income-tax expense account debited with the CIT — the P&L 'Tulumaks' line (default: lowest Kulud account in 8900–8999, else 8900)"),
       share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default 3000)"),
       force: z.boolean().optional().describe("Create journal even if retained earnings are insufficient (default false)"),
       dry_run: z.boolean().optional().describe("Preview calculation and postings without creating journal (default false)"),
     },
     { ...create, title: "Prepare Dividend Distribution" },
-    async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, share_capital_account, force, dry_run }) => {
+    async ({ net_dividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, income_tax_expense_account, share_capital_account, force, dry_run }) => {
       // Reject non-positive dividends up front — a zero or negative net
       // would otherwise compute gross=0 and book an empty journal with
       // zero-amount postings, which is noise on the ledger and passes
@@ -90,10 +110,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
 
       // Validate all accounts exist in chart of accounts
       const accounts = await api.readonly.getAccounts();
+      // The CIT is a P&L expense, not a retained-earnings debit, so it needs a
+      // dedicated income-tax-expense account. Resolve it against the chart the
+      // caller's company actually uses (auto-detects the 8900-series "Tulumaks"
+      // account) rather than assuming a fixed number.
+      const incomeTaxExpenseAccount = resolveIncomeTaxExpenseAccount(accounts, income_tax_expense_account);
       const accountErrors = validateAccounts(accounts, [
         { id: retainedAccount, label: "Retained earnings account" },
         { id: payableAccount, label: "Dividend payable account" },
         { id: taxAccount, label: "Tax payable account" },
+        { id: incomeTaxExpenseAccount, label: "Income-tax expense account" },
         { id: shareCapitalAccount, label: "Share capital account" },
       ]);
       if (accountErrors.length > 0) {
@@ -121,6 +147,19 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const retainedResult = await computeAccountBalance(api, retainedAccount, undefined, undefined, effective_date, allJournals);
       const retainedBalance = retainedResult.balance;
       const warnings: string[] = [];
+
+      // Guard the manual override: auto-detection only ever picks a Kulud
+      // account, but an explicit income_tax_expense_account is existence-checked,
+      // not type-checked. A mistyped override (e.g. an equity or liability
+      // account) would silently book the CIT to the wrong statement line, so
+      // warn — non-blocking — when the resolved account is not an expense.
+      const incomeTaxExpenseRecord = accounts.find(a => a.id === incomeTaxExpenseAccount);
+      if (incomeTaxExpenseRecord && incomeTaxExpenseRecord.account_type_est !== "Kulud") {
+        warnings.push(
+          `Income-tax expense account ${incomeTaxExpenseAccount} (${incomeTaxExpenseRecord.name_est}) is not an expense (Kulud) account. ` +
+          `The dividend CIT belongs on the P&L 'Tulumaks' expense line (Kulud, usually 8900–8999). Verify income_tax_expense_account.`
+        );
+      }
 
       const balances = await computeAllBalances(api, undefined, effective_date, {
         preloadedAccounts: accounts,
@@ -219,20 +258,24 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
 
       const shareholder = await api.clients.get(shareholder_client_id);
 
-      // Journal entry: two D lines to retained earnings (net + CIT separately),
-      // so audit trail can distinguish payment-to-shareholder from the
-      // distribution-tax component. Economically the full gross drains
-      // retained earnings (KMS § 50). Credits go to dividend payable and
-      // tax payable.
+      // Journal entry (Estonian GAAP / RTJ): the NET dividend is the only debit
+      // to retained earnings (Jaotamata kasum) — it is what the resolution
+      // distributes to the shareholder. The distribution income tax (TuMS § 50)
+      // is a current-period income-tax EXPENSE (the P&L "Tulumaks" line), not a
+      // reduction of retained earnings, so it debits the income-tax-expense
+      // account. Credits go to dividend payable and the tax liability. Net
+      // assets still fall by the full gross (both a dividend payable and a tax
+      // liability arise), which is why the § 157 / retained-earnings checks
+      // above stay gross-based.
       const postings = [
         { accounts_id: retainedAccount, type: "D" as const, amount: net_dividend },
-        { accounts_id: retainedAccount, type: "D" as const, amount: cit },
+        { accounts_id: incomeTaxExpenseAccount, type: "D" as const, amount: cit },
         { accounts_id: payableAccount, type: "C" as const, amount: net_dividend },
         { accounts_id: taxAccount, type: "C" as const, amount: cit },
       ];
 
       // Self-documenting title so an operator opening the journal in e-arveldaja
-      // can see the split (two D-lines on retained earnings) without cross-
+      // can see the split (net dividend vs. income-tax expense) without cross-
       // referencing the audit log. The API Posting type has no per-line
       // description field, so the split rationale has to live on the journal
       // itself.
@@ -258,6 +301,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
                 cit_rate: citRate.formatted,
                 cit_amount: cit,
                 gross_dividend: roundMoney(grossDividend),
+              },
+              booking: {
+                retained_earnings_account: retainedAccount,
+                retained_earnings_debit: net_dividend,
+                income_tax_expense_account: incomeTaxExpenseAccount,
+                income_tax_expense_debit: cit,
+                note: "Only the net dividend drains retained earnings; the CIT is booked as income-tax expense (P&L 'Tulumaks').",
               },
               proposed_journal: journalData,
               shareholder: { id: shareholder.id, name: shareholder.name },
@@ -307,6 +357,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               cit_amount: cit,
               gross_dividend: roundMoney(grossDividend),
             },
+            booking: {
+              retained_earnings_account: retainedAccount,
+              retained_earnings_debit: net_dividend,
+              income_tax_expense_account: incomeTaxExpenseAccount,
+              income_tax_expense_debit: cit,
+              note: "Only the net dividend drains retained earnings; the CIT is booked as income-tax expense (P&L 'Tulumaks').",
+            },
             retained_earnings_check: {
               account: retainedAccount,
               balance_before: retainedBalance,
@@ -324,8 +381,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             journal_entry: {
               api_response: result,
               postings: [
-                { account: retainedAccount, type: "D", amount: net_dividend, description: `Dividend to ${shareholder.name} (net)` },
-                { account: retainedAccount, type: "D", amount: cit, description: `Tulumaks ${citRate.formatted}, dividend to ${shareholder.name}` },
+                { account: retainedAccount, type: "D", amount: net_dividend, description: `Dividend to ${shareholder.name} (net) — Jaotamata kasum` },
+                { account: incomeTaxExpenseAccount, type: "D", amount: cit, description: `Tulumaksukulu ${citRate.formatted}, dividend to ${shareholder.name}` },
                 { account: payableAccount, type: "C", amount: net_dividend, description: "Dividendide võlgnevus" },
                 { account: taxAccount, type: "C", amount: cit, description: "Tulumaksu kohustus" },
               ],

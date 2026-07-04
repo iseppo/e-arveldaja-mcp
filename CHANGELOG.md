@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`prepare_dividend_package` — dividend income tax is now booked as an expense, not a retained-earnings debit.** Previously the tool debited the **full gross** (net dividend + CIT) to retained earnings (Jaotamata kasum, 3020) across two D-lines, which overstated the drain on equity and never recorded the tax on the profit-and-loss statement. Per Estonian GAAP / RTJ, the corporate income tax on a distribution (TuMS § 50, 22/78) is charged against **current-year profit as an income-tax expense** — the P&L "Tulumaks" line — while only the **net dividend** reduces retained earnings. The journal now debits the net dividend to retained earnings and the CIT to an income-tax-expense account (auto-detected as the lowest Kulud account in 8900–8999, matching the annual report's "Tulumaks" mapping; override with the new `income_tax_expense_account` parameter, default 8900). Credits (dividend payable 2370, CIT liability 2540) and the gross-based ÄS § 157 / retained-earnings legality checks are unchanged — net assets still fall by the full gross. The response now includes a `booking` summary showing which accounts were debited.
+
 ## [0.17.0] - 2026-06-17
 
 ### Added

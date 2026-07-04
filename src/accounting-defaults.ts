@@ -22,6 +22,17 @@ export const DIVIDEND_PAYABLE_ACCOUNT = 2370;
 export const CIT_PAYABLE_ACCOUNT = 2540;
 
 /**
+ * Corporate income tax expense (Tulumaksukulu) — the profit-and-loss "Tulumaks"
+ * line under RTJ Schema 1, which `annual-report.ts` maps to Kulud accounts
+ * 8900–8999. The income tax triggered by a dividend distribution (TuMS § 50) is
+ * a current-period expense, NOT a direct reduction of retained earnings: only
+ * the net dividend drains Jaotamata kasum, while the 22/78 tax hits this expense
+ * line and an equal Tulumaksu kohustus liability. Default is the lowest 8900-
+ * series expense account found in the chart; falls back to this constant.
+ */
+export const INCOME_TAX_EXPENSE_ACCOUNT = 8900;
+
+/**
  * EMTA prepayment account (EMTA ettemaksukonto) — the single tax-authority
  * prepayment account all taxes are drawn from (post-2021). A bank transfer to
  * EMTA is a top-up of this asset account (Debit 1516 / Credit bank); the
