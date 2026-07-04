@@ -995,7 +995,7 @@ async function main() {
   registerCamtImportTools(scopedServer, api, toolExposure);
   registerAccountingInboxTools(scopedServer, api, toolExposure);
   registerAnalyzeUnconfirmedTools(scopedServer, api);
-  registerWorkflowRecommendationTools(scopedServer);
+  registerWorkflowRecommendationTools(scopedServer, toolExposure);
 
   // Register resources via scopedServer so reads stay pinned to the selected connection
   registerResources(scopedServer, api);

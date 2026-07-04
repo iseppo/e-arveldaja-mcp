@@ -4,6 +4,7 @@ import { readOnly } from "../annotations.js";
 import { registerTool } from "../mcp-compat.js";
 import { toolResponse } from "../tool-response.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
+import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 
 type RiskMode = "automatic" | "confirm_once" | "dry_run" | "accountant_review";
 
@@ -383,7 +384,53 @@ function compactWorkflow(workflow: WorkflowGuide): Record<string, unknown> {
   };
 }
 
-export function registerWorkflowRecommendationTools(server: McpServer): void {
+/**
+ * Tool names named by the recipes above that the tool-exposure config can
+ * unregister, so `recommend_workflow` never advertises a tool that is absent
+ * from `tools/list`. Keep in sync with the recipes: only tools that both appear
+ * in a recipe and can be gated by an env flag need an entry.
+ *
+ * The setup/credential tools (`import_apikey_credentials` etc.) are intentionally
+ * NOT filtered here: they are hidden only in configured mode, not setup mode, and
+ * this tool cannot see the connection state — filtering them would wrongly hide
+ * the setup workflow from a first-time user who needs exactly that.
+ */
+function hiddenRecipeTools(exposure: ToolExposureConfig): Set<string> {
+  const hidden = new Set<string>();
+  if (!exposure.enableLightyear) {
+    for (const tool of [
+      "parse_lightyear_statement", "parse_lightyear_capital_gains",
+      "lightyear_portfolio_summary", "book_lightyear_trades", "book_lightyear_distributions",
+    ]) hidden.add(tool);
+  }
+  if (!exposure.enableSales) hidden.add("compute_receivables_aging");
+  return hidden;
+}
+
+/**
+ * Return the workflow with any hidden tools stripped from `primary_tools` and
+ * `next_actions`, or `null` when every primary tool is hidden (the whole
+ * workflow is unavailable, e.g. `lightyear-booking` when Lightyear is disabled).
+ */
+function visibleWorkflow(workflow: WorkflowGuide, hidden: Set<string>): WorkflowGuide | null {
+  if (hidden.size === 0) return workflow;
+  const primary_tools = workflow.primary_tools.filter(tool => !hidden.has(tool));
+  if (primary_tools.length === 0) return null;
+  return {
+    ...workflow,
+    primary_tools,
+    next_actions: workflow.next_actions.filter(action => !hidden.has(action.tool)),
+  };
+}
+
+export function registerWorkflowRecommendationTools(
+  server: McpServer,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
+): void {
+  const visibleWorkflows = WORKFLOWS
+    .map(workflow => visibleWorkflow(workflow, hiddenRecipeTools(exposure)))
+    .filter((workflow): workflow is WorkflowGuide => workflow !== null);
+
   registerTool(server, "recommend_workflow",
     "Recommend the safest e-arveldaja workflow for a user goal. Use this when the user asks what to do next or when choosing among many tools.",
     {
@@ -393,7 +440,7 @@ export function registerWorkflowRecommendationTools(server: McpServer): void {
     { ...readOnly, title: "Recommend Workflow" },
     async ({ goal, risk_tolerance }) => {
       const normalizedGoal = normalizeGoal(goal);
-      const ranked = WORKFLOWS
+      const ranked = visibleWorkflows
         .map(workflow => ({ workflow, score: scoreWorkflow(workflow, normalizedGoal) }))
         .sort((a, b) => b.score - a.score || a.workflow.id.localeCompare(b.workflow.id));
 
@@ -405,7 +452,7 @@ export function registerWorkflowRecommendationTools(server: McpServer): void {
           raw: null,
           extra: {
             risk_tolerance: risk_tolerance ?? "balanced",
-            available_workflows: WORKFLOWS.map(compactWorkflow),
+            available_workflows: visibleWorkflows.map(compactWorkflow),
             workflow: buildWorkflowEnvelope({
               summary: "Listed common e-arveldaja workflows. Pass goal to get a single recommendation.",
               fallback_actions: [{

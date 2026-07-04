@@ -154,14 +154,30 @@ describe("reference-data admin tool surface", () => {
 });
 
 describe("sales and products tool surface", () => {
+  // Full inventories — a partial-gating regression (a tool left in/out of the
+  // group) must fail, so these list every tool the flag is meant to govern.
   const SALE_INVOICE_TOOLS = [
     "list_sale_invoices",
+    "get_sale_invoice",
     "create_sale_invoice",
+    "update_sale_invoice",
+    "delete_sale_invoice",
     "confirm_sale_invoice",
+    "invalidate_sale_invoice",
+    "get_sale_invoice_delivery_options",
     "send_sale_invoice",
+    "get_sale_invoice_document",
     "get_sale_invoice_xml",
   ];
-  const PRODUCT_TOOLS = ["list_products", "create_product", "delete_product"];
+  const PRODUCT_TOOLS = [
+    "list_products",
+    "get_product",
+    "create_product",
+    "update_product",
+    "deactivate_product",
+    "reactivate_product",
+    "delete_product",
+  ];
 
   it("registers sale-invoice and product tools by default", () => {
     const names = registeredToolNames(registerCrudTools, EXPOSED);

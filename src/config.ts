@@ -221,10 +221,13 @@ export interface ToolExposureConfig {
    * Register the product-catalog tools (`list/get/create/update/deactivate/
    * reactivate/delete_product`). Enabled by default; set
    * `EARVELDAJA_DISABLE_PRODUCTS=1` when the catalog is managed in the
-   * e-arveldaja UI. Products are the line-item catalog for sale invoices (they
-   * are not used by purchase invoices), so a `DISABLE_SALES` deployment will
-   * usually set this too — but the flags are independent so a seller can keep
-   * issuing invoices with existing/free-text lines without exposing catalog CRUD.
+   * e-arveldaja UI. Products are chiefly the sale-invoice line-item catalog
+   * (sale items require `products_id`; purchase items key on
+   * `cl_purchase_articles_id`, though the purchase item type also accepts an
+   * optional `products_id`), so a `DISABLE_SALES` deployment usually sets this
+   * too. The flag only unregisters the catalog-management tools — it does not
+   * affect creating either invoice type, which take product IDs as data — so it
+   * stays independent from `DISABLE_SALES`.
    */
   enableProducts: boolean;
 }

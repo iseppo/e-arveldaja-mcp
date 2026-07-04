@@ -144,6 +144,14 @@ every disable flag set (incl. Lightyear) lands near 80 tools. (The former
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
 
+`recommend_workflow` filters its suggestions to the registered surface, so it
+never names a tool an opt-out flag has dropped (and it hides a whole workflow
+whose tools are all gated, e.g. `lightyear-booking` when Lightyear is off). The
+static workflow prompts (`company-overview`, `month-end`, …) are shared across
+purchase- and sales-side deployments and are not gated per flag, so they may
+still mention a dropped tool (e.g. `compute_receivables_aging` under
+`DISABLE_SALES`); the agent simply skips a tool that is not in `tools/list`.
+
 ## Authentication
 
 HMAC-SHA-384 signing (`src/auth.ts`):
