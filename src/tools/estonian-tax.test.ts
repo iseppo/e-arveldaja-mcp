@@ -287,6 +287,34 @@ describe("prepare_dividend_package", () => {
     expect(je.postings.find(p => p.type === "D" && p.account === 8910)?.amount).toBe(2820.51);
   });
 
+  it("auto-detect skips an inactive 8900-series account and picks the active one", async () => {
+    // 8900 exists but is deactivated (is_valid=false); 8910 is active.
+    // getAccounts() returns inactive accounts and validateAccounts() rejects
+    // them, so the resolver must skip 8900 and book to 8910 — not error out.
+    const accounts = [
+      ...makeStandardAccounts().filter(a => a.id !== 8900),
+      makeAccount(8900, "D", "Kulud", "Tulumaks (vana)", "Income tax (old)", { is_valid: false }),
+      makeAccount(8910, "D", "Kulud", "Tulumaks", "Income tax expense"),
+    ];
+    api = makeApi(makeHealthyJournals(), accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const booking = data.booking as { income_tax_expense_account: number };
+    expect(booking.income_tax_expense_account).toBe(8910);
+    const je = data.journal_entry as { postings: Array<{ account: number; type: string; amount: number }> };
+    expect(je.postings.find(p => p.type === "D" && p.account === 8910)?.amount).toBe(2820.51);
+  });
+
   it("warns (non-blocking) when an override points the CIT at a non-expense account", async () => {
     const cb = tools.get("prepare_dividend_package")!;
     // Override to retained earnings 3020 (an equity account) — the exact class

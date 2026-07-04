@@ -60,16 +60,20 @@ export function getCitRateForDate(effective_date: string): { num: number; den: n
 /**
  * Resolve the profit-and-loss income-tax-expense account (the "Tulumaks" line)
  * for the dividend distribution tax. An explicit override always wins. Otherwise
- * auto-detect the lowest Kulud account in the 8900–8999 range — the same range
- * `annual-report.ts` maps to the RTJ Schema 1 "Tulumaks" line — so the booked
- * tax lands on the income-statement line the annual report reads it from. Falls
- * back to the INCOME_TAX_EXPENSE_ACCOUNT constant when the chart has no such
- * account (account validation then surfaces a helpful error).
+ * auto-detect the lowest ACTIVE Kulud account in the 8900–8999 range — the same
+ * range `annual-report.ts` maps to the RTJ Schema 1 "Tulumaks" line — so the
+ * booked tax lands on the income-statement line the annual report reads it from.
+ * Inactive accounts (is_valid === false) are skipped: getAccounts() returns the
+ * raw chart including deactivated accounts, and validateAccounts() rejects an
+ * inactive account, so picking the lowest-numbered one blindly would fail the
+ * booking even when an active higher-numbered account exists. Falls back to the
+ * INCOME_TAX_EXPENSE_ACCOUNT constant when the chart has no active such account
+ * (account validation then surfaces a helpful error).
  */
 export function resolveIncomeTaxExpenseAccount(accounts: Account[], override?: number): number {
   if (override !== undefined) return override;
   const candidate = accounts
-    .filter(a => a.account_type_est === "Kulud" && a.id >= 8900 && a.id <= 8999)
+    .filter(a => a.account_type_est === "Kulud" && a.is_valid !== false && a.id >= 8900 && a.id <= 8999)
     .map(a => a.id)
     .sort((x, y) => x - y)[0];
   return candidate ?? INCOME_TAX_EXPENSE_ACCOUNT;
