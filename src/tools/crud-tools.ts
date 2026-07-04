@@ -17,10 +17,10 @@ export function registerCrudTools(
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): void {
   registerClientTools(server, api);
-  registerProductTools(server, api);
+  if (exposure.enableProducts) registerProductTools(server, api);
   registerJournalTools(server, api);
   registerTransactionTools(server, api);
-  registerSaleInvoiceTools(server, api);
+  if (exposure.enableSales) registerSaleInvoiceTools(server, api);
   registerPurchaseInvoiceTools(server, api);
   registerReferenceDataTools(server, api, exposure);
 }

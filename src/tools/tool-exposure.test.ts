@@ -5,10 +5,12 @@ import { registerBankReconciliationTools } from "./bank-reconciliation.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { registerReferenceDataTools } from "./reference-data-tools.js";
+import { registerCrudTools } from "./crud-tools.js";
+import { registerAgingTools } from "./aging-analysis.js";
 import { registerPrompts } from "../prompts.js";
 
-const HIDDEN: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true };
-const EXPOSED: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true };
+const HIDDEN: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
+const EXPOSED: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
 
 function registeredToolNames(
   register: (server: any, api: any, exposure?: ToolExposureConfig) => void,
@@ -91,6 +93,28 @@ describe("getToolExposureConfig", () => {
     expect(getToolExposureConfig({ EARVELDAJA_DISABLE_ANNUAL_REPORT: "" } as any).enableAnnualReport).toBe(true);
     expect(getToolExposureConfig({ EARVELDAJA_DISABLE_ANNUAL_REPORT: "0" } as any).enableAnnualReport).toBe(true);
   });
+
+  it("enables the sales side by default", () => {
+    expect(getToolExposureConfig({} as NodeJS.ProcessEnv).enableSales).toBe(true);
+  });
+
+  it("disables the sales side only when EARVELDAJA_DISABLE_SALES is truthy", () => {
+    expect(getToolExposureConfig({ EARVELDAJA_DISABLE_SALES: "1" } as any).enableSales).toBe(false);
+    expect(getToolExposureConfig({ EARVELDAJA_DISABLE_SALES: "true" } as any).enableSales).toBe(false);
+    expect(getToolExposureConfig({ EARVELDAJA_DISABLE_SALES: "" } as any).enableSales).toBe(true);
+    expect(getToolExposureConfig({ EARVELDAJA_DISABLE_SALES: "0" } as any).enableSales).toBe(true);
+  });
+
+  it("enables the product catalog by default", () => {
+    expect(getToolExposureConfig({} as NodeJS.ProcessEnv).enableProducts).toBe(true);
+  });
+
+  it("disables the product catalog only when EARVELDAJA_DISABLE_PRODUCTS is truthy", () => {
+    expect(getToolExposureConfig({ EARVELDAJA_DISABLE_PRODUCTS: "1" } as any).enableProducts).toBe(false);
+    expect(getToolExposureConfig({ EARVELDAJA_DISABLE_PRODUCTS: "true" } as any).enableProducts).toBe(false);
+    expect(getToolExposureConfig({ EARVELDAJA_DISABLE_PRODUCTS: "" } as any).enableProducts).toBe(true);
+    expect(getToolExposureConfig({ EARVELDAJA_DISABLE_PRODUCTS: "0" } as any).enableProducts).toBe(true);
+  });
 });
 
 describe("reference-data admin tool surface", () => {
@@ -126,6 +150,52 @@ describe("reference-data admin tool surface", () => {
     });
     for (const tool of REFERENCE_ADMIN_TOOLS) expect(names).not.toContain(tool);
     for (const tool of REFERENCE_READ_TOOLS) expect(names).toContain(tool);
+  });
+});
+
+describe("sales and products tool surface", () => {
+  const SALE_INVOICE_TOOLS = [
+    "list_sale_invoices",
+    "create_sale_invoice",
+    "confirm_sale_invoice",
+    "send_sale_invoice",
+    "get_sale_invoice_xml",
+  ];
+  const PRODUCT_TOOLS = ["list_products", "create_product", "delete_product"];
+
+  it("registers sale-invoice and product tools by default", () => {
+    const names = registeredToolNames(registerCrudTools, EXPOSED);
+    for (const tool of SALE_INVOICE_TOOLS) expect(names).toContain(tool);
+    for (const tool of PRODUCT_TOOLS) expect(names).toContain(tool);
+    // purchase side is unconditional
+    expect(names).toContain("create_purchase_invoice");
+  });
+
+  it("drops the sale-invoice tools but keeps purchase + products when sales is disabled", () => {
+    const names = registeredToolNames(registerCrudTools, { ...EXPOSED, enableSales: false });
+    for (const tool of SALE_INVOICE_TOOLS) expect(names).not.toContain(tool);
+    expect(names).toContain("create_purchase_invoice");
+    for (const tool of PRODUCT_TOOLS) expect(names).toContain(tool);
+  });
+
+  it("drops the product tools but keeps sale invoices when products is disabled", () => {
+    const names = registeredToolNames(registerCrudTools, { ...EXPOSED, enableProducts: false });
+    for (const tool of PRODUCT_TOOLS) expect(names).not.toContain(tool);
+    for (const tool of SALE_INVOICE_TOOLS) expect(names).toContain(tool);
+  });
+});
+
+describe("aging tool surface", () => {
+  it("registers both receivables and payables aging by default", () => {
+    const names = registeredToolNames(registerAgingTools, EXPOSED);
+    expect(names).toContain("compute_receivables_aging");
+    expect(names).toContain("compute_payables_aging");
+  });
+
+  it("drops receivables aging (sales/AR) but keeps payables aging when sales is disabled", () => {
+    const names = registeredToolNames(registerAgingTools, { ...EXPOSED, enableSales: false });
+    expect(names).not.toContain("compute_receivables_aging");
+    expect(names).toContain("compute_payables_aging");
   });
 });
 
@@ -211,12 +281,12 @@ describe("receipt inbox tool surface", () => {
 
 describe("prompt surface", () => {
   it("registers the lightyear-booking prompt when Lightyear is enabled", () => {
-    expect(registeredPromptNames({ enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true }))
+    expect(registeredPromptNames({ enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true }))
       .toContain("lightyear-booking");
   });
 
   it("skips the lightyear-booking prompt when Lightyear is disabled", () => {
-    const names = registeredPromptNames({ enableLightyear: false, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true });
+    const names = registeredPromptNames({ enableLightyear: false, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
     expect(names).not.toContain("lightyear-booking");
     // The rest of the prompt surface is unaffected.
     expect(names).toContain("book-invoice");

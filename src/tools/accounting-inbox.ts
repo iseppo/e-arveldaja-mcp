@@ -765,7 +765,7 @@ function captureInternalToolHandlers(api: ApiContext): Map<string, AutopilotInte
   // This registry feeds the internal autopilot pipeline, not the MCP tool
   // surface, so it must always see every tool regardless of what the operator
   // exposes in tools/list via EARVELDAJA_EXPOSE_GRANULAR_TOOLS.
-  const captureEverything: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true };
+  const captureEverything: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
 
   registerCamtImportTools(server, api, captureEverything);
   registerWiseImportTools(server, api);

@@ -205,6 +205,28 @@ export interface ToolExposureConfig {
    * bulk of the year and re-enable it at closing time.
    */
   enableAnnualReport: boolean;
+  /**
+   * Register the sales-invoicing side: the sale-invoice tools
+   * (`list/get/create/update/delete/confirm/invalidate_sale_invoice`,
+   * `get_sale_invoice_delivery_options`, `send_sale_invoice`,
+   * `get_sale_invoice_document`, `get_sale_invoice_xml`),
+   * `create_recurring_sale_invoices`, and the accounts-receivable report
+   * `compute_receivables_aging`. Enabled by default; set
+   * `EARVELDAJA_DISABLE_SALES=1` on a purchase-side-only bookkeeping deployment
+   * that never issues sale invoices. The accounts-payable report
+   * `compute_payables_aging` and the purchase-invoice tools are unaffected.
+   */
+  enableSales: boolean;
+  /**
+   * Register the product-catalog tools (`list/get/create/update/deactivate/
+   * reactivate/delete_product`). Enabled by default; set
+   * `EARVELDAJA_DISABLE_PRODUCTS=1` when the catalog is managed in the
+   * e-arveldaja UI. Products are the line-item catalog for sale invoices (they
+   * are not used by purchase invoices), so a `DISABLE_SALES` deployment will
+   * usually set this too — but the flags are independent so a seller can keep
+   * issuing invoices with existing/free-text lines without exposing catalog CRUD.
+   */
+  enableProducts: boolean;
 }
 
 function envFlagEnabled(value: string | undefined): boolean {
@@ -220,6 +242,8 @@ export function getToolExposureConfig(env: NodeJS.ProcessEnv = process.env): Too
     enableTaxTools: !envFlagEnabled(env.EARVELDAJA_DISABLE_TAX_TOOLS),
     enableReferenceAdmin: !envFlagEnabled(env.EARVELDAJA_DISABLE_REFERENCE_ADMIN),
     enableAnnualReport: !envFlagEnabled(env.EARVELDAJA_DISABLE_ANNUAL_REPORT),
+    enableSales: !envFlagEnabled(env.EARVELDAJA_DISABLE_SALES),
+    enableProducts: !envFlagEnabled(env.EARVELDAJA_DISABLE_PRODUCTS),
   };
 }
 

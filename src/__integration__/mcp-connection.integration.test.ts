@@ -316,6 +316,8 @@ describe("MCP Server Opt-Out Group Flags", () => {
         EARVELDAJA_DISABLE_TAX_TOOLS: "1",
         EARVELDAJA_DISABLE_REFERENCE_ADMIN: "1",
         EARVELDAJA_DISABLE_ANNUAL_REPORT: "1",
+        EARVELDAJA_DISABLE_SALES: "1",
+        EARVELDAJA_DISABLE_PRODUCTS: "1",
       }, { inheritEarveldaja: false }),
     });
     client = new Client({ name: "integration-test-group-flags", version: "1.0.0" });
@@ -326,7 +328,7 @@ describe("MCP Server Opt-Out Group Flags", () => {
     try { await client.close(); } catch {}
   });
 
-  it("drops the tax, reference-admin, and annual-report groups when disabled", async () => {
+  it("drops the tax, reference-admin, annual-report, sales, and product groups when disabled", async () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name);
     for (const gated of [
@@ -348,12 +350,24 @@ describe("MCP Server Opt-Out Group Flags", () => {
       "create_bank_account",
       "update_bank_account",
       "delete_bank_account",
+      // EARVELDAJA_DISABLE_SALES
+      "list_sale_invoices",
+      "create_sale_invoice",
+      "confirm_sale_invoice",
+      "send_sale_invoice",
+      "get_sale_invoice_xml",
+      "create_recurring_sale_invoices",
+      "compute_receivables_aging",
+      // EARVELDAJA_DISABLE_PRODUCTS
+      "list_products",
+      "create_product",
+      "delete_product",
     ]) {
       expect(names, `${gated} should be gated off`).not.toContain(gated);
     }
   });
 
-  it("keeps the reference-data reads and core tools when the groups are disabled", async () => {
+  it("keeps the reads, purchase side, and payables aging when the groups are disabled", async () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name);
     for (const kept of [
@@ -364,6 +378,7 @@ describe("MCP Server Opt-Out Group Flags", () => {
       "get_vat_info",
       "create_purchase_invoice",
       "compute_trial_balance",
+      "compute_payables_aging",
     ]) {
       expect(names, `${kept} should stay registered`).toContain(kept);
     }

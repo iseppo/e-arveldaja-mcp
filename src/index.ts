@@ -984,8 +984,8 @@ async function main() {
   registerCurrencyRoundingTools(scopedServer, api);
   registerBankReconciliationTools(scopedServer, api, toolExposure);
   registerFinancialStatementTools(scopedServer, api);
-  registerAgingTools(scopedServer, api);
-  registerRecurringInvoiceTools(scopedServer, api);
+  registerAgingTools(scopedServer, api, toolExposure);
+  if (toolExposure.enableSales) registerRecurringInvoiceTools(scopedServer, api);
   if (toolExposure.enableTaxTools) registerEstonianTaxTools(scopedServer, api);
   if (toolExposure.enableAnnualReport) registerAnnualReportTools(scopedServer, api);
   registerDocumentAuditTools(scopedServer, api);

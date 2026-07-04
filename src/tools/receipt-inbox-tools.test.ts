@@ -17,7 +17,7 @@ const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
 
 // Behavior tests exercise the granular constituent tools directly, so register
 // with the full surface exposed (default hides them behind the merged tools).
-const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true };
+const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
 
 afterEach(() => {
   if (ORIGINAL_RULES_FILE === undefined) {

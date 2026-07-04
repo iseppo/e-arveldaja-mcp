@@ -115,8 +115,10 @@ The tool list is sent into the model's context on every session, so it is a fixe
 - `EARVELDAJA_DISABLE_TAX_TOOLS=1` — drops the Estonian tax helpers (`prepare_dividend_package`, `create_owner_expense_reimbursement`, `check_tax_free_limits`). The statutory tax-rules advice behind `suggest_booking` is unaffected. Use it when you never run dividend/reimbursement/tax-free-limit workflows.
 - `EARVELDAJA_DISABLE_REFERENCE_ADMIN=1` — drops the reference-data admin tools that create/update/delete bank accounts and invoice series and update invoice settings (plus the single-record `get_bank_account`/`get_invoice_series` reads). The `list_*`/`get_invoice_info`/`get_vat_info` reads stay. Use it when the chart of accounts, bank accounts, and invoice series are already set up and managed in the e-arveldaja UI.
 - `EARVELDAJA_DISABLE_ANNUAL_REPORT=1` — drops the year-end tools (`prepare_year_end_close`, `generate_annual_report_data`, `execute_year_end_close`). Use it for the bulk of the year; re-enable at closing time.
+- `EARVELDAJA_DISABLE_SALES=1` — drops the sales-invoicing side: the 11 sale-invoice tools, `create_recurring_sale_invoices`, and receivables aging (`compute_receivables_aging`). Payables aging and all purchase-invoice tools stay. Use it for purchase-side-only bookkeeping.
+- `EARVELDAJA_DISABLE_PRODUCTS=1` — drops the product-catalog tools (`list/get/create/update/deactivate/reactivate/delete_product`). Products are the sale-invoice line-item catalog (not used by purchase invoices); a `DISABLE_SALES` deployment usually sets this too, but the flags are independent.
 
-A lean purchase-side-only deployment with all four flags set lands near 100 tools instead of the default 120. Conversely, `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` and `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` register the hidden granular and credential-management tools when you need them.
+A lean purchase-side-only deployment with every disable flag set (incl. Lightyear) lands near 80 tools instead of the default 120. Conversely, `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` and `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` register the hidden granular and credential-management tools when you need them.
 
 Confirmed supplier history still wins over local rules for purchase booking defaults.
 

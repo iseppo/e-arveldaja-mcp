@@ -70,7 +70,7 @@ serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
 ### Tool exposure (per-session token cost)
 
 `tools/list` is loaded into the client context on every session, so the tool
-surface is a fixed per-session token cost. Six env flags control optional
+surface is a fixed per-session token cost. Eight env flags control optional
 parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
 - **`EARVELDAJA_DISABLE_LIGHTYEAR=1`** — do not register the Lightyear
@@ -97,7 +97,7 @@ parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
   always explain how to add a connection (set this flag to add a second company
   without a restart).
 
-The next three are opt-out feature-group flags (default enabled; the group is
+The next five are opt-out feature-group flags (default enabled; the group is
 registered unless the flag is set). They cut the surface for a lean deployment
 without changing the default:
 
@@ -119,14 +119,27 @@ without changing the default:
   year-end tools (`prepare_year_end_close`, `generate_annual_report_data`,
   `execute_year_end_close`). Use for the bulk of the year; re-enable at closing
   time. Saves ≈0.4k tokens.
+- **`EARVELDAJA_DISABLE_SALES=1`** — do not register the sales-invoicing side:
+  the 11 sale-invoice tools (`list/get/create/update/delete/confirm/invalidate_sale_invoice`,
+  `get_sale_invoice_delivery_options`, `send_sale_invoice`,
+  `get_sale_invoice_document`, `get_sale_invoice_xml`),
+  `create_recurring_sale_invoices`, and the accounts-receivable report
+  `compute_receivables_aging`. The accounts-payable report
+  `compute_payables_aging` and all purchase-invoice tools stay. Use on a
+  purchase-side-only bookkeeping deployment. Saves ≈2.7k tokens (13 tools).
+- **`EARVELDAJA_DISABLE_PRODUCTS=1`** — do not register the product-catalog tools
+  (`list/get/create/update/deactivate/reactivate/delete_product`). Products are
+  the sale-invoice line-item catalog (not used by purchase invoices), so a
+  `DISABLE_SALES` deployment usually sets this too — but the flags are
+  independent. Saves ≈1.3k tokens (7 tools).
 
 The default surface is 120 tools; `DISABLE_LIGHTYEAR` drops it to 115.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both raises it to the full 133. The three opt-out
+credential tools; enabling both raises it to the full 133. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−3),
-`DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3) — so a lean
-purchase-only deployment with all four disable flags set lands near 100 tools.
-(The former
+`DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
+(−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
+every disable flag set (incl. Lightyear) lands near 80 tools. (The former
 `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
