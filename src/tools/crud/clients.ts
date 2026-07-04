@@ -42,7 +42,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     is_client: z.boolean().describe("Is a buyer"),
     is_supplier: z.boolean().describe("Is a supplier"),
     cl_code_country: z.string().optional().describe("Country code (default EST)"),
-    is_physical_entity: z.boolean().describe("REQUIRED person-type: true = natural person (private individual); false = legal entity / company (a registry `code` is then also required). The API rejects creation without this."),
+    is_physical_entity: z.boolean().describe("REQUIRED: true = natural person, false = legal entity/company (registry `code` then also required). The API rejects creation without this."),
     email: z.string().optional().describe("Contact email"),
     telephone: z.string().optional().describe("Phone"),
     address_text: z.string().optional().describe("Address"),

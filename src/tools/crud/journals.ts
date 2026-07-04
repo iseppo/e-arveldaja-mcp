@@ -135,8 +135,8 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     postings: jsonObjectArrayInput.describe(
       "Postings [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, base_amount?, projects_project_id?, projects_location_id?, projects_person_id?}]. " +
       "accounts_dimensions_id is REQUIRED when accounts_id has sub-accounts. " +
-      "base_amount is the EUR equivalent for multi-currency entries (when cl_currencies_id is not EUR). " +
-      "projects_project_id / projects_location_id / projects_person_id link the posting to project tracking dimensions."
+      "base_amount = EUR equivalent for non-EUR entries. " +
+      "projects_* fields link the posting to project tracking dimensions."
     ),
   }, { ...create, title: "Create Journal" }, async (params) => {
     const postings = parsePostings(params.postings);

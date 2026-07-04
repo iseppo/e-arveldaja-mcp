@@ -196,7 +196,7 @@ export class HttpClient {
         });
         break;
       case "transactions":
-        actions.push({ tool: "reconcile_transactions", args: { min_confidence: 30 }, why: "Check whether the transaction is already matched or conflicts with another booking." });
+        actions.push({ tool: "reconcile_bank_transactions", args: { mode: "suggest", min_confidence: 30 }, why: "Check whether the transaction is already matched or conflicts with another booking." });
         break;
     }
     const listAction = HttpClient.listActionForPath(path);

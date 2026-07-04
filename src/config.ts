@@ -149,6 +149,22 @@ export interface ToolExposureConfig {
    * track investments.
    */
   enableLightyear: boolean;
+  /**
+   * Also register the granular constituent tools whose functionality is fully
+   * covered by a merged entry point (`reconcile_bank_transactions`,
+   * `process_camt053`, `receipt_batch`, `classify_bank_transactions`,
+   * `continue_accounting_workflow`): `reconcile_transactions`,
+   * `auto_confirm_exact_matches`, `parse_camt053`, `import_camt053`,
+   * `scan_receipt_folder`, `process_receipt_batch`,
+   * `classify_unmatched_transactions`, `apply_transaction_classifications`,
+   * `prepare_accounting_review_action`, `resolve_accounting_review_item`.
+   * Hidden by default to cut the per-session tools/list token cost; the merged
+   * tools keep routing to the same handlers internally. Set
+   * `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` to register them again.
+   * (`reconcile_inter_account_transfers` is always registered — the merged
+   * tool has no execute mode for inter-account transfers.)
+   */
+  exposeGranularTools: boolean;
 }
 
 function envFlagEnabled(value: string | undefined): boolean {
@@ -159,6 +175,7 @@ function envFlagEnabled(value: string | undefined): boolean {
 export function getToolExposureConfig(env: NodeJS.ProcessEnv = process.env): ToolExposureConfig {
   return {
     enableLightyear: !envFlagEnabled(env.EARVELDAJA_DISABLE_LIGHTYEAR),
+    exposeGranularTools: envFlagEnabled(env.EARVELDAJA_EXPOSE_GRANULAR_TOOLS),
   };
 }
 

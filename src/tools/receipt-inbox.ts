@@ -3,6 +3,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
@@ -1036,8 +1037,25 @@ function extractClassificationGroups(payload: unknown): ClassifiedTransactionGro
 // Tool registrations
 // ---------------------------------------------------------------------------
 
-export function registerReceiptInboxTools(server: McpServer, api: ApiContext): void {
+export function registerReceiptInboxTools(
+  server: McpServer,
+  api: ApiContext,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
+): void {
   const handlers = new Map<string, ReceiptInboxToolHandler>();
+
+  // Constituents fully covered by merged entry points: receipt_batch
+  // (scan / dry_run / create / create_and_confirm) covers scan_receipt_folder +
+  // process_receipt_batch; classify_bank_transactions (classify / dry_run_apply /
+  // execute_apply) covers classify_unmatched_transactions +
+  // apply_transaction_classifications. Handlers stay captured for internal
+  // routing; the tools enter tools/list (a fixed per-session token cost) only
+  // when EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1.
+  const granularOnlyTools = new Set([
+    "process_receipt_batch",
+    "classify_unmatched_transactions",
+    "apply_transaction_classifications",
+  ]);
 
   function registerCapturedTool<Args extends z.ZodRawShape>(
     name: string,
@@ -1047,10 +1065,13 @@ export function registerReceiptInboxTools(server: McpServer, api: ApiContext): v
     cb: (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown,
   ): void {
     handlers.set(name, cb as unknown as ReceiptInboxToolHandler);
+    if (granularOnlyTools.has(name) && !exposure.exposeGranularTools) return;
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
 
-  registerTool(server,
+  // scan_receipt_folder is covered by receipt_batch mode="scan" (which calls
+  // scanReceiptFolderInternal directly), so it is granular-gated too.
+  if (exposure.exposeGranularTools) registerTool(server,
     "scan_receipt_folder",
     "Scan a folder for supported receipt files (PDF, JPG, PNG) without recursing into subfolders. Returns valid file metadata and skipped entries.",
     {

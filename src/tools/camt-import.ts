@@ -6,6 +6,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Client, Transaction } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
 import { resolveFileInput } from "../file-validation.js";
@@ -1103,8 +1104,18 @@ function remapProcessCamtWorkflow(result: Record<string, unknown>): Record<strin
   };
 }
 
-export function registerCamtImportTools(server: McpServer, api: ApiContext): void {
+export function registerCamtImportTools(
+  server: McpServer,
+  api: ApiContext,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
+): void {
   const handlers = new Map<string, CamtToolHandler>();
+
+  // Both constituents are fully covered by the merged process_camt053 modes
+  // (parse / dry_run / execute). Handlers stay captured for internal routing;
+  // the tools enter tools/list (a fixed per-session token cost) only when
+  // EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1.
+  const granularOnlyTools = new Set(["parse_camt053", "import_camt053"]);
 
   function registerCapturedTool<Args extends z.ZodRawShape>(
     name: string,
@@ -1114,6 +1125,7 @@ export function registerCamtImportTools(server: McpServer, api: ApiContext): voi
     cb: (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown,
   ): void {
     handlers.set(name, cb as unknown as CamtToolHandler);
+    if (granularOnlyTools.has(name) && !exposure.exposeGranularTools) return;
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
 

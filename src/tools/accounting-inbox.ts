@@ -4,6 +4,7 @@ import { basename, extname, resolve } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
+import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
@@ -761,10 +762,15 @@ function captureInternalToolHandlers(api: ApiContext): Map<string, AutopilotInte
     },
   } as unknown as McpServer;
 
-  registerCamtImportTools(server, api);
+  // This registry feeds the internal autopilot pipeline, not the MCP tool
+  // surface, so it must always see every tool regardless of what the operator
+  // exposes in tools/list via EARVELDAJA_EXPOSE_GRANULAR_TOOLS.
+  const captureEverything: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true };
+
+  registerCamtImportTools(server, api, captureEverything);
   registerWiseImportTools(server, api);
-  registerReceiptInboxTools(server, api);
-  registerBankReconciliationTools(server, api);
+  registerReceiptInboxTools(server, api, captureEverything);
+  registerBankReconciliationTools(server, api, captureEverything);
 
   return handlers;
 }
@@ -900,10 +906,10 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
       suggested_workflow: isOwnerExpense ? undefined : "book-invoice",
       suggested_tools: isOwnerExpense
         ? ["create_owner_expense_reimbursement"]
-        : ["process_receipt_batch"],
+        : ["receipt_batch"],
       next_step_summary: isOwnerExpense
         ? "After the missing VAT/business-use answers are known, continue with create_owner_expense_reimbursement instead of forcing this through purchase-invoice booking."
-        : `Resolve the missing receipt facts first${filePath ? ` for ${filePath}` : ""}, then either book it via book-invoice for one document or rerun process_receipt_batch for the folder.`,
+        : `Resolve the missing receipt facts first${filePath ? ` for ${filePath}` : ""}, then either book it via book-invoice for one document or rerun receipt_batch for the folder.`,
     };
   }
 
@@ -917,7 +923,7 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
       unresolved_questions: guidance?.follow_up_questions ?? [],
       policy_hint: guidance?.policy_hint,
       suggested_workflow: "classify-unmatched",
-      suggested_tools: ["classify_unmatched_transactions", "apply_transaction_classifications"],
+      suggested_tools: ["classify_bank_transactions"],
       next_step_summary: "Decide the real treatment of this transaction group first. Only after that should you either book it manually, save a stable rule, or rerun the classification/apply flow.",
     };
   }
@@ -942,7 +948,7 @@ function resolveReviewItemPlan(reviewItem: Record<string, unknown>): ReviewResol
         ? ["cleanup_camt_possible_duplicate"]
         : newTransactionId !== undefined
           ? ["delete_transaction"]
-          : ["import_camt053"],
+          : ["process_camt053"],
       next_step_summary: confirmedMatches.length > 1
         ? `Multiple confirmed transactions match this CAMT row${newTransactionId !== undefined ? ` alongside new PROJECT transaction ${newTransactionId}` : ""}. Choose the authoritative older row first; only then should any metadata patching or deletion happen.`
         : confirmedMatch && newTransactionId !== undefined
@@ -1203,7 +1209,11 @@ function buildReviewActionResponse(
   };
 }
 
-export function registerAccountingInboxTools(server: McpServer, api: ApiContext): void {
+export function registerAccountingInboxTools(
+  server: McpServer,
+  api: ApiContext,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
+): void {
   // accounting_inbox is the single inbox entry point: mode="scan" plans,
   // mode="dry_run" runs the safe dry-run pipeline. (The former
   // prepare_accounting_inbox / run_accounting_inbox_dry_runs tools were exact
@@ -1276,7 +1286,9 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
     },
   );
 
-  registerTool(server,
+  // Granular constituent of continue_accounting_workflow (action="resolve_review");
+  // listed in tools/list only when EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1.
+  if (exposure.exposeGranularTools) registerTool(server,
     "resolve_accounting_review_item",
     "Resolve one accounting review item into recommendation, questions, and next workflow/tool.",
     {
@@ -1289,7 +1301,9 @@ export function registerAccountingInboxTools(server: McpServer, api: ApiContext)
     },
   );
 
-  registerTool(server,
+  // Granular constituent of continue_accounting_workflow (action="prepare_action");
+  // listed in tools/list only when EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1.
+  if (exposure.exposeGranularTools) registerTool(server,
     "prepare_accounting_review_action",
     "Prepare the concrete approval action for one resolved accounting review item.",
     {

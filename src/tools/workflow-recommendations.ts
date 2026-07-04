@@ -92,7 +92,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Turn one accounting review item into a recommendation, compliance basis, unresolved questions, and next workflow.",
     when_to_use: ["review item", "accountant review", "needs review", "compliance basis", "classification group"],
     required_inputs: ["review_item_json"],
-    primary_tools: ["continue_accounting_workflow", "resolve_accounting_review_item"],
+    primary_tools: ["continue_accounting_workflow"],
     risk_policy: {
       default_mode: "accountant_review",
       interrupt_when: ["unresolved accounting judgment", "missing source evidence"],
@@ -111,7 +111,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Prepare the concrete action for an already-resolved review item, such as duplicate cleanup or saving a booking rule.",
     when_to_use: ["prepare approved action", "cleanup duplicate", "save rule", "proposed action", "after review resolution"],
     required_inputs: ["review_item_json", "optional save_as_rule", "optional rule_override_json"],
-    primary_tools: ["continue_accounting_workflow", "prepare_accounting_review_action"],
+    primary_tools: ["continue_accounting_workflow"],
     risk_policy: {
       default_mode: "confirm_once",
       interrupt_when: ["approval missing", "rule fields incomplete", "destructive duplicate cleanup"],

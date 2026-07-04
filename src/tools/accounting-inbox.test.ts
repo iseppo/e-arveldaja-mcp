@@ -21,11 +21,15 @@ vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
 
 const mockedParseDocument = vi.mocked(parseDocument);
 
+// Behavior tests exercise the granular constituent tools directly, so register
+// with the full surface exposed (default hides them behind the merged tools).
+const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true };
+
 function setupAccountingInboxTool(apiOptions: AccountingWorkflowApiOptions = {}, toolName = "accounting_inbox") {
   const server = createMockToolServer();
   const api = createAccountingWorkflowApi(apiOptions);
 
-  registerAccountingInboxTools(server, api);
+  registerAccountingInboxTools(server, api, EXPOSE_GRANULAR);
 
   return {
     api,
@@ -1109,7 +1113,9 @@ ${entryXml}
     expect(payload).toMatchObject({
       review_type: "receipt_review",
       suggested_workflow: "book-invoice",
-      suggested_tools: ["process_receipt_batch"],
+      // The suggestion points at the merged default-surface tool, not the
+      // granular-gated process_receipt_batch primitive.
+      suggested_tools: ["receipt_batch"],
     });
   });
 
@@ -1519,7 +1525,7 @@ ${entryXml}
         },
       } as any;
 
-      registerReceiptInboxTools(server, api);
+      registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
       const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "classify_unmatched_transactions");
       if (!registration) throw new Error("classify_unmatched_transactions not registered");
       const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;

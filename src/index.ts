@@ -474,7 +474,7 @@ async function main() {
   }, {
     instructions: setupMode ? `Setup mode:
 - No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.
-- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, scan_receipt_folder, parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
+- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, receipt_batch (mode="scan"), parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
 - Call get_setup_instructions for the exact credential setup steps.
 - list_connections returns the currently configured connections (0 until credentials are added).
 - Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.
@@ -754,8 +754,8 @@ async function main() {
     "Retrieve mutating-operation audit log Markdown for the current connection, another audit-log label, or connection:<raw name>.",
     {
       connection: z.string().optional().describe("Audit-log label, or connection:<raw connection name>; default current connection."),
-      entity_type: AuditEntityType.optional().describe("Filter by entity type (client, product, journal, transaction, sale_invoice, purchase_invoice, invoice_series, bank_account, invoice_info, tool_execution)"),
-      action: AuditAction.optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT, DELETE_FAILED, CONNECTION_SWITCH_INTERRUPTED)"),
+      entity_type: AuditEntityType.optional().describe("Filter by entity type."),
+      action: AuditAction.optional().describe("Filter by action."),
       date_from: z.string().optional().describe("Return entries from this date (YYYY-MM-DD or ISO 8601)"),
       date_to: z.string().optional().describe("Return entries up to this date (YYYY-MM-DD or ISO 8601)"),
       limit: z.number().int().min(1).optional().describe("Maximum entries to return (positive integer, default 100, returns most recent)"),
@@ -974,18 +974,18 @@ async function main() {
   registerPdfWorkflowTools(scopedServer, api);
   registerDocumentAttachmentTools(scopedServer, api);
   registerCurrencyRoundingTools(scopedServer, api);
-  registerBankReconciliationTools(scopedServer, api);
+  registerBankReconciliationTools(scopedServer, api, toolExposure);
   registerFinancialStatementTools(scopedServer, api);
   registerAgingTools(scopedServer, api);
   registerRecurringInvoiceTools(scopedServer, api);
   registerEstonianTaxTools(scopedServer, api);
   registerAnnualReportTools(scopedServer, api);
   registerDocumentAuditTools(scopedServer, api);
-  registerReceiptInboxTools(scopedServer, api);
+  registerReceiptInboxTools(scopedServer, api, toolExposure);
   if (toolExposure.enableLightyear) registerLightyearTools(scopedServer, api);
   registerWiseImportTools(scopedServer, api);
-  registerCamtImportTools(scopedServer, api);
-  registerAccountingInboxTools(scopedServer, api);
+  registerCamtImportTools(scopedServer, api, toolExposure);
+  registerAccountingInboxTools(scopedServer, api, toolExposure);
   registerAnalyzeUnconfirmedTools(scopedServer, api);
   registerWorkflowRecommendationTools(scopedServer);
 
@@ -995,7 +995,7 @@ async function main() {
   registerAccountingKnowledgeResources(scopedServer);
 
   // Register prompts
-  registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined });
+  registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined, toolExposure });
 
   // Start server
   const transport = new StdioServerTransport();

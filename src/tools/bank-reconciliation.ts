@@ -3,6 +3,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
@@ -243,8 +244,20 @@ export function getInvoiceMatchEligibility(
   };
 }
 
-export function registerBankReconciliationTools(server: McpServer, api: ApiContext): void {
+export function registerBankReconciliationTools(
+  server: McpServer,
+  api: ApiContext,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
+): void {
   const handlers = new Map<string, BankReconciliationToolHandler>();
+
+  // Constituents fully covered by the merged reconcile_bank_transactions modes
+  // (suggest / dry_run_auto_confirm / execute_auto_confirm). Their handlers are
+  // always captured so the merged tool keeps routing to them, but they enter
+  // tools/list (a fixed per-session token cost) only when
+  // EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1. reconcile_inter_account_transfers is
+  // never gated: the merged tool has no inter-account execute mode.
+  const granularOnlyTools = new Set(["reconcile_transactions", "auto_confirm_exact_matches"]);
 
   function registerCapturedTool<Args extends z.ZodRawShape>(
     name: string,
@@ -254,6 +267,7 @@ export function registerBankReconciliationTools(server: McpServer, api: ApiConte
     cb: (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown,
   ): void {
     handlers.set(name, cb as unknown as BankReconciliationToolHandler);
+    if (granularOnlyTools.has(name) && !exposure.exposeGranularTools) return;
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
 

@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-133 tools (128 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
+123 tools by default (118 with Lightyear disabled, 133 with granular tools exposed — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -70,17 +70,28 @@ serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
 ### Tool exposure (per-session token cost)
 
 `tools/list` is loaded into the client context on every session, so the tool
-surface is a fixed per-session token cost. The Lightyear investment tools are an
-optional feature group that can be dropped when unused (see
-`getToolExposureConfig()` in `src/config.ts`):
+surface is a fixed per-session token cost. Two env flags control optional parts
+of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
 - **`EARVELDAJA_DISABLE_LIGHTYEAR=1`** — do not register the Lightyear
   investment tools (`book_lightyear_*`, `parse_lightyear_*`,
-  `lightyear_portfolio_summary`). Use when the company does not track
-  investments. Default: Lightyear is enabled.
+  `lightyear_portfolio_summary`) or the `lightyear-booking` prompt. Use when
+  the company does not track investments. Default: Lightyear is enabled.
+- **`EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`** — also register the 10 granular
+  constituent tools whose functionality is fully covered by merged mode-based
+  entry points: `reconcile_transactions`, `auto_confirm_exact_matches`
+  (→ `reconcile_bank_transactions`), `parse_camt053`, `import_camt053`
+  (→ `process_camt053`), `scan_receipt_folder`, `process_receipt_batch`
+  (→ `receipt_batch`), `classify_unmatched_transactions`,
+  `apply_transaction_classifications` (→ `classify_bank_transactions`),
+  `resolve_accounting_review_item`, `prepare_accounting_review_action`
+  (→ `continue_accounting_workflow`). Default: hidden — the merged tools keep
+  routing to the same handlers internally, so no functionality is lost.
+  `reconcile_inter_account_transfers` is never gated (no merged execute mode).
 
-The default surface is 133 tools; `DISABLE_LIGHTYEAR` drops it to 128. (The
-former `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
+The default surface is 123 tools; `DISABLE_LIGHTYEAR` drops it to 118;
+`EXPOSE_GRANULAR_TOOLS` raises it to 133. (The former
+`prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
 
@@ -245,7 +256,10 @@ fields with a per-call random nonce sandbox via `wrapUntrustedOcr` in
 **Wrapped at MCP output:**
 - Direct processing tools: `extract_pdf_invoice`, `parse_camt053`,
   `import_camt053`, `process_receipt_batch`, `parse_lightyear_capital_gains`,
-  `parse_lightyear_statement`, `import_wise_transactions`, etc.
+  `parse_lightyear_statement`, `import_wise_transactions`, etc. (Granular-gated
+  tools listed here stay wrapped when exposed; the merged entry points that
+  delegate to them — `process_camt053`, `receipt_batch`, … — inherit the same
+  wrapped output.)
 - `get_document`: the stored/uploaded-document filename (`name`) — it is
   user-supplied content, so it is wrapped in both the metadata-only and
   full-payload branches.
@@ -330,5 +344,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 133 tools
+const { tools } = await client.listTools(); // 123 tools (default exposure)
 ```

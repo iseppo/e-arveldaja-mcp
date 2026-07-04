@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerPrompt as registerMcpPrompt } from "./mcp-compat.js";
-import type { CredentialSetupInfo } from "./config.js";
+import type { CredentialSetupInfo, ToolExposureConfig } from "./config.js";
 import {
   buildWorkflowPromptSourceText,
   WORKFLOW_PROMPT_SOURCE_BY_PROMPT,
@@ -101,7 +101,7 @@ function registerWorkflowPromptWithoutArgs(
 
 export function registerPrompts(
   server: McpServer,
-  options: { setupInfo?: CredentialSetupInfo } = {},
+  options: { setupInfo?: CredentialSetupInfo; toolExposure?: ToolExposureConfig } = {},
 ): void {
   const setupInfo = options.setupInfo;
 
@@ -147,7 +147,7 @@ export function registerPrompts(
     server,
     undefined,
     "prepare-accounting-review-action",
-    "SECOND PASS of the review flow. Calls `continue_accounting_workflow` with action='prepare_action' to emit a concrete `proposed_action` for explicit approval.",
+    "SECOND PASS of the review flow: continue_accounting_workflow action='prepare_action' emits a concrete proposed_action for explicit approval.",
     {
       review_item_json: z.string().describe("JSON object from autopilot.needs_accountant_review[*].resolver_input or a direct review item payload"),
       save_as_rule: z.boolean().optional().describe("Optional hint to prepare a save_auto_booking_rule action when the treatment is stable"),
@@ -179,7 +179,7 @@ export function registerPrompts(
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
     },
     {
-      offlineTools: ["receipt_batch", "scan_receipt_folder"],
+      offlineTools: ["receipt_batch"],
       note: "Full receipt processing, supplier resolution, duplicate checks, bank matching, and invoice creation all require configured credentials.",
     },
   );
@@ -196,8 +196,8 @@ export function registerPrompts(
       date_to: z.string().optional().describe("Optional statement-entry upper bound (YYYY-MM-DD)"),
     },
     {
-      offlineTools: ["process_camt053", "parse_camt053"],
-      note: "Parsing the CAMT file can be done locally, but dry-run imports and transaction creation require configured e-arveldaja credentials.",
+      offlineTools: ["process_camt053"],
+      note: "Parsing the CAMT file can be done locally (process_camt053 mode='parse'), but dry-run imports and transaction creation require configured e-arveldaja credentials.",
     },
   );
 
@@ -205,7 +205,7 @@ export function registerPrompts(
     server,
     setupInfo,
     "import-wise",
-    "Preview Wise transaction import results, including fees and skipped duplicates, before creating any bank transactions.",
+    "Preview Wise CSV import results (fees, skipped duplicates) before creating any bank transactions.",
     {
       file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export"),
       accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID for the Wise account; if omitted, list account dimensions and ask the user to confirm the Wise bank account"),
@@ -280,26 +280,32 @@ export function registerPrompts(
     },
   );
 
-  registerWorkflowPrompt(
-    server,
-    setupInfo,
-    "lightyear-booking",
-    "Book Lightyear investment trades and distributions into e-arveldaja journals. Parses CSV exports, pairs FX conversions, matches capital gains, and creates journal entries.",
-    {
-      statement_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
-      capital_gains_path: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sells)"),
-      investment_account: z.number().describe("Investment asset account number (e.g. 1550)"),
-      broker_account: z.number().describe("Broker cash account number (e.g. 1120)"),
-      income_account: z.number().optional().describe("Distribution income account (e.g. 8320 or 8400)"),
-      gain_loss_account: z.number().optional().describe("Realized gain/loss account for sell trades"),
-      loss_account: z.number().optional().describe("Optional separate realized loss account"),
-      fee_account: z.number().optional().describe("Optional fee expense account"),
-      tax_account: z.number().optional().describe("Withheld tax account for distributions"),
-      investment_dimension_id: z.number().optional().describe("Optional dimension ID for the investment account"),
-      broker_dimension_id: z.number().optional().describe("Optional dimension ID for the broker account"),
-    },
-    {
-      note: "Lightyear booking needs live e-arveldaja journal creation and duplicate checks, so it cannot run before credentials are configured.",
-    },
-  );
+  // The Lightyear tool group can be dropped via EARVELDAJA_DISABLE_LIGHTYEAR;
+  // skip the matching prompt too so prompts/list never advertises a workflow
+  // whose tools are not registered. Wrapped in an `if` (not an early return) so
+  // any prompt added after this block still registers regardless of the flag.
+  if (options.toolExposure?.enableLightyear !== false) {
+    registerWorkflowPrompt(
+      server,
+      setupInfo,
+      "lightyear-booking",
+      "Book Lightyear investment trades and distributions into e-arveldaja journals. Parses CSV exports, pairs FX conversions, matches capital gains, and creates journal entries.",
+      {
+        statement_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
+        capital_gains_path: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sells)"),
+        investment_account: z.number().describe("Investment asset account number (e.g. 1550)"),
+        broker_account: z.number().describe("Broker cash account number (e.g. 1120)"),
+        income_account: z.number().optional().describe("Distribution income account (e.g. 8320 or 8400)"),
+        gain_loss_account: z.number().optional().describe("Realized gain/loss account for sell trades"),
+        loss_account: z.number().optional().describe("Optional separate realized loss account"),
+        fee_account: z.number().optional().describe("Optional fee expense account"),
+        tax_account: z.number().optional().describe("Withheld tax account for distributions"),
+        investment_dimension_id: z.number().optional().describe("Optional dimension ID for the investment account"),
+        broker_dimension_id: z.number().optional().describe("Optional dimension ID for the broker account"),
+      },
+      {
+        note: "Lightyear booking needs live e-arveldaja journal creation and duplicate checks, so it cannot run before credentials are configured.",
+      },
+    );
+  }
 }

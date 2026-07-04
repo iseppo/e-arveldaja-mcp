@@ -510,10 +510,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       items: jsonObjectArrayInput.describe(
         "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts."
       ),
-      vat_price: z.number().optional().describe("EXACT total VAT from the original invoice. Optional only when genuinely unknown; when present on the invoice, pass the exact original total and never recalculate."),
-      gross_price: z.number().optional().describe("EXACT total gross from the original invoice. Optional only when genuinely unknown; when present on the invoice, pass the exact original total and never recalculate."),
+      vat_price: z.number().optional().describe("EXACT total VAT from the original invoice; never recalculate. Omit only if truly absent from the document."),
+      gross_price: z.number().optional().describe("EXACT total gross from the original invoice; never recalculate. Omit only if truly absent from the document."),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
-      notes: z.string().optional().describe("Optional notes for genuinely useful context such as assumptions made or manual adjustments. Do NOT use the source document filename — the document is already uploaded and attached to the invoice."),
+      notes: z.string().optional().describe("Optional notes (assumptions made, manual adjustments). Do NOT use the source document filename — the document is already uploaded and attached."),
       ref_number: z.string().optional().describe("Reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
       currency: z.string().optional().describe("Currency code (default EUR). Use the original invoice currency (e.g. USD) and supply currency_rate."),

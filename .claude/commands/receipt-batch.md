@@ -45,8 +45,8 @@ Call `receipt_batch`:
 
 Review:
 - `receipt_batch` is the preferred merged workflow tool.
-- Fallback compatibility primitives: `scan_receipt_folder` and `process_receipt_batch` remain available, but only use them if the preferred tool is unavailable. Do not mention fallback tool names to the user.
-- Use `result` as the delegated `process_receipt_batch` payload.
+- Fallback compatibility primitives: `scan_receipt_folder` and `process_receipt_batch` are registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `receipt_batch` with `mode="scan"` / `mode="dry_run"` / `mode="create"` / `mode="create_and_confirm"`. Do not mention fallback tool names to the user.
+- Use `result` as the delegated batch payload.
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.needs_review`, `execution.errors`, and `execution.audit_reference`.
 - Fall back to legacy top-level `summary`, `skipped`, and `results` only if `execution` is absent.

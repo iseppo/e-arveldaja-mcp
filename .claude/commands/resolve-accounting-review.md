@@ -43,4 +43,4 @@ For owner-paid expense receipts: Ordinary business VAT defaults to deductible, w
 
 If the next step is clear, continue with `continue_accounting_workflow` and `action: "prepare_action"` instead of inventing your own action plan.
 
-`resolve_accounting_review_item` remains available as a compatibility primitive, but prefer the merged continuation tool for new flows.
+`resolve_accounting_review_item` is a compatibility primitive registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use the merged continuation tool (`continue_accounting_workflow` with `action="resolve_review"`).

@@ -19,7 +19,7 @@ Preferred: call `reconcile_bank_transactions`:
 - mode: "suggest"
 - min_confidence: 30 (to see all potential matches including low-confidence ones)
 
-Fallback compatibility primitive: `reconcile_transactions` remains available, but only use it if the preferred mode-based tool is unavailable. Do not mention fallback tool names to the user.
+Fallback compatibility primitive: `reconcile_transactions` is registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `reconcile_bank_transactions` with `mode="suggest"`. Do not mention fallback tool names to the user.
 
 Review the output:
 - `result.total_unconfirmed`: bank transactions needing attention
@@ -54,7 +54,7 @@ Call `reconcile_bank_transactions`:
 - mode: "dry_run_auto_confirm"
 - min_confidence: 90
 
-Fallback compatibility primitive: `auto_confirm_exact_matches` remains available, but prefer `reconcile_bank_transactions`.
+Fallback compatibility primitive: `auto_confirm_exact_matches` is registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `reconcile_bank_transactions` with `mode="dry_run_auto_confirm"` / `mode="execute_auto_confirm"`.
 
 Treat `result.execution` as the canonical batch payload when present. Prefer `result.execution.summary`, `result.execution.results`, `result.execution.errors`, and `result.execution.audit_reference`.
 
