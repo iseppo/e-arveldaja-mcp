@@ -176,7 +176,7 @@ describe("MCP Server Integration", () => {
       "create_purchase_invoice",
       "compute_trial_balance",
       "extract_pdf_invoice",
-      "reconcile_transactions",
+      "reconcile_bank_transactions",
     ]));
   });
 
