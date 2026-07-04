@@ -18,6 +18,9 @@
 - **Currency-rounding and purchase-invoice base VAT reconcile to the cent.** `reconcile_currency_rounding` and the foreign-currency purchase-invoice writer now derive `base_vat` as the residual `base_gross − base_net`, so the trio always reconciles exactly instead of drifting a cent when net, vat, and gross are each rounded independently against the FX rate (which could fail the API's sum validation). `compute_account_balance` also rounds its returned balance so an exact-boundary consumer (the § 157 check) can't be flipped by sub-cent float noise.
 - **Consistency and documentation fixes.** `reconcile-bank` now books bank/transfer fees to 8610 (consistent with Wise fees) and no longer labels an ≥80 confidence match "safe to auto-confirm" (auto mode gates at ≥90 and still requires approval). `compute_client_debt` and the purchase-VAT fallback now interpolate their default account numbers into descriptions/warnings instead of hard-coding them, and `compute_account_balance`'s `account_id` help text is corrected. Lightyear fee accounts reference the shared `DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT` constant instead of a repeated literal.
 
+### Changed
+- **`extract_pdf_invoice` no longer emits a duplicate `extracted.raw_text`.** The full document/OCR text was returned twice per call — once as `hints.raw_text` and again as `extracted.raw_text` (both are the same parsed text). Only `hints.raw_text` is kept (the booking workflow's documented source of truth; still capped to `MAX_UNTRUSTED_TEXT_CHARS` and wrapped in the per-call untrusted-OCR nonce sandbox). The `extracted` object keeps its structured fields (supplier, totals, and the still-wrapped `description` / `supplier_name`) but no longer carries `raw_text` or its `raw_text_truncated` / `raw_text_length` markers. Saves up to ~5k tokens per extraction on long documents with no loss of information — read the document text from `hints.raw_text`.
+
 ## [0.17.0] - 2026-06-17
 
 ### Added
