@@ -474,7 +474,7 @@ async function main() {
   }, {
     instructions: setupMode ? `Setup mode:
 - No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.
-- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, scan_receipt_folder, parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
+- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, receipt_batch (mode="scan"), parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
 - Call get_setup_instructions for the exact credential setup steps.
 - list_connections returns the currently configured connections (0 until credentials are added).
 - Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.
@@ -493,6 +493,10 @@ async function main() {
 
   // --- Multi-account tools ---
 
+  // toolExposure decides which optional/redundant tools enter tools/list;
+  // resolved here (before the credential tools) so setup-tool gating can use it.
+  const toolExposure = getToolExposureConfig();
+
   registerTool(server, "get_setup_instructions",
     "Show how to configure e-arveldaja API credentials when the server is running without connections.",
     {},
@@ -505,7 +509,13 @@ async function main() {
     })
   );
 
-  registerTool(server, "import_apikey_credentials",
+  // Credential-management tools are only needed in setup mode (no connections
+  // yet) or when an operator is adding/rotating credentials, so they are hidden
+  // by default once connections exist to cut the per-session tools/list cost.
+  // Restore them in configured mode with EARVELDAJA_EXPOSE_SETUP_TOOLS=1.
+  // get_setup_instructions stays registered above so the agent can always
+  // explain how to add a connection (its payload documents these tools).
+  if (setupMode || toolExposure.exposeSetupTools) registerTool(server, "import_apikey_credentials",
     "Verify apikey*.txt credentials and store them in local/global .env. overwrite=false appends different credentials as another connection.",
     {
       file_path: z.string().optional().describe("Absolute path to apikey*.txt; defaults to the only secure apikey*.txt in cwd."),
@@ -583,7 +593,7 @@ async function main() {
     }
   );
 
-  registerTool(server, "list_stored_credentials",
+  if (setupMode || toolExposure.exposeSetupTools) registerTool(server, "list_stored_credentials",
     "Inspect credentials stored in local/global .env files.",
     {
       storage_scope: z.enum(["local", "global"]).optional().describe("Optional scope filter."),
@@ -611,7 +621,7 @@ async function main() {
     }
   );
 
-  registerTool(server, "remove_stored_credentials",
+  if (setupMode || toolExposure.exposeSetupTools) registerTool(server, "remove_stored_credentials",
     "Remove one stored credential block from a local/global .env file.",
     {
       storage_scope: z.enum(["local", "global"]).describe("Which .env file to modify."),
@@ -754,8 +764,8 @@ async function main() {
     "Retrieve mutating-operation audit log Markdown for the current connection, another audit-log label, or connection:<raw name>.",
     {
       connection: z.string().optional().describe("Audit-log label, or connection:<raw connection name>; default current connection."),
-      entity_type: AuditEntityType.optional().describe("Filter by entity type (client, product, journal, transaction, sale_invoice, purchase_invoice, invoice_series, bank_account, invoice_info, tool_execution)"),
-      action: AuditAction.optional().describe("Filter by action (CREATED, UPDATED, DELETED, CONFIRMED, INVALIDATED, UPLOADED, IMPORTED, SENT, DELETE_FAILED, CONNECTION_SWITCH_INTERRUPTED)"),
+      entity_type: AuditEntityType.optional().describe("Filter by entity type."),
+      action: AuditAction.optional().describe("Filter by action."),
       date_from: z.string().optional().describe("Return entries from this date (YYYY-MM-DD or ISO 8601)"),
       date_to: z.string().optional().describe("Return entries up to this date (YYYY-MM-DD or ISO 8601)"),
       limit: z.number().int().min(1).optional().describe("Maximum entries to return (positive integer, default 100, returns most recent)"),
@@ -967,27 +977,25 @@ async function main() {
   }) as McpServer;
 
   // Register all tools (via scopedServer so handlers get connection-pinned).
-  // toolExposure decides which optional/redundant tools enter tools/list.
-  const toolExposure = getToolExposureConfig();
-  registerCrudTools(scopedServer, api);
+  registerCrudTools(scopedServer, api, toolExposure);
   registerAccountBalanceTools(scopedServer, api);
   registerPdfWorkflowTools(scopedServer, api);
   registerDocumentAttachmentTools(scopedServer, api);
   registerCurrencyRoundingTools(scopedServer, api);
-  registerBankReconciliationTools(scopedServer, api);
+  registerBankReconciliationTools(scopedServer, api, toolExposure);
   registerFinancialStatementTools(scopedServer, api);
-  registerAgingTools(scopedServer, api);
-  registerRecurringInvoiceTools(scopedServer, api);
-  registerEstonianTaxTools(scopedServer, api);
-  registerAnnualReportTools(scopedServer, api);
+  registerAgingTools(scopedServer, api, toolExposure);
+  if (toolExposure.enableSales) registerRecurringInvoiceTools(scopedServer, api);
+  if (toolExposure.enableTaxTools) registerEstonianTaxTools(scopedServer, api);
+  if (toolExposure.enableAnnualReport) registerAnnualReportTools(scopedServer, api);
   registerDocumentAuditTools(scopedServer, api);
-  registerReceiptInboxTools(scopedServer, api);
+  registerReceiptInboxTools(scopedServer, api, toolExposure);
   if (toolExposure.enableLightyear) registerLightyearTools(scopedServer, api);
   registerWiseImportTools(scopedServer, api);
-  registerCamtImportTools(scopedServer, api);
-  registerAccountingInboxTools(scopedServer, api);
+  registerCamtImportTools(scopedServer, api, toolExposure);
+  registerAccountingInboxTools(scopedServer, api, toolExposure);
   registerAnalyzeUnconfirmedTools(scopedServer, api);
-  registerWorkflowRecommendationTools(scopedServer);
+  registerWorkflowRecommendationTools(scopedServer, toolExposure);
 
   // Register resources via scopedServer so reads stay pinned to the selected connection
   registerResources(scopedServer, api);
@@ -995,7 +1003,7 @@ async function main() {
   registerAccountingKnowledgeResources(scopedServer);
 
   // Register prompts
-  registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined });
+  registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined, toolExposure });
 
   // Start server
   const transport = new StdioServerTransport();

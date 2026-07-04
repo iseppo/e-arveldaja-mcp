@@ -1,10 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import { registerWorkflowRecommendationTools } from "./workflow-recommendations.js";
+import type { ToolExposureConfig } from "../config.js";
 
-function getRecommendWorkflowHarness() {
+const ALL_ENABLED: ToolExposureConfig = {
+  enableLightyear: true,
+  exposeGranularTools: false,
+  exposeSetupTools: false,
+  enableTaxTools: true,
+  enableReferenceAdmin: true,
+  enableAnnualReport: true,
+  enableSales: true,
+  enableProducts: true,
+};
+
+function getRecommendWorkflowHarness(exposure?: Partial<ToolExposureConfig>) {
   const server = { registerTool: vi.fn() };
-  registerWorkflowRecommendationTools(server as never);
+  registerWorkflowRecommendationTools(server as never, { ...ALL_ENABLED, ...exposure });
   const call = server.registerTool.mock.calls.find(([name]) => name === "recommend_workflow");
   if (!call) throw new Error("recommend_workflow tool was not registered");
   return {
@@ -215,6 +227,29 @@ describe("recommend_workflow", () => {
       tool: "receipt_batch",
       args: { mode: "dry_run" },
     });
+  });
+
+  it("drops receivables aging from the company-overview recommendation when sales is disabled", async () => {
+    const { handler } = getRecommendWorkflowHarness({ enableSales: false });
+
+    const result = await handler({ goal: "financial overview dashboard" });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+
+    expect(payload.recommended_workflow).toMatchObject({ id: "company-overview" });
+    expect(payload.raw.primary_tools).not.toContain("compute_receivables_aging");
+    expect(payload.raw.primary_tools).toContain("compute_payables_aging");
+  });
+
+  it("omits the lightyear-booking workflow entirely when Lightyear is disabled", async () => {
+    const { handler } = getRecommendWorkflowHarness({ enableLightyear: false });
+
+    const listed = parseMcpResponse((await handler({})).content[0]!.text) as Record<string, any>;
+    expect(listed.available_workflows.map((workflow: any) => workflow.id)).not.toContain("lightyear-booking");
+
+    const recommended = parseMcpResponse(
+      (await handler({ goal: "book Lightyear CSV dividends and trades" })).content[0]!.text,
+    ) as Record<string, any>;
+    expect(recommended.recommended_workflow?.id).not.toBe("lightyear-booking");
   });
 
   it("starts book-invoice recommendations with current VAT status before extraction", async () => {

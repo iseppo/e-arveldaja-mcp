@@ -43,7 +43,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       has_bank_ref: z.boolean().optional().describe("true = only transactions with a bank_ref_number; false = only without"),
       bank_ref_contains: z.string().optional().describe("Case-insensitive substring match on bank_ref_number (client-side)"),
       clients_id: z.number().int().positive().optional().describe("Filter by clients_id. Narrowed server-side."),
-      per_page: z.number().int().min(1).max(500).optional().describe("Items per page (default 100, max 500). Applies only when a client-side filter (amount/bank-ref/dimension) is active; otherwise the API's native pagination is used."),
+      per_page: z.number().int().min(1).max(500).optional().describe("Items per page (default 100, max 500); applies only when a client-side filter (amount/bank-ref/dimension) is active."),
     },
     { ...readOnly, title: "List Transactions" },
     async (params) => {
@@ -144,7 +144,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
 
   registerTool(server, "create_transaction", "Create a bank transaction", {
     accounts_dimensions_id: coerceId.describe("Bank account dimension ID"),
-    type: z.string().describe("Transaction type to create: D for incoming/import-provided debit rows or C for outgoing/import-provided credit rows. Preserve tool-provided values; do not infer accounting treatment from an existing transaction's type."),
+    type: z.string().describe("D = incoming, C = outgoing (import-provided). Preserve tool-provided values; do not infer accounting treatment from a transaction's type."),
     amount: z.number().describe("Transaction amount"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
     date: isoDateString("Transaction date (YYYY-MM-DD)"),
@@ -174,18 +174,16 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
 
   registerTool(server, "confirm_transaction",
     "Confirm a bank transaction by providing distribution rows. " +
-    "If the transaction has no clients_id (common for CAMT imports), pass clients_id to set it before confirming — " +
+    "If the transaction has no clients_id (common for CAMT imports), pass clients_id — " +
     "otherwise the API rejects with 'buyer or supplier is missing'. " +
     "For invoice distributions, clients_id is auto-resolved from the invoice.",
     {
     id: coerceId.describe("Transaction ID"),
       distributions: jsonObjectArrayInput.optional().describe(
-        "Array of distribution rows: [{related_table, related_id, related_sub_id?, amount}]. " +
-      "related_table values: 'accounts' (book to a GL account), 'purchase_invoices', 'sale_invoices'. " +
-      "related_id is REQUIRED for all three related_table values (the account ID, purchase-invoice ID, or sale-invoice ID). " +
+        "Array of distribution rows: [{related_table: 'accounts'|'purchase_invoices'|'sale_invoices', related_id, related_sub_id?, amount}]. " +
+      "related_id is always REQUIRED (the account or invoice DB ID). " +
       "related_sub_id is REQUIRED when related_table='accounts' and the account has dimensions — " +
-      "pass the dimension ID there (e.g. 1360 'Arveldused aruandvate isikutega' with sub-account per person). " +
-      "Without related_sub_id the API rejects dimensioned-account postings."
+      "pass the dimension ID (e.g. 1360 has one sub-account per person); the API rejects dimensioned postings without it."
     ),
     clients_id: coerceId.optional().describe("Client ID to set on the transaction before confirming (required when transaction has no clients_id and distribution is against accounts, not invoices)"),
   }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions, clients_id }) => {

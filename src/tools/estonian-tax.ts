@@ -83,7 +83,7 @@ export function resolveIncomeTaxExpenseAccount(accounts: Account[], override?: n
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "prepare_dividend_package",
-    "Calculate dividend tax (22/78 CIT from 2025-01-01, 20/80 before) and create draft journal entries. Only the NET dividend drains retained earnings (Jaotamata kasum); the CIT is booked as an income-tax expense (kasumiaruande 'Tulumaks' rida) with an equal tax liability — per Estonian GAAP the dividend income tax is a current-period expense, not a direct reduction of retained earnings. Hard-blocks distributions that lack retained earnings or would push net assets below share capital (ÄS § 157) unless force=true.",
+    "Calculate dividend CIT (22/78 from 2025-01-01, 20/80 before) and create draft journal entries. Only the NET dividend debits retained earnings (Jaotamata kasum); the CIT books as a current-period income-tax expense (P&L 'Tulumaks' line), never a direct reduction of retained earnings. Hard-blocks distributions that lack retained earnings or would push net assets below share capital (ÄS § 157) unless force=true.",
     {
       net_dividend: z.number().finite().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: coerceId.describe("Shareholder client ID"),
@@ -486,7 +486,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       effective_date: isoDateSchema("Expense date (YYYY-MM-DD)"),
       description: z.string().describe("Expense description"),
       net_amount: z.number().finite().describe("Net amount (without VAT)"),
-      vat_rate: z.number().finite().describe("VAT rate as decimal (e.g. 0.24 for 24%, 0.13, 0.09, 0.05, or 0 for no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),
+      vat_rate: z.number().finite().describe("VAT rate as decimal (e.g. 0.24 for 24%; 0 = no VAT/non-deductible). Must be a fraction, NOT a percentage — use 0.24, not 24."),
       vat_amount: z.number().finite().optional().describe("Exact VAT amount (overrides vat_rate if provided)"),
       vat_deduction_mode: z.enum(["none", "full", "partial"]).optional().describe("VAT deduction mode. Use partial with deductible_vat_amount."),
       deductible_vat_amount: z.number().finite().optional().describe("Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default or configured ratio."),
@@ -706,7 +706,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "check_tax_free_limits",
-    "Compute the cumulative TuMS § 49 tax-free limits (representation costs 50 €/month + 2% of payroll; donations 3% of payroll or 10% of prior-year profit) and the income tax (22/78) on any excess. Pure calculator over caller-supplied year-to-date figures — get payroll from the TSD declaration and prior-year profit from compute_profit_and_loss; it does not read the ledger.",
+    "Compute cumulative TuMS § 49 tax-free limits (representation 50 €/month + 2% of payroll; donations 3% of payroll or 10% of prior-year profit) and the 22/78 income tax on any excess. Pure calculator over caller-supplied year-to-date figures (payroll from the TSD declaration, prior-year profit from compute_profit_and_loss); it does not read the ledger.",
     {
       as_of_date: isoDateSchema("Date the cumulative figures are taken as of (YYYY-MM-DD). Sets the 22/78 rate and the default months elapsed."),
       ytd_social_taxed_payroll: z.number().describe("Year-to-date payments subject to social tax (the 2%/3% base)."),

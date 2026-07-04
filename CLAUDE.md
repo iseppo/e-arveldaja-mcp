@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-133 tools (128 with Lightyear disabled — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
+120 tools by default (115 with Lightyear disabled; up to 133 with the optional granular and setup tools exposed — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -70,19 +70,87 @@ serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
 ### Tool exposure (per-session token cost)
 
 `tools/list` is loaded into the client context on every session, so the tool
-surface is a fixed per-session token cost. The Lightyear investment tools are an
-optional feature group that can be dropped when unused (see
-`getToolExposureConfig()` in `src/config.ts`):
+surface is a fixed per-session token cost. Eight env flags control optional
+parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
 - **`EARVELDAJA_DISABLE_LIGHTYEAR=1`** — do not register the Lightyear
   investment tools (`book_lightyear_*`, `parse_lightyear_*`,
-  `lightyear_portfolio_summary`). Use when the company does not track
-  investments. Default: Lightyear is enabled.
+  `lightyear_portfolio_summary`) or the `lightyear-booking` prompt. Use when
+  the company does not track investments. Default: Lightyear is enabled.
+- **`EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`** — also register the 10 granular
+  constituent tools whose functionality is fully covered by merged mode-based
+  entry points: `reconcile_transactions`, `auto_confirm_exact_matches`
+  (→ `reconcile_bank_transactions`), `parse_camt053`, `import_camt053`
+  (→ `process_camt053`), `scan_receipt_folder`, `process_receipt_batch`
+  (→ `receipt_batch`), `classify_unmatched_transactions`,
+  `apply_transaction_classifications` (→ `classify_bank_transactions`),
+  `resolve_accounting_review_item`, `prepare_accounting_review_action`
+  (→ `continue_accounting_workflow`). Default: hidden — the merged tools keep
+  routing to the same handlers internally, so no functionality is lost.
+  `reconcile_inter_account_transfers` is never gated (no merged execute mode).
+- **`EARVELDAJA_EXPOSE_SETUP_TOOLS=1`** — also register the credential-management
+  tools (`import_apikey_credentials`, `list_stored_credentials`,
+  `remove_stored_credentials`) when the server already has configured
+  connections. They are always registered in setup mode (no connections) and
+  hidden by default once credentials exist, since they are only needed to add or
+  rotate credentials. `get_setup_instructions` is never gated, so the agent can
+  always explain how to add a connection (set this flag to add a second company
+  without a restart).
 
-The default surface is 133 tools; `DISABLE_LIGHTYEAR` drops it to 128. (The
-former `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
+The next five are opt-out feature-group flags (default enabled; the group is
+registered unless the flag is set). They cut the surface for a lean deployment
+without changing the default:
+
+- **`EARVELDAJA_DISABLE_TAX_TOOLS=1`** — do not register the Estonian tax
+  helpers (`prepare_dividend_package`, `create_owner_expense_reimbursement`,
+  `check_tax_free_limits`). The statutory tax-rules advisory layer used by
+  `suggest_booking` is unaffected — only these three tools are unregistered.
+  Use when the deployment never runs dividend/reimbursement/tax-free-limit
+  workflows. Saves ≈1.5k tokens.
+- **`EARVELDAJA_DISABLE_REFERENCE_ADMIN=1`** — do not register the reference-data
+  administration tools that create, update, or delete configuration:
+  `create/update/delete_bank_account`, `create/update/delete_invoice_series`,
+  `update_invoice_info`, and the single-record `get_bank_account` /
+  `get_invoice_series` reads. The `list_*` / `get_invoice_info` / `get_vat_info`
+  reads stay registered so the agent can still inspect the configuration. Use
+  when the chart of accounts, bank accounts, and invoice series are already set
+  up and managed in the e-arveldaja UI. Saves ≈1.7k tokens.
+- **`EARVELDAJA_DISABLE_ANNUAL_REPORT=1`** — do not register the annual-report /
+  year-end tools (`prepare_year_end_close`, `generate_annual_report_data`,
+  `execute_year_end_close`). Use for the bulk of the year; re-enable at closing
+  time. Saves ≈0.4k tokens.
+- **`EARVELDAJA_DISABLE_SALES=1`** — do not register the sales-invoicing side:
+  the 11 sale-invoice tools (`list/get/create/update/delete/confirm/invalidate_sale_invoice`,
+  `get_sale_invoice_delivery_options`, `send_sale_invoice`,
+  `get_sale_invoice_document`, `get_sale_invoice_xml`),
+  `create_recurring_sale_invoices`, and the accounts-receivable report
+  `compute_receivables_aging`. The accounts-payable report
+  `compute_payables_aging` and all purchase-invoice tools stay. Use on a
+  purchase-side-only bookkeeping deployment. Saves ≈2.7k tokens (13 tools).
+- **`EARVELDAJA_DISABLE_PRODUCTS=1`** — do not register the product-catalog tools
+  (`list/get/create/update/deactivate/reactivate/delete_product`). Products are
+  the sale-invoice line-item catalog (not used by purchase invoices), so a
+  `DISABLE_SALES` deployment usually sets this too — but the flags are
+  independent. Saves ≈1.3k tokens (7 tools).
+
+The default surface is 120 tools; `DISABLE_LIGHTYEAR` drops it to 115.
+`EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
+credential tools; enabling both raises it to the full 133. The five opt-out
+group flags trim the default further — `DISABLE_TAX_TOOLS` (−3),
+`DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
+(−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
+every disable flag set (incl. Lightyear) lands near 80 tools. (The former
+`prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
+
+`recommend_workflow` filters its suggestions to the registered surface, so it
+never names a tool an opt-out flag has dropped (and it hides a whole workflow
+whose tools are all gated, e.g. `lightyear-booking` when Lightyear is off). The
+static workflow prompts (`company-overview`, `month-end`, …) are shared across
+purchase- and sales-side deployments and are not gated per flag, so they may
+still mention a dropped tool (e.g. `compute_receivables_aging` under
+`DISABLE_SALES`); the agent simply skips a tool that is not in `tools/list`.
 
 ## Authentication
 
@@ -245,7 +313,10 @@ fields with a per-call random nonce sandbox via `wrapUntrustedOcr` in
 **Wrapped at MCP output:**
 - Direct processing tools: `extract_pdf_invoice`, `parse_camt053`,
   `import_camt053`, `process_receipt_batch`, `parse_lightyear_capital_gains`,
-  `parse_lightyear_statement`, `import_wise_transactions`, etc.
+  `parse_lightyear_statement`, `import_wise_transactions`, etc. (Granular-gated
+  tools listed here stay wrapped when exposed; the merged entry points that
+  delegate to them — `process_camt053`, `receipt_batch`, … — inherit the same
+  wrapped output.)
 - `get_document`: the stored/uploaded-document filename (`name`) — it is
   user-supplied content, so it is wrapped in both the metadata-only and
   full-payload branches.
@@ -330,5 +401,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 133 tools
+const { tools } = await client.listTools(); // 120 tools (default exposure)
 ```

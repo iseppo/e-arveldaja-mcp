@@ -6,6 +6,7 @@ import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
 import { readOnly } from "../annotations.js";
+import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 
 interface AgingBucket {
   label: string;
@@ -60,9 +61,15 @@ function bucketLabel(days: number): string {
   return "90+";
 }
 
-export function registerAgingTools(server: McpServer, api: ApiContext): void {
+export function registerAgingTools(
+  server: McpServer,
+  api: ApiContext,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
+): void {
 
-  registerTool(server, "compute_receivables_aging",
+  // Receivables aging is the sales/AR side — gated with the sale-invoice group.
+  // Payables aging (below) is the purchase/AP side and is always registered.
+  if (exposure.enableSales) registerTool(server, "compute_receivables_aging",
     "Compute receivables aging by client from unpaid sale invoices. Pass as_of_date for a specific cutoff.",
     {
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),

@@ -99,7 +99,10 @@ function setupCamtTool(options: {
     },
   });
 
-  registerCamtImportTools(server, api);
+  // Behavior tests exercise the granular constituent tools directly, so
+  // register with the full surface exposed (default hides them behind the
+  // merged process_camt053 tool).
+  registerCamtImportTools(server, api, { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
 
   return {
     api,

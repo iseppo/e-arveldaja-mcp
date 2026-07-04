@@ -18,7 +18,7 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 ## Workflow
 
-`process_camt053` is the preferred merged workflow tool. Fallback compatibility primitives: `parse_camt053` and `import_camt053` remain available, but only use them if the preferred tool is unavailable. Do not mention fallback tool names to the user.
+`process_camt053` is the preferred merged workflow tool. Fallback compatibility primitives: `parse_camt053` and `import_camt053` are registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `process_camt053` with `mode="parse"` / `mode="dry_run"` / `mode="execute"`. Do not mention fallback tool names to the user.
 
 ### Step 1: Parse the statement
 
@@ -27,7 +27,7 @@ Call `process_camt053`:
 - `file_path`: the provided file
 
 Show:
-- `result` as the delegated `parse_camt053` payload
+- `result` as the delegated parse payload
 - `statement_metadata`
 - `summary.entry_count`
 - `summary.credit_count` and `summary.credit_total`
@@ -45,7 +45,7 @@ Call `process_camt053`:
 - include `date_from` / `date_to` when provided
 
 Review:
-- Use `result` as the delegated `import_camt053` payload.
+- Use `result` as the delegated import payload.
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary.total_statement_entries`, `execution.summary.eligible_entries`, `execution.summary.filtered_out`, `execution.summary.created_count`, `execution.summary.skipped_count`, `execution.summary.error_count`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
 - Also inspect `execution.needs_review` for possible duplicates against older manual transactions that lack CAMT bank references.

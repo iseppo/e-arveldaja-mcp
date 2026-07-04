@@ -8,13 +8,24 @@ import { toolError } from "../tool-error.js";
 import { toolResponse } from "../tool-response.js";
 import { coerceId } from "./crud/shared.js";
 import type { ApiContext } from "./crud-tools.js";
+import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 
 /** Drop keys whose value is undefined, leaving only the fields the caller set. */
 function pruneUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
   return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined)) as Partial<T>;
 }
 
-export function registerReferenceDataTools(server: McpServer, api: ApiContext): void {
+export function registerReferenceDataTools(
+  server: McpServer,
+  api: ApiContext,
+  exposure: ToolExposureConfig = getToolExposureConfig(),
+): void {
+  // Config-mutation reference-admin tools (create/update/delete bank accounts &
+  // invoice series, update_invoice_info, single-record get_*) are gated behind
+  // `enableReferenceAdmin`. The list_*/get_invoice_info/get_vat_info reads below
+  // are always registered so the agent can still inspect the configuration.
+  const exposeReferenceAdmin = exposure.enableReferenceAdmin;
+
   registerTool(server, "list_accounts", "Get chart of accounts (kontoplaani kontod)", {}, { ...readOnly, title: "List Accounts" }, async () => {
     const result = await api.readonly.getAccounts();
     const compact = result.map(a => ({
@@ -69,7 +80,7 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "update_invoice_info", "Update company invoice settings (contact details, default template, invoice/balance email text, footer). Pass only the fields to change.", {
+  if (exposeReferenceAdmin) registerTool(server, "update_invoice_info", "Update company invoice settings (contact details, default template, invoice/balance email text, footer). Pass only the fields to change.", {
     address: z.string().optional().describe("Company address shown on invoices"),
     email: z.string().optional().describe("Contact email"),
     phone: z.string().optional().describe("Contact phone"),
@@ -111,14 +122,14 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "get_invoice_series", "Get a single invoice numbering series by ID", {
+  if (exposeReferenceAdmin) registerTool(server, "get_invoice_series", "Get a single invoice numbering series by ID", {
     id: coerceId.describe("Invoice series ID"),
   }, { ...readOnly, title: "Get Invoice Series" }, async ({ id }) => {
     const result = await api.readonly.getInvoiceSeriesOne(id);
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "create_invoice_series", "Create an invoice series", {
+  if (exposeReferenceAdmin) registerTool(server, "create_invoice_series", "Create an invoice series", {
     number_prefix: z.string().describe("Invoice number prefix"),
     number_start_value: z.number().describe("Starting number"),
     term_days: z.number().describe("Default payment term"),
@@ -142,7 +153,7 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     });
   });
 
-  registerTool(server, "update_invoice_series", "Update an invoice numbering series (fix the prefix, start value, payment term, overdue charge, or the active/default flags). Pass only the fields to change.", {
+  if (exposeReferenceAdmin) registerTool(server, "update_invoice_series", "Update an invoice numbering series (fix the prefix, start value, payment term, overdue charge, or the active/default flags). Pass only the fields to change.", {
     id: coerceId.describe("Invoice series ID"),
     number_prefix: z.string().optional().describe("Invoice number prefix"),
     number_start_value: z.number().optional().describe("Starting number"),
@@ -171,7 +182,7 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     });
   });
 
-  registerTool(server, "delete_invoice_series", "Delete an invoice numbering series. Fails if the series is already in use.", {
+  if (exposeReferenceAdmin) registerTool(server, "delete_invoice_series", "Delete an invoice numbering series. Fails if the series is already in use.", {
     id: coerceId.describe("Invoice series ID"),
   }, { ...destructive, title: "Delete Invoice Series" }, async ({ id }) => {
     const result = await api.readonly.deleteInvoiceSeries(id);
@@ -195,14 +206,14 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "get_bank_account", "Get a single company bank account by ID", {
+  if (exposeReferenceAdmin) registerTool(server, "get_bank_account", "Get a single company bank account by ID", {
     id: coerceId.describe("Bank account ID"),
   }, { ...readOnly, title: "Get Bank Account" }, async ({ id }) => {
     const result = await api.readonly.getBankAccount(id);
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 
-  registerTool(server, "create_bank_account", "Create a bank account", {
+  if (exposeReferenceAdmin) registerTool(server, "create_bank_account", "Create a bank account", {
     account_name_est: z.string().describe("Account name"),
     account_no: z.string().describe("Account number (IBAN)"),
     cl_banks_id: z.number().optional().describe("Bank ID"),
@@ -225,7 +236,7 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     });
   });
 
-  registerTool(server, "update_bank_account", "Update a company bank account (rename it, fix the account number/SWIFT/bank, or toggle whether it shows on sale invoices). Pass only the fields to change.", {
+  if (exposeReferenceAdmin) registerTool(server, "update_bank_account", "Update a company bank account (rename it, fix the account number/SWIFT/bank, or toggle whether it shows on sale invoices). Pass only the fields to change.", {
     id: coerceId.describe("Bank account ID"),
     account_name_est: z.string().optional().describe("Account name"),
     account_no: z.string().optional().describe("Account number (IBAN)"),
@@ -253,7 +264,7 @@ export function registerReferenceDataTools(server: McpServer, api: ApiContext): 
     });
   });
 
-  registerTool(server, "delete_bank_account", "Delete a company bank account. Fails if the account is referenced by existing transactions.", {
+  if (exposeReferenceAdmin) registerTool(server, "delete_bank_account", "Delete a company bank account. Fails if the account is referenced by existing transactions.", {
     id: coerceId.describe("Bank account ID"),
   }, { ...destructive, title: "Delete Bank Account" }, async ({ id }) => {
     const result = await api.readonly.deleteBankAccount(id);

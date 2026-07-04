@@ -37,4 +37,4 @@ Treat the tool response as the source of truth:
 - if the action is `cleanup_camt_possible_duplicate`, explain briefly that it fills missing CAMT metadata onto the kept older transaction before deleting the duplicate PROJECT row
 - if the action is `save_auto_booking_rule`, explain briefly that it updates the local `accounting-rules.md` file
 
-`prepare_accounting_review_action` remains available as a compatibility primitive, but prefer the merged continuation tool for new flows.
+`prepare_accounting_review_action` is a compatibility primitive registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use the merged continuation tool (`continue_accounting_workflow` with `action="prepare_action"`).

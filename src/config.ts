@@ -149,6 +149,87 @@ export interface ToolExposureConfig {
    * track investments.
    */
   enableLightyear: boolean;
+  /**
+   * Also register the granular constituent tools whose functionality is fully
+   * covered by a merged entry point (`reconcile_bank_transactions`,
+   * `process_camt053`, `receipt_batch`, `classify_bank_transactions`,
+   * `continue_accounting_workflow`): `reconcile_transactions`,
+   * `auto_confirm_exact_matches`, `parse_camt053`, `import_camt053`,
+   * `scan_receipt_folder`, `process_receipt_batch`,
+   * `classify_unmatched_transactions`, `apply_transaction_classifications`,
+   * `prepare_accounting_review_action`, `resolve_accounting_review_item`.
+   * Hidden by default to cut the per-session tools/list token cost; the merged
+   * tools keep routing to the same handlers internally. Set
+   * `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` to register them again.
+   * (`reconcile_inter_account_transfers` is always registered — the merged
+   * tool has no execute mode for inter-account transfers.)
+   */
+  exposeGranularTools: boolean;
+  /**
+   * Register the setup/credential-management tools (`import_apikey_credentials`,
+   * `list_stored_credentials`, `remove_stored_credentials`) even when the server
+   * already has configured connections. They are always registered in setup
+   * mode (no connections); once credentials exist they are hidden by default to
+   * cut the per-session tools/list cost, since they are only needed when adding
+   * or rotating credentials. `get_setup_instructions` is never gated, so the
+   * agent can always explain how to add a connection (its payload documents
+   * these tools). Set `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` to keep them registered
+   * in configured mode too (e.g. to add a second company without a restart).
+   */
+  exposeSetupTools: boolean;
+  /**
+   * Register the Estonian tax helper tools (`prepare_dividend_package`,
+   * `create_owner_expense_reimbursement`, `check_tax_free_limits`). Enabled by
+   * default; set `EARVELDAJA_DISABLE_TAX_TOOLS=1` to drop the group on a lean
+   * deployment that never runs dividend/reimbursement/tax-free-limit workflows.
+   * The statutory tax-rules advisory layer (used by `suggest_booking`) is
+   * unaffected — only these three user-facing tools are unregistered.
+   */
+  enableTaxTools: boolean;
+  /**
+   * Register the reference-data administration tools that create, update, or
+   * delete configuration: `create/update/delete_bank_account`,
+   * `create/update/delete_invoice_series`, `update_invoice_info`, and the
+   * single-record `get_bank_account`/`get_invoice_series` reads (redundant with
+   * the always-registered `list_bank_accounts`/`list_invoice_series`). Enabled
+   * by default; set `EARVELDAJA_DISABLE_REFERENCE_ADMIN=1` to drop them when the
+   * chart of accounts, bank accounts, and invoice series are already set up and
+   * managed in the e-arveldaja UI. The `list_*`/`get_invoice_info`/`get_vat_info`
+   * reads stay registered so the agent can still inspect the configuration.
+   */
+  enableReferenceAdmin: boolean;
+  /**
+   * Register the annual-report / year-end tools (`prepare_year_end_close`,
+   * `generate_annual_report_data`, `execute_year_end_close`). Enabled by
+   * default; set `EARVELDAJA_DISABLE_ANNUAL_REPORT=1` to drop the group for the
+   * bulk of the year and re-enable it at closing time.
+   */
+  enableAnnualReport: boolean;
+  /**
+   * Register the sales-invoicing side: the sale-invoice tools
+   * (`list/get/create/update/delete/confirm/invalidate_sale_invoice`,
+   * `get_sale_invoice_delivery_options`, `send_sale_invoice`,
+   * `get_sale_invoice_document`, `get_sale_invoice_xml`),
+   * `create_recurring_sale_invoices`, and the accounts-receivable report
+   * `compute_receivables_aging`. Enabled by default; set
+   * `EARVELDAJA_DISABLE_SALES=1` on a purchase-side-only bookkeeping deployment
+   * that never issues sale invoices. The accounts-payable report
+   * `compute_payables_aging` and the purchase-invoice tools are unaffected.
+   */
+  enableSales: boolean;
+  /**
+   * Register the product-catalog tools (`list/get/create/update/deactivate/
+   * reactivate/delete_product`). Enabled by default; set
+   * `EARVELDAJA_DISABLE_PRODUCTS=1` when the catalog is managed in the
+   * e-arveldaja UI. Products are chiefly the sale-invoice line-item catalog
+   * (sale items require `products_id`; purchase items key on
+   * `cl_purchase_articles_id`, though the purchase item type also accepts an
+   * optional `products_id`), so a `DISABLE_SALES` deployment usually sets this
+   * too. The flag only unregisters the catalog-management tools — it does not
+   * affect creating either invoice type, which take product IDs as data — so it
+   * stays independent from `DISABLE_SALES`.
+   */
+  enableProducts: boolean;
 }
 
 function envFlagEnabled(value: string | undefined): boolean {
@@ -159,6 +240,13 @@ function envFlagEnabled(value: string | undefined): boolean {
 export function getToolExposureConfig(env: NodeJS.ProcessEnv = process.env): ToolExposureConfig {
   return {
     enableLightyear: !envFlagEnabled(env.EARVELDAJA_DISABLE_LIGHTYEAR),
+    exposeGranularTools: envFlagEnabled(env.EARVELDAJA_EXPOSE_GRANULAR_TOOLS),
+    exposeSetupTools: envFlagEnabled(env.EARVELDAJA_EXPOSE_SETUP_TOOLS),
+    enableTaxTools: !envFlagEnabled(env.EARVELDAJA_DISABLE_TAX_TOOLS),
+    enableReferenceAdmin: !envFlagEnabled(env.EARVELDAJA_DISABLE_REFERENCE_ADMIN),
+    enableAnnualReport: !envFlagEnabled(env.EARVELDAJA_DISABLE_ANNUAL_REPORT),
+    enableSales: !envFlagEnabled(env.EARVELDAJA_DISABLE_SALES),
+    enableProducts: !envFlagEnabled(env.EARVELDAJA_DISABLE_PRODUCTS),
   };
 }
 
