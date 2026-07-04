@@ -1253,12 +1253,22 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       // account — crediting income there booked it to an expense line, wrong sign.
       const reward_account = reward_account_param ?? DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT;
 
-      // Validate accounts exist and are active
+      const csv = await readCsvFile(file_path);
+      const rows = parseAccountStatement(csv);
+      const distributions = extractDistributions(rows);
+
+      // Validate accounts exist and are active. reward_account is only validated
+      // when a reward will actually be booked (or the caller pinned it): its
+      // default moved from 8600 to 3800, so a dividend/interest-only import must
+      // not start failing just because the chart lacks the reward income account.
+      const hasReward = distributions.some(dist => dist.type === "Reward");
       const accounts = await api.readonly.getAccounts();
       const errors = validateAccounts(accounts, [
         { id: broker_account, label: "Broker account" },
         { id: income_account, label: "Income account" },
-        { id: reward_account, label: "Reward account" },
+        ...((hasReward || reward_account_param !== undefined)
+          ? [{ id: reward_account, label: "Reward account" }]
+          : []),
         ...(tax_account ? [{ id: tax_account, label: "Tax account" }] : []),
         { id: fee_account, label: "Fee account" },
       ]);
@@ -1269,10 +1279,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           details: errors,
         });
       }
-
-      const csv = await readCsvFile(file_path);
-      const rows = parseAccountStatement(csv);
-      const distributions = extractDistributions(rows);
 
       if (!tax_account && distributions.some(dist => dist.tax_amount > 0)) {
         return toolError({

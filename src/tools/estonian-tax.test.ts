@@ -728,6 +728,50 @@ describe("prepare_dividend_package", () => {
     expect(warnings.some(w => w.includes("Algbilansi kanded"))).toBe(true);
   });
 
+  it("errors when an explicit restricted_reserve_accounts entry does not exist in the chart", async () => {
+    // A mistyped/absent reserve override must fail loudly — silently reading a
+    // 0 balance would LOWER the §157(2) floor and could pass an unlawful dividend.
+    const cb = tools.get("prepare_dividend_package")!;
+    const result = await cb({
+      net_dividend: 100,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+      restricted_reserve_accounts: [9999], // absent from makeStandardAccounts
+    });
+    expect(isError(result)).toBe(true);
+    const r = result as { content: Array<{ text: string }> };
+    expect(r.content[0].text).toContain("Account validation failed");
+    expect(r.content[0].text).toContain("Restricted reserve account");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the opening-balance caveat on a blocked distribution when retained earnings read 0", async () => {
+    // Share capital present, retained earnings absent (opening balances the
+    // /journals API may omit). The distribution is blocked, but the caveat that
+    // the check ran on possibly-incomplete data must still reach the operator on
+    // the error path — not just on dry_run / executed.
+    const journals = [
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(3000, "C", 5000)]),
+    ];
+    api = makeApi(journals, makeStandardAccounts());
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 100,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(String(data.error)).toContain("Insufficient retained earnings");
+    const warnings = (data.warnings ?? []) as string[];
+    expect(warnings.some(w => w.includes("Algbilansi kanded"))).toBe(true);
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
   // -------------------------------------------------------------------------
   // Account validation
   // -------------------------------------------------------------------------

@@ -192,6 +192,44 @@ describe("reconcile_currency_rounding", () => {
     expect(c.proposed_base_net_price + c.proposed_base_vat_price).toBeCloseTo(25.49, 2);
   });
 
+  it("derives base_net as the residual when only vat_price is present (no net_price)", async () => {
+    // Degenerate but possible: a foreign invoice carrying vat but no net_price.
+    // The tool must still reconcile base_net + base_vat == base_gross, deriving
+    // the missing net side as the residual rather than leaving base_net stale.
+    const { handler } = setupTool({
+      invoices: [
+        {
+          id: 140,
+          number: "USD-040",
+          client_name: "OpenAI",
+          status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID",
+          cl_currencies_id: "USD",
+          vat_price: 3.61,
+          gross_price: 20,
+          base_vat_price: 3.08,
+          base_gross_price: 17.10,
+          create_date: "2026-05-01",
+          transactions: [240],
+        },
+      ],
+      transactionsById: {
+        240: { id: 240, status: "CONFIRMED", amount: 17.07, cl_currencies_id: "EUR" },
+      },
+    });
+
+    const result = await handler({ execute: false });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const c = payload.candidates[0];
+
+    expect(c.category).toBe("small_rounding");
+    expect(c.proposed_base_gross_price).toBe(17.07);
+    expect(c.proposed_base_vat_price).toBe(3.08);
+    // base_net derived as the residual, so the trio reconciles to the cent.
+    expect(c.proposed_base_net_price).toBe(13.99);
+    expect(c.proposed_base_net_price + c.proposed_base_vat_price).toBeCloseTo(17.07, 2);
+  });
+
   it("falls in the fx_difference bucket and posts D 2310 / C 8500 when liability is overstated", async () => {
     const journalCreate = vi.fn().mockResolvedValue({ created_object_id: 777 });
     const journalConfirm = vi.fn().mockResolvedValue({});

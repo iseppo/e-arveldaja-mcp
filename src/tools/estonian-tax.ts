@@ -133,12 +133,24 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // caller's company actually uses (auto-detects the 8900-series "Tulumaks"
       // account) rather than assuming a fixed number.
       const incomeTaxExpenseAccount = resolveIncomeTaxExpenseAccount(accounts, income_tax_expense_account);
+      // Restricted reserves for the §157(2) floor. An explicit override is
+      // deduped and validated up front, so a mistyped or absent reserve account
+      // errors rather than silently reading a 0 balance and LOWERING the floor —
+      // which could let an unlawful dividend through. The default [3010]
+      // auto-detect path is intentionally not required to exist: an absent
+      // reservkapital simply means no reserve floor (the conservative direction).
+      const restrictedReserveAccounts = restricted_reserve_accounts
+        ? [...new Set(restricted_reserve_accounts)]
+        : DEFAULT_RESTRICTED_RESERVE_ACCOUNTS;
       const accountErrors = validateAccounts(accounts, [
         { id: retainedAccount, label: "Retained earnings account" },
         { id: payableAccount, label: "Dividend payable account" },
         { id: taxAccount, label: "Tax payable account" },
         { id: incomeTaxExpenseAccount, label: "Income-tax expense account" },
         { id: shareCapitalAccount, label: "Share capital account" },
+        ...(restricted_reserve_accounts
+          ? restrictedReserveAccounts.map(id => ({ id, label: "Restricted reserve account" }))
+          : []),
       ]);
       if (accountErrors.length > 0) {
         return toolError({
@@ -203,10 +215,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
 
       // ÄS § 157(2): statutory/articles-mandated reserves (reservkapital) are not
       // distributable — the net-assets floor is share capital PLUS these reserves,
-      // not share capital alone. Default to auto-detecting reservkapital (3010);
-      // an operator can override with restricted_reserve_accounts when the articles
-      // mandate additional restricted reserves on other account numbers.
-      const restrictedReserveAccounts = restricted_reserve_accounts ?? DEFAULT_RESTRICTED_RESERVE_ACCOUNTS;
+      // not share capital alone. restrictedReserveAccounts was resolved/validated
+      // above (default: auto-detect reservkapital 3010; override via
+      // restricted_reserve_accounts).
       const restrictedReserveDetails = restrictedReserveAccounts
         .map(id => ({ account: id, balance: roundMoney(balances.find(b => b.account_id === id)?.balance ?? 0) }))
         .filter(r => r.balance !== 0);
@@ -295,6 +306,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             },
           }),
           calculation: { net_dividend, cit_rate: citRate.formatted, cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
+          // Surface non-blocking warnings (esp. the opening-balance caveat) on the
+          // blocked path too: a "0 retained earnings" block is often exactly the
+          // symptom of opening balances the /journals API omits, so the operator
+          // must see that the check may have run on incomplete data.
+          ...(warnings.length > 0 && { warnings }),
           hint:
             retainedShortfall && netAssetsBreach
               ? "Both retained-earnings and § 157 net-assets clauses fail. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action)."
