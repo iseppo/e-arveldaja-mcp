@@ -17,7 +17,7 @@ import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { normalizeCompanyName } from "../company-name.js";
-import { buildWorkflowEnvelope } from "../workflow-response.js";
+import { buildWorkflowEnvelope, remapHiddenGranularWorkflowResult } from "../workflow-response.js";
 import { arrayAt, isRecord, recordAt } from "../record-utils.js";
 
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -1063,47 +1063,6 @@ interface CamtToolResponse {
 }
 type CamtToolHandler = (args: Record<string, unknown>) => Promise<CamtToolResponse>;
 
-function processCamtExecuteArgs(args: Record<string, unknown>): Record<string, unknown> {
-  const { execute: _execute, ...rest } = args;
-  return { mode: "execute", ...rest };
-}
-
-function remapProcessCamtWorkflowAction(action: unknown): unknown {
-  if (!isRecord(action) || action.tool !== "import_camt053") return action;
-  const args = recordAt(action, "args") ?? {};
-  return {
-    ...action,
-    tool: "process_camt053",
-    args: processCamtExecuteArgs(args),
-  };
-}
-
-function remapProcessCamtApprovalPreview(preview: unknown): unknown {
-  if (!isRecord(preview) || preview.execute_tool !== "import_camt053") return preview;
-  const executeArgs = recordAt(preview, "execute_args") ?? {};
-  return {
-    ...preview,
-    source_tool: "process_camt053",
-    execute_tool: "process_camt053",
-    execute_args: processCamtExecuteArgs(executeArgs),
-  };
-}
-
-function remapProcessCamtWorkflow(result: Record<string, unknown>): Record<string, unknown> {
-  const workflow = recordAt(result, "workflow");
-  if (!workflow) return result;
-
-  return {
-    ...result,
-    workflow: {
-      ...workflow,
-      recommended_next_action: remapProcessCamtWorkflowAction(workflow.recommended_next_action),
-      available_actions: arrayAt(workflow, "available_actions").map(remapProcessCamtWorkflowAction),
-      approval_previews: arrayAt(workflow, "approval_previews").map(remapProcessCamtApprovalPreview),
-    },
-  };
-}
-
 export function registerCamtImportTools(
   server: McpServer,
   api: ApiContext,
@@ -1552,9 +1511,7 @@ export function registerCamtImportTools(
       }
 
       const delegatedResult = await invokeCapturedTool(delegatedTool, delegatedArgs);
-      const result = selectedMode === "dry_run"
-        ? remapProcessCamtWorkflow(delegatedResult)
-        : delegatedResult;
+      const result = remapHiddenGranularWorkflowResult(delegatedResult);
       return {
         content: [{
           type: "text",

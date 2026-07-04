@@ -245,9 +245,11 @@ describe("reconcile_transactions", () => {
         contract: "workflow_action_v1",
         recommended_next_action: {
           kind: "approve_tool_call",
-          tool: "auto_confirm_exact_matches",
+          // Granular auto_confirm_exact_matches is hidden by default; the merged
+          // entry point is what the contract must name (execute mode).
+          tool: "reconcile_bank_transactions",
           args: {
-            execute: true,
+            mode: "execute_auto_confirm",
             min_confidence: 90,
           },
         },

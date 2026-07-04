@@ -58,7 +58,7 @@ import {
   buildClassificationReviewGuidance,
   buildReceiptReviewGuidance,
 } from "../estonian-accounting-guidance.js";
-import { buildWorkflowEnvelope } from "../workflow-response.js";
+import { buildWorkflowEnvelope, remapHiddenGranularWorkflowResult } from "../workflow-response.js";
 import { DEFAULT_LIABILITY_ACCOUNT, EMTA_PREPAYMENT_ACCOUNT } from "../accounting-defaults.js";
 import {
   RECEIPT_BATCH_EXECUTION_MODES,
@@ -1599,7 +1599,7 @@ export function registerReceiptInboxTools(
             mode: selectedMode,
             delegated_tool: delegatedTool,
             delegated_args: delegatedArgs,
-            result,
+            result: remapHiddenGranularWorkflowResult(result),
           }),
         }],
       };
@@ -2125,7 +2125,7 @@ export function registerReceiptInboxTools(
             mode: selectedMode,
             delegated_tool: delegatedTool,
             delegated_args: delegatedArgs,
-            result,
+            result: remapHiddenGranularWorkflowResult(result),
           }),
         }],
       };

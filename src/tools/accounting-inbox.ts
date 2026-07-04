@@ -23,7 +23,7 @@ import {
   normalizeAutoBookingRuleMatch,
   saveAutoBookingRule,
 } from "../accounting-rules.js";
-import { workflowFromAccountingInboxPayload } from "../workflow-response.js";
+import { remapHiddenGranularWorkflowEnvelope, workflowFromAccountingInboxPayload } from "../workflow-response.js";
 import {
   runAccountingInboxDryRunPipeline,
   type AutopilotInternalToolHandler,
@@ -1120,7 +1120,7 @@ async function buildAccountingInboxScanResponse(
       type: "text",
       text: toMcpJson({
         ...payload,
-        workflow: workflowFromAccountingInboxPayload(payload),
+        workflow: remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload)),
       }),
     }],
   };
@@ -1141,7 +1141,7 @@ async function buildAccountingInboxDryRunResponse(
     prepared_inbox: preparedPayload,
     autopilot,
   };
-  const workflow = workflowFromAccountingInboxPayload(payload);
+  const workflow = remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload));
 
   return {
     content: [{
@@ -1262,9 +1262,11 @@ export function registerAccountingInboxTools(
       }
 
       const workflowState = parseRequiredJsonObject(workflow_state_json, "workflow_state_json");
-      const workflow = isRecord(workflowState.workflow)
-        ? workflowState.workflow
-        : workflowFromAccountingInboxPayload(workflowState);
+      const workflow = remapHiddenGranularWorkflowEnvelope(
+        isRecord(workflowState.workflow)
+          ? workflowState.workflow
+          : workflowFromAccountingInboxPayload(workflowState),
+      );
       const nextAction = isRecord(workflow)
         ? recordAt(workflow, "recommended_next_action")
         : undefined;

@@ -60,6 +60,123 @@ type MaterializingDryRunTool =
   | "auto_confirm_exact_matches"
   | "reconcile_inter_account_transfers";
 
+// --- Hidden-granular → merged entry-point remap -----------------------------
+//
+// With EARVELDAJA_EXPOSE_GRANULAR_TOOLS unset (the default) the 10 granular
+// constituent tools are not registered in tools/list. The merged entry points
+// still delegate to them internally and, when they emit a workflow_action_v1
+// envelope, name the granular delegate as the next action / approval to run.
+// Left unrewritten, the contract would point the caller at a tool that is not
+// in tools/list. These helpers rewrite any granular tool named in an emitted
+// envelope back to its merged entry point plus the equivalent `mode`, so the
+// contract only ever names a tool the caller can actually invoke. The merged
+// tools are always registered, so this remap is applied unconditionally (it is
+// a no-op for any name that is not a hidden granular constituent).
+interface MergedToolTarget {
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+function mergedToolArgs(mode: string, granularArgs: Record<string, unknown>): Record<string, unknown> {
+  // The merged entry points accept the same underlying args plus a `mode`; the
+  // granular execute/execution_mode flag is subsumed by `mode`, so drop it.
+  const { execute: _execute, execution_mode: _executionMode, ...rest } = granularArgs;
+  return { mode, ...rest };
+}
+
+function receiptBatchMode(executionMode: unknown): string {
+  if (executionMode === "create") return "create";
+  if (executionMode === "create_and_confirm") return "create_and_confirm";
+  return "dry_run";
+}
+
+/**
+ * Maps a hidden granular tool name plus the args it would have been delegated
+ * with to the merged entry point that is actually registered, translating the
+ * execute/execution_mode flag into the merged tool's `mode`. Returns undefined
+ * for any tool that is not a hidden granular constituent (leave it untouched).
+ */
+export function remapHiddenGranularTool(
+  tool: string,
+  args: Record<string, unknown>,
+): MergedToolTarget | undefined {
+  switch (tool) {
+    case "reconcile_transactions":
+      return { tool: "reconcile_bank_transactions", args: mergedToolArgs("suggest", args) };
+    case "auto_confirm_exact_matches":
+      return {
+        tool: "reconcile_bank_transactions",
+        args: mergedToolArgs(args.execute === true ? "execute_auto_confirm" : "dry_run_auto_confirm", args),
+      };
+    case "parse_camt053":
+      return { tool: "process_camt053", args: mergedToolArgs("parse", args) };
+    case "import_camt053":
+      return { tool: "process_camt053", args: mergedToolArgs(args.execute === true ? "execute" : "dry_run", args) };
+    case "scan_receipt_folder":
+      return { tool: "receipt_batch", args: mergedToolArgs("scan", args) };
+    case "process_receipt_batch":
+      return { tool: "receipt_batch", args: mergedToolArgs(receiptBatchMode(args.execution_mode), args) };
+    case "classify_unmatched_transactions":
+      return { tool: "classify_bank_transactions", args: mergedToolArgs("classify", args) };
+    case "apply_transaction_classifications":
+      return {
+        tool: "classify_bank_transactions",
+        args: mergedToolArgs(args.execute === true ? "execute_apply" : "dry_run_apply", args),
+      };
+    default:
+      return undefined;
+  }
+}
+
+function remapHiddenGranularAction(action: unknown): unknown {
+  if (!isRecord(action)) return action;
+  const tool = stringAt(action, "tool");
+  if (!tool) return action;
+  const remapped = remapHiddenGranularTool(tool, recordAt(action, "args") ?? {});
+  if (!remapped) return action;
+  return { ...action, tool: remapped.tool, args: remapped.args };
+}
+
+function remapHiddenGranularApprovalPreview(preview: unknown): unknown {
+  if (!isRecord(preview)) return preview;
+  const tool = stringAt(preview, "execute_tool");
+  if (!tool) return preview;
+  const remapped = remapHiddenGranularTool(tool, recordAt(preview, "execute_args") ?? {});
+  if (!remapped) return preview;
+  return { ...preview, source_tool: remapped.tool, execute_tool: remapped.tool, execute_args: remapped.args };
+}
+
+/**
+ * Rewrites every granular tool named in a workflow envelope's actions and
+ * approval previews to its merged entry point. Operates on the loosely-typed
+ * envelope (it may be a parsed JSON record forwarded from a delegated tool), so
+ * it never assumes the concrete WorkflowEnvelope shape.
+ */
+export function remapHiddenGranularWorkflowEnvelope(workflow: unknown): unknown {
+  if (!isRecord(workflow)) return workflow;
+  const next: Record<string, unknown> = { ...workflow };
+  if (workflow.recommended_next_action !== undefined) {
+    next.recommended_next_action = remapHiddenGranularAction(workflow.recommended_next_action);
+  }
+  if (workflow.available_actions !== undefined) {
+    next.available_actions = arrayAt(workflow, "available_actions").map(remapHiddenGranularAction);
+  }
+  if (workflow.approval_previews !== undefined) {
+    next.approval_previews = arrayAt(workflow, "approval_previews").map(remapHiddenGranularApprovalPreview);
+  }
+  return next;
+}
+
+/**
+ * Convenience for the merged tools that forward a delegated granular tool's raw
+ * result: remap the `workflow` envelope nested on that result object. A no-op
+ * when the result carries no workflow envelope.
+ */
+export function remapHiddenGranularWorkflowResult(result: unknown): unknown {
+  if (!isRecord(result) || !isRecord(result.workflow)) return result;
+  return { ...result, workflow: remapHiddenGranularWorkflowEnvelope(result.workflow) };
+}
+
 function humanizeToolName(name: string): string {
   return name
     .split(/[_-]+/)

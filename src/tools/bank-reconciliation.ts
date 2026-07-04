@@ -9,7 +9,7 @@ import type { Transaction, SaleInvoice, PurchaseInvoice } from "../types/api.js"
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
-import { buildWorkflowEnvelope } from "../workflow-response.js";
+import { buildWorkflowEnvelope, remapHiddenGranularWorkflowEnvelope } from "../workflow-response.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
@@ -1527,7 +1527,7 @@ export function registerBankReconciliationTools(
             mode: selectedMode,
             delegated_tool: delegatedTool,
             delegated_args: delegatedArgs,
-            ...(workflow ? { workflow } : {}),
+            ...(workflow ? { workflow: remapHiddenGranularWorkflowEnvelope(workflow) } : {}),
             result,
           }),
         }],
