@@ -88,9 +88,13 @@ export async function computeAccountBalance(
 
   // For D-type accounts (assets, expenses): balance = debit - credit
   // For C-type accounts (liabilities, equity, income): balance = credit - debit
-  const balance = balanceType === "D"
-    ? debitTotal - creditTotal
-    : creditTotal - debitTotal;
+  // Round the result: debitTotal/creditTotal are each rounded, but subtracting
+  // two 2dp floats reintroduces sub-cent noise (~1e-12) that can flip an
+  // exact-boundary comparison in a consumer — e.g. the §157 retained-earnings
+  // check compares this balance directly against the gross dividend.
+  const balance = roundMoney(
+    balanceType === "D" ? debitTotal - creditTotal : creditTotal - debitTotal,
+  );
 
   // Sort by date
   entries.sort((a, b) => a.date.localeCompare(b.date));
@@ -109,7 +113,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
   registerTool(server, "compute_account_balance",
     "Compute account balance from journal postings with optional client/date filters.",
     {
-      account_id: coerceId.describe("Account database id (the integer `id` from list_accounts — NOT the account code like 2110)."),
+      account_id: coerceId.describe("Account id from list_accounts. In the RIK chart the id is the account number itself (e.g. 2110, 8900)."),
       clients_id: z.number().optional().describe("Filter by client ID"),
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
@@ -150,7 +154,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     "Compute net position against a client across selected accounts.",
     {
       clients_id: coerceId.describe("Client ID"),
-      account_ids: z.string().optional().describe("Comma-separated account IDs to check (default: 2110,2310,1210)"),
+      account_ids: z.string().optional().describe(`Comma-separated account IDs to check (default: ${DEFAULT_DEBT_CHECK_ACCOUNTS.join(",")})`),
       fresh: z.boolean().optional().describe("Clear cached API/reference data first."),
     },
     { ...readOnly, title: "Compute Client Net Position" },

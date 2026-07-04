@@ -46,11 +46,29 @@ export const EMTA_PREPAYMENT_ACCOUNT = 1516;
 /** Share capital (Osakapital) */
 export const SHARE_CAPITAL_ACCOUNT = 3000;
 
+/** Statutory reserve capital (Reservkapital), ÄS § 157(2) restricted reserve. */
+export const RESERVE_CAPITAL_ACCOUNT = 3010;
+
+/**
+ * Reserves that ÄS § 157(2) makes non-distributable: net assets must stay at or
+ * above share capital PLUS these reserves. Defaults to reservkapital (3010);
+ * override per company when the articles mandate additional restricted reserves.
+ */
+export const DEFAULT_RESTRICTED_RESERVE_ACCOUNTS = [RESERVE_CAPITAL_ACCOUNT];
+
 /** Current year profit/loss (Aruandeaasta kasum/kahjum) */
 export const CURRENT_YEAR_PROFIT_ACCOUNT = 2970;
 
 /** Other financial expenses (Muud finantskulud) */
 export const DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT = 8610;
+
+/**
+ * Other operating income (Muud äritulud), 3800-series. Default for booking
+ * Lightyear platform rewards, which are non-investment other income (real
+ * investment income — fund distributions, interest — uses a caller-supplied
+ * income account such as 8320/8400).
+ */
+export const DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT = 3800;
 
 /** Exchange rate gain (Kasum valuutakursi muutusest) */
 export const DEFAULT_FX_GAIN_ACCOUNT = 8500;

@@ -57,7 +57,7 @@ If the parsed distributions include withheld tax and no `tax_account` is known, 
 
 When the required accounts are known, call `book_lightyear_distributions` with `dry_run: true`.
 - Include `broker_account`, `income_account`, optional `tax_account`, optional `fee_account`, and optional `broker_dimension_id`.
-- The tool defaults `reward_account` to 8600 ("Muud äritulud") for platform rewards. Only pass `reward_account` explicitly when the user wants to override the default.
+- The tool defaults `reward_account` to 3800 ("Muud äritulud", other operating income) for platform rewards — rewards are non-investment income, not a financial cost. Only pass `reward_account` explicitly when the user wants to override the default.
 - Present dividends, interest, platform rewards, withheld tax, skipped entries, duplicate-detection basis, and warnings.
 - Ask for explicit approval before re-running with `dry_run: false`.
 - The distribution approval card must include source CSV, income/tax/reward accounts, journals that would be created, skipped duplicates, and side effects.

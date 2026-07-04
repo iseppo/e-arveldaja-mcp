@@ -145,6 +145,53 @@ describe("reconcile_currency_rounding", () => {
     expect(patch.base_vat_price).toBeCloseTo(3.08, 2);
   });
 
+  it("derives base_vat as the gross−net residual so the trio reconciles when independent rounding would drift a cent", async () => {
+    // Chosen so double-rounding actually diverges: rate = round(25.49/25.85, 6)
+    // = 0.986074. round(net*rate) = round(11.13*0.986074) = 10.98 and
+    // round(vat*rate) = round(14.72*0.986074) = 14.52 — but 10.98 + 14.52 =
+    // 25.50 ≠ the 25.49 actually paid, so a naive per-field rounding overstates
+    // base_gross by a cent and trips the API's net+vat=gross check. The residual
+    // rule takes base_vat = round(base_gross − base_net) = round(25.49 − 10.98)
+    // = 14.51, so 10.98 + 14.51 = 25.49 exactly.
+    const { handler } = setupTool({
+      invoices: [
+        {
+          id: 130,
+          number: "USD-030",
+          client_name: "OpenAI",
+          status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID",
+          cl_currencies_id: "USD",
+          net_price: 11.13,
+          vat_price: 14.72,
+          gross_price: 25.85,
+          base_net_price: 10.99,
+          base_vat_price: 14.53,
+          base_gross_price: 25.52,
+          create_date: "2026-05-01",
+          transactions: [230],
+        },
+      ],
+      transactionsById: {
+        230: { id: 230, status: "CONFIRMED", amount: 25.49, cl_currencies_id: "EUR" },
+      },
+    });
+
+    const result = await handler({ execute: false });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const c = payload.candidates[0];
+
+    expect(c.category).toBe("small_rounding");
+    expect(c.proposed_currency_rate).toBeCloseTo(0.986074, 5);
+    expect(c.proposed_base_gross_price).toBe(25.49);
+    expect(c.proposed_base_net_price).toBe(10.98);
+    // The residual, NOT round(vat*rate)=14.52 which would break the sum.
+    expect(c.proposed_base_vat_price).toBe(14.51);
+    expect(c.proposed_base_vat_price).not.toBe(14.52);
+    // net + vat reconciles to gross to the cent.
+    expect(c.proposed_base_net_price + c.proposed_base_vat_price).toBeCloseTo(25.49, 2);
+  });
+
   it("falls in the fx_difference bucket and posts D 2310 / C 8500 when liability is overstated", async () => {
     const journalCreate = vi.fn().mockResolvedValue({ created_object_id: 777 });
     const journalConfirm = vi.fn().mockResolvedValue({});

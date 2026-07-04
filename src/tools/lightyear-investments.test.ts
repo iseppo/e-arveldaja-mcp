@@ -67,6 +67,7 @@ function setupLightyearTool(
         { id: 1550, is_deleted: false, code: "1550", title_est: "Finantsinvesteeringud" },
         { id: 8610, is_deleted: false, code: "8610", title_est: "Muud finantskulud" },
         { id: 8320, is_deleted: false, code: "8320", title_est: "Investeeringutulu" },
+        { id: 3800, is_deleted: false, code: "3800", title_est: "Muud äritulud" },
       ]),
     },
     journals: {
@@ -490,6 +491,40 @@ describe("lightyear investments tools", () => {
 
     expect(payload.duplicates_skipped).toBe(0);
     expect(api.journals.create).toHaveBeenCalled();
+  });
+
+  it("books a platform reward to Muud äritulud (3800) income by default, not the FX-loss account", async () => {
+    // Reward = non-investment other income. It must be CREDITED to an income
+    // account (3800 Muud äritulud), not the old 8600 default which is the
+    // FX-loss expense account (wrong statement line and wrong sign).
+    mockedReadFile.mockResolvedValue(
+      buildStatementCsv([
+        // Date, Reference, Ticker, ISIN, Type, Quantity, CCY, Price/share,
+        // Gross Amount, FX Rate, Fee, Net Amt., Tax Amt.
+        ["2026-02-01", "RW-001", "", "", "Reward", "0", "EUR", "0", "5.00", "1", "0", "5.00", "0"],
+      ]),
+    );
+    const { api, handler } = setupLightyearTool("book_lightyear_distributions");
+
+    const result = await handler({
+      file_path: "/tmp/lightyear.csv",
+      broker_account: 1120,
+      income_account: 8320, // real investment income; rewards must NOT use this
+      dry_run: false,
+    });
+
+    expect(parseMcpResponse(result.content[0]!.text)).toBeTruthy();
+    expect(api.journals.create).toHaveBeenCalledTimes(1);
+    const journal = (api.journals.create as any).mock.calls[0][0] as {
+      postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }>;
+    };
+    const credit = journal.postings.find((p) => p.type === "C");
+    // Credited to 3800 (Muud äritulud), NOT 8320 (investment income) and NOT 8600.
+    expect(credit?.accounts_id).toBe(3800);
+    expect(credit?.amount).toBe(5);
+    expect(journal.postings.some((p) => p.accounts_id === 8600)).toBe(false);
+    // Broker cash (1120) is debited with the net received.
+    expect(journal.postings.find((p) => p.type === "D")?.accounts_id).toBe(1120);
   });
 });
 

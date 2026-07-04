@@ -152,8 +152,12 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         const rate = data.currency_rate!;
         const net = roundMoney(itemNet);
         const baseNet = data.base_net_price ?? roundMoney(net * rate);
-        const baseVat = data.base_vat_price ?? roundMoney(vat * rate);
         const baseGross = data.base_gross_price ?? roundMoney(gross * rate);
+        // Derive base_vat as the residual of base_gross − base_net so the trio
+        // reconciles exactly (base_net + base_vat === base_gross). Rounding net,
+        // vat, and gross independently against the rate can leave them off by a
+        // cent, which fails API sum validation or re-trips currency rounding.
+        const baseVat = data.base_vat_price ?? roundMoney(baseGross - baseNet);
         patchPayload.cl_currencies_id = currency;
         patchPayload.currency_rate = rate;
         patchPayload.base_net_price = baseNet;

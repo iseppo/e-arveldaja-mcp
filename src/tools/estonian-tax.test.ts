@@ -601,6 +601,134 @@ describe("prepare_dividend_package", () => {
   });
 
   // -------------------------------------------------------------------------
+  // § 157(2) restricted-reserve floor (reservkapital)
+  // -------------------------------------------------------------------------
+
+  // Fixture: share 5000, reservkapital 3000, retained 20000, current-year loss
+  // 18000 ⇒ net assets = 10000. A 2000 EUR net dividend (gross 2564.10) leaves
+  // net assets at 7435.90 — above bare share capital (5000) but below the
+  // § 157(2) floor of share + reserves (8000).
+  function reserveFloorJournals(): Journal[] {
+    return [
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(3000, "C", 5000)]),
+      makeJournal("2023-02-01", [makePosting(1000, "D", 3000), makePosting(3010, "C", 3000)]),
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]),
+      makeJournal("2026-03-01", [makePosting(5000, "D", 18000), makePosting(1000, "C", 18000)]),
+    ];
+  }
+  function accountsWithReserveCapital(): Account[] {
+    return [
+      ...makeStandardAccounts().map(a =>
+        a.id === 3000 ? makeAccount(3000, "C", "Omakapital", "Osakapital", "Share capital") : a
+      ),
+      makeAccount(3010, "C", "Omakapital", "Reservkapital", "Statutory reserve"),
+    ];
+  }
+
+  it("blocks on the §157(2) reservkapital floor even when net assets clear share capital alone", async () => {
+    api = makeApi(reserveFloorJournals(), accountsWithReserveCapital());
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 2000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(data.error).toBe("ÄS § 157 net assets breach");
+    const netCheck = data.net_assets_check as {
+      share_capital: number; restricted_reserves: number; minimum_net_assets: number;
+      net_assets_after_distribution: number; shortfall: number;
+    };
+    expect(netCheck.share_capital).toBe(5000);
+    expect(netCheck.restricted_reserves).toBe(3000);
+    // Floor is share + reserves, not share alone.
+    expect(netCheck.minimum_net_assets).toBe(8000);
+    expect(netCheck.net_assets_after_distribution).toBe(7435.9);
+    expect(netCheck.shortfall).toBe(564.1);
+  });
+
+  it("override restricted_reserve_accounts=[] drops the reserve floor back to share capital", async () => {
+    api = makeApi(reserveFloorJournals(), accountsWithReserveCapital());
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    // Same distribution, but the operator declares no reserves are restricted:
+    // net assets after (7435.90) clear bare share capital (5000), so it books.
+    const result = await cb({
+      net_dividend: 2000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+      restricted_reserve_accounts: [],
+    });
+
+    expect(isError(result)).toBe(false);
+    expect(vi.mocked(api.journals.create)).toHaveBeenCalledOnce();
+    const data = parseResult(result);
+    const netCheck = data.net_assets_check as { restricted_reserves: number; minimum_net_assets: number; sufficient: boolean };
+    expect(netCheck.restricted_reserves).toBe(0);
+    expect(netCheck.minimum_net_assets).toBe(5000);
+    expect(netCheck.sufficient).toBe(true);
+  });
+
+  it("auto-detects reservkapital, raises the floor, and warns on an otherwise lawful distribution", async () => {
+    const journals = [
+      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(3000, "C", 2500)]),
+      makeJournal("2023-02-01", [makePosting(1000, "D", 1000), makePosting(3010, "C", 1000)]),
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]),
+    ];
+    api = makeApi(journals, accountsWithReserveCapital());
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 100,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const netCheck = data.net_assets_check as { restricted_reserves: number; minimum_net_assets: number; sufficient: boolean };
+    expect(netCheck.restricted_reserves).toBe(1000);
+    expect(netCheck.minimum_net_assets).toBe(3500);
+    expect(netCheck.sufficient).toBe(true);
+    const warnings = (data.warnings ?? []) as string[];
+    expect(warnings.some(w => w.includes("restricted-reserve floor applied"))).toBe(true);
+  });
+
+  it("surfaces the opening-balance API limitation when share capital or retained earnings reads as zero", async () => {
+    // Retained earnings present but no share-capital postings — the classic
+    // symptom of opening balances entered as "Algbilansi kanded" that the
+    // /journals API omits, so the § 157 check runs on incomplete data. Warn
+    // (don't block): the operator verifies opening balances in the UI.
+    const journals = [
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]),
+    ];
+    api = makeApi(journals, makeStandardAccounts());
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 100,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const warnings = (data.warnings ?? []) as string[];
+    expect(warnings.some(w => w.includes("Algbilansi kanded"))).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
   // Account validation
   // -------------------------------------------------------------------------
 
@@ -744,6 +872,122 @@ describe("prepare_dividend_package", () => {
     const data = parseResult(result);
     const warnings = (data.warnings ?? []) as string[];
     expect(warnings.some(w => w.includes("Ledger imbalance"))).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Booked journal: assert on what is actually sent to api.journals.create,
+  // not just the echoed journal_entry. The create() payload keys postings on
+  // `accounts_id` (the API field); the echoed journal_entry keys them on
+  // `account`. A bug that books the wrong accounts_id but echoes the right
+  // `account` would pass every response-parsing test above — so pin the call.
+  // -------------------------------------------------------------------------
+
+  it("sends the correct postings to api.journals.create (booked journal, not the echo)", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    const result = await cb({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(false);
+    expect(vi.mocked(api.journals.create)).toHaveBeenCalledOnce();
+    const booked = vi.mocked(api.journals.create).mock.calls[0][0] as {
+      postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }>;
+      cl_currencies_id: string;
+    };
+    expect(booked.postings).toHaveLength(4);
+    const byAccount = (id: number) => booked.postings.find(p => p.accounts_id === id);
+    // NET dividend debited to retained earnings (3020); CIT debited to the
+    // 8900 income-tax expense account — NOT a second debit to retained earnings.
+    expect(byAccount(3020)).toEqual({ accounts_id: 3020, type: "D", amount: 10000 });
+    expect(byAccount(8900)).toEqual({ accounts_id: 8900, type: "D", amount: 2820.51 });
+    // NET dividend credited to payable (2370); CIT credited to tax payable (2540).
+    expect(byAccount(2370)).toEqual({ accounts_id: 2370, type: "C", amount: 10000 });
+    expect(byAccount(2540)).toEqual({ accounts_id: 2540, type: "C", amount: 2820.51 });
+    // Retained earnings is debited exactly once — the gross was never drained.
+    expect(booked.postings.filter(p => p.accounts_id === 3020)).toHaveLength(1);
+    // Double-entry balances.
+    const debits = booked.postings.filter(p => p.type === "D").reduce((s, p) => s + p.amount, 0);
+    const credits = booked.postings.filter(p => p.type === "C").reduce((s, p) => s + p.amount, 0);
+    expect(roundMoney(debits)).toBe(roundMoney(credits));
+    expect(roundMoney(debits)).toBe(roundMoney(10000 + 2820.51));
+    expect(booked.cl_currencies_id).toBe("EUR");
+  });
+
+  it("rejects a non-positive net_dividend and books nothing", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    for (const bad of [0, -0.01, -10000]) {
+      const result = await cb({
+        net_dividend: bad,
+        shareholder_client_id: 1,
+        effective_date: "2026-06-01",
+      });
+      expect(isError(result)).toBe(true);
+      expect((result as { content: Array<{ text: string }> }).content[0].text)
+        .toContain("net_dividend must be > 0");
+    }
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("rejects a net_dividend that rounds to 0.00 EUR and books nothing", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    // 0.004 EUR is positive but rounds to 0.00 — must be caught AFTER rounding,
+    // not by the raw > 0 guard, or an empty journal would be booked.
+    const result = await cb({
+      net_dividend: 0.004,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+    expect(isError(result)).toBe(true);
+    expect((result as { content: Array<{ text: string }> }).content[0].text)
+      .toContain("net_dividend rounds to 0.00 EUR");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("dry_run previews the postings without creating a journal", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    const result = await cb({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+      dry_run: true,
+    });
+    expect(isError(result)).toBe(false);
+    expect(parseResult(result).dry_run).toBe(true);
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("rounds a sub-cent net_dividend before booking — no unrounded amount leaks into the journal", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    // 100.006 rounds up to 100.01; every booked amount must be cent-exact and
+    // the reported gross must equal the sum actually posted.
+    const result = await cb({
+      net_dividend: 100.006,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const calc = data.calculation as { net_dividend: number; gross_dividend: number };
+    expect(calc.net_dividend).toBe(100.01);
+
+    const booked = vi.mocked(api.journals.create).mock.calls[0][0] as {
+      postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }>;
+    };
+    // Every posted amount is already cent-rounded (=== its own roundMoney).
+    for (const p of booked.postings) {
+      expect(p.amount).toBe(roundMoney(p.amount));
+    }
+    // Net dividend booked at the rounded value, not the raw 100.006.
+    const retainedDebit = booked.postings.find(p => p.accounts_id === 3020 && p.type === "D");
+    expect(retainedDebit?.amount).toBe(100.01);
+    // Debits balance credits exactly, and the reported gross is that same total.
+    const debits = roundMoney(booked.postings.filter(p => p.type === "D").reduce((s, p) => s + p.amount, 0));
+    const credits = roundMoney(booked.postings.filter(p => p.type === "C").reduce((s, p) => s + p.amount, 0));
+    expect(debits).toBe(credits);
+    expect(calc.gross_dividend).toBe(debits);
   });
 });
 
