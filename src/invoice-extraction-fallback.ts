@@ -74,6 +74,11 @@ export function hasConfidentInvoiceNumber(value?: string): boolean {
 export function summarizeInvoiceExtraction(
   snapshot: InvoiceExtractionSnapshot,
   signals?: ExtractionConfidenceSignals,
+  // Response path where the caller exposes the full OCR text, named in the
+  // guidance so a consumer is pointed at a field that actually exists. Defaults
+  // to `extracted.raw_text` (the receipt-batch flow); `extract_pdf_invoice`
+  // carries the text once as `hints.raw_text` and passes that instead.
+  rawTextField: string = "extracted.raw_text",
 ): InvoiceExtractionFallback {
   // Currency is conditionally required: only when there's a numeric total to
   // attach units to. Without it, booking the gross at face value silently
@@ -157,7 +162,7 @@ export function summarizeInvoiceExtraction(
   const guidance = !rawTextAvailable
     ? "Keep the document in review. Without raw_text, the model cannot safely recover the missing fields."
     : recommended
-      ? "Use extracted.raw_text as the source of truth. Extract the missing required fields manually with the model, then validate totals before booking. If the document still does not contain them, keep the result in review instead of guessing."
+      ? `Use ${rawTextField} as the source of truth. Extract the missing required fields manually with the model, then validate totals before booking. If the document still does not contain them, keep the result in review instead of guessing.`
       : "Raw OCR text is available for verification. Use it to confirm ambiguous fields before executing any booking."
   ;
 

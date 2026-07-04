@@ -94,7 +94,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const parsedDocument = await parseDocument(resolved);
         const hints = extractPdfHints(parsedDocument.text);
         const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved));
-        const llmFallback = summarizeInvoiceExtraction(extracted);
+        // extract_pdf_invoice carries the full OCR text once, as hints.raw_text,
+        // so the fallback guidance must point there (not the dropped
+        // extracted.raw_text).
+        const llmFallback = summarizeInvoiceExtraction(extracted, undefined, "hints.raw_text");
 
         const warnings: string[] = [];
         // ISO-4217 codes are exactly three uppercase letters. Reject anything
@@ -113,7 +116,11 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         // or maliciously oversized document cannot flood the consuming LLM's
         // context; surface `raw_text_truncated`/`raw_text_length` when cut.
         const hintsRaw = capUntrustedText(hints.raw_text);
-        const extractedRaw = capUntrustedText(extracted.raw_text);
+        // `extracted.raw_text` duplicates `hints.raw_text` — both are the same
+        // parsed document text. Emit the full text once, via `hints.raw_text`
+        // (the booking workflow's documented source of truth), and drop the
+        // copy from `extracted` to save the per-call token cost.
+        const { raw_text: _extractedRawText, ...extractedWithoutRawText } = extracted;
         return {
           content: [{
             type: "text",
@@ -123,15 +130,13 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
                 raw_text: wrapUntrustedOcr(hintsRaw.text) ?? "",
                 ...(hintsRaw.truncated ? { raw_text_truncated: true, raw_text_length: hintsRaw.original_length } : {}),
               },
-              // Wrap every OCR-origin free-form field, not just raw_text.
               // `description` (line 1 of the receipt body) and `supplier_name`
-              // are both derived from unsanitized OCR text and can carry
-              // attacker-crafted content; they must ship under the same
-              // per-call nonce boundary the raw_text gets.
+              // are OCR-derived free text that can carry attacker-crafted
+              // content, so they ship under the same per-call nonce boundary as
+              // hints.raw_text. raw_text itself is intentionally omitted here —
+              // it is carried once, above.
               extracted: {
-                ...extracted,
-                raw_text: wrapUntrustedOcr(extractedRaw.text),
-                ...(extractedRaw.truncated ? { raw_text_truncated: true, raw_text_length: extractedRaw.original_length } : {}),
+                ...extractedWithoutRawText,
                 description: wrapUntrustedOcr(extracted.description),
                 supplier_name: wrapUntrustedOcr(extracted.supplier_name),
                 ...(warnings.length > 0 ? { warnings } : {}),

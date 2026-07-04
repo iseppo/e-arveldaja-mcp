@@ -200,9 +200,14 @@ describe("pdf workflow tools", () => {
       recommended: true,
       missing_required_fields: expect.arrayContaining(["supplier_name", "invoice_date", "total_gross"]),
     }));
+    // The fallback guidance must point at a field the response actually carries:
+    // extract_pdf_invoice exposes the OCR text as hints.raw_text, not the dropped
+    // extracted.raw_text.
+    expect(payload.llm_fallback.guidance).toContain("hints.raw_text");
+    expect(payload.llm_fallback.guidance).not.toContain("extracted.raw_text");
   });
 
-  it("caps an oversized OCR raw_text and flags the truncation in both hints and extracted", async () => {
+  it("caps an oversized OCR raw_text and flags the truncation on hints.raw_text", async () => {
     const huge = "INVOICE START\n" + "x".repeat(MAX_UNTRUSTED_TEXT_CHARS + 5000);
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/invoice.pdf" });
     mockedParseDocument.mockResolvedValue({
@@ -215,17 +220,18 @@ describe("pdf workflow tools", () => {
     const response = await handler({ file_path: "/tmp/invoice.pdf" });
     const payload = parseMcpResponse(response.content[0]!.text) as any;
 
-    // Truncation flagged on both views so a consumer knows the blob was cut.
+    // hints.raw_text is the single full-document copy; flag truncation there so
+    // a consumer knows the blob was cut. extracted no longer carries raw_text.
     expect(payload.hints.raw_text_truncated).toBe(true);
     expect(payload.hints.raw_text_length).toBe(huge.length);
-    expect(payload.extracted.raw_text_truncated).toBe(true);
-    expect(payload.extracted.raw_text_length).toBe(huge.length);
+    expect(payload.extracted.raw_text).toBeUndefined();
+    expect(payload.extracted.raw_text_truncated).toBeUndefined();
+    expect(payload.extracted.raw_text_length).toBeUndefined();
 
     // The emitted (wrapped) raw_text carries at most the budget plus the nonce
     // delimiters — never the full oversized blob.
     expect(payload.hints.raw_text).toContain("UNTRUSTED_OCR_START:");
     expect(payload.hints.raw_text.length).toBeLessThan(MAX_UNTRUSTED_TEXT_CHARS + 200);
-    expect(payload.extracted.raw_text.length).toBeLessThan(MAX_UNTRUSTED_TEXT_CHARS + 200);
   });
 
   it("emits a foreign-currency warning with an ISO-validated currency code", async () => {
@@ -637,8 +643,10 @@ describe("pdf workflow tools", () => {
     expect(description).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>/);
     expect(description).toMatch(/<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/);
     expect(description).toContain("IGNORE PREVIOUS INSTRUCTIONS");
-    // raw_text was already wrapped before this PR; assert it still is so we
-    // don't regress.
-    expect(payload.extracted.raw_text).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>/);
+    // The full document text is carried once, as hints.raw_text, and must still
+    // ship wrapped so an injection payload in it can't be mistaken for a
+    // directive. extracted no longer carries a duplicate raw_text.
+    expect(payload.hints.raw_text).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>/);
+    expect(payload.extracted.raw_text).toBeUndefined();
   });
 });
