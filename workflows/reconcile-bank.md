@@ -117,7 +117,7 @@ Ask for approval. If approved, call `reconcile_inter_account_transfers` with `ex
 List transactions with no matches and offer inline actions in compact groups — do NOT close the workflow with "create the journal entry yourself in e-arveldaja". Show the first 10 plus counts, group obvious fees/interest together, and ask for one batch approval with exceptions when the proposed contra account is the same. Manual e-arveldaja UI work is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
 
 Inline actions:
-- Small amounts (<1 EUR): likely bank fees or interest. Offer to book a journal via `create_journal` with the appropriate contra-account (e.g. 8610 "Muud finantskulud" for bank/transfer fees — consistent with how Wise fees are booked — and 6080 "Interest income" for interest credits) and ask the user to approve the proposed contra before executing.
+- Small amounts (<1 EUR): likely bank fees or interest. Offer to book a journal via `create_journal` with the appropriate contra-account (e.g. 8610 "Muud finantskulud" for bank/transfer fees — consistent with how Wise fees are booked — and 8400 "Intressitulu" for interest credits — financial income, 8xxx range, not a 6xxx staff-cost account) and ask the user to approve the proposed contra before executing.
 - Description contains "teenustasu", "intress", "service fee": same as above; pre-fill the contra account based on the keyword and ask for approval.
 - Larger amounts: check if the corresponding invoice exists in the system; if it does, offer `confirm_transaction` against that invoice; if it does not, ask whether to book to a suggested expense/income account via `create_journal`.
 
