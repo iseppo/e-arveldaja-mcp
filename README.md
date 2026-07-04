@@ -109,9 +109,14 @@ The bundle is also browsable as MCP resources under `earveldaja://accounting_kno
 
 ### Trimming the tool surface
 
-The tool list is sent into the model's context on every session, so it is a fixed per-session token cost. The Lightyear investment tools are an optional feature group:
+The tool list is sent into the model's context on every session, so it is a fixed per-session token cost. Several feature groups are opt-out — they are registered by default but can be dropped when a deployment does not use them:
 
-- `EARVELDAJA_DISABLE_LIGHTYEAR=1` — drops the Lightyear investment tools (`book_lightyear_*`, `parse_lightyear_*`, `lightyear_portfolio_summary`). Use it when the company does not track investments.
+- `EARVELDAJA_DISABLE_LIGHTYEAR=1` — drops the Lightyear investment tools (`book_lightyear_*`, `parse_lightyear_*`, `lightyear_portfolio_summary`) and the `lightyear-booking` prompt. Use it when the company does not track investments.
+- `EARVELDAJA_DISABLE_TAX_TOOLS=1` — drops the Estonian tax helpers (`prepare_dividend_package`, `create_owner_expense_reimbursement`, `check_tax_free_limits`). The statutory tax-rules advice behind `suggest_booking` is unaffected. Use it when you never run dividend/reimbursement/tax-free-limit workflows.
+- `EARVELDAJA_DISABLE_REFERENCE_ADMIN=1` — drops the reference-data admin tools that create/update/delete bank accounts and invoice series and update invoice settings (plus the single-record `get_bank_account`/`get_invoice_series` reads). The `list_*`/`get_invoice_info`/`get_vat_info` reads stay. Use it when the chart of accounts, bank accounts, and invoice series are already set up and managed in the e-arveldaja UI.
+- `EARVELDAJA_DISABLE_ANNUAL_REPORT=1` — drops the year-end tools (`prepare_year_end_close`, `generate_annual_report_data`, `execute_year_end_close`). Use it for the bulk of the year; re-enable at closing time.
+
+A lean purchase-side-only deployment with all four flags set lands near 100 tools instead of the default 120. Conversely, `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` and `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` register the hidden granular and credential-management tools when you need them.
 
 Confirmed supplier history still wins over local rules for purchase booking defaults.
 

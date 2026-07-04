@@ -177,6 +177,34 @@ export interface ToolExposureConfig {
    * in configured mode too (e.g. to add a second company without a restart).
    */
   exposeSetupTools: boolean;
+  /**
+   * Register the Estonian tax helper tools (`prepare_dividend_package`,
+   * `create_owner_expense_reimbursement`, `check_tax_free_limits`). Enabled by
+   * default; set `EARVELDAJA_DISABLE_TAX_TOOLS=1` to drop the group on a lean
+   * deployment that never runs dividend/reimbursement/tax-free-limit workflows.
+   * The statutory tax-rules advisory layer (used by `suggest_booking`) is
+   * unaffected — only these three user-facing tools are unregistered.
+   */
+  enableTaxTools: boolean;
+  /**
+   * Register the reference-data administration tools that create, update, or
+   * delete configuration: `create/update/delete_bank_account`,
+   * `create/update/delete_invoice_series`, `update_invoice_info`, and the
+   * single-record `get_bank_account`/`get_invoice_series` reads (redundant with
+   * the always-registered `list_bank_accounts`/`list_invoice_series`). Enabled
+   * by default; set `EARVELDAJA_DISABLE_REFERENCE_ADMIN=1` to drop them when the
+   * chart of accounts, bank accounts, and invoice series are already set up and
+   * managed in the e-arveldaja UI. The `list_*`/`get_invoice_info`/`get_vat_info`
+   * reads stay registered so the agent can still inspect the configuration.
+   */
+  enableReferenceAdmin: boolean;
+  /**
+   * Register the annual-report / year-end tools (`prepare_year_end_close`,
+   * `generate_annual_report_data`, `execute_year_end_close`). Enabled by
+   * default; set `EARVELDAJA_DISABLE_ANNUAL_REPORT=1` to drop the group for the
+   * bulk of the year and re-enable it at closing time.
+   */
+  enableAnnualReport: boolean;
 }
 
 function envFlagEnabled(value: string | undefined): boolean {
@@ -189,6 +217,9 @@ export function getToolExposureConfig(env: NodeJS.ProcessEnv = process.env): Too
     enableLightyear: !envFlagEnabled(env.EARVELDAJA_DISABLE_LIGHTYEAR),
     exposeGranularTools: envFlagEnabled(env.EARVELDAJA_EXPOSE_GRANULAR_TOOLS),
     exposeSetupTools: envFlagEnabled(env.EARVELDAJA_EXPOSE_SETUP_TOOLS),
+    enableTaxTools: !envFlagEnabled(env.EARVELDAJA_DISABLE_TAX_TOOLS),
+    enableReferenceAdmin: !envFlagEnabled(env.EARVELDAJA_DISABLE_REFERENCE_ADMIN),
+    enableAnnualReport: !envFlagEnabled(env.EARVELDAJA_DISABLE_ANNUAL_REPORT),
   };
 }
 

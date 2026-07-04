@@ -70,7 +70,7 @@ serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
 ### Tool exposure (per-session token cost)
 
 `tools/list` is loaded into the client context on every session, so the tool
-surface is a fixed per-session token cost. Three env flags control optional
+surface is a fixed per-session token cost. Six env flags control optional
 parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
 - **`EARVELDAJA_DISABLE_LIGHTYEAR=1`** — do not register the Lightyear
@@ -97,9 +97,36 @@ parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
   always explain how to add a connection (set this flag to add a second company
   without a restart).
 
+The next three are opt-out feature-group flags (default enabled; the group is
+registered unless the flag is set). They cut the surface for a lean deployment
+without changing the default:
+
+- **`EARVELDAJA_DISABLE_TAX_TOOLS=1`** — do not register the Estonian tax
+  helpers (`prepare_dividend_package`, `create_owner_expense_reimbursement`,
+  `check_tax_free_limits`). The statutory tax-rules advisory layer used by
+  `suggest_booking` is unaffected — only these three tools are unregistered.
+  Use when the deployment never runs dividend/reimbursement/tax-free-limit
+  workflows. Saves ≈1.5k tokens.
+- **`EARVELDAJA_DISABLE_REFERENCE_ADMIN=1`** — do not register the reference-data
+  administration tools that create, update, or delete configuration:
+  `create/update/delete_bank_account`, `create/update/delete_invoice_series`,
+  `update_invoice_info`, and the single-record `get_bank_account` /
+  `get_invoice_series` reads. The `list_*` / `get_invoice_info` / `get_vat_info`
+  reads stay registered so the agent can still inspect the configuration. Use
+  when the chart of accounts, bank accounts, and invoice series are already set
+  up and managed in the e-arveldaja UI. Saves ≈1.7k tokens.
+- **`EARVELDAJA_DISABLE_ANNUAL_REPORT=1`** — do not register the annual-report /
+  year-end tools (`prepare_year_end_close`, `generate_annual_report_data`,
+  `execute_year_end_close`). Use for the bulk of the year; re-enable at closing
+  time. Saves ≈0.4k tokens.
+
 The default surface is 120 tools; `DISABLE_LIGHTYEAR` drops it to 115.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both raises it to the full 133. (The former
+credential tools; enabling both raises it to the full 133. The three opt-out
+group flags trim the default further — `DISABLE_TAX_TOOLS` (−3),
+`DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3) — so a lean
+purchase-only deployment with all four disable flags set lands near 100 tools.
+(The former
 `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)

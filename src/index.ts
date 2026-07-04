@@ -977,7 +977,7 @@ async function main() {
   }) as McpServer;
 
   // Register all tools (via scopedServer so handlers get connection-pinned).
-  registerCrudTools(scopedServer, api);
+  registerCrudTools(scopedServer, api, toolExposure);
   registerAccountBalanceTools(scopedServer, api);
   registerPdfWorkflowTools(scopedServer, api);
   registerDocumentAttachmentTools(scopedServer, api);
@@ -986,8 +986,8 @@ async function main() {
   registerFinancialStatementTools(scopedServer, api);
   registerAgingTools(scopedServer, api);
   registerRecurringInvoiceTools(scopedServer, api);
-  registerEstonianTaxTools(scopedServer, api);
-  registerAnnualReportTools(scopedServer, api);
+  if (toolExposure.enableTaxTools) registerEstonianTaxTools(scopedServer, api);
+  if (toolExposure.enableAnnualReport) registerAnnualReportTools(scopedServer, api);
   registerDocumentAuditTools(scopedServer, api);
   registerReceiptInboxTools(scopedServer, api, toolExposure);
   if (toolExposure.enableLightyear) registerLightyearTools(scopedServer, api);

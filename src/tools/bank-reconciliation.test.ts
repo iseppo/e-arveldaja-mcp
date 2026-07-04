@@ -5,7 +5,7 @@ import { parseMcpResponse } from "../mcp-json.js";
 
 // Behavior tests exercise the granular constituent tools directly, so register
 // with the full surface exposed (default hides them behind the merged tools).
-const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true };
+const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true };
 
 function setupReconciliationTool(options: {
   transactions?: unknown[];

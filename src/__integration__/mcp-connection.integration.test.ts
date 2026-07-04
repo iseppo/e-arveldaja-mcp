@@ -290,6 +290,86 @@ describe("MCP Server Integration", () => {
   });
 });
 
+describe("MCP Server Opt-Out Group Flags", () => {
+  let client: Client;
+  let transport: StdioClientTransport;
+
+  beforeAll(async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "earveldaja-mcp-group-flags-"));
+    const apiKeyFile = join(configDir, "apikey.txt");
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: integration-test-key-id",
+      "ApiKey public value: integration-test-public-value",
+      "Password: integration-test-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    chmodSync(apiKeyFile, 0o600);
+
+    transport = createTransport({
+      env: buildTransportEnv({
+        EARVELDAJA_API_KEY_ID: "integration-test-key-id",
+        EARVELDAJA_API_PUBLIC_VALUE: "integration-test-public-value",
+        EARVELDAJA_API_PASSWORD: "integration-test-password",
+        EARVELDAJA_API_KEY_FILE: apiKeyFile,
+        EARVELDAJA_SERVER: "demo",
+        EARVELDAJA_CONFIG_DIR: configDir,
+        EARVELDAJA_DISABLE_TAX_TOOLS: "1",
+        EARVELDAJA_DISABLE_REFERENCE_ADMIN: "1",
+        EARVELDAJA_DISABLE_ANNUAL_REPORT: "1",
+      }, { inheritEarveldaja: false }),
+    });
+    client = new Client({ name: "integration-test-group-flags", version: "1.0.0" });
+    await client.connect(transport);
+  });
+
+  afterAll(async () => {
+    try { await client.close(); } catch {}
+  });
+
+  it("drops the tax, reference-admin, and annual-report groups when disabled", async () => {
+    const { tools } = await client.listTools();
+    const names = tools.map(t => t.name);
+    for (const gated of [
+      // EARVELDAJA_DISABLE_TAX_TOOLS
+      "prepare_dividend_package",
+      "create_owner_expense_reimbursement",
+      "check_tax_free_limits",
+      // EARVELDAJA_DISABLE_ANNUAL_REPORT
+      "prepare_year_end_close",
+      "generate_annual_report_data",
+      "execute_year_end_close",
+      // EARVELDAJA_DISABLE_REFERENCE_ADMIN
+      "update_invoice_info",
+      "get_invoice_series",
+      "create_invoice_series",
+      "update_invoice_series",
+      "delete_invoice_series",
+      "get_bank_account",
+      "create_bank_account",
+      "update_bank_account",
+      "delete_bank_account",
+    ]) {
+      expect(names, `${gated} should be gated off`).not.toContain(gated);
+    }
+  });
+
+  it("keeps the reference-data reads and core tools when the groups are disabled", async () => {
+    const { tools } = await client.listTools();
+    const names = tools.map(t => t.name);
+    for (const kept of [
+      "list_accounts",
+      "list_invoice_series",
+      "list_bank_accounts",
+      "get_invoice_info",
+      "get_vat_info",
+      "create_purchase_invoice",
+      "compute_trial_balance",
+    ]) {
+      expect(names, `${kept} should stay registered`).toContain(kept);
+    }
+  });
+});
+
 describe("MCP Server Setup Mode", () => {
   let client: Client;
   let transport: StdioClientTransport;
