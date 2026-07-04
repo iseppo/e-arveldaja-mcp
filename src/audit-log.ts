@@ -381,25 +381,39 @@ const ENTITY_LABELS: Record<Lang, Record<string, string>> = {
 
 const FIELD_LABELS: Record<Lang, Record<string, string>> = {
   et: {
+    field: "Väli", value: "Väärtus", summary: "Kokkuvõte",
     tool: "Tööriist", supplier: "Hankija", client: "Klient", name: "Nimi",
     invoice_no: "Arve nr", date: "Kuupäev", due_date: "Tähtaeg", amount: "Summa",
     total: "Kokku", net: "neto", vat: "KM", gross: "bruto",
     postings: "Kanded", account: "Konto", direction: "Suund", description: "Kirjeldus",
     items: "Read", distribution: "Jaotus", count: "Arv", fields_changed: "Muudetud väljad",
-    file: "Fail", warnings: "Hoiatused",
+    file: "Fail", warnings: "Hoiatused", reason: "Põhjus", title: "Pealkiri",
+    document_number: "Dokumendi nr", code: "Kood", type: "Tüüp", currency: "Valuuta",
+    counterparty: "Vastaspool", bank_reference: "Panga viide", invoice_id: "Arve ID",
+    transaction_id: "Pangatehingu ID", source_id: "Allika ID", source_number: "Allika nr",
+    wise_id: "Wise ID", currency_rate: "Valuutakurss", old_gross: "Vana bruto",
+    new_gross: "Uus bruto", base_gross_price: "Alusbruto", target_dimension_id: "Sihtdimensioon",
+    accounts_dimensions_id: "Kontodimensioon", related_sub_id: "Alamdimensioon",
   },
   en: {
+    field: "Field", value: "Value", summary: "Summary",
     tool: "Tool", supplier: "Supplier", client: "Client", name: "Name",
     invoice_no: "Invoice no", date: "Date", due_date: "Due date", amount: "Amount",
     total: "Total", net: "net", vat: "VAT", gross: "gross",
     postings: "Postings", account: "Account", direction: "Type", description: "Description",
     items: "Lines", distribution: "Distribution", count: "Count", fields_changed: "Fields changed",
-    file: "File", warnings: "Warnings",
+    file: "File", warnings: "Warnings", reason: "Reason", title: "Title",
+    document_number: "Document no", code: "Code", type: "Type", currency: "Currency",
+    counterparty: "Counterparty", bank_reference: "Bank reference", invoice_id: "Invoice ID",
+    transaction_id: "Transaction ID", source_id: "Source ID", source_number: "Source no",
+    wise_id: "Wise ID", currency_rate: "Currency rate", old_gross: "Old gross",
+    new_gross: "New gross", base_gross_price: "Base gross", target_dimension_id: "Target dimension",
+    accounts_dimensions_id: "Account dimension", related_sub_id: "Sub-dimension",
   },
 };
 
 function l(key: string): string {
-  return FIELD_LABELS[getLang()][key] ?? key;
+  return FIELD_LABELS[getLang()][key] ?? humanizeFieldKey(key);
 }
 
 function actionLabel(action: string): string {
@@ -423,53 +437,121 @@ function escapeMarkdown(s: string): string {
   return s.replace(/[|*_`[\]\\]/g, "\\$&");
 }
 
+function humanizeFieldKey(key: string): string {
+  return key
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .replace(/\bId\b/g, "ID")
+    .replace(/\bVat\b/g, "VAT")
+    .replace(/\bEur\b/g, "EUR");
+}
+
+function sentenceCaseLabel(label: string): string {
+  return label.charAt(0).toLocaleLowerCase(getLang() === "et" ? "et-EE" : "en-US") + label.slice(1);
+}
+
+function renderActionSentence(entry: AuditEntry): string {
+  const idSuffix = entry.entity_id ? ` #${entry.entity_id}` : "";
+  return `${entityLabel(entry.entity_type)}${idSuffix} ${sentenceCaseLabel(actionLabel(entry.action))}.`;
+}
+
+function isMoneyLikeField(key: string): boolean {
+  return /(^amount$|amount|price|gross|net|vat|diff|paid|booked|fee|tax|dividend)/i.test(key);
+}
+
+function formatDetailValue(key: string, value: unknown, opts?: { code?: boolean }): string {
+  if (opts?.code) {
+    return `\`${String(value).replace(/`/g, "\\`")}\``;
+  }
+  if (typeof value === "number") {
+    return isMoneyLikeField(key) ? value.toFixed(2) : String(value);
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  return escapeMarkdown(String(value).replace(/\r?\n/g, " "));
+}
+
+function renderFieldTable(rows: Array<{ label: string; value: string }>): string {
+  if (rows.length === 0) return "";
+  return `| ${l("field")} | ${l("value")} |\n|------|---------|\n` +
+    rows.map(row => `| ${row.label} | ${row.value} |`).join("\n");
+}
+
 function renderPostingsTable(postings: unknown): string {
   if (!Array.isArray(postings) || postings.length === 0) return "";
+  const hasDimension = postings.some((p: Record<string, unknown>) => p.accounts_dimensions_id !== undefined);
+  const hasBaseAmount = postings.some((p: Record<string, unknown>) => p.base_amount !== undefined);
+  const headers = [l("account"), l("direction"), l("amount")];
+  if (hasDimension) headers.push(l("accounts_dimensions_id"));
+  if (hasBaseAmount) headers.push("Base");
+
   const rows = postings.map((p: Record<string, unknown>) => {
     const account = String(p.account_name ?? p.accounts_id ?? "");
     const type = p.type === "D" ? "D" : p.type === "C" ? "K" : String(p.type);
     const amount = typeof p.amount === "number" ? p.amount.toFixed(2) : String(p.amount ?? "");
-    return `| ${account} | ${type} | ${amount} |`;
+    const cells = [escapeMarkdown(account), type, amount];
+    if (hasDimension) cells.push(p.accounts_dimensions_id === undefined ? "" : escapeMarkdown(String(p.accounts_dimensions_id)));
+    if (hasBaseAmount) cells.push(typeof p.base_amount === "number" ? p.base_amount.toFixed(2) : escapeMarkdown(String(p.base_amount ?? "")));
+    return `| ${cells.join(" | ")} |`;
   });
-  return `\n**${l("postings")}:**\n| ${l("account")} | ${l("direction")} | ${l("amount")} |\n|-------|-------|-------|\n` + rows.join("\n");
+  return `**${l("postings")}**\n\n| ${headers.join(" | ")} |\n|${headers.map(() => "-------").join("|")}|\n` + rows.join("\n");
 }
 
 function renderDetails(entry: Omit<AuditEntry, "timestamp"> & { timestamp: string }): string {
   const d = entry.details;
-  const lines: string[] = [];
+  const sections: string[] = [renderActionSentence(entry)];
+  const rows: Array<{ label: string; value: string }> = [];
+  const rendered = new Set<string>();
 
-  lines.push(`**${l("tool")}:** \`${entry.tool}\``);
+  const addRow = (key: string, value: unknown, opts?: { labelKey?: string; code?: boolean; renderedKeys?: string[] }) => {
+    if (value === undefined || value === null) return;
+    rows.push({
+      label: l(opts?.labelKey ?? key),
+      value: formatDetailValue(key, value, opts),
+    });
+    rendered.add(key);
+    for (const renderedKey of opts?.renderedKeys ?? []) {
+      rendered.add(renderedKey);
+    }
+  };
+
+  addRow("tool", entry.tool, { code: true });
 
   // Supplier / client info
   if (d.client_name || d.supplier_name) {
     const name = escapeMarkdown(String(d.client_name ?? d.supplier_name ?? ""));
     const reg = d.reg_code ? ` (reg: ${escapeMarkdown(String(d.reg_code))})` : "";
-    lines.push(`**${entry.entity_type === "purchase_invoice" ? l("supplier") : l("client")}:** ${name}${reg}`);
+    rows.push({
+      label: entry.entity_type === "purchase_invoice" ? l("supplier") : l("client"),
+      value: `${name}${reg}`,
+    });
+    rendered.add("client_name");
+    rendered.add("supplier_name");
+    rendered.add("reg_code");
   }
   if (d.name && (entry.entity_type === "client" || entry.entity_type === "product")) {
-    lines.push(`**${l("name")}:** ${escapeMarkdown(String(d.name))}`);
+    addRow("name", d.name);
   }
 
   // Invoice number
   if (d.invoice_number) {
-    lines.push(`**${l("invoice_no")}:** ${escapeMarkdown(String(d.invoice_number))}`);
+    addRow("invoice_number", d.invoice_number, { labelKey: "invoice_no" });
   }
 
   // Dates
-  const dateParts: string[] = [];
   if (d.date || d.effective_date || d.invoice_date) {
-    dateParts.push(`**${l("date")}:** ${d.date ?? d.effective_date ?? d.invoice_date}`);
+    addRow("date", d.date ?? d.effective_date ?? d.invoice_date, {
+      renderedKeys: ["effective_date", "invoice_date"],
+    });
   }
   if (d.due_date) {
-    dateParts.push(`**${l("due_date")}:** ${d.due_date}`);
-  }
-  if (dateParts.length > 0) {
-    lines.push(dateParts.join(" | "));
+    addRow("due_date", d.due_date);
   }
 
   // Amounts
   if (d.amount !== undefined) {
-    lines.push(`**${l("amount")}:** ${typeof d.amount === "number" ? (d.amount as number).toFixed(2) : d.amount}`);
+    addRow("amount", d.amount);
   }
 
   // Totals line
@@ -478,68 +560,80 @@ function renderDetails(entry: Omit<AuditEntry, "timestamp"> & { timestamp: strin
   if (d.total_vat !== undefined) totalParts.push(`${l("vat")} ${(d.total_vat as number).toFixed(2)}`);
   if (d.total_gross !== undefined) totalParts.push(`${l("gross")} ${(d.total_gross as number).toFixed(2)}`);
   if (totalParts.length > 0) {
-    lines.push(`**${l("total")}:** ${totalParts.join(" | ")}`);
-  }
-
-  // Postings table
-  if (d.postings) {
-    const table = renderPostingsTable(d.postings as unknown);
-    if (table) lines.push(table);
+    rows.push({ label: l("total"), value: totalParts.map(escapeMarkdown).join(" \\| ") });
+    rendered.add("total_net");
+    rendered.add("total_vat");
+    rendered.add("total_gross");
   }
 
   // Description
   if (d.description && !d.client_name && !d.supplier_name) {
-    lines.push(`**${l("description")}:** ${escapeMarkdown(String(d.description))}`);
+    addRow("description", d.description);
   }
 
   // Items
   if (Array.isArray(d.items) && d.items.length > 0) {
-    lines.push(`**${l("items")}:** ${d.items.length}`);
+    addRow("items", d.items.length);
   }
 
   // Distribution
   if (Array.isArray(d.distributions) && d.distributions.length > 0) {
     const distParts = (d.distributions as Array<Record<string, unknown>>).map(
-      dist => `${dist.related_table}/${dist.related_id}: ${dist.amount}`,
+      dist => `${dist.related_table}/${dist.related_id}` +
+        `${dist.related_sub_id ? `/${dist.related_sub_id}` : ""}: ${dist.amount}`,
     );
-    lines.push(`**${l("distribution")}:** ${distParts.join(", ")}`);
+    rows.push({ label: l("distribution"), value: escapeMarkdown(distParts.join(", ")) });
+    rendered.add("distributions");
   }
 
   // Count (for batch operations)
   if (d.count !== undefined) {
-    lines.push(`**${l("count")}:** ${d.count}`);
+    addRow("count", d.count);
   }
 
   // Fields changed (for updates)
   if (Array.isArray(d.fields_changed) && d.fields_changed.length > 0) {
-    lines.push(`**${l("fields_changed")}:** ${d.fields_changed.join(", ")}`);
+    rows.push({
+      label: l("fields_changed"),
+      value: (d.fields_changed as unknown[]).map(field => escapeMarkdown(l(String(field)))).join(", "),
+    });
+    rendered.add("fields_changed");
   }
 
   // File
   if (d.file_name) {
-    lines.push(`**${l("file")}:** ${escapeMarkdown(String(d.file_name))}`);
+    addRow("file_name", d.file_name, { labelKey: "file" });
   }
 
   // Warnings
   if (Array.isArray(d.warnings) && d.warnings.length > 0) {
-    lines.push(`**${l("warnings")}:** ${(d.warnings as string[]).join("; ")}`);
+    rows.push({
+      label: l("warnings"),
+      value: (d.warnings as string[]).map(warning => escapeMarkdown(warning)).join("; "),
+    });
+    rendered.add("warnings");
   }
 
   // Extra key-value pairs not already covered
-  const rendered = new Set([
-    "client_name", "supplier_name", "reg_code", "name", "invoice_number",
-    "date", "effective_date", "invoice_date", "due_date", "amount",
-    "total_net", "total_vat", "total_gross", "postings", "description",
-    "items", "distributions", "count", "fields_changed", "file_name", "warnings",
-  ]);
+  if (d.postings) {
+    rendered.add("postings");
+  }
   for (const [key, value] of Object.entries(d)) {
     if (rendered.has(key)) continue;
     if (value === undefined || value === null) continue;
     if (typeof value === "object") continue; // skip complex nested objects
-    lines.push(`**${key}:** ${escapeMarkdown(String(value))}`);
+    addRow(key, value);
   }
 
-  return lines.join("\n");
+  const table = renderFieldTable(rows);
+  if (table) sections.push(table);
+
+  if (d.postings) {
+    const postingsTable = renderPostingsTable(d.postings as unknown);
+    if (postingsTable) sections.push(postingsTable);
+  }
+
+  return sections.join("\n\n");
 }
 
 function renderEntry(entry: AuditEntry): string {

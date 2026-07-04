@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-07-04
+
+### Changed
+- **Audit log Markdown readability.** Mutating-operation audit entries now render a short action sentence plus a compact `Field | Value` table with human labels for common details such as reasons, titles, document numbers, files, and related IDs. Journal postings remain tabled, now with optional dimension and base-amount columns, while the hidden `<!-- audit:... -->` metadata used by `get_session_log` filters stays unchanged.
+
+### Fixed
+- **Audit log total rows keep net/VAT/gross in one table cell.** Entries with multiple totals now escape the visual separator inside the value cell, so purchase invoices, dividend journals, and owner-expense entries no longer break the two-column Markdown table.
+
 ## [0.18.0] - 2026-07-04
 
 ### Changed

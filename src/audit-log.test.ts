@@ -273,6 +273,123 @@ describe("audit log date filters", () => {
   });
 });
 
+describe("audit log Markdown rendering", () => {
+  let tempDir: string | undefined;
+  const originalAuditLang = process.env.EARVELDAJA_AUDIT_LANG;
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    if (originalAuditLang === undefined) {
+      delete process.env.EARVELDAJA_AUDIT_LANG;
+    } else {
+      process.env.EARVELDAJA_AUDIT_LANG = originalAuditLang;
+    }
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  it("renders journal entries with visible summary, friendly labels, and readable tables", async () => {
+    process.env.EARVELDAJA_AUDIT_LANG = "et";
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-render-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-26T10:39:30Z"));
+    auditLog.logAudit({
+      tool: "create_journal",
+      action: "CREATED",
+      entity_type: "journal",
+      entity_id: 27404497,
+      summary: 'Created journal "Lightyear konto sulgemine" on 2026-03-31',
+      details: {
+        effective_date: "2026-03-31",
+        title: "Lightyear konto sulgemine",
+        document_number: "LY:CLOSE",
+        postings: [
+          { accounts_id: 1020, type: "D", amount: 2236.84 },
+          { accounts_id: 1100, type: "C", amount: 2222.34 },
+          { accounts_id: 8600, type: "C", amount: 14.5 },
+        ],
+      },
+    });
+
+    const log = auditLog.getAuditLog();
+
+    expect(log).toContain("### 2026-04-26 10:39:30 — Kanne loodud #27404497");
+    expect(log).toContain('<!-- audit:{"t":"create_journal","a":"CREATED","e":"journal","id":27404497} -->');
+    expect(log).toContain("Kanne #27404497 loodud.");
+    expect(log).toContain("| Väli | Väärtus |");
+    expect(log).toContain("| Tööriist | `create_journal` |");
+    expect(log).toContain("| Kuupäev | 2026-03-31 |");
+    expect(log).toContain("| Pealkiri | Lightyear konto sulgemine |");
+    expect(log).toContain("| Dokumendi nr | LY:CLOSE |");
+    expect(log).toContain("**Kanded**");
+    expect(log).toContain("| 8600 | K | 14.50 |");
+    expect(log).not.toContain("**Tööriist:**");
+    expect(log).not.toContain("**title:**");
+    expect(log).not.toContain("**document_number:**");
+  });
+
+  it("renders batch reasons with a human label instead of the raw detail key", async () => {
+    process.env.EARVELDAJA_AUDIT_LANG = "et";
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-render-batch-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-26T10:41:36Z"));
+    auditLog.logAudit({
+      tool: "batch_delete_transactions",
+      action: "DELETED",
+      entity_type: "transaction",
+      entity_id: 13254705,
+      summary: "Deleted transaction 13254705: duplicate CAMT import",
+      details: {
+        reason: "LHV CAMT kordusimport: alles jäi varaseim ID.",
+      },
+    });
+
+    const log = auditLog.getAuditLog();
+
+    expect(log).toContain("Pangatehing #13254705 kustutatud.");
+    expect(log).toContain("| Põhjus | LHV CAMT kordusimport: alles jäi varaseim ID. |");
+    expect(log).not.toContain("**reason:**");
+  });
+
+  it("keeps multiple totals inside one Markdown table cell", async () => {
+    process.env.EARVELDAJA_AUDIT_LANG = "et";
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-render-totals-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 42,
+      summary: "Created purchase invoice",
+      details: {
+        supplier_name: "Acme OÜ",
+        total_net: 10,
+        total_vat: 2.2,
+        total_gross: 12.2,
+      },
+    });
+
+    const log = auditLog.getAuditLog();
+
+    expect(log).toContain("| Kokku | neto 10.00 \\| KM 2.20 \\| bruto 12.20 |");
+    expect(log).not.toContain("| Kokku | neto 10.00 | KM 2.20 | bruto 12.20 |");
+  });
+});
+
 describe("audit log labels", () => {
   let tempDir: string | undefined;
 
