@@ -223,13 +223,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         .filter(r => r.balance !== 0);
       const restrictedReserveTotal = roundMoney(restrictedReserveDetails.reduce((sum, r) => sum + r.balance, 0));
       // The § 157 net-assets floor: share capital + non-distributable reserves.
-      // Clamp each component to ≥ 0 so a data anomaly (a debit balance on the
-      // share-capital or a reserve account, which should never happen on a clean
-      // ledger) can only make the floor — and therefore the distribution block —
-      // more conservative, never silently lower it below the true minimum. The
-      // reported restricted_reserves echo keeps the raw signed total so the
-      // anomaly stays visible.
-      const legalCapitalFloor = roundMoney(Math.max(0, roundedShareCapital) + Math.max(0, restrictedReserveTotal));
+      // Clamp each component to ≥ 0 — PER reserve account, not just the summed
+      // total — so a data anomaly (a debit balance on the share-capital or a
+      // reserve account, which should never happen on a clean ledger) can only
+      // make the floor, and therefore the distribution block, more conservative,
+      // never silently lower it. Clamping only the total would let a negative
+      // reserve balance offset a positive one and pull the floor down; summing
+      // max(0, balance) per account prevents that. The reported restricted_reserves
+      // echo keeps the raw signed total so the anomaly stays visible.
+      const restrictedReserveFloor = roundMoney(restrictedReserveDetails.reduce((sum, r) => sum + Math.max(0, r.balance), 0));
+      const legalCapitalFloor = roundMoney(Math.max(0, roundedShareCapital) + restrictedReserveFloor);
 
       // Cross-check: on a balanced ledger, Assets − Liabilities must equal
       // Equity + P&L. A mismatch indicates unbalanced or partially-deleted

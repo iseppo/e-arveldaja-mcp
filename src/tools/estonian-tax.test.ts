@@ -577,6 +577,45 @@ describe("prepare_dividend_package", () => {
     expect(check.restricted_reserves).toBe(-3000); // raw signed total still surfaced for visibility
   });
 
+  it("clamps restricted reserves per account, so a negative one cannot offset a positive one in the § 157 floor", async () => {
+    // Two explicit restricted reserves: 3010 = +3000, 3011 = −2000. Clamping the
+    // summed total would give max(0, 1000) = 1000 and a 6000 floor; clamping per
+    // account gives 3000 + 0 = 3000 and an 8000 floor. net_assets_after ≈ 6971.79
+    // sits between the two, so the per-account clamp must BLOCK this distribution.
+    const accounts = [
+      ...makeStandardAccounts(),
+      makeAccount(3010, "C", "Omakapital", "Reservkapital", "Reserve capital"),
+      makeAccount(3011, "C", "Omakapital", "Muu reserv", "Other reserve"),
+    ];
+    const journals = [
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(3000, "C", 5000)]),    // share capital 5000
+      makeJournal("2024-01-01", [makePosting(1000, "D", 30000), makePosting(3020, "C", 30000)]),  // retained 30000
+      makeJournal("2024-02-01", [makePosting(1000, "D", 3000), makePosting(3010, "C", 3000)]),    // reserve 3010 = +3000
+      makeJournal("2024-03-01", [makePosting(3011, "D", 2000), makePosting(1000, "C", 2000)]),    // reserve 3011 = −2000
+      makeJournal("2026-03-01", [makePosting(5000, "D", 28900), makePosting(1000, "C", 28900)]),  // current-year loss
+    ];
+    // net_assets_before = equity (5000+30000+3000−2000) + P&L (−28900) = 7100
+    // net_dividend 100 → gross ≈ 128.21 → net_assets_after ≈ 6971.79
+    api = makeApi(journals, accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 100,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+      restricted_reserve_accounts: [3010, 3011],
+    });
+
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(data.error).toBe("ÄS § 157 net assets breach");
+    const check = data.net_assets_check as { minimum_net_assets: number; restricted_reserves: number };
+    expect(check.minimum_net_assets).toBe(8000); // 5000 + max(0,3000) + max(0,−2000), NOT 5000 + max(0,1000)
+    expect(check.restricted_reserves).toBe(1000); // raw signed total (3000 + −2000) still surfaced
+  });
+
   it("warns (still creates journal) when force=true and net assets would fall below share capital", async () => {
     // Same fixture, but with force=true: the journal is created and the
     // warning mentions both § 157 and "Net assets after distribution".
