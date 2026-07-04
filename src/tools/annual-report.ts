@@ -249,9 +249,37 @@ function classifyLiabilitySection(balance: AccountBalance): LiabilityClass {
   if (configured) return configured;
   if (hasExplicitNonCurrentLiabilityMarker(name) && !hasExplicitCurrentLiabilityMarker(name)) return "non_current";
   if (hasExplicitCurrentLiabilityMarker(name)) return "current";
+  // Short-term payables to owners/related parties (21xx, incl. the MCP's default
+  // owner-payable account 2110 booked by create_owner_expense_reimbursement),
+  // supplier/dividend payables (23xx) and tax liabilities (25xx). An explicit
+  // long-term name marker is checked above, so a genuinely non-current 21xx
+  // account is still diverted before this range default applies.
+  if (inRange(balance.account_id, 2100, 2199)) return "current";
   if (inRange(balance.account_id, 2300, 2399)) return "current";
   if (inRange(balance.account_id, 2500, 2599)) return "current";
   return "manual_review";
+}
+
+// Balance-sheet asset classification by account-number prefix. Current assets
+// (Käibevara) span 10–16 — cash (10), short-term financial investments / broker
+// cash (11), receivables (12), short-term investments (13), inventories (14),
+// prepayments/other current (15–16); non-current assets (Põhivara) span 17–19.
+// Extracted so the same predicates drive both the displayed lines and the
+// unclassified-asset safety net (an asset outside both ranges would otherwise
+// vanish from the asset lines while still counting toward total assets — the
+// liabilities side already has this via the "Klassifitseerimata kohustused" line).
+function isCurrentAssetAccount(balance: AccountBalance): boolean {
+  return balance.account_type_est === "Varad" &&
+    (hasPrefix(balance.account_id, "10") || hasPrefix(balance.account_id, "11") ||
+      hasPrefix(balance.account_id, "12") || hasPrefix(balance.account_id, "13") ||
+      hasPrefix(balance.account_id, "14") || hasPrefix(balance.account_id, "15") ||
+      hasPrefix(balance.account_id, "16"));
+}
+
+function isNonCurrentAssetAccount(balance: AccountBalance): boolean {
+  return balance.account_type_est === "Varad" &&
+    (hasPrefix(balance.account_id, "17") || hasPrefix(balance.account_id, "18") ||
+      hasPrefix(balance.account_id, "19"));
 }
 
 function buildUnresolvedItems(
@@ -677,15 +705,19 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const currentYearProfitAccountId = getCurrentYearProfitAccountRule() ?? CURRENT_YEAR_PROFIT_ACCOUNT;
   const warnings: string[] = [];
 
-  const currentAssets = buildStatementLine("Käibevara", yearEndBalances, (balance) =>
-    balance.account_type_est === "Varad" &&
-    (hasPrefix(balance.account_id, "10") || hasPrefix(balance.account_id, "12") || hasPrefix(balance.account_id, "13") || hasPrefix(balance.account_id, "14") || hasPrefix(balance.account_id, "15") || hasPrefix(balance.account_id, "16")),
-  );
-  const nonCurrentAssets = buildStatementLine("Põhivara", yearEndBalances, (balance) =>
-    balance.account_type_est === "Varad" &&
-    (hasPrefix(balance.account_id, "17") || hasPrefix(balance.account_id, "18") || hasPrefix(balance.account_id, "19")),
-  );
+  const currentAssets = buildStatementLine("Käibevara", yearEndBalances, isCurrentAssetAccount);
+  const nonCurrentAssets = buildStatementLine("Põhivara", yearEndBalances, isNonCurrentAssetAccount);
   const totalAssets = sumStatementBalances(yearEndBalances, (balance) => balance.account_type_est === "Varad");
+  // Safety net mirroring the liabilities' "Klassifitseerimata kohustused": any
+  // asset account outside both prefix ranges is counted in totalAssets but shows
+  // in neither line, so the asset lines would silently fail to reconcile. Surface
+  // it as a warning instead of dropping it invisibly.
+  const unclassifiedAssets = yearEndBalances.filter((balance) =>
+    balance.account_type_est === "Varad" &&
+    !isCurrentAssetAccount(balance) &&
+    !isNonCurrentAssetAccount(balance) &&
+    Math.abs(statementAmount(balance)) >= 0.01,
+  );
 
   const currentLiabilities = buildStatementLine("Lühiajalised kohustused", yearEndBalances, (balance) =>
     balance.account_type_est === "Kohustused" &&
@@ -803,6 +835,13 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
 
   if (unmappedProfitAndLossAccounts.length > 0) {
     warnings.push("Some revenue/expense accounts fall outside the RTJ Schema 1 mapping rules and should be reviewed manually.");
+  }
+  if (unclassifiedAssets.length > 0) {
+    warnings.push(
+      `Some asset accounts fall outside the current (10–16) / non-current (17–19) balance-sheet ranges, ` +
+      `so they count toward total assets but appear in neither asset line: ` +
+      `${unclassifiedAssets.map((balance) => balance.account_id).join(", ")}. Review their classification.`,
+    );
   }
   if (Math.abs(balanceDifference) >= 0.01) {
     warnings.push(`Mapped balance sheet lines do not fully balance. Difference: ${balanceDifference} EUR.`);
