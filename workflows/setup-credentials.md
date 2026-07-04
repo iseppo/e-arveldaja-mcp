@@ -24,6 +24,8 @@ Treat its response as the source of truth for:
 - If `mode="setup"`, say clearly that API-backed workflows are blocked until credentials are configured.
 - If `mode="configured"`, say clearly that credentials already exist and this workflow can be used to inspect, append, replace, or remove stored `.env` credentials.
 
+The credential-management tools (`import_apikey_credentials`, `list_stored_credentials`, `remove_stored_credentials`) are always registered in `setup` mode. In `configured` mode they are hidden by default and only appear when the server is started with `EARVELDAJA_EXPOSE_SETUP_TOOLS=1`. If a step below needs one of these tools and it is not in `tools/list`, do not guess: explain the setup paths from `get_setup_instructions`, tell the user to restart the server with `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` (or from the setup folder) to expose them, and stop.
+
 Explain the two storage scopes:
 - `local`: works only when the MCP server is started from this folder
 - `global`: works when the MCP server is started from any folder on this computer

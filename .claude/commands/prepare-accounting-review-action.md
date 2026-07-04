@@ -35,6 +35,6 @@ Treat the tool response as the source of truth:
 - if `proposed_action` is present, present it as the default next step
 - ask for explicit approval before executing any `proposed_action`
 - if the action is `cleanup_camt_possible_duplicate`, explain briefly that it fills missing CAMT metadata onto the kept older transaction before deleting the duplicate PROJECT row
-- if the action is `save_auto_booking_rule`, explain briefly that it updates the local `accounting-rules.md` file
+- if the action is `save_auto_booking_rule`, explain briefly that it saves the rule into the company's configured accounting-knowledge store (an Open Knowledge Format bundle by default, or the legacy `accounting-rules.md` single file when that mode is configured)
 
 `prepare_accounting_review_action` is a compatibility primitive registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use the merged continuation tool (`continue_accounting_workflow` with `action="prepare_action"`).
