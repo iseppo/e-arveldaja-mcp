@@ -545,6 +545,38 @@ describe("prepare_dividend_package", () => {
     expect(data.error).toBe("ÄS § 157 net assets breach");
   });
 
+  it("does not let a negative restricted-reserve balance lower the § 157 floor (clamped to ≥ 0)", async () => {
+    // Reserve account 3010 carries an anomalous DEBIT balance (−3000). Unclamped,
+    // the § 157 floor would drop to 5000 + (−3000) = 2000 and wrongly let this
+    // distribution through; clamped, the floor stays at the 5000 share capital.
+    const accounts = [
+      ...makeStandardAccounts(),
+      makeAccount(3010, "C", "Omakapital", "Reservkapital", "Reserve capital"),
+    ];
+    const journals = [
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(3000, "C", 5000)]),   // share capital 5000
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]), // retained 20000
+      makeJournal("2024-06-01", [makePosting(3010, "D", 3000), makePosting(1000, "C", 3000)]),   // reserve → −3000
+      makeJournal("2026-03-01", [makePosting(5000, "D", 18000), makePosting(1000, "C", 18000)]), // current-year loss
+    ];
+    // net_assets_before = equity (5000+20000−3000) + P&L (−18000) = 4000
+    // net_dividend 100 → gross ≈ 128.21 → net_assets_after ≈ 3871.79
+    //   clamped floor 5000 → 3871.79 < 5000 → BLOCKED (would pass at unclamped floor 2000)
+    api = makeApi(journals, accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({ net_dividend: 100, shareholder_client_id: 1, effective_date: "2026-06-01" });
+
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(data.error).toBe("ÄS § 157 net assets breach");
+    const check = data.net_assets_check as { minimum_net_assets: number; restricted_reserves: number };
+    expect(check.minimum_net_assets).toBe(5000);   // floor NOT lowered by the −3000 reserve
+    expect(check.restricted_reserves).toBe(-3000); // raw signed total still surfaced for visibility
+  });
+
   it("warns (still creates journal) when force=true and net assets would fall below share capital", async () => {
     // Same fixture, but with force=true: the journal is created and the
     // warning mentions both § 157 and "Net assets after distribution".
@@ -1062,6 +1094,40 @@ describe("create_owner_expense_reimbursement", () => {
     expect(metadata).not.toContain("restricted categories ask for confirmation");
   });
 
+  it("rejects a non-positive net_amount instead of booking an empty/reversed journal", async () => {
+    setup(false);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+    for (const net_amount of [0, -50]) {
+      const result = await cb({
+        owner_client_id: 1,
+        effective_date: "2026-06-01",
+        description: "Bad reimbursement",
+        net_amount,
+        vat_rate: 0,
+        expense_account: 5000,
+      });
+      expect(isError(result)).toBe(true);
+      expect((result as { content: Array<{ text: string }> }).content[0].text).toContain("net_amount");
+    }
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("rejects a negative vat_rate", async () => {
+    setup(false);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+    const result = await cb({
+      owner_client_id: 1,
+      effective_date: "2026-06-01",
+      description: "Bad VAT",
+      net_amount: 100,
+      vat_rate: -0.24,
+      expense_account: 5000,
+    });
+    expect(isError(result)).toBe(true);
+    expect((result as { content: Array<{ text: string }> }).content[0].text).toContain("vat_rate");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
   // -------------------------------------------------------------------------
   // VAT-registered company: splits input VAT
   // -------------------------------------------------------------------------
@@ -1442,19 +1508,20 @@ describe("check_tax_free_limits", () => {
     expect(rep.limit).toBe(350); // months derived from "03" → 50*3 + 200
   });
 
-  it("uses the 20/80 rate and says so for pre-2025 dates", async () => {
+  it("uses the 20/80 rate and the pre-2025 32 €/month allowance for pre-2025 dates", async () => {
     const handler = getHandler();
     const payload = parseResult(await handler({
       as_of_date: "2024-12-31",
       ytd_social_taxed_payroll: 10000,
       months_elapsed: 12,
-      ytd_representation_costs: 1400, // limit = 600 + 200 = 800 → excess 600
+      ytd_representation_costs: 1400, // 2024 limit = 32*12 + 0.02*10000 = 384 + 200 = 584 → excess 816
     }));
 
     expect(payload.cit_rate).toBe("20/80");
     expect(payload.note).toContain("20/80");
     expect(payload.note).not.toContain("22/78");
     const rep = payload.representation as Record<string, number>;
-    expect(rep.income_tax_on_excess).toBe(roundMoney(600 * 20 / 80)); // 150
+    expect(rep.limit).toBe(584); // 32 €/month, not the current 50 €
+    expect(rep.income_tax_on_excess).toBe(roundMoney(816 * 20 / 80)); // 204
   });
 });

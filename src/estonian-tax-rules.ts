@@ -66,6 +66,36 @@ export const REDUCED_VAT_RATES: readonly ReducedVatRate[] = [
   { rate: 0, applies: "eksport, ühendusesisene käive jms", from: null, basis: "KMS § 15 lg 3–4" },
 ];
 
+export interface RepresentationMonthlyLimitPeriod {
+  /** Inclusive start date (YYYY-MM-DD). */
+  from: string;
+  /** Inclusive end date (YYYY-MM-DD), or null while still in force. */
+  to: string | null;
+  /** Tax-free allowance in euros per calendar month. */
+  amount: number;
+}
+
+/**
+ * Representation/entertainment tax-free monthly allowance (TuMS § 49 lg 4). The
+ * per-calendar-month figure was 32 € through 2024 and rose to 50 € on
+ * 2025-01-01; the separate 2% year-to-date payroll component is unchanged. Kept
+ * as a date-gated timeline so a cumulative limit is computed at the rate that
+ * was actually in force for the reporting date's year (a 2024 filing must use
+ * 32 €/month, not the current 50 €).
+ */
+export const REPRESENTATION_MONTHLY_LIMIT_TIMELINE: readonly RepresentationMonthlyLimitPeriod[] = [
+  { from: "2000-01-01", to: "2024-12-31", amount: 32 },
+  { from: "2025-01-01", to: null, amount: 50 },
+];
+
+/** Representation tax-free allowance (€/calendar month) in force on the given ISO date, or null if not a valid calendar date. */
+export function representationMonthlyLimitOn(dateISO: string | undefined | null): number | null {
+  const d = dateISO?.slice(0, 10);
+  if (!d || !isStrictIsoDate(d)) return null;
+  const period = REPRESENTATION_MONTHLY_LIMIT_TIMELINE.find(p => d >= p.from && (p.to === null || d <= p.to));
+  return period ? period.amount : null;
+}
+
 export interface TaxRuleReference {
   /** Statutory code, e.g. "TuMS § 49 lg 4". */
   code: string;
@@ -102,7 +132,7 @@ export const DEDUCTION_AND_LIMIT_RULES: readonly TaxRuleReference[] = [
     code: "TuMS § 49 lg 4",
     title: "Vastuvõtukulude maksuvaba piirmäär",
     summary:
-      "Vastuvõtukulud on tulumaksuvabad kuni 50 € kalendrikuus + 2% samal kalendriaastal sotsiaalmaksuga maksustatud väljamaksetest (arvestatakse kalendriaasta algusest kasvavalt). Piirmäära ületav osa maksustatakse tulumaksuga 22/78.",
+      "Vastuvõtukulud on tulumaksuvabad kuni 50 € kalendrikuus (kuni 2024: 32 €/kuu) + 2% samal kalendriaastal sotsiaalmaksuga maksustatud väljamaksetest (arvestatakse kalendriaasta algusest kasvavalt). Piirmäära ületav osa maksustatakse tulumaksuga 22/78.",
     basis: "TuMS § 49 lg 4",
   },
   {
@@ -183,25 +213,34 @@ function buildLimitResult(limit: number, used: number, formula: string, basis: s
 }
 
 /**
- * Representation/entertainment cost tax-free limit (TuMS § 49 lg 4):
- * 50 € per calendar month (cumulative from the start of the year) plus 2% of
- * the year-to-date payroll subject to social tax. The excess is taxed 22/78.
+ * Representation/entertainment cost tax-free limit (TuMS § 49 lg 4): a
+ * date-gated per-calendar-month allowance (32 € through 2024, 50 € from
+ * 2025-01-01 — see REPRESENTATION_MONTHLY_LIMIT_TIMELINE), cumulative from the
+ * start of the year, plus 2% of the year-to-date payroll subject to social tax.
+ * The excess is taxed at the CIT rate (22/78 from 2025). `asOfDate` selects the
+ * monthly rate: a cumulative year-to-date figure sits within one calendar year,
+ * so its whole accrual uses that year's rate.
  */
 export function computeRepresentationCostLimit(input: {
   ytdSocialTaxedPayroll: number;
   monthsElapsed: number;
   ytdRepresentationCosts: number;
+  asOfDate: string;
 }): TaxFreeLimitResult {
   assertFinite("ytdSocialTaxedPayroll", input.ytdSocialTaxedPayroll);
   assertFinite("ytdRepresentationCosts", input.ytdRepresentationCosts);
   assertFinite("monthsElapsed", input.monthsElapsed);
+  const monthlyAllowance = representationMonthlyLimitOn(input.asOfDate);
+  if (monthlyAllowance === null) {
+    throw new Error(`asOfDate must be a valid YYYY-MM-DD date, got ${JSON.stringify(input.asOfDate)}`);
+  }
   const months = Math.min(12, Math.max(0, Math.trunc(input.monthsElapsed)));
   const payroll = Math.max(0, input.ytdSocialTaxedPayroll);
-  const limit = 50 * months + 0.02 * payroll;
+  const limit = monthlyAllowance * months + 0.02 * payroll;
   return buildLimitResult(
     limit,
     input.ytdRepresentationCosts,
-    `50 € × ${months} kuud + 2% × ${roundMoney(payroll)} € palgafondist`,
+    `${monthlyAllowance} € × ${months} kuud + 2% × ${roundMoney(payroll)} € palgafondist`,
     "TuMS § 49 lg 4",
   );
 }
@@ -261,7 +300,7 @@ export interface EstonianTaxNote {
 // does not auto-apply anything. Estonian stems are left unbounded so inflected
 // forms match; short ambiguous tokens are word-bounded.
 const PASSENGER_CAR_RE = /(sõiduauto|\bauto\b|vehicle|kütus|bensiin|diisel|\bfuel\b|tankla|parkim|parking|liising|leasing|rehvi|\btyre\b|\btire\b)/iu;
-const ENTERTAINMENT_HOSPITALITY_RE = /(restoran|restaurant|caf[eé]|kohvik|baar\b|pub\b|catering|toitlust|meelelahut|vastuvõt|esindus|representation|entertainment|reception|banquet|banket|\bfood\b|majutus|accommodation)/iu;
+const ENTERTAINMENT_HOSPITALITY_RE = /(restoran|restaurant|caf[eé]|kohvik|baar\b|pub\b|catering|toitlust|meelelahut|vastuvõt|esindus|representation|entertainment|reception|banquet|banket|\bfood\b|majutus|accommodation|hotel|hostel|motel)/iu;
 
 export interface ExpenseVatClassification {
   isPassengerCar: boolean;

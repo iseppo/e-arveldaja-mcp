@@ -90,6 +90,13 @@ describe("detectVatDeductionNotes", () => {
     expect(notes[0].detail).toContain("töölähetuse majutuse sisendkäibemaks on mahaarvatav");
   });
 
+  it("flags a hotel/hostel/motel supplier even without the word 'majutus'", () => {
+    for (const supplierName of ["Hotel Palace", "Hostel Tallinn", "Motell 12"]) {
+      const notes = detectVatDeductionNotes({ supplierName });
+      expect(notes.map(n => n.code)).toContain("KMS § 30");
+    }
+  });
+
   it("returns nothing for ordinary, unrestricted purchases", () => {
     expect(detectVatDeductionNotes({ supplierName: "Microsoft Ireland", descriptions: ["Cloud subscription"] })).toEqual([]);
     expect(detectVatDeductionNotes({})).toEqual([]);
@@ -142,28 +149,40 @@ describe("buildTaxRulesReference", () => {
 });
 
 describe("computeRepresentationCostLimit", () => {
-  it("is 50 € per month plus 2% of YTD payroll", () => {
-    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: 500 });
+  it("is 50 € per month plus 2% of YTD payroll from 2025", () => {
+    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: 500, asOfDate: "2025-06-01" });
     expect(r.limit).toBe(500); // 50*6 + 0.02*10000 = 300 + 200
     expect(r.remaining).toBe(0);
     expect(r.excess).toBe(0);
     expect(r.basis).toBe("TuMS § 49 lg 4");
+    expect(r.formula).toContain("50 €");
+  });
+
+  it("uses the pre-2025 32 €/month allowance for 2024 dates", () => {
+    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: 500, asOfDate: "2024-06-01" });
+    expect(r.limit).toBe(392); // 32*6 + 0.02*10000 = 192 + 200
+    expect(r.excess).toBe(108); // 500 − 392
+    expect(r.formula).toContain("32 €");
+  });
+
+  it("rejects an invalid asOfDate", () => {
+    expect(() => computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 0, monthsElapsed: 1, ytdRepresentationCosts: 0, asOfDate: "2025-13-99" })).toThrow(/asOfDate/);
   });
 
   it("reports the taxable excess when costs exceed the limit", () => {
-    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: 700 });
+    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: 700, asOfDate: "2025-06-01" });
     expect(r.limit).toBe(500);
     expect(r.excess).toBe(200);
     expect(r.remaining).toBe(0);
   });
 
   it("clamps months to 0..12 and floors negative payroll at 0", () => {
-    expect(computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 0, monthsElapsed: 13, ytdRepresentationCosts: 0 }).limit).toBe(600);
-    expect(computeRepresentationCostLimit({ ytdSocialTaxedPayroll: -5000, monthsElapsed: 1, ytdRepresentationCosts: 0 }).limit).toBe(50);
+    expect(computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 0, monthsElapsed: 13, ytdRepresentationCosts: 0, asOfDate: "2025-06-01" }).limit).toBe(600);
+    expect(computeRepresentationCostLimit({ ytdSocialTaxedPayroll: -5000, monthsElapsed: 1, ytdRepresentationCosts: 0, asOfDate: "2025-01-01" }).limit).toBe(50);
   });
 
   it("floors a negative used amount so it cannot inflate remaining headroom", () => {
-    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: -100 });
+    const r = computeRepresentationCostLimit({ ytdSocialTaxedPayroll: 10000, monthsElapsed: 6, ytdRepresentationCosts: -100, asOfDate: "2025-06-01" });
     expect(r.used).toBe(0);
     expect(r.remaining).toBe(500);
     expect(r.excess).toBe(0);
