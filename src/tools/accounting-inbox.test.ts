@@ -23,7 +23,7 @@ const mockedParseDocument = vi.mocked(parseDocument);
 
 // Behavior tests exercise the granular constituent tools directly, so register
 // with the full surface exposed (default hides them behind the merged tools).
-const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true };
+const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true };
 
 function setupAccountingInboxTool(apiOptions: AccountingWorkflowApiOptions = {}, toolName = "accounting_inbox") {
   const server = createMockToolServer();

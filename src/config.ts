@@ -165,6 +165,18 @@ export interface ToolExposureConfig {
    * tool has no execute mode for inter-account transfers.)
    */
   exposeGranularTools: boolean;
+  /**
+   * Register the setup/credential-management tools (`import_apikey_credentials`,
+   * `list_stored_credentials`, `remove_stored_credentials`) even when the server
+   * already has configured connections. They are always registered in setup
+   * mode (no connections); once credentials exist they are hidden by default to
+   * cut the per-session tools/list cost, since they are only needed when adding
+   * or rotating credentials. `get_setup_instructions` is never gated, so the
+   * agent can always explain how to add a connection (its payload documents
+   * these tools). Set `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` to keep them registered
+   * in configured mode too (e.g. to add a second company without a restart).
+   */
+  exposeSetupTools: boolean;
 }
 
 function envFlagEnabled(value: string | undefined): boolean {
@@ -176,6 +188,7 @@ export function getToolExposureConfig(env: NodeJS.ProcessEnv = process.env): Too
   return {
     enableLightyear: !envFlagEnabled(env.EARVELDAJA_DISABLE_LIGHTYEAR),
     exposeGranularTools: envFlagEnabled(env.EARVELDAJA_EXPOSE_GRANULAR_TOOLS),
+    exposeSetupTools: envFlagEnabled(env.EARVELDAJA_EXPOSE_SETUP_TOOLS),
   };
 }
 

@@ -6,8 +6,8 @@ import { registerCamtImportTools } from "./camt-import.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { registerPrompts } from "../prompts.js";
 
-const HIDDEN: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: false };
-const EXPOSED: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true };
+const HIDDEN: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false };
+const EXPOSED: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true };
 
 function registeredToolNames(
   register: (server: any, api: any, exposure?: ToolExposureConfig) => void,
@@ -45,6 +45,17 @@ describe("getToolExposureConfig", () => {
     expect(getToolExposureConfig({ EARVELDAJA_EXPOSE_GRANULAR_TOOLS: "true" } as any).exposeGranularTools).toBe(true);
     expect(getToolExposureConfig({ EARVELDAJA_EXPOSE_GRANULAR_TOOLS: "" } as any).exposeGranularTools).toBe(false);
     expect(getToolExposureConfig({ EARVELDAJA_EXPOSE_GRANULAR_TOOLS: "0" } as any).exposeGranularTools).toBe(false);
+  });
+
+  it("hides setup/credential tools by default", () => {
+    expect(getToolExposureConfig({} as NodeJS.ProcessEnv).exposeSetupTools).toBe(false);
+  });
+
+  it("exposes setup tools only when EARVELDAJA_EXPOSE_SETUP_TOOLS is truthy", () => {
+    expect(getToolExposureConfig({ EARVELDAJA_EXPOSE_SETUP_TOOLS: "1" } as any).exposeSetupTools).toBe(true);
+    expect(getToolExposureConfig({ EARVELDAJA_EXPOSE_SETUP_TOOLS: "true" } as any).exposeSetupTools).toBe(true);
+    expect(getToolExposureConfig({ EARVELDAJA_EXPOSE_SETUP_TOOLS: "" } as any).exposeSetupTools).toBe(false);
+    expect(getToolExposureConfig({ EARVELDAJA_EXPOSE_SETUP_TOOLS: "0" } as any).exposeSetupTools).toBe(false);
   });
 });
 
@@ -130,12 +141,12 @@ describe("receipt inbox tool surface", () => {
 
 describe("prompt surface", () => {
   it("registers the lightyear-booking prompt when Lightyear is enabled", () => {
-    expect(registeredPromptNames({ enableLightyear: true, exposeGranularTools: false }))
+    expect(registeredPromptNames({ enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false }))
       .toContain("lightyear-booking");
   });
 
   it("skips the lightyear-booking prompt when Lightyear is disabled", () => {
-    const names = registeredPromptNames({ enableLightyear: false, exposeGranularTools: false });
+    const names = registeredPromptNames({ enableLightyear: false, exposeGranularTools: false, exposeSetupTools: false });
     expect(names).not.toContain("lightyear-booking");
     // The rest of the prompt surface is unaffected.
     expect(names).toContain("book-invoice");

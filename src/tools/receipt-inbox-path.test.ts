@@ -29,7 +29,7 @@ describe("receipt inbox folder path validation", () => {
   it("accepts Windows-style child folders under an allowed root", async () => {
     const server = { registerTool: vi.fn() } as any;
     // scan_receipt_folder is granular-gated by default, so expose it here.
-    registerReceiptInboxTools(server, {} as any, { enableLightyear: true, exposeGranularTools: true });
+    registerReceiptInboxTools(server, {} as any, { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true });
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "scan_receipt_folder");
     if (!registration) throw new Error("scan_receipt_folder was not registered");

@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-123 tools by default (118 with Lightyear disabled, 133 with granular tools exposed — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
+120 tools by default (115 with Lightyear disabled; up to 133 with the optional granular and setup tools exposed — see Tool exposure below), 15 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -70,8 +70,8 @@ serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
 ### Tool exposure (per-session token cost)
 
 `tools/list` is loaded into the client context on every session, so the tool
-surface is a fixed per-session token cost. Two env flags control optional parts
-of the surface (see `getToolExposureConfig()` in `src/config.ts`):
+surface is a fixed per-session token cost. Three env flags control optional
+parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
 - **`EARVELDAJA_DISABLE_LIGHTYEAR=1`** — do not register the Lightyear
   investment tools (`book_lightyear_*`, `parse_lightyear_*`,
@@ -88,9 +88,18 @@ of the surface (see `getToolExposureConfig()` in `src/config.ts`):
   (→ `continue_accounting_workflow`). Default: hidden — the merged tools keep
   routing to the same handlers internally, so no functionality is lost.
   `reconcile_inter_account_transfers` is never gated (no merged execute mode).
+- **`EARVELDAJA_EXPOSE_SETUP_TOOLS=1`** — also register the credential-management
+  tools (`import_apikey_credentials`, `list_stored_credentials`,
+  `remove_stored_credentials`) when the server already has configured
+  connections. They are always registered in setup mode (no connections) and
+  hidden by default once credentials exist, since they are only needed to add or
+  rotate credentials. `get_setup_instructions` is never gated, so the agent can
+  always explain how to add a connection (set this flag to add a second company
+  without a restart).
 
-The default surface is 123 tools; `DISABLE_LIGHTYEAR` drops it to 118;
-`EXPOSE_GRANULAR_TOOLS` raises it to 133. (The former
+The default surface is 120 tools; `DISABLE_LIGHTYEAR` drops it to 115.
+`EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
+credential tools; enabling both raises it to the full 133. (The former
 `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
@@ -344,5 +353,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 123 tools (default exposure)
+const { tools } = await client.listTools(); // 120 tools (default exposure)
 ```

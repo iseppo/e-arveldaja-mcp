@@ -180,6 +180,15 @@ describe("MCP Server Integration", () => {
     ]));
   });
 
+  it("hides credential-management tools outside setup mode but keeps get_setup_instructions", async () => {
+    const { tools } = await client.listTools();
+    const names = tools.map(t => t.name);
+    expect(names).toContain("get_setup_instructions");
+    expect(names).not.toContain("import_apikey_credentials");
+    expect(names).not.toContain("list_stored_credentials");
+    expect(names).not.toContain("remove_stored_credentials");
+  });
+
   it("switch_connection rejects invalid index without changing active connection", async () => {
     const before = await client.callTool({ name: "list_connections", arguments: {} });
     const beforeData = parseMcpResponse((before.content as any)[0].text);

@@ -18,7 +18,7 @@ import { resetAccountingRulesCache } from "../accounting-rules.js";
 
 // Behavior tests exercise the granular constituent tools directly, so register
 // with the full surface exposed (default hides them behind the merged tools).
-const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true };
+const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true };
 
 vi.mock("fs/promises", async (importOriginal) => ({
   ...(await importOriginal<typeof import("fs/promises")>()),

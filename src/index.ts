@@ -493,6 +493,10 @@ async function main() {
 
   // --- Multi-account tools ---
 
+  // toolExposure decides which optional/redundant tools enter tools/list;
+  // resolved here (before the credential tools) so setup-tool gating can use it.
+  const toolExposure = getToolExposureConfig();
+
   registerTool(server, "get_setup_instructions",
     "Show how to configure e-arveldaja API credentials when the server is running without connections.",
     {},
@@ -505,7 +509,13 @@ async function main() {
     })
   );
 
-  registerTool(server, "import_apikey_credentials",
+  // Credential-management tools are only needed in setup mode (no connections
+  // yet) or when an operator is adding/rotating credentials, so they are hidden
+  // by default once connections exist to cut the per-session tools/list cost.
+  // Restore them in configured mode with EARVELDAJA_EXPOSE_SETUP_TOOLS=1.
+  // get_setup_instructions stays registered above so the agent can always
+  // explain how to add a connection (its payload documents these tools).
+  if (setupMode || toolExposure.exposeSetupTools) registerTool(server, "import_apikey_credentials",
     "Verify apikey*.txt credentials and store them in local/global .env. overwrite=false appends different credentials as another connection.",
     {
       file_path: z.string().optional().describe("Absolute path to apikey*.txt; defaults to the only secure apikey*.txt in cwd."),
@@ -583,7 +593,7 @@ async function main() {
     }
   );
 
-  registerTool(server, "list_stored_credentials",
+  if (setupMode || toolExposure.exposeSetupTools) registerTool(server, "list_stored_credentials",
     "Inspect credentials stored in local/global .env files.",
     {
       storage_scope: z.enum(["local", "global"]).optional().describe("Optional scope filter."),
@@ -611,7 +621,7 @@ async function main() {
     }
   );
 
-  registerTool(server, "remove_stored_credentials",
+  if (setupMode || toolExposure.exposeSetupTools) registerTool(server, "remove_stored_credentials",
     "Remove one stored credential block from a local/global .env file.",
     {
       storage_scope: z.enum(["local", "global"]).describe("Which .env file to modify."),
@@ -967,8 +977,6 @@ async function main() {
   }) as McpServer;
 
   // Register all tools (via scopedServer so handlers get connection-pinned).
-  // toolExposure decides which optional/redundant tools enter tools/list.
-  const toolExposure = getToolExposureConfig();
   registerCrudTools(scopedServer, api);
   registerAccountBalanceTools(scopedServer, api);
   registerPdfWorkflowTools(scopedServer, api);
