@@ -200,6 +200,11 @@ describe("pdf workflow tools", () => {
       recommended: true,
       missing_required_fields: expect.arrayContaining(["supplier_name", "invoice_date", "total_gross"]),
     }));
+    // The fallback guidance must point at a field the response actually carries:
+    // extract_pdf_invoice exposes the OCR text as hints.raw_text, not the dropped
+    // extracted.raw_text.
+    expect(payload.llm_fallback.guidance).toContain("hints.raw_text");
+    expect(payload.llm_fallback.guidance).not.toContain("extracted.raw_text");
   });
 
   it("caps an oversized OCR raw_text and flags the truncation on hints.raw_text", async () => {
@@ -220,6 +225,8 @@ describe("pdf workflow tools", () => {
     expect(payload.hints.raw_text_truncated).toBe(true);
     expect(payload.hints.raw_text_length).toBe(huge.length);
     expect(payload.extracted.raw_text).toBeUndefined();
+    expect(payload.extracted.raw_text_truncated).toBeUndefined();
+    expect(payload.extracted.raw_text_length).toBeUndefined();
 
     // The emitted (wrapped) raw_text carries at most the budget plus the nonce
     // delimiters — never the full oversized blob.

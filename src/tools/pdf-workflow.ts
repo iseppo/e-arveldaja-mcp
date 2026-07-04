@@ -94,7 +94,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const parsedDocument = await parseDocument(resolved);
         const hints = extractPdfHints(parsedDocument.text);
         const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved));
-        const llmFallback = summarizeInvoiceExtraction(extracted);
+        // extract_pdf_invoice carries the full OCR text once, as hints.raw_text,
+        // so the fallback guidance must point there (not the dropped
+        // extracted.raw_text).
+        const llmFallback = summarizeInvoiceExtraction(extracted, undefined, "hints.raw_text");
 
         const warnings: string[] = [];
         // ISO-4217 codes are exactly three uppercase letters. Reject anything
