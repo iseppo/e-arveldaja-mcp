@@ -30,6 +30,25 @@ interface WorkflowGuide {
 
 const WORKFLOWS: WorkflowGuide[] = [
   {
+    id: "vat-registration-threshold",
+    prompt: "vat-registration-threshold",
+    title: "Check VAT Registration Threshold",
+    summary: "Check the 40 000 EUR VAT registration threshold for non-VAT companies, with separate financial, insurance, and real-estate turnover buckets for manual incidental/non-incidental judgment.",
+    when_to_use: ["VAT registration threshold", "KMKR threshold", "40 000 EUR turnover", "non-VAT company turnover", "financial turnover"],
+    required_inputs: ["calendar year", "optional financial/insurance/real-estate turnover buckets"],
+    primary_tools: ["check_vat_registration_threshold"],
+    risk_policy: {
+      default_mode: "accountant_review",
+      interrupt_when: ["financial turnover may be incidental", "real-estate turnover may be incidental or fixed-asset disposal", "turnover place of supply may be outside Estonia"],
+    },
+    next_actions: [{
+      tool: "check_vat_registration_threshold",
+      args: { year: "<YYYY>" },
+      why: "Start with confirmed sale invoices, then add financial, insurance, real-estate, social-exempt, or incidental turnover buckets for review.",
+    }],
+    keywords: ["vat registration threshold", "VAT registration", "KMKR", "käibemaksukohustus", "käibemaksukohustuslane", "40 000", "40000", "financial turnover", "finantskäive", "maksuvaba käive"],
+  },
+  {
     id: "setup-credentials",
     prompt: "setup-credentials",
     title: "Setup Credentials",
@@ -403,6 +422,7 @@ function hiddenRecipeTools(exposure: ToolExposureConfig): Set<string> {
       "lightyear_portfolio_summary", "book_lightyear_trades", "book_lightyear_distributions",
     ]) hidden.add(tool);
   }
+  if (!exposure.enableTaxTools) hidden.add("check_vat_registration_threshold");
   if (!exposure.enableSales) hidden.add("compute_receivables_aging");
   return hidden;
 }

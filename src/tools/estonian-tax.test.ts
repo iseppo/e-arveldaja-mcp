@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { z } from "zod";
-import type { Account, Journal, Posting } from "../types/api.js";
+import type { Account, Journal, Posting, SaleInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { registerEstonianTaxTools } from "./estonian-tax.js";
 import { roundMoney } from "../money.js";
@@ -72,9 +72,10 @@ function makeApi(
     vatRegistered?: boolean;
     extraBalances?: Journal[];
     clientName?: string;
+    saleInvoices?: SaleInvoice[];
   } = {},
 ): ApiContext {
-  const { vatRegistered = false, clientName = "Test Shareholder" } = options;
+  const { vatRegistered = false, clientName = "Test Shareholder", saleInvoices = [] } = options;
 
   return {
     readonly: {
@@ -93,9 +94,26 @@ function makeApi(
       listAllWithPostings: vi.fn(async () => journals),
       create: vi.fn(async (data: unknown) => ({ code: 200, created_object_id: 42, messages: [], ...data })),
     },
-    saleInvoices: { listAll: vi.fn(async () => []) },
+    saleInvoices: { listAll: vi.fn(async () => saleInvoices) },
     purchaseInvoices: { listAll: vi.fn(async () => []) },
   } as unknown as ApiContext;
+}
+
+function makeSaleInvoice(overrides: Partial<SaleInvoice> & Pick<SaleInvoice, "id" | "journal_date">): SaleInvoice {
+  return {
+    sale_invoice_type: "INVOICE",
+    cl_templates_id: 1,
+    clients_id: 1,
+    cl_countries_id: "EST",
+    number_suffix: String(overrides.id),
+    create_date: overrides.journal_date,
+    term_days: 7,
+    cl_currencies_id: "EUR",
+    show_client_balance: false,
+    status: "CONFIRMED",
+    gross_price: 0,
+    ...overrides,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,5 +1580,132 @@ describe("check_tax_free_limits", () => {
     const rep = payload.representation as Record<string, number>;
     expect(rep.limit).toBe(584); // 32 €/month, not the current 50 €
     expect(rep.income_tax_on_excess).toBe(roundMoney(816 * 20 / 80)); // 204
+  });
+});
+
+describe("check_vat_registration_threshold", () => {
+  function setup(options: Parameters<typeof makeApi>[2] = {}) {
+    const mock = makeMockServer();
+    const api = makeApi([], makeStandardAccounts(), options);
+    registerEstonianTaxTools(mock.server, api);
+    return {
+      api,
+      handler: mock.tools.get("check_vat_registration_threshold") as ToolCallback,
+    };
+  }
+
+  function getHandler(options: Parameters<typeof makeApi>[2] = {}) {
+    return setup(options).handler;
+  }
+
+  it("breaks out taxable, real-estate, insurance, and financial turnover so the operator can judge incidental exclusions", async () => {
+    const { api, handler } = setup({
+      vatRegistered: false,
+      saleInvoices: [
+        makeSaleInvoice({ id: 1, journal_date: "2026-01-15", base_net_price: 18000, net_price: 18000, base_gross_price: 21960, gross_price: 21960 }),
+        makeSaleInvoice({ id: 2, journal_date: "2026-02-15", base_net_price: 9000, net_price: 9000, base_gross_price: 10980, gross_price: 10980 }),
+        makeSaleInvoice({ id: 3, journal_date: "2026-03-15", base_gross_price: 5000, gross_price: 5000, status: "PROJECT" }),
+        makeSaleInvoice({ id: 4, journal_date: "2025-12-31", base_gross_price: 100000, gross_price: 100000 }),
+      ],
+    });
+
+    const payload = parseResult(await handler({
+      year: 2026,
+      financial_turnover: 16000,
+      insurance_turnover: 2000,
+      real_estate_turnover: 5000,
+      exempt_social_turnover: 8000,
+      incidental_excluded_turnover: 3000,
+      taxable_turnover_adjustment: -1000,
+    }));
+
+    expect(api.saleInvoices.listAll).toHaveBeenCalledWith({
+      start_date: "2026-01-01",
+      end_date: "2026-12-31",
+      status: "CONFIRMED",
+    });
+    expect(payload.vat_registered).toBe(false);
+    expect(payload.threshold_eur).toBe(40000);
+    expect(payload.sale_invoice_confirmed_turnover).toBe(27000);
+    expect(payload.manual_bucket_source).toBe("outside_sale_invoices");
+    expect(payload.sale_invoice_turnover_reclassified_to_manual_buckets).toBe(0);
+    expect(payload.sale_invoice_ordinary_turnover_after_bucket_split).toBe(27000);
+    expect(payload.taxable_turnover_adjustment).toBe(-1000);
+    expect(payload.taxable_or_zero_rated_turnover).toBe(26000);
+    expect(payload.count_if_not_incidental).toMatchObject({
+      real_estate_turnover: 5000,
+      insurance_turnover: 2000,
+      financial_turnover: 16000,
+    });
+    expect(payload.not_counted).toMatchObject({
+      exempt_social_turnover: 8000,
+      incidental_excluded_turnover: 3000,
+    });
+    expect(payload.threshold_total_if_all_non_incidental).toBe(49000);
+    expect(payload.status).toBe("needs_manual_review");
+    expect(payload.manual_review_questions).toEqual(expect.arrayContaining([
+      expect.stringContaining("financial_turnover"),
+      expect.stringContaining("real_estate_turnover"),
+      expect.stringContaining("insurance_turnover"),
+    ]));
+    expect(String(payload.note)).toContain("not a hard legal decision");
+    expect(String(payload.legal_basis)).toContain("EMTA");
+  });
+
+  it("does not double-count manual buckets that are already included in confirmed sale invoices", async () => {
+    const handler = getHandler({
+      vatRegistered: false,
+      saleInvoices: [
+        makeSaleInvoice({ id: 1, journal_date: "2026-01-15", base_net_price: 18000, base_gross_price: 21960, gross_price: 21960 }),
+        makeSaleInvoice({ id: 2, journal_date: "2026-02-15", base_net_price: 9000, base_gross_price: 10980, gross_price: 10980 }),
+      ],
+    });
+
+    const payload = parseResult(await handler({
+      year: 2026,
+      financial_turnover: 16000,
+      manual_bucket_source: "included_in_sale_invoices",
+    }));
+
+    expect(payload.sale_invoice_confirmed_turnover).toBe(27000);
+    expect(payload.sale_invoice_turnover_reclassified_to_manual_buckets).toBe(16000);
+    expect(payload.sale_invoice_ordinary_turnover_after_bucket_split).toBe(11000);
+    expect(payload.taxable_or_zero_rated_turnover).toBe(11000);
+    expect(payload.count_if_not_incidental.financial_turnover).toBe(16000);
+    expect(payload.threshold_total_if_all_non_incidental).toBe(27000);
+    expect(payload.status).toBe("ok");
+  });
+
+  it("reports exceeded when confirmed sales alone cross the registration threshold", async () => {
+    const handler = getHandler({
+      vatRegistered: false,
+      saleInvoices: [
+        makeSaleInvoice({ id: 1, journal_date: "2026-01-15", base_gross_price: 25000, gross_price: 25000 }),
+        makeSaleInvoice({ id: 2, journal_date: "2026-02-15", base_gross_price: 17000, gross_price: 17000 }),
+      ],
+    });
+
+    const payload = parseResult(await handler({ year: 2026 }));
+
+    expect(payload.taxable_or_zero_rated_turnover).toBe(42000);
+    expect(payload.threshold_total_if_all_non_incidental).toBe(42000);
+    expect(payload.status).toBe("exceeded");
+    expect(payload.excess_if_all_non_incidental).toBe(2000);
+    expect(payload.suggested_action).toContain("registreerimiskohustus");
+  });
+
+  it("stays ok for already VAT-registered companies while still returning the turnover breakdown", async () => {
+    const handler = getHandler({
+      vatRegistered: true,
+      saleInvoices: [
+        makeSaleInvoice({ id: 1, journal_date: "2026-01-15", base_gross_price: 100000, gross_price: 100000 }),
+      ],
+    });
+
+    const payload = parseResult(await handler({ year: 2026, financial_turnover: 50000 }));
+
+    expect(payload.vat_registered).toBe(true);
+    expect(payload.status).toBe("already_registered");
+    expect(payload.threshold_total_if_all_non_incidental).toBe(150000);
   });
 });

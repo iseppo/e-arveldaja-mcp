@@ -178,12 +178,13 @@ export interface ToolExposureConfig {
    */
   exposeSetupTools: boolean;
   /**
-   * Register the Estonian tax helper tools (`prepare_dividend_package`,
-   * `create_owner_expense_reimbursement`, `check_tax_free_limits`). Enabled by
-   * default; set `EARVELDAJA_DISABLE_TAX_TOOLS=1` to drop the group on a lean
-   * deployment that never runs dividend/reimbursement/tax-free-limit workflows.
+   * Register the Estonian tax helper tools (`check_vat_registration_threshold`,
+   * `prepare_dividend_package`, `create_owner_expense_reimbursement`,
+   * `check_tax_free_limits`). Enabled by default; set
+   * `EARVELDAJA_DISABLE_TAX_TOOLS=1` to drop the group on a lean deployment that
+   * never runs VAT-threshold/dividend/reimbursement/tax-free-limit workflows.
    * The statutory tax-rules advisory layer (used by `suggest_booking`) is
-   * unaffected — only these three user-facing tools are unregistered.
+   * unaffected — only these user-facing tools are unregistered.
    */
   enableTaxTools: boolean;
   /**

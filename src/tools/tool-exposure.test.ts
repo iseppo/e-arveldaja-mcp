@@ -296,6 +296,14 @@ describe("receipt inbox tool surface", () => {
 });
 
 describe("prompt surface", () => {
+  it("registers the vat-registration-threshold prompt only when tax tools are enabled", () => {
+    const enabledNames = registeredPromptNames({ enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
+    const disabledNames = registeredPromptNames({ enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: false, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
+
+    expect(enabledNames).toContain("vat-registration-threshold");
+    expect(disabledNames).not.toContain("vat-registration-threshold");
+  });
+
   it("registers the lightyear-booking prompt when Lightyear is enabled", () => {
     expect(registeredPromptNames({ enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true }))
       .toContain("lightyear-booking");

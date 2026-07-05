@@ -83,6 +83,7 @@ describe("recommend_workflow", () => {
 
     expect(payload.ok).toBe(true);
     expect(payload.available_workflows.map((workflow: any) => workflow.id)).toEqual([
+      "vat-registration-threshold",
       "setup-credentials",
       "setup-e-arveldaja",
       "accounting-inbox",
@@ -132,6 +133,7 @@ describe("recommend_workflow", () => {
   });
 
   it.each([
+    ["check KMKR 40 000 threshold with finantskäive", "vat-registration-threshold"],
     ["close March month end", "month-end-close"],
     ["book Lightyear CSV dividends and trades", "lightyear-booking"],
     ["set up API credentials from apikey file", "setup-credentials"],
@@ -250,6 +252,18 @@ describe("recommend_workflow", () => {
       (await handler({ goal: "book Lightyear CSV dividends and trades" })).content[0]!.text,
     ) as Record<string, any>;
     expect(recommended.recommended_workflow?.id).not.toBe("lightyear-booking");
+  });
+
+  it("omits the VAT threshold workflow entirely when tax tools are disabled", async () => {
+    const { handler } = getRecommendWorkflowHarness({ enableTaxTools: false });
+
+    const listed = parseMcpResponse((await handler({})).content[0]!.text) as Record<string, any>;
+    expect(listed.available_workflows.map((workflow: any) => workflow.id)).not.toContain("vat-registration-threshold");
+
+    const recommended = parseMcpResponse(
+      (await handler({ goal: "check KMKR 40 000 threshold" })).content[0]!.text,
+    ) as Record<string, any>;
+    expect(recommended.recommended_workflow?.id).not.toBe("vat-registration-threshold");
   });
 
   it("starts book-invoice recommendations with current VAT status before extraction", async () => {

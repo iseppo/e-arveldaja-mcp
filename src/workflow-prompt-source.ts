@@ -3,6 +3,7 @@ import { resolve } from "path";
 import { getProjectRoot } from "./paths.js";
 
 export const WORKFLOW_PROMPT_SOURCE_BY_PROMPT = {
+  "vat-registration-threshold": "vat-registration-threshold",
   "setup-credentials": "setup-credentials",
   "setup-e-arveldaja": "setup-e-arveldaja",
   "accounting-inbox": "accounting-inbox",

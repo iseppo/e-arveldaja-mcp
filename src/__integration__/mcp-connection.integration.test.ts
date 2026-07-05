@@ -333,6 +333,7 @@ describe("MCP Server Opt-Out Group Flags", () => {
     const names = tools.map(t => t.name);
     for (const gated of [
       // EARVELDAJA_DISABLE_TAX_TOOLS
+      "check_vat_registration_threshold",
       "prepare_dividend_package",
       "create_owner_expense_reimbursement",
       "check_tax_free_limits",

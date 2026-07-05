@@ -81,6 +81,7 @@ describe("registerPrompts", () => {
 
     const names = server.registerPrompt.mock.calls.map(([name]) => name);
     expect(names).toEqual([
+      "vat-registration-threshold",
       "setup-credentials",
       "setup-e-arveldaja",
       "accounting-inbox",

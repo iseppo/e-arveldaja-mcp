@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 120 tools, 15 workflow prompts, 13 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 121 tools, 16 workflow prompts, 13 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 > **Safer CAMT re-imports.** The CAMT import (`process_camt053`) preserves CAMT bank-reference and counterparty-account metadata in the writable transaction description when the e-arveldaja API drops the dedicated fields. Long bank references are stored as stable hashes, marker-only prior imports still surface in duplicate review when the exact key does not match, and repeated CAMT imports are less likely to create duplicate PROJECT rows. See the [changelog](CHANGELOG.md) for full details.
 >
@@ -112,13 +112,13 @@ The bundle is also browsable as MCP resources under `earveldaja://accounting_kno
 The tool list is sent into the model's context on every session, so it is a fixed per-session token cost. Several feature groups are opt-out — they are registered by default but can be dropped when a deployment does not use them:
 
 - `EARVELDAJA_DISABLE_LIGHTYEAR=1` — drops the Lightyear investment tools (`book_lightyear_*`, `parse_lightyear_*`, `lightyear_portfolio_summary`) and the `lightyear-booking` prompt. Use it when the company does not track investments.
-- `EARVELDAJA_DISABLE_TAX_TOOLS=1` — drops the Estonian tax helpers (`prepare_dividend_package`, `create_owner_expense_reimbursement`, `check_tax_free_limits`). The statutory tax-rules advice behind `suggest_booking` is unaffected. Use it when you never run dividend/reimbursement/tax-free-limit workflows.
+- `EARVELDAJA_DISABLE_TAX_TOOLS=1` — drops the Estonian tax helpers (`check_vat_registration_threshold`, `prepare_dividend_package`, `create_owner_expense_reimbursement`, `check_tax_free_limits`) and the VAT-threshold prompt. The statutory tax-rules advice behind `suggest_booking` is unaffected. Use it when you never run VAT-threshold/dividend/reimbursement/tax-free-limit workflows.
 - `EARVELDAJA_DISABLE_REFERENCE_ADMIN=1` — drops the reference-data admin tools that create/update/delete bank accounts and invoice series and update invoice settings (plus the single-record `get_bank_account`/`get_invoice_series` reads). The `list_*`/`get_invoice_info`/`get_vat_info` reads stay. Use it when the chart of accounts, bank accounts, and invoice series are already set up and managed in the e-arveldaja UI.
 - `EARVELDAJA_DISABLE_ANNUAL_REPORT=1` — drops the year-end tools (`prepare_year_end_close`, `generate_annual_report_data`, `execute_year_end_close`). Use it for the bulk of the year; re-enable at closing time.
 - `EARVELDAJA_DISABLE_SALES=1` — drops the sales-invoicing side: the 11 sale-invoice tools, `create_recurring_sale_invoices`, and receivables aging (`compute_receivables_aging`). Payables aging and all purchase-invoice tools stay. Use it for purchase-side-only bookkeeping.
 - `EARVELDAJA_DISABLE_PRODUCTS=1` — drops the product-catalog tools (`list/get/create/update/deactivate/reactivate/delete_product`). Products are chiefly the sale-invoice line-item catalog (purchase items key on `cl_purchase_articles_id`, though they can also carry an optional `products_id`), so a `DISABLE_SALES` deployment usually sets this too. It only removes catalog management — creating either invoice type still works — so the flags stay independent.
 
-A lean purchase-side-only deployment with every disable flag set (incl. Lightyear) lands near 80 tools instead of the default 120. Conversely, `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` and `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` register the hidden granular and credential-management tools when you need them.
+A lean purchase-side-only deployment with every disable flag set (incl. Lightyear) lands near 80 tools instead of the default 121. Conversely, `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` and `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` register the hidden granular and credential-management tools when you need them.
 
 Confirmed supplier history still wins over local rules for purchase booking defaults.
 
@@ -147,10 +147,11 @@ npm install && npm run build
 
 ## Workflows (MCP Prompts)
 
-The server includes 15 built-in workflow prompts that any MCP client can discover and use. These guide the AI through multi-step accounting tasks:
+The server includes 16 built-in workflow prompts that any MCP client can discover and use. These guide the AI through multi-step accounting tasks:
 
 | Prompt | Description |
 |---|---|
+| `vat-registration-threshold` | Check the 40 000 EUR VAT registration threshold with finance, insurance, and real-estate turnover separated for review |
 | `accounting-inbox` | Start here: scan a workspace, detect likely inputs, suggest the next safe dry-run steps, and ask only the smallest necessary follow-up questions |
 | `resolve-accounting-review` | Turn one accounting review item into a concrete next-step plan with compliance references |
 | `prepare-accounting-review-action` | Prepare the concrete next action for a resolved review item (delete duplicate, save rule, etc.) |
@@ -167,7 +168,7 @@ The server includes 15 built-in workflow prompts that any MCP client can discove
 | `setup-credentials` | Verify and import API credentials from `apikey.txt` into `.env` storage |
 | `setup-e-arveldaja` | Explain how to configure API credentials when running in setup mode |
 
-**Claude Code** also has these as slash commands: `/accounting-inbox`, `/resolve-accounting-review`, `/prepare-accounting-review-action`, `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`, `/company-overview`, `/lightyear-booking`, `/setup-credentials`, `/setup-e-arveldaja`.
+**Claude Code** also has these as slash commands: `/vat-registration-threshold`, `/accounting-inbox`, `/resolve-accounting-review`, `/prepare-accounting-review-action`, `/book-invoice`, `/receipt-batch`, `/import-camt`, `/import-wise`, `/classify-unmatched`, `/reconcile-bank`, `/month-end`, `/new-supplier`, `/company-overview`, `/lightyear-booking`, `/setup-credentials`, `/setup-e-arveldaja`.
 
 ## Usage Examples
 

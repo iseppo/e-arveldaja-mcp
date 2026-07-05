@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **`check_vat_registration_threshold` tool and `vat-registration-threshold` workflow.** Adds a read-only advisory check for the 2025+ Estonian VAT registration threshold: confirmed sale invoices provide the year-to-date taxable/0% net turnover base, while the caller can enter real-estate, insurance, and financial-services turnover separately so the operator can decide whether those amounts are non-incidental and therefore count toward the 40 000 EUR threshold. `manual_bucket_source` tells the tool whether those manual buckets are outside sale invoices or already included there, avoiding double counting when the amounts are reclassified from invoice turnover. The response also shows social-type exempt turnover and already-judged incidental turnover as not counted, returns `exceeded` only when ordinary taxable/0% turnover alone crosses the threshold, and uses `needs_manual_review` when the result depends on the finance/insurance/real-estate classification. The default surface is now 121 tools and 16 workflow prompts; `EARVELDAJA_DISABLE_TAX_TOOLS=1` drops this tool and prompt with the other Estonian tax helpers.
+
 ## [0.18.1] - 2026-07-04
 
 ### Changed

@@ -13,7 +13,7 @@ import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
 import { OPENING_BALANCE_API_LIMITATION_WARNING } from "../opening-balance-limitations.js";
 import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, INCOME_TAX_EXPENSE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_RESTRICTED_RESERVE_ACCOUNTS, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
-import type { Account } from "../types/api.js";
+import type { Account, SaleInvoice } from "../types/api.js";
 import {
   getDefaultOwnerExpenseVatDeductionMode,
   getDefaultOwnerExpenseVatDeductionRatio,
@@ -40,6 +40,30 @@ function isValidIsoDate(s: string): boolean {
 
 const isoDateSchema = (description: string) =>
   z.string().refine(isValidIsoDate, { message: "Expected valid YYYY-MM-DD date" }).describe(description);
+
+const VAT_REGISTRATION_THRESHOLD_EUR = 40000;
+
+function saleInvoiceTurnoverAmount(invoice: SaleInvoice): number {
+  const raw = invoice.base_net_price ?? invoice.net_price ?? invoice.base_gross_price ?? invoice.gross_price;
+  if (raw == null) {
+    process.stderr.write(`WARNING: Sale invoice ${invoice.id ?? "unknown"} has no net/gross amount — treating as 0 for VAT threshold check\n`);
+    return 0;
+  }
+  const amount = roundMoney(raw);
+  return invoice.sale_invoice_type === "CREDIT_INVOICE" ? -Math.abs(amount) : amount;
+}
+
+function thresholdStatus(input: {
+  vatRegistered: boolean;
+  taxableTurnover: number;
+  thresholdTotalIfAllNonIncidental: number;
+}): "already_registered" | "exceeded" | "needs_manual_review" | "approaching" | "ok" {
+  if (input.vatRegistered) return "already_registered";
+  if (input.taxableTurnover > VAT_REGISTRATION_THRESHOLD_EUR) return "exceeded";
+  if (input.thresholdTotalIfAllNonIncidental > VAT_REGISTRATION_THRESHOLD_EUR) return "needs_manual_review";
+  if (input.thresholdTotalIfAllNonIncidental >= VAT_REGISTRATION_THRESHOLD_EUR * 0.8) return "approaching";
+  return "ok";
+}
 
 /**
  * Estonian corporate income tax rate on distributed profits (TuMS § 50).
@@ -725,6 +749,128 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               ? `Expense booked. Owner debt increased by ${total} EUR on account ${payAcc}.`
               : `Expense booked. Company is not VAT-registered, so the full gross amount was debited to expense account ${expense_account}. Owner debt increased by ${total} EUR on account ${payAcc}.`,
             ...(suggestions.length > 0 ? { suggestions } : {}),
+          }),
+        }],
+      };
+    }
+  );
+
+  registerTool(server, "check_vat_registration_threshold",
+    "Check whether a non-VAT-registered Estonian company may be approaching or exceeding the 40 000 EUR VAT registration threshold under the 2025 rules. Read-only advisory: confirmed sale invoices provide the taxable/0% turnover base, while real-estate, insurance, and financial turnover are supplied separately so the operator can decide whether they are non-incidental and count toward the threshold.",
+    {
+      year: z.number().int().min(2000).max(2100).optional().describe("Calendar year to check. Defaults to the current year."),
+      taxable_turnover_adjustment: z.number().finite().optional().describe("Manual EUR adjustment to confirmed sale-invoice turnover. Use negative values to exclude fixed-asset disposals, non-Estonian-place turnover, or other amounts that should not count; use positive values for taxable/0% turnover not represented by sale invoices."),
+      real_estate_turnover: z.number().finite().min(0).optional().describe("EUR turnover from KMS §16(2) p 2, 3, 6 real-estate transactions/rent. Counts toward the threshold only when not fixed-asset disposal and not incidental."),
+      insurance_turnover: z.number().finite().min(0).optional().describe("EUR turnover from insurance/reinsurance/intermediation services. Counts toward the threshold only when not incidental."),
+      financial_turnover: z.number().finite().min(0).optional().describe("EUR turnover from financial services, e.g. non-incidental lending interest, securities/FX activity, leasing or payment services. Counts toward the threshold only when it is business turnover and not incidental; bank deposit interest, received dividends, and incidental investment disposals are normally excluded."),
+      exempt_social_turnover: z.number().finite().min(0).optional().describe("EUR social-type exempt turnover such as healthcare or education. Reported separately and not counted toward the 40 000 EUR threshold."),
+      incidental_excluded_turnover: z.number().finite().min(0).optional().describe("EUR real-estate/financial/insurance turnover the operator has judged incidental. Reported separately and not counted toward the threshold."),
+      manual_bucket_source: z.enum(["outside_sale_invoices", "included_in_sale_invoices"]).optional().describe("Whether the manually entered real_estate/insurance/financial/exempt/incidental buckets are already included in confirmed sale invoices. Defaults to outside_sale_invoices; use included_in_sale_invoices to reclassify parts of sale-invoice turnover and avoid double counting."),
+    },
+    { ...readOnly, title: "Check VAT Registration Threshold" },
+    async ({
+      year,
+      taxable_turnover_adjustment,
+      real_estate_turnover,
+      insurance_turnover,
+      financial_turnover,
+      exempt_social_turnover,
+      incidental_excluded_turnover,
+      manual_bucket_source,
+    }) => {
+      const checkYear = year ?? new Date().getUTCFullYear();
+      const from = `${checkYear}-01-01`;
+      const to = `${checkYear}-12-31`;
+      const [vatRegistered, saleInvoices] = await Promise.all([
+        isCompanyVatRegistered(api),
+        api.saleInvoices.listAll({ start_date: from, end_date: to, status: "CONFIRMED" }),
+      ]);
+
+      const confirmedSales = saleInvoices.filter(invoice =>
+        invoice.status === "CONFIRMED" &&
+        invoice.journal_date >= from &&
+        invoice.journal_date <= to,
+      );
+      const saleInvoiceConfirmedTurnover = roundMoney(confirmedSales.reduce(
+        (sum, invoice) => sum + saleInvoiceTurnoverAmount(invoice),
+        0,
+      ));
+      const taxableAdjustment = roundMoney(taxable_turnover_adjustment ?? 0);
+      const realEstateTurnover = roundMoney(real_estate_turnover ?? 0);
+      const insuranceTurnover = roundMoney(insurance_turnover ?? 0);
+      const financialTurnover = roundMoney(financial_turnover ?? 0);
+      const exemptSocialTurnover = roundMoney(exempt_social_turnover ?? 0);
+      const incidentalExcludedTurnover = roundMoney(incidental_excluded_turnover ?? 0);
+      const manualBucketSource = manual_bucket_source ?? "outside_sale_invoices";
+      const manualBucketsTotal = roundMoney(realEstateTurnover + insuranceTurnover + financialTurnover + exemptSocialTurnover + incidentalExcludedTurnover);
+      const reclassifiedFromSaleInvoices = manualBucketSource === "included_in_sale_invoices" ? manualBucketsTotal : 0;
+      const saleInvoiceOrdinaryTurnover = roundMoney(Math.max(0, saleInvoiceConfirmedTurnover - reclassifiedFromSaleInvoices));
+      const countIfNotIncidental = roundMoney(realEstateTurnover + insuranceTurnover + financialTurnover);
+      const taxableOrZeroRatedTurnover = roundMoney(Math.max(0, saleInvoiceOrdinaryTurnover + taxableAdjustment));
+      const thresholdTotalIfAllNonIncidental = roundMoney(taxableOrZeroRatedTurnover + countIfNotIncidental);
+      const status = thresholdStatus({
+        vatRegistered,
+        taxableTurnover: taxableOrZeroRatedTurnover,
+        thresholdTotalIfAllNonIncidental,
+      });
+
+      const inputWarnings: string[] = [];
+      if (manualBucketSource === "included_in_sale_invoices" && reclassifiedFromSaleInvoices > saleInvoiceConfirmedTurnover) {
+        inputWarnings.push("manual_bucket_source='included_in_sale_invoices' was used, but manual buckets exceed confirmed sale-invoice turnover. Check whether some buckets are actually outside sale invoices.");
+      }
+
+      const manualReviewQuestions = [
+        "Kas real_estate_turnover sisaldab ainult KMS §16 lg 2 p 2, 3 või 6 kinnisasjatehinguid, mis ei ole põhivara võõrandamine ega juhuslik tehing?",
+        "Kas insurance_turnover on ettevõtte tavapärane kindlustus-/edasikindlustus-/vahendusteenuse käive, mitte juhuslik teenus?",
+        "Kas financial_turnover on ettevõtluse käigus osutatud finantsteenuse käive (nt laenuintress ettevõtte tavategevusena), mitte hoiuseintress, saadud dividend, võlakirja lunastus või juhuslik investeeringutehing?",
+        "Kas käsitsi sisestatud käibeliigid on juba müügiarvete sees? Kui jah, kasuta manual_bucket_source='included_in_sale_invoices', et neid mitte topelt lugeda.",
+        "Kas mõni muu müügiarve kuulub taxable_turnover_adjustment kaudu välja arvata, sest käibe tekkimise koht ei ole Eesti või tegu on põhivara võõrandamisega?",
+      ];
+
+      const suggestedAction = status === "already_registered"
+        ? "Company already has a VAT number; use this breakdown as a reasonableness check only."
+        : status === "exceeded"
+          ? "Tavalise maksustatava/0% käibe põhjal on 40 000 EUR piirmäär ületatud; kontrolli kuupäeva, millal registreerimiskohustus tekkis, ja valmista KMKR avaldus."
+          : status === "needs_manual_review"
+            ? "40 000 EUR piirmäära ületamine sõltub finants-, kindlustus- või kinnisasjakäibe mitte-juhuslikuks lugemisest. Märgi juhuslik osa incidental_excluded_turnover alla või lisa mitte-juhuslik osa vastavasse käibeliiki."
+            : status === "approaching"
+              ? "Piirmäärale lähenetakse; jälgi järgmisi müügiarveid ja hinda eraldi finants-, kindlustus- ning kinnisasjakäibe juhuslikkust."
+              : "Piirmäär ei ole sisestatud andmete põhjal lähedal.";
+
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            year: checkYear,
+            period: { from, to },
+            vat_registered: vatRegistered,
+            threshold_eur: VAT_REGISTRATION_THRESHOLD_EUR,
+            status,
+            sale_invoice_confirmed_turnover: saleInvoiceConfirmedTurnover,
+            confirmed_sale_invoice_count: confirmedSales.length,
+            manual_bucket_source: manualBucketSource,
+            sale_invoice_turnover_reclassified_to_manual_buckets: reclassifiedFromSaleInvoices,
+            sale_invoice_ordinary_turnover_after_bucket_split: saleInvoiceOrdinaryTurnover,
+            taxable_turnover_adjustment: taxableAdjustment,
+            taxable_or_zero_rated_turnover: taxableOrZeroRatedTurnover,
+            count_if_not_incidental: {
+              real_estate_turnover: realEstateTurnover,
+              insurance_turnover: insuranceTurnover,
+              financial_turnover: financialTurnover,
+              total: countIfNotIncidental,
+            },
+            not_counted: {
+              exempt_social_turnover: exemptSocialTurnover,
+              incidental_excluded_turnover: incidentalExcludedTurnover,
+            },
+            threshold_total_if_all_non_incidental: thresholdTotalIfAllNonIncidental,
+            remaining_if_all_non_incidental: roundMoney(Math.max(0, VAT_REGISTRATION_THRESHOLD_EUR - thresholdTotalIfAllNonIncidental)),
+            excess_if_all_non_incidental: roundMoney(Math.max(0, thresholdTotalIfAllNonIncidental - VAT_REGISTRATION_THRESHOLD_EUR)),
+            input_warnings: inputWarnings,
+            manual_review_questions: manualReviewQuestions,
+            suggested_action: suggestedAction,
+            legal_basis: "EMTA guidance for VAT registration threshold calculation from 2025-01-01: taxable/0% turnover counts; non-incidental real-estate, insurance, and financial services can count; social-type exempt services such as healthcare/education remain excluded; only turnover whose place of supply is Estonia counts.",
+            note: "Advisory calculation, not a hard legal decision. e-arveldaja sale invoices do not reliably identify fixed-asset disposals, incidental financial/investment transactions, all exempt categories, or place-of-supply exceptions, so review the separate turnover buckets before deciding registration duty.",
           }),
         }],
       };

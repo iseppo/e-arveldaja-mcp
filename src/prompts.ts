@@ -105,6 +105,28 @@ export function registerPrompts(
 ): void {
   const setupInfo = options.setupInfo;
 
+  if (options.toolExposure?.enableTaxTools !== false) {
+    registerWorkflowPrompt(
+      server,
+      setupInfo,
+      "vat-registration-threshold",
+      "Check whether a non-VAT-registered company is approaching or exceeding the 40 000 EUR VAT registration threshold, with financial/insurance/real-estate turnover separated for review.",
+      {
+        year: z.number().int().min(2000).max(2100).optional().describe("Calendar year to check; defaults to current year"),
+        financial_turnover: z.number().min(0).optional().describe("Optional financial-services turnover to include if not incidental"),
+        insurance_turnover: z.number().min(0).optional().describe("Optional insurance-services turnover to include if not incidental"),
+        real_estate_turnover: z.number().min(0).optional().describe("Optional real-estate turnover to include if not incidental"),
+        exempt_social_turnover: z.number().min(0).optional().describe("Optional healthcare/education or similar exempt turnover to show as not counted"),
+        incidental_excluded_turnover: z.number().min(0).optional().describe("Optional finance/insurance/real-estate turnover already judged incidental and excluded"),
+        taxable_turnover_adjustment: z.number().optional().describe("Optional signed adjustment to sale-invoice taxable/0% turnover"),
+        manual_bucket_source: z.enum(["outside_sale_invoices", "included_in_sale_invoices"]).optional().describe("Whether manual bucket amounts are outside sale invoices or already included there"),
+      },
+      {
+        note: "VAT threshold checking needs live VAT status and sale invoices from e-arveldaja, so it cannot run before credentials are configured.",
+      },
+    );
+  }
+
   registerWorkflowPrompt(
     server,
     undefined,
