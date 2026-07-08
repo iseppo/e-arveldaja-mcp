@@ -31,6 +31,7 @@ import {
   buildReferencedInvoiceForPaymentReceipt,
   deriveOwnCompanyRegistryCode,
   detectSelfVatOnly,
+  detectSelfRegCodeOnly,
   resolveSupplierFromTransaction,
   supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
@@ -773,6 +774,37 @@ describe("detectSelfVatOnly", () => {
 
   it("is false when raw_text is missing", () => {
     expect(detectSelfVatOnly({}, ownVat)).toBe(false);
+  });
+});
+
+describe("detectSelfRegCodeOnly (#22)", () => {
+  const ownReg = "17133416";
+
+  it("is true when raw text contains own reg code and supplier_reg_code is empty", () => {
+    expect(detectSelfRegCodeOnly({ raw_text: "Bill to Seppo AI OÜ\n17133416" }, ownReg)).toBe(true);
+  });
+
+  it("is false when supplier_reg_code is set (resolution found a real supplier)", () => {
+    expect(
+      detectSelfRegCodeOnly({ raw_text: "Supplier 12345678\nBuyer 17133416", supplier_reg_code: "12345678" }, ownReg),
+    ).toBe(false);
+  });
+
+  it("is false when own reg code is not present in raw text", () => {
+    expect(detectSelfRegCodeOnly({ raw_text: "Registrikood: 12345678" }, ownReg)).toBe(false);
+  });
+
+  it("is false when ownCompanyRegistryCode is undefined", () => {
+    expect(detectSelfRegCodeOnly({ raw_text: "17133416" }, undefined)).toBe(false);
+  });
+
+  it("is false when raw_text is missing", () => {
+    expect(detectSelfRegCodeOnly({}, ownReg)).toBe(false);
+  });
+
+  it("is false when own reg code is a substring of a longer number (digit boundaries)", () => {
+    expect(detectSelfRegCodeOnly({ raw_text: "171334160" }, ownReg)).toBe(false);
+    expect(detectSelfRegCodeOnly({ raw_text: "017133416" }, ownReg)).toBe(false);
   });
 });
 

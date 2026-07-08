@@ -26,6 +26,8 @@ export type ExtractionConfidence = "low" | "medium" | "high";
 export interface ExtractionConfidenceSignals {
   /** Buyer's own VAT was the only VAT on the page (#14). */
   self_vat_detected?: boolean;
+  /** Buyer's own registry code was the only reg code on the page (#22). */
+  self_reg_code_detected?: boolean;
   /** Supplier resolution did not return a concrete client. */
   supplier_resolution_failed?: boolean;
   /** Booking suggestion came from supplier history (clients_id), not a keyword fallback. */
@@ -44,6 +46,12 @@ export interface ExtractionConfidenceSignals {
    * routed to review rather than auto-confirmed.
    */
   foreign_reverse_charge_default_unverified?: boolean;
+  /**
+   * EST-supplier invoice (country inferred) but no supplier VAT recovered —
+   * KMS § 37 compliance risk. Medium signal: routes to review, but a
+   * non-VAT-registered Estonian supplier legitimately has no KMKR.
+   */
+  missing_supplier_vat_on_est_invoice?: boolean;
 }
 
 export interface InvoiceExtractionFallback {
@@ -79,6 +87,10 @@ export function summarizeInvoiceExtraction(
   // to `extracted.raw_text` (the receipt-batch flow); `extract_pdf_invoice`
   // carries the text once as `hints.raw_text` and passes that instead.
   rawTextField: string = "extracted.raw_text",
+  // Inferred supplier country (ISO 3-letter e-arveldaja code, e.g. "EST").
+  // When EST and no supplier_vat_no is recovered, a KMS § 37 compliance
+  // signal is emitted (medium). Optional/backwards-compatible.
+  supplierCountry?: string,
 ): InvoiceExtractionFallback {
   // Currency is conditionally required: only when there's a numeric total to
   // attach units to. Without it, booking the gross at face value silently
@@ -124,12 +136,23 @@ export function summarizeInvoiceExtraction(
   if (missingRequiredFields.length > 0) lowSignals.push("missing_required_fields");
   if (currencyDefaulted) lowSignals.push("currency_defaulted");
   if (signals?.self_vat_detected) lowSignals.push("self_vat_detected");
+  if (signals?.self_reg_code_detected) lowSignals.push("self_reg_code_detected");
   if (signals?.duplicate_invoice_in_batch) lowSignals.push("duplicate_invoice_in_batch");
   if (signals?.reverse_charge_phrase_unhandled) lowSignals.push("reverse_charge_phrase_unhandled");
 
   if (signals?.supplier_resolution_failed) mediumSignals.push("supplier_resolution_failed");
   if (signals?.improbable_fixed_asset) mediumSignals.push("improbable_fixed_asset");
   if (signals?.foreign_reverse_charge_default_unverified) mediumSignals.push("foreign_reverse_charge_default_unverified");
+  if (signals?.missing_supplier_vat_on_est_invoice) mediumSignals.push("missing_supplier_vat_on_est_invoice");
+  // Auto-derive the EST-missing-VAT signal when the caller passes supplierCountry
+  // but did not set the signal explicitly. Non-VAT-registered Estonian suppliers
+  // legitimately have no KMKR, so this is a medium (review) signal, not low.
+  if (!signals?.missing_supplier_vat_on_est_invoice &&
+      supplierCountry === "EST" &&
+      !snapshot.supplier_vat_no &&
+      !mediumSignals.includes("missing_supplier_vat_on_est_invoice")) {
+    mediumSignals.push("missing_supplier_vat_on_est_invoice");
+  }
   // Booking from a keyword/fallback path is fine for low-stakes review,
   // but it's a soft signal that we did NOT find a confirming history. Only
   // downgrade to medium when paired with another medium-or-low signal —

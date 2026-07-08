@@ -358,4 +358,82 @@ describe("summarizeInvoiceExtraction", () => {
       expect(result.missing_optional_fields).not.toContain("currency");
     });
   });
+
+  describe("missing_supplier_vat_on_est_invoice signal", () => {
+    const baseGoodWithCountry = {
+      supplier_name: "Acme OÜ",
+      invoice_number: "INV-2024-001",
+      invoice_date: "2024-01-15",
+      total_gross: 121.0,
+      currency: "EUR",
+      raw_text: "Invoice content",
+    };
+
+    it("auto-derives the signal when supplierCountry=EST and supplier_vat_no is missing", () => {
+      const result = summarizeInvoiceExtraction(
+        { ...baseGoodWithCountry, supplier_vat_no: undefined },
+        undefined,
+        "extracted.raw_text",
+        "EST",
+      );
+      expect(result.confidence).toBe("medium");
+      expect(result.confidence_signals).toContain("missing_supplier_vat_on_est_invoice");
+    });
+
+    it("does not fire the signal when supplier_vat_no is present", () => {
+      const result = summarizeInvoiceExtraction(
+        { ...baseGoodWithCountry, supplier_vat_no: "EE100594102" },
+        undefined,
+        "extracted.raw_text",
+        "EST",
+      );
+      expect(result.confidence_signals).not.toContain("missing_supplier_vat_on_est_invoice");
+    });
+
+    it("does not fire the signal for a non-EST supplier", () => {
+      const result = summarizeInvoiceExtraction(
+        { ...baseGoodWithCountry, supplier_vat_no: undefined },
+        undefined,
+        "extracted.raw_text",
+        "FIN",
+      );
+      expect(result.confidence_signals).not.toContain("missing_supplier_vat_on_est_invoice");
+    });
+
+    it("does not fire the signal when supplierCountry is not provided", () => {
+      const result = summarizeInvoiceExtraction(
+        { ...baseGoodWithCountry, supplier_vat_no: undefined },
+      );
+      expect(result.confidence_signals).not.toContain("missing_supplier_vat_on_est_invoice");
+    });
+
+    it("explicitly-set signal takes precedence and is idempotent with auto-derivation", () => {
+      const result = summarizeInvoiceExtraction(
+        { ...baseGoodWithCountry, supplier_vat_no: undefined },
+        { missing_supplier_vat_on_est_invoice: true },
+        "extracted.raw_text",
+        "EST",
+      );
+      expect(result.confidence).toBe("medium");
+      const count = result.confidence_signals.filter(s => s === "missing_supplier_vat_on_est_invoice").length;
+      expect(count).toBe(1);
+    });
+  });
+
+  describe("self_reg_code_detected signal (#22)", () => {
+    const baseGood = {
+      supplier_name: "Acme OÜ",
+      invoice_number: "INV-2024-001",
+      invoice_date: "2024-01-15",
+      total_gross: 121.0,
+      currency: "EUR",
+      raw_text: "Invoice content",
+    };
+
+    it("downgrades to low when self_reg_code_detected is set", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { self_reg_code_detected: true });
+      expect(result.confidence).toBe("low");
+      expect(result.confidence_signals).toContain("self_reg_code_detected");
+    });
+  });
 });

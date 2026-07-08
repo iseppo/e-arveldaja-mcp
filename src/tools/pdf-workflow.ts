@@ -15,9 +15,9 @@ import { readOnly, create } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
-import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
+import { extractIdentifiers, isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
-import { extractReceiptFieldsFromText } from "./receipt-extraction.js";
+import { extractReceiptFieldsFromText, inferSupplierCountry } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { detectVatDeductionNotes, standardVatRateOn } from "../estonian-tax-rules.js";
 
@@ -63,6 +63,11 @@ interface PdfHints {
   supplier_iban?: string;
   ref_number?: string;
   raw_text: string;
+  all_vat_candidates?: string[];
+  all_reg_code_candidates?: string[];
+  reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
+  vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
+  rejected_candidates?: Array<{ kind: "reg_code" | "vat_no"; value: string; reason: string }>;
 }
 
 /**
@@ -70,13 +75,19 @@ interface PdfHints {
  * Amounts, dates, items, and supplier names are left to the LLM —
  * regex is unreliable for those in varied PDF layouts.
  */
-function extractPdfHints(text: string): PdfHints {
+function extractPdfHints(text: string, textItems?: readonly LayoutTextItem[]): PdfHints {
+  const ids = extractIdentifiers(text, textItems ? { textItems } : undefined);
   return {
     raw_text: text,
-    supplier_reg_code: extractRegistryCode(text),
-    supplier_vat_no: extractVatNumber(text),
-    supplier_iban: extractIban(text),
-    ref_number: extractReferenceNumber(text),
+    supplier_reg_code: ids.reg_code,
+    supplier_vat_no: ids.vat_no,
+    supplier_iban: ids.iban,
+    ref_number: ids.ref_number,
+    all_vat_candidates: ids.all_vat_candidates,
+    all_reg_code_candidates: ids.all_reg_code_candidates,
+    ...(ids.reg_code_rationale ? { reg_code_rationale: ids.reg_code_rationale } : {}),
+    ...(ids.vat_no_rationale ? { vat_no_rationale: ids.vat_no_rationale } : {}),
+    rejected_candidates: ids.rejected_candidates,
   };
 }
 
@@ -92,12 +103,12 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const { path: resolved, cleanup } = await resolveInvoiceDocumentInput(file_path);
       try {
         const parsedDocument = await parseDocument(resolved);
-        const hints = extractPdfHints(parsedDocument.text);
-        const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved));
+        const hints = extractPdfHints(parsedDocument.text, parsedDocument.result?.pages?.[0]?.textItems);
+        const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved), { textItems: parsedDocument.result?.pages?.[0]?.textItems });
         // extract_pdf_invoice carries the full OCR text once, as hints.raw_text,
         // so the fallback guidance must point there (not the dropped
         // extracted.raw_text).
-        const llmFallback = summarizeInvoiceExtraction(extracted, undefined, "hints.raw_text");
+        const llmFallback = summarizeInvoiceExtraction(extracted, undefined, "hints.raw_text", inferSupplierCountry(extracted));
 
         const warnings: string[] = [];
         // ISO-4217 codes are exactly three uppercase letters. Reject anything
@@ -164,9 +175,11 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       cl_currencies_id: z.string().optional().describe("Invoice currency (default EUR)"),
       currency_rate: z.number().positive().optional().describe("Planned exchange rate (EUR per 1 foreign unit)"),
       base_net_price: z.number().optional().describe("Planned EUR-equivalent net amount"),
+      reg_code: z.string().optional().describe("Supplier registry code (registrikood, 8-digit Estonian business code)"),
+      vat_no: z.string().optional().describe("Supplier VAT number (KMKR, e.g. EE102809963)"),
     },
     { ...readOnly, title: "Validate Invoice Data" },
-    async ({ total_net, total_vat, total_gross, items, invoice_date, due_date, cl_currencies_id, currency_rate, base_net_price }) => {
+    async ({ total_net, total_vat, total_gross, items, invoice_date, due_date, cl_currencies_id, currency_rate, base_net_price, reg_code, vat_no }) => {
       const errors: string[] = [];
       const warnings: string[] = [];
       const parsed = parseJsonObjectArray(items, "items");
@@ -312,6 +325,40 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           `Without these, the EUR booking may not match the actual Wise card-payment conversion and the invoice can stay PARTIALLY_PAID. ` +
           `Pass currency_rate (Wise CSV "Source amount (after fees)" / "Target amount (after fees)") and/or base_gross_price to lock the EUR settlement.`
         );
+      }
+
+      if (reg_code !== undefined && reg_code !== null) {
+        const trimmedReg = reg_code.trim();
+        if (trimmedReg) {
+          if (isValidEeRegistryCode(trimmedReg)) {
+            // valid — no warning
+          } else if (/^\d{8}$/.test(trimmedReg)) {
+            warnings.push(`reg_code "${wrapUntrustedOcr(trimmedReg)}" has an invalid Estonian registry-code checksum — possible OCR misread. Verify before booking.`);
+          } else {
+            warnings.push(`reg_code "${wrapUntrustedOcr(trimmedReg.slice(0, 20))}" is not a valid 8-digit Estonian registry code. Foreign registry-code checksums are not implemented; verify manually.`);
+          }
+        }
+      }
+
+      if (vat_no !== undefined && vat_no !== null) {
+        const trimmedVat = vat_no.trim();
+        if (trimmedVat) {
+          const normalized = trimmedVat.replace(/\s+/g, "").toUpperCase();
+          if (normalized.startsWith("EE")) {
+            if (isValidEeVatNumber(normalized)) {
+              // valid — no warning
+            } else if (/^EE\d{9}$/.test(normalized)) {
+              warnings.push(`vat_no "${wrapUntrustedOcr(normalized)}" has an invalid EE VAT checksum — possible OCR misread. Verify before booking.`);
+            } else {
+              warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" is not a valid EE+9-digit VAT number. Verify manually.`);
+            }
+          } else if (/^[A-Z]{2}[0-9A-Z]{6,}$/.test(normalized)) {
+            // Foreign VAT — permissive shape check only, soft warning.
+            warnings.push(`vat_no "${wrapUntrustedOcr(normalized)}" is a foreign VAT number; structural checksum not implemented for non-EE VATs. Verify manually if uncertain.`);
+          } else {
+            warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" does not match the expected VAT number shape (XX + 6+ alphanumeric). Verify before booking.`);
+          }
+        }
       }
 
       const valid = errors.length === 0;

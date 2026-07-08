@@ -1,7 +1,7 @@
 import { basename, extname } from "path";
 import { normalizeCompanyName as normalizeCompanyNameShared } from "../company-name.js";
 import { roundMoney } from "../money.js";
-import { extractIban, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
+import { type LayoutTextItem, type RejectedCandidate, extractIban, extractIdentifiers, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
 import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { normalizeVatRate } from "./purchase-vat-defaults.js";
@@ -209,6 +209,12 @@ export interface ExtractedReceiptFields {
   raw_text_truncated?: boolean;
   /** Output-only: original raw_text length, present only when truncated. */
   raw_text_length?: number;
+  /** Structured identifier candidates surfaced for reviewer visibility (#vat-reg-recovery). */
+  all_vat_candidates?: string[];
+  all_reg_code_candidates?: string[];
+  reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
+  vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
+  rejected_candidates?: RejectedCandidate[];
 }
 
 export interface TransactionGroupClassificationInput {
@@ -808,26 +814,31 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
 }
 
 export interface ExtractReceiptFieldsOptions {
-  /**
-   * VAT number of the active company. Used to keep an invoice's buyer-side VAT
-   * (= our own VAT) from being resolved as the supplier when the supplier's
-   * VAT is missing from the document — see issue #14.
-   */
   ownCompanyVat?: string;
+  ownCompanyRegistryCode?: string;
+  /** Layout text items from the PDF parser for coordinate-based column classification. */
+  textItems?: readonly LayoutTextItem[];
 }
 
 export function extractPdfIdentifiers(
   text: string,
   options?: ExtractReceiptFieldsOptions,
-): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number"> {
+): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number" | "all_vat_candidates" | "all_reg_code_candidates" | "reg_code_rationale" | "vat_no_rationale" | "rejected_candidates"> {
+  const ids = extractIdentifiers(text, {
+    excludeVat: options?.ownCompanyVat,
+    excludeRegCode: options?.ownCompanyRegistryCode,
+    textItems: options?.textItems,
+  });
   return {
-    supplier_reg_code: extractRegistryCode(text),
-    supplier_vat_no: extractVatNumber(
-      text,
-      options?.ownCompanyVat ? { exclude: options.ownCompanyVat } : undefined,
-    ),
-    supplier_iban: extractIban(text),
-    ref_number: extractReferenceNumber(text),
+    supplier_reg_code: ids.reg_code,
+    supplier_vat_no: ids.vat_no,
+    supplier_iban: ids.iban,
+    ref_number: ids.ref_number,
+    all_vat_candidates: ids.all_vat_candidates,
+    all_reg_code_candidates: ids.all_reg_code_candidates,
+    ...(ids.reg_code_rationale ? { reg_code_rationale: ids.reg_code_rationale } : {}),
+    ...(ids.vat_no_rationale ? { vat_no_rationale: ids.vat_no_rationale } : {}),
+    rejected_candidates: ids.rejected_candidates,
   };
 }
 

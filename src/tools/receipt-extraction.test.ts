@@ -500,6 +500,30 @@ describe("extractPdfIdentifiers", () => {
       extractPdfIdentifiers(text, { ownCompanyVat: "EE102809963" }).supplier_vat_no,
     ).toBeUndefined();
   });
+
+  it("returns structured all_vat_candidates and rejected_candidates from extractIdentifiers", () => {
+    const text = "KMKR: EE100594103\nKMKR: EE102809963";
+    const ids = extractPdfIdentifiers(text);
+    expect(ids.all_vat_candidates).toEqual(
+      expect.arrayContaining(["EE100594103", "EE102809963"]),
+    );
+    // The bad-checksum value is in rejected_candidates.
+    expect(ids.rejected_candidates?.some(r => r.kind === "vat_no" && r.value === "EE100594103")).toBe(true);
+    // The checksum-failing labeled value is not canonical when a valid alternative exists.
+    expect(ids.supplier_vat_no).toBe("EE102809963");
+  });
+
+  it("recovers a bare reg code via tier 2 when no label is present", () => {
+    const text = ["Acme OÜ", "17133416", "Tallinn"].join("\n");
+    expect(extractPdfIdentifiers(text).supplier_reg_code).toBe("17133416");
+  });
+
+  it("threads ownCompanyRegistryCode through to excludeRegCode", () => {
+    const text = ["Acme OÜ", "17133416", "Tallinn"].join("\n");
+    expect(
+      extractPdfIdentifiers(text, { ownCompanyRegistryCode: "17133416" }).supplier_reg_code,
+    ).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

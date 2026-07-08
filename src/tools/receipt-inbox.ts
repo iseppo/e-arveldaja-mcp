@@ -39,6 +39,7 @@ import {
   getBookingSuggestionVatConfig,
   getAutoBookedVatConfig,
   hasAutoBookableReceiptFields,
+  inferSupplierCountry,
   normalizeCounterpartyName,
   scoreTransactionToInvoice,
   suggestBookingInternal,
@@ -727,10 +728,16 @@ async function resolveClassificationSuggestion(
 async function extractReceiptFields(
   file: ReceiptFileInfo,
   ownCompanyVat?: string,
+  ownCompanyRegistryCode?: string,
 ): Promise<ExtractedReceiptFields> {
   const validatedPath = await revalidateReceiptFilePath(file);
   const parsedDocument = await parseDocument(validatedPath);
-  return extractReceiptFieldsFromText(parsedDocument.text, file.name, { ownCompanyVat });
+  const textItems = parsedDocument.result?.pages?.[0]?.textItems;
+  return extractReceiptFieldsFromText(parsedDocument.text, file.name, {
+    ownCompanyVat,
+    ownCompanyRegistryCode,
+    textItems,
+  });
 }
 
 function normalizeVatForCompare(value: string | null | undefined): string {
@@ -756,6 +763,27 @@ export function detectSelfVatOnly(extracted: ExtractedReceiptFields, ownCompanyV
   if (!ownNormalized) return false;
   const normalizedText = extracted.raw_text.replace(/\s+/g, "").toUpperCase();
   return normalizedText.includes(ownNormalized);
+}
+
+/**
+ * Symmetric to `detectSelfVatOnly` for the registry code (#22): true when
+ * the document text contains the active company's own registrikood and the
+ * deterministic extractor (called with own-reg excluded) did NOT recover a
+ * different supplier reg code. Indicates the only 8-digit code on the page
+ * was the buyer's own — supplier resolution must not silently proceed to
+ * creating a duplicate of the active company.
+ */
+export function detectSelfRegCodeOnly(extracted: ExtractedReceiptFields, ownCompanyRegistryCode: string | undefined): boolean {
+  if (!ownCompanyRegistryCode || !extracted.raw_text) return false;
+  if (extracted.supplier_reg_code) return false;
+  const own = ownCompanyRegistryCode.trim();
+  if (!own) return false;
+  const normalizedText = extracted.raw_text.replace(/\s+/g, "");
+  const idx = normalizedText.indexOf(own);
+  if (idx < 0) return false;
+  const before = idx > 0 ? normalizedText[idx - 1] : "";
+  const after = idx + own.length < normalizedText.length ? normalizedText[idx + own.length]! : "";
+  return !/\d/.test(before) && !/\d/.test(after);
 }
 
 /**
@@ -1149,7 +1177,7 @@ export function registerReceiptInboxTools(
         const notes: string[] = [];
 
         try {
-          const extracted = await extractReceiptFields(file, ownCompanyVat);
+          const extracted = await extractReceiptFields(file, ownCompanyVat, ownCompanyRegistryCode);
           const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
           const selfVatDetected = detectSelfVatOnly(extracted, ownCompanyVat);
 
@@ -1160,7 +1188,10 @@ export function registerReceiptInboxTools(
           // phrasing without a flag) feed into the confidence verdict.
           const signals: ExtractionConfidenceSignals = {};
           if (selfVatDetected) signals.self_vat_detected = true;
-          const summarize = () => summarizeInvoiceExtraction(extracted, signals);
+          const selfRegCodeDetected = detectSelfRegCodeOnly(extracted, ownCompanyRegistryCode);
+          if (selfRegCodeDetected) signals.self_reg_code_detected = true;
+          const inferredSupplierCountry = inferSupplierCountry(extracted);
+          const summarize = () => summarizeInvoiceExtraction(extracted, signals, "extracted.raw_text", inferredSupplierCountry);
           const llmFallback = summarize();
 
           if (file.file_type !== "pdf") {
@@ -1169,6 +1200,11 @@ export function registerReceiptInboxTools(
           if (selfVatDetected) {
             notes.push(
               "Document only printed the buyer's VAT (matches active company). Supplier VAT cleared — verify supplier manually before booking (#14).",
+            );
+          }
+          if (selfRegCodeDetected) {
+            notes.push(
+              "Document only printed the buyer's registry code (matches active company). Supplier reg code cleared — verify supplier manually before booking (#22).",
             );
           }
 
