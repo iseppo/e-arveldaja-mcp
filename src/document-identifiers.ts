@@ -237,18 +237,19 @@ export function extractReferenceNumber(text: string): string | undefined {
 // Coordinate-based layout classification (Option C hybrid)
 // ---------------------------------------------------------------------------
 
-const SUPPLIER_MARKER_RE = /\b(tarnija|m[üu][üu]ja|seller|müüja)\b/i;
+export const SUPPLIER_MARKER_RE = /\b(tarnija|m[üu][üu]ja|seller|müüja)\b/i;
 // `saaja` alone is buyer-side (e.g. "arve saaja"), but `makse saaja` (payee)
 // is supplier-side. Use a negative lookbehind to exclude `makse saaja`.
-const BUYER_MARKER_RE = /(?<!makse\s)\b(saaja|maksja|arve\s*saaja|bill\s*to|invoice\s*to|ostja|klient|client|buyer|recipient|vastuv[õo]tja|receiver)\b/i;
+export const BUYER_MARKER_RE = /(?<!makse\s)\b(saaja|maksja|arve\s*saaja|bill\s*to|invoice\s*to|ostja|klient|client|buyer|recipient|vastuv[õo]tja|receiver)\b/i;
 
 const COLUMN_PROXIMITY_THRESHOLD = 50;
 
-interface MarkerPosition {
+export interface MarkerPosition {
   text: string;
   x: number;
   y: number;
   width: number;
+  pageNum?: number;
   side: "supplier" | "buyer";
 }
 
@@ -266,7 +267,10 @@ interface CandidatePosition {
  *
  * Returns "supplier" | "buyer" | "unknown".
  */
-function classifyByPosition(candidate: CandidatePosition, markers: MarkerPosition[]): "supplier" | "buyer" | "unknown" {
+export function classifyByPosition(
+  candidate: Pick<CandidatePosition, "x" | "y">,
+  markers: readonly MarkerPosition[],
+): "supplier" | "buyer" | "unknown" {
   if (markers.length === 0) return "unknown";
 
   const markersAbove = markers
@@ -401,7 +405,7 @@ function classifyCandidateOccurrence(
 ): "supplier" | "buyer" | "unknown" {
   const items = findAllItemsForCandidate(textItems, value);
   const sides = items.map(item =>
-    classifyByPosition({ value, kind, x: item.x, y: item.y }, markers),
+    classifyByPosition({ x: item.x, y: item.y }, markers),
   );
   const selectedSide = selectedOccurrenceIndex === undefined ? sides[0] : sides[selectedOccurrenceIndex];
 
@@ -418,7 +422,7 @@ function hasUnambiguousSupplierOccurrence(
   markers: MarkerPosition[],
 ): boolean {
   const sides = findAllItemsForCandidate(textItems, value).map(item =>
-    classifyByPosition({ value, kind, x: item.x, y: item.y }, markers),
+    classifyByPosition({ x: item.x, y: item.y }, markers),
   );
   return sides.includes("supplier") && !sides.includes("buyer");
 }
@@ -659,13 +663,13 @@ function resolveVatNo(
   return { value, rationale, occurrenceIndex, candidates, rejected };
 }
 
-function buildIdentifierMarkers(textItems: readonly LayoutTextItem[]): MarkerPosition[] {
+export function buildIdentifierMarkers(textItems: readonly LayoutTextItem[]): MarkerPosition[] {
   const markers: MarkerPosition[] = [];
   for (const item of textItems) {
     if (BUYER_MARKER_RE.test(item.text)) {
-      markers.push({ text: item.text, x: item.x, y: item.y, width: item.width, side: "buyer" });
+      markers.push({ text: item.text, x: item.x, y: item.y, width: item.width, pageNum: item.pageNum, side: "buyer" });
     } else if (SUPPLIER_MARKER_RE.test(item.text)) {
-      markers.push({ text: item.text, x: item.x, y: item.y, width: item.width, side: "supplier" });
+      markers.push({ text: item.text, x: item.x, y: item.y, width: item.width, pageNum: item.pageNum, side: "supplier" });
     }
   }
   return markers;

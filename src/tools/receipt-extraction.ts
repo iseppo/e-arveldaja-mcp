@@ -3,7 +3,10 @@ import { normalizeCompanyName as normalizeCompanyNameShared } from "../company-n
 import { roundMoney } from "../money.js";
 import {
   type LayoutTextItem,
+  type MarkerPosition,
   type RejectedCandidate,
+  buildIdentifierMarkers,
+  classifyByPosition,
   extractIban,
   extractIdentifiers,
   extractReferenceNumber,
@@ -1503,7 +1506,99 @@ export function extractPdfIdentifiers(
   };
 }
 
-export function extractSupplierName(text: string, fallbackFileName: string): string | undefined {
+interface SupplierNameLayoutCandidate {
+  name: string;
+  item: LayoutTextItem;
+  marker: MarkerPosition;
+  score: number;
+}
+
+const SUPPLIER_NAME_REGION_Y_WINDOW = 170;
+const SUPPLIER_NAME_COLUMN_X_WINDOW = 90;
+
+function layoutItemFontSize(item: LayoutTextItem): number {
+  return item.fontSize ?? item.height;
+}
+
+function layoutItemSamePageAsMarker(item: LayoutTextItem, marker: MarkerPosition): boolean {
+  return (item.pageNum ?? 1) === (marker.pageNum ?? 1);
+}
+
+function layoutItemColumnDistance(item: LayoutTextItem, marker: MarkerPosition): number {
+  const markerCenter = marker.x + marker.width / 2;
+  const itemCenter = item.x + item.width / 2;
+  return Math.abs(itemCenter - markerCenter);
+}
+
+function isLayoutItemInSupplierRegion(
+  item: LayoutTextItem,
+  marker: MarkerPosition,
+  markers: readonly MarkerPosition[],
+): boolean {
+  if (!layoutItemSamePageAsMarker(item, marker)) return false;
+  const yDistance = item.y - marker.y;
+  if (yDistance < -2 || yDistance > SUPPLIER_NAME_REGION_Y_WINDOW) return false;
+  if (layoutItemColumnDistance(item, marker) > SUPPLIER_NAME_COLUMN_X_WINDOW) return false;
+  return classifyByPosition({ x: item.x, y: item.y }, markers) === "supplier";
+}
+
+function scoreSupplierLayoutCandidate(
+  item: LayoutTextItem,
+  marker: MarkerPosition,
+  buyerMarkers: readonly MarkerPosition[],
+): number {
+  const yDistance = Math.max(0, item.y - marker.y);
+  const fontScore = layoutItemFontSize(item) * 8;
+  const proximityScore = Math.max(0, SUPPLIER_NAME_REGION_Y_WINDOW - yDistance) / 2;
+  const columnScore = Math.max(0, SUPPLIER_NAME_COLUMN_X_WINDOW - layoutItemColumnDistance(item, marker)) / 2;
+  const beforeBuyerScore = buyerMarkers.some(buyer =>
+    layoutItemSamePageAsMarker(item, buyer) &&
+    buyer.y > marker.y &&
+    item.y < buyer.y
+  ) ? 35 : 0;
+  return fontScore + proximityScore + columnScore + beforeBuyerScore;
+}
+
+function extractSupplierNameFromLayout(textItems: readonly LayoutTextItem[]): string | undefined {
+  const markers = buildIdentifierMarkers(textItems);
+  const supplierMarkers = markers.filter(marker => marker.side === "supplier");
+  if (supplierMarkers.length === 0) return undefined;
+
+  const buyerMarkers = markers.filter(marker => marker.side === "buyer");
+  const candidates: SupplierNameLayoutCandidate[] = [];
+
+  for (const marker of supplierMarkers) {
+    for (const item of textItems) {
+      if (!isLayoutItemInSupplierRegion(item, marker, markers)) continue;
+      const candidate = cleanSupplierCandidate(item.text);
+      if (!candidate) continue;
+      candidates.push({
+        name: candidate,
+        item,
+        marker,
+        score: scoreSupplierLayoutCandidate(item, marker, buyerMarkers),
+      });
+    }
+  }
+
+  return candidates
+    .sort((a, b) =>
+      b.score - a.score ||
+      layoutItemFontSize(b.item) - layoutItemFontSize(a.item) ||
+      Math.abs(a.item.y - a.marker.y) - Math.abs(b.item.y - b.marker.y),
+    )[0]?.name;
+}
+
+export function extractSupplierName(
+  text: string,
+  fallbackFileName: string,
+  textItems?: readonly LayoutTextItem[],
+): string | undefined {
+  if (textItems && textItems.length > 0) {
+    const layoutSupplierName = extractSupplierNameFromLayout(textItems);
+    if (layoutSupplierName) return layoutSupplierName;
+  }
+
   const rows = text
     .split(/\r?\n/)
     .map(raw => ({ raw, line: clampTextLine(raw) }))
@@ -2102,7 +2197,7 @@ export function extractReceiptFieldsFromText(
 ): ExtractedReceiptFields {
   const identifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date } = extractDates(text);
-  const supplierName = extractSupplierName(text, fileName);
+  const supplierName = extractSupplierName(text, fileName, options?.textItems);
   const amounts = extractAmountsWithMetadata(text, options?.textItems);
   const currency = detectReceiptCurrency(text);
   const invoiceNumber = extractInvoiceNumber(text, fileName);

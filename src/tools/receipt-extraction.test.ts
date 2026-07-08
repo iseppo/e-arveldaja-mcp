@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Account } from "../types/api.js";
+import type { LayoutTextItem } from "../document-identifiers.js";
 import {
   normalizeDate,
   extractAmounts,
@@ -884,6 +885,70 @@ describe("deriveAutoBookedVatPrice", () => {
 // ---------------------------------------------------------------------------
 
 describe("extractSupplierName", () => {
+  it("uses coordinates to pick the supplier column when text order favors the buyer", () => {
+    const text = [
+      "Ostja Müüja",
+      "Buyer Wrong OÜ Correct Vendor OÜ",
+      "Kokku 12.00",
+    ].join("\n");
+    const textItems = [
+      { text: "Ostja", x: 20, y: 20, width: 35, height: 10, fontSize: 10 },
+      { text: "Müüja", x: 300, y: 20, width: 40, height: 10, fontSize: 10 },
+      { text: "Buyer Wrong OÜ", x: 20, y: 42, width: 110, height: 12, fontSize: 12 },
+      { text: "Correct Vendor OÜ", x: 300, y: 42, width: 150, height: 12, fontSize: 12 },
+      { text: "Kokku 12.00", x: 300, y: 220, width: 70, height: 10, fontSize: 10 },
+    ] satisfies readonly LayoutTextItem[];
+
+    expect(extractSupplierName(text, "invoice.pdf", textItems)).toBe("Correct Vendor OÜ");
+  });
+
+  it("extracts the supplier name below a müüja label in a multi-column layout", () => {
+    const text = [
+      "Saaja Müüja",
+      "Buyer OÜ",
+      "Tark Tarnija OÜ",
+      "Invoice INV-1",
+      "Kokku 12.00",
+    ].join("\n");
+    const textItems = [
+      { text: "Saaja", x: 310, y: 34, width: 40, height: 10, fontSize: 10 },
+      { text: "Müüja:", x: 24, y: 34, width: 42, height: 10, fontSize: 10 },
+      { text: "Buyer OÜ", x: 310, y: 54, width: 68, height: 10, fontSize: 10 },
+      { text: "Tark Tarnija OÜ", x: 24, y: 58, width: 120, height: 12, fontSize: 12 },
+      { text: "Invoice INV-1", x: 24, y: 120, width: 90, height: 10, fontSize: 10 },
+      { text: "Kokku 12.00", x: 320, y: 220, width: 72, height: 10, fontSize: 10 },
+    ] satisfies readonly LayoutTextItem[];
+
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf", { textItems });
+
+    expect(result.supplier_name).toBe("Tark Tarnija OÜ");
+  });
+
+  it("falls back to line heuristics when no text items are provided", () => {
+    const text = "Müüja: Fallback Tarnija OÜ\nOstja: Buyer OÜ\nKokku 12.00";
+
+    expect(extractSupplierName(text, "invoice.pdf")).toBe("Fallback Tarnija OÜ");
+  });
+
+  it("uses the largest font header in the supplier region", () => {
+    const text = [
+      "Müüja",
+      "Tiny Services OÜ",
+      "Dominant Header OÜ",
+      "Ostja",
+      "Buyer OÜ",
+    ].join("\n");
+    const textItems = [
+      { text: "Müüja", x: 24, y: 20, width: 42, height: 10, fontSize: 10 },
+      { text: "Tiny Services OÜ", x: 24, y: 44, width: 120, height: 9, fontSize: 9 },
+      { text: "Dominant Header OÜ", x: 24, y: 66, width: 180, height: 18, fontSize: 18 },
+      { text: "Ostja", x: 310, y: 20, width: 35, height: 10, fontSize: 10 },
+      { text: "Buyer OÜ", x: 310, y: 44, width: 66, height: 10, fontSize: 10 },
+    ] satisfies readonly LayoutTextItem[];
+
+    expect(extractSupplierName(text, "invoice.pdf", textItems)).toBe("Dominant Header OÜ");
+  });
+
   it("extracts company name with OÜ suffix", () => {
     const text = "ACME OÜ\nReg. nr: 12345678\nInvoice: 001";
     const result = extractSupplierName(text, "invoice.pdf");
