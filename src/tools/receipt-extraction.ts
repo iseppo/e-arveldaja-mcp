@@ -307,11 +307,14 @@ function parseAmount(raw: string): number | undefined {
       ? normalized.replace(/\./g, "").replace(",", ".")
       : normalized.replace(/,/g, "");
   } else if (commaIndex >= 0) {
-    normalized = normalized.replace(/\./g, "").replace(",", ".");
+    if (/^\d{1,3}(,\d{3})+$/.test(normalized)) {
+      normalized = normalized.replace(/,/g, "");
+    } else {
+      normalized = normalized.replace(/\./g, "").replace(",", ".");
+    }
   } else if ((normalized.match(/\./g) ?? []).length > 1) {
     normalized = normalized.replace(/\./g, "");
   } else if (/^\d{1,3}\.\d{3}$/.test(normalized)) {
-    // Single dot as thousands separator (e.g., "1.000" → "1000")
     normalized = normalized.replace(".", "");
   }
 
@@ -320,7 +323,7 @@ function parseAmount(raw: string): number | undefined {
 }
 
 function extractAmountsFromLine(line: string): number[] {
-  const matches = [...line.matchAll(/\d[\d\s.,-]*\d|\d/g)];
+  const matches = [...line.matchAll(/-?\d[\d\s.,-]*\d|-?\d/g)];
   const amounts = matches
     .filter(match => {
       const raw = match[0] ?? "";

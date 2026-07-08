@@ -36,11 +36,11 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
       target_journal_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New turnover date (YYYY-MM-DD)"),
       invoice_ids: z.string().regex(COMMA_SEPARATED_IDS_REGEX, "Expected comma-separated numeric invoice IDs").optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
       auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
-      dry_run: z.boolean().optional().describe("Preview without creating invoices (default false)"),
+      dry_run: z.boolean().optional().describe("Preview without creating invoices (default true)"),
     },
     { ...batch, title: "Create Recurring Sale Invoices" },
     async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm, dry_run }) => {
-      const isDryRun = dry_run === true;
+      const isDryRun = dry_run !== false;
       const allSales = await api.saleInvoices.listAll();
       const sourceFrom = `${source_month}-01`;
       const sourceLastDay = new Date(parseInt(source_month.split("-")[0]!, 10), parseInt(source_month.split("-")[1]!, 10), 0).getDate();

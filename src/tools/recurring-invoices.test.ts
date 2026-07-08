@@ -73,13 +73,29 @@ function setupRecurringTool(options: {
 }
 
 describe("recurring invoices tool", () => {
-  it("creates invoices by default when dry_run is omitted", async () => {
+  it("previews by default when dry_run is omitted", async () => {
     const { api, handler } = setupRecurringTool();
 
     const result = await handler({
       source_month: "2026-01",
       target_date: "2026-02-01",
       target_journal_date: "2026-02-01",
+    });
+
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.mode).toBe("DRY_RUN");
+    expect(api.saleInvoices.create).not.toHaveBeenCalled();
+  });
+
+  it("creates invoices when dry_run is explicitly false", async () => {
+    const { api, handler } = setupRecurringTool();
+
+    const result = await handler({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+      dry_run: false,
     });
 
     const payload = parseMcpResponse(result.content[0]!.text);
@@ -92,7 +108,7 @@ describe("recurring invoices tool", () => {
     }));
   });
 
-  it("supports explicit preview mode without creating invoices", async () => {
+  it("supports explicit preview mode with dry_run: true", async () => {
     const { api, handler } = setupRecurringTool();
 
     const result = await handler({
@@ -160,6 +176,7 @@ describe("recurring invoices tool", () => {
       source_month: "2026-01",
       target_date: "2026-02-01",
       target_journal_date: "2026-02-01",
+      dry_run: false,
     });
 
     const payload = parseMcpResponse(result.content[0]!.text);
@@ -187,6 +204,7 @@ describe("recurring invoices tool", () => {
       target_date: "2026-02-01",
       target_journal_date: "2026-02-01",
       auto_confirm: true,
+      dry_run: false,
     });
 
     const payload = parseMcpResponse(result.content[0]!.text);
@@ -214,6 +232,7 @@ describe("recurring invoices tool", () => {
       source_month: "2026-01",
       target_date: "2026-02-01",
       target_journal_date: "2026-02-01",
+      dry_run: false,
     });
 
     const payload = parseMcpResponse(result.content[0]!.text);

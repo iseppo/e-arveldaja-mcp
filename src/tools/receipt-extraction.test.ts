@@ -712,3 +712,29 @@ describe("detectReverseChargeFromText (#18)", () => {
     expect(detectReverseChargeFromText("")).toBe(false);
   });
 });
+
+describe("parseAmount — comma thousands and negative signs (Codex review 6)", () => {
+  it("treats 1,234 as 1234 (comma thousands separator, not decimal)", () => {
+    const text = "Kokku: 1,234 EUR";
+    const result = extractAmounts(text);
+    expect(result.total_gross).toBe(1234);
+  });
+
+  it("treats 1,234.56 as 1234.56 (comma thousands, dot decimal)", () => {
+    const text = "Total: 1,234.56 EUR";
+    const result = extractAmounts(text);
+    expect(result.total_gross).toBe(1234.56);
+  });
+
+  it("treats 1.234,56 as 1234.56 (dot thousands, comma decimal)", () => {
+    const text = "Kokku: 1.234,56 EUR";
+    const result = extractAmounts(text);
+    expect(result.total_gross).toBe(1234.56);
+  });
+
+  it("preserves negative sign in amount", () => {
+    const text = "Kokku: -123.45 EUR";
+    const result = extractAmounts(text);
+    expect(result.total_gross).toBe(-123.45);
+  });
+});

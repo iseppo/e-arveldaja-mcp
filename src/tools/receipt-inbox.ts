@@ -1267,7 +1267,7 @@ export function registerReceiptInboxTools(
             api,
             context.clients,
             extracted,
-            !dryRun,
+            false,
             ownCompanyVat || ownCompanyRegistryCode
               ? {
                   ...(ownCompanyVat ? { ownCompanyVat } : {}),
@@ -1500,12 +1500,33 @@ export function registerReceiptInboxTools(
             continue;
           }
 
+          let materializedSupplierResolution = supplierResolution;
+          if (!dryRun && !supplierResolution.found && supplierResolution.preview_client) {
+            materializedSupplierResolution = await resolveSupplierInternal(
+              api,
+              context.clients,
+              extracted,
+              true,
+              ownCompanyVat || ownCompanyRegistryCode
+                ? {
+                    ...(ownCompanyVat ? { ownCompanyVat } : {}),
+                    ...(ownCompanyRegistryCode ? { ownCompanyRegistryCode } : {}),
+                  }
+                : undefined,
+            );
+            if (materializedSupplierResolution.self_match_blocked) {
+              notes.push(
+                "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
+              );
+            }
+          }
+
           const created = await createAndMaybeMatchPurchaseInvoice(
             api,
             context,
             file,
             extracted,
-            supplierResolution,
+            materializedSupplierResolution,
             bookingSuggestion,
             bankTransactions,
             executionMode,

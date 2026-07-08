@@ -201,11 +201,13 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     const hasInvoiceGross = invoice.gross_price !== undefined && invoice.gross_price !== null;
     const hasInvoiceVat = invoice.vat_price !== undefined && invoice.vat_price !== null;
 
-    if (options.preserveExistingTotals && hasInvoiceGross && (hasInvoiceVat || !isVatRegistered)) {
+    const items = invoice.items;
+    const hasReverseCharge = items?.some(i => i.reversed_vat_id !== undefined && i.reversed_vat_id !== null) ?? false;
+
+    if ((options.preserveExistingTotals || hasReverseCharge) && hasInvoiceGross && (hasInvoiceVat || !isVatRegistered)) {
       return this.confirm(id);
     }
 
-    const items = invoice.items;
     if (items) {
       const itemVat = roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0));
       const net = roundMoney(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0));
