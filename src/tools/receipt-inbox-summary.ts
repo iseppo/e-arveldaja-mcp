@@ -56,7 +56,10 @@ export function buildReceiptBatchWorkflow(options: {
           tool: "process_receipt_batch",
           summary: options.workflowSummary,
           suggested_args: options.workflowArgs,
-          preview: options.summary,
+          preview: {
+            ...options.summary,
+            results: options.sanitizedResults,
+          },
         }]
       : [],
   });

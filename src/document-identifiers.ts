@@ -261,6 +261,14 @@ interface CandidatePosition {
   pageNum?: number;
 }
 
+function layoutPageNum(item: Pick<LayoutTextItem, "pageNum">): number {
+  return item.pageNum ?? 1;
+}
+
+function compareLayoutTextPosition(a: LayoutTextItem, b: LayoutTextItem): number {
+  return layoutPageNum(a) - layoutPageNum(b) || a.y - b.y || a.x - b.x;
+}
+
 /**
  * For a candidate at (x, y), walk markers above it from nearest to farthest.
  * The first marker in the same x-column classifies the candidate. Markers in
@@ -303,12 +311,12 @@ function findAllItemsForCandidate(textItems: readonly LayoutTextItem[], value: s
   }
 
   if (matches.length > 0) {
-    return matches.sort((a, b) => a.y - b.y);
+    return matches.sort(compareLayoutTextPosition);
   }
 
-  const lineGroups = new Map<number, LayoutTextItem[]>();
+  const lineGroups = new Map<string, LayoutTextItem[]>();
   for (const item of textItems) {
-    const lineKey = Math.round(item.y);
+    const lineKey = `${layoutPageNum(item)}:${Math.round(item.y)}`;
     const group = lineGroups.get(lineKey);
     if (group) {
       group.push(item);
@@ -343,7 +351,7 @@ function findAllItemsForCandidate(textItems: readonly LayoutTextItem[], value: s
     }
   }
 
-  return matches.sort((a, b) => a.y - b.y);
+  return matches.sort(compareLayoutTextPosition);
 }
 
 function normalizedTextWithIndex(text: string): Array<{ char: string; index: number }> {

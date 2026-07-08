@@ -40,7 +40,7 @@ import { readValidatedReceiptFile, revalidateReceiptFilePath } from "./receipt-i
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import { MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
-import { buildReceiptBatchSummary } from "./receipt-inbox-summary.js";
+import { buildReceiptBatchSummary, buildReceiptBatchWorkflow } from "./receipt-inbox-summary.js";
 import type { ReceiptBatchFileResult } from "./receipt-inbox-types.js";
 
 vi.mock("../file-validation.js", async (importOriginal) => ({
@@ -88,6 +88,74 @@ describe("buildDryRunCreatedInvoicePreview", () => {
       confirmed: false,
       uploaded_document: false,
     });
+  });
+
+  it("blocks receipt batch dry-run approval when sanitized results carry partial OCR failure", () => {
+    const file = {
+      name: "receipt.pdf",
+      path: "/tmp/receipts/receipt.pdf",
+      extension: ".pdf",
+      file_type: "pdf",
+      size_bytes: 100,
+      modified_at: "2026-07-08T00:00:00.000Z",
+    } satisfies ReceiptBatchFileResult["file"];
+    const summary = buildReceiptBatchSummary({
+      executionMode: "dry_run",
+      legacyExecuteCreate: false,
+      dryRun: true,
+      scannedFiles: 1,
+      skippedInvalidFiles: 0,
+      results: [{
+        file,
+        classification: "purchase_invoice",
+        status: "dry_run_preview",
+        llm_fallback: {
+          method: "parsed_document",
+          confidence: "medium",
+          confidence_signals: ["partial_ocr_failure"],
+        },
+        notes: [],
+      }],
+    });
+
+    const workflow = buildReceiptBatchWorkflow({
+      summary,
+      workflowSummary: "Receipt dry run would create 1 purchase invoice.",
+      sanitizedResults: [{
+        file,
+        classification: "purchase_invoice",
+        status: "dry_run_preview",
+        llm_fallback: {
+          method: "parsed_document",
+          confidence: "medium",
+          confidence_signals: ["partial_ocr_failure"],
+        },
+        notes: [],
+      }],
+      workflowArgs: {
+        folder_path: "/tmp/receipts",
+        accounts_dimensions_id: 100,
+        execution_mode: "create",
+      },
+    });
+
+    expect(workflow.approval_previews).toEqual([]);
+    expect(workflow.available_actions).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "approve_tool_call",
+          tool: "process_receipt_batch",
+        }),
+      ]),
+    );
+    expect(workflow.available_actions).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "approve_tool_call",
+          tool: "receipt_batch",
+        }),
+      ]),
+    );
   });
 });
 

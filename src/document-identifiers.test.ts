@@ -608,6 +608,26 @@ describe("extractIdentifiers — coordinate-based classification (Option C)", ()
     expect(ids.reg_code).toBe("12176678");
     expect(ids.reg_code_rationale).toBe("bare_structural");
   });
+
+  it("keeps duplicate selected reg-code occurrence page-aware when page 2 has a lower y", () => {
+    const text = [
+      "Müüja Supplier OÜ",
+      "Rg-kood 12176678",
+      "Arve saaja Buyer OÜ",
+      "Rg-kood 12176678",
+    ].join("\n");
+    const textItems: LayoutTextItem[] = [
+      { text: "Müüja Supplier OÜ", x: 52, y: 150, width: 100, height: 10, pageNum: 1 },
+      { text: "Rg-kood 12176678", x: 52, y: 180, width: 90, height: 10, pageNum: 1 },
+      { text: "Arve saaja Buyer OÜ", x: 52, y: 20, width: 120, height: 10, pageNum: 2 },
+      { text: "Rg-kood 12176678", x: 52, y: 40, width: 90, height: 10, pageNum: 2 },
+    ];
+
+    const ids = extractIdentifiers(text, { textItems });
+
+    expect(ids.reg_code).toBe("12176678");
+    expect(ids.reg_code_rationale).toBe("labeled");
+  });
 });
 
 describe("extractIdentifiers — second-review regression tests", () => {
