@@ -209,7 +209,7 @@ export interface FieldProvenance {
     | "iban"
     | "ref_number"
     | "currency";
-  value: string | number | undefined;
+  value: string | number;
   source: "label" | "regex" | "coordinate" | "fallback" | "ocr" | "unknown";
   pageNum?: number;
   bbox?: { x: number; y: number; width: number; height: number };

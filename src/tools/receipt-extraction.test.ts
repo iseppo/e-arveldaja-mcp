@@ -225,6 +225,58 @@ describe("extractReceiptFieldsFromText parser quality metadata", () => {
       }),
     ]));
   });
+
+  it("attributes supplier identifiers to page 1, not page 2 buyer block, across a multi-page PDF", () => {
+    // Page 1: supplier block. Page 2: buyer block with its own reg/VAT/IBAN
+    // at the SAME in-page y coordinates as page 1's supplier block. The
+    // merged textItems feed coordinate-based classification; a page-blind
+    // classifier could let the page-2 buyer markers "win" the page-1 supplier
+    // candidates (or vice versa). Provenance must keep supplier IDs on page 1.
+    const text = [
+      "Müüja: Acme OÜ",
+      "Reg. nr 17487472",
+      "KMKR: EE102809963",
+      "IBAN: EE471000001020145685",
+      "Kokku: 120.00 EUR",
+      "Arve saaja: Buyer OÜ",
+      "Reg. nr 12345678",
+      "KMKR: EE123412342",
+      "IBAN: EE927700771006313596",
+    ].join("\n");
+    const textItems = [
+      { text: "Müüja: Acme OÜ", x: 10, y: 30, width: 110, height: 10, confidence: 0.95, pageNum: 1 },
+      { text: "Reg. nr 17487472", x: 10, y: 50, width: 90, height: 10, confidence: 0.93, pageNum: 1 },
+      { text: "KMKR: EE102809963", x: 10, y: 70, width: 110, height: 10, confidence: 0.91, pageNum: 1 },
+      { text: "IBAN: EE471000001020145685", x: 10, y: 90, width: 180, height: 10, confidence: 0.92, pageNum: 1 },
+      { text: "Kokku: 120.00 EUR", x: 10, y: 200, width: 120, height: 10, confidence: 0.90, pageNum: 1 },
+      { text: "Arve saaja: Buyer OÜ", x: 10, y: 30, width: 130, height: 10, confidence: 0.94, pageNum: 2 },
+      { text: "Reg. nr 12345678", x: 10, y: 50, width: 90, height: 10, confidence: 0.92, pageNum: 2 },
+      { text: "KMKR: EE123412342", x: 10, y: 70, width: 110, height: 10, confidence: 0.90, pageNum: 2 },
+      { text: "IBAN: EE927700771006313596", x: 10, y: 90, width: 180, height: 10, confidence: 0.91, pageNum: 2 },
+    ];
+
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf", { textItems });
+
+    // Supplier fields must be the page-1 supplier's, never the page-2 buyer's.
+    expect(result.supplier_reg_code).toBe("17487472");
+    expect(result.supplier_vat_no).toBe("EE102809963");
+    expect(result.supplier_iban).toBe("EE471000001020145685");
+
+    const regProvenance = result.field_provenance?.find(p => p.field === "supplier_reg_code");
+    expect(regProvenance).toBeDefined();
+    expect(regProvenance!.pageNum).toBe(1);
+    expect(regProvenance!.bbox).toEqual({ x: 10, y: 50, width: 90, height: 10 });
+
+    const vatProvenance = result.field_provenance?.find(p => p.field === "supplier_vat_no");
+    expect(vatProvenance).toBeDefined();
+    expect(vatProvenance!.pageNum).toBe(1);
+    expect(vatProvenance!.bbox).toEqual({ x: 10, y: 70, width: 110, height: 10 });
+
+    const ibanProvenance = result.field_provenance?.find(p => p.field === "iban");
+    expect(ibanProvenance).toBeDefined();
+    expect(ibanProvenance!.pageNum).toBe(1);
+    expect(ibanProvenance!.bbox).toEqual({ x: 10, y: 90, width: 180, height: 10 });
+  });
 });
 
 describe("computeMinOcrConfidence robust heuristic", () => {

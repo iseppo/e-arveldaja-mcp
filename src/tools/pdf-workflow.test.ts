@@ -202,16 +202,6 @@ describe("pdf workflow tools", () => {
       supplier_vat_no: "IE3668997OH",
       supplier_iban: "EE471000001020145685",
       ref_number: "12345",
-      field_provenance: expect.arrayContaining([
-        expect.objectContaining({
-          field: "supplier_reg_code",
-          value: expect.stringContaining("12345678"),
-          source: "label",
-          pageNum: 2,
-          bbox: { x: 10, y: 20, width: 110, height: 10 },
-          confidence: 0.94,
-        }),
-      ]),
     }));
     expect(payload.extracted).toEqual(expect.objectContaining({
       supplier_reg_code: "12345678",

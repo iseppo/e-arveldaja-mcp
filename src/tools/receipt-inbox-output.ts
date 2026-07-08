@@ -9,7 +9,8 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
 
   if (next.extracted) {
     const { raw_text, description, supplier_name, field_provenance } = next.extracted;
-    if (raw_text !== undefined || description !== undefined || supplier_name !== undefined || field_provenance !== undefined) {
+    const hasProvenance = field_provenance !== undefined && field_provenance.length > 0;
+    if (raw_text !== undefined || description !== undefined || supplier_name !== undefined || hasProvenance) {
       // Cap the OCR blob before wrapping so an oversized/pathological document
       // cannot flood the consuming LLM's context; mark when it was truncated.
       const cappedRaw = capUntrustedText(raw_text);
@@ -21,10 +22,10 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
           ...(cappedRaw.truncated && { raw_text_truncated: true, raw_text_length: cappedRaw.original_length }),
           ...(description !== undefined && { description: wrapUntrustedOcr(description) }),
           ...(supplier_name !== undefined && { supplier_name: wrapUntrustedOcr(supplier_name) }),
-          ...(field_provenance !== undefined && {
-            field_provenance: field_provenance.map(entry => ({
+          ...(hasProvenance && {
+            field_provenance: field_provenance!.map(entry => ({
               ...entry,
-              value: typeof entry.value === "string" ? wrapUntrustedOcr(entry.value) : entry.value,
+              value: typeof entry.value === "string" ? wrapUntrustedOcr(entry.value) ?? entry.value : entry.value,
             })),
           }),
         },

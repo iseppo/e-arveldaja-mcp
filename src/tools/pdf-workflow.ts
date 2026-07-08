@@ -69,7 +69,6 @@ interface PdfHints {
   reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
   vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
   rejected_candidates?: Array<{ kind: "reg_code" | "vat_no"; value: string; reason: string }>;
-  field_provenance?: FieldProvenance[];
 }
 
 /**
@@ -77,7 +76,7 @@ interface PdfHints {
  * Amounts, dates, items, and supplier names are left to the LLM —
  * regex is unreliable for those in varied PDF layouts.
  */
-function extractPdfHints(text: string, textItems?: readonly LayoutTextItem[], fieldProvenance?: FieldProvenance[]): PdfHints {
+function extractPdfHints(text: string, textItems?: readonly LayoutTextItem[]): PdfHints {
   const ids = extractIdentifiers(text, textItems ? { textItems } : undefined);
   return {
     raw_text: text,
@@ -90,7 +89,6 @@ function extractPdfHints(text: string, textItems?: readonly LayoutTextItem[], fi
     ...(ids.reg_code_rationale ? { reg_code_rationale: ids.reg_code_rationale } : {}),
     ...(ids.vat_no_rationale ? { vat_no_rationale: ids.vat_no_rationale } : {}),
     rejected_candidates: ids.rejected_candidates,
-    ...(fieldProvenance ? { field_provenance: fieldProvenance } : {}),
   };
 }
 
@@ -125,7 +123,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const allTextItems = textItemsWithPageNums(parsedDocument.result?.pages);
         const minOcrConfidence = computeMinOcrConfidence(allTextItems);
         const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved), { textItems: allTextItems });
-        const hints = extractPdfHints(parsedDocument.text, allTextItems, extracted.field_provenance);
+        const hints = extractPdfHints(parsedDocument.text, allTextItems);
         const outputFieldProvenance = wrapFieldProvenanceValues(extracted.field_provenance);
         // Build confidence signals from parser quality metadata so the
         // single-PDF flow reports the same OCR quality issues as the receipt
@@ -168,7 +166,6 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
                 ...hints,
                 raw_text: wrapUntrustedOcr(hintsRaw.text) ?? "",
                 ...(hintsRaw.truncated ? { raw_text_truncated: true, raw_text_length: hintsRaw.original_length } : {}),
-                ...(outputFieldProvenance ? { field_provenance: outputFieldProvenance } : {}),
               },
               // `description` (line 1 of the receipt body) and `supplier_name`
               // are OCR-derived free text that can carry attacker-crafted
