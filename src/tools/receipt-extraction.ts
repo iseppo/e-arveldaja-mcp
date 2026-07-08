@@ -307,7 +307,7 @@ function parseAmount(raw: string): number | undefined {
       ? normalized.replace(/\./g, "").replace(",", ".")
       : normalized.replace(/,/g, "");
   } else if (commaIndex >= 0) {
-    if (/^\d{1,3}(,\d{3})+$/.test(normalized)) {
+    if (/^-?\d{1,3}(,\d{3})+$/.test(normalized)) {
       normalized = normalized.replace(/,/g, "");
     } else {
       normalized = normalized.replace(/\./g, "").replace(",", ".");
@@ -323,7 +323,7 @@ function parseAmount(raw: string): number | undefined {
 }
 
 function extractAmountsFromLine(line: string): number[] {
-  const matches = [...line.matchAll(/-?\d[\d\s.,-]*\d|-?\d/g)];
+  const matches = [...line.matchAll(/-?\d[\d\s.,]*\d|-?\d/g)];
   const amounts = matches
     .filter(match => {
       const raw = match[0] ?? "";
@@ -1370,9 +1370,14 @@ async function suggestBookingInternalImpl(
     .filter(invoice => invoice.clients_id === clientId && invoice.status === "CONFIRMED")
     .sort((a, b) => (b.create_date ?? "").localeCompare(a.create_date ?? ""));
 
-  for (const invoice of supplierInvoices.slice(0, 5)) {
-    if (!invoice.id) continue;
-    const fullInvoice = await api.purchaseInvoices.get(invoice.id);
+  const fullInvoices = await Promise.all(
+    supplierInvoices.slice(0, 5).map(invoice =>
+      invoice.id ? api.purchaseInvoices.get(invoice.id) : Promise.resolve(undefined)
+    )
+  );
+
+  for (const fullInvoice of fullInvoices) {
+    if (!fullInvoice) continue;
     const matchedItem = fullInvoice.items?.find(item =>
       item.custom_title?.toLowerCase().includes(description.toLowerCase())
     ) ?? fullInvoice.items?.[0];

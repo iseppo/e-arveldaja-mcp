@@ -20,7 +20,7 @@ export type SupplierIdentityFields = Pick<ExtractedReceiptFields, "supplier_name
 export interface SupplierResolution {
   found: boolean;
   created: boolean;
-  match_type?: "registry_code" | "vat_no" | "name_normalized" | "name_fuzzy" | "created";
+  match_type?: "registry_code" | "vat_no" | "name_normalized" | "name_fuzzy" | "created" | "client_id";
   client?: Client;
   preview_client?: Partial<Client>;
   registry_data?: Record<string, string> | null;

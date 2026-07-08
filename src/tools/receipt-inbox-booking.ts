@@ -99,7 +99,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
     itemNetAmount,
     context.purchaseArticlesWithVat,
     context.isVatRegistered,
-    extracted.total_vat === 0 && extracted.vat_explicit
+    extracted.total_vat === 0
       ? "-"
       : extracted.total_vat !== undefined
         ? bookingSuggestion.item.vat_rate_dropdown

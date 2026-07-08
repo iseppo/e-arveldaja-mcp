@@ -468,29 +468,29 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           (b.create_date ?? "").localeCompare(a.create_date ?? "")
         );
 
-      // Get detailed invoices with items
-      const detailed = [];
-      for (const inv of supplierInvoices.slice(0, maxResults + 5)) {
-        const full = await api.purchaseInvoices.get(inv.id!);
-        detailed.push({
-          id: full.id,
-          number: full.number,
-          date: full.create_date,
-          gross_price: full.gross_price,
-          liability_accounts_id: full.liability_accounts_id,
-          items: full.items?.map(item => ({
-            custom_title: item.custom_title,
-            cl_purchase_articles_id: item.cl_purchase_articles_id,
-            purchase_accounts_id: item.purchase_accounts_id,
-            purchase_accounts_dimensions_id: item.purchase_accounts_dimensions_id,
-            total_net_price: item.total_net_price,
-            vat_rate_dropdown: item.vat_rate_dropdown,
-            vat_accounts_id: item.vat_accounts_id,
-            cl_vat_articles_id: item.cl_vat_articles_id,
-            reversed_vat_id: item.reversed_vat_id,
-          })),
-        });
-      }
+      const detailed = await Promise.all(
+        supplierInvoices.slice(0, maxResults + 5).map(async (inv) => {
+          const full = await api.purchaseInvoices.get(inv.id!);
+          return {
+            id: full.id,
+            number: full.number,
+            date: full.create_date,
+            gross_price: full.gross_price,
+            liability_accounts_id: full.liability_accounts_id,
+            items: full.items?.map(item => ({
+              custom_title: item.custom_title,
+              cl_purchase_articles_id: item.cl_purchase_articles_id,
+              purchase_accounts_id: item.purchase_accounts_id,
+              purchase_accounts_dimensions_id: item.purchase_accounts_dimensions_id,
+              total_net_price: item.total_net_price,
+              vat_rate_dropdown: item.vat_rate_dropdown,
+              vat_accounts_id: item.vat_accounts_id,
+              cl_vat_articles_id: item.cl_vat_articles_id,
+              reversed_vat_id: item.reversed_vat_id,
+            })),
+          };
+        })
+      );
 
       // If description provided, prefer invoices with matching item descriptions
       if (description) {

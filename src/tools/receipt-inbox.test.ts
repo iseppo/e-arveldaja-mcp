@@ -1621,7 +1621,7 @@ describe("sanitizeReceiptResultForOutput OCR trust boundary", () => {
     expect(out).toBe(input);
   });
 
-  it("wraps note strings (they can echo exception text seeded by OCR fields)", () => {
+  it("leaves note strings unwrapped (server-authored text, not OCR)", () => {
     const input = {
       file: { path: "/x.pdf" } as any,
       classification: { category: "non_invoice" } as any,
@@ -1630,6 +1630,6 @@ describe("sanitizeReceiptResultForOutput OCR trust boundary", () => {
     } as any;
 
     const out = sanitizeReceiptResultForOutput(input);
-    expect(out.notes[0]).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nunclassified\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$/);
+    expect(out.notes[0]).toBe("unclassified");
   });
 });

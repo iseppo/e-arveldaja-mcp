@@ -737,4 +737,10 @@ describe("parseAmount — comma thousands and negative signs (Codex review 6)", 
     const result = extractAmounts(text);
     expect(result.total_gross).toBe(-123.45);
   });
+
+  it("handles negative amount with comma thousands separator (Oracle review)", () => {
+    const text = "Kokku: -1,234 EUR";
+    const result = extractAmounts(text);
+    expect(result.total_gross).toBe(-1234);
+  });
 });

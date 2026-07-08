@@ -111,6 +111,32 @@ describe("PurchaseInvoicesApi.confirmWithTotals", () => {
     expect(patch).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledWith("/purchase_invoices/1/register", {});
   });
+
+  it("preserves reverse-charge totals even when gross_price is missing (Oracle review)", async () => {
+    const get = vi.fn().mockResolvedValue({
+      id: 1,
+      gross_price: undefined,
+      vat_price: 0,
+      items: [{
+        custom_title: "SaaS subscription",
+        total_net_price: 100,
+        vat_amount: 0,
+        reversed_vat_id: 1,
+      }],
+    });
+    const patch = vi.fn().mockResolvedValue({ code: 200, messages: [] });
+
+    const api = new PurchaseInvoicesApi({
+      cacheNamespace: "test",
+      get,
+      patch,
+    } as any);
+
+    await api.confirmWithTotals(1, true);
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith("/purchase_invoices/1/register", {});
+  });
 });
 
 describe("PurchaseInvoicesApi.createAndSetTotals", () => {

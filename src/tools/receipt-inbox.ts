@@ -1010,7 +1010,7 @@ export async function resolveSupplierFromTransaction(
       return {
         found: true,
         created: false,
-        match_type: "registry_code",
+        match_type: "client_id",
         client: existingClient,
       };
     }
@@ -1521,6 +1521,27 @@ export function registerReceiptInboxTools(
             }
           }
 
+          if (materializedSupplierResolution.self_match_blocked && !materializedSupplierResolution.found) {
+            notes.push("Supplier materialization blocked: self-match detected. Manual review required.");
+            results.push({
+              file,
+              classification,
+              status: "needs_review",
+              extracted,
+              llm_fallback: summarize(),
+              supplier_resolution: materializedSupplierResolution,
+              booking_suggestion: bookingSuggestion,
+              review_guidance: buildReceiptReviewGuidance({
+                classification,
+                notes,
+                extracted,
+                llmFallback: summarize(),
+              }),
+              notes,
+            });
+            continue;
+          }
+
           const created = await createAndMaybeMatchPurchaseInvoice(
             api,
             context,
@@ -1540,7 +1561,7 @@ export function registerReceiptInboxTools(
             status: created.status,
             extracted,
             llm_fallback: summarize(),
-            supplier_resolution: supplierResolution,
+            supplier_resolution: materializedSupplierResolution,
             booking_suggestion: bookingSuggestion,
             created_invoice: created.created_invoice,
             bank_match: created.bank_match,

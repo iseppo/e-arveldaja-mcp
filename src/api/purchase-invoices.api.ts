@@ -138,7 +138,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         // Apply the rounding difference to the last item's gross
         const lastItem = patchItems[patchItems.length - 1]!;
         const currentGross = lastItem.project_no_vat_gross_price
-          ?? roundMoney((lastItem.total_net_price ?? 0) * (1 + parseVatRateDropdown(lastItem.vat_rate_dropdown) / 100));
+          ?? roundMoney((lastItem.total_net_price ?? 0) + (apiItems?.[patchItems.length - 1]?.vat_amount ?? 0));
         lastItem.project_no_vat_gross_price = roundMoney(currentGross + vatDiff);
       }
 
@@ -204,7 +204,11 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     const items = invoice.items;
     const hasReverseCharge = items?.some(i => i.reversed_vat_id !== undefined && i.reversed_vat_id !== null) ?? false;
 
-    if ((options.preserveExistingTotals || hasReverseCharge) && hasInvoiceGross && (hasInvoiceVat || !isVatRegistered)) {
+    if (options.preserveExistingTotals && hasInvoiceGross && (hasInvoiceVat || !isVatRegistered)) {
+      return this.confirm(id);
+    }
+
+    if (hasReverseCharge) {
       return this.confirm(id);
     }
 

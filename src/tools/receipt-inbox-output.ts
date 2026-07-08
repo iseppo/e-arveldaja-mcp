@@ -55,12 +55,6 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
   if (next.error !== undefined) {
     next = { ...next, error: wrapUntrustedOcr(next.error) ?? next.error };
   }
-  if (next.notes.length > 0) {
-    next = {
-      ...next,
-      notes: next.notes.map(note => wrapUntrustedOcr(note) ?? note),
-    };
-  }
 
   return next;
 }

@@ -78,7 +78,8 @@ export function findDuplicateInvoice(
     invoice.status !== "DELETED" &&
     invoice.status !== "INVALIDATED" &&
     invoice.create_date === createDate &&
-    Math.abs((invoice.gross_price ?? 0) - grossPrice) < 0.01
+    Math.abs((invoice.gross_price ?? 0) - grossPrice) < 0.01 &&
+    (!invoice.number?.trim() || !normalizedNumber)
   );
   if (sameAmountDate?.id) {
     return {

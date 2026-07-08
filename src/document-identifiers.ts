@@ -342,22 +342,20 @@ function normalizedTextWithIndex(text: string): Array<{ char: string; index: num
   return chars;
 }
 
-const normalizedTextCache = new Map<string, Array<{ char: string; index: number }>>();
-
-function getNormalizedTextWithIndex(text: string): Array<{ char: string; index: number }> {
-  let cached = normalizedTextCache.get(text);
+function getNormalizedTextWithIndex(text: string, cache: Map<string, Array<{ char: string; index: number }>>): Array<{ char: string; index: number }> {
+  let cached = cache.get(text);
   if (!cached) {
     cached = normalizedTextWithIndex(text);
-    normalizedTextCache.set(text, cached);
+    cache.set(text, cached);
   }
   return cached;
 }
 
-function candidateOccurrenceIndex(text: string, value: string, valueIndex: number): number | undefined {
+function candidateOccurrenceIndex(text: string, value: string, valueIndex: number, cache: Map<string, Array<{ char: string; index: number }>>): number | undefined {
   const target = value.replace(/\s+/g, "").toUpperCase();
   if (!target) return undefined;
 
-  const normalized = getNormalizedTextWithIndex(text);
+  const normalized = getNormalizedTextWithIndex(text, cache);
   let occurrenceIndex = 0;
   for (let i = 0; i <= normalized.length - target.length; i++) {
     let matches = true;
@@ -424,7 +422,7 @@ function hasUnambiguousSupplierOccurrence(
  * and keep their existing signatures for backwards compatibility.
  */
 export function extractIdentifiers(text: string, options?: ExtractIdentifiersOptions): ExtractedIdentifiers {
-  normalizedTextCache.clear();
+  const normalizedTextCache = new Map<string, Array<{ char: string; index: number }>>();
   const excludeVat = normalizeVatForCompare(options?.excludeVat);
   const excludeReg = normalizeRegCode(options?.excludeRegCode);
   const rejectedCandidates: RejectedCandidate[] = [];
@@ -480,7 +478,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
       const supplierSide = labeledRegFiltered.find(m => (m.index ?? Number.MAX_SAFE_INTEGER) < buyerSectionIndex);
       if (supplierSide?.[1]) {
         reg_code = supplierSide[1];
-        regCodeSelectedOccurrenceIndex = candidateOccurrenceIndex(text, reg_code, matchValueIndex(text, supplierSide, reg_code));
+        regCodeSelectedOccurrenceIndex = candidateOccurrenceIndex(text, reg_code, matchValueIndex(text, supplierSide, reg_code), normalizedTextCache);
         reg_code_rationale = "labeled";
       } else {
         // All labeled matches are on the buyer side — save as fallback.
@@ -489,7 +487,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
     } else {
       reg_code = labeledRegFiltered[0]?.[1];
       if (reg_code) {
-        regCodeSelectedOccurrenceIndex = candidateOccurrenceIndex(text, reg_code, matchValueIndex(text, labeledRegFiltered[0]!, reg_code));
+        regCodeSelectedOccurrenceIndex = candidateOccurrenceIndex(text, reg_code, matchValueIndex(text, labeledRegFiltered[0]!, reg_code), normalizedTextCache);
       }
       reg_code_rationale = "labeled";
     }
@@ -542,7 +540,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
       const finalPool = inTopThird.length > 0 ? inTopThird : pool;
       finalPool.sort((a, b) => a.index - b.index);
       reg_code = finalPool[0]!.value;
-      regCodeSelectedOccurrenceIndex = candidateOccurrenceIndex(text, reg_code, finalPool[0]!.index);
+      regCodeSelectedOccurrenceIndex = candidateOccurrenceIndex(text, reg_code, finalPool[0]!.index, normalizedTextCache);
       reg_code_rationale = "bare_structural";
     }
   }
@@ -552,7 +550,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
     reg_code = regCodeBuyerSectionFallback;
     const fallbackMatch = labeledRegFiltered.find(match => match[1] === regCodeBuyerSectionFallback);
     if (fallbackMatch) {
-      regCodeSelectedOccurrenceIndex = candidateOccurrenceIndex(text, reg_code, matchValueIndex(text, fallbackMatch, reg_code));
+      regCodeSelectedOccurrenceIndex = candidateOccurrenceIndex(text, reg_code, matchValueIndex(text, fallbackMatch, reg_code), normalizedTextCache);
     }
     reg_code_rationale = "buyer_section_only";
   }
@@ -585,7 +583,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
       const supplierSide = labeledVatFiltered.find(m => (m.index ?? Number.MAX_SAFE_INTEGER) < buyerSectionIndex);
       if (supplierSide?.[1]) {
         vat_no = normalizeVatCandidate(supplierSide[1]);
-        vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, matchValueIndex(text, supplierSide, supplierSide[1]));
+        vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, matchValueIndex(text, supplierSide, supplierSide[1]), normalizedTextCache);
         vat_no_rationale = "labeled";
       } else {
         vatNoBuyerSectionFallback = normalizeVatCandidate(labeledVatFiltered[0]![1]!);
@@ -594,7 +592,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
       const first = labeledVatFiltered[0];
       if (first?.[1]) {
         vat_no = normalizeVatCandidate(first[1]);
-        vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, matchValueIndex(text, first, first[1]));
+        vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, matchValueIndex(text, first, first[1]), normalizedTextCache);
         vat_no_rationale = "labeled";
       }
     }
@@ -629,12 +627,12 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
     if (pool.length > 0) {
       if (buyerSectionIndex >= 0 && bareVatCandidates.length === 0) {
         vat_no = pool[0]!.value;
-        vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, pool[0]!.index);
+        vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, pool[0]!.index, normalizedTextCache);
         vat_no_rationale = "buyer_section_only";
       } else {
         const supplierSide = pool.find(c => c.index < buyerSectionIndex);
         vat_no = supplierSide ? supplierSide.value : pool[0]!.value;
-        vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, supplierSide ? supplierSide.index : pool[0]!.index);
+        vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, supplierSide ? supplierSide.index : pool[0]!.index, normalizedTextCache);
         vat_no_rationale = "bare_structural";
       }
     }
@@ -644,7 +642,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
     vat_no = vatNoBuyerSectionFallback;
     const fallbackMatch = labeledVatFiltered.find(match => normalizeVatCandidate(match[1]!) === vatNoBuyerSectionFallback);
     if (fallbackMatch?.[1]) {
-      vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, matchValueIndex(text, fallbackMatch, fallbackMatch[1]));
+      vatNoSelectedOccurrenceIndex = candidateOccurrenceIndex(text, vat_no, matchValueIndex(text, fallbackMatch, fallbackMatch[1]), normalizedTextCache);
     }
     vat_no_rationale = "buyer_section_only";
   }
