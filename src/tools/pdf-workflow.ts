@@ -17,7 +17,8 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { extractIdentifiers, isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
-import { extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate } from "./receipt-extraction.js";
+import { computeMinOcrConfidence, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate } from "./receipt-extraction.js";
+import type { ExtractionConfidenceSignals } from "../invoice-extraction-fallback.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { detectVatDeductionNotes, standardVatRateOn } from "../estonian-tax-rules.js";
 
@@ -103,12 +104,20 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       const { path: resolved, cleanup } = await resolveInvoiceDocumentInput(file_path);
       try {
         const parsedDocument = await parseDocument(resolved);
+        const allTextItems = parsedDocument.result?.pages?.flatMap(page => page.textItems ?? []) ?? [];
+        const minOcrConfidence = computeMinOcrConfidence(allTextItems);
         const hints = extractPdfHints(parsedDocument.text, parsedDocument.result?.pages?.[0]?.textItems);
         const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved), { textItems: parsedDocument.result?.pages?.[0]?.textItems });
+        // Build confidence signals from parser quality metadata so the
+        // single-PDF flow reports the same OCR quality issues as the receipt
+        // batch flow (issue #20 consistency).
+        const signals: ExtractionConfidenceSignals = {};
+        if (parsedDocument.ocrPartialFailure) signals.partial_ocr_failure = true;
+        if (minOcrConfidence !== undefined && minOcrConfidence < 0.6) signals.low_ocr_confidence = true;
         // extract_pdf_invoice carries the full OCR text once, as hints.raw_text,
         // so the fallback guidance must point there (not the dropped
         // extracted.raw_text).
-        const llmFallback = summarizeInvoiceExtraction(extracted, undefined, "hints.raw_text", inferSupplierCountry(extracted));
+        const llmFallback = summarizeInvoiceExtraction(extracted, signals, "hints.raw_text", inferSupplierCountry(extracted));
 
         const warnings: string[] = [];
         // ISO-4217 codes are exactly three uppercase letters. Reject anything
@@ -154,6 +163,8 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
               },
               llm_fallback: llmFallback,
               page_count: parsedDocument.pageCount,
+              ...(parsedDocument.ocrPartialFailure ? { partial_ocr_failure: true } : {}),
+              ...(minOcrConfidence !== undefined ? { min_ocr_confidence: minOcrConfidence } : {}),
             }),
           }],
         };

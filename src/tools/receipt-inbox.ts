@@ -35,6 +35,7 @@ import {
   deriveAutoBookedNetAmount,
   deriveAutoBookedVatPrice,
   detectReverseChargeFromText,
+  computeMinOcrConfidence,
   extractReceiptFieldsFromText,
   findAccountByKeywords,
   findPurchaseArticleByKeywords,
@@ -770,10 +771,13 @@ async function extractReceiptFields(
   const validatedPath = await revalidateReceiptFilePath(file);
   const parsedDocument = await parseDocument(validatedPath);
   const textItems = parsedDocument.result?.pages?.[0]?.textItems;
+  const allTextItems = parsedDocument.result?.pages?.flatMap(page => page.textItems ?? []);
   return extractReceiptFieldsFromText(parsedDocument.text, file.name, {
     ownCompanyVat,
     ownCompanyRegistryCode,
     textItems,
+    minOcrConfidence: computeMinOcrConfidence(allTextItems),
+    partialOcrFailure: parsedDocument.ocrPartialFailure,
   });
 }
 
@@ -1002,6 +1006,10 @@ async function processSingleReceipt(
     const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
     const selfVatDetected = detectSelfVatOnly(extracted, options.ownCompanyVat);
     const signals: ExtractionConfidenceSignals = {};
+    if (extracted.partial_ocr_failure) signals.partial_ocr_failure = true;
+    if (extracted.min_ocr_confidence !== undefined && extracted.min_ocr_confidence < 0.6) {
+      signals.low_ocr_confidence = true;
+    }
     if (selfVatDetected) signals.self_vat_detected = true;
     const selfRegCodeDetected = detectSelfRegCodeOnly(extracted, options.ownCompanyRegistryCode);
     if (selfRegCodeDetected) signals.self_reg_code_detected = true;

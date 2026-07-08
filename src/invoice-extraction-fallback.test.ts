@@ -281,6 +281,18 @@ describe("summarizeInvoiceExtraction", () => {
       expect(result.confidence_signals).toContain("foreign_reverse_charge_default_unverified");
     });
 
+    it("downgrades to medium when OCR confidence is low", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { low_ocr_confidence: true });
+      expect(result.confidence).toBe("medium");
+      expect(result.confidence_signals).toContain("low_ocr_confidence");
+    });
+
+    it("downgrades to medium when partial OCR failure is reported", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { partial_ocr_failure: true });
+      expect(result.confidence).toBe("medium");
+      expect(result.confidence_signals).toContain("partial_ocr_failure");
+    });
+
     it("low signals dominate medium signals when both are present", () => {
       const result = summarizeInvoiceExtraction(baseGood, {
         self_vat_detected: true,

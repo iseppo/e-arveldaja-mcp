@@ -1514,4 +1514,87 @@ describe("process_receipt_batch rollback handling", () => {
       .toBe("foreign_supplier_default");
     expect(payload.results[0]!.booking_suggestion.item.reversed_vat_id).toBe(1);
   });
+
+  it("threads parser OCR quality metadata into receipt confidence signals", async () => {
+    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(readdir).mockResolvedValue([
+      { name: "receipt.pdf", isFile: () => true },
+    ] as any);
+    vi.mocked(stat).mockImplementation(async (path) => {
+      if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
+      return {
+        isDirectory: () => false,
+        size: 512,
+        mtime: new Date("2026-04-20T10:00:00.000Z"),
+      } as any;
+    });
+    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
+    vi.mocked(resolveFilePath).mockImplementation((path) => path);
+    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
+    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    vi.mocked(parseDocument).mockResolvedValue({
+      text: "Acme OÜ\nInvoice INV-1\nTotal 12.00 EUR",
+      pageCount: 1,
+      ocrPartialFailure: true,
+      result: {
+        pages: [{
+          pageNum: 1,
+          textItems: [
+            { text: "Acme OÜ", x: 0, y: 0, width: 50, height: 10, confidence: 0.92 },
+            { text: "Total 12.00 EUR", x: 0, y: 20, width: 80, height: 10, confidence: 0.51 },
+          ],
+        }],
+      },
+    } as any);
+    vi.mocked(classifyReceiptDocument).mockReturnValue("purchase_invoice");
+    vi.mocked(extractReceiptFieldsFromText).mockImplementation((text, _fileName, options) => ({
+      supplier_name: "Acme OÜ",
+      invoice_number: "INV-1",
+      invoice_date: "2026-04-20",
+      total_gross: 12,
+      currency: "EUR",
+      raw_text: text,
+      min_ocr_confidence: options?.minOcrConfidence,
+      partial_ocr_failure: options?.partialOcrFailure,
+    } as any));
+    vi.mocked(hasAutoBookableReceiptFields).mockReturnValue(false);
+
+    const server = { registerTool: vi.fn() } as any;
+    const api = {
+      clients: { listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
+      },
+      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+    } as any;
+
+    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
+    if (!registration) throw new Error("Tool was not registered");
+    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const result = await handler({
+      folder_path: "/tmp/receipts",
+      accounts_dimensions_id: 100,
+      execution_mode: "dry_run",
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(extractReceiptFieldsFromText).toHaveBeenCalledWith(
+      expect.any(String),
+      "receipt.pdf",
+      expect.objectContaining({
+        minOcrConfidence: 0.51,
+        partialOcrFailure: true,
+      }),
+    );
+    expect(payload.results[0]!.llm_fallback.confidence).toBe("medium");
+    expect(payload.results[0]!.llm_fallback.confidence_signals).toEqual(
+      expect.arrayContaining(["low_ocr_confidence", "partial_ocr_failure"]),
+    );
+  });
 });

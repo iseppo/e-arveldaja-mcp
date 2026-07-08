@@ -4,6 +4,7 @@ import {
   normalizeDate,
   extractAmounts,
   buildKeywordSuggestion,
+  computeMinOcrConfidence,
   computeTermDays,
   detectReverseChargeFromText,
   extractPdfIdentifiers,
@@ -14,6 +15,7 @@ import {
   looksLikePersonCounterparty,
   deriveAutoBookedNetAmount,
   deriveAutoBookedVatPrice,
+  extractReceiptFieldsFromText,
   extractSupplierName,
 } from "./receipt-extraction.js";
 
@@ -97,6 +99,79 @@ describe("normalizeDate", () => {
 
   it("trims surrounding whitespace", () => {
     expect(normalizeDate("  2024-03-15  ")).toBe("2024-03-15");
+  });
+});
+
+describe("extractReceiptFieldsFromText parser quality metadata", () => {
+  it("records the minimum OCR confidence from text items", () => {
+    const result = extractReceiptFieldsFromText("Acme OÜ\nInvoice INV-1\nTotal 12.00 EUR", "invoice.pdf", {
+      textItems: [
+        { text: "Acme OÜ", x: 0, y: 0, width: 50, height: 10, confidence: 0.91 },
+        { text: "Total 12.00 EUR", x: 0, y: 20, width: 80, height: 10, confidence: 0.52 },
+        { text: "native", x: 0, y: 40, width: 40, height: 10 },
+      ],
+    });
+
+    expect(result.min_ocr_confidence).toBe(0.52);
+  });
+
+  it("preserves partial OCR failure metadata from parser options", () => {
+    const result = extractReceiptFieldsFromText("Acme OÜ\nInvoice INV-1\nTotal 12.00 EUR", "invoice.pdf", {
+      partialOcrFailure: true,
+    });
+
+    expect(result.partial_ocr_failure).toBe(true);
+  });
+});
+
+describe("computeMinOcrConfidence robust heuristic", () => {
+  it("returns undefined for undefined text items", () => {
+    expect(computeMinOcrConfidence(undefined)).toBeUndefined();
+  });
+
+  it("returns undefined when no items have confidence values", () => {
+    expect(computeMinOcrConfidence([
+      { text: "hello", x: 0, y: 0, width: 50, height: 10 },
+    ])).toBeUndefined();
+  });
+
+  it("uses minimum when fewer than 5 items have confidence (not enough for percentile)", () => {
+    const items = [
+      { text: "Invoice text", x: 0, y: 0, width: 50, height: 10, confidence: 0.95 },
+      { text: "Total 12.00", x: 0, y: 20, width: 80, height: 10, confidence: 0.30 },
+      { text: "Date 2024", x: 0, y: 40, width: 40, height: 10, confidence: 0.88 },
+    ];
+    expect(computeMinOcrConfidence(items)).toBe(0.30);
+  });
+
+  it("filters out short text items (< 3 chars) before computing percentile", () => {
+    const items = [
+      { text: "Invoice number 12345", x: 0, y: 0, width: 50, height: 10, confidence: 0.95 },
+      { text: "Total 120.00 EUR", x: 0, y: 20, width: 80, height: 10, confidence: 0.92 },
+      { text: "Date 2024-01-15", x: 0, y: 40, width: 40, height: 10, confidence: 0.90 },
+      { text: "Acme OÜ supplier", x: 0, y: 60, width: 40, height: 10, confidence: 0.88 },
+      { text: "Reg nr 12345678", x: 0, y: 80, width: 40, height: 10, confidence: 0.91 },
+      { text: ".", x: 0, y: 100, width: 5, height: 10, confidence: 0.10 },
+    ];
+    // 5 robust items (1-char "." filtered): sorted [0.88, 0.90, 0.91, 0.92, 0.95]
+    // 10th percentile index = floor(5 * 0.1) = 0 -> 0.88
+    expect(computeMinOcrConfidence(items)).toBe(0.88);
+  });
+
+  it("uses 10th percentile ignoring short noise items that would otherwise dominate", () => {
+    const items = [
+      { text: "Invoice number 12345", x: 0, y: 0, width: 50, height: 10, confidence: 0.95 },
+      { text: "Total 120.00 EUR", x: 0, y: 20, width: 80, height: 10, confidence: 0.92 },
+      { text: "Date 2024-01-15", x: 0, y: 40, width: 40, height: 10, confidence: 0.90 },
+      { text: "Acme OÜ supplier", x: 0, y: 60, width: 40, height: 10, confidence: 0.88 },
+      { text: "Reg nr 12345678", x: 0, y: 80, width: 40, height: 10, confidence: 0.91 },
+      { text: "VAT EE102809963", x: 0, y: 100, width: 40, height: 10, confidence: 0.89 },
+      { text: "IBAN EE4710000", x: 0, y: 120, width: 40, height: 10, confidence: 0.93 },
+      { text: "x", x: 0, y: 140, width: 5, height: 10, confidence: 0.05 },
+    ];
+    // 7 robust items (1-char "x" filtered): sorted [0.88, 0.89, 0.90, 0.91, 0.92, 0.93, 0.95]
+    // 10th percentile index = floor(7 * 0.1) = 0 -> 0.88
+    expect(computeMinOcrConfidence(items)).toBe(0.88);
   });
 });
 

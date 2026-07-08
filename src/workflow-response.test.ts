@@ -4,6 +4,7 @@ import {
   buildWorkflowEnvelope,
   remapHiddenGranularTool,
   remapHiddenGranularWorkflowEnvelope,
+  workflowActionFromBlockedDryRunStep,
 } from "./workflow-response.js";
 
 describe("workflow response helpers", () => {
@@ -120,6 +121,42 @@ describe("workflow response helpers", () => {
       accounting_impact: expect.arrayContaining(["2 purchase invoices"]),
       source_documents: ["/tmp/receipts"],
     });
+  });
+
+  it("blocks receipt batch approval when result confidence signals include OCR quality issues", () => {
+    const step = {
+      tool: "process_receipt_batch",
+      summary: "Receipt dry run would create 2 purchase invoices.",
+      suggested_args: {
+        folder_path: "/tmp/receipts",
+        execution_mode: "dry_run",
+      },
+      preview: {
+        created: 0,
+        matched: 0,
+        dry_run_preview: 2,
+        skipped_duplicate: 0,
+        needs_review: 0,
+        failed: 0,
+        results: [
+          {
+            llm_fallback: {
+              confidence_signals: ["partial_ocr_failure"],
+            },
+          },
+          {
+            llm_fallback: {
+              confidence_signals: ["low_ocr_confidence"],
+            },
+          },
+        ],
+      },
+    };
+
+    expect(approvalPreviewFromDryRunStep(step)).toBeUndefined();
+    const action = workflowActionFromBlockedDryRunStep(step);
+    expect(action?.why).toContain("partial OCR failure");
+    expect(action?.why).toContain("low OCR confidence");
   });
 
   it("turns safe materializing dry-run steps into approval actions", () => {

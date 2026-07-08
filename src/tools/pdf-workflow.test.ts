@@ -792,4 +792,64 @@ describe("pdf workflow tools", () => {
     expect(payload.hints.raw_text).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>/);
     expect(payload.extracted.raw_text).toBeUndefined();
   });
+
+  it("threads partial_ocr_failure and low_ocr_confidence signals through to llm_fallback", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/scanned.pdf" });
+    mockedParseDocument.mockResolvedValue({
+      text: "watermark footer label",
+      pageCount: 1,
+      ocrPartialFailure: true,
+      result: {
+        text: "",
+        pages: [{
+          pageNum: 1,
+          text: "watermark footer label",
+          width: 600,
+          height: 800,
+          textItems: [
+            { text: "watermark", x: 0, y: 0, width: 50, height: 10, confidence: 0.30 },
+            { text: "footer", x: 0, y: 20, width: 30, height: 10, confidence: 0.40 },
+          ],
+        }],
+      } as any,
+    });
+
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice");
+    const response = await handler({ file_path: "/tmp/scanned.pdf" });
+    const payload = parseMcpResponse(response.content[0]!.text);
+
+    expect(payload.partial_ocr_failure).toBe(true);
+    expect(payload.min_ocr_confidence).toBe(0.30);
+    expect(payload.llm_fallback.confidence_signals).toEqual(
+      expect.arrayContaining(["partial_ocr_failure", "low_ocr_confidence"]),
+    );
+  });
+
+  it("does not emit OCR quality signals for digital PDFs (no OCR, no confidence)", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/native.pdf" });
+    mockedParseDocument.mockResolvedValue({
+      text: "Acme OÜ\nInvoice INV-1\nTotal 120.00 EUR",
+      pageCount: 1,
+      ocrPartialFailure: false,
+      result: {
+        text: "",
+        pages: [{
+          pageNum: 1,
+          text: "Acme OÜ\nInvoice INV-1\nTotal 120.00 EUR",
+          width: 600,
+          height: 800,
+          textItems: [],
+        }],
+      } as any,
+    });
+
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice");
+    const response = await handler({ file_path: "/tmp/native.pdf" });
+    const payload = parseMcpResponse(response.content[0]!.text);
+
+    expect(payload.partial_ocr_failure).toBeUndefined();
+    expect(payload.min_ocr_confidence).toBeUndefined();
+    expect(payload.llm_fallback.confidence_signals).not.toContain("partial_ocr_failure");
+    expect(payload.llm_fallback.confidence_signals).not.toContain("low_ocr_confidence");
+  });
 });

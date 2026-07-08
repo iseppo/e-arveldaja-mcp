@@ -217,6 +217,10 @@ export interface ExtractedReceiptFields {
   raw_text_truncated?: boolean;
   /** Output-only: original raw_text length, present only when truncated. */
   raw_text_length?: number;
+  /** Minimum OCR confidence reported by parser text items, when available. */
+  min_ocr_confidence?: number;
+  /** Parser reported likely missing OCR text for one or more OCR-needed pages. */
+  partial_ocr_failure?: boolean;
   /** Structured identifier candidates surfaced for reviewer visibility (#vat-reg-recovery). */
   all_vat_candidates?: string[];
   all_reg_code_candidates?: string[];
@@ -941,6 +945,26 @@ export interface ExtractReceiptFieldsOptions {
   ownCompanyRegistryCode?: string;
   /** Layout text items from the PDF parser for coordinate-based column classification. */
   textItems?: readonly LayoutTextItem[];
+  /** Minimum OCR confidence reported by parser text items, when precomputed by the caller. */
+  minOcrConfidence?: number;
+  /** Parser reported likely missing OCR text for one or more OCR-needed pages. */
+  partialOcrFailure?: boolean;
+}
+
+export function computeMinOcrConfidence(textItems: readonly LayoutTextItem[] | undefined): number | undefined {
+  const confidenceValues = textItems
+    ?.map(item => item.confidence)
+    .filter((value): value is number => value !== undefined && Number.isFinite(value));
+  if (!confidenceValues || confidenceValues.length === 0) return undefined;
+  // Filter out very short text items (< 3 chars) — likely noise/logo artifacts
+  // that carry stray low confidence and would trigger false low_ocr_confidence.
+  const robustValues = textItems!
+    .filter(item => (item.text?.length ?? 0) >= 3)
+    .map(item => item.confidence)
+    .filter((value): value is number => value !== undefined && Number.isFinite(value));
+  if (robustValues.length < 5) return Math.min(...confidenceValues);
+  const sorted = [...robustValues].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length * 0.1)]!;
 }
 
 export function extractPdfIdentifiers(
@@ -1390,6 +1414,7 @@ export function extractReceiptFieldsFromText(
   const supplierName = extractSupplierName(text, fileName);
   const amounts = extractAmounts(text);
   const currency = detectReceiptCurrency(text);
+  const minOcrConfidence = options?.minOcrConfidence ?? computeMinOcrConfidence(options?.textItems);
 
   return {
     ...identifiers,
@@ -1401,6 +1426,8 @@ export function extractReceiptFieldsFromText(
     due_date,
     description: extractDescription(text, supplierName),
     raw_text: text,
+    ...(minOcrConfidence !== undefined ? { min_ocr_confidence: minOcrConfidence } : {}),
+    ...(options?.partialOcrFailure ? { partial_ocr_failure: true } : {}),
   };
 }
 

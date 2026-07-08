@@ -52,6 +52,10 @@ export interface ExtractionConfidenceSignals {
    * non-VAT-registered Estonian supplier legitimately has no KMKR.
    */
   missing_supplier_vat_on_est_invoice?: boolean;
+  /** Parser reported OCR text likely missing for an OCR-needed page. */
+  partial_ocr_failure?: boolean;
+  /** OCR text item confidence fell below the review threshold. */
+  low_ocr_confidence?: boolean;
 }
 
 export interface InvoiceExtractionFallback {
@@ -144,6 +148,8 @@ export function summarizeInvoiceExtraction(
   if (signals?.improbable_fixed_asset) mediumSignals.push("improbable_fixed_asset");
   if (signals?.foreign_reverse_charge_default_unverified) mediumSignals.push("foreign_reverse_charge_default_unverified");
   if (signals?.missing_supplier_vat_on_est_invoice) mediumSignals.push("missing_supplier_vat_on_est_invoice");
+  if (signals?.partial_ocr_failure) mediumSignals.push("partial_ocr_failure");
+  if (signals?.low_ocr_confidence) mediumSignals.push("low_ocr_confidence");
   // Auto-derive the EST-missing-VAT signal when the caller passes supplierCountry
   // but did not set the signal explicitly. Non-VAT-registered Estonian suppliers
   // legitimately have no KMKR, so this is a medium (review) signal, not low.

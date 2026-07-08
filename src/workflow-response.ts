@@ -460,6 +460,20 @@ function invoiceCurrencyFixImpact(preview: Record<string, unknown>): string | un
   return impactLine(count, "invoice FX update");
 }
 
+function receiptSignalCounts(preview: Record<string, unknown>): { partialOcrFailure: number; lowOcrConfidence: number } {
+  let partialOcrFailure = 0;
+  let lowOcrConfidence = 0;
+  for (const result of arrayAt(preview, "results") ?? []) {
+    if (!isRecord(result)) continue;
+    const fallback = recordAt(result, "llm_fallback");
+    const signals = fallback ? arrayAt(fallback, "confidence_signals") : undefined;
+    if (!signals) continue;
+    if (signals.includes("partial_ocr_failure")) partialOcrFailure += 1;
+    if (signals.includes("low_ocr_confidence")) lowOcrConfidence += 1;
+  }
+  return { partialOcrFailure, lowOcrConfidence };
+}
+
 type DryRunToolCounts = Record<string, number>;
 
 interface DryRunToolSpec {
@@ -538,27 +552,33 @@ const DRY_RUN_TOOL_REGISTRY: DryRunToolSpec[] = [
         skippedDuplicate: numberAt(preview, "skipped_duplicate") ?? 0,
         reviewCount: numberAt(preview, "needs_review") ?? 0,
         failed: numberAt(preview, "failed") ?? 0,
+        ...receiptSignalCounts(preview),
       };
     },
     canApprove: counts =>
       (counts.wouldCreate > 0 || counts.matched > 0) &&
       counts.skippedDuplicate <= 0 &&
       counts.reviewCount <= 0 &&
-      counts.failed <= 0,
+      counts.failed <= 0 &&
+      counts.partialOcrFailure <= 0 &&
+      counts.lowOcrConfidence <= 0,
     buildImpact: counts => [
       impactLine(counts.wouldCreate, "purchase invoice"),
       impactLine(counts.matched, "matched transaction"),
       impactLine(counts.skippedDuplicate, "skipped duplicate"),
+      counts.partialOcrFailure > 0 ? `${counts.partialOcrFailure} receipt(s) with partial OCR failure requiring review` : undefined,
       counts.reviewCount > 0 ? `${counts.reviewCount} receipt(s) still need review before approval` : undefined,
       counts.failed > 0 ? `${counts.failed} receipt(s) failed and should be fixed before approval` : undefined,
     ].filter((line): line is string => line !== undefined),
-    duplicateRisk: counts => counts.skippedDuplicate > 0 || counts.reviewCount > 0 || counts.failed > 0
+    duplicateRisk: counts => counts.skippedDuplicate > 0 || counts.reviewCount > 0 || counts.failed > 0 || counts.partialOcrFailure > 0 || counts.lowOcrConfidence > 0
       ? "Review unresolved receipt items before approving execution."
       : "No unresolved receipt review items were reported by the dry run.",
     blockedReasons: counts => [
       impactLine(counts.skippedDuplicate, "skipped duplicate"),
       impactLine(counts.reviewCount, "receipt needing review", "receipts needing review"),
       impactLine(counts.failed, "failed receipt"),
+      impactLine(counts.partialOcrFailure, "receipt with partial OCR failure", "receipts with partial OCR failure"),
+      impactLine(counts.lowOcrConfidence, "receipt with low OCR confidence", "receipts with low OCR confidence"),
     ].filter((line): line is string => line !== undefined),
   },
   {
