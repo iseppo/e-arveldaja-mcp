@@ -265,6 +265,18 @@ export const CATEGORY_KEYWORD_MAP: Array<{
   accountKeywords: string[];
 }> = [
   {
+    category: "bank_fees",
+    pattern: /(bank|pank|fee|teenustasu|commission|service charge|haldustasu)/i,
+    articleKeywords: ["bank", "teenus", "fee"],
+    accountKeywords: ["bank", "teenus", "fee"],
+  },
+  {
+    category: "saas_subscriptions",
+    pattern: /(software|subscription|hosting|cloud|openai|chatgpt|anthropic|claude|cursor|google|zoom|slack|github|microsoft|internet|sideteenus|api\b|credits)/i,
+    articleKeywords: ["tarkvara", "software", "internet", "side", "subscription", "sideteenus", "internetikulu"],
+    accountKeywords: ["tarkvara", "software", "subscription", "internet", "it", "sideteenus"],
+  },
+  {
     category: "card_purchases",
     pattern: /(bolt|uber|taxi|parking|transport)/i,
     articleKeywords: ["transport", "sõidu", "auto"],
@@ -275,18 +287,6 @@ export const CATEGORY_KEYWORD_MAP: Array<{
     pattern: /(wolt|restaurant|cafe|toit|food)/i,
     articleKeywords: ["toit", "food", "representation", "esindus"],
     accountKeywords: ["representation", "esindus", "food", "toit"],
-  },
-  {
-    category: "saas_subscriptions",
-    pattern: /(software|subscription|hosting|cloud|openai|chatgpt|anthropic|claude|cursor|google|zoom|slack|github|microsoft|internet|sideteenus|api\b|credits)/i,
-    articleKeywords: ["tarkvara", "software", "internet", "side", "subscription", "sideteenus", "internetikulu"],
-    accountKeywords: ["tarkvara", "software", "subscription", "internet", "it", "sideteenus"],
-  },
-  {
-    category: "bank_fees",
-    pattern: /(bank|pank|fee|teenustasu|commission|service charge|haldustasu)/i,
-    articleKeywords: ["bank", "teenus", "fee"],
-    accountKeywords: ["bank", "teenus", "fee"],
   },
   {
     category: "tax_payments",
@@ -1104,11 +1104,15 @@ export function looksLikePersonCounterparty(normalizedCounterparty: string, rawC
 }
 
 export function getAutoBookedVatConfig(
+  _category?: TransactionClassificationCategory,
+  _supplierCountry?: string | null,
 ): Pick<PurchaseInvoiceItem, "vat_rate_dropdown" | "reversed_vat_id"> {
   return { vat_rate_dropdown: "-" };
 }
 
 export function getAutoBookedVatRateDropdown(
+  _category?: TransactionClassificationCategory,
+  _supplierCountry?: string | null,
 ): string {
   return getAutoBookedVatConfig().vat_rate_dropdown ?? "-";
 }
