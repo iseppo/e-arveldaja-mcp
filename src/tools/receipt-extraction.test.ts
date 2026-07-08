@@ -949,6 +949,60 @@ describe("extractSupplierName", () => {
     expect(extractSupplierName(text, "invoice.pdf", textItems)).toBe("Dominant Header OÜ");
   });
 
+  it("picks supplier name above the müüja marker within the above-window", () => {
+    const text = [
+      "Header Corp OÜ",
+      "Müüja",
+      "Kokku 12.00",
+    ].join("\n");
+    const textItems = [
+      { text: "Header Corp OÜ", x: 24, y: 30, width: 130, height: 14, fontSize: 14 },
+      { text: "Müüja", x: 24, y: 70, width: 42, height: 10, fontSize: 10 },
+      { text: "Kokku 12.00", x: 24, y: 120, width: 70, height: 10, fontSize: 10 },
+    ] satisfies readonly LayoutTextItem[];
+
+    expect(extractSupplierName(text, "invoice.pdf", textItems)).toBe("Header Corp OÜ");
+  });
+
+  it("surfaces extraction_notes when layout and text supplier names disagree", () => {
+    const text = [
+      "Müüja: Text Vendor OÜ",
+      "Ostja: Buyer OÜ",
+      "Kokku 12.00",
+    ].join("\n");
+    const textItems = [
+      { text: "Müüja:", x: 24, y: 34, width: 42, height: 10, fontSize: 10 },
+      { text: "Layout Vendor OÜ", x: 24, y: 54, width: 120, height: 12, fontSize: 12 },
+      { text: "Ostja:", x: 310, y: 34, width: 35, height: 10, fontSize: 10 },
+      { text: "Buyer OÜ", x: 310, y: 54, width: 68, height: 10, fontSize: 10 },
+      { text: "Kokku 12.00", x: 24, y: 120, width: 70, height: 10, fontSize: 10 },
+    ] satisfies readonly LayoutTextItem[];
+
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf", { textItems });
+
+    expect(result.supplier_name).toBe("Layout Vendor OÜ");
+    expect(result.extraction_notes).toEqual(expect.arrayContaining([
+      expect.stringContaining("Supplier name conflict"),
+    ]));
+  });
+
+  it("prefers supplier candidate above buyer marker via beforeBuyerScore", () => {
+    const text = [
+      "Top Supplier OÜ",
+      "Müüja",
+      "Ostja",
+      "Wrong Buyer OÜ",
+    ].join("\n");
+    const textItems = [
+      { text: "Top Supplier OÜ", x: 24, y: 80, width: 130, height: 12, fontSize: 12 },
+      { text: "Müüja", x: 24, y: 100, width: 42, height: 10, fontSize: 10 },
+      { text: "Ostja", x: 24, y: 140, width: 35, height: 10, fontSize: 10 },
+      { text: "Wrong Buyer OÜ", x: 24, y: 160, width: 100, height: 10, fontSize: 10 },
+    ] satisfies readonly LayoutTextItem[];
+
+    expect(extractSupplierName(text, "invoice.pdf", textItems)).toBe("Top Supplier OÜ");
+  });
+
   it("extracts company name with OÜ suffix", () => {
     const text = "ACME OÜ\nReg. nr: 12345678\nInvoice: 001";
     const result = extractSupplierName(text, "invoice.pdf");

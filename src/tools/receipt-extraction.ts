@@ -1514,6 +1514,7 @@ interface SupplierNameLayoutCandidate {
 }
 
 const SUPPLIER_NAME_REGION_Y_WINDOW = 170;
+const SUPPLIER_NAME_REGION_Y_ABOVE_WINDOW = 80;
 const SUPPLIER_NAME_COLUMN_X_WINDOW = 90;
 
 function layoutItemFontSize(item: LayoutTextItem): number {
@@ -1537,8 +1538,17 @@ function isLayoutItemInSupplierRegion(
 ): boolean {
   if (!layoutItemSamePageAsMarker(item, marker)) return false;
   const yDistance = item.y - marker.y;
-  if (yDistance < -2 || yDistance > SUPPLIER_NAME_REGION_Y_WINDOW) return false;
+  if (yDistance < -SUPPLIER_NAME_REGION_Y_ABOVE_WINDOW || yDistance > SUPPLIER_NAME_REGION_Y_WINDOW) return false;
   if (layoutItemColumnDistance(item, marker) > SUPPLIER_NAME_COLUMN_X_WINDOW) return false;
+  if (yDistance < 0) {
+    const buyerAbove = markers.some(m =>
+      m.side === "buyer" &&
+      layoutItemSamePageAsMarker(item, m) &&
+      m.y <= item.y + 5 &&
+      Math.abs((m.x + m.width / 2) - (item.x + item.width / 2)) <= 50,
+    );
+    return !buyerAbove;
+  }
   return classifyByPosition({ x: item.x, y: item.y }, markers) === "supplier";
 }
 
@@ -1547,7 +1557,7 @@ function scoreSupplierLayoutCandidate(
   marker: MarkerPosition,
   buyerMarkers: readonly MarkerPosition[],
 ): number {
-  const yDistance = Math.max(0, item.y - marker.y);
+  const yDistance = Math.abs(item.y - marker.y);
   const fontScore = layoutItemFontSize(item) * 8;
   const proximityScore = Math.max(0, SUPPLIER_NAME_REGION_Y_WINDOW - yDistance) / 2;
   const columnScore = Math.max(0, SUPPLIER_NAME_COLUMN_X_WINDOW - layoutItemColumnDistance(item, marker)) / 2;
@@ -1589,16 +1599,7 @@ function extractSupplierNameFromLayout(textItems: readonly LayoutTextItem[]): st
     )[0]?.name;
 }
 
-export function extractSupplierName(
-  text: string,
-  fallbackFileName: string,
-  textItems?: readonly LayoutTextItem[],
-): string | undefined {
-  if (textItems && textItems.length > 0) {
-    const layoutSupplierName = extractSupplierNameFromLayout(textItems);
-    if (layoutSupplierName) return layoutSupplierName;
-  }
-
+function extractSupplierNameFromText(text: string, fallbackFileName: string): string | undefined {
   const rows = text
     .split(/\r?\n/)
     .map(raw => ({ raw, line: clampTextLine(raw) }))
@@ -1672,6 +1673,42 @@ export function extractSupplierName(
     return undefined;
   }
   return fileToken;
+}
+
+export interface SupplierNameExtractionResult {
+  name?: string;
+  extraction_notes?: string[];
+}
+
+export function extractSupplierNameWithNotes(
+  text: string,
+  fallbackFileName: string,
+  textItems?: readonly LayoutTextItem[],
+): SupplierNameExtractionResult {
+  const textName = extractSupplierNameFromText(text, fallbackFileName);
+  if (!textItems || textItems.length === 0) {
+    return textName !== undefined ? { name: textName } : {};
+  }
+
+  const layoutName = extractSupplierNameFromLayout(textItems);
+  if (layoutName === undefined) {
+    return textName !== undefined ? { name: textName } : {};
+  }
+  if (textName === undefined || layoutName === textName) {
+    return { name: layoutName };
+  }
+  return {
+    name: layoutName,
+    extraction_notes: [`Supplier name conflict: layout="${layoutName}" text="${textName}" — using layout result`],
+  };
+}
+
+export function extractSupplierName(
+  text: string,
+  fallbackFileName: string,
+  textItems?: readonly LayoutTextItem[],
+): string | undefined {
+  return extractSupplierNameWithNotes(text, fallbackFileName, textItems).name;
 }
 
 export function extractInvoiceNumber(text: string, fileName: string): string {
@@ -2197,7 +2234,8 @@ export function extractReceiptFieldsFromText(
 ): ExtractedReceiptFields {
   const identifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date } = extractDates(text);
-  const supplierName = extractSupplierName(text, fileName, options?.textItems);
+  const supplierResult = extractSupplierNameWithNotes(text, fileName, options?.textItems);
+  const supplierName = supplierResult.name;
   const amounts = extractAmountsWithMetadata(text, options?.textItems);
   const currency = detectReceiptCurrency(text);
   const invoiceNumber = extractInvoiceNumber(text, fileName);
@@ -2215,7 +2253,11 @@ export function extractReceiptFieldsFromText(
     },
     options?.textItems,
   );
-  const { provenance: _amountProvenance, extraction_notes: extractionNotes, ...amountFields } = amounts;
+  const { provenance: _amountProvenance, extraction_notes: amountNotes, ...amountFields } = amounts;
+  const extractionNotes = [
+    ...(amountNotes ?? []),
+    ...(supplierResult.extraction_notes ?? []),
+  ];
 
   return {
     ...identifiers,
