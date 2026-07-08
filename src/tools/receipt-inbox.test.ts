@@ -1112,7 +1112,7 @@ describe("looksLikePersonCounterparty", () => {
 
 describe("getAutoBookedVatConfig", () => {
   it("defaults unmatched auto-bookings to no VAT assumptions", () => {
-    expect(getAutoBookedVatConfig("saas_subscriptions", "IRL")).toEqual({
+    expect(getAutoBookedVatConfig()).toEqual({
       vat_rate_dropdown: "-",
     });
   });
@@ -1120,22 +1120,20 @@ describe("getAutoBookedVatConfig", () => {
 
 describe("getAutoBookedVatRateDropdown", () => {
   it("keeps conservative no-VAT defaults for unmatched heuristics", () => {
-    expect(getAutoBookedVatRateDropdown("card_purchases", "EST")).toBe("-");
-    expect(getAutoBookedVatRateDropdown("saas_subscriptions", "IRL")).toBe("-");
-    expect(getAutoBookedVatRateDropdown("bank_fees", "EST")).toBe("-");
+    expect(getAutoBookedVatRateDropdown()).toBe("-");
   });
 });
 
 describe("deriveAutoBookedNetAmount", () => {
   it("keeps unmatched card purchases at gross until a real VAT treatment is known", () => {
-    const vatConfig = getAutoBookedVatConfig("card_purchases", "EST");
+    const vatConfig = getAutoBookedVatConfig();
 
     expect(deriveAutoBookedNetAmount(100, vatConfig)).toBe(100);
     expect(deriveAutoBookedVatPrice(100, vatConfig)).toBe(0);
   });
 
   it("keeps reverse-charge SaaS purchases at their supplier gross amount", () => {
-    const vatConfig = getAutoBookedVatConfig("saas_subscriptions", "IRL");
+    const vatConfig = getAutoBookedVatConfig();
 
     expect(deriveAutoBookedNetAmount(100, vatConfig)).toBe(100);
     expect(deriveAutoBookedVatPrice(100, vatConfig)).toBe(0);

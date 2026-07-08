@@ -28,6 +28,28 @@ export function buildDryRunCreatedInvoicePreview(invoiceNumber: string) {
   };
 }
 
+export async function invalidateAndReport(
+  api: ApiContext,
+  invoice: Pick<PurchaseInvoice, "id">,
+  notes: string[],
+  messages: {
+    reason: string;
+    onInvalidated: (invoiceId: number) => string;
+    onInvalidationFailed: (invoiceId: number, invalidateMessage: string) => string;
+  },
+): Promise<string | undefined> {
+  if (!invoice.id) return undefined;
+  try {
+    await api.purchaseInvoices.invalidate(invoice.id);
+    notes.push(messages.onInvalidated(invoice.id));
+    return undefined;
+  } catch (invalidateError) {
+    const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
+    notes.push(messages.onInvalidationFailed(invoice.id, invalidateMessage));
+    return invalidateMessage;
+  }
+}
+
 function buildSyntheticItem(
   suggestion: BookingSuggestion,
   description: string,
@@ -196,33 +218,32 @@ export async function createAndMaybeMatchPurchaseInvoice(
       };
     }
 
-    try {
-      await api.purchaseInvoices.invalidate(createdInvoice.id);
-      notes.push(`Invalidated created purchase invoice ${createdInvoice.id} because ${reason}: ${message}.`);
+    const invalidateMessage = await invalidateAndReport(api, createdInvoice, notes, {
+      reason,
+      onInvalidated: invoiceId => `Invalidated created purchase invoice ${invoiceId} because ${reason}: ${message}.`,
+      onInvalidationFailed: (invoiceId, failedMessage) =>
+        `Created purchase invoice ${invoiceId} could not be invalidated after ${reason}: ${message}. ` +
+        `Automatic invalidation also failed: ${failedMessage}.`,
+    });
+    if (!invalidateMessage) {
       return {
         notes,
         status: "failed" as const,
         error: message,
       };
-    } catch (invalidateError) {
-      const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
-      notes.push(
-        `Created purchase invoice ${createdInvoice.id} could not be invalidated after ${reason}: ${message}. ` +
-        `Automatic invalidation also failed: ${invalidateMessage}.`
-      );
-      return {
-        notes,
-        status: "failed" as const,
-        error: `${message}; automatic invalidation failed: ${invalidateMessage}`,
-        created_invoice: {
-          id: createdInvoice.id,
-          number: createdInvoice.number,
-          status: createdInvoice.status,
-          confirmed: false,
-          uploaded_document: uploadedDocument,
-        },
-      };
     }
+    return {
+      notes,
+      status: "failed" as const,
+      error: `${message}; automatic invalidation failed: ${invalidateMessage}`,
+      created_invoice: {
+        id: createdInvoice.id,
+        number: createdInvoice.number,
+        status: createdInvoice.status,
+        confirmed: false,
+        uploaded_document: uploadedDocument,
+      },
+    };
   };
 
   if (createdInvoice.id) {

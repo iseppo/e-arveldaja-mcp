@@ -380,12 +380,7 @@ function blockedDryRunLabel(tool: MaterializingDryRunTool): string {
 }
 
 function isMaterializingDryRunTool(tool: string): tool is MaterializingDryRunTool {
-  return tool === "import_camt053"
-    || tool === "import_wise_transactions"
-    || tool === "process_receipt_batch"
-    || tool === "apply_transaction_classifications"
-    || tool === "auto_confirm_exact_matches"
-    || tool === "reconcile_inter_account_transfers";
+  return DRY_RUN_TOOL_REGISTRY.some(spec => spec.tool === tool);
 }
 
 function doneAction(): WorkflowAction {
@@ -465,6 +460,178 @@ function invoiceCurrencyFixImpact(preview: Record<string, unknown>): string | un
   return impactLine(count, "invoice FX update");
 }
 
+type DryRunToolCounts = Record<string, number>;
+
+interface DryRunToolSpec {
+  tool: MaterializingDryRunTool;
+  title: string;
+  defaultSummary: (counts: DryRunToolCounts) => string;
+  executeArgs: (args: Record<string, unknown>) => Record<string, unknown>;
+  extractCounts: (preview: Record<string, unknown>) => DryRunToolCounts;
+  canApprove: (counts: DryRunToolCounts) => boolean;
+  buildImpact: (counts: DryRunToolCounts, preview: Record<string, unknown>) => string[];
+  duplicateRisk: (counts: DryRunToolCounts) => string;
+  blockedReasons: (counts: DryRunToolCounts) => string[];
+}
+
+const DRY_RUN_TOOL_REGISTRY: DryRunToolSpec[] = [
+  {
+    tool: "import_camt053",
+    title: "Approve CAMT transaction import",
+    defaultSummary: counts => `CAMT dry run would create ${counts.created} transaction(s).`,
+    executeArgs: withExecuteTrue,
+    extractCounts: preview => ({
+      created: numberAt(preview, "created_count") ?? 0,
+      duplicateCount: numberAt(preview, "possible_duplicate_count") ?? 0,
+      errorCount: numberAt(preview, "error_count") ?? 0,
+      skipped: numberAt(preview, "skipped_count") ?? 0,
+    }),
+    canApprove: counts => counts.created > 0 && counts.duplicateCount <= 0 && counts.errorCount <= 0,
+    buildImpact: counts => [
+      impactLine(counts.created, "bank transaction"),
+      impactLine(counts.skipped, "skipped row"),
+      counts.errorCount > 0 ? `${counts.errorCount} import error(s) must be reviewed before approval` : undefined,
+    ].filter((line): line is string => line !== undefined),
+    duplicateRisk: counts => counts.duplicateCount > 0
+      ? `${counts.duplicateCount} possible duplicate(s) were reported; resolve those review items before approval.`
+      : "No possible duplicate review items were reported by the dry run.",
+    blockedReasons: counts => [
+      impactLine(counts.duplicateCount, "possible duplicate"),
+      impactLine(counts.errorCount, "import error"),
+    ].filter((line): line is string => line !== undefined),
+  },
+  {
+    tool: "import_wise_transactions",
+    title: "Approve Wise transaction import",
+    defaultSummary: counts => `Wise dry run would create ${counts.created} transaction(s).`,
+    executeArgs: withExecuteTrue,
+    extractCounts: preview => ({
+      created: numberAt(preview, "created") ?? 0,
+      errorCount: numberAt(preview, "error_count") ?? 0,
+      skipped: numberAt(preview, "skipped") ?? 0,
+    }),
+    canApprove: counts => counts.created > 0 && counts.errorCount <= 0,
+    buildImpact: (counts, preview) => [
+      impactLine(counts.created, "bank transaction"),
+      impactLine(counts.skipped, "skipped row"),
+      invoiceCurrencyFixImpact(preview),
+      counts.errorCount > 0 ? `${counts.errorCount} import error(s) must be reviewed before approval` : undefined,
+    ].filter((line): line is string => line !== undefined),
+    duplicateRisk: () => "Review skipped rows, transfer handling, and invoice_currency_fixes before approval. Execution confirms or links source bank transactions where the dry run shows fee or inter-account handling.",
+    blockedReasons: counts => [
+      impactLine(counts.errorCount, "import error"),
+    ].filter((line): line is string => line !== undefined),
+  },
+  {
+    tool: "process_receipt_batch",
+    title: "Approve receipt batch booking",
+    defaultSummary: counts => `Receipt dry run would create ${counts.wouldCreate} invoice(s).`,
+    executeArgs: withReceiptCreateMode,
+    extractCounts: preview => {
+      const created = numberAt(preview, "created") ?? 0;
+      const dryRunPreview = numberAt(preview, "dry_run_preview") ?? 0;
+      return {
+        created,
+        dryRunPreview,
+        wouldCreate: created > 0 ? created : dryRunPreview,
+        matched: numberAt(preview, "matched") ?? 0,
+        skippedDuplicate: numberAt(preview, "skipped_duplicate") ?? 0,
+        reviewCount: numberAt(preview, "needs_review") ?? 0,
+        failed: numberAt(preview, "failed") ?? 0,
+      };
+    },
+    canApprove: counts =>
+      (counts.wouldCreate > 0 || counts.matched > 0) &&
+      counts.skippedDuplicate <= 0 &&
+      counts.reviewCount <= 0 &&
+      counts.failed <= 0,
+    buildImpact: counts => [
+      impactLine(counts.wouldCreate, "purchase invoice"),
+      impactLine(counts.matched, "matched transaction"),
+      impactLine(counts.skippedDuplicate, "skipped duplicate"),
+      counts.reviewCount > 0 ? `${counts.reviewCount} receipt(s) still need review before approval` : undefined,
+      counts.failed > 0 ? `${counts.failed} receipt(s) failed and should be fixed before approval` : undefined,
+    ].filter((line): line is string => line !== undefined),
+    duplicateRisk: counts => counts.skippedDuplicate > 0 || counts.reviewCount > 0 || counts.failed > 0
+      ? "Review unresolved receipt items before approving execution."
+      : "No unresolved receipt review items were reported by the dry run.",
+    blockedReasons: counts => [
+      impactLine(counts.skippedDuplicate, "skipped duplicate"),
+      impactLine(counts.reviewCount, "receipt needing review", "receipts needing review"),
+      impactLine(counts.failed, "failed receipt"),
+    ].filter((line): line is string => line !== undefined),
+  },
+  {
+    tool: "apply_transaction_classifications",
+    title: "Approve transaction classification booking",
+    defaultSummary: counts => `Classification dry run would create ${counts.wouldCreate} invoice(s).`,
+    executeArgs: withExecuteTrue,
+    extractCounts: preview => ({
+      wouldCreate: numberAt(preview, "would_create") ?? numberAt(preview, "dry_run_preview") ?? 0,
+      skipped: numberAt(preview, "skipped") ?? 0,
+      failed: numberAt(preview, "failed") ?? 0,
+    }),
+    canApprove: counts => counts.wouldCreate > 0 && counts.failed <= 0,
+    buildImpact: counts => [
+      impactLine(counts.wouldCreate, "purchase invoice"),
+      impactLine(counts.skipped, "skipped classification"),
+      counts.failed > 0 ? `${counts.failed} classification group(s) failed and should be fixed before approval` : undefined,
+    ].filter((line): line is string => line !== undefined),
+    duplicateRisk: () => "Review the classification source groups before approving execution.",
+    blockedReasons: counts => [
+      impactLine(counts.failed, "failed classification group"),
+    ].filter((line): line is string => line !== undefined),
+  },
+  {
+    tool: "auto_confirm_exact_matches",
+    title: "Approve exact-match transaction confirmations",
+    defaultSummary: counts => `Exact-match dry run would confirm ${counts.autoConfirmed} bank transaction(s).`,
+    executeArgs: withExecuteTrue,
+    extractCounts: preview => ({
+      autoConfirmed: numberAt(preview, "auto_confirmed") ?? 0,
+      skipped: numberAt(preview, "skipped") ?? 0,
+      errorCount: numberAt(preview, "error_count") ?? 0,
+    }),
+    canApprove: counts => counts.autoConfirmed > 0 && counts.skipped <= 0 && counts.errorCount <= 0,
+    buildImpact: counts => [
+      impactLine(counts.autoConfirmed, "bank transaction confirmation"),
+      impactLine(counts.skipped, "skipped transaction"),
+      counts.errorCount > 0 ? `${counts.errorCount} confirmation error(s) must be reviewed before approval` : undefined,
+    ].filter((line): line is string => line !== undefined),
+    duplicateRisk: () => "Review invoice and transaction matches before approving confirmation.",
+    blockedReasons: counts => [
+      impactLine(counts.skipped, "skipped transaction"),
+      impactLine(counts.errorCount, "confirmation error"),
+    ].filter((line): line is string => line !== undefined),
+  },
+  {
+    tool: "reconcile_inter_account_transfers",
+    title: "Approve inter-account transfer reconciliation",
+    defaultSummary: counts => `Inter-account dry run would reconcile ${counts.matchedPairs + counts.matchedOneSided} transfer(s).`,
+    executeArgs: withExecuteTrue,
+    extractCounts: preview => ({
+      matchedPairs: numberAt(preview, "matched_pairs") ?? 0,
+      matchedOneSided: numberAt(preview, "matched_one_sided") ?? 0,
+      skippedAlreadyHandled: numberAt(preview, "skipped_already_handled") ?? 0,
+      skippedAmbiguous: numberAt(preview, "skipped_ambiguous") ?? 0,
+      errorCount: numberAt(preview, "error_count") ?? 0,
+    }),
+    canApprove: counts => (counts.matchedPairs + counts.matchedOneSided) > 0 && counts.skippedAmbiguous <= 0 && counts.errorCount <= 0,
+    buildImpact: counts => [
+      impactLine(counts.matchedPairs, "inter-account transfer pair"),
+      impactLine(counts.matchedOneSided, "one-sided inter-account transfer"),
+      impactLine(counts.skippedAlreadyHandled, "already handled transfer"),
+      counts.skippedAmbiguous > 0 ? `${counts.skippedAmbiguous} ambiguous transfer(s) must be reviewed before approval` : undefined,
+      counts.errorCount > 0 ? `${counts.errorCount} reconciliation error(s) must be reviewed before approval` : undefined,
+    ].filter((line): line is string => line !== undefined),
+    duplicateRisk: () => "Existing inter-account journals are checked before approval; review already-handled and ambiguous transfers.",
+    blockedReasons: counts => [
+      impactLine(counts.skippedAmbiguous, "ambiguous transfer"),
+      impactLine(counts.errorCount, "reconciliation error"),
+    ].filter((line): line is string => line !== undefined),
+  },
+];
+
 export function approvalPreviewFromDryRunStep(step: unknown): ApprovalPreview | undefined {
   if (!isRecord(step)) return undefined;
   const tool = stringAt(step, "tool");
@@ -472,151 +639,21 @@ export function approvalPreviewFromDryRunStep(step: unknown): ApprovalPreview | 
   const preview = recordAt(step, "preview");
   if (!tool || !preview) return undefined;
 
-  if (tool === "import_camt053") {
-    const created = numberAt(preview, "created_count") ?? 0;
-    const duplicateCount = numberAt(preview, "possible_duplicate_count") ?? 0;
-    const errorCount = numberAt(preview, "error_count") ?? 0;
-    if (created <= 0 || duplicateCount > 0 || errorCount > 0) return undefined;
-    return {
-      title: "Approve CAMT transaction import",
-      summary: stringAt(step, "summary") ?? `CAMT dry run would create ${created} transaction(s).`,
-      approval_required: true,
-      source_tool: tool,
-      execute_tool: tool,
-      execute_args: withExecuteTrue(args),
-      accounting_impact: [
-        impactLine(created, "bank transaction"),
-        impactLine(numberAt(preview, "skipped_count"), "skipped row"),
-        errorCount > 0 ? `${errorCount} import error(s) must be reviewed before approval` : undefined,
-      ].filter((line): line is string => line !== undefined),
-      duplicate_risk: duplicateCount > 0
-        ? `${duplicateCount} possible duplicate(s) were reported; resolve those review items before approval.`
-        : "No possible duplicate review items were reported by the dry run.",
-      source_documents: sourceDocuments(args),
-    };
-  }
-
-  if (tool === "import_wise_transactions") {
-    const created = numberAt(preview, "created") ?? 0;
-    const errorCount = numberAt(preview, "error_count") ?? 0;
-    if (created <= 0 || errorCount > 0) return undefined;
-    return {
-      title: "Approve Wise transaction import",
-      summary: stringAt(step, "summary") ?? `Wise dry run would create ${created} transaction(s).`,
-      approval_required: true,
-      source_tool: tool,
-      execute_tool: tool,
-      execute_args: withExecuteTrue(args),
-      accounting_impact: [
-        impactLine(created, "bank transaction"),
-        impactLine(numberAt(preview, "skipped"), "skipped row"),
-        invoiceCurrencyFixImpact(preview),
-        errorCount > 0 ? `${errorCount} import error(s) must be reviewed before approval` : undefined,
-      ].filter((line): line is string => line !== undefined),
-      duplicate_risk: "Review skipped rows, transfer handling, and invoice_currency_fixes before approval. Execution confirms or links source bank transactions where the dry run shows fee or inter-account handling.",
-      source_documents: sourceDocuments(args),
-    };
-  }
-
-  if (tool === "process_receipt_batch") {
-    const created = numberAt(preview, "created") ?? 0;
-    const dryRunPreview = numberAt(preview, "dry_run_preview") ?? 0;
-    const wouldCreate = created > 0 ? created : dryRunPreview;
-    const matched = numberAt(preview, "matched") ?? 0;
-    const skippedDuplicate = numberAt(preview, "skipped_duplicate") ?? 0;
-    const reviewCount = numberAt(preview, "needs_review") ?? 0;
-    const failed = numberAt(preview, "failed") ?? 0;
-    if ((wouldCreate <= 0 && matched <= 0) || skippedDuplicate > 0 || reviewCount > 0 || failed > 0) return undefined;
-    return {
-      title: "Approve receipt batch booking",
-      summary: stringAt(step, "summary") ?? `Receipt dry run would create ${wouldCreate} invoice(s).`,
-      approval_required: true,
-      source_tool: tool,
-      execute_tool: tool,
-      execute_args: withReceiptCreateMode(args),
-      accounting_impact: [
-        impactLine(wouldCreate, "purchase invoice"),
-        impactLine(matched, "matched transaction"),
-        impactLine(skippedDuplicate, "skipped duplicate"),
-        reviewCount > 0 ? `${reviewCount} receipt(s) still need review before approval` : undefined,
-        failed > 0 ? `${failed} receipt(s) failed and should be fixed before approval` : undefined,
-      ].filter((line): line is string => line !== undefined),
-      duplicate_risk: skippedDuplicate > 0 || reviewCount > 0 || failed > 0
-        ? "Review unresolved receipt items before approving execution."
-        : "No unresolved receipt review items were reported by the dry run.",
-      source_documents: sourceDocuments(args),
-    };
-  }
-
-  if (tool === "apply_transaction_classifications") {
-    const wouldCreate = numberAt(preview, "would_create") ?? numberAt(preview, "dry_run_preview") ?? 0;
-    const failed = numberAt(preview, "failed") ?? 0;
-    if (wouldCreate <= 0 || failed > 0) return undefined;
-    return {
-      title: "Approve transaction classification booking",
-      summary: stringAt(step, "summary") ?? `Classification dry run would create ${wouldCreate} invoice(s).`,
-      approval_required: true,
-      source_tool: tool,
-      execute_tool: tool,
-      execute_args: withExecuteTrue(args),
-      accounting_impact: [
-        impactLine(wouldCreate, "purchase invoice"),
-        impactLine(numberAt(preview, "skipped"), "skipped classification"),
-        failed > 0 ? `${failed} classification group(s) failed and should be fixed before approval` : undefined,
-      ].filter((line): line is string => line !== undefined),
-      duplicate_risk: "Review the classification source groups before approving execution.",
-      source_documents: sourceDocuments(args),
-    };
-  }
-
-  if (tool === "auto_confirm_exact_matches") {
-    const autoConfirmed = numberAt(preview, "auto_confirmed") ?? 0;
-    const skipped = numberAt(preview, "skipped") ?? 0;
-    const errorCount = numberAt(preview, "error_count") ?? 0;
-    if (autoConfirmed <= 0 || skipped > 0 || errorCount > 0) return undefined;
-    return {
-      title: "Approve exact-match transaction confirmations",
-      summary: stringAt(step, "summary") ?? `Exact-match dry run would confirm ${autoConfirmed} bank transaction(s).`,
-      approval_required: true,
-      source_tool: tool,
-      execute_tool: tool,
-      execute_args: withExecuteTrue(args),
-      accounting_impact: [
-        impactLine(autoConfirmed, "bank transaction confirmation"),
-        impactLine(skipped, "skipped transaction"),
-        errorCount > 0 ? `${errorCount} confirmation error(s) must be reviewed before approval` : undefined,
-      ].filter((line): line is string => line !== undefined),
-      duplicate_risk: "Review invoice and transaction matches before approving confirmation.",
-      source_documents: sourceDocuments(args),
-    };
-  }
-
-  if (tool === "reconcile_inter_account_transfers") {
-    const matchedPairs = numberAt(preview, "matched_pairs") ?? 0;
-    const matchedOneSided = numberAt(preview, "matched_one_sided") ?? 0;
-    const skippedAmbiguous = numberAt(preview, "skipped_ambiguous") ?? 0;
-    const errorCount = numberAt(preview, "error_count") ?? 0;
-    if ((matchedPairs + matchedOneSided) <= 0 || skippedAmbiguous > 0 || errorCount > 0) return undefined;
-    return {
-      title: "Approve inter-account transfer reconciliation",
-      summary: stringAt(step, "summary") ?? `Inter-account dry run would reconcile ${matchedPairs + matchedOneSided} transfer(s).`,
-      approval_required: true,
-      source_tool: tool,
-      execute_tool: tool,
-      execute_args: withExecuteTrue(args),
-      accounting_impact: [
-        impactLine(matchedPairs, "inter-account transfer pair"),
-        impactLine(matchedOneSided, "one-sided inter-account transfer"),
-        impactLine(numberAt(preview, "skipped_already_handled"), "already handled transfer"),
-        skippedAmbiguous > 0 ? `${skippedAmbiguous} ambiguous transfer(s) must be reviewed before approval` : undefined,
-        errorCount > 0 ? `${errorCount} reconciliation error(s) must be reviewed before approval` : undefined,
-      ].filter((line): line is string => line !== undefined),
-      duplicate_risk: "Existing inter-account journals are checked before approval; review already-handled and ambiguous transfers.",
-      source_documents: sourceDocuments(args),
-    };
-  }
-
-  return undefined;
+  const spec = DRY_RUN_TOOL_REGISTRY.find(candidate => candidate.tool === tool);
+  if (!spec) return undefined;
+  const counts = spec.extractCounts(preview);
+  if (!spec.canApprove(counts)) return undefined;
+  return {
+    title: spec.title,
+    summary: stringAt(step, "summary") ?? spec.defaultSummary(counts),
+    approval_required: true,
+    source_tool: spec.tool,
+    execute_tool: spec.tool,
+    execute_args: spec.executeArgs(args),
+    accounting_impact: spec.buildImpact(counts, preview),
+    duplicate_risk: spec.duplicateRisk(counts),
+    source_documents: sourceDocuments(args),
+  };
 }
 
 export function approvalPreviewsFromDryRunSteps(steps: unknown[]): ApprovalPreview[] {
@@ -626,54 +663,8 @@ export function approvalPreviewsFromDryRunSteps(steps: unknown[]): ApprovalPrevi
 }
 
 function blockedDryRunReasons(tool: MaterializingDryRunTool, preview: Record<string, unknown>): string[] {
-  switch (tool) {
-    case "import_camt053": {
-      const possibleDuplicates = numberAt(preview, "possible_duplicate_count") ?? 0;
-      const errors = numberAt(preview, "error_count") ?? 0;
-      return [
-        impactLine(possibleDuplicates, "possible duplicate"),
-        impactLine(errors, "import error"),
-      ].filter((line): line is string => line !== undefined);
-    }
-    case "import_wise_transactions": {
-      const errors = numberAt(preview, "error_count") ?? 0;
-      return [
-        impactLine(errors, "import error"),
-      ].filter((line): line is string => line !== undefined);
-    }
-    case "process_receipt_batch": {
-      const skippedDuplicate = numberAt(preview, "skipped_duplicate") ?? 0;
-      const needsReview = numberAt(preview, "needs_review") ?? 0;
-      const failed = numberAt(preview, "failed") ?? 0;
-      return [
-        impactLine(skippedDuplicate, "skipped duplicate"),
-        impactLine(needsReview, "receipt needing review", "receipts needing review"),
-        impactLine(failed, "failed receipt"),
-      ].filter((line): line is string => line !== undefined);
-    }
-    case "apply_transaction_classifications": {
-      const failed = numberAt(preview, "failed") ?? 0;
-      return [
-        impactLine(failed, "failed classification group"),
-      ].filter((line): line is string => line !== undefined);
-    }
-    case "auto_confirm_exact_matches": {
-      const skipped = numberAt(preview, "skipped") ?? 0;
-      const errors = numberAt(preview, "error_count") ?? 0;
-      return [
-        impactLine(skipped, "skipped transaction"),
-        impactLine(errors, "confirmation error"),
-      ].filter((line): line is string => line !== undefined);
-    }
-    case "reconcile_inter_account_transfers": {
-      const ambiguous = numberAt(preview, "skipped_ambiguous") ?? 0;
-      const errors = numberAt(preview, "error_count") ?? 0;
-      return [
-        impactLine(ambiguous, "ambiguous transfer"),
-        impactLine(errors, "reconciliation error"),
-      ].filter((line): line is string => line !== undefined);
-    }
-  }
+  const spec = DRY_RUN_TOOL_REGISTRY.find(candidate => candidate.tool === tool);
+  return spec ? spec.blockedReasons(spec.extractCounts(preview)) : [];
 }
 
 export function workflowActionFromBlockedDryRunStep(step: unknown): WorkflowAction | undefined {

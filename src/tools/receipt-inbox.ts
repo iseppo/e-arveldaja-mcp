@@ -14,6 +14,7 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { type ApiContext, isCompanyVatRegistered, jsonObjectOrArrayInput, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
+import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeCompanyName } from "../company-name.js";
 import {
   type ExtractionConfidenceSignals,
@@ -27,6 +28,7 @@ import {
   type ReceiptClassification,
   type TransactionClassificationCategory,
   type TransactionGroupClassification,
+  CATEGORY_KEYWORD_MAP,
   buildKeywordSuggestion,
   categorizeTransactionGroup,
   classifyReceiptDocument,
@@ -76,6 +78,7 @@ import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import {
   buildDryRunCreatedInvoicePreview,
   createAndMaybeMatchPurchaseInvoice,
+  invalidateAndReport,
 } from "./receipt-inbox-booking.js";
 import {
   buildReceiptBatchExecution,
@@ -173,6 +176,47 @@ function maybeAddLlmFallbackNote(notes: string[], fallback: InvoiceExtractionFal
   }
 }
 
+function buildNeedsReviewResult(
+  file: ReceiptFileInfo,
+  classification: ReceiptClassification,
+  extracted: ExtractedReceiptFields,
+  fallback: InvoiceExtractionFallback,
+  notes: string[],
+  extras?: Pick<ReceiptBatchFileResult, "supplier_resolution" | "booking_suggestion" | "referenced_invoice">,
+): ReceiptBatchFileResult {
+  return {
+    file,
+    classification,
+    status: "needs_review",
+    extracted,
+    llm_fallback: fallback,
+    ...extras,
+    review_guidance: buildReceiptReviewGuidance({
+      classification,
+      notes,
+      extracted,
+      llmFallback: fallback,
+    }),
+    notes,
+  };
+}
+
+function shouldGateCreation(
+  summary: InvoiceExtractionFallback,
+  executionMode: ReceiptBatchExecutionMode,
+): { gate: boolean; reason: string } {
+  const foreignDefaultUnverified = summary.confidence_signals.includes(
+    "foreign_reverse_charge_default_unverified",
+  );
+  const confirmModeNeedsHighConfidence =
+    executionMode === "create_and_confirm" && summary.confidence !== "high";
+  const gate = summary.confidence === "low" || foreignDefaultUnverified || confirmModeNeedsHighConfidence;
+  return {
+    gate,
+    reason: summary.confidence_signals.join(", ") || "low confidence",
+  };
+}
+
 function shouldProcessExpenseAsPurchaseInvoice(classification: TransactionClassificationCategory): boolean {
   return classification === "saas_subscriptions" ||
     classification === "bank_fees" ||
@@ -257,21 +301,9 @@ function inferReceiptAutoBookingCategory(
   extracted: Pick<ExtractedReceiptFields, "supplier_name" | "description">,
 ): TransactionClassificationCategory | undefined {
   const text = `${extracted.supplier_name ?? ""} ${extracted.description ?? ""}`.toLowerCase();
-
-  if (/(bank|pank|fee|teenustasu|commission|service charge|haldustasu)/i.test(text)) {
-    return "bank_fees";
-  }
-  if (/(software|subscription|hosting|cloud|openai|google|zoom|slack|github|microsoft|internet|sideteenus)/i.test(text)) {
-    return "saas_subscriptions";
-  }
-  if (/(bolt|uber|taxi|parking|transport|wolt|restaurant|cafe|food|toit)/i.test(text)) {
-    return "card_purchases";
-  }
-  if (/(tax|emta|maks)/i.test(text)) {
-    return "tax_payments";
-  }
-
-  return undefined;
+  return CATEGORY_KEYWORD_MAP.find(entry =>
+    entry.category !== "unknown" && entry.pattern.test(text)
+  )?.category;
 }
 
 function resolveMergedPurchaseAccountDimension(
@@ -573,14 +605,17 @@ export function buildClassificationSuggestion(
   let articleKeywords = ["muu", "other", "general"];
   let accountKeywords = ["muu", "general", "kulud"];
   let reason = "Fallback booking suggestion from generic expense keywords.";
+  const keywordEntry = CATEGORY_KEYWORD_MAP.find(entry =>
+    entry.category === category && entry.pattern.test(normalizedCounterparty)
+  );
 
   if (category === "saas_subscriptions") {
-    articleKeywords = ["software", "subscription", "internet", "it", "sideteenus"];
-    accountKeywords = ["software", "subscription", "internet", "it", "sideteenus"];
+    articleKeywords = keywordEntry?.articleKeywords ?? CATEGORY_KEYWORD_MAP.find(entry => entry.category === "saas_subscriptions")!.articleKeywords;
+    accountKeywords = keywordEntry?.accountKeywords ?? CATEGORY_KEYWORD_MAP.find(entry => entry.category === "saas_subscriptions")!.accountKeywords;
     reason = "Recurring similar payments to the same counterparty suggest a subscription or SaaS vendor.";
   } else if (category === "bank_fees") {
-    articleKeywords = ["bank", "fee", "teenus"];
-    accountKeywords = ["bank", "fee", "teenus"];
+    articleKeywords = keywordEntry?.articleKeywords ?? CATEGORY_KEYWORD_MAP.find(entry => entry.category === "bank_fees")!.articleKeywords;
+    accountKeywords = keywordEntry?.accountKeywords ?? CATEGORY_KEYWORD_MAP.find(entry => entry.category === "bank_fees")!.accountKeywords;
     reason = "Counterparty and description patterns match bank service fees.";
   } else if (category === "salary_payroll") {
     articleKeywords = ["salary", "palk", "payroll"];
@@ -592,16 +627,19 @@ export function buildClassificationSuggestion(
     reason = "Counterparty matches a known owner or related physical person.";
   } else if (category === "card_purchases") {
     if (/(bolt|uber)/i.test(normalizedCounterparty)) {
-      articleKeywords = ["transport", "sõidu", "auto"];
-      accountKeywords = ["transport", "sõidu", "auto"];
+      const transportEntry = CATEGORY_KEYWORD_MAP.find(entry => entry.pattern.test("bolt"))!;
+      articleKeywords = transportEntry.articleKeywords;
+      accountKeywords = transportEntry.accountKeywords;
       reason = "Bolt/Uber patterns usually map to travel or transport expenses.";
     } else if (/(wolt)/i.test(normalizedCounterparty)) {
-      articleKeywords = ["food", "toit", "representation", "esindus"];
-      accountKeywords = ["food", "toit", "representation", "esindus"];
+      const foodEntry = CATEGORY_KEYWORD_MAP.find(entry => entry.pattern.test("wolt"))!;
+      articleKeywords = foodEntry.articleKeywords;
+      accountKeywords = foodEntry.accountKeywords;
       reason = "Wolt-like payments usually map to food or representation expenses.";
     } else {
-      articleKeywords = ["office", "kontor", "general", "muu"];
-      accountKeywords = ["office", "kontor", "general", "muu"];
+      const officeEntry = CATEGORY_KEYWORD_MAP.find(entry => entry.category === "unknown" && entry.pattern.test("office"))!;
+      articleKeywords = ["office", ...officeEntry.articleKeywords, "general", "muu"];
+      accountKeywords = ["office", ...officeEntry.accountKeywords, "general", "muu"];
       reason = "Card purchase with no invoice match; suggested booking uses broad operating expense defaults.";
     }
   } else if (category === "revenue_without_invoice") {
@@ -741,7 +779,7 @@ async function extractReceiptFields(
 }
 
 function normalizeVatForCompare(value: string | null | undefined): string {
-  return (value ?? "").replace(/\s+/g, "").toUpperCase();
+  return normalizeVatValue(value) ?? "";
 }
 
 /**
@@ -939,6 +977,280 @@ export function buildReferencedInvoiceForPaymentReceipt(
     return { invoice_number: trimmed, matched: true, matched_invoice_id: found.id };
   }
   return { invoice_number: trimmed, matched: false };
+}
+
+interface ProcessSingleReceiptOptions {
+  ownCompanyVat?: string;
+  ownCompanyRegistryCode?: string;
+  bankTransactions: Transaction[];
+  executionMode: ReceiptBatchExecutionMode;
+  legacyExecuteCreate: boolean;
+  dryRun: boolean;
+  consumedTransactionIds: Set<number>;
+  previousResults: ReceiptBatchFileResult[];
+}
+
+async function processSingleReceipt(
+  api: ApiContext,
+  context: ReceiptProcessingContext,
+  file: ReceiptFileInfo,
+  options: ProcessSingleReceiptOptions,
+): Promise<ReceiptBatchFileResult> {
+  const notes: string[] = [];
+
+  try {
+    const extracted = await extractReceiptFields(file, options.ownCompanyVat, options.ownCompanyRegistryCode);
+    const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
+    const selfVatDetected = detectSelfVatOnly(extracted, options.ownCompanyVat);
+    const signals: ExtractionConfidenceSignals = {};
+    if (selfVatDetected) signals.self_vat_detected = true;
+    const selfRegCodeDetected = detectSelfRegCodeOnly(extracted, options.ownCompanyRegistryCode);
+    if (selfRegCodeDetected) signals.self_reg_code_detected = true;
+    const inferredSupplierCountry = inferSupplierCountry(extracted);
+    const summarize = () => summarizeInvoiceExtraction(extracted, signals, "extracted.raw_text", inferredSupplierCountry);
+    const llmFallback = summarize();
+
+    if (file.file_type !== "pdf") {
+      notes.push("Image receipt OCR-parsed with LiteParse.");
+    }
+    if (selfVatDetected) {
+      notes.push(
+        "Document only printed the buyer's VAT (matches active company). Supplier VAT cleared — verify supplier manually before booking (#14).",
+      );
+    }
+    if (selfRegCodeDetected) {
+      notes.push(
+        "Document only printed the buyer's registry code (matches active company). Supplier reg code cleared — verify supplier manually before booking (#22).",
+      );
+    }
+
+    if (classification !== "purchase_invoice") {
+      const referencedInvoice =
+        classification === "payment_receipt"
+          ? buildReferencedInvoiceForPaymentReceipt(extracted.invoice_number, context.purchaseInvoices)
+          : undefined;
+      notes.push(
+        classification === "owner_paid_expense_reimbursement"
+          ? "PDF looks like an owner-paid expense receipt. Review manually before booking."
+          : classification === "payment_receipt"
+            ? `Document is a payment receipt${
+                referencedInvoice
+                  ? ` for invoice ${referencedInvoice.invoice_number}`
+                  : ""
+              }, not a separate purchase invoice. Booking it would duplicate the underlying invoice — attach to the existing invoice document instead (#15).`
+            : "Document could not be classified as a supplier purchase invoice.",
+      );
+      maybeAddLlmFallbackNote(notes, llmFallback);
+      return buildNeedsReviewResult(file, classification, extracted, llmFallback, notes, {
+        ...(referencedInvoice ? { referenced_invoice: referencedInvoice } : {}),
+      });
+    }
+
+    if (!hasAutoBookableReceiptFields(extracted)) {
+      notes.push("Missing supplier name, confident invoice number, invoice date, or gross total required for auto-booking.");
+      maybeAddLlmFallbackNote(notes, llmFallback);
+      return buildNeedsReviewResult(file, classification, extracted, llmFallback, notes);
+    }
+
+    const ownCompanyOptions = options.ownCompanyVat || options.ownCompanyRegistryCode
+      ? {
+          ...(options.ownCompanyVat ? { ownCompanyVat: options.ownCompanyVat } : {}),
+          ...(options.ownCompanyRegistryCode ? { ownCompanyRegistryCode: options.ownCompanyRegistryCode } : {}),
+        }
+      : undefined;
+    const supplierResolution = await resolveSupplierInternal(
+      api,
+      context.clients,
+      extracted,
+      false,
+      ownCompanyOptions,
+    );
+    if (supplierResolution.self_match_blocked) {
+      notes.push(
+        "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
+      );
+    }
+    if (!supplierResolution.found) signals.supplier_resolution_failed = true;
+    if (!supplierResolution.client && !supplierResolution.preview_client) {
+      const fallback = summarize();
+      notes.push("Supplier could not be resolved or prepared for creation.");
+      maybeAddLlmFallbackNote(notes, fallback);
+      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
+        supplier_resolution: supplierResolution,
+      });
+    }
+
+    if (supplierCountryNeedsReview(supplierResolution)) {
+      const fallback = summarize();
+      notes.push("Supplier country could not be inferred from IBAN, VAT number, or OCR country text. Manual review required before booking.");
+      maybeAddLlmFallbackNote(notes, fallback);
+      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
+        supplier_resolution: supplierResolution,
+      });
+    }
+
+    const resolvedClientId = supplierResolution.client?.id;
+    if (!resolvedClientId && options.dryRun) {
+      notes.push("Dry run: supplier would need to be created before invoice creation.");
+    }
+
+    const bookingSuggestion = applyReceiptAutoBookingRule(
+      resolvedClientId
+      ? await suggestBookingInternal(api, context, resolvedClientId, extracted.description ?? extracted.supplier_name ?? "Receipt expense")
+      : buildKeywordSuggestion(
+        context.purchaseArticlesWithVat,
+        context.accounts,
+        `${extracted.description ?? ""} ${extracted.supplier_name ?? ""}`,
+      ),
+      extracted,
+      context,
+    );
+
+    if (bookingSuggestion) {
+      applyReverseChargeAutoDetection(bookingSuggestion, extracted, supplierResolution, context.isVatRegistered, notes);
+      if (bookingSuggestion.reverse_charge_reason === "foreign_supplier_default") {
+        signals.foreign_reverse_charge_default_unverified = true;
+      }
+      signals.booking_from_history = bookingSuggestion.source === "supplier_history";
+      if (
+        bookingSuggestion.suggested_account?.is_fixed_asset &&
+        extracted.total_gross !== undefined &&
+        extracted.total_gross < 1000
+      ) {
+        signals.improbable_fixed_asset = true;
+      }
+      if (
+        detectReverseChargeFromText(extracted.raw_text) &&
+        !bookingSuggestion.item.reversed_vat_id
+      ) {
+        signals.reverse_charge_phrase_unhandled = true;
+      }
+    }
+
+    if (!bookingSuggestion) {
+      const fallback = summarize();
+      notes.push("Could not find a purchase article / account suggestion for this receipt.");
+      maybeAddLlmFallbackNote(notes, fallback);
+      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
+        supplier_resolution: supplierResolution,
+      });
+    }
+
+    if (extracted.invoice_number) {
+      const myInvoice = extracted.invoice_number.trim().toLowerCase();
+      const myRegCode = extracted.supplier_reg_code?.trim();
+      const myVat = normalizeVatForCompare(extracted.supplier_vat_no);
+      const myNameKey = extracted.supplier_name ? normalizeCompanyName(extracted.supplier_name) : "";
+      const earlier = options.previousResults.find(prev => {
+        if (prev.extracted?.invoice_number?.trim().toLowerCase() !== myInvoice) return false;
+        if (resolvedClientId && prev.supplier_resolution?.client?.id === resolvedClientId) return true;
+        if (myRegCode && prev.extracted?.supplier_reg_code?.trim() === myRegCode) return true;
+        if (myVat && normalizeVatForCompare(prev.extracted?.supplier_vat_no) === myVat) return true;
+        if (myNameKey.length >= 4 && prev.extracted?.supplier_name &&
+            normalizeCompanyName(prev.extracted.supplier_name) === myNameKey) return true;
+        return false;
+      });
+      if (earlier) {
+        signals.duplicate_invoice_in_batch = true;
+      }
+    }
+
+    if (resolvedClientId && extracted.invoice_number && extracted.invoice_date && extracted.total_gross !== undefined) {
+      const duplicate = findDuplicateInvoice(
+        context.purchaseInvoices,
+        resolvedClientId,
+        extracted.invoice_number,
+        extracted.invoice_date,
+        extracted.total_gross,
+      );
+      if (duplicate) {
+        return {
+          file,
+          classification,
+          status: "skipped_duplicate",
+          extracted,
+          llm_fallback: summarize(),
+          supplier_resolution: supplierResolution,
+          booking_suggestion: bookingSuggestion,
+          duplicate_match: duplicate,
+          notes: [`Skipped duplicate by ${duplicate.reason}.`],
+        };
+      }
+    }
+
+    const preCreateSummary = summarize();
+    const creationGate = shouldGateCreation(preCreateSummary, options.executionMode);
+    if (creationGate.gate) {
+      const tense = options.dryRun ? "would be skipped" : "skipped";
+      notes.push(
+        `Auto-create ${tense}: confidence is ${preCreateSummary.confidence} (${creationGate.reason}). Manual review required before booking or confirming (#19).`,
+      );
+      return buildNeedsReviewResult(file, classification, extracted, preCreateSummary, notes, {
+        supplier_resolution: supplierResolution,
+        booking_suggestion: bookingSuggestion,
+      });
+    }
+
+    let materializedSupplierResolution = supplierResolution;
+    if (!options.dryRun && !supplierResolution.found && supplierResolution.preview_client) {
+      materializedSupplierResolution = await resolveSupplierInternal(
+        api,
+        context.clients,
+        extracted,
+        true,
+        ownCompanyOptions,
+      );
+      if (materializedSupplierResolution.self_match_blocked) {
+        notes.push(
+          "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
+        );
+      }
+    }
+
+    if (materializedSupplierResolution.self_match_blocked && !materializedSupplierResolution.found) {
+      notes.push("Supplier materialization blocked: self-match detected. Manual review required.");
+      const fallback = summarize();
+      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
+        supplier_resolution: materializedSupplierResolution,
+        booking_suggestion: bookingSuggestion,
+      });
+    }
+
+    const created = await createAndMaybeMatchPurchaseInvoice(
+      api,
+      context,
+      file,
+      extracted,
+      materializedSupplierResolution,
+      bookingSuggestion,
+      options.bankTransactions,
+      options.executionMode,
+      options.legacyExecuteCreate,
+      options.consumedTransactionIds,
+    );
+
+    return {
+      file,
+      classification,
+      status: created.status,
+      extracted,
+      llm_fallback: summarize(),
+      supplier_resolution: materializedSupplierResolution,
+      booking_suggestion: bookingSuggestion,
+      created_invoice: created.created_invoice,
+      bank_match: created.bank_match,
+      notes: created.notes,
+      error: created.error,
+    };
+  } catch (error) {
+    return {
+      file,
+      classification: "unclassifiable",
+      status: "failed",
+      notes,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): boolean {
@@ -1174,409 +1486,16 @@ export function registerReceiptInboxTools(
       for (let index = 0; index < scan.files.length; index++) {
         const file = scan.files[index]!;
         await reportProgress(index, scan.files.length);
-        const notes: string[] = [];
-
-        try {
-          const extracted = await extractReceiptFields(file, ownCompanyVat, ownCompanyRegistryCode);
-          const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
-          const selfVatDetected = detectSelfVatOnly(extracted, ownCompanyVat);
-
-          // Confidence signals accumulated as we walk the per-file pipeline
-          // (#20). The summary is recomputed at each push site rather than
-          // once up-front so late-stage findings (supplier resolution
-          // outcome, booking source, in-batch duplicates, reverse-charge
-          // phrasing without a flag) feed into the confidence verdict.
-          const signals: ExtractionConfidenceSignals = {};
-          if (selfVatDetected) signals.self_vat_detected = true;
-          const selfRegCodeDetected = detectSelfRegCodeOnly(extracted, ownCompanyRegistryCode);
-          if (selfRegCodeDetected) signals.self_reg_code_detected = true;
-          const inferredSupplierCountry = inferSupplierCountry(extracted);
-          const summarize = () => summarizeInvoiceExtraction(extracted, signals, "extracted.raw_text", inferredSupplierCountry);
-          const llmFallback = summarize();
-
-          if (file.file_type !== "pdf") {
-            notes.push("Image receipt OCR-parsed with LiteParse.");
-          }
-          if (selfVatDetected) {
-            notes.push(
-              "Document only printed the buyer's VAT (matches active company). Supplier VAT cleared — verify supplier manually before booking (#14).",
-            );
-          }
-          if (selfRegCodeDetected) {
-            notes.push(
-              "Document only printed the buyer's registry code (matches active company). Supplier reg code cleared — verify supplier manually before booking (#22).",
-            );
-          }
-
-          if (classification !== "purchase_invoice") {
-            const referencedInvoice =
-              classification === "payment_receipt"
-                ? buildReferencedInvoiceForPaymentReceipt(extracted.invoice_number, context.purchaseInvoices)
-                : undefined;
-            notes.push(
-              classification === "owner_paid_expense_reimbursement"
-                ? "PDF looks like an owner-paid expense receipt. Review manually before booking."
-                : classification === "payment_receipt"
-                  ? `Document is a payment receipt${
-                      referencedInvoice
-                        ? ` for invoice ${referencedInvoice.invoice_number}`
-                        : ""
-                    }, not a separate purchase invoice. Booking it would duplicate the underlying invoice — attach to the existing invoice document instead (#15).`
-                  : "Document could not be classified as a supplier purchase invoice.",
-            );
-            maybeAddLlmFallbackNote(notes, llmFallback);
-            results.push({
-              file,
-              classification,
-              status: "needs_review",
-              extracted,
-              llm_fallback: llmFallback,
-              ...(referencedInvoice ? { referenced_invoice: referencedInvoice } : {}),
-              review_guidance: buildReceiptReviewGuidance({
-                classification,
-                notes,
-                extracted,
-                llmFallback,
-              }),
-              notes,
-            });
-            continue;
-          }
-
-          if (!hasAutoBookableReceiptFields(extracted)) {
-            notes.push("Missing supplier name, confident invoice number, invoice date, or gross total required for auto-booking.");
-            maybeAddLlmFallbackNote(notes, llmFallback);
-            results.push({
-              file,
-              classification,
-              status: "needs_review",
-              extracted,
-              llm_fallback: llmFallback,
-              review_guidance: buildReceiptReviewGuidance({
-                classification,
-                notes,
-                extracted,
-                llmFallback,
-              }),
-              notes,
-            });
-            continue;
-          }
-
-          const supplierResolution = await resolveSupplierInternal(
-            api,
-            context.clients,
-            extracted,
-            false,
-            ownCompanyVat || ownCompanyRegistryCode
-              ? {
-                  ...(ownCompanyVat ? { ownCompanyVat } : {}),
-                  ...(ownCompanyRegistryCode ? { ownCompanyRegistryCode } : {}),
-                }
-              : undefined,
-          );
-          if (supplierResolution.self_match_blocked) {
-            notes.push(
-              "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
-            );
-          }
-          if (!supplierResolution.found) signals.supplier_resolution_failed = true;
-          if (!supplierResolution.client && !supplierResolution.preview_client) {
-            const fallback = summarize();
-            notes.push("Supplier could not be resolved or prepared for creation.");
-            maybeAddLlmFallbackNote(notes, fallback);
-            results.push({
-              file,
-              classification,
-              status: "needs_review",
-              extracted,
-              llm_fallback: fallback,
-              supplier_resolution: supplierResolution,
-              review_guidance: buildReceiptReviewGuidance({
-                classification,
-                notes,
-                extracted,
-                llmFallback: fallback,
-              }),
-              notes,
-            });
-            continue;
-          }
-
-          if (supplierCountryNeedsReview(supplierResolution)) {
-            const fallback = summarize();
-            notes.push("Supplier country could not be inferred from IBAN, VAT number, or OCR country text. Manual review required before booking.");
-            maybeAddLlmFallbackNote(notes, fallback);
-            results.push({
-              file,
-              classification,
-              status: "needs_review",
-              extracted,
-              llm_fallback: fallback,
-              supplier_resolution: supplierResolution,
-              review_guidance: buildReceiptReviewGuidance({
-                classification,
-                notes,
-                extracted,
-                llmFallback: fallback,
-              }),
-              notes,
-            });
-            continue;
-          }
-
-          const resolvedClientId = supplierResolution.client?.id;
-          if (!resolvedClientId && dryRun) {
-            notes.push("Dry run: supplier would need to be created before invoice creation.");
-          }
-
-          const bookingSuggestion = applyReceiptAutoBookingRule(
-            resolvedClientId
-            ? await suggestBookingInternal(api, context, resolvedClientId, extracted.description ?? extracted.supplier_name ?? "Receipt expense")
-            : buildKeywordSuggestion(
-              context.purchaseArticlesWithVat,
-              context.accounts,
-              `${extracted.description ?? ""} ${extracted.supplier_name ?? ""}`,
-            ),
-            extracted,
-            context,
-          );
-
-          if (bookingSuggestion) {
-            applyReverseChargeAutoDetection(bookingSuggestion, extracted, supplierResolution, context.isVatRegistered, notes);
-            // Foreign-supplier reverse-charge default fits SaaS/services
-            // but mis-codes goods imports, so it must NOT silently
-            // auto-confirm (#18). Flag the row so the contract gate (#19)
-            // routes it to needs_review rather than create+confirm.
-            if (bookingSuggestion.reverse_charge_reason === "foreign_supplier_default") {
-              signals.foreign_reverse_charge_default_unverified = true;
-            }
-            signals.booking_from_history = bookingSuggestion.source === "supplier_history";
-            // Improbable fixed-asset guard (#20): a small invoice routed
-            // to a fixed-asset account is almost certainly miscoded. The
-            // 1000 EUR threshold is a defensive heuristic — typical SaaS,
-            // cloud, professional-services invoices fall well below it.
-            if (
-              bookingSuggestion.suggested_account?.is_fixed_asset &&
-              extracted.total_gross !== undefined &&
-              extracted.total_gross < 1000
-            ) {
-              signals.improbable_fixed_asset = true;
-            }
-            // Reverse-charge phrase present but the booking suggestion did
-            // not flag it: should be rare since applyReverseChargeAutoDetection
-            // sets it automatically. The signal handles edge cases where the
-            // phrase regex hits but downstream logic refused to apply.
-            if (
-              detectReverseChargeFromText(extracted.raw_text) &&
-              !bookingSuggestion.item.reversed_vat_id
-            ) {
-              signals.reverse_charge_phrase_unhandled = true;
-            }
-          }
-
-          if (!bookingSuggestion) {
-            const fallback = summarize();
-            notes.push("Could not find a purchase article / account suggestion for this receipt.");
-            maybeAddLlmFallbackNote(notes, fallback);
-            results.push({
-              file,
-              classification,
-              status: "needs_review",
-              extracted,
-              llm_fallback: fallback,
-              supplier_resolution: supplierResolution,
-              review_guidance: buildReceiptReviewGuidance({
-                classification,
-                notes,
-                extracted,
-                llmFallback: fallback,
-              }),
-              notes,
-            });
-            continue;
-          }
-
-          // In-batch duplicate detection (#19): two files in the same batch
-          // bearing the same supplier-side invoice number AND a matching
-          // supplier identity are almost always the same invoice scanned
-          // twice. The first wins; the second is flagged.
-          //
-          // Also key by reg_code / VAT / normalized supplier name so dry
-          // runs that haven't yet created a client (only a preview_client)
-          // still detect the dupe. Without this, scanning an unknown
-          // supplier twice would silently under-report the risk in
-          // dry-run output.
-          if (extracted.invoice_number) {
-            const myInvoice = extracted.invoice_number.trim().toLowerCase();
-            const myRegCode = extracted.supplier_reg_code?.trim();
-            const myVat = normalizeVatForCompare(extracted.supplier_vat_no);
-            const myNameKey = extracted.supplier_name ? normalizeCompanyName(extracted.supplier_name) : "";
-            const earlier = results.find(prev => {
-              if (prev.extracted?.invoice_number?.trim().toLowerCase() !== myInvoice) return false;
-              if (resolvedClientId && prev.supplier_resolution?.client?.id === resolvedClientId) return true;
-              if (myRegCode && prev.extracted?.supplier_reg_code?.trim() === myRegCode) return true;
-              if (myVat && normalizeVatForCompare(prev.extracted?.supplier_vat_no) === myVat) return true;
-              if (myNameKey.length >= 4 && prev.extracted?.supplier_name &&
-                  normalizeCompanyName(prev.extracted.supplier_name) === myNameKey) return true;
-              return false;
-            });
-            if (earlier) {
-              signals.duplicate_invoice_in_batch = true;
-            }
-          }
-
-          if (resolvedClientId && extracted.invoice_number && extracted.invoice_date && extracted.total_gross !== undefined) {
-            const duplicate = findDuplicateInvoice(
-              context.purchaseInvoices,
-              resolvedClientId,
-              extracted.invoice_number,
-              extracted.invoice_date,
-              extracted.total_gross,
-            );
-            if (duplicate) {
-              results.push({
-                file,
-                classification,
-                status: "skipped_duplicate",
-                extracted,
-                llm_fallback: summarize(),
-                supplier_resolution: supplierResolution,
-                booking_suggestion: bookingSuggestion,
-                duplicate_match: duplicate,
-                notes: [`Skipped duplicate by ${duplicate.reason}.`],
-              });
-              continue;
-            }
-          }
-
-          // Contract gate (#19): the explicit create/create_and_confirm
-          // paths still refuse to mutate any row whose final confidence is
-          // "low" — silent miscoding is the worse failure than holding the
-          // row for review.
-          //
-          // We additionally gate `foreign_reverse_charge_default_unverified`
-          // at medium: that signal means we auto-applied reverse-charge
-          // because the supplier is foreign with no explicit phrase or
-          // history backing. The default is right for SaaS / services and
-          // wrong for goods imports — the fact that the rest of the
-          // extraction succeeded does not let us judge which it is. A
-          // blanket "block all medium" is too aggressive here because
-          // `booking_not_from_history` makes many legitimate keyword
-          // bookings medium too; only this specific signal is gated.
-          //
-          // Dry-run mirrors the same gate so `dry_run_preview` and the
-          // approval card it feeds reflect what `execution_mode="create"`
-          // would actually do — otherwise the preview promises a booking
-          // that the executor will refuse and route to review.
-          const preCreateSummary = summarize();
-          const foreignDefaultUnverified = preCreateSummary.confidence_signals.includes(
-            "foreign_reverse_charge_default_unverified",
-          );
-          const confirmModeNeedsHighConfidence =
-            executionMode === "create_and_confirm" && preCreateSummary.confidence !== "high";
-          if (preCreateSummary.confidence === "low" || foreignDefaultUnverified || confirmModeNeedsHighConfidence) {
-            const reasons = preCreateSummary.confidence_signals.join(", ") || "low confidence";
-            const tense = dryRun ? "would be skipped" : "skipped";
-            notes.push(
-              `Auto-create ${tense}: confidence is ${preCreateSummary.confidence} (${reasons}). Manual review required before booking or confirming (#19).`,
-            );
-            results.push({
-              file,
-              classification,
-              status: "needs_review",
-              extracted,
-              llm_fallback: preCreateSummary,
-              supplier_resolution: supplierResolution,
-              booking_suggestion: bookingSuggestion,
-              review_guidance: buildReceiptReviewGuidance({
-                classification,
-                notes,
-                extracted,
-                llmFallback: preCreateSummary,
-              }),
-              notes,
-            });
-            continue;
-          }
-
-          let materializedSupplierResolution = supplierResolution;
-          if (!dryRun && !supplierResolution.found && supplierResolution.preview_client) {
-            materializedSupplierResolution = await resolveSupplierInternal(
-              api,
-              context.clients,
-              extracted,
-              true,
-              ownCompanyVat || ownCompanyRegistryCode
-                ? {
-                    ...(ownCompanyVat ? { ownCompanyVat } : {}),
-                    ...(ownCompanyRegistryCode ? { ownCompanyRegistryCode } : {}),
-                  }
-                : undefined,
-            );
-            if (materializedSupplierResolution.self_match_blocked) {
-              notes.push(
-                "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
-              );
-            }
-          }
-
-          if (materializedSupplierResolution.self_match_blocked && !materializedSupplierResolution.found) {
-            notes.push("Supplier materialization blocked: self-match detected. Manual review required.");
-            results.push({
-              file,
-              classification,
-              status: "needs_review",
-              extracted,
-              llm_fallback: summarize(),
-              supplier_resolution: materializedSupplierResolution,
-              booking_suggestion: bookingSuggestion,
-              review_guidance: buildReceiptReviewGuidance({
-                classification,
-                notes,
-                extracted,
-                llmFallback: summarize(),
-              }),
-              notes,
-            });
-            continue;
-          }
-
-          const created = await createAndMaybeMatchPurchaseInvoice(
-            api,
-            context,
-            file,
-            extracted,
-            materializedSupplierResolution,
-            bookingSuggestion,
-            bankTransactions,
-            executionMode,
-            legacyExecuteCreate,
-            consumedTransactionIds,
-          );
-
-          results.push({
-            file,
-            classification,
-            status: created.status,
-            extracted,
-            llm_fallback: summarize(),
-            supplier_resolution: materializedSupplierResolution,
-            booking_suggestion: bookingSuggestion,
-            created_invoice: created.created_invoice,
-            bank_match: created.bank_match,
-            notes: created.notes,
-            error: created.error,
-          });
-        } catch (error) {
-          results.push({
-            file,
-            classification: "unclassifiable",
-            status: "failed",
-            notes,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+        results.push(await processSingleReceipt(api, context, file, {
+          ownCompanyVat,
+          ownCompanyRegistryCode,
+          bankTransactions,
+          executionMode,
+          legacyExecuteCreate,
+          dryRun,
+          consumedTransactionIds,
+          previousResults: results,
+        }));
       }
 
       const summary = buildReceiptBatchSummary({
@@ -1948,7 +1867,7 @@ export function registerReceiptInboxTools(
                 vat_rate_dropdown: resolved.suggestion.vat_rate_dropdown,
                 reversed_vat_id: resolved.suggestion.reversed_vat_id,
               } as PurchaseInvoiceItem,
-            }) ?? getAutoBookedVatConfig(group.category, supplierMetadata?.cl_code_country);
+            }) ?? getAutoBookedVatConfig();
             const netAmount = deriveAutoBookedNetAmount(grossAmount, vatConfig);
             const purchaseItem = applyPurchaseVatDefaults(
               purchaseArticlesWithVat,
@@ -2004,13 +1923,12 @@ export function registerReceiptInboxTools(
 
             if (invoice.id) {
               const invalidateAutoCreatedInvoice = async (reason: string) => {
-                try {
-                  await api.purchaseInvoices.invalidate(invoice.id!);
-                  notes.push(`Invalidated auto-created purchase invoice ${invoice.id} because ${reason}.`);
-                } catch (invalidateError) {
-                  const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
-                  notes.push(`Auto-created purchase invoice ${invoice.id} could not be kept because ${reason}, and invalidation also failed: ${invalidateMessage}.`);
-                }
+                await invalidateAndReport(api, invoice, notes, {
+                  reason,
+                  onInvalidated: invoiceId => `Invalidated auto-created purchase invoice ${invoiceId} because ${reason}.`,
+                  onInvalidationFailed: (invoiceId, invalidateMessage) =>
+                    `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${invalidateMessage}.`,
+                });
               };
 
               const freshTransaction = await api.transactions.get(transaction.id!);

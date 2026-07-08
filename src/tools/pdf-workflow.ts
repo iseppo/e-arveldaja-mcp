@@ -17,7 +17,7 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { extractIdentifiers, isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
-import { extractReceiptFieldsFromText, inferSupplierCountry } from "./receipt-extraction.js";
+import { extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { detectVatDeductionNotes, standardVatRateOn } from "../estonian-tax-rules.js";
 
@@ -268,13 +268,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       }
 
       // Validate dates — check format AND that the date actually exists on the calendar
-      const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-      function isValidCalendarDate(s: string): boolean {
-        if (!dateRe.test(s)) return false;
+      const isValidCalendarDate = (s: string): boolean => {
         const [y, m, d] = s.split("-").map(Number);
-        const date = new Date(Date.UTC(y!, m! - 1, d!));
-        return date.getUTCFullYear() === y && date.getUTCMonth() === m! - 1 && date.getUTCDate() === d;
-      }
+        return toIsoDate(y!, m!, d!) === s;
+      };
       // Only a strictly valid invoice date is safe to compare/echo downstream.
       const validInvoiceDate = invoice_date && isValidCalendarDate(invoice_date) ? invoice_date : undefined;
       if (invoice_date) {

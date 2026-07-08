@@ -3,6 +3,7 @@ import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
 import { normalizeCompanyName } from "../company-name.js";
+import { normalizeVatValue } from "../document-identifiers.js";
 import {
   type ExtractedReceiptFields,
   type TransactionClassificationCategory,
@@ -55,8 +56,7 @@ export interface SupplierResolutionOptions {
 }
 
 function normalizeVatForCompare(value?: string | null): string | undefined {
-  const normalized = value?.replace(/\s+/g, "").toUpperCase();
-  return normalized || undefined;
+  return normalizeVatValue(value);
 }
 
 // ---------------------------------------------------------------------------

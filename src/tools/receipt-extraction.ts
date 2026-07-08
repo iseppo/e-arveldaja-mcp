@@ -1,7 +1,15 @@
 import { basename, extname } from "path";
 import { normalizeCompanyName as normalizeCompanyNameShared } from "../company-name.js";
 import { roundMoney } from "../money.js";
-import { type LayoutTextItem, type RejectedCandidate, extractIban, extractIdentifiers, extractReferenceNumber, extractRegistryCode, extractVatNumber } from "../document-identifiers.js";
+import {
+  type LayoutTextItem,
+  type RejectedCandidate,
+  extractIban,
+  extractIdentifiers,
+  extractReferenceNumber,
+  extractRegistryCode,
+  extractVatNumber,
+} from "../document-identifiers.js";
 import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { normalizeVatRate } from "./purchase-vat-defaults.js";
@@ -250,6 +258,50 @@ export interface BookingSuggestion {
   reverse_charge_reason?: "phrase_match" | "foreign_supplier_default" | "supplier_history" | "none";
 }
 
+export const CATEGORY_KEYWORD_MAP: Array<{
+  category: TransactionClassificationCategory;
+  pattern: RegExp;
+  articleKeywords: string[];
+  accountKeywords: string[];
+}> = [
+  {
+    category: "card_purchases",
+    pattern: /(bolt|uber|taxi|parking|transport)/i,
+    articleKeywords: ["transport", "sõidu", "auto"],
+    accountKeywords: ["transport", "sõidu", "auto"],
+  },
+  {
+    category: "card_purchases",
+    pattern: /(wolt|restaurant|cafe|toit|food)/i,
+    articleKeywords: ["toit", "food", "representation", "esindus"],
+    accountKeywords: ["representation", "esindus", "food", "toit"],
+  },
+  {
+    category: "saas_subscriptions",
+    pattern: /(software|subscription|hosting|cloud|openai|chatgpt|anthropic|claude|cursor|google|zoom|slack|github|microsoft|internet|sideteenus|api\b|credits)/i,
+    articleKeywords: ["tarkvara", "software", "internet", "side", "subscription", "sideteenus", "internetikulu"],
+    accountKeywords: ["tarkvara", "software", "subscription", "internet", "it", "sideteenus"],
+  },
+  {
+    category: "bank_fees",
+    pattern: /(bank|pank|fee|teenustasu|commission|service charge|haldustasu)/i,
+    articleKeywords: ["bank", "teenus", "fee"],
+    accountKeywords: ["bank", "teenus", "fee"],
+  },
+  {
+    category: "tax_payments",
+    pattern: /(tax|emta|maks)/i,
+    articleKeywords: ["maks", "tax"],
+    accountKeywords: ["maks", "tax"],
+  },
+  {
+    category: "unknown",
+    pattern: /(office|kontor|stationery|admin)/i,
+    articleKeywords: ["kontor", "office", "admin"],
+    accountKeywords: ["kontor", "office", "admin"],
+  },
+];
+
 export interface InvoiceSummaryForMatching {
   id?: number;
   clients_id?: number;
@@ -446,7 +498,7 @@ function normalizeYearToken(rawYear: string): number {
   return shortYear >= 70 ? 1900 + shortYear : 2000 + shortYear;
 }
 
-function toIsoDate(year: number, month: number, day: number): string | undefined {
+export function toIsoDate(year: number, month: number, day: number): string | undefined {
   if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
     return undefined;
   }
@@ -660,6 +712,90 @@ export function normalizeDate(raw: string): string | undefined {
   return undefined;
 }
 
+interface ClassifiedAmountLine {
+  line: string;
+  inspectionLine: string;
+  blockedAsReference: boolean;
+  blockedAsReferenceInInspection: boolean;
+  amounts: number[];
+  pickedGross?: number;
+  pickedVat?: number;
+  hasCurrencyKeyword: boolean;
+  hasTotalLikeLabel: boolean;
+  hasNetLikeLabel: boolean;
+  hasVatAmountLabel: boolean;
+  score: number;
+}
+
+function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
+  const line = lines[index]!;
+  const amounts = extractAmountsFromLine(line);
+  const inspectionLine = buildAmountInspectionLine(lines, index);
+  const inspectionLower = inspectionLine.toLowerCase();
+  const lineLower = line.toLowerCase();
+  const blockedAsReference = RECEIPT_REFERENCE_LINE_RE.test(lineLower);
+  const blockedAsReferenceInInspection = RECEIPT_REFERENCE_LINE_RE.test(inspectionLine);
+  const hasCurrencyKeyword = RECEIPT_CURRENCY_PATTERNS.some(currency => currency.pattern.test(line));
+  const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower);
+  const hasNetLikeLabel = RECEIPT_NET_LABEL_RE.test(lineLower);
+  const hasVatAmountLabel = isVatAmountLine(inspectionLine);
+  const deDatedAmounts = amounts.filter(amount => !isLikelyYearAmount(amount, line));
+  const filteredAmounts = (deDatedAmounts.length > 0 ? deDatedAmounts : amounts).filter(amount =>
+    !(Number.isInteger(amount) && amount >= 1000 && !hasCurrencyKeyword && !hasTotalLikeLabel),
+  );
+
+  if (filteredAmounts.length === 0) {
+    return {
+      line,
+      inspectionLine,
+      blockedAsReference,
+      blockedAsReferenceInInspection,
+      amounts: [],
+      hasCurrencyKeyword,
+      hasTotalLikeLabel,
+      hasNetLikeLabel,
+      hasVatAmountLabel,
+      score: 0,
+    };
+  }
+
+  const pickedGross = filteredAmounts.length > 1 && (RECEIPT_VAT_LABEL_RE.test(inspectionLower) || /\b(?:sisaldab|including|incl\.?)\b/i.test(inspectionLine))
+    ? Math.max(...filteredAmounts)
+    : filteredAmounts[filteredAmounts.length - 1];
+  const vatCandidates = filteredAmounts.filter(amount => ![...inspectionLine.matchAll(/(\d{1,2}(?:[.,]\d+)?)\s*%/g)]
+    .map(match => parseAmount(match[1] ?? ""))
+    .some(rate => rate !== undefined && Math.abs(rate - amount) < 0.001));
+  // Guard against a narrow VAT misread: when the %-rate filter above discards every candidate
+  // except one, and that survivor equals the largest amount on the line, the "VAT" is almost
+  // certainly the gross total (e.g. "Kokku 100 EUR KM 20%" → 20 excluded as rate, leaving 100).
+  // Keep lastVatCandidate in that case so totalVat falls through to the later gross − net
+  // reconciliation. Lines without a %-rate exclusion (e.g. "Tax 1 €3.96 €3.96") are unaffected.
+  const lastVatCandidate = vatCandidates[vatCandidates.length - 1];
+  const filteredByPercentRate = vatCandidates.length < filteredAmounts.length;
+  const pickedVat = lastVatCandidate !== undefined &&
+    (!filteredByPercentRate || filteredAmounts.length <= 1 || lastVatCandidate < Math.max(...filteredAmounts))
+    ? lastVatCandidate
+    : undefined;
+  const score = !blockedAsReference && hasTotalLikeLabel
+    ? scoreExplicitGrossCandidate(inspectionLine, hasCurrencyKeyword, hasTotalLikeLabel)
+    : 0;
+
+  return {
+    line,
+    inspectionLine,
+    blockedAsReference,
+    blockedAsReferenceInInspection,
+    amounts: filteredAmounts,
+    pickedGross,
+    pickedVat,
+    hasCurrencyKeyword,
+    hasTotalLikeLabel,
+    hasNetLikeLabel,
+    hasVatAmountLabel,
+    score,
+  };
+}
+
 export function extractAmounts(text: string): { total_net?: number; total_vat?: number; total_gross?: number; vat_explicit?: boolean } {
   const lines = text
     .split(/\r?\n/)
@@ -674,95 +810,61 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
   const componentAmounts: number[] = [];
   let bestExplicitGrossCandidate: { amount: number; score: number } | undefined;
-  const hasExplicitVatLine = lines.some((_line, index) =>
-    isVatAmountLine(buildAmountInspectionLine(lines, index)) &&
-    !RECEIPT_REFERENCE_LINE_RE.test(buildAmountInspectionLine(lines, index)) &&
-    !RECEIPT_NET_LABEL_RE.test(buildAmountInspectionLine(lines, index)),
+  const classifiedLines = lines.map((_line, index) => classifyLine(lines, index));
+  const hasExplicitVatLine = classifiedLines.some(classified =>
+    classified.hasVatAmountLabel &&
+    !classified.blockedAsReferenceInInspection &&
+    !RECEIPT_NET_LABEL_RE.test(classified.inspectionLine),
   );
 
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!;
-    const amounts = extractAmountsFromLine(line);
-    if (amounts.length === 0) continue;
-
-    const inspectionLine = buildAmountInspectionLine(lines, index);
-    const inspectionLower = inspectionLine.toLowerCase();
-    const lineLower = line.toLowerCase();
-    const blockedAsReference = RECEIPT_REFERENCE_LINE_RE.test(lineLower);
-    const hasCurrencyKeyword = RECEIPT_CURRENCY_PATTERNS.some(currency => currency.pattern.test(line));
-    const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower);
-    const hasNetLikeLabel = RECEIPT_NET_LABEL_RE.test(lineLower);
-    const hasVatAmountLabel = isVatAmountLine(inspectionLine);
-    const deDatedAmounts = amounts.filter(amount => !isLikelyYearAmount(amount, line));
-    const filteredAmounts = (deDatedAmounts.length > 0 ? deDatedAmounts : amounts).filter(amount =>
-      !(Number.isInteger(amount) && amount >= 1000 && !hasCurrencyKeyword && !hasTotalLikeLabel),
-    );
-    if (filteredAmounts.length === 0) {
+  for (const classified of classifiedLines) {
+    if (classified.amounts.length === 0 || classified.pickedGross === undefined) {
       continue;
     }
 
-    const pickedGross = filteredAmounts.length > 1 && (RECEIPT_VAT_LABEL_RE.test(inspectionLower) || /\b(?:sisaldab|including|incl\.?)\b/i.test(inspectionLine))
-      ? Math.max(...filteredAmounts)
-      : filteredAmounts[filteredAmounts.length - 1];
-    const vatCandidates = filteredAmounts.filter(amount => ![...inspectionLine.matchAll(/(\d{1,2}(?:[.,]\d+)?)\s*%/g)]
-      .map(match => parseAmount(match[1] ?? ""))
-      .some(rate => rate !== undefined && Math.abs(rate - amount) < 0.001));
-    // Guard against a narrow VAT misread: when the %-rate filter above discards every candidate
-    // except one, and that survivor equals the largest amount on the line, the "VAT" is almost
-    // certainly the gross total (e.g. "Kokku 100 EUR KM 20%" → 20 excluded as rate, leaving 100).
-    // Keep lastVatCandidate in that case so totalVat falls through to the later gross − net
-    // reconciliation. Lines without a %-rate exclusion (e.g. "Tax 1 €3.96 €3.96") are unaffected.
-    const lastVatCandidate = vatCandidates[vatCandidates.length - 1];
-    const filteredByPercentRate = vatCandidates.length < filteredAmounts.length;
-    const pickedVat = lastVatCandidate !== undefined &&
-      (!filteredByPercentRate || filteredAmounts.length <= 1 || lastVatCandidate < Math.max(...filteredAmounts))
-      ? lastVatCandidate
-      : undefined;
-
-    fallbackCandidates.push(...filteredAmounts.map(amount => ({
+    fallbackCandidates.push(...classified.amounts.map(amount => ({
       amount,
-      blocked_as_reference: blockedAsReference,
-      has_currency_keyword: hasCurrencyKeyword,
-      has_total_like_label: hasTotalLikeLabel,
-      likely_year_amount: isLikelyYearAmount(amount, line),
+      blocked_as_reference: classified.blockedAsReference,
+      has_currency_keyword: classified.hasCurrencyKeyword,
+      has_total_like_label: classified.hasTotalLikeLabel,
+      likely_year_amount: isLikelyYearAmount(amount, classified.line),
     })));
 
     if (
-      !blockedAsReference &&
-      hasTotalLikeLabel
+      !classified.blockedAsReference &&
+      classified.hasTotalLikeLabel
     ) {
-      const score = scoreExplicitGrossCandidate(inspectionLine, hasCurrencyKeyword, hasTotalLikeLabel);
-      if (!bestExplicitGrossCandidate || score > bestExplicitGrossCandidate.score || (score === bestExplicitGrossCandidate.score && pickedGross > bestExplicitGrossCandidate.amount)) {
-        bestExplicitGrossCandidate = { amount: pickedGross, score };
+      if (!bestExplicitGrossCandidate || classified.score > bestExplicitGrossCandidate.score || (classified.score === bestExplicitGrossCandidate.score && classified.pickedGross > bestExplicitGrossCandidate.amount)) {
+        bestExplicitGrossCandidate = { amount: classified.pickedGross, score: classified.score };
       }
     }
 
     if (
       totalVat === undefined &&
-      pickedVat !== undefined &&
-      !blockedAsReference &&
-      hasVatAmountLabel &&
-      !hasNetLikeLabel
+      classified.pickedVat !== undefined &&
+      !classified.blockedAsReference &&
+      classified.hasVatAmountLabel &&
+      !classified.hasNetLikeLabel
     ) {
-      totalVat = pickedVat;
+      totalVat = classified.pickedVat;
       vatFromExplicitLine = true;
     }
 
     if (
       totalNet === undefined &&
-      !blockedAsReference &&
-      hasNetLikeLabel
+      !classified.blockedAsReference &&
+      classified.hasNetLikeLabel
     ) {
-      totalNet = Math.max(...filteredAmounts);
+      totalNet = Math.max(...classified.amounts);
       netFromExplicitLine = true;
     }
 
     if (
-      !blockedAsReference &&
-      !hasTotalLikeLabel &&
-      RECEIPT_COMPONENT_LABEL_RE.test(lineLower)
+      !classified.blockedAsReference &&
+      !classified.hasTotalLikeLabel &&
+      RECEIPT_COMPONENT_LABEL_RE.test(classified.line.toLowerCase())
     ) {
-      componentAmounts.push(pickedGross);
+      componentAmounts.push(classified.pickedGross);
     }
   }
 
@@ -1002,21 +1104,13 @@ export function looksLikePersonCounterparty(normalizedCounterparty: string, rawC
 }
 
 export function getAutoBookedVatConfig(
-  category: TransactionClassificationCategory,
-  supplierCountry?: string | null,
 ): Pick<PurchaseInvoiceItem, "vat_rate_dropdown" | "reversed_vat_id"> {
-  if (category === "bank_fees") {
-    return { vat_rate_dropdown: "-" };
-  }
-  void supplierCountry;
   return { vat_rate_dropdown: "-" };
 }
 
 export function getAutoBookedVatRateDropdown(
-  category: TransactionClassificationCategory,
-  supplierCountry?: string | null,
 ): string {
-  return getAutoBookedVatConfig(category, supplierCountry).vat_rate_dropdown ?? "-";
+  return getAutoBookedVatConfig().vat_rate_dropdown ?? "-";
 }
 
 export function getBookingSuggestionVatConfig(
@@ -1484,28 +1578,10 @@ export function buildKeywordSuggestion(
   let articleKeywords = ["muu", "other", "general"];
   let accountKeywords = ["muu", "general", "kulud"];
 
-  if (/(bolt|uber|taxi|parking|transport)/i.test(normalizedHints)) {
-    articleKeywords = ["transport", "sõidu", "auto"];
-    accountKeywords = ["transport", "sõidu", "auto"];
-  } else if (/(wolt|restaurant|cafe|toit|food)/i.test(normalizedHints)) {
-    articleKeywords = ["toit", "food", "representation", "esindus"];
-    accountKeywords = ["representation", "esindus", "food", "toit"];
-  } else if (/(software|subscription|hosting|cloud|openai|chatgpt|anthropic|claude|cursor|google|zoom|slack|github|microsoft|api\b|credits)/i.test(normalizedHints)) {
-    // Article-level keywords are tried in order; longer/specific keys come
-    // first so the boundary matcher (#17) doesn't accidentally pick a generic
-    // entry. Bare "it" is intentionally NOT here — it is too short and was
-    // the source of the original Ehitised miscoding bug.
-    articleKeywords = ["tarkvara", "software", "internet", "side", "subscription", "sideteenus", "internetikulu"];
-    accountKeywords = ["tarkvara", "software", "internet", "sideteenus"];
-  } else if (/(bank|pank|fee|teenustasu|commission)/i.test(normalizedHints)) {
-    articleKeywords = ["bank", "teenus", "fee"];
-    accountKeywords = ["bank", "teenus", "fee"];
-  } else if (/(tax|emta|maks)/i.test(normalizedHints)) {
-    articleKeywords = ["maks", "tax"];
-    accountKeywords = ["maks", "tax"];
-  } else if (/(office|kontor|stationery|admin)/i.test(normalizedHints)) {
-    articleKeywords = ["kontor", "office", "admin"];
-    accountKeywords = ["kontor", "office", "admin"];
+  const keywordMatch = CATEGORY_KEYWORD_MAP.find(entry => entry.pattern.test(normalizedHints));
+  if (keywordMatch) {
+    articleKeywords = keywordMatch.articleKeywords;
+    accountKeywords = keywordMatch.accountKeywords;
   }
 
   const fallbackArticle = findPurchaseArticleByKeywords(purchaseArticles, ["muu", "other", "general"]);
