@@ -249,6 +249,7 @@ export interface ExtractedReceiptFields {
   vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
   rejected_candidates?: RejectedCandidate[];
   field_provenance?: FieldProvenance[];
+  extraction_notes?: string[];
 }
 
 export interface TransactionGroupClassificationInput {
@@ -391,6 +392,7 @@ interface ExtractedAmounts {
 
 interface ExtractedAmountsWithMetadata extends ExtractedAmounts {
   provenance: AmountProvenanceMetadata[];
+  extraction_notes?: string[];
 }
 
 interface LayoutRow {
@@ -910,6 +912,9 @@ function layoutCenterX(item: LayoutTextItem): number {
 
 function groupLayoutRows(textItems: readonly LayoutTextItem[]): LayoutRow[] {
   const rows: LayoutRow[] = [];
+  const rowsByPageBucket = new Map<number, Map<number, LayoutRow[]>>();
+  const bucketByRow = new Map<LayoutRow, number>();
+  const maxRowHeightByPage = new Map<number, number>();
   const sortedItems = [...textItems]
     .filter(item => clampTextLine(item.text).length > 0)
     .sort((a, b) =>
@@ -920,8 +925,13 @@ function groupLayoutRows(textItems: readonly LayoutTextItem[]): LayoutRow[] {
 
   for (const item of sortedItems) {
     const pageNum = layoutItemPageNum(item);
-    const row = rows
-      .filter(candidate => candidate.pageNum === pageNum)
+    const pageBuckets = rowsByPageBucket.get(pageNum) ?? new Map<number, LayoutRow[]>();
+    const itemBucket = Math.round(item.y / 10);
+    const maxPageHeight = Math.max(maxRowHeightByPage.get(pageNum) ?? 0, item.height);
+    const bucketRange = Math.max(1, Math.ceil(Math.max(4, maxPageHeight * 0.7) / 10) + 1);
+    const candidateRows = Array.from({ length: bucketRange * 2 + 1 }, (_entry, index) => itemBucket - bucketRange + index)
+      .flatMap(bucket => pageBuckets.get(bucket) ?? []);
+    const row = candidateRows
       .find(candidate => Math.abs(candidate.y - item.y) <= Math.max(4, Math.max(candidate.maxHeight, item.height) * 0.7));
 
     if (row) {
@@ -929,8 +939,22 @@ function groupLayoutRows(textItems: readonly LayoutTextItem[]): LayoutRow[] {
       row.items.sort((a, b) => a.x - b.x);
       row.y = row.items.reduce((sum, rowItem) => sum + rowItem.y, 0) / row.items.length;
       row.maxHeight = Math.max(row.maxHeight, item.height);
+      const previousBucket = bucketByRow.get(row);
+      const nextBucket = Math.round(row.y / 10);
+      if (previousBucket !== undefined && previousBucket !== nextBucket) {
+        const previousRows = pageBuckets.get(previousBucket);
+        if (previousRows) pageBuckets.set(previousBucket, previousRows.filter(candidate => candidate !== row));
+        pageBuckets.set(nextBucket, [...(pageBuckets.get(nextBucket) ?? []), row]);
+        bucketByRow.set(row, nextBucket);
+      }
+      maxRowHeightByPage.set(pageNum, Math.max(maxRowHeightByPage.get(pageNum) ?? 0, row.maxHeight));
     } else {
-      rows.push({ pageNum, y: item.y, maxHeight: item.height, items: [item] });
+      const newRow: LayoutRow = { pageNum, y: item.y, maxHeight: item.height, items: [item] };
+      rows.push(newRow);
+      pageBuckets.set(itemBucket, [...(pageBuckets.get(itemBucket) ?? []), newRow]);
+      rowsByPageBucket.set(pageNum, pageBuckets);
+      bucketByRow.set(newRow, itemBucket);
+      maxRowHeightByPage.set(pageNum, Math.max(maxRowHeightByPage.get(pageNum) ?? 0, item.height));
     }
   }
 
@@ -1061,8 +1085,13 @@ function horizontalGap(left: LayoutTextItem, right: LayoutTextItem): number {
 }
 
 function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly LayoutAmountCell[]): LayoutAmountCell | undefined {
-  return amounts
-    .filter(amount => amount.row === label.row && amount.item !== label.item)
+  const sameRowAmounts = amounts
+    .filter(amount => amount.row === label.row && amount.item !== label.item);
+  const labelRightEdge = label.item.x + label.item.width;
+  const rightSideAmounts = sameRowAmounts.filter(amount => amount.item.x >= labelRightEdge);
+  const candidates = rightSideAmounts.length > 0 ? rightSideAmounts : sameRowAmounts;
+
+  return candidates
     .sort((a, b) =>
       horizontalGap(label.item, a.item) - horizontalGap(label.item, b.item) ||
       Math.abs(a.centerX - label.centerX) - Math.abs(b.centerX - label.centerX),
@@ -1175,16 +1204,33 @@ function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): Extract
 }
 
 function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, textAmounts: ExtractedAmountsWithMetadata): ExtractedAmountsWithMetadata {
-  const mergedProvenance = [...layoutAmounts.provenance];
+  const grossValuesDisagree = layoutAmounts.total_gross !== undefined &&
+    textAmounts.total_gross !== undefined &&
+    Math.abs(layoutAmounts.total_gross - textAmounts.total_gross) > 0.02;
+  const textGrossIsPlausible = layoutAmounts.total_gross !== undefined &&
+    textAmounts.total_gross !== undefined &&
+    Math.abs(textAmounts.total_gross) <= MAX_RECEIPT_FALLBACK_AMOUNT &&
+    (layoutAmounts.total_gross === 0 || textAmounts.total_gross === 0 || Math.sign(layoutAmounts.total_gross) === Math.sign(textAmounts.total_gross));
+  const preferTextGross = grossValuesDisagree && textGrossIsPlausible;
+  const mergedProvenance = preferTextGross
+    ? layoutAmounts.provenance.filter(entry => entry.field !== "total_gross")
+    : [...layoutAmounts.provenance];
   let totalNet = layoutAmounts.total_net;
   let totalVat = layoutAmounts.total_vat;
-  const totalGross = layoutAmounts.total_gross;
+  const totalGross = preferTextGross ? textAmounts.total_gross : layoutAmounts.total_gross;
+  const extractionNotes = preferTextGross && layoutAmounts.total_gross !== undefined && textAmounts.total_gross !== undefined
+    ? [`layout_total_gross_${layoutAmounts.total_gross}_disagreed_with_text_total_gross_${textAmounts.total_gross}_text_preferred`]
+    : [];
 
   const addTextField = (field: AmountField, value: number | undefined) => {
     if (value === undefined) return;
     const metadata = textAmounts.provenance.find(entry => entry.field === field && Math.abs(entry.value - value) < 0.001);
     if (metadata) mergedProvenance.unshift(metadata);
   };
+
+  if (preferTextGross) {
+    addTextField("total_gross", totalGross);
+  }
 
   if (totalNet === undefined && textAmounts.total_net !== undefined && totalGross !== undefined && textAmounts.total_net <= totalGross) {
     totalNet = textAmounts.total_net;
@@ -1202,6 +1248,7 @@ function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, textAmo
     total_gross: totalGross,
     vat_explicit: layoutAmounts.vat_explicit || (totalVat !== undefined && textAmounts.vat_explicit === true),
     provenance: mergedProvenance,
+    ...(extractionNotes.length > 0 ? { extraction_notes: extractionNotes } : {}),
   };
 }
 
@@ -1398,7 +1445,7 @@ function extractAmountsWithMetadata(text: string, textItems?: readonly LayoutTex
   const textAmounts = extractAmountsFromTextWithMetadata(text);
   if (!textItems || textItems.length === 0) return textAmounts;
   const layoutAmounts = extractAmountsFromLayout(textItems);
-  if (!layoutAmounts?.total_gross) return textAmounts;
+  if (!layoutAmounts || layoutAmounts.total_gross === undefined) return textAmounts;
   return mergeLayoutAmounts(layoutAmounts, textAmounts);
 }
 
@@ -2073,7 +2120,7 @@ export function extractReceiptFieldsFromText(
     },
     options?.textItems,
   );
-  const { provenance: _amountProvenance, ...amountFields } = amounts;
+  const { provenance: _amountProvenance, extraction_notes: extractionNotes, ...amountFields } = amounts;
 
   return {
     ...identifiers,
@@ -2088,6 +2135,7 @@ export function extractReceiptFieldsFromText(
     ...(minOcrConfidence !== undefined ? { min_ocr_confidence: minOcrConfidence } : {}),
     ...(options?.partialOcrFailure ? { partial_ocr_failure: true } : {}),
     ...(fieldProvenance.length > 0 ? { field_provenance: fieldProvenance } : {}),
+    ...(extractionNotes && extractionNotes.length > 0 ? { extraction_notes: extractionNotes } : {}),
   };
 }
 

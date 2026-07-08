@@ -336,6 +336,57 @@ describe("extractReceiptFieldsFromText parser quality metadata", () => {
     ]));
   });
 
+  it("keeps text gross when a later page layout total disagrees", () => {
+    const text = [
+      "ACME OÜ",
+      "Invoice INV-1",
+      "Amount due 124.00 EUR",
+      "Page 2 summary",
+      "Total 999.00",
+    ].join("\n");
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf", {
+      textItems: [
+        { text: "ACME OÜ", x: 10, y: 10, width: 45, height: 10, pageNum: 1 },
+        { text: "Invoice INV-1", x: 10, y: 30, width: 70, height: 10, pageNum: 1 },
+        { text: "Amount due", x: 20, y: 120, width: 70, height: 10, pageNum: 1 },
+        { text: "124.00", x: 110, y: 120, width: 45, height: 10, pageNum: 1 },
+        { text: "Page 2 summary", x: 10, y: 10, width: 90, height: 10, pageNum: 2 },
+        { text: "Total", x: 20, y: 120, width: 38, height: 10, pageNum: 2 },
+        { text: "999.00", x: 90, y: 120, width: 45, height: 10, pageNum: 2 },
+      ],
+    });
+
+    expect(result.total_gross).toBe(124);
+    expect(result.extraction_notes).toEqual([
+      "layout_total_gross_999_disagreed_with_text_total_gross_124_text_preferred",
+    ]);
+    expect(result.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "total_gross",
+        value: 124,
+        source: "label",
+      }),
+    ]));
+  });
+
+  it("binds same-row layout labels to right-side amounts before left-side amounts", () => {
+    const result = extractReceiptFieldsFromText("ACME OÜ\nInvoice INV-1\n100.00 Käibemaks 24.00\nKokku 124.00", "invoice.pdf", {
+      textItems: [
+        { text: "ACME OÜ", x: 10, y: 10, width: 45, height: 10, pageNum: 1 },
+        { text: "Invoice INV-1", x: 10, y: 30, width: 70, height: 10, pageNum: 1 },
+        { text: "100.00", x: 70, y: 100, width: 45, height: 10, pageNum: 1 },
+        { text: "Käibemaks", x: 120, y: 100, width: 65, height: 10, pageNum: 1 },
+        { text: "24.00", x: 195, y: 100, width: 38, height: 10, pageNum: 1 },
+        { text: "Kokku", x: 120, y: 130, width: 40, height: 10, pageNum: 1 },
+        { text: "124.00", x: 195, y: 130, width: 45, height: 10, pageNum: 1 },
+      ],
+    });
+
+    expect(result.total_vat).toBe(24);
+    expect(result.total_net).toBe(100);
+    expect(result.total_gross).toBe(124);
+  });
+
   it("falls back to flattened text amount extraction when no layout items are present", () => {
     const result = extractReceiptFieldsFromText(
       [
@@ -358,6 +409,24 @@ describe("extractReceiptFieldsFromText parser quality metadata", () => {
         source: "label",
       }),
     ]));
+  });
+
+  it("falls back to flattened text amount extraction when layout items are empty", () => {
+    const result = extractReceiptFieldsFromText(
+      [
+        "ACME OÜ",
+        "Invoice INV-1",
+        "Summa km-ta 100.00",
+        "Käibemaks 24.00",
+        "Kokku 124.00",
+      ].join("\n"),
+      "invoice.pdf",
+      { textItems: [] },
+    );
+
+    expect(result.total_net).toBe(100);
+    expect(result.total_vat).toBe(24);
+    expect(result.total_gross).toBe(124);
   });
 
   it("records coordinate provenance for layout-extracted amounts", () => {
