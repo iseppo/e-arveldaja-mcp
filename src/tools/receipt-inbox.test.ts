@@ -41,6 +41,7 @@ import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import { MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
 import { buildReceiptBatchSummary } from "./receipt-inbox-summary.js";
+import type { ReceiptBatchFileResult } from "./receipt-inbox-types.js";
 
 vi.mock("../file-validation.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../file-validation.js")>()),
@@ -1552,6 +1553,33 @@ describe("sanitizeReceiptResultForOutput OCR trust boundary", () => {
     expect(provenance[0]!.value).toMatch(WRAP_START);
     expect(provenance[0]!.value).toContain("Evil Corp");
     expect(provenance[1]!.value).toBe(120);
+  });
+
+  it("wraps extraction_notes entries", () => {
+    const input: ReceiptBatchFileResult = {
+      file: {
+        name: "x.pdf",
+        path: "/x.pdf",
+        extension: ".pdf",
+        file_type: "pdf",
+        size_bytes: 12,
+        modified_at: "2026-07-08T00:00:00.000Z",
+      },
+      classification: "purchase_invoice",
+      status: "needs_review",
+      extracted: {
+        invoice_number: "INV-1",
+        extraction_notes: ["Supplier name conflict: layout=\"Evil Layout\" text=\"Evil Text\""],
+      },
+      notes: [],
+    };
+
+    const out = sanitizeReceiptResultForOutput(input);
+    const note = out.extracted?.extraction_notes?.[0];
+
+    expect(note).toMatch(WRAP_START);
+    expect(note).toMatch(WRAP_END);
+    expect(note).toContain("Supplier name conflict");
   });
 
   it("caps an oversized raw_text and flags the truncation", () => {

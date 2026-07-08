@@ -99,6 +99,10 @@ function wrapFieldProvenanceValues(fieldProvenance: FieldProvenance[] | undefine
   }));
 }
 
+function wrapExtractionNotes(extractionNotes: string[] | undefined): string[] | undefined {
+  return extractionNotes?.map(entry => wrapUntrustedOcr(entry) ?? entry);
+}
+
 function textItemsWithPageNums(pages: NonNullable<Awaited<ReturnType<typeof parseDocument>>["result"]>["pages"] | undefined): LayoutTextItem[] {
   return pages?.flatMap(page =>
     (page.textItems ?? []).map(item => ({
@@ -125,6 +129,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved), { textItems: allTextItems });
         const hints = extractPdfHints(parsedDocument.text, allTextItems);
         const outputFieldProvenance = wrapFieldProvenanceValues(extracted.field_provenance);
+        const outputExtractionNotes = wrapExtractionNotes(extracted.extraction_notes);
         // Build confidence signals from parser quality metadata so the
         // single-PDF flow reports the same OCR quality issues as the receipt
         // batch flow (issue #20 consistency).
@@ -176,6 +181,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
                 ...extractedWithoutRawText,
                 description: wrapUntrustedOcr(extracted.description),
                 supplier_name: wrapUntrustedOcr(extracted.supplier_name),
+                ...(outputExtractionNotes ? { extraction_notes: outputExtractionNotes } : {}),
                 ...(outputFieldProvenance ? { field_provenance: outputFieldProvenance } : {}),
                 ...(warnings.length > 0 ? { warnings } : {}),
               },

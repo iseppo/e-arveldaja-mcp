@@ -14,6 +14,7 @@ import {
   extractVatNumber,
 } from "../document-identifiers.js";
 import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { normalizeVatRate } from "./purchase-vat-defaults.js";
 
@@ -1549,7 +1550,7 @@ function isLayoutItemInSupplierRegion(
     );
     return !buyerAbove;
   }
-  return classifyByPosition({ x: item.x, y: item.y }, markers) === "supplier";
+  return classifyByPosition({ x: item.x, y: item.y, pageNum: item.pageNum }, markers) === "supplier";
 }
 
 function scoreSupplierLayoutCandidate(
@@ -1569,7 +1570,7 @@ function scoreSupplierLayoutCandidate(
   return fontScore + proximityScore + columnScore + beforeBuyerScore;
 }
 
-function extractSupplierNameFromLayout(textItems: readonly LayoutTextItem[]): string | undefined {
+function extractSupplierNameFromLayout(textItems: readonly LayoutTextItem[]): SupplierNameLayoutCandidate | undefined {
   const markers = buildIdentifierMarkers(textItems);
   const supplierMarkers = markers.filter(marker => marker.side === "supplier");
   if (supplierMarkers.length === 0) return undefined;
@@ -1596,7 +1597,7 @@ function extractSupplierNameFromLayout(textItems: readonly LayoutTextItem[]): st
       b.score - a.score ||
       layoutItemFontSize(b.item) - layoutItemFontSize(a.item) ||
       Math.abs(a.item.y - a.marker.y) - Math.abs(b.item.y - b.marker.y),
-    )[0]?.name;
+    )[0];
 }
 
 function extractSupplierNameFromText(text: string, fallbackFileName: string): string | undefined {
@@ -1678,6 +1679,8 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string): st
 export interface SupplierNameExtractionResult {
   name?: string;
   extraction_notes?: string[];
+  layoutSupplierNameItem?: LayoutTextItem;
+  layoutSupplierNameRationale?: string;
 }
 
 export function extractSupplierNameWithNotes(
@@ -1690,16 +1693,21 @@ export function extractSupplierNameWithNotes(
     return textName !== undefined ? { name: textName } : {};
   }
 
-  const layoutName = extractSupplierNameFromLayout(textItems);
-  if (layoutName === undefined) {
+  const layoutCandidate = extractSupplierNameFromLayout(textItems);
+  if (!layoutCandidate) {
     return textName !== undefined ? { name: textName } : {};
   }
+  const layoutName = layoutCandidate.name;
   if (textName === undefined || layoutName === textName) {
-    return { name: layoutName };
+    return { name: layoutName, layoutSupplierNameItem: layoutCandidate.item, layoutSupplierNameRationale: "layout_marker" };
   }
+  const wrappedLayoutName = wrapUntrustedOcr(layoutName) ?? layoutName;
+  const wrappedTextName = wrapUntrustedOcr(textName) ?? textName;
   return {
     name: layoutName,
-    extraction_notes: [`Supplier name conflict: layout="${layoutName}" text="${textName}" — using layout result`],
+    layoutSupplierNameItem: layoutCandidate.item,
+    layoutSupplierNameRationale: "layout_marker",
+    extraction_notes: [`Supplier name conflict: layout="${wrappedLayoutName}" text="${wrappedTextName}" — using layout result`],
   };
 }
 
@@ -1877,6 +1885,8 @@ function buildFieldProvenance(
   amounts: ExtractedAmountsWithMetadata,
   fields: Pick<ExtractedReceiptFields, "supplier_name" | "invoice_number" | "invoice_date" | "currency">,
   textItems?: readonly LayoutTextItem[],
+  layoutSupplierNameItem?: LayoutTextItem,
+  layoutSupplierNameRationale?: string,
 ): FieldProvenance[] {
   const provenance: FieldProvenance[] = [];
   const lines = text.split(/\r?\n/).map(clampTextLine).filter(Boolean);
@@ -1886,19 +1896,22 @@ function buildFieldProvenance(
     value: string | undefined,
     source: FieldProvenance["source"],
     rationale?: string,
+    textItem?: LayoutTextItem,
   ) => {
     if (value === undefined) return;
     provenance.push({
       field,
       value,
       source,
-      ...provenanceLocation(findTextItemForStringValue(value, textItems)),
+      ...provenanceLocation(textItem ?? findTextItemForStringValue(value, textItems)),
       ...(rationale ? { rationale } : {}),
     });
   };
 
-  const supplierSource = supplierNameSource(text, fileName, fields.supplier_name);
-  pushString("supplier_name", fields.supplier_name, supplierSource.source, supplierSource.rationale);
+  const supplierSource = layoutSupplierNameItem
+    ? { source: "coordinate" as const, rationale: layoutSupplierNameRationale }
+    : supplierNameSource(text, fileName, fields.supplier_name);
+  pushString("supplier_name", fields.supplier_name, supplierSource.source, supplierSource.rationale, layoutSupplierNameItem);
   pushString(
     "supplier_reg_code",
     identifiers.supplier_reg_code,
@@ -2252,6 +2265,8 @@ export function extractReceiptFieldsFromText(
       currency,
     },
     options?.textItems,
+    supplierResult.layoutSupplierNameItem,
+    supplierResult.layoutSupplierNameRationale,
   );
   const { provenance: _amountProvenance, extraction_notes: amountNotes, ...amountFields } = amounts;
   const extractionNotes = [

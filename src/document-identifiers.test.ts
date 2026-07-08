@@ -588,6 +588,26 @@ describe("extractIdentifiers — coordinate-based classification (Option C)", ()
     expect(ids.reg_code).toBeUndefined();
     expect(ids.reg_code_rationale).toBe("coordinate_rejected");
   });
+
+  it("does not use a buyer marker from page 2 to reject a page 1 supplier candidate", () => {
+    const text = [
+      "Supplier OÜ",
+      "12176678",
+      "Arve saaja",
+      "Buyer OÜ",
+    ].join("\n");
+    const textItems: LayoutTextItem[] = [
+      { text: "Supplier OÜ", x: 52, y: 90, width: 80, height: 10, pageNum: 1 },
+      { text: "12176678", x: 52, y: 120, width: 55, height: 10, pageNum: 1 },
+      { text: "Arve saaja", x: 52, y: 90, width: 70, height: 10, pageNum: 2 },
+      { text: "Buyer OÜ", x: 52, y: 110, width: 60, height: 10, pageNum: 2 },
+    ];
+
+    const ids = extractIdentifiers(text, { textItems });
+
+    expect(ids.reg_code).toBe("12176678");
+    expect(ids.reg_code_rationale).toBe("bare_structural");
+  });
 });
 
 describe("extractIdentifiers — second-review regression tests", () => {

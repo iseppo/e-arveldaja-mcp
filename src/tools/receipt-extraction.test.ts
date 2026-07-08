@@ -986,6 +986,57 @@ describe("extractSupplierName", () => {
     ]));
   });
 
+  it("wraps supplier names inside layout conflict extraction notes", () => {
+    const text = [
+      "Müüja: Text Vendor OÜ",
+      "Ostja: Buyer OÜ",
+      "Kokku 12.00",
+    ].join("\n");
+    const textItems = [
+      { text: "Müüja:", x: 24, y: 34, width: 42, height: 10, fontSize: 10 },
+      { text: "Layout Vendor OÜ", x: 24, y: 54, width: 120, height: 12, fontSize: 12 },
+      { text: "Ostja:", x: 310, y: 34, width: 35, height: 10, fontSize: 10 },
+      { text: "Buyer OÜ", x: 310, y: 54, width: 68, height: 10, fontSize: 10 },
+      { text: "Kokku 12.00", x: 24, y: 120, width: 70, height: 10, fontSize: 10 },
+    ] satisfies readonly LayoutTextItem[];
+
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf", { textItems });
+    const note = result.extraction_notes?.find(entry => entry.includes("Supplier name conflict"));
+
+    expect(note).toContain("layout=\"<<UNTRUSTED_OCR_START:");
+    expect(note).toContain("Layout Vendor OÜ");
+    expect(note).toContain("text=\"<<UNTRUSTED_OCR_START:");
+    expect(note).toContain("Text Vendor OÜ");
+  });
+
+  it("records coordinate provenance when supplier name comes from layout", () => {
+    const text = [
+      "Müüja: Text Vendor OÜ",
+      "Ostja: Buyer OÜ",
+      "Kokku 12.00",
+    ].join("\n");
+    const textItems = [
+      { text: "Müüja:", x: 24, y: 34, width: 42, height: 10, fontSize: 10, pageNum: 1 },
+      { text: "Layout Vendor OÜ", x: 24, y: 54, width: 120, height: 12, fontSize: 12, pageNum: 1 },
+      { text: "Ostja:", x: 310, y: 34, width: 35, height: 10, fontSize: 10, pageNum: 1 },
+      { text: "Buyer OÜ", x: 310, y: 54, width: 68, height: 10, fontSize: 10, pageNum: 1 },
+      { text: "Kokku 12.00", x: 24, y: 120, width: 70, height: 10, fontSize: 10, pageNum: 1 },
+    ] satisfies readonly LayoutTextItem[];
+
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf", { textItems });
+
+    expect(result.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "supplier_name",
+        value: "Layout Vendor OÜ",
+        source: "coordinate",
+        rationale: "layout_marker",
+        pageNum: 1,
+        bbox: { x: 24, y: 54, width: 120, height: 12 },
+      }),
+    ]));
+  });
+
   it("prefers supplier candidate above buyer marker via beforeBuyerScore", () => {
     const text = [
       "Top Supplier OÜ",

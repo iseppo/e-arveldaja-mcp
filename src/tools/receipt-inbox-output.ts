@@ -8,9 +8,10 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
   let next = result;
 
   if (next.extracted) {
-    const { raw_text, description, supplier_name, field_provenance } = next.extracted;
+    const { raw_text, description, supplier_name, field_provenance, extraction_notes } = next.extracted;
     const hasProvenance = field_provenance !== undefined && field_provenance.length > 0;
-    if (raw_text !== undefined || description !== undefined || supplier_name !== undefined || hasProvenance) {
+    const hasExtractionNotes = extraction_notes !== undefined && extraction_notes.length > 0;
+    if (raw_text !== undefined || description !== undefined || supplier_name !== undefined || hasProvenance || hasExtractionNotes) {
       // Cap the OCR blob before wrapping so an oversized/pathological document
       // cannot flood the consuming LLM's context; mark when it was truncated.
       const cappedRaw = capUntrustedText(raw_text);
@@ -22,6 +23,9 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
           ...(cappedRaw.truncated && { raw_text_truncated: true, raw_text_length: cappedRaw.original_length }),
           ...(description !== undefined && { description: wrapUntrustedOcr(description) }),
           ...(supplier_name !== undefined && { supplier_name: wrapUntrustedOcr(supplier_name) }),
+          ...(hasExtractionNotes && {
+            extraction_notes: extraction_notes!.map(entry => wrapUntrustedOcr(entry) ?? entry),
+          }),
           ...(hasProvenance && {
             field_provenance: field_provenance!.map(entry => ({
               ...entry,

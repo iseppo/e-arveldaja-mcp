@@ -258,6 +258,7 @@ interface CandidatePosition {
   kind: "reg_code" | "vat_no";
   x: number;
   y: number;
+  pageNum?: number;
 }
 
 /**
@@ -268,13 +269,14 @@ interface CandidatePosition {
  * Returns "supplier" | "buyer" | "unknown".
  */
 export function classifyByPosition(
-  candidate: Pick<CandidatePosition, "x" | "y">,
+  candidate: Pick<CandidatePosition, "x" | "y" | "pageNum">,
   markers: readonly MarkerPosition[],
 ): "supplier" | "buyer" | "unknown" {
   if (markers.length === 0) return "unknown";
+  const candidatePageNum = candidate.pageNum ?? 1;
 
   const markersAbove = markers
-    .filter(marker => marker.y <= candidate.y + 5)
+    .filter(marker => (marker.pageNum ?? 1) === candidatePageNum && marker.y <= candidate.y + 5)
     .map(marker => ({ marker, yDistance: Math.max(0, candidate.y - marker.y) }))
     .sort((a, b) => a.yDistance - b.yDistance);
 
@@ -405,7 +407,7 @@ function classifyCandidateOccurrence(
 ): "supplier" | "buyer" | "unknown" {
   const items = findAllItemsForCandidate(textItems, value);
   const sides = items.map(item =>
-    classifyByPosition({ x: item.x, y: item.y }, markers),
+    classifyByPosition({ x: item.x, y: item.y, pageNum: item.pageNum }, markers),
   );
   const selectedSide = selectedOccurrenceIndex === undefined ? sides[0] : sides[selectedOccurrenceIndex];
 
@@ -422,7 +424,7 @@ function hasUnambiguousSupplierOccurrence(
   markers: MarkerPosition[],
 ): boolean {
   const sides = findAllItemsForCandidate(textItems, value).map(item =>
-    classifyByPosition({ x: item.x, y: item.y }, markers),
+    classifyByPosition({ x: item.x, y: item.y, pageNum: item.pageNum }, markers),
   );
   return sides.includes("supplier") && !sides.includes("buyer");
 }
