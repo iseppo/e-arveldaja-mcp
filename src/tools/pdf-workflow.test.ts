@@ -170,9 +170,22 @@ describe("pdf workflow tools", () => {
   it("extract_pdf_invoice uses LiteParse output for raw text and page count", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/invoice.pdf" });
     mockedParseDocument.mockResolvedValue({
-      text: "Registrikood 12345678\nKM-number: IE3668997OH\nEE47 1000 0010 2014 5685\nViitenumber 12345",
+      text: "Registrikood 12345678\nKM-number: IE3668997OH\nEE47 1000 0010 2014 5685\nViitenumber 12345\nKokku: 120.00 EUR",
       pageCount: 2,
-      result: { text: "", pages: [] } as any,
+      result: {
+        text: "",
+        pages: [{
+          pageNum: 2,
+          text: "Registrikood 12345678\nKM-number: IE3668997OH\nEE47 1000 0010 2014 5685\nViitenumber 12345\nKokku: 120.00 EUR",
+          width: 600,
+          height: 800,
+          textItems: [
+            { text: "Registrikood 12345678", x: 10, y: 20, width: 110, height: 10, confidence: 0.94 },
+            { text: "KM-number: IE3668997OH", x: 10, y: 40, width: 120, height: 10, confidence: 0.91 },
+            { text: "Kokku: 120.00 EUR", x: 10, y: 60, width: 100, height: 10, confidence: 0.90 },
+          ],
+        }],
+      } as any,
     });
 
     const { handler } = setupPdfWorkflowTool("extract_pdf_invoice");
@@ -189,16 +202,36 @@ describe("pdf workflow tools", () => {
       supplier_vat_no: "IE3668997OH",
       supplier_iban: "EE471000001020145685",
       ref_number: "12345",
+      field_provenance: expect.arrayContaining([
+        expect.objectContaining({
+          field: "supplier_reg_code",
+          value: expect.stringContaining("12345678"),
+          source: "label",
+          pageNum: 2,
+          bbox: { x: 10, y: 20, width: 110, height: 10 },
+          confidence: 0.94,
+        }),
+      ]),
     }));
     expect(payload.extracted).toEqual(expect.objectContaining({
       supplier_reg_code: "12345678",
       supplier_vat_no: "IE3668997OH",
       supplier_iban: "EE471000001020145685",
       ref_number: "12345",
+      field_provenance: expect.arrayContaining([
+        expect.objectContaining({
+          field: "total_gross",
+          value: 120,
+          source: "label",
+          pageNum: 2,
+          bbox: { x: 10, y: 60, width: 100, height: 10 },
+          confidence: 0.90,
+        }),
+      ]),
     }));
     expect(payload.llm_fallback).toEqual(expect.objectContaining({
       recommended: true,
-      missing_required_fields: expect.arrayContaining(["supplier_name", "invoice_date", "total_gross"]),
+      missing_required_fields: expect.arrayContaining(["supplier_name", "invoice_date"]),
     }));
     // The fallback guidance must point at a field the response actually carries:
     // extract_pdf_invoice exposes the OCR text as hints.raw_text, not the dropped

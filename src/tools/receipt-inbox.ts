@@ -770,12 +770,16 @@ async function extractReceiptFields(
 ): Promise<ExtractedReceiptFields> {
   const validatedPath = await revalidateReceiptFilePath(file);
   const parsedDocument = await parseDocument(validatedPath);
-  const textItems = parsedDocument.result?.pages?.[0]?.textItems;
-  const allTextItems = parsedDocument.result?.pages?.flatMap(page => page.textItems ?? []);
+  const allTextItems = parsedDocument.result?.pages?.flatMap(page =>
+    (page.textItems ?? []).map(item => ({
+      ...item,
+      pageNum: page.pageNum,
+    }))
+  );
   return extractReceiptFieldsFromText(parsedDocument.text, file.name, {
     ownCompanyVat,
     ownCompanyRegistryCode,
-    textItems,
+    textItems: allTextItems,
     minOcrConfidence: computeMinOcrConfidence(allTextItems),
     partialOcrFailure: parsedDocument.ocrPartialFailure,
   });

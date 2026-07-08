@@ -152,6 +152,7 @@ export interface LayoutTextItem {
   y: number;
   width: number;
   height: number;
+  pageNum?: number;
   confidence?: number;
   fontSize?: number;
   fontName?: string;

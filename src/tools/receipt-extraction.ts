@@ -196,6 +196,27 @@ export type ReceiptClassification =
   | "owner_paid_expense_reimbursement"
   | "unclassifiable";
 
+export interface FieldProvenance {
+  field:
+    | "supplier_name"
+    | "supplier_vat_no"
+    | "supplier_reg_code"
+    | "invoice_number"
+    | "invoice_date"
+    | "total_net"
+    | "total_vat"
+    | "total_gross"
+    | "iban"
+    | "ref_number"
+    | "currency";
+  value: string | number | undefined;
+  source: "label" | "regex" | "coordinate" | "fallback" | "ocr" | "unknown";
+  pageNum?: number;
+  bbox?: { x: number; y: number; width: number; height: number };
+  confidence?: number;
+  rationale?: string;
+}
+
 export interface ExtractedReceiptFields {
   supplier_name?: string;
   supplier_reg_code?: string;
@@ -227,6 +248,7 @@ export interface ExtractedReceiptFields {
   reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
   vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
   rejected_candidates?: RejectedCandidate[];
+  field_provenance?: FieldProvenance[];
 }
 
 export interface TransactionGroupClassificationInput {
@@ -342,10 +364,32 @@ export type ClassificationApplyMode = "purchase_invoice" | "review_only";
 
 interface ReceiptAmountCandidate {
   amount: number;
+  lineIndex?: number;
   blocked_as_reference: boolean;
   has_currency_keyword: boolean;
   has_total_like_label: boolean;
   likely_year_amount: boolean;
+}
+
+type AmountField = "total_net" | "total_vat" | "total_gross";
+
+interface AmountProvenanceMetadata {
+  field: AmountField;
+  value: number;
+  lineIndex?: number;
+  source: FieldProvenance["source"];
+  rationale: string;
+}
+
+interface ExtractedAmounts {
+  total_net?: number;
+  total_vat?: number;
+  total_gross?: number;
+  vat_explicit?: boolean;
+}
+
+interface ExtractedAmountsWithMetadata extends ExtractedAmounts {
+  provenance: AmountProvenanceMetadata[];
 }
 
 // ---------------------------------------------------------------------------
@@ -818,7 +862,7 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   };
 }
 
-export function extractAmounts(text: string): { total_net?: number; total_vat?: number; total_gross?: number; vat_explicit?: boolean } {
+function extractAmountsWithMetadata(text: string): ExtractedAmountsWithMetadata {
   const lines = text
     .split(/\r?\n/)
     .map(clampTextLine)
@@ -831,7 +875,10 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
   let netFromExplicitLine = false;
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
   const componentAmounts: number[] = [];
-  let bestExplicitGrossCandidate: { amount: number; score: number } | undefined;
+  let bestExplicitGrossCandidate: { amount: number; score: number; lineIndex: number } | undefined;
+  let vatMetadata: AmountProvenanceMetadata | undefined;
+  let netMetadata: AmountProvenanceMetadata | undefined;
+  let grossMetadata: AmountProvenanceMetadata | undefined;
   const classifiedLines = lines.map((_line, index) => classifyLine(lines, index));
   const hasExplicitVatLine = classifiedLines.some(classified =>
     classified.hasVatAmountLabel &&
@@ -839,13 +886,14 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     !RECEIPT_NET_LABEL_RE.test(classified.inspectionLine),
   );
 
-  for (const classified of classifiedLines) {
+  for (const [lineIndex, classified] of classifiedLines.entries()) {
     if (classified.amounts.length === 0 || classified.pickedGross === undefined) {
       continue;
     }
 
     fallbackCandidates.push(...classified.amounts.map(amount => ({
       amount,
+      lineIndex,
       blocked_as_reference: classified.blockedAsReference,
       has_currency_keyword: classified.hasCurrencyKeyword,
       has_total_like_label: classified.hasTotalLikeLabel,
@@ -857,7 +905,7 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
       classified.hasTotalLikeLabel
     ) {
       if (!bestExplicitGrossCandidate || classified.score > bestExplicitGrossCandidate.score || (classified.score === bestExplicitGrossCandidate.score && classified.pickedGross > bestExplicitGrossCandidate.amount)) {
-        bestExplicitGrossCandidate = { amount: classified.pickedGross, score: classified.score };
+        bestExplicitGrossCandidate = { amount: classified.pickedGross, score: classified.score, lineIndex };
       }
     }
 
@@ -870,6 +918,13 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     ) {
       totalVat = classified.pickedVat;
       vatFromExplicitLine = true;
+      vatMetadata = {
+        field: "total_vat",
+        value: totalVat,
+        lineIndex,
+        source: "label",
+        rationale: "line_score",
+      };
     }
 
     if (
@@ -879,6 +934,13 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     ) {
       totalNet = Math.max(...classified.amounts);
       netFromExplicitLine = true;
+      netMetadata = {
+        field: "total_net",
+        value: totalNet,
+        lineIndex,
+        source: "label",
+        rationale: "line_score",
+      };
     }
 
     if (
@@ -892,10 +954,17 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
 
   if (bestExplicitGrossCandidate) {
     totalGross = bestExplicitGrossCandidate.amount;
+    grossMetadata = {
+      field: "total_gross",
+      value: totalGross,
+      lineIndex: bestExplicitGrossCandidate.lineIndex,
+      source: "label",
+      rationale: "line_score",
+    };
   }
 
   if (totalGross === undefined) {
-    totalGross = [...fallbackCandidates]
+    const fallbackCandidate = [...fallbackCandidates]
       .filter(candidate =>
         candidate.amount <= MAX_RECEIPT_FALLBACK_AMOUNT &&
         !candidate.blocked_as_reference,
@@ -903,7 +972,17 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
       .sort((a, b) =>
         scoreReceiptAmountFallbackCandidate(b) - scoreReceiptAmountFallbackCandidate(a) ||
         b.amount - a.amount,
-      )[0]?.amount;
+      )[0];
+    totalGross = fallbackCandidate?.amount;
+    if (fallbackCandidate) {
+      grossMetadata = {
+        field: "total_gross",
+        value: fallbackCandidate.amount,
+        lineIndex: fallbackCandidate.lineIndex,
+        source: "fallback",
+        rationale: "fallback_largest",
+      };
+    }
   }
 
   if (totalGross !== undefined && totalVat !== undefined) {
@@ -913,11 +992,25 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
       Math.abs(roundMoney(totalNet + totalVat) - totalGross) > 0.02
     ) {
       totalNet = derivedNet;
+      netMetadata = {
+        field: "total_net",
+        value: totalNet,
+        lineIndex: vatMetadata?.lineIndex ?? grossMetadata?.lineIndex,
+        source: "fallback",
+        rationale: "derived_from_gross_vat",
+      };
     }
   }
 
   if (totalVat === undefined && totalGross !== undefined && totalNet !== undefined) {
     totalVat = roundMoney(totalGross - totalNet);
+    vatMetadata = {
+      field: "total_vat",
+      value: totalVat,
+      lineIndex: netMetadata?.lineIndex ?? grossMetadata?.lineIndex,
+      source: "fallback",
+      rationale: "derived_from_gross_net",
+    };
   }
 
   if (totalGross !== undefined && componentAmounts.length > 0) {
@@ -925,6 +1018,20 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     if (Math.abs(componentSum - totalGross) < 0.02 && !hasExplicitVatLine) {
       totalNet = totalGross;
       totalVat = 0;
+      netMetadata = {
+        field: "total_net",
+        value: totalNet,
+        lineIndex: grossMetadata?.lineIndex,
+        source: "fallback",
+        rationale: "component_sum",
+      };
+      vatMetadata = {
+        field: "total_vat",
+        value: totalVat,
+        lineIndex: grossMetadata?.lineIndex,
+        source: "fallback",
+        rationale: "component_sum",
+      };
       // Inferred "no VAT" from component-sum reconciliation; this is structural,
       // not an explicit OCR statement that VAT is 0.
       vatFromExplicitLine = false;
@@ -932,12 +1039,21 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
     }
   }
 
+  const provenance = [netMetadata, vatMetadata, grossMetadata]
+    .filter((entry): entry is AmountProvenanceMetadata => entry !== undefined);
+
   return {
     total_net: totalNet,
     total_vat: totalVat,
     total_gross: totalGross,
     vat_explicit: totalVat !== undefined && (vatFromExplicitLine || netFromExplicitLine),
+    provenance,
   };
+}
+
+export function extractAmounts(text: string): { total_net?: number; total_vat?: number; total_gross?: number; vat_explicit?: boolean } {
+  const { provenance: _provenance, ...amounts } = extractAmountsWithMetadata(text);
+  return amounts;
 }
 
 export interface ExtractReceiptFieldsOptions {
@@ -1116,6 +1232,183 @@ export function extractDates(text: string): { invoice_date?: string; due_date?: 
     invoice_date: rawDates[0],
     due_date: rawDates[1],
   };
+}
+
+function normalizeProvenanceSearchValue(value: string): string {
+  return value.replace(/\s+/g, "").toUpperCase();
+}
+
+function textItemContainsStringValue(item: LayoutTextItem, value: string): boolean {
+  const normalizedItem = normalizeProvenanceSearchValue(item.text);
+  const normalizedValue = normalizeProvenanceSearchValue(value);
+  return normalizedValue.length > 0 && normalizedItem.includes(normalizedValue);
+}
+
+function textItemContainsAmountValue(item: LayoutTextItem, value: number): boolean {
+  return extractAmountsFromLine(item.text).some(amount => Math.abs(amount - value) < 0.001);
+}
+
+function findTextItemForStringValue(value: string | undefined, textItems?: readonly LayoutTextItem[]): LayoutTextItem | undefined {
+  if (!value || !textItems || textItems.length === 0) return undefined;
+  return textItems.find(item => textItemContainsStringValue(item, value));
+}
+
+function findTextItemForAmountValue(value: number, lineIndex: number | undefined, lines: readonly string[], textItems?: readonly LayoutTextItem[]): LayoutTextItem | undefined {
+  if (!textItems || textItems.length === 0) return undefined;
+  const line = lineIndex !== undefined ? lines[lineIndex] : undefined;
+  if (line) {
+    const normalizedLine = clampTextLine(line);
+    const lineMatch = textItems.find(item =>
+      clampTextLine(item.text) === normalizedLine && textItemContainsAmountValue(item, value)
+    );
+    if (lineMatch) return lineMatch;
+  }
+  return textItems.find(item => textItemContainsAmountValue(item, value));
+}
+
+function provenanceLocation(item: LayoutTextItem | undefined): Pick<FieldProvenance, "pageNum" | "bbox" | "confidence"> {
+  if (!item) return {};
+  return {
+    pageNum: item.pageNum ?? 1,
+    bbox: { x: item.x, y: item.y, width: item.width, height: item.height },
+    ...(item.confidence !== undefined ? { confidence: item.confidence } : {}),
+  };
+}
+
+function identifierSourceFromRationale(rationale?: ExtractedReceiptFields["reg_code_rationale"] | ExtractedReceiptFields["vat_no_rationale"]): FieldProvenance["source"] {
+  switch (rationale) {
+    case "labeled":
+      return "label";
+    case "coordinate_confirmed":
+    case "coordinate_rejected":
+      return "coordinate";
+    case "bare_structural":
+      return "regex";
+    case "buyer_section_only":
+    case "excluded_self":
+      return "fallback";
+    default:
+      return "unknown";
+  }
+}
+
+function supplierNameSource(text: string, fileName: string, supplierName: string | undefined): { source: FieldProvenance["source"]; rationale?: string } {
+  if (!supplierName) return { source: "unknown" };
+  const lines = text.split(/\r?\n/).map(clampTextLine).filter(Boolean);
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (SUPPLIER_LABEL_RE.test(line)) {
+      const labelledCandidate = cleanSupplierCandidate(line);
+      const nextLineCandidate = cleanSupplierCandidate(lines[index + 1] ?? "");
+      if (labelledCandidate === supplierName || nextLineCandidate === supplierName) {
+        return { source: "label", rationale: "labeled" };
+      }
+    }
+  }
+  const fileToken = normalizeFilenameToken(fileName).replace(/-/g, " ");
+  if (fileToken && fileToken === supplierName) {
+    return { source: "fallback", rationale: "filename_token" };
+  }
+  return { source: "ocr", rationale: "top_line" };
+}
+
+function invoiceNumberSource(text: string, invoiceNumber: string): { source: FieldProvenance["source"]; rationale?: string } {
+  if (invoiceNumber.startsWith("AUTO-")) return { source: "fallback", rationale: "filename_token" };
+  const labelPatterns = [
+    /(?:arve(?:\/tehingu)?(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?)|tellimuse\s*number|order\s*number|booking\s*(?:number|no\.?)|pileti\s*nr)[:#\s.-]*([A-Z0-9/_-]{3,})/i,
+    /(?:number|nr|no\.?)[:#\s-]*([A-Z0-9/_-]{3,})/i,
+  ];
+  for (const pattern of labelPatterns) {
+    const match = text.match(pattern);
+    if (match?.[1]?.trim() === invoiceNumber) {
+      return { source: "label", rationale: "labeled" };
+    }
+  }
+  return { source: "regex", rationale: "pattern_match" };
+}
+
+function dateSource(text: string, value: string): { source: FieldProvenance["source"]; rationale?: string } {
+  const labelPatterns = [
+    new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|kuupäev|date|issue\\s*date|date\\s*of\\s*issue|tellimuse\\s*kuupäev|date\\s*paid|receipt\\s*date|purchase\\s*date)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
+  ];
+  for (const pattern of labelPatterns) {
+    const match = text.match(pattern);
+    if (match?.[1] && normalizeDate(match[1]) === value) {
+      return { source: "label", rationale: "labeled" };
+    }
+  }
+  return { source: "regex", rationale: "date_pattern" };
+}
+
+function buildFieldProvenance(
+  text: string,
+  fileName: string,
+  identifiers: ReturnType<typeof extractPdfIdentifiers>,
+  amounts: ExtractedAmountsWithMetadata,
+  fields: Pick<ExtractedReceiptFields, "supplier_name" | "invoice_number" | "invoice_date" | "currency">,
+  textItems?: readonly LayoutTextItem[],
+): FieldProvenance[] {
+  const provenance: FieldProvenance[] = [];
+  const lines = text.split(/\r?\n/).map(clampTextLine).filter(Boolean);
+
+  const pushString = (
+    field: FieldProvenance["field"],
+    value: string | undefined,
+    source: FieldProvenance["source"],
+    rationale?: string,
+  ) => {
+    if (value === undefined) return;
+    provenance.push({
+      field,
+      value,
+      source,
+      ...provenanceLocation(findTextItemForStringValue(value, textItems)),
+      ...(rationale ? { rationale } : {}),
+    });
+  };
+
+  const supplierSource = supplierNameSource(text, fileName, fields.supplier_name);
+  pushString("supplier_name", fields.supplier_name, supplierSource.source, supplierSource.rationale);
+  pushString(
+    "supplier_reg_code",
+    identifiers.supplier_reg_code,
+    identifierSourceFromRationale(identifiers.reg_code_rationale),
+    identifiers.reg_code_rationale,
+  );
+  pushString(
+    "supplier_vat_no",
+    identifiers.supplier_vat_no,
+    identifierSourceFromRationale(identifiers.vat_no_rationale),
+    identifiers.vat_no_rationale,
+  );
+  pushString("iban", identifiers.supplier_iban, "regex", "pattern_match");
+  pushString("ref_number", identifiers.ref_number, "regex", "pattern_match");
+
+  if (fields.invoice_number !== undefined) {
+    const source = invoiceNumberSource(text, fields.invoice_number);
+    pushString("invoice_number", fields.invoice_number, source.source, source.rationale);
+  }
+
+  if (fields.invoice_date !== undefined) {
+    const source = dateSource(text, fields.invoice_date);
+    pushString("invoice_date", fields.invoice_date, source.source, source.rationale);
+  }
+
+  if (fields.currency !== undefined) {
+    pushString("currency", fields.currency, "regex", "currency_pattern");
+  }
+
+  for (const amount of amounts.provenance) {
+    provenance.push({
+      field: amount.field,
+      value: amount.value,
+      source: amount.source,
+      ...provenanceLocation(findTextItemForAmountValue(amount.value, amount.lineIndex, lines, textItems)),
+      rationale: amount.rationale,
+    });
+  }
+
+  return provenance.slice(0, 15);
 }
 
 export function normalizeCounterpartyName(name?: string | null): string {
@@ -1412,22 +1705,38 @@ export function extractReceiptFieldsFromText(
   const identifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date } = extractDates(text);
   const supplierName = extractSupplierName(text, fileName);
-  const amounts = extractAmounts(text);
+  const amounts = extractAmountsWithMetadata(text);
   const currency = detectReceiptCurrency(text);
+  const invoiceNumber = extractInvoiceNumber(text, fileName);
   const minOcrConfidence = options?.minOcrConfidence ?? computeMinOcrConfidence(options?.textItems);
+  const fieldProvenance = buildFieldProvenance(
+    text,
+    fileName,
+    identifiers,
+    amounts,
+    {
+      supplier_name: supplierName,
+      invoice_number: invoiceNumber,
+      invoice_date,
+      currency,
+    },
+    options?.textItems,
+  );
+  const { provenance: _amountProvenance, ...amountFields } = amounts;
 
   return {
     ...identifiers,
-    ...amounts,
+    ...amountFields,
     currency,
     supplier_name: supplierName,
-    invoice_number: extractInvoiceNumber(text, fileName),
+    invoice_number: invoiceNumber,
     invoice_date,
     due_date,
     description: extractDescription(text, supplierName),
     raw_text: text,
     ...(minOcrConfidence !== undefined ? { min_ocr_confidence: minOcrConfidence } : {}),
     ...(options?.partialOcrFailure ? { partial_ocr_failure: true } : {}),
+    ...(fieldProvenance.length > 0 ? { field_provenance: fieldProvenance } : {}),
   };
 }
 

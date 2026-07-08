@@ -1517,6 +1517,43 @@ describe("sanitizeReceiptResultForOutput OCR trust boundary", () => {
     expect(out.extracted!.invoice_number).toBe("INV-1");
   });
 
+  it("wraps string provenance values but leaves provenance metadata trusted", () => {
+    const input = {
+      file: { path: "/x.pdf" } as any,
+      classification: { category: "purchase_invoice" } as any,
+      status: "ok" as any,
+      extracted: {
+        field_provenance: [
+          {
+            field: "supplier_name",
+            value: "Evil Corp",
+            source: "ocr",
+            pageNum: 1,
+            bbox: { x: 10, y: 20, width: 30, height: 10 },
+            confidence: 0.7,
+            rationale: "top_line",
+          },
+          {
+            field: "total_gross",
+            value: 120,
+            source: "label",
+            rationale: "line_score",
+          },
+        ],
+      },
+      notes: [],
+    } as any;
+
+    const out = sanitizeReceiptResultForOutput(input);
+    const provenance = out.extracted!.field_provenance!;
+
+    expect(provenance[0]!.source).toBe("ocr");
+    expect(provenance[0]!.rationale).toBe("top_line");
+    expect(provenance[0]!.value).toMatch(WRAP_START);
+    expect(provenance[0]!.value).toContain("Evil Corp");
+    expect(provenance[1]!.value).toBe(120);
+  });
+
   it("caps an oversized raw_text and flags the truncation", () => {
     const huge = "RECEIPT START\n" + "z".repeat(MAX_UNTRUSTED_TEXT_CHARS + 3000);
     const input = {

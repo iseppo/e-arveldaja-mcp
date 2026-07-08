@@ -122,6 +122,109 @@ describe("extractReceiptFieldsFromText parser quality metadata", () => {
 
     expect(result.partial_ocr_failure).toBe(true);
   });
+
+  it("records field provenance for labeled VAT, labeled registry code, and labeled total", () => {
+    const result = extractReceiptFieldsFromText(
+      [
+        "Müüja: Acme OÜ",
+        "Reg. nr 17487472",
+        "KMKR: EE102809963",
+        "Kokku: 120.00 EUR",
+      ].join("\n"),
+      "invoice.pdf",
+      {
+        textItems: [
+          { text: "Müüja: Acme OÜ", x: 10, y: 10, width: 90, height: 10, confidence: 0.95, pageNum: 1 },
+          { text: "Reg. nr 17487472", x: 10, y: 30, width: 80, height: 10, confidence: 0.93, pageNum: 1 },
+          { text: "KMKR: EE102809963", x: 10, y: 50, width: 90, height: 10, confidence: 0.91, pageNum: 1 },
+          { text: "Kokku: 120.00 EUR", x: 10, y: 70, width: 100, height: 10, confidence: 0.90, pageNum: 1 },
+        ],
+      },
+    );
+
+    expect(result.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "supplier_reg_code",
+        value: "17487472",
+        source: "label",
+        pageNum: 1,
+        bbox: { x: 10, y: 30, width: 80, height: 10 },
+        confidence: 0.93,
+        rationale: "labeled",
+      }),
+      expect.objectContaining({
+        field: "supplier_vat_no",
+        value: "EE102809963",
+        source: "label",
+        pageNum: 1,
+        bbox: { x: 10, y: 50, width: 90, height: 10 },
+        confidence: 0.91,
+        rationale: "labeled",
+      }),
+      expect.objectContaining({
+        field: "total_gross",
+        value: 120,
+        source: "label",
+        pageNum: 1,
+        bbox: { x: 10, y: 70, width: 100, height: 10 },
+        confidence: 0.90,
+        rationale: "line_score",
+      }),
+    ]));
+  });
+
+  it("records fallback amount provenance", () => {
+    const result = extractReceiptFieldsFromText(
+      [
+        "ACME OÜ",
+        "Consulting 12.00",
+        "Hosting 18.50",
+      ].join("\n"),
+      "receipt.pdf",
+    );
+
+    expect(result.total_gross).toBe(18.5);
+    expect(result.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "total_gross",
+        value: 18.5,
+        source: "fallback",
+        rationale: "fallback_largest",
+      }),
+    ]));
+  });
+
+  it("records OCR provenance for supplier name from document text", () => {
+    const result = extractReceiptFieldsFromText(
+      [
+        "ACME OÜ",
+        "Reg. nr 17487472",
+        "Invoice INV-1",
+        "Total 12.00 EUR",
+      ].join("\n"),
+      "invoice.pdf",
+      {
+        textItems: [
+          { text: "ACME OÜ", x: 12, y: 14, width: 45, height: 10, confidence: 0.88, pageNum: 2 },
+          { text: "Reg. nr 17487472", x: 12, y: 24, width: 70, height: 10, confidence: 0.87, pageNum: 2 },
+          { text: "Invoice INV-1", x: 12, y: 34, width: 70, height: 10, confidence: 0.86, pageNum: 2 },
+          { text: "Total 12.00 EUR", x: 12, y: 54, width: 85, height: 10, confidence: 0.85, pageNum: 2 },
+        ],
+      },
+    );
+
+    expect(result.supplier_name).toBe("ACME OÜ");
+    expect(result.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "supplier_name",
+        value: "ACME OÜ",
+        source: "ocr",
+        pageNum: 2,
+        bbox: { x: 12, y: 14, width: 45, height: 10 },
+        confidence: 0.88,
+      }),
+    ]));
+  });
 });
 
 describe("computeMinOcrConfidence robust heuristic", () => {
