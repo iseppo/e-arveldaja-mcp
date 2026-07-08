@@ -226,6 +226,163 @@ describe("extractReceiptFieldsFromText parser quality metadata", () => {
     ]));
   });
 
+  it("uses layout rows when flattened invoice text would bind the wrong total", () => {
+    const text = [
+      "ACME OÜ",
+      "Invoice INV-1",
+      "Kokku 144.00 12.00",
+    ].join("\n");
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf", {
+      textItems: [
+        { text: "ACME OÜ", x: 10, y: 10, width: 45, height: 10, pageNum: 1 },
+        { text: "Invoice INV-1", x: 10, y: 30, width: 70, height: 10, pageNum: 1 },
+        { text: "Kokku", x: 20, y: 120, width: 40, height: 10, pageNum: 1 },
+        { text: "144.00", x: 86, y: 120, width: 45, height: 10, pageNum: 1 },
+        { text: "12.00", x: 420, y: 120, width: 35, height: 10, pageNum: 1 },
+      ],
+    });
+
+    expect(result.total_gross).toBe(144);
+  });
+
+  it("extracts net and VAT from separate columns in the same visual row", () => {
+    const text = [
+      "ACME OÜ",
+      "Invoice INV-1",
+      "Summa km-ta Käibemaks",
+      "Kokku 124.00",
+    ].join("\n");
+    const result = extractReceiptFieldsFromText(text, "invoice.pdf", {
+      textItems: [
+        { text: "ACME OÜ", x: 10, y: 10, width: 45, height: 10, pageNum: 1 },
+        { text: "Invoice INV-1", x: 10, y: 30, width: 70, height: 10, pageNum: 1 },
+        { text: "Summa km-ta", x: 20, y: 100, width: 70, height: 10, pageNum: 1 },
+        { text: "100.00", x: 105, y: 100, width: 45, height: 10, pageNum: 1 },
+        { text: "Käibemaks", x: 260, y: 100, width: 65, height: 10, pageNum: 1 },
+        { text: "24.00", x: 340, y: 100, width: 38, height: 10, pageNum: 1 },
+        { text: "Kokku", x: 260, y: 130, width: 40, height: 10, pageNum: 1 },
+        { text: "124.00", x: 340, y: 130, width: 45, height: 10, pageNum: 1 },
+      ],
+    });
+
+    expect(result.total_net).toBe(100);
+    expect(result.total_vat).toBe(24);
+    expect(result.total_gross).toBe(124);
+    expect(result.vat_explicit).toBe(true);
+  });
+
+  it("combines split layout label tokens before classifying amount fields", () => {
+    const result = extractReceiptFieldsFromText("ACME OÜ\nInvoice INV-1\nTotal net 100.00\nKokku 124.00", "invoice.pdf", {
+      textItems: [
+        { text: "ACME OÜ", x: 10, y: 10, width: 45, height: 10, pageNum: 1 },
+        { text: "Invoice INV-1", x: 10, y: 30, width: 70, height: 10, pageNum: 1 },
+        { text: "Total", x: 20, y: 100, width: 34, height: 10, pageNum: 1 },
+        { text: "net", x: 60, y: 100, width: 22, height: 10, pageNum: 1 },
+        { text: "100.00", x: 105, y: 100, width: 45, height: 10, pageNum: 1 },
+        { text: "Kokku", x: 260, y: 130, width: 40, height: 10, pageNum: 1 },
+        { text: "124.00", x: 340, y: 130, width: 45, height: 10, pageNum: 1 },
+      ],
+    });
+
+    expect(result.total_net).toBe(100);
+    expect(result.total_vat).toBe(24);
+    expect(result.total_gross).toBe(124);
+    expect(result.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "total_net",
+        value: 100,
+        source: "coordinate",
+        bbox: { x: 105, y: 100, width: 45, height: 10 },
+      }),
+    ]));
+  });
+
+  it("uses same-column values below layout labels when the label row has no numbers", () => {
+    const result = extractReceiptFieldsFromText("ACME OÜ\nInvoice INV-1\nSumma km-ta Käibemaks Kokku\n100.00 24.00 124.00", "invoice.pdf", {
+      textItems: [
+        { text: "ACME OÜ", x: 10, y: 10, width: 45, height: 10, pageNum: 1 },
+        { text: "Invoice INV-1", x: 10, y: 30, width: 70, height: 10, pageNum: 1 },
+        { text: "Summa km-ta", x: 80, y: 100, width: 70, height: 10, pageNum: 1 },
+        { text: "Käibemaks", x: 220, y: 100, width: 65, height: 10, pageNum: 1 },
+        { text: "Kokku", x: 360, y: 100, width: 40, height: 10, pageNum: 1 },
+        { text: "100.00", x: 92, y: 122, width: 45, height: 10, pageNum: 1 },
+        { text: "24.00", x: 232, y: 122, width: 38, height: 10, pageNum: 1 },
+        { text: "124.00", x: 360, y: 122, width: 45, height: 10, pageNum: 1 },
+      ],
+    });
+
+    expect(result.total_net).toBe(100);
+    expect(result.total_vat).toBe(24);
+    expect(result.total_gross).toBe(124);
+    expect(result.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "total_net",
+        value: 100,
+        source: "coordinate",
+        bbox: { x: 92, y: 122, width: 45, height: 10 },
+      }),
+      expect.objectContaining({
+        field: "total_vat",
+        value: 24,
+        source: "coordinate",
+        bbox: { x: 232, y: 122, width: 38, height: 10 },
+      }),
+      expect.objectContaining({
+        field: "total_gross",
+        value: 124,
+        source: "coordinate",
+        bbox: { x: 360, y: 122, width: 45, height: 10 },
+      }),
+    ]));
+  });
+
+  it("falls back to flattened text amount extraction when no layout items are present", () => {
+    const result = extractReceiptFieldsFromText(
+      [
+        "ACME OÜ",
+        "Invoice INV-1",
+        "Summa km-ta 100.00",
+        "Käibemaks 24.00",
+        "Kokku 124.00",
+      ].join("\n"),
+      "invoice.pdf",
+    );
+
+    expect(result.total_net).toBe(100);
+    expect(result.total_vat).toBe(24);
+    expect(result.total_gross).toBe(124);
+    expect(result.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "total_gross",
+        value: 124,
+        source: "label",
+      }),
+    ]));
+  });
+
+  it("records coordinate provenance for layout-extracted amounts", () => {
+    const result = extractReceiptFieldsFromText("ACME OÜ\nInvoice INV-1\nKokku 144.00 12.00", "invoice.pdf", {
+      textItems: [
+        { text: "ACME OÜ", x: 10, y: 10, width: 45, height: 10, pageNum: 2 },
+        { text: "Invoice INV-1", x: 10, y: 30, width: 70, height: 10, pageNum: 2 },
+        { text: "Kokku", x: 20, y: 120, width: 40, height: 10, pageNum: 2 },
+        { text: "144.00", x: 86, y: 120, width: 45, height: 10, pageNum: 2, confidence: 0.88 },
+        { text: "12.00", x: 420, y: 120, width: 35, height: 10, pageNum: 2 },
+      ],
+    });
+
+    expect(result.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: "total_gross",
+        value: 144,
+        source: "coordinate",
+        pageNum: 2,
+        bbox: { x: 86, y: 120, width: 45, height: 10 },
+        confidence: 0.88,
+      }),
+    ]));
+  });
+
   it("attributes supplier identifiers to page 1, not page 2 buyer block, across a multi-page PDF", () => {
     // Page 1: supplier block. Page 2: buyer block with its own reg/VAT/IBAN
     // at the SAME in-page y coordinates as page 1's supplier block. The

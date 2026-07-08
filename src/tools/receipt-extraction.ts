@@ -378,6 +378,7 @@ interface AmountProvenanceMetadata {
   value: number;
   lineIndex?: number;
   source: FieldProvenance["source"];
+  textItem?: LayoutTextItem;
   rationale: string;
 }
 
@@ -390,6 +391,43 @@ interface ExtractedAmounts {
 
 interface ExtractedAmountsWithMetadata extends ExtractedAmounts {
   provenance: AmountProvenanceMetadata[];
+}
+
+interface LayoutRow {
+  pageNum: number;
+  y: number;
+  maxHeight: number;
+  items: LayoutTextItem[];
+}
+
+interface LayoutAmountCell {
+  amount: number;
+  item: LayoutTextItem;
+  row: LayoutRow;
+  columnIndex: number;
+  centerX: number;
+}
+
+interface LayoutLabelCell {
+  field: AmountField;
+  item: LayoutTextItem;
+  row: LayoutRow;
+  columnIndex: number;
+  centerX: number;
+}
+
+interface LayoutTextCell {
+  text: string;
+  item: LayoutTextItem;
+  row: LayoutRow;
+  columnIndex: number;
+  centerX: number;
+}
+
+interface LayoutColumn {
+  index: number;
+  centerX: number;
+  count: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -862,7 +900,312 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   };
 }
 
-function extractAmountsWithMetadata(text: string): ExtractedAmountsWithMetadata {
+function layoutItemPageNum(item: LayoutTextItem): number {
+  return item.pageNum ?? 1;
+}
+
+function layoutCenterX(item: LayoutTextItem): number {
+  return item.x + item.width / 2;
+}
+
+function groupLayoutRows(textItems: readonly LayoutTextItem[]): LayoutRow[] {
+  const rows: LayoutRow[] = [];
+  const sortedItems = [...textItems]
+    .filter(item => clampTextLine(item.text).length > 0)
+    .sort((a, b) =>
+      layoutItemPageNum(a) - layoutItemPageNum(b) ||
+      a.y - b.y ||
+      a.x - b.x,
+    );
+
+  for (const item of sortedItems) {
+    const pageNum = layoutItemPageNum(item);
+    const row = rows
+      .filter(candidate => candidate.pageNum === pageNum)
+      .find(candidate => Math.abs(candidate.y - item.y) <= Math.max(4, Math.max(candidate.maxHeight, item.height) * 0.7));
+
+    if (row) {
+      row.items.push(item);
+      row.items.sort((a, b) => a.x - b.x);
+      row.y = row.items.reduce((sum, rowItem) => sum + rowItem.y, 0) / row.items.length;
+      row.maxHeight = Math.max(row.maxHeight, item.height);
+    } else {
+      rows.push({ pageNum, y: item.y, maxHeight: item.height, items: [item] });
+    }
+  }
+
+  return rows.sort((a, b) => a.pageNum - b.pageNum || a.y - b.y);
+}
+
+function assignLayoutColumns(rows: readonly LayoutRow[]): Map<LayoutTextItem, number> {
+  const columnsByPage = new Map<number, LayoutColumn[]>();
+  const columnByItem = new Map<LayoutTextItem, number>();
+  const items = rows
+    .flatMap(row => row.items)
+    .sort((a, b) =>
+      layoutItemPageNum(a) - layoutItemPageNum(b) ||
+      layoutCenterX(a) - layoutCenterX(b),
+    );
+
+  for (const item of items) {
+    const pageNum = layoutItemPageNum(item);
+    const centerX = layoutCenterX(item);
+    const columns = columnsByPage.get(pageNum) ?? [];
+    const match = columns.find(column => Math.abs(column.centerX - centerX) <= 35);
+    if (match) {
+      match.centerX = (match.centerX * match.count + centerX) / (match.count + 1);
+      match.count += 1;
+      columnByItem.set(item, match.index);
+    } else {
+      const column: LayoutColumn = { index: columns.length, centerX, count: 1 };
+      columns.push(column);
+      columnsByPage.set(pageNum, columns);
+      columnByItem.set(item, column.index);
+    }
+  }
+
+  return columnByItem;
+}
+
+function classifyLayoutAmountLabel(text: string): AmountField | undefined {
+  if (RECEIPT_NET_LABEL_RE.test(text)) return "total_net";
+  if (RECEIPT_TOTAL_LABEL_RE.test(text)) return "total_gross";
+  if (RECEIPT_VAT_LABEL_RE.test(text)) return "total_vat";
+  return undefined;
+}
+
+function mergeLayoutTextItems(items: readonly LayoutTextItem[]): LayoutTextItem {
+  const first = items[0]!;
+  const minX = Math.min(...items.map(item => item.x));
+  const minY = Math.min(...items.map(item => item.y));
+  const maxX = Math.max(...items.map(item => item.x + item.width));
+  const maxY = Math.max(...items.map(item => item.y + item.height));
+  const confidences = items
+    .map(item => item.confidence)
+    .filter((value): value is number => value !== undefined && Number.isFinite(value));
+
+  return {
+    text: items.map(item => clampTextLine(item.text)).join(" "),
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+    pageNum: first.pageNum,
+    ...(confidences.length > 0 ? { confidence: Math.min(...confidences) } : {}),
+  };
+}
+
+function buildLayoutTextCells(row: LayoutRow, columnByItem: ReadonlyMap<LayoutTextItem, number>): LayoutTextCell[] {
+  const cells: LayoutTextCell[] = [];
+  const textItems = row.items.filter(item => extractAmountsFromLine(item.text).length === 0);
+
+  for (let start = 0; start < textItems.length; start++) {
+    for (let end = start; end < Math.min(textItems.length, start + 4); end++) {
+      const span = textItems.slice(start, end + 1);
+      const merged = mergeLayoutTextItems(span);
+      const columnIndex = columnByItem.get(span[0]!);
+      if (columnIndex === undefined) continue;
+      cells.push({
+        text: merged.text,
+        item: merged,
+        row,
+        columnIndex,
+        centerX: layoutCenterX(merged),
+      });
+    }
+  }
+
+  return cells;
+}
+
+function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<LayoutTextItem, number>): {
+  labels: LayoutLabelCell[];
+  amounts: LayoutAmountCell[];
+} {
+  const labels: LayoutLabelCell[] = [];
+  const amounts: LayoutAmountCell[] = [];
+
+  for (const row of rows) {
+    for (const item of row.items) {
+      const text = clampTextLine(item.text);
+      const columnIndex = columnByItem.get(item);
+      if (columnIndex === undefined) continue;
+
+      for (const amount of extractAmountsFromLine(text)) {
+        if (amount > MAX_RECEIPT_FALLBACK_AMOUNT || isLikelyYearAmount(amount, text)) continue;
+        amounts.push({ amount, item, row, columnIndex, centerX: layoutCenterX(item) });
+      }
+    }
+
+    for (const cell of buildLayoutTextCells(row, columnByItem)) {
+      const field = classifyLayoutAmountLabel(cell.text);
+      if (field) {
+        labels.push({
+          field,
+          item: cell.item,
+          row: cell.row,
+          columnIndex: cell.columnIndex,
+          centerX: cell.centerX,
+        });
+      }
+    }
+  }
+
+  return { labels, amounts };
+}
+
+function horizontalGap(left: LayoutTextItem, right: LayoutTextItem): number {
+  if (right.x >= left.x + left.width) return right.x - (left.x + left.width);
+  if (left.x >= right.x + right.width) return left.x - (right.x + right.width);
+  return 0;
+}
+
+function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly LayoutAmountCell[]): LayoutAmountCell | undefined {
+  return amounts
+    .filter(amount => amount.row === label.row && amount.item !== label.item)
+    .sort((a, b) =>
+      horizontalGap(label.item, a.item) - horizontalGap(label.item, b.item) ||
+      Math.abs(a.centerX - label.centerX) - Math.abs(b.centerX - label.centerX),
+    )[0];
+}
+
+function findBelowColumnLayoutAmount(label: LayoutLabelCell, amounts: readonly LayoutAmountCell[]): LayoutAmountCell | undefined {
+  return amounts
+    .filter(amount =>
+      amount.row.pageNum === label.row.pageNum &&
+      amount.row.y > label.row.y &&
+      amount.columnIndex === label.columnIndex,
+    )
+    .sort((a, b) =>
+      a.row.y - b.row.y ||
+      Math.abs(a.centerX - label.centerX) - Math.abs(b.centerX - label.centerX),
+    )[0];
+}
+
+function shouldReplaceLayoutBinding(current: LayoutAmountCell | undefined, next: LayoutAmountCell, field: AmountField): boolean {
+  if (!current) return true;
+  if (field === "total_gross") {
+    return next.row.pageNum > current.row.pageNum ||
+      (next.row.pageNum === current.row.pageNum && next.row.y >= current.row.y);
+  }
+  return false;
+}
+
+function amountMetadataFromLayout(field: AmountField, cell: LayoutAmountCell): AmountProvenanceMetadata {
+  return {
+    field,
+    value: cell.amount,
+    source: "coordinate",
+    textItem: cell.item,
+    rationale: "layout_label_binding",
+  };
+}
+
+function reconcileLayoutAmounts(bindings: ReadonlyMap<AmountField, LayoutAmountCell>): ExtractedAmountsWithMetadata | undefined {
+  const grossBinding = bindings.get("total_gross");
+  if (!grossBinding) return undefined;
+
+  const netBinding = bindings.get("total_net");
+  const vatBinding = bindings.get("total_vat");
+  let totalGross = grossBinding.amount;
+  let totalNet = netBinding?.amount;
+  let totalVat = vatBinding?.amount;
+  const grossMetadata = amountMetadataFromLayout("total_gross", grossBinding);
+  let netMetadata = netBinding ? amountMetadataFromLayout("total_net", netBinding) : undefined;
+  let vatMetadata = vatBinding ? amountMetadataFromLayout("total_vat", vatBinding) : undefined;
+
+  if (totalGross !== undefined && totalVat !== undefined) {
+    const derivedNet = roundMoney(totalGross - totalVat);
+    if (
+      totalNet === undefined ||
+      Math.abs(roundMoney(totalNet + totalVat) - totalGross) > 0.02
+    ) {
+      totalNet = derivedNet;
+      netMetadata = {
+        field: "total_net",
+        value: totalNet,
+        source: "fallback",
+        textItem: vatMetadata?.textItem ?? grossMetadata.textItem,
+        rationale: "derived_from_gross_vat",
+      };
+    }
+  }
+
+  if (totalVat === undefined && totalGross !== undefined && totalNet !== undefined) {
+    totalVat = roundMoney(totalGross - totalNet);
+    vatMetadata = {
+      field: "total_vat",
+      value: totalVat,
+      source: "fallback",
+      textItem: netMetadata?.textItem ?? grossMetadata.textItem,
+      rationale: "derived_from_gross_net",
+    };
+  }
+
+  const provenance = [netMetadata, vatMetadata, grossMetadata]
+    .filter((entry): entry is AmountProvenanceMetadata => entry !== undefined);
+
+  return {
+    total_net: totalNet,
+    total_vat: totalVat,
+    total_gross: totalGross,
+    vat_explicit: totalVat !== undefined && (vatBinding !== undefined || netBinding !== undefined),
+    provenance,
+  };
+}
+
+function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): ExtractedAmountsWithMetadata | undefined {
+  const rows = groupLayoutRows(textItems);
+  if (rows.length === 0) return undefined;
+
+  const columnByItem = assignLayoutColumns(rows);
+  const { labels, amounts } = buildLayoutCells(rows, columnByItem);
+  const bindings = new Map<AmountField, LayoutAmountCell>();
+
+  for (const label of labels) {
+    const cell = findSameRowLayoutAmount(label, amounts) ?? findBelowColumnLayoutAmount(label, amounts);
+    if (!cell) continue;
+    const current = bindings.get(label.field);
+    if (shouldReplaceLayoutBinding(current, cell, label.field)) {
+      bindings.set(label.field, cell);
+    }
+  }
+
+  return reconcileLayoutAmounts(bindings);
+}
+
+function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, textAmounts: ExtractedAmountsWithMetadata): ExtractedAmountsWithMetadata {
+  const mergedProvenance = [...layoutAmounts.provenance];
+  let totalNet = layoutAmounts.total_net;
+  let totalVat = layoutAmounts.total_vat;
+  const totalGross = layoutAmounts.total_gross;
+
+  const addTextField = (field: AmountField, value: number | undefined) => {
+    if (value === undefined) return;
+    const metadata = textAmounts.provenance.find(entry => entry.field === field && Math.abs(entry.value - value) < 0.001);
+    if (metadata) mergedProvenance.unshift(metadata);
+  };
+
+  if (totalNet === undefined && textAmounts.total_net !== undefined && totalGross !== undefined && textAmounts.total_net <= totalGross) {
+    totalNet = textAmounts.total_net;
+    addTextField("total_net", totalNet);
+  }
+
+  if (totalVat === undefined && textAmounts.total_vat !== undefined && totalGross !== undefined && textAmounts.total_vat <= totalGross) {
+    totalVat = textAmounts.total_vat;
+    addTextField("total_vat", totalVat);
+  }
+
+  return {
+    total_net: totalNet,
+    total_vat: totalVat,
+    total_gross: totalGross,
+    vat_explicit: layoutAmounts.vat_explicit || (totalVat !== undefined && textAmounts.vat_explicit === true),
+    provenance: mergedProvenance,
+  };
+}
+
+function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithMetadata {
   const lines = text
     .split(/\r?\n/)
     .map(clampTextLine)
@@ -1049,6 +1392,14 @@ function extractAmountsWithMetadata(text: string): ExtractedAmountsWithMetadata 
     vat_explicit: totalVat !== undefined && (vatFromExplicitLine || netFromExplicitLine),
     provenance,
   };
+}
+
+function extractAmountsWithMetadata(text: string, textItems?: readonly LayoutTextItem[]): ExtractedAmountsWithMetadata {
+  const textAmounts = extractAmountsFromTextWithMetadata(text);
+  if (!textItems || textItems.length === 0) return textAmounts;
+  const layoutAmounts = extractAmountsFromLayout(textItems);
+  if (!layoutAmounts?.total_gross) return textAmounts;
+  return mergeLayoutAmounts(layoutAmounts, textAmounts);
 }
 
 export function extractAmounts(text: string): { total_net?: number; total_vat?: number; total_gross?: number; vat_explicit?: boolean } {
@@ -1403,7 +1754,7 @@ function buildFieldProvenance(
       field: amount.field,
       value: amount.value,
       source: amount.source,
-      ...provenanceLocation(findTextItemForAmountValue(amount.value, amount.lineIndex, lines, textItems)),
+      ...provenanceLocation(amount.textItem ?? findTextItemForAmountValue(amount.value, amount.lineIndex, lines, textItems)),
       rationale: amount.rationale,
     });
   }
@@ -1705,7 +2056,7 @@ export function extractReceiptFieldsFromText(
   const identifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date } = extractDates(text);
   const supplierName = extractSupplierName(text, fileName);
-  const amounts = extractAmountsWithMetadata(text);
+  const amounts = extractAmountsWithMetadata(text, options?.textItems);
   const currency = detectReceiptCurrency(text);
   const invoiceNumber = extractInvoiceNumber(text, fileName);
   const minOcrConfidence = options?.minOcrConfidence ?? computeMinOcrConfidence(options?.textItems);
