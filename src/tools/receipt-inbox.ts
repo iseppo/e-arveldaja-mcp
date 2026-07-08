@@ -302,7 +302,7 @@ function inferReceiptAutoBookingCategory(
 ): TransactionClassificationCategory | undefined {
   const text = `${extracted.supplier_name ?? ""} ${extracted.description ?? ""}`.toLowerCase();
   return CATEGORY_KEYWORD_MAP.find(entry =>
-    entry.category !== "unknown" && entry.pattern.test(text)
+    entry.category !== "unknown" && (entry.receiptAutoBookingPattern ?? entry.pattern).test(text)
   )?.category;
 }
 
@@ -605,17 +605,16 @@ export function buildClassificationSuggestion(
   let articleKeywords = ["muu", "other", "general"];
   let accountKeywords = ["muu", "general", "kulud"];
   let reason = "Fallback booking suggestion from generic expense keywords.";
-  const keywordEntry = CATEGORY_KEYWORD_MAP.find(entry =>
-    entry.category === category && entry.pattern.test(normalizedCounterparty)
-  );
 
   if (category === "saas_subscriptions") {
-    articleKeywords = keywordEntry?.articleKeywords ?? CATEGORY_KEYWORD_MAP.find(entry => entry.category === "saas_subscriptions")!.articleKeywords;
-    accountKeywords = keywordEntry?.accountKeywords ?? CATEGORY_KEYWORD_MAP.find(entry => entry.category === "saas_subscriptions")!.accountKeywords;
+    const saasEntry = CATEGORY_KEYWORD_MAP.find(entry => entry.category === "saas_subscriptions")!;
+    articleKeywords = saasEntry.classificationArticleKeywords ?? saasEntry.articleKeywords;
+    accountKeywords = saasEntry.classificationAccountKeywords ?? saasEntry.accountKeywords;
     reason = "Recurring similar payments to the same counterparty suggest a subscription or SaaS vendor.";
   } else if (category === "bank_fees") {
-    articleKeywords = keywordEntry?.articleKeywords ?? CATEGORY_KEYWORD_MAP.find(entry => entry.category === "bank_fees")!.articleKeywords;
-    accountKeywords = keywordEntry?.accountKeywords ?? CATEGORY_KEYWORD_MAP.find(entry => entry.category === "bank_fees")!.accountKeywords;
+    const bankEntry = CATEGORY_KEYWORD_MAP.find(entry => entry.category === "bank_fees")!;
+    articleKeywords = bankEntry.classificationArticleKeywords ?? bankEntry.articleKeywords;
+    accountKeywords = bankEntry.classificationAccountKeywords ?? bankEntry.accountKeywords;
     reason = "Counterparty and description patterns match bank service fees.";
   } else if (category === "salary_payroll") {
     articleKeywords = ["salary", "palk", "payroll"];
@@ -628,18 +627,18 @@ export function buildClassificationSuggestion(
   } else if (category === "card_purchases") {
     if (/(bolt|uber)/i.test(normalizedCounterparty)) {
       const transportEntry = CATEGORY_KEYWORD_MAP.find(entry => entry.pattern.test("bolt"))!;
-      articleKeywords = transportEntry.articleKeywords;
-      accountKeywords = transportEntry.accountKeywords;
+      articleKeywords = transportEntry.classificationArticleKeywords ?? transportEntry.articleKeywords;
+      accountKeywords = transportEntry.classificationAccountKeywords ?? transportEntry.accountKeywords;
       reason = "Bolt/Uber patterns usually map to travel or transport expenses.";
     } else if (/(wolt)/i.test(normalizedCounterparty)) {
       const foodEntry = CATEGORY_KEYWORD_MAP.find(entry => entry.pattern.test("wolt"))!;
-      articleKeywords = foodEntry.articleKeywords;
-      accountKeywords = foodEntry.accountKeywords;
+      articleKeywords = foodEntry.classificationArticleKeywords ?? foodEntry.articleKeywords;
+      accountKeywords = foodEntry.classificationAccountKeywords ?? foodEntry.accountKeywords;
       reason = "Wolt-like payments usually map to food or representation expenses.";
     } else {
       const officeEntry = CATEGORY_KEYWORD_MAP.find(entry => entry.category === "unknown" && entry.pattern.test("office"))!;
-      articleKeywords = ["office", ...officeEntry.articleKeywords, "general", "muu"];
-      accountKeywords = ["office", ...officeEntry.accountKeywords, "general", "muu"];
+      articleKeywords = officeEntry.classificationArticleKeywords ?? ["office", ...officeEntry.articleKeywords, "general", "muu"];
+      accountKeywords = officeEntry.classificationAccountKeywords ?? ["office", ...officeEntry.accountKeywords, "general", "muu"];
       reason = "Card purchase with no invoice match; suggested booking uses broad operating expense defaults.";
     }
   } else if (category === "revenue_without_invoice") {

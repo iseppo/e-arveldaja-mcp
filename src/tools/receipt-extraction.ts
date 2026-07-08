@@ -261,36 +261,52 @@ export interface BookingSuggestion {
 export const CATEGORY_KEYWORD_MAP: Array<{
   category: TransactionClassificationCategory;
   pattern: RegExp;
+  receiptAutoBookingPattern?: RegExp;
   articleKeywords: string[];
   accountKeywords: string[];
+  classificationArticleKeywords?: string[];
+  classificationAccountKeywords?: string[];
 }> = [
   {
     category: "bank_fees",
     pattern: /(bank|pank|fee|teenustasu|commission|service charge|haldustasu)/i,
+    receiptAutoBookingPattern: /(bank|pank|fee|teenustasu|commission|service charge|haldustasu)/i,
     articleKeywords: ["bank", "teenus", "fee"],
     accountKeywords: ["bank", "teenus", "fee"],
+    classificationArticleKeywords: ["bank", "fee", "teenus"],
+    classificationAccountKeywords: ["bank", "fee", "teenus"],
   },
   {
     category: "saas_subscriptions",
     pattern: /(software|subscription|hosting|cloud|openai|chatgpt|anthropic|claude|cursor|google|zoom|slack|github|microsoft|internet|sideteenus|api\b|credits)/i,
+    receiptAutoBookingPattern: /(software|subscription|hosting|cloud|openai|google|zoom|slack|github|microsoft|internet|sideteenus)/i,
     articleKeywords: ["tarkvara", "software", "internet", "side", "subscription", "sideteenus", "internetikulu"],
-    accountKeywords: ["tarkvara", "software", "subscription", "internet", "it", "sideteenus"],
+    accountKeywords: ["tarkvara", "software", "subscription", "internet", "sideteenus"],
+    classificationArticleKeywords: ["software", "subscription", "internet", "sideteenus"],
+    classificationAccountKeywords: ["software", "subscription", "internet", "sideteenus"],
   },
   {
     category: "card_purchases",
     pattern: /(bolt|uber|taxi|parking|transport)/i,
+    receiptAutoBookingPattern: /(bolt|uber|taxi|parking|transport)/i,
     articleKeywords: ["transport", "sõidu", "auto"],
     accountKeywords: ["transport", "sõidu", "auto"],
+    classificationArticleKeywords: ["transport", "sõidu", "auto"],
+    classificationAccountKeywords: ["transport", "sõidu", "auto"],
   },
   {
     category: "card_purchases",
     pattern: /(wolt|restaurant|cafe|toit|food)/i,
+    receiptAutoBookingPattern: /(wolt|restaurant|cafe|food|toit)/i,
     articleKeywords: ["toit", "food", "representation", "esindus"],
     accountKeywords: ["representation", "esindus", "food", "toit"],
+    classificationArticleKeywords: ["food", "toit", "representation", "esindus"],
+    classificationAccountKeywords: ["food", "toit", "representation", "esindus"],
   },
   {
     category: "tax_payments",
     pattern: /(tax|emta|maks)/i,
+    receiptAutoBookingPattern: /(tax|emta|maks)/i,
     articleKeywords: ["maks", "tax"],
     accountKeywords: ["maks", "tax"],
   },
@@ -299,6 +315,8 @@ export const CATEGORY_KEYWORD_MAP: Array<{
     pattern: /(office|kontor|stationery|admin)/i,
     articleKeywords: ["kontor", "office", "admin"],
     accountKeywords: ["kontor", "office", "admin"],
+    classificationArticleKeywords: ["office", "kontor", "general", "muu"],
+    classificationAccountKeywords: ["office", "kontor", "general", "muu"],
   },
 ];
 
