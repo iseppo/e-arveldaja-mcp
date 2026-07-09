@@ -18,7 +18,13 @@ import {
   deriveAutoBookedVatPrice,
   extractReceiptFieldsFromText,
   extractSupplierName,
+  classifyLayoutAmountLabel,
+  extractAmountsFromLine,
+  extractAmountsFromLayout,
+  mergeLayoutAmounts,
+  suggestBookingInternal,
 } from "./receipt-extraction.js";
+import type { ExtractedAmountsWithMetadata } from "./receipt-extraction.js";
 
 // ---------------------------------------------------------------------------
 // normalizeDate
@@ -1340,10 +1346,21 @@ describe("detectReverseChargeFromText (#18)", () => {
 });
 
 describe("parseAmount — comma thousands and negative signs (Codex review 6)", () => {
-  it("treats 1,234 as 1234 (comma thousands separator, not decimal)", () => {
+  it("treats a single-digit integer + one 3-digit group (1,234) as decimal 1.23 in Estonian context", () => {
+    // A bare "1,234" (single leading digit, one 3-digit group, no dot) is
+    // structurally identical to a 3-decimal Estonian unit price. Estonian uses
+    // the comma as the decimal separator, so it must be read as 1.234 (rounded
+    // to 1.23 cents), NOT as a thousands-grouped 1234. Multi-digit integers and
+    // multi-group values below still keep the thousands interpretation.
     const text = "Kokku: 1,234 EUR";
     const result = extractAmounts(text);
-    expect(result.total_gross).toBe(1234);
+    expect(result.total_gross).toBe(1.23);
+  });
+
+  it("treats 12,345 as 12345 (multi-digit integer keeps thousands interpretation)", () => {
+    const text = "Kokku: 12,345 EUR";
+    const result = extractAmounts(text);
+    expect(result.total_gross).toBe(12345);
   });
 
   it("treats 1,234.56 as 1234.56 (comma thousands, dot decimal)", () => {
@@ -1364,9 +1381,471 @@ describe("parseAmount — comma thousands and negative signs (Codex review 6)", 
     expect(result.total_gross).toBe(-123.45);
   });
 
-  it("handles negative amount with comma thousands separator (Oracle review)", () => {
+  it("handles negative single-digit + one group (-1,234) as decimal -1.23 in Estonian context", () => {
+    // Mirrors the positive single-digit-group case: comma is decimal, so this
+    // is -1.234 (rounded -1.23), not thousands-grouped -1234.
     const text = "Kokku: -1,234 EUR";
     const result = extractAmounts(text);
-    expect(result.total_gross).toBe(-1234);
+    expect(result.total_gross).toBe(-1.23);
+  });
+
+  it("reads a 3-decimal unit price 1,899 as ~1.9, not 1899 (Estonian fuel price)", () => {
+    // "1,899 EUR" is an Estonian 3-decimal unit price (1.899 rounded to 1.90),
+    // NOT a thousands-grouped 1899. Regression for the fuel-price misread.
+    const text = "Kokku: 1,899 EUR";
+    const result = extractAmounts(text);
+    expect(result.total_gross).toBe(1.9);
+    expect(result.total_gross).not.toBe(1899);
+  });
+
+  // PASS3 #3: comma-only vs dot-decimal context disambiguation for "N,NNN".
+  it("reads a comma-only '1,899 EUR/l' as a 3-decimal ~1.9 (Estonian)", () => {
+    expect(extractAmountsFromLine("1,899 EUR/l")).toContain(1.9);
+  });
+
+  it("reads '1,500' as English thousands 1500 when a dot-decimal sibling is on the line", () => {
+    // A sibling "0.00" dot-decimal signals English formatting, so the bare
+    // "1,500" is a thousands-grouped 1500, not a 3-decimal 1.5.
+    const amounts = extractAmountsFromLine("Total 1,500 VAT 0.00");
+    expect(amounts).toContain(1500);
+    expect(amounts).not.toContain(1.5);
+  });
+
+  it("leaves '1,234.56' as 1234.56 regardless of context", () => {
+    expect(extractAmountsFromLine("1,234.56")).toContain(1234.56);
+  });
+
+  // PASS4 #2: document-level (cross-line) locale detection. A bare "1,234" on
+  // its own line must read the dot-/comma-decimal siblings on OTHER lines to
+  // pick the right locale, not just its own line.
+  it("reads a bare '1,234' as English thousands 1234 when a dot-decimal sibling is on ANOTHER line", () => {
+    const text = "Subtotal 10.00 EUR\nTotal 1,234 EUR";
+    const result = extractAmounts(text);
+    expect(result.total_gross).toBe(1234);
+  });
+
+  it("keeps a bare '1,899 EUR/l' as ~1.9 when a comma-decimal sibling '12,50' is on ANOTHER line (Estonian)", () => {
+    const amounts = extractAmountsFromLine("1,899 EUR/l", "Kütus 1,899 EUR/l\nKokku 12,50 €");
+    expect(amounts).toContain(1.9);
+    expect(amounts).not.toContain(1899);
+  });
+
+  it("reads '1,234.56' as 1234.56 even with a wide English document context", () => {
+    const amounts = extractAmountsFromLine("1,234.56", "Subtotal 10.00\n1,234.56");
+    expect(amounts).toContain(1234.56);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractAmountsFromLine — leading-minus discipline (Codex review #7)
+// ---------------------------------------------------------------------------
+
+describe("extractAmountsFromLine — leading minus (Codex review #7)", () => {
+  it("does not manufacture negative amounts from a date like 2024-01-15", () => {
+    const result = extractAmountsFromLine("2024-01-15");
+    expect(result.some(value => value < 0)).toBe(false);
+  });
+
+  it("does not manufacture a negative from a numeric range 10-20", () => {
+    const result = extractAmountsFromLine("10-20");
+    expect(result.some(value => value < 0)).toBe(false);
+    expect(result).toContain(10);
+    expect(result).toContain(20);
+  });
+
+  it("honors a genuine leading minus at start of line", () => {
+    expect(extractAmountsFromLine("-123.45")).toContain(-123.45);
+  });
+
+  it("honors a minus after whitespace", () => {
+    expect(extractAmountsFromLine("Balance -50.00")).toContain(-50);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// classifyLayoutAmountLabel — VAT before TOTAL (Codex review #1a)
+// ---------------------------------------------------------------------------
+
+describe("classifyLayoutAmountLabel (Codex review #1a)", () => {
+  it("classifies 'Käibemaks kokku' as total_vat, not total_gross", () => {
+    expect(classifyLayoutAmountLabel("Käibemaks kokku")).toBe("total_vat");
+  });
+
+  it("classifies a bare 'Käibemaks' as total_vat", () => {
+    expect(classifyLayoutAmountLabel("Käibemaks")).toBe("total_vat");
+  });
+
+  it("keeps a 'with VAT' gross indicator 'Summa (km-ga)' as total_gross", () => {
+    expect(classifyLayoutAmountLabel("Summa (km-ga)")).toBe("total_gross");
+  });
+
+  it("classifies a net 'Summa km-ta' label as total_net", () => {
+    expect(classifyLayoutAmountLabel("Summa km-ta")).toBe("total_net");
+  });
+
+  it("classifies a plain 'Kokku' total as total_gross", () => {
+    expect(classifyLayoutAmountLabel("Kokku")).toBe("total_gross");
+  });
+
+  it("classifies an English 'Total' as total_gross", () => {
+    expect(classifyLayoutAmountLabel("Total")).toBe("total_gross");
+  });
+
+  // PASS3 #1: widened "includes VAT" guard — Estonian "sisaldab/sis. KM" and
+  // English "VAT included/including VAT" name the gross, not the VAT.
+  it("classifies 'Tasuda (sis. KM)' as total_gross", () => {
+    expect(classifyLayoutAmountLabel("Tasuda (sis. KM)")).toBe("total_gross");
+  });
+
+  it("classifies 'Total (VAT included)' as total_gross", () => {
+    expect(classifyLayoutAmountLabel("Total (VAT included)")).toBe("total_gross");
+  });
+
+  it("classifies 'Total including VAT' as total_gross", () => {
+    expect(classifyLayoutAmountLabel("Total including VAT")).toBe("total_gross");
+  });
+
+  it("classifies 'Kokku (sisaldab KM 24%)' as total_gross", () => {
+    expect(classifyLayoutAmountLabel("Kokku (sisaldab KM 24%)")).toBe("total_gross");
+  });
+
+  // PASS3 #5: a "with VAT" gross indicator with no TOTAL word must still win
+  // over the trailing VAT fallback, not be misread as total_vat.
+  it("classifies 'Hind käibemaksuga' (no TOTAL word) as total_gross", () => {
+    expect(classifyLayoutAmountLabel("Hind käibemaksuga")).toBe("total_gross");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractAmountsFromLayout — bottom-most VAT binding (Codex review #1b)
+// ---------------------------------------------------------------------------
+
+describe("extractAmountsFromLayout — bottom-most VAT binding (Codex review #1b)", () => {
+  const makeItem = (text: string, x: number, y: number, width: number): LayoutTextItem => ({
+    text, x, y, width, height: 10, pageNum: 1,
+  });
+
+  it("binds total_vat to the bottom summary line, not a top per-line VAT value", () => {
+    const items: LayoutTextItem[] = [
+      // Top per-line VAT column value — must NOT lock the VAT binding.
+      makeItem("Käibemaks", 0, 10, 80),
+      makeItem("0.50", 200, 10, 40),
+      // Net summary.
+      makeItem("Summa km-ta", 0, 40, 100),
+      makeItem("100.00", 200, 40, 50),
+      // Bottom VAT summary — the authoritative total VAT.
+      makeItem("Käibemaks kokku", 0, 70, 130),
+      makeItem("21.00", 200, 70, 50),
+      // Gross total.
+      makeItem("Kokku", 0, 100, 60),
+      makeItem("121.00", 200, 100, 60),
+    ];
+
+    const result = extractAmountsFromLayout(items);
+    expect(result?.total_gross).toBe(121);
+    expect(result?.total_vat).toBe(21);
+    expect(result?.total_net).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractAmountsFromLayout — multi-rate VAT summation (PASS3 #6)
+// ---------------------------------------------------------------------------
+
+describe("extractAmountsFromLayout — multi-rate VAT with no summary (PASS3 #6)", () => {
+  const makeItem = (text: string, x: number, y: number, width: number): LayoutTextItem => ({
+    text, x, y, width, height: 10, pageNum: 1,
+  });
+
+  it("sums distinct per-rate VAT rows instead of taking the bottom-most row", () => {
+    const items: LayoutTextItem[] = [
+      // Two per-rate VAT rows, no "kokku" VAT summary line. The bottom-most row
+      // (KM 20% -> 1.90) must NOT shadow the whole VAT charged.
+      makeItem("KM 24%", 0, 10, 60),
+      makeItem("2.38", 200, 10, 40),
+      makeItem("KM 20%", 0, 25, 60),
+      makeItem("1.90", 200, 25, 40),
+      makeItem("Kokku", 0, 40, 60),
+      makeItem("24.28", 200, 40, 50),
+    ];
+
+    const result = extractAmountsFromLayout(items);
+    expect(result?.total_gross).toBe(24.28);
+    expect(result?.total_vat).toBe(4.28);
+  });
+
+  it("keeps the finding's KM 24% row when a KM 0% row contributes nothing", () => {
+    const items: LayoutTextItem[] = [
+      makeItem("KM 24%", 0, 10, 60),
+      makeItem("2.38", 200, 10, 40),
+      makeItem("KM 0%", 0, 25, 60),
+      makeItem("0.00", 200, 25, 40),
+      makeItem("Kokku", 0, 40, 60),
+      makeItem("12.38", 200, 40, 50),
+    ];
+
+    const result = extractAmountsFromLayout(items);
+    expect(result?.total_gross).toBe(12.38);
+    expect(result?.total_vat).toBe(2.38);
+  });
+
+  it("defers to the 'kokku' VAT summary line when one exists (no summation)", () => {
+    const items: LayoutTextItem[] = [
+      makeItem("KM 24%", 0, 10, 60),
+      makeItem("2.38", 200, 10, 40),
+      makeItem("KM 20%", 0, 25, 60),
+      makeItem("1.90", 200, 25, 40),
+      makeItem("Käibemaks kokku", 0, 40, 130),
+      makeItem("4.28", 200, 40, 40),
+      makeItem("Kokku", 0, 55, 60),
+      makeItem("24.28", 200, 55, 50),
+    ];
+
+    const result = extractAmountsFromLayout(items);
+    expect(result?.total_gross).toBe(24.28);
+    expect(result?.total_vat).toBe(4.28);
+  });
+
+  // PASS4 #3: breakdown rows with BOTH a taxable-base column AND a VAT column
+  // "KM 24% | 10.00 | 2.40". The nearest right-side amount is the base (10.00);
+  // total_vat must bind to the RIGHTMOST amount (the VAT column) so the sum is
+  // the VAT charged (2.40), not a sum of bases (15.00).
+  it("binds a multi-rate VAT row to the rightmost (VAT) column, not the base column", () => {
+    const items: LayoutTextItem[] = [
+      makeItem("KM 24%", 0, 10, 60),
+      makeItem("10.00", 150, 10, 45),
+      makeItem("2.40", 260, 10, 40),
+      makeItem("KM 0%", 0, 25, 60),
+      makeItem("5.00", 150, 25, 45),
+      makeItem("0.00", 260, 25, 40),
+      makeItem("Kokku", 0, 40, 60),
+      makeItem("17.40", 260, 40, 50),
+    ];
+
+    const result = extractAmountsFromLayout(items);
+    expect(result?.total_gross).toBe(17.4);
+    expect(result?.total_vat).toBe(2.4);
+    expect(result?.total_vat).not.toBe(15);
+  });
+
+  it("keeps the single-amount 'KM 24% 2.38' + 'KM 0% 0.00' case at 2.38 (rightmost = only amount)", () => {
+    const items: LayoutTextItem[] = [
+      makeItem("KM 24%", 0, 10, 60),
+      makeItem("2.38", 200, 10, 40),
+      makeItem("KM 0%", 0, 25, 60),
+      makeItem("0.00", 200, 25, 40),
+      makeItem("Kokku", 0, 40, 60),
+      makeItem("12.38", 200, 40, 50),
+    ];
+
+    const result = extractAmountsFromLayout(items);
+    expect(result?.total_vat).toBe(2.38);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mergeLayoutAmounts — VAT conflict + net re-derivation (Codex review #1c/#2)
+// ---------------------------------------------------------------------------
+
+describe("mergeLayoutAmounts (Codex review #1c/#2)", () => {
+  it("prefers a correct explicit text VAT over a wrong layout VAT and re-derives net (#1c)", () => {
+    const layoutAmounts: ExtractedAmountsWithMetadata = {
+      total_net: 115,
+      total_vat: 5,
+      total_gross: 120,
+      vat_explicit: true,
+      provenance: [
+        { field: "total_net", value: 115, source: "coordinate", rationale: "layout_label_binding" },
+        { field: "total_vat", value: 5, source: "coordinate", rationale: "layout_label_binding" },
+        { field: "total_gross", value: 120, source: "coordinate", rationale: "layout_label_binding" },
+      ],
+    };
+    const textAmounts: ExtractedAmountsWithMetadata = {
+      total_net: 100,
+      total_vat: 20,
+      total_gross: 120,
+      vat_explicit: true,
+      provenance: [
+        { field: "total_vat", value: 20, source: "label", rationale: "explicit_vat_line" },
+      ],
+    };
+
+    const result = mergeLayoutAmounts(layoutAmounts, textAmounts);
+    expect(result.total_gross).toBe(120);
+    expect(result.total_vat).toBe(20);
+    expect(result.total_net).toBe(100);
+  });
+
+  it("re-derives net after preferring the text gross so net + vat = gross (#2)", () => {
+    const layoutAmounts: ExtractedAmountsWithMetadata = {
+      total_net: 100,
+      total_vat: 20,
+      total_gross: 120,
+      vat_explicit: true,
+      provenance: [
+        { field: "total_net", value: 100, source: "coordinate", rationale: "layout_label_binding" },
+        { field: "total_vat", value: 20, source: "coordinate", rationale: "layout_label_binding" },
+        { field: "total_gross", value: 120, source: "coordinate", rationale: "layout_label_binding" },
+      ],
+    };
+    const textAmounts: ExtractedAmountsWithMetadata = {
+      total_gross: 150,
+      vat_explicit: false,
+      provenance: [
+        { field: "total_gross", value: 150, source: "label", rationale: "explicit_total_line" },
+      ],
+    };
+
+    const result = mergeLayoutAmounts(layoutAmounts, textAmounts);
+    expect(result.total_gross).toBe(150);
+    expect(result.total_vat).toBe(20);
+    expect(result.total_net).toBe(130);
+  });
+
+  // PASS3 #4: when the trio-drop branch clears total_vat and no text fallback
+  // qualifies, vat_explicit must be false — not a leaked stale layout flag.
+  it("reports vat_explicit false when the trio-drop clears total_vat (#4)", () => {
+    const layoutAmounts: ExtractedAmountsWithMetadata = {
+      total_vat: 150,
+      total_gross: 100,
+      vat_explicit: true,
+      provenance: [
+        { field: "total_vat", value: 150, source: "coordinate", rationale: "layout_label_binding" },
+        { field: "total_gross", value: 100, source: "coordinate", rationale: "layout_label_binding" },
+      ],
+    };
+    const textAmounts: ExtractedAmountsWithMetadata = {
+      vat_explicit: false,
+      provenance: [],
+    };
+
+    const result = mergeLayoutAmounts(layoutAmounts, textAmounts);
+    expect(result.total_vat).toBeUndefined();
+    expect(result.vat_explicit).toBe(false);
+  });
+
+  // PASS4 #5: a negative layout VAT must never re-derive net (that would keep
+  // the bad VAT and inflate net); it is dropped so text fallbacks supply
+  // consistent values.
+  it("drops a negative layout VAT instead of re-deriving net from it (#5)", () => {
+    const layoutAmounts: ExtractedAmountsWithMetadata = {
+      total_net: 100,
+      total_vat: -5,
+      total_gross: 100,
+      vat_explicit: true,
+      provenance: [
+        { field: "total_net", value: 100, source: "coordinate", rationale: "layout_label_binding" },
+        { field: "total_vat", value: -5, source: "coordinate", rationale: "layout_label_binding" },
+        { field: "total_gross", value: 100, source: "coordinate", rationale: "layout_label_binding" },
+      ],
+    };
+    const textAmounts: ExtractedAmountsWithMetadata = {
+      vat_explicit: false,
+      provenance: [],
+    };
+
+    const result = mergeLayoutAmounts(layoutAmounts, textAmounts);
+    expect(result.total_gross).toBe(100);
+    expect(result.total_vat).toBeUndefined();
+    expect(result.total_vat).not.toBe(-5);
+    expect(result.total_net).not.toBe(105);
+    expect(result.vat_explicit).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildKeywordSuggestion — transport-before-bank ordering (Codex review #3)
+// ---------------------------------------------------------------------------
+
+describe("buildKeywordSuggestion — transport before bank (Codex review #3)", () => {
+  const accounts = [
+    makeAccount({ id: 5100, name_est: "Transpordikulud", name_eng: "Transport costs" }),
+    makeAccount({ id: 5200, name_est: "Pangateenustasud", name_eng: "Bank service fees" }),
+    makeAccount({ id: 5300, name_est: "Toitlustuskulud", name_eng: "Food and restaurant" }),
+    makeAccount({ id: 5990, name_est: "Muud tegevuskulud", name_eng: "Other expenses" }),
+  ];
+  const articles = [
+    { id: 20, name_est: "Transpordikulu", name_eng: "Transport expense", accounts_id: 5100 },
+    { id: 30, name_est: "Pangateenustasu", name_eng: "Bank service fee", accounts_id: 5200 },
+    { id: 40, name_est: "Toitlustus", name_eng: "Food and restaurant", accounts_id: 5300 },
+    { id: 99, name_est: "Muu kulu", name_eng: "Other expense", accounts_id: 5990 },
+  ];
+
+  it("routes 'Bolt teenustasu' to transport, not bank fees", () => {
+    const result = buildKeywordSuggestion(articles, accounts, "Bolt teenustasu");
+    expect(result?.suggested_purchase_article?.id).toBe(20);
+    expect(result?.suggested_purchase_article?.id).not.toBe(30);
+  });
+
+  it("routes 'parking fee' to transport, not bank fees", () => {
+    const result = buildKeywordSuggestion(articles, accounts, "parking fee");
+    expect(result?.suggested_purchase_article?.id).toBe(20);
+  });
+
+  it("routes 'Wolt service charge' to food/representation, not bank fees", () => {
+    const result = buildKeywordSuggestion(articles, accounts, "Wolt service charge");
+    expect(result?.suggested_purchase_article?.id).toBe(40);
+    expect(result?.suggested_purchase_article?.id).not.toBe(30);
+  });
+
+  it("still routes a genuine bank fee to bank fees", () => {
+    const result = buildKeywordSuggestion(articles, accounts, "Bank haldustasu");
+    expect(result?.suggested_purchase_article?.id).toBe(30);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// suggestBookingInternal — tolerates transient GET failures (Codex review #5)
+// ---------------------------------------------------------------------------
+
+describe("suggestBookingInternal — allSettled tolerance (Codex review #5)", () => {
+  it("skips an invoice whose GET rejects and still uses a later fulfilled invoice", async () => {
+    const api = {
+      purchaseInvoices: {
+        get: async (id: number) => {
+          if (id === 1) throw new Error("transient 503");
+          return {
+            id: 2,
+            number: "INV-2",
+            liability_accounts_id: 2110,
+            items: [
+              { custom_title: "Cloud hosting", cl_purchase_articles_id: 10, purchase_accounts_id: 4920 },
+            ],
+          };
+        },
+      },
+    };
+    const context = {
+      purchaseInvoices: [
+        { id: 1, clients_id: 7, status: "CONFIRMED", create_date: "2024-02-01" },
+        { id: 2, clients_id: 7, status: "CONFIRMED", create_date: "2024-01-01" },
+      ],
+      purchaseArticlesWithVat: [
+        { id: 10, name_est: "Serverikulu", name_eng: "Hosting", accounts_id: 4920 },
+      ],
+      accounts: [makeAccount({ id: 4920, name_est: "Serveriteenus" })],
+    };
+
+    const result = await suggestBookingInternal(api, context, 7, "hosting");
+    expect(result?.source).toBe("supplier_history");
+    expect(result?.matched_invoice_id).toBe(2);
+    expect(result?.suggested_purchase_article?.id).toBe(10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeMinOcrConfidence — small-sample robust minimum (Codex review #6)
+// ---------------------------------------------------------------------------
+
+describe("computeMinOcrConfidence — small-sample robust minimum (Codex review #6)", () => {
+  it("ignores a <3-char noise item's low confidence in the small-sample branch", () => {
+    const items = [
+      { text: "Total 12.00", x: 0, y: 0, width: 80, height: 10, confidence: 0.90 },
+      { text: "Acme OÜ", x: 0, y: 20, width: 60, height: 10, confidence: 0.85 },
+      { text: ".", x: 0, y: 40, width: 5, height: 10, confidence: 0.10 },
+    ];
+    // Only 2 robust (>=3 char) items -> small-sample branch, but the min must be
+    // taken over robust values (0.85), NOT the unfiltered min (0.10 noise).
+    expect(computeMinOcrConfidence(items)).toBe(0.85);
   });
 });

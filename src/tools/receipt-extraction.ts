@@ -249,8 +249,8 @@ export interface ExtractedReceiptFields {
   /** Structured identifier candidates surfaced for reviewer visibility (#vat-reg-recovery). */
   all_vat_candidates?: string[];
   all_reg_code_candidates?: string[];
-  reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
-  vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
+  reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
+  vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
   rejected_candidates?: RejectedCandidate[];
   field_provenance?: FieldProvenance[];
   extraction_notes?: string[];
@@ -287,6 +287,13 @@ export interface BookingSuggestion {
    * suggestion is produced; `suggestBookingInternal` itself does not set it.
    */
   reverse_charge_reason?: "phrase_match" | "foreign_supplier_default" | "supplier_history" | "none";
+  /**
+   * Degradation note (#6): set when one or more of the supplier's recent
+   * purchase-invoice GETs rejected and were skipped, so the freshest history may
+   * be missing from this suggestion. Surfaced to the operator so the suggestion
+   * is not silently trusted as complete.
+   */
+  history_partial_note?: string;
 }
 
 export const CATEGORY_KEYWORD_MAP: Array<{
@@ -394,7 +401,7 @@ interface ExtractedAmounts {
   vat_explicit?: boolean;
 }
 
-interface ExtractedAmountsWithMetadata extends ExtractedAmounts {
+export interface ExtractedAmountsWithMetadata extends ExtractedAmounts {
   provenance: AmountProvenanceMetadata[];
   extraction_notes?: string[];
 }
@@ -456,7 +463,45 @@ function normalizeFilenameToken(name: string): string {
     .toUpperCase();
 }
 
-function parseAmount(raw: string): number | undefined {
+// True when `context` contains a dot used as a decimal separator (an "N.NN"
+// money amount, e.g. "0.00" or "1,234.56"), ignoring dots inside percentages
+// like "24.5%". Signals English number formatting so a bare "1,500" is read as
+// thousands, not a 3-decimal Estonian value.
+function hasDotDecimalSignal(context?: string): boolean {
+  if (!context) return false;
+  return [...context.matchAll(/\d\.\d{1,2}(?!\d)/g)].some(match => {
+    const after = context.slice((match.index ?? 0) + match[0].length);
+    return !after.startsWith("%");
+  });
+}
+
+// True when `context` carries a comma used as a decimal separator with exactly
+// one or two fraction digits, e.g. "12,50 €" or "0,5". A three-fraction-digit
+// "1,899" is deliberately NOT matched (the trailing digit breaks the boundary)
+// because it is the very token whose locale we are trying to resolve — only a
+// DIFFERENT, unambiguously comma-decimal sibling should count as an Estonian
+// signal.
+function hasCommaDecimalSignal(context?: string): boolean {
+  if (!context) return false;
+  return /\d,\d{1,2}(?!\d)/.test(context);
+}
+
+// Document-level number-locale classification used to disambiguate a bare
+// single-group "1,234"/"1,899" token, which is structurally identical to both a
+// 3-decimal Estonian unit price and an English thousands-grouped integer. The
+// context should be as wide as available (ideally the whole document) so the
+// decision is document-level, not just same-line (#2). Rules:
+//   - a dot-decimal sibling ("10.00") => English (thousands);
+//   - else a comma-decimal sibling ("12,50") => European (3-decimal);
+//   - else no locale signal at all => "unknown" (caller keeps the
+//     Estonian-safe 3-decimal default so a fuel price is never inflated 1000x).
+function detectNumberLocale(context?: string): "english" | "european" | "unknown" {
+  if (hasDotDecimalSignal(context)) return "english";
+  if (hasCommaDecimalSignal(context)) return "european";
+  return "unknown";
+}
+
+function parseAmount(raw: string, context?: string, documentContext?: string): number | undefined {
   const cleaned = raw.replace(/[^\d,.-]/g, "").trim();
   if (!cleaned) return undefined;
 
@@ -469,7 +514,21 @@ function parseAmount(raw: string): number | undefined {
       ? normalized.replace(/\./g, "").replace(",", ".")
       : normalized.replace(/,/g, "");
   } else if (commaIndex >= 0) {
-    if (/^-?\d{1,3}(,\d{3})+$/.test(normalized)) {
+    // A single-digit integer part with exactly one 3-digit group (e.g. "1,899")
+    // is ambiguous: in Estonian receipts the comma is the decimal separator, so
+    // it is a 3-decimal unit price (1.899 EUR/l), not a thousands-grouped 1899.
+    // But in English formatting the same "1,500" is a thousands-grouped 1500.
+    // Resolve it by DOCUMENT-level locale (widest context available), not just
+    // the single tokenized line: a dot-decimal sibling anywhere in the document
+    // ("10.00") reads it as English thousands; an Estonian/European document
+    // (comma-decimal siblings, no dot-decimal) keeps the 3-decimal reading; with
+    // no locale signal at all keep the Estonian-safe 3-decimal default. Multi-
+    // digit integers ("12,345") or multiple groups ("1,234,567") are always
+    // thousands.
+    const localeContext = documentContext ?? context;
+    if (/^-?\d{1,3}(,\d{3})+$/.test(normalized) && !/^-?\d,\d{3}$/.test(normalized)) {
+      normalized = normalized.replace(/,/g, "");
+    } else if (/^-?\d,\d{3}$/.test(normalized) && detectNumberLocale(localeContext) === "english") {
       normalized = normalized.replace(/,/g, "");
     } else {
       normalized = normalized.replace(/\./g, "").replace(",", ".");
@@ -484,15 +543,20 @@ function parseAmount(raw: string): number | undefined {
   return Number.isFinite(parsed) ? roundMoney(parsed) : undefined;
 }
 
-function extractAmountsFromLine(line: string): number[] {
-  const matches = [...line.matchAll(/-?\d[\d\s.,]*\d|-?\d/g)];
+// Exported for unit tests.
+export function extractAmountsFromLine(line: string, documentContext?: string): number[] {
+  // Only honor a leading minus at start-of-line or after whitespace, and only
+  // start a number when it is not immediately preceded by another digit. This
+  // stops date/range fragments like "2024-01-15" (→ -1, -15) or "10-20" (→ -20)
+  // from manufacturing spurious negative pseudo-amounts.
+  const matches = [...line.matchAll(/(?<!\d)-?\d[\d\s.,]*\d|(?<!\d)-?\d/g)];
   const amounts = matches
     .filter(match => {
       const raw = match[0] ?? "";
       const next = line.slice((match.index ?? 0) + raw.length).trimStart();
       return !next.startsWith("%");
     })
-    .map(match => parseAmount(match[0] ?? ""))
+    .map(match => parseAmount(match[0] ?? "", line, documentContext))
     .filter((value): value is number => value !== undefined && value !== 0);
 
   return [...new Set(amounts)];
@@ -839,7 +903,10 @@ interface ClassifiedAmountLine {
 
 function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   const line = lines[index]!;
-  const amounts = extractAmountsFromLine(line);
+  // Pass the whole document as locale context so a bare "1,234" is disambiguated
+  // by dot-/comma-decimal siblings on OTHER lines, not just this one (#2).
+  const documentContext = lines.join("\n");
+  const amounts = extractAmountsFromLine(line, documentContext);
   const inspectionLine = buildAmountInspectionLine(lines, index);
   const inspectionLower = inspectionLine.toLowerCase();
   const lineLower = line.toLowerCase();
@@ -995,9 +1062,26 @@ function assignLayoutColumns(rows: readonly LayoutRow[]): Map<LayoutTextItem, nu
   return columnByItem;
 }
 
-function classifyLayoutAmountLabel(text: string): AmountField | undefined {
+// "with VAT" gross indicators that also trip the VAT-word regex (`km` inside
+// `km-ga`, `käibemaks` inside `käibemaksuga`). These name the *gross* amount
+// (sum *including* VAT), so they must never be pulled to total_vat.
+const RECEIPT_GROSS_WITH_VAT_RE = /(km-ga|käibemaksuga|koos\s+km|sis(\.|aldab)?\s*(km|käibemaks)|with\s+vat|incl(\.|uding)?\s*vat|vat\s*incl(\.|uded)?)/i;
+
+// Exported for unit tests.
+export function classifyLayoutAmountLabel(text: string): AmountField | undefined {
   if (RECEIPT_NET_LABEL_RE.test(text)) return "total_net";
+  const grossWithVat = RECEIPT_GROSS_WITH_VAT_RE.test(text);
+  // A summary line that explicitly names VAT ("Käibemaks kokku") also contains a
+  // TOTAL word ("kokku"). Test VAT before TOTAL when a genuine VAT word is
+  // present so the bottom VAT summary is not misclassified as gross — but let an
+  // explicit "with VAT" gross indicator ("summa (km-ga)", "Tasuda (sis. KM)")
+  // stay gross.
+  if (RECEIPT_VAT_LABEL_RE.test(text) && !grossWithVat) return "total_vat";
   if (RECEIPT_TOTAL_LABEL_RE.test(text)) return "total_gross";
+  // A "with VAT" gross indicator names the gross amount even with no TOTAL word
+  // ("Hind käibemaksuga"); it must win over the trailing VAT fallback below so
+  // the guard is not contradicted by a same-line VAT word.
+  if (grossWithVat) return "total_gross";
   if (RECEIPT_VAT_LABEL_RE.test(text)) return "total_vat";
   return undefined;
 }
@@ -1052,6 +1136,12 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
 } {
   const labels: LayoutLabelCell[] = [];
   const amounts: LayoutAmountCell[] = [];
+  // Whole-document locale context so a bare "1,234" amount cell is disambiguated
+  // by dot-/comma-decimal siblings elsewhere on the document, not just its own
+  // cell (#2).
+  const documentContext = rows
+    .flatMap(row => row.items.map(item => clampTextLine(item.text)))
+    .join("\n");
 
   for (const row of rows) {
     for (const item of row.items) {
@@ -1059,7 +1149,7 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
       const columnIndex = columnByItem.get(item);
       if (columnIndex === undefined) continue;
 
-      for (const amount of extractAmountsFromLine(text)) {
+      for (const amount of extractAmountsFromLine(text, documentContext)) {
         if (amount > MAX_RECEIPT_FALLBACK_AMOUNT || isLikelyYearAmount(amount, text)) continue;
         amounts.push({ amount, item, row, columnIndex, centerX: layoutCenterX(item) });
       }
@@ -1095,6 +1185,20 @@ function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly Layou
   const rightSideAmounts = sameRowAmounts.filter(amount => amount.item.x >= labelRightEdge);
   const candidates = rightSideAmounts.length > 0 ? rightSideAmounts : sameRowAmounts;
 
+  // #3: on a multi-rate breakdown row "KM 24% | 10.00 | 2.40" the taxable base
+  // is printed before the VAT amount, so the VAT column is the RIGHTMOST amount,
+  // not the nearest one. Binding a total_vat label to the nearest amount would
+  // pick the base (10.00) and later sum bases instead of VAT. Bind total_vat to
+  // the rightmost same-row amount; single-amount rows ("KM 24% 2.38") are
+  // unaffected (rightmost = only amount). Other fields keep nearest-column
+  // binding.
+  if (label.field === "total_vat" && candidates.length > 1) {
+    return [...candidates].sort((a, b) =>
+      (b.item.x + b.item.width) - (a.item.x + a.item.width) ||
+      b.centerX - a.centerX,
+    )[0];
+  }
+
   return candidates
     .sort((a, b) =>
       horizontalGap(label.item, a.item) - horizontalGap(label.item, b.item) ||
@@ -1115,13 +1219,14 @@ function findBelowColumnLayoutAmount(label: LayoutLabelCell, amounts: readonly L
     )[0];
 }
 
-function shouldReplaceLayoutBinding(current: LayoutAmountCell | undefined, next: LayoutAmountCell, field: AmountField): boolean {
+function shouldReplaceLayoutBinding(current: LayoutAmountCell | undefined, next: LayoutAmountCell): boolean {
   if (!current) return true;
-  if (field === "total_gross") {
-    return next.row.pageNum > current.row.pageNum ||
-      (next.row.pageNum === current.row.pageNum && next.row.y >= current.row.y);
-  }
-  return false;
+  // Prefer the bottom-most binding for every field, not just total_gross. A
+  // per-line VAT/net value in a table body (or a column header) can otherwise
+  // lock the binding at the top of the page and shadow the authoritative bottom
+  // summary line ("Käibemaks kokku"). The bottom-most summary is the total.
+  return next.row.pageNum > current.row.pageNum ||
+    (next.row.pageNum === current.row.pageNum && next.row.y >= current.row.y);
 }
 
 function amountMetadataFromLayout(field: AmountField, cell: LayoutAmountCell): AmountProvenanceMetadata {
@@ -1187,27 +1292,70 @@ function reconcileLayoutAmounts(bindings: ReadonlyMap<AmountField, LayoutAmountC
   };
 }
 
-function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): ExtractedAmountsWithMetadata | undefined {
+// Exported for unit tests.
+export function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): ExtractedAmountsWithMetadata | undefined {
   const rows = groupLayoutRows(textItems);
   if (rows.length === 0) return undefined;
 
   const columnByItem = assignLayoutColumns(rows);
   const { labels, amounts } = buildLayoutCells(rows, columnByItem);
   const bindings = new Map<AmountField, LayoutAmountCell>();
+  const vatRowBindings = new Map<LayoutRow, { label: LayoutLabelCell; cell: LayoutAmountCell }>();
 
   for (const label of labels) {
     const cell = findSameRowLayoutAmount(label, amounts) ?? findBelowColumnLayoutAmount(label, amounts);
     if (!cell) continue;
+    if (label.field === "total_vat" && !vatRowBindings.has(label.row)) {
+      vatRowBindings.set(label.row, { label, cell });
+    }
     const current = bindings.get(label.field);
-    if (shouldReplaceLayoutBinding(current, cell, label.field)) {
+    if (shouldReplaceLayoutBinding(current, cell)) {
       bindings.set(label.field, cell);
+    }
+  }
+
+  // Fix #2: on a multi-rate receipt with several per-rate VAT rows (e.g.
+  // "KM 24% 2.38" + "KM 0% 0.00") and NO "kokku"/total VAT summary line, taking
+  // the bottom-most row can silently understate VAT (bind to the 0% row). Sum the
+  // distinct per-rate VAT rows instead so total_vat is the whole VAT charged.
+  const bottomVat = bindings.get("total_vat");
+  const hasVatSummaryLabel = [...vatRowBindings.values()].some(({ label }) => RECEIPT_TOTAL_LABEL_RE.test(label.item.text));
+  if (bottomVat && vatRowBindings.size > 1 && !hasVatSummaryLabel) {
+    // #3: sum only the cells that sit in the actual VAT column. On a breakdown
+    // with both a taxable-base column and a VAT column ("KM 24% | 10.00 | 2.40",
+    // "KM 0% | 5.00 | 0.00"), a 0%-rate row's 0.00 VAT is filtered out as a zero
+    // amount, leaving only its BASE (5.00) bound to the row — summing that base
+    // would inflate VAT (2.40 + 5.00 = 7.40). Anchor on the rightmost bound VAT
+    // cell and sum only same-column cells; a row whose only bound cell is a base
+    // in a left column contributes nothing (its true VAT was 0).
+    const vatCells = [...vatRowBindings.values()].map(({ cell }) => cell);
+    const rightmostVatCell = vatCells.reduce((best, cell) =>
+      (cell.item.x + cell.item.width) > (best.item.x + best.item.width) ? cell : best,
+    );
+    const summed = roundMoney(
+      vatCells
+        .filter(cell => cell.columnIndex === rightmostVatCell.columnIndex)
+        .reduce((total, cell) => total + cell.amount, 0),
+    );
+    // Coherence guard: only accept the summed VAT when it is plausible against
+    // the gross total. A summed VAT that swallows most of (or exceeds) the gross
+    // cannot be right — keep the single bottom-most VAT binding and let
+    // reconciliation/text fallbacks supply a consistent value instead of
+    // emitting an inflated VAT.
+    const grossAmount = bindings.get("total_gross")?.amount;
+    const summedIsCoherent = grossAmount === undefined ||
+      grossAmount <= 0 ||
+      summed < grossAmount;
+    if (summedIsCoherent) {
+      bindings.set("total_vat", { ...bottomVat, amount: summed });
     }
   }
 
   return reconcileLayoutAmounts(bindings);
 }
 
-function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, textAmounts: ExtractedAmountsWithMetadata): ExtractedAmountsWithMetadata {
+// Exported for unit tests.
+export function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, textAmounts: ExtractedAmountsWithMetadata): ExtractedAmountsWithMetadata {
   const grossValuesDisagree = layoutAmounts.total_gross !== undefined &&
     textAmounts.total_gross !== undefined &&
     Math.abs(layoutAmounts.total_gross - textAmounts.total_gross) > 0.02;
@@ -1222,7 +1370,7 @@ function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, textAmo
   let totalNet = layoutAmounts.total_net;
   let totalVat = layoutAmounts.total_vat;
   const totalGross = preferTextGross ? textAmounts.total_gross : layoutAmounts.total_gross;
-  const extractionNotes = preferTextGross && layoutAmounts.total_gross !== undefined && textAmounts.total_gross !== undefined
+  const extractionNotes: string[] = preferTextGross && layoutAmounts.total_gross !== undefined && textAmounts.total_gross !== undefined
     ? [`layout_total_gross_${layoutAmounts.total_gross}_disagreed_with_text_total_gross_${textAmounts.total_gross}_text_preferred`]
     : [];
 
@@ -1232,8 +1380,66 @@ function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, textAmo
     if (metadata) mergedProvenance.unshift(metadata);
   };
 
+  const dropProvenance = (field: AmountField) => {
+    const index = mergedProvenance.findIndex(entry => entry.field === field);
+    if (index >= 0) mergedProvenance.splice(index, 1);
+  };
+
   if (preferTextGross) {
     addTextField("total_gross", totalGross);
+  }
+
+  // #1c: a layout VAT pinned to the wrong table column (e.g. a per-line VAT or a
+  // header cell) can disagree with a correct explicit text VAT. Apply the same
+  // conflict rule gross uses — prefer the plausible, explicitly-stated text VAT
+  // when the two disagree, so a correct text VAT can override a wrong layout VAT.
+  const vatValuesDisagree = totalVat !== undefined &&
+    textAmounts.total_vat !== undefined &&
+    Math.abs(totalVat - textAmounts.total_vat) > 0.02;
+  const textVatIsPlausible = textAmounts.total_vat !== undefined &&
+    textAmounts.vat_explicit === true &&
+    totalGross !== undefined &&
+    textAmounts.total_vat >= 0 &&
+    textAmounts.total_vat <= totalGross;
+  if (vatValuesDisagree && textVatIsPlausible) {
+    extractionNotes.push(`layout_total_vat_${totalVat}_disagreed_with_text_total_vat_${textAmounts.total_vat}_text_preferred`);
+    dropProvenance("total_vat");
+    totalVat = textAmounts.total_vat;
+    addTextField("total_vat", totalVat);
+  }
+
+  // #2: after preferring the text gross (or overriding the VAT above) the layout
+  // net can go stale — net + vat no longer equals the gross. Re-derive net from
+  // the trusted gross and the vat; if the vat itself is implausible against the
+  // new gross, drop the stale layout net/vat so the text fallbacks below supply
+  // consistent values.
+  if (totalGross !== undefined && totalVat !== undefined) {
+    const trioReconciles = totalNet !== undefined &&
+      Math.abs(roundMoney(totalNet + totalVat) - totalGross) <= 0.02;
+    if (!trioReconciles) {
+      // #5: a negative layout VAT (e.g. -5 against gross 100) is implausible —
+      // re-deriving net from it (net = 105) keeps the bad VAT and inflates net.
+      // Only re-derive net when the VAT is within [0, gross]; otherwise drop the
+      // stale layout net+vat so the text fallbacks below supply consistent
+      // values.
+      if (totalVat >= 0 && totalVat <= totalGross) {
+        totalNet = roundMoney(totalGross - totalVat);
+        dropProvenance("total_net");
+        mergedProvenance.unshift({
+          field: "total_net",
+          value: totalNet,
+          source: "fallback",
+          textItem: mergedProvenance.find(entry => entry.field === "total_vat")?.textItem
+            ?? mergedProvenance.find(entry => entry.field === "total_gross")?.textItem,
+          rationale: "derived_from_gross_vat",
+        });
+      } else {
+        dropProvenance("total_net");
+        dropProvenance("total_vat");
+        totalNet = undefined;
+        totalVat = undefined;
+      }
+    }
   }
 
   if (totalNet === undefined && textAmounts.total_net !== undefined && totalGross !== undefined && textAmounts.total_net <= totalGross) {
@@ -1250,7 +1456,10 @@ function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, textAmo
     total_net: totalNet,
     total_vat: totalVat,
     total_gross: totalGross,
-    vat_explicit: layoutAmounts.vat_explicit || (totalVat !== undefined && textAmounts.vat_explicit === true),
+    // vat_explicit must reflect the FINAL total_vat: only true when a total_vat
+    // survives AND came from an explicit source. When the trio-drop branch above
+    // clears total_vat, a stale layout vat_explicit must not leak through.
+    vat_explicit: totalVat !== undefined && (layoutAmounts.vat_explicit || textAmounts.vat_explicit === true),
     provenance: mergedProvenance,
     ...(extractionNotes.length > 0 ? { extraction_notes: extractionNotes } : {}),
   };
@@ -1469,6 +1678,14 @@ export interface ExtractReceiptFieldsOptions {
   partialOcrFailure?: boolean;
 }
 
+/**
+ * Below this minimum OCR confidence (scale 0–1, verified empirically) a
+ * document is flagged `low_ocr_confidence` and routed to review. Shared by the
+ * single-PDF flow (`extract_pdf_invoice`) and the receipt-batch flow so both
+ * gate on the same bar.
+ */
+export const LOW_OCR_CONFIDENCE_THRESHOLD = 0.6;
+
 export function computeMinOcrConfidence(textItems: readonly LayoutTextItem[] | undefined): number | undefined {
   const confidenceValues = textItems
     ?.map(item => item.confidence)
@@ -1480,7 +1697,12 @@ export function computeMinOcrConfidence(textItems: readonly LayoutTextItem[] | u
     .filter(item => (item.text?.length ?? 0) >= 3)
     .map(item => item.confidence)
     .filter((value): value is number => value !== undefined && Number.isFinite(value));
-  if (robustValues.length < 5) return Math.min(...confidenceValues);
+  // Too few robust items for a stable 10th-percentile: fall back to the minimum
+  // of the robust (>=3 char) values so a stray low-confidence <3-char noise item
+  // cannot dominate. Only use the unfiltered min when no robust item survives.
+  if (robustValues.length < 5) {
+    return robustValues.length > 0 ? Math.min(...robustValues) : Math.min(...confidenceValues);
+  }
   const sorted = [...robustValues].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length * 0.1)]!;
 }
@@ -1818,6 +2040,7 @@ function identifierSourceFromRationale(rationale?: ExtractedReceiptFields["reg_c
     case "labeled":
       return "label";
     case "coordinate_confirmed":
+    case "coordinate_confirmed_echo":
     case "coordinate_rejected":
       return "coordinate";
     case "bare_structural":
@@ -2373,13 +2596,28 @@ async function suggestBookingInternalImpl(
     .filter(invoice => invoice.clients_id === clientId && invoice.status === "CONFIRMED")
     .sort((a, b) => (b.create_date ?? "").localeCompare(a.create_date ?? ""));
 
-  const fullInvoices = await Promise.all(
+  // Use allSettled so a single transient GET failure does not reject the whole
+  // batch and lose the other suppliers' history. Fulfilled results are processed
+  // in the original (most-recent-first) order; rejected entries are skipped.
+  const settledInvoices = await Promise.allSettled(
     supplierInvoices.slice(0, 5).map(invoice =>
       invoice.id ? api.purchaseInvoices.get(invoice.id) : Promise.resolve(undefined)
     )
   );
 
-  for (const fullInvoice of fullInvoices) {
+  // #6: a rejected GET is skipped below so the whole suggestion does not fail,
+  // but the freshest history may then be missing — carry a degradation note on
+  // the suggestion so the caller does not silently trust older history only.
+  const historyUnavailable = settledInvoices.filter(settled => settled.status === "rejected").length;
+  const historyPartialNote = historyUnavailable > 0
+    ? `supplier_history_partial: ${historyUnavailable} of ${settledInvoices.length} recent invoices unavailable`
+    : undefined;
+  const withHistoryNote = (suggestion: BookingSuggestion | undefined): BookingSuggestion | undefined =>
+    suggestion && historyPartialNote ? { ...suggestion, history_partial_note: historyPartialNote } : suggestion;
+
+  for (const settled of settledInvoices) {
+    if (settled.status !== "fulfilled") continue;
+    const fullInvoice = settled.value;
     if (!fullInvoice) continue;
     const matchedItem = fullInvoice.items?.find(item =>
       item.custom_title?.toLowerCase().includes(description.toLowerCase())
@@ -2394,7 +2632,7 @@ async function suggestBookingInternalImpl(
         ? context.accounts.find(account => account.id === suggestedArticle.accounts_id)
         : undefined;
 
-    return {
+    return withHistoryNote({
       source: "supplier_history",
       matched_invoice_id: fullInvoice.id,
       matched_invoice_number: fullInvoice.number,
@@ -2414,14 +2652,14 @@ async function suggestBookingInternalImpl(
         custom_title: matchedItem.custom_title || description,
         amount: 1,
       },
-    };
+    });
   }
 
-  return buildKeywordSuggestion(
+  return withHistoryNote(buildKeywordSuggestion(
     context.purchaseArticlesWithVat,
     context.accounts,
     description,
-  );
+  ));
 }
 
 function pickFirstDefined<T>(...values: Array<T | undefined>): T | undefined {
@@ -2487,7 +2725,18 @@ export function buildKeywordSuggestion(
   let articleKeywords = ["muu", "other", "general"];
   let accountKeywords = ["muu", "general", "kulud"];
 
-  const keywordMatch = CATEGORY_KEYWORD_MAP.find(entry => entry.pattern.test(normalizedHints));
+  // Merchant-specific card_purchases patterns (bolt/uber/taxi/parking/wolt/…)
+  // must be tested before the generic bank_fees pattern. Otherwise a hint like
+  // "Bolt teenustasu" / "parking fee" / "Wolt service charge" matches the
+  // bank_fees `fee|teenustasu|service charge` alternation (which is listed
+  // first in CATEGORY_KEYWORD_MAP) and is miscoded as a bank fee instead of a
+  // transport/representation expense. Restore transport-before-bank ordering
+  // for this call site the way the sibling classification functions do.
+  const orderedCategories = [
+    ...CATEGORY_KEYWORD_MAP.filter(entry => entry.category === "card_purchases"),
+    ...CATEGORY_KEYWORD_MAP.filter(entry => entry.category !== "card_purchases"),
+  ];
+  const keywordMatch = orderedCategories.find(entry => entry.pattern.test(normalizedHints));
   if (keywordMatch) {
     articleKeywords = keywordMatch.articleKeywords;
     accountKeywords = keywordMatch.accountKeywords;
