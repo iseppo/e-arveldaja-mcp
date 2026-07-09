@@ -46,4 +46,4 @@ For owner-paid expense receipts:
 
 If the next step is clear, continue with `continue_accounting_workflow` and `action: "prepare_action"` instead of inventing your own action plan.
 
-`resolve_accounting_review_item` is a compatibility primitive registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use the merged continuation tool (`continue_accounting_workflow` with `action="resolve_review"`).
+Use `continue_accounting_workflow` with `action="resolve_review"`. The granular `resolve_accounting_review_item` only appears when granular tools are exposed — treat it as the same tool and don't name it to the user.

@@ -18,7 +18,7 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 ## Workflow
 
-`process_camt053` is the preferred merged workflow tool. Fallback compatibility primitives: `parse_camt053` and `import_camt053` are registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `process_camt053` with `mode="parse"` / `mode="dry_run"` / `mode="execute"`. Do not mention fallback tool names to the user.
+Use `process_camt053` with `mode="parse"` / `mode="dry_run"` / `mode="execute"`. The granular `parse_camt053` / `import_camt053` only appear when granular tools are exposed — treat them as the same tool and don't name them to the user.
 
 ### Step 1: Parse the statement
 

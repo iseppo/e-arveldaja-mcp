@@ -27,7 +27,7 @@ Call `classify_bank_transactions`:
 - `accounts_dimensions_id`: the confirmed or provided dimension ID
 - include `date_from` / `date_to` when provided
 
-Fallback compatibility primitive: `classify_unmatched_transactions` is registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `classify_bank_transactions` with `mode="classify"`. Do not mention fallback tool names to the user.
+Use `classify_bank_transactions` with `mode="classify"`. The granular `classify_unmatched_transactions` only appears in `tools/list` when granular tools are exposed — treat it as the same tool and don't name it to the user.
 
 Show:
 - `result.total_unconfirmed`
@@ -57,7 +57,7 @@ Call `classify_bank_transactions`:
 - mode: "dry_run_apply"
 - `classifications_json`: the step-1 result payload passed directly as a JSON object/array (a JSON string also works but is legacy compatibility only)
 
-Fallback compatibility primitive: `apply_transaction_classifications` is registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `classify_bank_transactions` with `mode="dry_run_apply"` / `mode="execute_apply"`.
+Use `classify_bank_transactions` with `mode="dry_run_apply"` / `mode="execute_apply"`. The granular `apply_transaction_classifications` only appears when granular tools are exposed — treat it as the same tool and don't name it to the user.
 
 Read the result:
 - Treat `result.execution` as the canonical batch payload when present.

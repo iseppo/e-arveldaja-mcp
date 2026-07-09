@@ -285,7 +285,7 @@ describe("registerPrompts", () => {
     expect(text).toContain('mode: "dry_run"');
     expect(text).toContain('mode: "create"');
     expect(text).toContain('mode: "create_and_confirm"');
-    expect(text).toContain("compatibility primitives");
+    expect(text).toContain("treat them as the same tool");
     expect(text).toContain("Treat `execution` as the canonical batch payload when present.");
     expect(text).toContain("execution.results");
     expect(text).toContain("execution.needs_review");
@@ -347,7 +347,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("`mode`: `parse`");
     expect(text).toContain("`mode`: `dry_run`");
     expect(text).toContain("`mode`: `execute`");
-    expect(text).toContain("compatibility primitives");
+    expect(text).toContain("treat them as the same tool");
     expect(text).toContain("execution.summary");
     expect(text).toContain("execution.results");
     expect(text).toContain("execution.audit_reference");
@@ -582,7 +582,7 @@ describe("registerPrompts", () => {
       expect(text).toContain("receipt_batch");
       expect(text).toContain("scan_receipt_folder");
       expect(text).toContain("process_receipt_batch");
-      expect(text).toContain("compatibility primitives");
+      expect(text).toContain("treat them as the same tool");
       expect(text).toContain("`mode`: `dry_run`");
       expect(text).toContain("`mode`: `create`");
       expect(text).toContain("create_and_confirm");
@@ -653,7 +653,7 @@ describe("registerPrompts", () => {
     for (const relativePath of ["workflows/import-camt.md", ".claude/commands/import-camt.md"]) {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("process_camt053");
-      expect(text).toContain("compatibility primitives");
+      expect(text).toContain("treat them as the same tool");
       expect(text).toContain("`mode`: `dry_run`");
       expect(text).toContain("`mode`: `execute`");
       expect(text).toContain("execution.summary");

@@ -45,8 +45,7 @@ Call `receipt_batch`:
 - include `date_from` / `date_to` when provided
 
 Review:
-- `receipt_batch` is the preferred merged workflow tool.
-- Fallback compatibility primitives: `scan_receipt_folder` and `process_receipt_batch` are registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `receipt_batch` with `mode="scan"` / `mode="dry_run"` / `mode="create"` / `mode="create_and_confirm"`. Do not mention fallback tool names to the user.
+- Use `receipt_batch` with `mode="scan"` / `mode="dry_run"` / `mode="create"` / `mode="create_and_confirm"`. The granular `scan_receipt_folder` / `process_receipt_batch` only appear when granular tools are exposed — treat them as the same tool and don't name them to the user.
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.needs_review`, `execution.errors`, and `execution.audit_reference`.
 - Fall back to legacy top-level `summary`, `skipped`, and `results` only if `execution` is absent.
