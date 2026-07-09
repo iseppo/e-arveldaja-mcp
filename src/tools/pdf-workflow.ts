@@ -15,9 +15,9 @@ import { readOnly, create } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
-import { extractIdentifiers, isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
+import { isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
-import { computeMinOcrConfidence, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance } from "./receipt-extraction.js";
+import { computeMinOcrConfidence, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, LOW_OCR_CONFIDENCE_THRESHOLD, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
 import type { ExtractionConfidenceSignals } from "../invoice-extraction-fallback.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { detectVatDeductionNotes, standardVatRateOn } from "../estonian-tax-rules.js";
@@ -66,29 +66,31 @@ interface PdfHints {
   raw_text: string;
   all_vat_candidates?: string[];
   all_reg_code_candidates?: string[];
-  reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
-  vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
+  reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
+  vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
   rejected_candidates?: Array<{ kind: "reg_code" | "vat_no"; value: string; reason: string }>;
 }
 
 /**
- * Extract machine-readable identifiers from PDF text.
- * Amounts, dates, items, and supplier names are left to the LLM —
- * regex is unreliable for those in varied PDF layouts.
+ * Assemble the PDF hints from identifiers already extracted by
+ * `extractReceiptFieldsFromText`. `extractReceiptFieldsFromText` runs
+ * `extractIdentifiers` internally (spread onto its result), so recomputing it
+ * here would duplicate that work on identical inputs. Amounts, dates, items,
+ * and supplier names are left to the LLM — regex is unreliable for those in
+ * varied PDF layouts.
  */
-function extractPdfHints(text: string, textItems?: readonly LayoutTextItem[]): PdfHints {
-  const ids = extractIdentifiers(text, textItems ? { textItems } : undefined);
+function extractPdfHints(text: string, extracted: ExtractedReceiptFields): PdfHints {
   return {
     raw_text: text,
-    supplier_reg_code: ids.reg_code,
-    supplier_vat_no: ids.vat_no,
-    supplier_iban: ids.iban,
-    ref_number: ids.ref_number,
-    all_vat_candidates: ids.all_vat_candidates,
-    all_reg_code_candidates: ids.all_reg_code_candidates,
-    ...(ids.reg_code_rationale ? { reg_code_rationale: ids.reg_code_rationale } : {}),
-    ...(ids.vat_no_rationale ? { vat_no_rationale: ids.vat_no_rationale } : {}),
-    rejected_candidates: ids.rejected_candidates,
+    supplier_reg_code: extracted.supplier_reg_code,
+    supplier_vat_no: extracted.supplier_vat_no,
+    supplier_iban: extracted.supplier_iban,
+    ref_number: extracted.ref_number,
+    all_vat_candidates: extracted.all_vat_candidates,
+    all_reg_code_candidates: extracted.all_reg_code_candidates,
+    ...(extracted.reg_code_rationale ? { reg_code_rationale: extracted.reg_code_rationale } : {}),
+    ...(extracted.vat_no_rationale ? { vat_no_rationale: extracted.vat_no_rationale } : {}),
+    rejected_candidates: extracted.rejected_candidates,
   };
 }
 
@@ -127,7 +129,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const allTextItems = textItemsWithPageNums(parsedDocument.result?.pages);
         const minOcrConfidence = computeMinOcrConfidence(allTextItems);
         const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved), { textItems: allTextItems });
-        const hints = extractPdfHints(parsedDocument.text, allTextItems);
+        // `extractReceiptFieldsFromText` already ran `extractIdentifiers` on the
+        // same text + textItems and spread the result onto `extracted`; reuse
+        // those identifiers rather than recomputing them (#14).
+        const hints = extractPdfHints(parsedDocument.text, extracted);
         const outputFieldProvenance = wrapFieldProvenanceValues(extracted.field_provenance);
         const outputExtractionNotes = wrapExtractionNotes(extracted.extraction_notes);
         // Build confidence signals from parser quality metadata so the
@@ -135,7 +140,16 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         // batch flow (issue #20 consistency).
         const signals: ExtractionConfidenceSignals = {};
         if (parsedDocument.ocrPartialFailure) signals.partial_ocr_failure = true;
-        if (minOcrConfidence !== undefined && minOcrConfidence < 0.6) signals.low_ocr_confidence = true;
+        if (minOcrConfidence !== undefined && minOcrConfidence < LOW_OCR_CONFIDENCE_THRESHOLD) signals.low_ocr_confidence = true;
+        // #1: an echo-only supplier identifier (coordinate_confirmed_echo) is
+        // kept but UNCONFIRMED — surface it as a review signal so the operator
+        // verifies the supplier before booking rather than trusting it.
+        if (
+          extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
+          extracted.vat_no_rationale === "coordinate_confirmed_echo"
+        ) {
+          signals.supplier_identifier_echo_unconfirmed = true;
+        }
         // extract_pdf_invoice carries the full OCR text once, as hints.raw_text,
         // so the fallback guidance must point there (not the dropped
         // extracted.raw_text).
@@ -500,7 +514,11 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           (b.create_date ?? "").localeCompare(a.create_date ?? "")
         );
 
-      const detailed = await Promise.all(
+      // Use allSettled so a single transient per-invoice GET failure does not
+      // reject the whole suggestion and lose the other invoices' history.
+      // Fulfilled results are kept in the original (most-recent-first) order;
+      // rejected entries are skipped (#15).
+      const settledInvoices = await Promise.allSettled(
         supplierInvoices.slice(0, maxResults + 5).map(async (inv) => {
           const full = await api.purchaseInvoices.get(inv.id!);
           return {
@@ -523,6 +541,17 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           };
         })
       );
+      const detailed = settledInvoices.flatMap(settled =>
+        settled.status === "fulfilled" ? [settled.value] : []
+      );
+      // #6: a rejected per-invoice GET is skipped above so the whole suggestion
+      // does not fail, but the freshest history may then be missing — surface a
+      // degradation note so the caller does not silently base the suggestion on
+      // older invoices only.
+      const historyUnavailable = settledInvoices.filter(settled => settled.status === "rejected").length;
+      const historyNotes = historyUnavailable > 0
+        ? [`supplier_history_partial: ${historyUnavailable} of ${settledInvoices.length} recent invoices unavailable`]
+        : [];
 
       // If description provided, prefer invoices with matching item descriptions
       if (description) {
@@ -574,6 +603,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
             supplier_id: clients_id,
             past_invoices: sanitizedDetailed,
             tax_notes,
+            ...(historyNotes.length > 0 ? { notes: historyNotes } : {}),
             suggestion: detailed.length > 0
               ? "Use the purchase article, account, and VAT settings from the most recent similar invoice."
               : "No past invoices found for this supplier. Use list_purchase_articles to find appropriate articles.",

@@ -287,6 +287,15 @@ describe("summarizeInvoiceExtraction", () => {
       expect(result.confidence_signals).toContain("low_ocr_confidence");
     });
 
+    // PASS4 #1: an echo-only supplier identifier is kept but UNCONFIRMED — it
+    // must route the row to review (medium), never stay high/auto-confirmable.
+    it("downgrades to medium when supplier_identifier_echo_unconfirmed is set (#1)", () => {
+      const result = summarizeInvoiceExtraction(baseGood, { supplier_identifier_echo_unconfirmed: true });
+      expect(result.confidence).toBe("medium");
+      expect(result.confidence_signals).toContain("supplier_identifier_echo_unconfirmed");
+      expect(result.recommended).toBe(true);
+    });
+
     it("downgrades to medium when partial OCR failure is reported", () => {
       const result = summarizeInvoiceExtraction(baseGood, { partial_ocr_failure: true });
       expect(result.confidence).toBe("medium");

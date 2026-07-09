@@ -385,6 +385,42 @@ describe("pdf workflow tools", () => {
     expect(payload.tax_notes).toEqual([]);
   });
 
+  it("tolerates a per-invoice GET failure and still returns the other invoices (#15)", async () => {
+    const { handler } = setupPdfWorkflowTool("suggest_booking", {
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([
+          { id: 1, clients_id: 7, status: "CONFIRMED", create_date: "2026-02-15" },
+          { id: 2, clients_id: 7, status: "CONFIRMED", create_date: "2026-01-15" },
+        ]),
+        get: vi.fn().mockImplementation((id: number) =>
+          id === 1
+            ? Promise.reject(new Error("transient GET failure"))
+            : Promise.resolve({
+                id: 2,
+                number: "PI-2",
+                create_date: "2026-01-15",
+                gross_price: 60,
+                liability_accounts_id: 2310,
+                items: [{ custom_title: "Internet subscription", cl_purchase_articles_id: 45, purchase_accounts_id: 5230, total_net_price: 50, vat_rate_dropdown: "24" }],
+              }),
+        ),
+      },
+    });
+
+    const result = await handler({ clients_id: 7, description: "internet" });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    // The rejected invoice (id 1) is dropped, but id 2 still comes through.
+    expect(payload.supplier_id).toBe(7);
+    expect(payload.past_invoices).toHaveLength(1);
+    expect(payload.past_invoices[0]!.number).toBe("PI-2");
+    // PASS4 #6: the dropped invoice must be surfaced as a degradation note so
+    // the caller does not silently trust older-only history.
+    expect(payload.notes).toEqual([
+      expect.stringMatching(/^supplier_history_partial: 1 of 2 recent invoices unavailable$/),
+    ]);
+  });
+
   it("warns when a standard VAT rate does not match the invoice date", async () => {
     const { handler } = setupPdfWorkflowTool("validate_invoice_data");
 

@@ -226,6 +226,55 @@ describe("document parser", () => {
     expect(result.ocrPartialFailure).toBe(false);
   });
 
+  it("reuses a single cached no-OCR parser across multiple text-native parses (#13)", async () => {
+    isComplexMock.mockResolvedValue([
+      complexityPage({ pageNumber: 1, needsOcr: false }),
+    ]);
+    parseMock.mockResolvedValue({
+      text: "Native PDF text",
+      pages: [{ pageNum: 1, text: "Native PDF text" }],
+    });
+
+    const { parseDocument } = await import("./document-parser.js");
+    await parseDocument("/tmp/native-1.pdf");
+    await parseDocument("/tmp/native-2.pdf");
+
+    // Two parses must not build two no-OCR parsers: exactly one OCR-enabled
+    // singleton (from the complexity preflight) and one cached no-OCR singleton.
+    expect(liteParseConstructor).toHaveBeenCalledTimes(2);
+    const noOcrConstructions = liteParseConstructor.mock.calls.filter(
+      call => (call[0] as { ocrEnabled?: boolean })?.ocrEnabled === false,
+    );
+    expect(noOcrConstructions).toHaveLength(1);
+  });
+
+  it("does not over-flag a garbled-native-text page (text-dominant, low image coverage) (#17)", async () => {
+    // A bad-font / ToUnicode-mapping page is flagged needsOcr + isGarbled but is
+    // text-dominant: low image coverage and not a full-page raster. Even though
+    // the parsed text barely exceeds native textLength, the image-dominance gate
+    // must keep it out of partial-OCR-failure review.
+    isComplexMock.mockResolvedValue([
+      complexityPage({
+        pageNumber: 1,
+        needsOcr: true,
+        isGarbled: true,
+        fullPageImage: false,
+        imageCoverage: 0.05,
+        textCoverage: 0.6,
+        textLength: 40,
+      }),
+    ]);
+    parseMock.mockResolvedValue({
+      text: "garbled overlay text",
+      pages: [{ pageNum: 1, text: "garbled overlay text" }],
+    });
+
+    const { parseDocument } = await import("./document-parser.js");
+    const result = await parseDocument("/tmp/garbled-font.pdf");
+
+    expect(result.ocrPartialFailure).toBe(false);
+  });
+
   it("rejects non-loopback http OCR endpoints", async () => {
     process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL = "http://ocr.example.com/parse";
 

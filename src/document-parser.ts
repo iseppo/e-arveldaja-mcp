@@ -158,10 +158,21 @@ export function buildDocumentParserConfig(): Partial<LiteParseConfig> {
 }
 
 let parser: LiteParse | undefined;
+let ocrDisabledParser: LiteParse | undefined;
 
 export function getDocumentParser(): LiteParse {
   parser ??= new LiteParse(buildDocumentParserConfig());
   return parser;
+}
+
+/**
+ * Singleton parser with OCR disabled, used for documents whose preflight found
+ * no OCR-needed page. Cached like the OCR-enabled parser so a batch of native
+ * PDFs doesn't reconstruct a fresh LiteParse per file.
+ */
+function getOcrDisabledDocumentParser(): LiteParse {
+  ocrDisabledParser ??= new LiteParse({ ...buildDocumentParserConfig(), ocrEnabled: false });
+  return ocrDisabledParser;
 }
 
 export async function analyzeDocumentComplexity(filePath: string): Promise<PageComplexityStats[]> {
@@ -182,6 +193,17 @@ function pageTextLength(result: ParseResult, pageNumber: number): number {
   return page?.text?.trim().length ?? 0;
 }
 
+// Intended trigger (#17): only a page that (a) the preflight said needs OCR AND
+// (b) is image-dominant — a full-page raster, or ≥50% image coverage — AND
+// (c) came back with essentially no text beyond the native overlay. The
+// image-dominance gate (b) is what keeps a *garbled-native-text* page (bad
+// font/ToUnicode mapping but text-dominant, low image coverage, not a
+// full-page image) from being flagged here: such a page fails (b) and returns
+// early, so it is never routed to review by this heuristic. The check
+// deliberately errs toward review — a false positive costs a manual look,
+// while a false negative would silently book a document whose OCR text is
+// missing. Do not loosen it into silently accepting an image page whose OCR
+// produced nothing.
 function detectOcrPartialFailure(complexity: ParsedDocumentComplexity, result: ParseResult): boolean {
   return complexity.pages.some(page => {
     if (!page.needsOcr) return false;
@@ -202,7 +224,7 @@ function detectOcrPartialFailure(complexity: ParsedDocumentComplexity, result: P
 export async function parseDocument(filePath: string): Promise<ParsedDocument> {
   const complexity = summarizeComplexity(await analyzeDocumentComplexity(filePath));
   const parserForParse = !complexity.anyNeedsOcr
-    ? new LiteParse({ ...buildDocumentParserConfig(), ocrEnabled: false })
+    ? getOcrDisabledDocumentParser()
     : getDocumentParser();
   const result = await parserForParse.parse(filePath);
   return {

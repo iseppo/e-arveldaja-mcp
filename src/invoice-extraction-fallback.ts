@@ -56,6 +56,17 @@ export interface ExtractionConfidenceSignals {
   partial_ocr_failure?: boolean;
   /** OCR text item confidence fell below the review threshold. */
   low_ocr_confidence?: boolean;
+  /**
+   * The supplier reg code / VAT number was only kept because the buyer-selected
+   * value ALSO appears at a supplier coordinate (rationale
+   * `coordinate_confirmed_echo`). Coordinate data alone cannot tell a supplier's
+   * own id echoed in the buyer block (legit) from a buyer's id echoed in a
+   * supplier-column reference line (false accept), so the value is UNCONFIRMED —
+   * routed to review so the operator verifies the supplier before booking (#1).
+   * Medium signal: the value is kept (not dropped, so a real supplier id is not
+   * lost), but not trusted as firmly coordinate-confirmed.
+   */
+  supplier_identifier_echo_unconfirmed?: boolean;
 }
 
 export interface InvoiceExtractionFallback {
@@ -150,6 +161,7 @@ export function summarizeInvoiceExtraction(
   if (signals?.missing_supplier_vat_on_est_invoice) mediumSignals.push("missing_supplier_vat_on_est_invoice");
   if (signals?.partial_ocr_failure) mediumSignals.push("partial_ocr_failure");
   if (signals?.low_ocr_confidence) mediumSignals.push("low_ocr_confidence");
+  if (signals?.supplier_identifier_echo_unconfirmed) mediumSignals.push("supplier_identifier_echo_unconfirmed");
   // Auto-derive the EST-missing-VAT signal when the caller passes supplierCountry
   // but did not set the signal explicitly. Non-VAT-registered Estonian suppliers
   // legitimately have no KMKR, so this is a medium (review) signal, not low.
