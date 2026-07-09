@@ -7,6 +7,7 @@ import {
   isValidEeRegistryCode,
   isValidEeVatNumber,
   extractIdentifiers,
+  buildIdentifierMarkers,
   type LayoutTextItem,
 } from "./document-identifiers.js";
 
@@ -460,6 +461,60 @@ describe("extractIdentifiers", () => {
   });
 });
 
+describe("buildIdentifierMarkers — split Makse/saaja guard (#11)", () => {
+  function ti(text: string, x: number, y: number, w = 50, h = 10): LayoutTextItem {
+    return { text, x, y, width: w, height: h };
+  }
+
+  it("does not treat a lone 'saaja' preceded on the same row by 'Makse' as a buyer marker", () => {
+    // "Makse" and "saaja" split into two layout items on the same row — the
+    // (?<!makse\s) lookbehind cannot see across items, so a naive test would
+    // classify the bare "saaja" as buyer. It is a payee (supplier-side), so it
+    // must not be emitted as a buyer marker.
+    const markers = buildIdentifierMarkers([
+      ti("Makse", 50, 100),
+      ti("saaja", 90, 100),
+    ]);
+    expect(markers.some(m => m.side === "buyer")).toBe(false);
+  });
+
+  it("still treats a lone 'saaja' as a buyer marker when the preceding same-row item is 'Arve'", () => {
+    const markers = buildIdentifierMarkers([
+      ti("Arve", 50, 100),
+      ti("saaja", 90, 100),
+    ]);
+    expect(markers.some(m => m.side === "buyer" && m.text.toLowerCase() === "saaja")).toBe(true);
+  });
+
+  it("still treats a lone 'saaja' as a buyer marker when 'Makse' is on a different row", () => {
+    const markers = buildIdentifierMarkers([
+      ti("Makse", 50, 40),
+      ti("saaja", 50, 100),
+    ]);
+    expect(markers.some(m => m.side === "buyer" && m.text.toLowerCase() === "saaja")).toBe(true);
+  });
+
+  // PASS3 #7a: a trailing colon on the split "saaja" ("Makse | saaja:") must
+  // still be recognised as the payee half and suppressed.
+  it("suppresses a 'saaja:' (trailing colon) preceded on the same row by 'Makse'", () => {
+    const markers = buildIdentifierMarkers([
+      ti("Makse", 50, 100),
+      ti("saaja:", 90, 100),
+    ]);
+    expect(markers.some(m => m.side === "buyer")).toBe(false);
+  });
+
+  // PASS3 #7b: a payment-method label "Makseviis" must NOT suppress a genuine
+  // buyer "saaja" — only an exact "Makse" neighbour is the payee prefix.
+  it("still treats 'saaja' as a buyer marker when the left neighbour is 'Makseviis'", () => {
+    const markers = buildIdentifierMarkers([
+      ti("Makseviis", 50, 100),
+      ti("saaja", 120, 100),
+    ]);
+    expect(markers.some(m => m.side === "buyer" && m.text.toLowerCase() === "saaja")).toBe(true);
+  });
+});
+
 describe("extractIdentifiers — coordinate-based classification (Option C)", () => {
   function ti(text: string, x: number, y: number, w = 50, h = 10): LayoutTextItem {
     return { text, x, y, width: w, height: h };
@@ -609,6 +664,93 @@ describe("extractIdentifiers — coordinate-based classification (Option C)", ()
     expect(ids.reg_code_rationale).toBe("bare_structural");
   });
 
+  it("keeps a supplier-side reg code echoed in the buyer block when text-stream order differs from geometric order (#10)", () => {
+    // Two-column, same page: supplier block on the right (x=400), buyer block on
+    // the left (x=50), both on the same rows. The SAME reg code 12176678 is
+    // printed under the supplier's Müüja marker AND echoed as a reference in the
+    // buyer block. The raw text stream serialises the buyer occurrence FIRST
+    // (top-down, left column first) while the geometric (page,y,x) order places
+    // the same-row supplier occurrence differently — the mismatch #10 is about.
+    // The supplier-side occurrence must win: 12176678 is the supplier's code.
+    const text = [
+      "Arve saaja",
+      "Buyer OÜ",
+      "Rg-kood 12176678",
+      "Müüja",
+      "Supplier OÜ",
+      "Rg-kood 12176678",
+    ].join("\n");
+    const textItems: LayoutTextItem[] = [
+      ti("Arve saaja", 50, 100),
+      ti("Müüja", 400, 100),
+      ti("Buyer OÜ", 50, 115),
+      ti("Supplier OÜ", 400, 115),
+      ti("Rg-kood 12176678", 50, 130, 90),
+      ti("Rg-kood 12176678", 400, 130, 90),
+    ];
+
+    const ids = extractIdentifiers(text, { textItems });
+    expect(ids.reg_code).toBe("12176678");
+    expect(ids.reg_code_rationale).not.toBe("coordinate_rejected");
+  });
+
+  // PASS3 #2: the echo-rescue keep path must carry a DISTINCT rationale
+  // (coordinate_confirmed_echo), not the firm coordinate_confirmed — the value
+  // was buyer-selected and only kept because it also echoes a supplier column,
+  // so downstream must not mistake it for a confidently confirmed supplier code.
+  it("marks an echo-rescued reg code as coordinate_confirmed_echo, not coordinate_confirmed (#2)", () => {
+    const text = [
+      "Arve saaja",
+      "Buyer OÜ",
+      "Rg-kood 12176678",
+      "Müüja",
+      "Supplier OÜ",
+      "Rg-kood 12176678",
+    ].join("\n");
+    const textItems: LayoutTextItem[] = [
+      ti("Arve saaja", 50, 100),
+      ti("Müüja", 400, 100),
+      ti("Buyer OÜ", 50, 115),
+      ti("Supplier OÜ", 400, 115),
+      ti("Rg-kood 12176678", 50, 130, 90),
+      ti("Rg-kood 12176678", 400, 130, 90),
+    ];
+
+    const ids = extractIdentifiers(text, { textItems });
+    expect(ids.reg_code).toBe("12176678");
+    expect(ids.reg_code_rationale).toBe("coordinate_confirmed_echo");
+  });
+
+  // PASS4 #1: a buyer VAT echoed in a supplier-column reference line must NOT be
+  // silently emitted as a firmly coordinate-confirmed supplier VAT. It is kept
+  // (so a real supplier id is never lost — #10) but carries the weaker
+  // coordinate_confirmed_echo rationale, which the receipt flow turns into an
+  // "unconfirmed / needs-review" signal so the operator verifies the supplier.
+  it("marks a buyer VAT echoed in a supplier-column reference line as echo, not trusted coordinate_confirmed (#1)", () => {
+    const text = [
+      "Arve saaja",
+      "Buyer OÜ",
+      "KMKR: EE102809963",
+      "Müüja",
+      "Supplier OÜ",
+      "Viide EE102809963",
+    ].join("\n");
+    const textItems: LayoutTextItem[] = [
+      ti("Arve saaja", 50, 100),
+      ti("Müüja", 400, 100),
+      ti("Buyer OÜ", 50, 115),
+      ti("Supplier OÜ", 400, 115),
+      ti("KMKR: EE102809963", 50, 130, 120),
+      ti("Viide EE102809963", 400, 130, 120),
+    ];
+
+    const ids = extractIdentifiers(text, { textItems });
+    // Value is kept (not dropped), but flagged echo — never trusted as firm.
+    expect(ids.vat_no).toBe("EE102809963");
+    expect(ids.vat_no_rationale).toBe("coordinate_confirmed_echo");
+    expect(ids.vat_no_rationale).not.toBe("coordinate_confirmed");
+  });
+
   it("keeps duplicate selected reg-code occurrence page-aware when page 2 has a lower y", () => {
     const text = [
       "Müüja Supplier OÜ",
@@ -627,6 +769,41 @@ describe("extractIdentifiers — coordinate-based classification (Option C)", ()
 
     expect(ids.reg_code).toBe("12176678");
     expect(ids.reg_code_rationale).toBe("labeled");
+  });
+
+  // PASS4 #7: the selected value's position is a CHARACTER fraction of the raw
+  // text. A long OCR item (a wrapped address line) printed just before the
+  // supplier reg code inflates the value's char position; a bare ORDINAL mapping
+  // back onto the geometric items would then land on the LATER (buyer) duplicate
+  // occurrence and misclassify the supplier code as buyer. Character-weighting
+  // the item positions keeps the selection on the real supplier occurrence.
+  it("selects the supplier occurrence of a duplicated reg code despite a long preceding OCR item (#7)", () => {
+    const longAddressLine =
+      "Registreeritud aadress: Pikk tänav 12, Kesklinna linnaosa, Tallinn 10123, Harjumaa, Eesti Vabariik";
+    const text = [
+      "Müüja",
+      "Supplier OÜ",
+      longAddressLine,
+      "Rg-kood 12176678",
+      "Arve saaja",
+      "Buyer OÜ",
+      "Rg-kood 12176678",
+    ].join("\n");
+    const textItems: LayoutTextItem[] = [
+      ti("Müüja", 50, 10),
+      ti("Supplier OÜ", 50, 20, 90),
+      ti(longAddressLine, 50, 30, 400),
+      ti("Rg-kood 12176678", 50, 40, 90),
+      ti("Arve saaja", 50, 50, 80),
+      ti("Buyer OÜ", 50, 60, 70),
+      ti("Rg-kood 12176678", 50, 70, 90),
+    ];
+
+    const ids = extractIdentifiers(text, { textItems });
+    // The value is kept and classified on the SUPPLIER side (not buyer/rejected).
+    expect(ids.reg_code).toBe("12176678");
+    expect(ids.reg_code_rationale).not.toBe("coordinate_rejected");
+    expect(ids.reg_code_rationale).not.toBe("coordinate_confirmed_echo");
   });
 });
 

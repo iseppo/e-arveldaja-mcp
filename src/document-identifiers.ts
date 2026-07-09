@@ -113,8 +113,8 @@ export interface RejectedCandidate {
   reason: string;
 }
 
-export type RegCodeRationale = "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
-export type VatNoRationale = "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_rejected";
+export type RegCodeRationale = "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
+export type VatNoRationale = "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
 
 export interface ExtractedIdentifiers {
   reg_code?: string;
@@ -354,50 +354,6 @@ function findAllItemsForCandidate(textItems: readonly LayoutTextItem[], value: s
   return matches.sort(compareLayoutTextPosition);
 }
 
-function normalizedTextWithIndex(text: string): Array<{ char: string; index: number }> {
-  const chars: Array<{ char: string; index: number }> = [];
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i]!;
-    if (!/\s/.test(char)) {
-      chars.push({ char: char.toUpperCase(), index: i });
-    }
-  }
-  return chars;
-}
-
-function getNormalizedTextWithIndex(text: string, cache: Map<string, Array<{ char: string; index: number }>>): Array<{ char: string; index: number }> {
-  let cached = cache.get(text);
-  if (!cached) {
-    cached = normalizedTextWithIndex(text);
-    cache.set(text, cached);
-  }
-  return cached;
-}
-
-function candidateOccurrenceIndex(text: string, value: string, valueIndex: number, cache: Map<string, Array<{ char: string; index: number }>>): number | undefined {
-  const target = value.replace(/\s+/g, "").toUpperCase();
-  if (!target) return undefined;
-
-  const normalized = getNormalizedTextWithIndex(text, cache);
-  let occurrenceIndex = 0;
-  for (let i = 0; i <= normalized.length - target.length; i++) {
-    let matches = true;
-    for (let j = 0; j < target.length; j++) {
-      if (normalized[i + j]?.char !== target[j]) {
-        matches = false;
-        break;
-      }
-    }
-    if (!matches) continue;
-
-    const originalIndex = normalized[i]!.index;
-    if (originalIndex >= valueIndex) return occurrenceIndex;
-    occurrenceIndex++;
-  }
-
-  return undefined;
-}
-
 function matchValueIndex(text: string, match: RegExpMatchArray, value: string): number {
   const matchIndex = match.index ?? 0;
   const directIndex = text.indexOf(value, matchIndex);
@@ -406,18 +362,67 @@ function matchValueIndex(text: string, match: RegExpMatchArray, value: string): 
   return rawValue ? text.indexOf(rawValue, matchIndex) : matchIndex;
 }
 
+/**
+ * Map the value's selected raw-text position (expressed as a document
+ * fraction in [0,1]) onto the geometrically-sorted matched items and return
+ * the index of the nearest one. The candidate was chosen by scanning the raw
+ * text stream, but `findAllItemsForCandidate` returns items in (page,y,x)
+ * reading order; when the two orders differ, indexing the geometric list with
+ * a stream ordinal selects the wrong occurrence (#10). Comparing document
+ * fractions aligns the two spaces without assuming identical ordering.
+ */
+function selectItemIndexByFraction(
+  allTextItems: readonly LayoutTextItem[],
+  matchedItems: readonly LayoutTextItem[],
+  selectedFraction: number,
+): number {
+  const globalOrder = [...allTextItems].sort(compareLayoutTextPosition);
+  // `selectedFraction` is a CHARACTER position in the raw text stream
+  // (valueIndex / textLength). Comparing it against a bare ORDINAL fraction
+  // (itemIndex / itemCount) skews when items vary greatly in length: a long OCR
+  // item (e.g. a wrapped address line) preceding the value inflates the value's
+  // char position but not its ordinal, so a duplicate-value document can select
+  // the wrong physical occurrence (#7). Weight each item by its character length
+  // so the item fraction lives in the same character space as `selectedFraction`;
+  // reading order (page,y,x) is preserved, so the page-aware selection is
+  // unchanged — only the spacing between occurrences is corrected.
+  const totalChars = globalOrder.reduce((sum, item) => sum + item.text.length, 0) || 1;
+  const charFractionByItem = new Map<LayoutTextItem, number>();
+  let acc = 0;
+  for (const item of globalOrder) {
+    // Use the CENTER of the item's character span so the fraction points at the
+    // value itself, not the gap before it.
+    charFractionByItem.set(item, (acc + item.text.length / 2) / totalChars);
+    acc += item.text.length;
+  }
+
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+  for (let k = 0; k < matchedItems.length; k++) {
+    const fraction = charFractionByItem.get(matchedItems[k]!) ?? 0;
+    const distance = Math.abs(fraction - selectedFraction);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = k;
+    }
+  }
+  return bestIndex;
+}
+
 function classifyCandidateOccurrence(
   textItems: readonly LayoutTextItem[],
   value: string,
   kind: CandidatePosition["kind"],
   markers: MarkerPosition[],
-  selectedOccurrenceIndex?: number,
+  selectedFraction?: number,
 ): "supplier" | "buyer" | "unknown" {
   const items = findAllItemsForCandidate(textItems, value);
   const sides = items.map(item =>
     classifyByPosition({ x: item.x, y: item.y, pageNum: item.pageNum }, markers),
   );
-  const selectedSide = selectedOccurrenceIndex === undefined ? sides[0] : sides[selectedOccurrenceIndex];
+  const selectedSide = selectedFraction === undefined || items.length === 0
+    ? sides[0]
+    : sides[selectItemIndexByFraction(textItems, items, selectedFraction)];
 
   if (selectedSide === "supplier" || selectedSide === "buyer") return selectedSide;
   if (sides.includes("buyer")) return "buyer";
@@ -437,24 +442,38 @@ function hasUnambiguousSupplierOccurrence(
   return sides.includes("supplier") && !sides.includes("buyer");
 }
 
-type NormalizedTextCache = Map<string, Array<{ char: string; index: number }>>;
-
-interface IdentifierResolutionCache {
-  normalizedTextCache: NormalizedTextCache;
+/** True when at least one physical occurrence of `value` sits in a supplier column. */
+function hasSupplierOccurrence(
+  textItems: readonly LayoutTextItem[],
+  value: string,
+  markers: MarkerPosition[],
+): boolean {
+  return findAllItemsForCandidate(textItems, value).some(item =>
+    classifyByPosition({ x: item.x, y: item.y, pageNum: item.pageNum }, markers) === "supplier",
+  );
 }
 
 interface IdentifierResolutionResult<Rationale extends RegCodeRationale | VatNoRationale> {
   value?: string;
   rationale?: Rationale;
-  occurrenceIndex?: number;
+  /**
+   * Document-position fraction ([0,1]) of the selected value in the raw text
+   * stream, used by the coordinate reclassifier to pick the matching physical
+   * occurrence by proximity (#10).
+   */
+  selectedFraction?: number;
   candidates: string[];
   rejected: RejectedCandidate[];
+}
+
+/** Fraction of the way through the raw text at which the value was selected. */
+function positionFraction(text: string, valueIndex: number): number {
+  return valueIndex / (text.length || 1);
 }
 
 function resolveRegCode(
   text: string,
   options: ExtractIdentifiersOptions | undefined,
-  cache: IdentifierResolutionCache,
 ): IdentifierResolutionResult<RegCodeRationale> {
   const excludeReg = normalizeRegCode(options?.excludeRegCode);
   const rejected: RejectedCandidate[] = [];
@@ -470,7 +489,7 @@ function resolveRegCode(
 
   let value: string | undefined;
   let rationale: RegCodeRationale | undefined;
-  let occurrenceIndex: number | undefined;
+  let selectedFraction: number | undefined;
 
   // Tier 1: labeled match.
   const labeledRegMatches = [...text.matchAll(REG_CODE_LABEL_RE)];
@@ -493,7 +512,7 @@ function resolveRegCode(
       const supplierSide = labeledRegFiltered.find(m => (m.index ?? Number.MAX_SAFE_INTEGER) < buyerSectionIndex);
       if (supplierSide?.[1]) {
         value = supplierSide[1];
-        occurrenceIndex = candidateOccurrenceIndex(text, value, matchValueIndex(text, supplierSide, value), cache.normalizedTextCache);
+        selectedFraction = positionFraction(text, matchValueIndex(text, supplierSide, value));
         rationale = "labeled";
       } else {
         buyerSectionFallback = labeledRegFiltered[0]?.[1];
@@ -501,7 +520,7 @@ function resolveRegCode(
     } else {
       value = labeledRegFiltered[0]?.[1];
       if (value) {
-        occurrenceIndex = candidateOccurrenceIndex(text, value, matchValueIndex(text, labeledRegFiltered[0]!, value), cache.normalizedTextCache);
+        selectedFraction = positionFraction(text, matchValueIndex(text, labeledRegFiltered[0]!, value));
       }
       rationale = "labeled";
     }
@@ -541,7 +560,7 @@ function resolveRegCode(
       const finalPool = inTopThird.length > 0 ? inTopThird : pool;
       finalPool.sort((a, b) => a.index - b.index);
       value = finalPool[0]!.value;
-      occurrenceIndex = candidateOccurrenceIndex(text, value, finalPool[0]!.index, cache.normalizedTextCache);
+      selectedFraction = positionFraction(text, finalPool[0]!.index);
       rationale = "bare_structural";
     }
   }
@@ -550,18 +569,17 @@ function resolveRegCode(
     value = buyerSectionFallback;
     const fallbackMatch = labeledRegFiltered.find(match => match[1] === buyerSectionFallback);
     if (fallbackMatch) {
-      occurrenceIndex = candidateOccurrenceIndex(text, value, matchValueIndex(text, fallbackMatch, value), cache.normalizedTextCache);
+      selectedFraction = positionFraction(text, matchValueIndex(text, fallbackMatch, value));
     }
     rationale = "buyer_section_only";
   }
 
-  return { value, rationale, occurrenceIndex, candidates, rejected };
+  return { value, rationale, selectedFraction, candidates, rejected };
 }
 
 function resolveVatNo(
   text: string,
   options: ExtractIdentifiersOptions | undefined,
-  cache: IdentifierResolutionCache,
 ): IdentifierResolutionResult<VatNoRationale> {
   const excludeVat = normalizeVatForCompare(options?.excludeVat);
   const rejected: RejectedCandidate[] = [];
@@ -577,7 +595,7 @@ function resolveVatNo(
 
   let value: string | undefined;
   let rationale: VatNoRationale | undefined;
-  let occurrenceIndex: number | undefined;
+  let selectedFraction: number | undefined;
 
   // Tier 1: labeled matches.
   const labeledVatMatches = [...text.matchAll(VAT_LABEL_RE)];
@@ -601,7 +619,7 @@ function resolveVatNo(
       const supplierSide = labeledVatFiltered.find(m => (m.index ?? Number.MAX_SAFE_INTEGER) < buyerSectionIndex);
       if (supplierSide?.[1]) {
         value = normalizeVatCandidate(supplierSide[1]);
-        occurrenceIndex = candidateOccurrenceIndex(text, value, matchValueIndex(text, supplierSide, supplierSide[1]), cache.normalizedTextCache);
+        selectedFraction = positionFraction(text, matchValueIndex(text, supplierSide, supplierSide[1]));
         rationale = "labeled";
       } else {
         buyerSectionFallback = normalizeVatCandidate(labeledVatFiltered[0]![1]!);
@@ -610,7 +628,7 @@ function resolveVatNo(
       const first = labeledVatFiltered[0];
       if (first?.[1]) {
         value = normalizeVatCandidate(first[1]);
-        occurrenceIndex = candidateOccurrenceIndex(text, value, matchValueIndex(text, first, first[1]), cache.normalizedTextCache);
+        selectedFraction = positionFraction(text, matchValueIndex(text, first, first[1]));
         rationale = "labeled";
       }
     }
@@ -643,12 +661,12 @@ function resolveVatNo(
     if (pool.length > 0) {
       if (buyerSectionIndex >= 0 && bareVatCandidates.length === 0) {
         value = pool[0]!.value;
-        occurrenceIndex = candidateOccurrenceIndex(text, value, pool[0]!.index, cache.normalizedTextCache);
+        selectedFraction = positionFraction(text, pool[0]!.index);
         rationale = "buyer_section_only";
       } else {
         const supplierSide = pool.find(c => c.index < buyerSectionIndex);
         value = supplierSide ? supplierSide.value : pool[0]!.value;
-        occurrenceIndex = candidateOccurrenceIndex(text, value, supplierSide ? supplierSide.index : pool[0]!.index, cache.normalizedTextCache);
+        selectedFraction = positionFraction(text, supplierSide ? supplierSide.index : pool[0]!.index);
         rationale = "bare_structural";
       }
     }
@@ -658,7 +676,7 @@ function resolveVatNo(
     value = buyerSectionFallback;
     const fallbackMatch = labeledVatFiltered.find(match => normalizeVatCandidate(match[1]!) === buyerSectionFallback);
     if (fallbackMatch?.[1]) {
-      occurrenceIndex = candidateOccurrenceIndex(text, value, matchValueIndex(text, fallbackMatch, fallbackMatch[1]), cache.normalizedTextCache);
+      selectedFraction = positionFraction(text, matchValueIndex(text, fallbackMatch, fallbackMatch[1]));
     }
     rationale = "buyer_section_only";
   }
@@ -670,12 +688,43 @@ function resolveVatNo(
     }
   }
 
-  return { value, rationale, occurrenceIndex, candidates, rejected };
+  return { value, rationale, selectedFraction, candidates, rejected };
+}
+
+/** Vertical tolerance (in layout units) for treating two items as same-row. */
+const SAME_ROW_Y_TOLERANCE = 5;
+
+/**
+ * True when the nearest same-row item immediately to the left of `item` is
+ * "Makse". The `(?<!makse\s)` lookbehind in BUYER_MARKER_RE only fires when
+ * "Makse" and "saaja" are one text item; when the PDF splits them into two
+ * layout items, a bare "saaja" would otherwise be misread as a buyer marker
+ * even though "Makse saaja" (payee) is supplier-side (#11).
+ */
+function precedingSameRowItemIsMakse(textItems: readonly LayoutTextItem[], item: LayoutTextItem): boolean {
+  let nearest: LayoutTextItem | undefined;
+  for (const other of textItems) {
+    if (other === item) continue;
+    if (layoutPageNum(other) !== layoutPageNum(item)) continue;
+    if (Math.abs(other.y - item.y) > SAME_ROW_Y_TOLERANCE) continue;
+    if (other.x >= item.x) continue;
+    if (!nearest || other.x > nearest.x) nearest = other;
+  }
+  // Require the left neighbour to be exactly "Makse" (optionally with a trailing
+  // colon/period) so "Makse saaja" (payee) is suppressed, but a payment-method
+  // label like "Makseviis" does NOT wrongly suppress a genuine buyer "saaja".
+  return nearest !== undefined && /^makse[:.]?$/i.test(nearest.text.trim());
 }
 
 export function buildIdentifierMarkers(textItems: readonly LayoutTextItem[]): MarkerPosition[] {
   const markers: MarkerPosition[] = [];
   for (const item of textItems) {
+    // Split-layout guard: a lone "saaja" preceded on the same row by "Makse"
+    // is a payee (supplier-side) marker, not a buyer marker — skip it so it is
+    // not classified as buyer (#11).
+    if (/^saaja[:.]?$/i.test(item.text.trim()) && precedingSameRowItemIsMakse(textItems, item)) {
+      continue;
+    }
     if (BUYER_MARKER_RE.test(item.text)) {
       markers.push({ text: item.text, x: item.x, y: item.y, width: item.width, pageNum: item.pageNum, side: "buyer" });
     } else if (SUPPLIER_MARKER_RE.test(item.text)) {
@@ -689,7 +738,7 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
   kind: CandidatePosition["kind"],
   value: string | undefined,
   rationale: Rationale | undefined,
-  occurrenceIndex: number | undefined,
+  selectedFraction: number | undefined,
   candidates: string[],
   textItems: readonly LayoutTextItem[],
   markers: MarkerPosition[],
@@ -697,10 +746,11 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
 ): { value?: string; rationale?: Rationale } {
   const isValid = kind === "reg_code" ? isValidEeRegistryCode : isValidEeVatNumber;
   const confirmed = "coordinate_confirmed" as Rationale;
+  const confirmedEcho = "coordinate_confirmed_echo" as Rationale;
   const rejected = "coordinate_rejected" as Rationale;
 
   if (value) {
-    const side = classifyCandidateOccurrence(textItems, value, kind, markers, occurrenceIndex);
+    const side = classifyCandidateOccurrence(textItems, value, kind, markers, selectedFraction);
     if (side === "buyer") {
       const supplierAlt = candidates.find(candidate => {
         if (candidate === value) return false;
@@ -710,6 +760,17 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
       });
       if (supplierAlt) {
         return { value: supplierAlt, rationale: confirmed };
+      }
+      // The selected occurrence classified as buyer, but if the SAME value also
+      // appears in a supplier column it is the supplier's own identifier merely
+      // echoed in the buyer block — keep it rather than rejecting. This is
+      // order-independent, so a text-stream vs (page,y,x) ordering difference
+      // cannot cause a valid supplier code to be dropped (#10). Surface the
+      // weaker confidence with a distinct rationale: the value was buyer-selected
+      // and only rescued because it echoes a supplier occurrence, so downstream
+      // must not treat it as a firmly coordinate-confirmed supplier identifier.
+      if (hasSupplierOccurrence(textItems, value, markers)) {
+        return { value, rationale: confirmedEcho };
       }
       return { rationale: rejected };
     }
@@ -741,13 +802,12 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
  * and keep their existing signatures for backwards compatibility.
  */
 export function extractIdentifiers(text: string, options?: ExtractIdentifiersOptions): ExtractedIdentifiers {
-  const cache: IdentifierResolutionCache = { normalizedTextCache: new Map() };
   const excludeVat = normalizeVatForCompare(options?.excludeVat);
   const excludeReg = normalizeRegCode(options?.excludeRegCode);
   const iban = extractIban(text);
   const ref_number = extractReferenceNumber(text);
-  const regCode = resolveRegCode(text, options, cache);
-  const vatNo = resolveVatNo(text, options, cache);
+  const regCode = resolveRegCode(text, options);
+  const vatNo = resolveVatNo(text, options);
   const rejectedCandidates = [...regCode.rejected, ...vatNo.rejected];
 
   let reg_code = regCode.value;
@@ -764,7 +824,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
         "reg_code",
         reg_code,
         reg_code_rationale,
-        regCode.occurrenceIndex,
+        regCode.selectedFraction,
         regCode.candidates,
         textItems,
         markers,
@@ -777,7 +837,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
         "vat_no",
         vat_no,
         vat_no_rationale,
-        vatNo.occurrenceIndex,
+        vatNo.selectedFraction,
         vatNo.candidates,
         textItems,
         markers,
