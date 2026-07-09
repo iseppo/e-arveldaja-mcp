@@ -70,8 +70,9 @@ This either returns an existing supplier match or registry data for a possible n
 ## Step 5: Check duplicate risk before creating anything
 
 Call `detect_duplicate_purchase_invoice` with:
-- `date_from`: invoice date
-- `date_to`: invoice date
+- `date_from`: invoice date minus ~30 days
+- `date_to`: invoice date plus ~30 days
+  (the tool filters on the stored booking date, which can differ from the invoice date when an earlier booking used a shifted turnover date — a narrow same-day window would miss that duplicate)
 - `invoice_number`: extracted invoice number
 - `gross_price`: extracted gross total
 - `clients_id`: resolved client ID if step 4 returned `found=true`

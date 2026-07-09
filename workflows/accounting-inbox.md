@@ -5,10 +5,14 @@ Start from one workspace-level scan, propose only the next safe dry-run steps, a
 ## Arguments
 
 - Optional `workspace_path`: folder to scan for CAMT statements, Wise CSV files, and receipt folders
+- Optional dimension overrides (pass when the user picks a specific bank-account dimension):
+  - `bank_account_dimension_id`: default bank-account dimension reused for CAMT and receipt suggestions
+  - `receipt_matching_dimension_id`: bank-account dimension used specifically for receipt matching
+  - `wise_account_dimension_id`: bank-account dimension used specifically for Wise suggestions
 
 ## Workflow
 
-### Step 1: Scan the workspace
+### Step 1: Run the dry-run pass (scans the workspace and runs the safe dry-run steps)
 
 Call `accounting_inbox`:
 - set `mode` to `dry_run`
@@ -41,7 +45,7 @@ If `autopilot.needs_one_decision` is non-empty:
 - ask only those listed questions
 - ask them one at a time
 - always start with the recommended default
-- if the user answers, re-run `accounting_inbox` with `mode: "dry_run"` and the chosen override values before continuing
+- if the user answers, re-run `accounting_inbox` with `mode: "dry_run"`, mapping the answer onto the matching override argument (`bank_account_dimension_id`, `receipt_matching_dimension_id`, or `wise_account_dimension_id`), before continuing
 
 If an item under `autopilot.needs_accountant_review` includes:
 - `recommendation`: present that first as the default compliant handling

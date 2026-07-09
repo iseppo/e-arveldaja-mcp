@@ -27,7 +27,6 @@ Call `process_camt053`:
 - `file_path`: the provided file
 
 Show:
-- `result` as the delegated parse payload
 - `statement_metadata`
 - `summary.entry_count`
 - `summary.credit_count` and `summary.credit_total`

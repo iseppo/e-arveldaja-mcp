@@ -399,7 +399,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("apply_transaction_classifications");
     expect(text).toContain('mode: "dry_run_apply"');
     expect(text).toContain('mode: "execute_apply"');
-    expect(text).toContain("`classifications_json`: `JSON.stringify(the result payload from step 1)`");
+    expect(text).toContain("`classifications_json`: the step-1 result payload passed directly as a JSON object/array");
     expect(text).not.toContain("JSON.stringify(the full response from step 1)");
     expect(text).toContain("result.total_unconfirmed");
     expect(text).toContain("result.execution.results");
@@ -630,7 +630,7 @@ describe("registerPrompts", () => {
       expect(text).toContain("resolve_accounting_review_item");
       expect(text).toContain("recommendation");
       expect(text).toContain("compliance_basis");
-      expect(text).toContain("for VAT-registered companies, ordinary business input VAT normally defaults to deductible");
+      expect(text).toContain("VAT-registered company: ordinary business input VAT normally defaults to deductible");
       expect(text).toContain("unresolved_questions");
       expect(text).toContain("suggested_workflow");
       expect(text).not.toContain("suggested_rule_markdown");
@@ -747,7 +747,7 @@ describe("registerPrompts", () => {
       expect(text).toContain('mode: "dry_run_apply"');
       expect(text).toContain('mode: "execute_apply"');
       expect(text).toContain("classifications_json");
-      expect(text).toContain("JSON.stringify(the result payload from step 1)");
+      expect(text).toContain("the step-1 result payload passed directly as a JSON object/array");
       expect(text).not.toContain("JSON.stringify(the full response from step 1)");
       expect(text).toContain("result.execution.summary");
       expect(text).toContain("result.execution.audit_reference");

@@ -55,7 +55,7 @@ For each group in `result.groups`, show:
 
 Call `classify_bank_transactions`:
 - mode: "dry_run_apply"
-- `classifications_json`: `JSON.stringify(the result payload from step 1)`
+- `classifications_json`: the step-1 result payload passed directly as a JSON object/array (a JSON string also works but is legacy compatibility only)
 
 Fallback compatibility primitive: `apply_transaction_classifications` is registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `classify_bank_transactions` with `mode="dry_run_apply"` / `mode="execute_apply"`.
 

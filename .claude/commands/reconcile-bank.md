@@ -17,7 +17,7 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 Preferred: call `reconcile_bank_transactions`:
 - mode: "suggest"
-- min_confidence: 30 (to see all potential matches including low-confidence ones)
+- min_confidence: 30 (surfaces matches down to confidence 30; scores below 30 are treated as no match)
 
 Fallback compatibility primitive: `reconcile_transactions` is registered only when `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1`; by default use `reconcile_bank_transactions` with `mode="suggest"`. Do not mention fallback tool names to the user.
 
@@ -98,7 +98,7 @@ For transfers between your own bank accounts (counterparty matches company name 
 Call `reconcile_bank_transactions`:
 - mode: "inter_account_dry_run" (dry run first)
 
-Fallback compatibility primitive: `reconcile_inter_account_transfers` remains available, but prefer the mode-based dry run through `reconcile_bank_transactions` before execution.
+Note: `reconcile_bank_transactions` has no merged inter-account *execute* mode. Dry-run through it with `mode="inter_account_dry_run"`, but execution always goes through `reconcile_inter_account_transfers` with `execute: true` (a distinct, always-registered tool — not a hidden fallback).
 
 Review the results:
 - Treat `result.execution.summary` as the canonical source for counts, and use `result.pairs`, `result.one_sided`, `result.already_handled`, and `result.ambiguous_pairs` for the detailed breakdown.

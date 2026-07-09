@@ -32,7 +32,10 @@ Always present:
 - only the unresolved questions, if any
 - the next concrete workflow or tool step
 
-For owner-paid expense receipts: for VAT-registered companies, ordinary business input VAT normally defaults to deductible (a non-VAT-registered company books the gross amount with no input-VAT deduction), while likely restricted categories (representation, passenger-car, etc.) need confirmation unless local rules define the policy.
+For owner-paid expense receipts:
+- VAT-registered company: ordinary business input VAT normally defaults to deductible.
+- Non-VAT-registered company: book the gross amount with no input-VAT deduction.
+- Likely restricted categories (representation, passenger-car, etc.): need confirmation, unless a saved company booking rule already defines the policy.
 
 ### Step 3: Keep the interaction minimal
 

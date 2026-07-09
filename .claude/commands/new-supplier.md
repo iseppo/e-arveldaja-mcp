@@ -64,7 +64,7 @@ Call `create_client`:
 - `is_client`: `false`
 - `is_supplier`: `true`
 - `cl_code_country`: `"EST"` (or as specified)
-- `is_juridical_entity`: `true` (default; `false` for natural persons)
+- `is_physical_entity`: `false` (REQUIRED — `false` = legal entity/company, the default case; `true` for natural persons)
 - `bank_account_no`: IBAN (if provided)
 - `invoice_vat_no`: VAT number (if provided)
 - `email`: (if provided)

@@ -68,7 +68,7 @@ Call `compute_trial_balance`:
 Verify total debits = total credits. Treat sub-cent rounding deltas (under 0.01 EUR) as acceptable in multi-currency books; anything larger is a blocker that needs investigation.
 
 Call `compute_profit_and_loss`:
-- `date_from`: YYYY-01-01 (fiscal year start)
+- `date_from`: YYYY-01-01 (fiscal-year start; use the company's fiscal-year start instead if it is not the calendar year)
 - `date_to`: last day of the month
 - `fresh`: true if the user asked for fresh data and you did not already call `clear_cache`
 
