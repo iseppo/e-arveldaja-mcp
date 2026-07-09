@@ -893,9 +893,10 @@ describe("process_receipt_batch rollback handling", () => {
       ],
       needs_review: [],
     });
-    // Notes are OCR-sandbox-wrapped at MCP output; match plain text inside the wrap.
+    // The interpolated API error fragment is untrusted-OCR-wrapped inside the
+    // note (#9); the server-authored template text stays clean.
     expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
-      expect.stringMatching(/Invalidated created purchase invoice 9001 because source document upload failed: upload failed\./),
+      expect.stringMatching(/Invalidated created purchase invoice 9001 because source document upload failed: <<UNTRUSTED_OCR_START:([0-9a-f]{32})>>\nupload failed\n<<UNTRUSTED_OCR_END:\1>>\./),
     ]));
     expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9001);
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();

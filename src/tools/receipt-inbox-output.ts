@@ -63,6 +63,20 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
     };
   }
 
+  // The payment-receipt NOTE already wraps the invoice number, but the
+  // structured `referenced_invoice.invoice_number` is OCR-derived too — wrap it
+  // at the output-sanitization site with the same helper so a downstream LLM
+  // cannot be tricked by an invoice number smuggled from a scanned receipt (#4).
+  if (next.referenced_invoice?.invoice_number !== undefined) {
+    next = {
+      ...next,
+      referenced_invoice: {
+        ...next.referenced_invoice,
+        invoice_number: wrapUntrustedOcr(next.referenced_invoice.invoice_number) ?? next.referenced_invoice.invoice_number,
+      },
+    };
+  }
+
   if (next.error !== undefined) {
     next = { ...next, error: wrapUntrustedOcr(next.error) ?? next.error };
   }

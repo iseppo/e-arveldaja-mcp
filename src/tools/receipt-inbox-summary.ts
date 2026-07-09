@@ -56,9 +56,18 @@ export function buildReceiptBatchWorkflow(options: {
           tool: "process_receipt_batch",
           summary: options.workflowSummary,
           suggested_args: options.workflowArgs,
+          // Slim projection: the only consumer (`receiptSignalCounts` in
+          // workflow-response.ts) reads `status` and
+          // `llm_fallback.confidence_signals`. Embedding the full sanitized
+          // results here duplicated the top-level array — each item can carry
+          // up to ~20KB of raw_text plus provenance/candidate arrays — so we
+          // project down to just the fields that consumer needs.
           preview: {
             ...options.summary,
-            results: options.sanitizedResults,
+            results: options.sanitizedResults.map(result => ({
+              status: result.status,
+              llm_fallback: { confidence_signals: result.llm_fallback?.confidence_signals ?? [] },
+            })),
           },
         }]
       : [],

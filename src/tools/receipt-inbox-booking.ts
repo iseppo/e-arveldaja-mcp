@@ -1,4 +1,5 @@
 import { logAudit } from "../audit-log.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { roundMoney } from "../money.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -209,6 +210,11 @@ export async function createAndMaybeMatchPurchaseInvoice(
   let uploadedDocument = false;
   const rollbackCreatedInvoice = async (reason: string, error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
+    // The API error message is untrusted upstream text; wrap only the
+    // interpolated fragment when it goes into a `notes[]` string (which is not
+    // wrapped at MCP output, unlike the `error` field), keeping the
+    // server-authored template clean — consistent with how `error` is wrapped.
+    const wrappedMessage = wrapUntrustedOcr(message) ?? message;
 
     if (!createdInvoice.id) {
       return {
@@ -220,10 +226,10 @@ export async function createAndMaybeMatchPurchaseInvoice(
 
     const invalidateMessage = await invalidateAndReport(api, createdInvoice, notes, {
       reason,
-      onInvalidated: invoiceId => `Invalidated created purchase invoice ${invoiceId} because ${reason}: ${message}.`,
+      onInvalidated: invoiceId => `Invalidated created purchase invoice ${invoiceId} because ${reason}: ${wrappedMessage}.`,
       onInvalidationFailed: (invoiceId, failedMessage) =>
-        `Created purchase invoice ${invoiceId} could not be invalidated after ${reason}: ${message}. ` +
-        `Automatic invalidation also failed: ${failedMessage}.`,
+        `Created purchase invoice ${invoiceId} could not be invalidated after ${reason}: ${wrappedMessage}. ` +
+        `Automatic invalidation also failed: ${wrapUntrustedOcr(failedMessage) ?? failedMessage}.`,
     });
     if (!invalidateMessage) {
       return {
@@ -341,7 +347,8 @@ export async function createAndMaybeMatchPurchaseInvoice(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      notes.push(`Could not link matched transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}: ${message}. Invoice was kept without bank link.`);
+      // Wrap the untrusted API-error fragment interpolated into this note (#9).
+      notes.push(`Could not link matched transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}: ${wrapUntrustedOcr(message) ?? message}. Invoice was kept without bank link.`);
     }
   } else if (matchedCandidate) {
     notes.push(`Found transaction candidate ${matchedCandidate.transaction_id}, but confidence ${matchedCandidate.confidence} was below auto-link threshold ${EXACT_MATCH_THRESHOLD}.`);

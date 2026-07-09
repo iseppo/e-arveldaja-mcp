@@ -43,6 +43,7 @@ import {
   getAutoBookedVatConfig,
   hasAutoBookableReceiptFields,
   inferSupplierCountry,
+  LOW_OCR_CONFIDENCE_THRESHOLD,
   normalizeCounterpartyName,
   scoreTransactionToInvoice,
   suggestBookingInternal,
@@ -824,11 +825,16 @@ export function detectSelfRegCodeOnly(extracted: ExtractedReceiptFields, ownComp
   const own = ownCompanyRegistryCode.trim();
   if (!own) return false;
   const normalizedText = extracted.raw_text.replace(/\s+/g, "");
-  const idx = normalizedText.indexOf(own);
-  if (idx < 0) return false;
-  const before = idx > 0 ? normalizedText[idx - 1] : "";
-  const after = idx + own.length < normalizedText.length ? normalizedText[idx + own.length]! : "";
-  return !/\d/.test(before) && !/\d/.test(after);
+  // Check EVERY occurrence, not just the first: the own reg code could appear
+  // first as a substring of a longer digit run (failing the boundary check) and
+  // again later as a standalone code. Return true if ANY occurrence stands
+  // alone (no adjacent digit on either side).
+  for (let idx = normalizedText.indexOf(own); idx >= 0; idx = normalizedText.indexOf(own, idx + 1)) {
+    const before = idx > 0 ? normalizedText[idx - 1]! : "";
+    const after = idx + own.length < normalizedText.length ? normalizedText[idx + own.length]! : "";
+    if (!/\d/.test(before) && !/\d/.test(after)) return true;
+  }
+  return false;
 }
 
 /**
@@ -1011,12 +1017,26 @@ async function processSingleReceipt(
     const selfVatDetected = detectSelfVatOnly(extracted, options.ownCompanyVat);
     const signals: ExtractionConfidenceSignals = {};
     if (extracted.partial_ocr_failure) signals.partial_ocr_failure = true;
-    if (extracted.min_ocr_confidence !== undefined && extracted.min_ocr_confidence < 0.6) {
+    if (extracted.min_ocr_confidence !== undefined && extracted.min_ocr_confidence < LOW_OCR_CONFIDENCE_THRESHOLD) {
       signals.low_ocr_confidence = true;
     }
     if (selfVatDetected) signals.self_vat_detected = true;
     const selfRegCodeDetected = detectSelfRegCodeOnly(extracted, options.ownCompanyRegistryCode);
     if (selfRegCodeDetected) signals.self_reg_code_detected = true;
+    // #1: an echo-only supplier identifier (rationale coordinate_confirmed_echo)
+    // is kept but UNCONFIRMED — coordinate data cannot tell a legit supplier-id
+    // echo in the buyer block from a buyer-id echo in a supplier-column
+    // reference line. Route it to review so the operator verifies the supplier
+    // before booking, rather than trusting it as coordinate-confirmed.
+    const supplierIdentifierEcho =
+      extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
+      extracted.vat_no_rationale === "coordinate_confirmed_echo";
+    if (supplierIdentifierEcho) {
+      signals.supplier_identifier_echo_unconfirmed = true;
+      notes.push(
+        "Supplier identifier was only kept because the same value also appears in a supplier column (echo). Coordinate data cannot confirm it is the supplier's own code — verify the supplier before booking (#1).",
+      );
+    }
     const inferredSupplierCountry = inferSupplierCountry(extracted);
     const summarize = () => summarizeInvoiceExtraction(extracted, signals, "extracted.raw_text", inferredSupplierCountry);
     const llmFallback = summarize();
@@ -1046,7 +1066,10 @@ async function processSingleReceipt(
           : classification === "payment_receipt"
             ? `Document is a payment receipt${
                 referencedInvoice
-                  ? ` for invoice ${referencedInvoice.invoice_number}`
+                  // invoice_number is OCR-derived; wrap only the interpolated
+                  // fragment so it is delimited as data, consistent with how
+                  // `error` is wrapped elsewhere (#9).
+                  ? ` for invoice ${wrapUntrustedOcr(referencedInvoice.invoice_number) ?? referencedInvoice.invoice_number}`
                   : ""
               }, not a separate purchase invoice. Booking it would duplicate the underlying invoice — attach to the existing invoice document instead (#15).`
             : "Document could not be classified as a supplier purchase invoice.",
@@ -1118,6 +1141,12 @@ async function processSingleReceipt(
     );
 
     if (bookingSuggestion) {
+      // #6: if a recent-invoice GET rejected, the booking suggestion may be
+      // based on stale history — surface the degradation note so the operator
+      // knows the freshest history may be missing.
+      if (bookingSuggestion.history_partial_note) {
+        notes.push(bookingSuggestion.history_partial_note);
+      }
       applyReverseChargeAutoDetection(bookingSuggestion, extracted, supplierResolution, context.isVatRegistered, notes);
       if (bookingSuggestion.reverse_charge_reason === "foreign_supplier_default") {
         signals.foreign_reverse_charge_default_unverified = true;
@@ -1938,7 +1967,7 @@ export function registerReceiptInboxTools(
                   reason,
                   onInvalidated: invoiceId => `Invalidated auto-created purchase invoice ${invoiceId} because ${reason}.`,
                   onInvalidationFailed: (invoiceId, invalidateMessage) =>
-                    `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${invalidateMessage}.`,
+                    `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${wrapUntrustedOcr(invalidateMessage) ?? invalidateMessage}.`,
                 });
               };
 
