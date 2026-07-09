@@ -203,16 +203,29 @@ function buildNeedsReviewResult(
   };
 }
 
-function shouldGateCreation(
+// Exported for unit tests.
+export function shouldGateCreation(
   summary: InvoiceExtractionFallback,
   executionMode: ReceiptBatchExecutionMode,
 ): { gate: boolean; reason: string } {
   const foreignDefaultUnverified = summary.confidence_signals.includes(
     "foreign_reverse_charge_default_unverified",
   );
+  // #4: an echo-only supplier identifier may be a buyer code misread from a
+  // supplier-column reference line — booking a purchase invoice against it would
+  // book to the wrong (or the active) company. Gate creation in every mode (like
+  // foreign_reverse_charge_default_unverified) so the operator verifies the
+  // supplier first, matching the "route to review before booking" intent; a bare
+  // medium signal would not block plain `create` mode.
+  const supplierIdentifierEchoUnconfirmed = summary.confidence_signals.includes(
+    "supplier_identifier_echo_unconfirmed",
+  );
   const confirmModeNeedsHighConfidence =
     executionMode === "create_and_confirm" && summary.confidence !== "high";
-  const gate = summary.confidence === "low" || foreignDefaultUnverified || confirmModeNeedsHighConfidence;
+  const gate = summary.confidence === "low" ||
+    foreignDefaultUnverified ||
+    supplierIdentifierEchoUnconfirmed ||
+    confirmModeNeedsHighConfidence;
   return {
     gate,
     reason: summary.confidence_signals.join(", ") || "low confidence",

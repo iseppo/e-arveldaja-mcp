@@ -1430,6 +1430,20 @@ describe("parseAmount — comma thousands and negative signs (Codex review 6)", 
     expect(amounts).not.toContain(1899);
   });
 
+  it("does not treat an Estonian date as dot-decimal evidence for a bare comma total", () => {
+    const result = extractAmounts("Kuupäev 15.03.2026\nKokku 1,899 EUR");
+
+    expect(result.total_gross).toBe(1.9);
+    expect(result.total_gross).not.toBe(1899);
+  });
+
+  it("does not treat an Estonian clock time as dot-decimal evidence for a bare comma total", () => {
+    const result = extractAmounts("Kell 12.30\nKokku 1,899 EUR");
+
+    expect(result.total_gross).toBe(1.9);
+    expect(result.total_gross).not.toBe(1899);
+  });
+
   it("reads '1,234.56' as 1234.56 even with a wide English document context", () => {
     const amounts = extractAmountsFromLine("1,234.56", "Subtotal 10.00\n1,234.56");
     expect(amounts).toContain(1234.56);
@@ -1545,6 +1559,37 @@ describe("extractAmountsFromLayout — bottom-most VAT binding (Codex review #1b
     expect(result?.total_gross).toBe(121);
     expect(result?.total_vat).toBe(21);
     expect(result?.total_net).toBe(100);
+  });
+
+  it("drops a negative VAT from layout extraction before it can derive an inflated net", () => {
+    const items: LayoutTextItem[] = [
+      makeItem("Käibemaks", 0, 40, 90),
+      makeItem("-5.00", 200, 40, 45),
+      makeItem("Kokku", 0, 70, 60),
+      makeItem("100.00", 200, 70, 55),
+    ];
+
+    const result = extractAmountsFromLayout(items);
+
+    expect(result?.total_gross).toBe(100);
+    expect(result?.total_vat).toBeUndefined();
+    expect(result?.total_net).not.toBe(105);
+  });
+
+  it("binds a combined VAT and total summary row to the VAT column", () => {
+    const items: LayoutTextItem[] = [
+      makeItem("Käibemaks kokku", 0, 40, 130),
+      makeItem("20.00", 150, 40, 45),
+      makeItem("Kokku", 230, 40, 60),
+      makeItem("120.00", 330, 40, 55),
+    ];
+
+    const result = extractAmountsFromLayout(items);
+
+    expect(result?.total_vat).toBe(20);
+    expect(result?.total_vat).not.toBe(120);
+    expect(result?.total_net).toBe(100);
+    expect(result?.total_gross).toBe(120);
   });
 });
 

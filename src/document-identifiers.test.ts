@@ -721,6 +721,76 @@ describe("extractIdentifiers — coordinate-based classification (Option C)", ()
     expect(ids.reg_code_rationale).toBe("coordinate_confirmed_echo");
   });
 
+  it("does not rescue a buyer-side code from a supplier occurrence on another page", () => {
+    const text = [
+      "Arve saaja",
+      "Buyer OÜ",
+      "Rg-kood 17487472",
+      "Müüja",
+      "Supplier OÜ",
+      "Viide 17487472",
+    ].join("\n");
+    const textItems: LayoutTextItem[] = [
+      ti("Arve saaja", 50, 100, 80, 10),
+      ti("Buyer OÜ", 50, 115, 70, 10),
+      ti("Rg-kood 17487472", 50, 130, 100, 10),
+      { ...ti("Müüja", 400, 100), pageNum: 2 },
+      { ...ti("Supplier OÜ", 400, 115, 90), pageNum: 2 },
+      { ...ti("Viide 17487472", 400, 130, 100), pageNum: 2 },
+    ];
+
+    const ids = extractIdentifiers(text, { textItems });
+
+    expect(ids.reg_code).toBeUndefined();
+    expect(ids.reg_code_rationale).toBe("coordinate_rejected");
+  });
+
+  it("treats a distant same-row Makse as unrelated to a buyer Saaja marker", () => {
+    const text = [
+      "Saaja",
+      "Acme OÜ",
+      "Rg-kood 17487472",
+    ].join("\n");
+    const textItems: LayoutTextItem[] = [
+      ti("Makse", 50, 100),
+      ti("Saaja", 450, 100),
+      ti("Acme OÜ", 450, 115, 70),
+      ti("Rg-kood 17487472", 450, 130, 100),
+    ];
+
+    const ids = extractIdentifiers(text, { textItems });
+
+    expect(ids.reg_code).toBeUndefined();
+    expect(ids.reg_code_rationale).toBe("coordinate_rejected");
+  });
+
+  it("keeps the raw-text supplier occurrence when geometric order puts the buyer first", () => {
+    const text = [
+      "Müüja",
+      "Supplier OÜ",
+      "Rg-kood 12176678",
+      "Arve saaja",
+      "Buyer OÜ",
+      "Rg-kood 12176678",
+    ].join("\n");
+    // Parser/source order follows the raw text, but geometric (page, y, x)
+    // sorting would put the buyer's left column before the supplier's right one.
+    const textItems: LayoutTextItem[] = [
+      ti("Müüja", 400, 100),
+      ti("Supplier OÜ", 400, 115, 90),
+      ti("Rg-kood 12176678", 400, 130, 100),
+      ti("Arve saaja", 50, 100, 80),
+      ti("Buyer OÜ", 50, 115, 70),
+      ti("Rg-kood 12176678", 50, 130, 100),
+    ];
+
+    const ids = extractIdentifiers(text, { textItems });
+
+    expect(ids.reg_code).toBe("12176678");
+    expect(ids.reg_code_rationale).toBe("labeled");
+    expect(ids.reg_code_rationale).not.toBe("coordinate_confirmed_echo");
+  });
+
   // PASS4 #1: a buyer VAT echoed in a supplier-column reference line must NOT be
   // silently emitted as a firmly coordinate-confirmed supplier VAT. It is kept
   // (so a real supplier id is never lost — #10) but carries the weaker

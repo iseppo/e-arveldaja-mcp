@@ -33,8 +33,10 @@ import {
   detectSelfVatOnly,
   detectSelfRegCodeOnly,
   resolveSupplierFromTransaction,
+  shouldGateCreation,
   supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
+import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
 import { readValidatedReceiptFile, revalidateReceiptFilePath } from "./receipt-inbox-files.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
@@ -1796,5 +1798,37 @@ describe("sanitizeReceiptResultForOutput OCR trust boundary", () => {
 
     const out = sanitizeReceiptResultForOutput(input);
     expect(out.notes[0]).toBe("unclassified");
+  });
+});
+
+describe("shouldGateCreation — echo-only supplier identifier (#4)", () => {
+  const baseGood = {
+    supplier_name: "Acme OÜ",
+    invoice_number: "INV-2024-001",
+    invoice_date: "2024-01-15",
+    total_gross: 121.0,
+    currency: "EUR",
+    raw_text: "Invoice content",
+  };
+
+  it("gates auto-create in plain 'create' mode when the supplier id is only an echo", () => {
+    const summary = summarizeInvoiceExtraction(baseGood, {
+      supplier_identifier_echo_unconfirmed: true,
+    });
+    // The signal only downgrades to medium, and plain `create` mode does not
+    // gate medium — so without the explicit signal gate an unconfirmed supplier
+    // echo would auto-create a purchase invoice against a possibly-wrong party.
+    expect(summary.confidence).toBe("medium");
+    expect(summary.confidence_signals).toContain("supplier_identifier_echo_unconfirmed");
+
+    const gate = shouldGateCreation(summary, "create");
+    expect(gate.gate).toBe(true);
+    expect(gate.reason).toContain("supplier_identifier_echo_unconfirmed");
+  });
+
+  it("does not gate a clean high-confidence extraction in 'create' mode", () => {
+    const summary = summarizeInvoiceExtraction(baseGood);
+    expect(summary.confidence).toBe("high");
+    expect(shouldGateCreation(summary, "create").gate).toBe(false);
   });
 });

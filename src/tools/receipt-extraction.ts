@@ -465,12 +465,21 @@ function normalizeFilenameToken(name: string): string {
 
 // True when `context` contains a dot used as a decimal separator (an "N.NN"
 // money amount, e.g. "0.00" or "1,234.56"), ignoring dots inside percentages
-// like "24.5%". Signals English number formatting so a bare "1,500" is read as
+// like "24.5%". A dotted date/time/version/identifier is NOT locale evidence:
+// treating one as English formatting can inflate an Estonian bare "1,899" to
+// 1899. Signals English number formatting so a bare "1,500" is read as
 // thousands, not a 3-decimal Estonian value.
 function hasDotDecimalSignal(context?: string): boolean {
   if (!context) return false;
-  return [...context.matchAll(/\d\.\d{1,2}(?!\d)/g)].some(match => {
-    const after = context.slice((match.index ?? 0) + match[0].length);
+  return [...context.matchAll(/(?<![\p{L}\d._-])\d[\d,]*\.\d{1,2}(?![\p{L}\d._-])/gu)].some(match => {
+    const start = match.index ?? 0;
+    const prefix = context.slice(Math.max(0, start - 24), start);
+    // #6: a clock label makes an otherwise amount-shaped "12.30" a time, and
+    // date/version/identifier labels serve the same role for dotted tokens.
+    if (/\b(?:kell|aeg|time|kuupäev|date|version|versioon|id|identifier|nr|no)\s*[:.]?\s*$/i.test(prefix)) {
+      return false;
+    }
+    const after = context.slice(start + match[0].length);
     return !after.startsWith("%");
   });
 }
@@ -1183,6 +1192,12 @@ function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly Layou
     .filter(amount => amount.row === label.row && amount.item !== label.item);
   const labelRightEdge = label.item.x + label.item.width;
   const rightSideAmounts = sameRowAmounts.filter(amount => amount.item.x >= labelRightEdge);
+  const isVatRateBreakdown = label.field === "total_vat" &&
+    /\b(?:km|käibemaks|vat)\s*\d{1,2}(?:[.,]\d+)?\s*%/i.test(label.item.text);
+  // #7: a percentage-rate row has its base and VAT in separate columns, so
+  // its VAT is the rightmost amount. Summary labels keep the normal nearest
+  // right-side binding, which selects their own VAT column rather than the
+  // following gross-total column.
   const candidates = rightSideAmounts.length > 0 ? rightSideAmounts : sameRowAmounts;
 
   // #3: on a multi-rate breakdown row "KM 24% | 10.00 | 2.40" the taxable base
@@ -1192,7 +1207,7 @@ function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly Layou
   // the rightmost same-row amount; single-amount rows ("KM 24% 2.38") are
   // unaffected (rightmost = only amount). Other fields keep nearest-column
   // binding.
-  if (label.field === "total_vat" && candidates.length > 1) {
+  if (isVatRateBreakdown && candidates.length > 1) {
     return [...candidates].sort((a, b) =>
       (b.item.x + b.item.width) - (a.item.x + a.item.width) ||
       b.centerX - a.centerX,
@@ -1226,7 +1241,7 @@ function shouldReplaceLayoutBinding(current: LayoutAmountCell | undefined, next:
   // lock the binding at the top of the page and shadow the authoritative bottom
   // summary line ("Käibemaks kokku"). The bottom-most summary is the total.
   return next.row.pageNum > current.row.pageNum ||
-    (next.row.pageNum === current.row.pageNum && next.row.y >= current.row.y);
+    (next.row.pageNum === current.row.pageNum && next.row.y > current.row.y);
 }
 
 function amountMetadataFromLayout(field: AmountField, cell: LayoutAmountCell): AmountProvenanceMetadata {
@@ -1251,6 +1266,15 @@ function reconcileLayoutAmounts(bindings: ReadonlyMap<AmountField, LayoutAmountC
   const grossMetadata = amountMetadataFromLayout("total_gross", grossBinding);
   let netMetadata = netBinding ? amountMetadataFromLayout("total_net", netBinding) : undefined;
   let vatMetadata = vatBinding ? amountMetadataFromLayout("total_vat", vatBinding) : undefined;
+
+  // #5: validate layout VAT before reconciliation. A negative VAT can make an
+  // otherwise self-consistent but impossible trio (100 - -5 = 105), so a
+  // later mismatch-only guard would never run. Drop it before it can derive
+  // an inflated net; text extraction may still supply a valid VAT afterwards.
+  if (totalVat !== undefined && (totalVat < 0 || totalVat > totalGross)) {
+    totalVat = undefined;
+    vatMetadata = undefined;
+  }
 
   if (totalGross !== undefined && totalVat !== undefined) {
     const derivedNet = roundMoney(totalGross - totalVat);
