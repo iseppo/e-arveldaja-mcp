@@ -13,7 +13,8 @@ import { buildWorkflowEnvelope, remapHiddenGranularWorkflowEnvelope } from "../w
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
-import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal, toUtcDay, UNKNOWN_JOURNAL_ID, type InterAccountJournalEntry } from "./inter-account-utils.js";
+import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
+import { BookingGuard } from "../booking-guard.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -691,10 +692,10 @@ export function registerBankReconciliationTools(
       const consumedTxIds = new Set<number>();
       const blockedOneSidedTxIds = new Set<number>();
 
-      // Build index of existing confirmed inter-account journals for duplicate detection.
-      // Key: "sourceDim|targetDim|amount|date" → journal_id
-      const allJournals = await api.journals.listAllWithPostings();
-      const existingInterAccountKeys = buildInterAccountJournalIndex(allJournals, ownDimensionIds);
+      // Load one BookingGuard snapshot of existing confirmed inter-account
+      // journals (Lane B) for duplicate detection, plus in-run recording of
+      // legs confirmed during this run.
+      const guard = await BookingGuard.load(api, { ownDimensionIds });
 
       /**
        * Check if an inter-account transfer is already journalized. When the
@@ -702,65 +703,39 @@ export function registerBankReconciliationTools(
        * is used to disambiguate multiple journals sharing amount+date+dims —
        * only a same-reference or ref-less existing journal counts as a
        * duplicate. Unrelated transfers with different references no longer
-       * suppress each other.
+       * suppress each other. `maxGapDays` widens the match to a date window
+       * (nearest-first) via the guard's Lane B lookup.
        */
       function findExistingJournal(
         sourceDim: number, targetDim: number, amount: number, date: string, maxGapDays: number,
         referenceNumber?: string | null,
       ): number | undefined {
-        const roundedAmount = roundMoney(amount);
-        const exactKey = `${sourceDim}|${targetDim}|${roundedAmount}|${date}`;
-        const exact = findMatchingJournal(existingInterAccountKeys.get(exactKey), referenceNumber);
-        if (exact !== undefined) return exact;
-        if (maxGapDays > 0) {
-          // Pure-UTC arithmetic via toUtcDay matches the Phase-1 compatibility
-          // check. new Date(string) parses YYYY-MM-DD as UTC midnight today,
-          // but any timestamp/offset suffix would drift under DST — defense
-          // in depth against future inputs.
-          const anchor = toUtcDay(date);
-          for (let offset = -maxGapDays; offset <= maxGapDays; offset++) {
-            if (offset === 0) continue;
-            const nearby = new Date(anchor + offset * 86_400_000);
-            const nearbyStr = nearby.toISOString().split("T")[0]!;
-            const nearbyKey = `${sourceDim}|${targetDim}|${roundedAmount}|${nearbyStr}`;
-            const nearbyMatch = findMatchingJournal(existingInterAccountKeys.get(nearbyKey), referenceNumber);
-            if (nearbyMatch !== undefined) return nearbyMatch;
-          }
-        }
-        return undefined;
+        return guard.findInterAccount({
+          sourceDim, targetDim, amount, date, maxGapDays, reference: referenceNumber,
+        });
       }
 
       /**
        * Register a just-created inter-account journal into the in-run index so
-       * a later leg checked in the same run sees it. `existingInterAccountKeys`
-       * is built once from the persisted journals at the top of the run; without
-       * this, confirming one leg of a transfer leaves the index stale and the
-       * opposite leg (querying the mirror key) is confirmed too — a duplicate
-       * journal. Uses the transaction's own reference so the entry disambiguates
-       * exactly as the persisted journal would on the next full run.
+       * a later leg checked in the same run sees it. The guard's snapshot is
+       * built once from the persisted journals; without this, confirming one
+       * leg of a transfer leaves the index stale and the opposite leg (querying
+       * the mirror key) is confirmed too — a duplicate journal. Uses the
+       * transaction's own reference so the entry disambiguates exactly as the
+       * persisted journal would on the next full run. When the confirm response
+       * omits created_object_id the guard records the sentinel journal id — the
+       * key is still recorded so in-run dedup works, and no tx id is ever
+       * mistaken for a journal id.
        */
       function recordInterAccountJournal(
         sourceDim: number | undefined, targetDim: number | undefined,
         amount: number, date: string, journalId: number | undefined, referenceNumber?: string | null,
       ): void {
         if (sourceDim === undefined || targetDim === undefined) return;
-        const roundedAmount = roundMoney(amount);
-        const entry: InterAccountJournalEntry = {
-          // Never fall back to the transaction id — that would report a tx id as
-          // a journal id in "already journalized" results. Use the sentinel when
-          // the confirm response omitted created_object_id; the key is still
-          // recorded so in-run dedup works.
-          journal_id: journalId ?? UNKNOWN_JOURNAL_ID,
-          document_number: referenceNumber ?? undefined,
-        };
-        for (const key of [
-          `${sourceDim}|${targetDim}|${roundedAmount}|${date}`,
-          `${targetDim}|${sourceDim}|${roundedAmount}|${date}`,
-        ]) {
-          const existing = existingInterAccountKeys.get(key);
-          if (existing) existing.push(entry);
-          else existingInterAccountKeys.set(key, [entry]);
-        }
+        guard.recordInterAccount(
+          { sourceDim, targetDim, amount, date, reference: referenceNumber },
+          journalId,
+        );
       }
 
       // Helper: ensure clients_id is set (API requires it for confirmation)

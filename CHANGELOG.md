@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Journal idempotency is now centralized in a single `BookingGuard` layer (`src/booking-guard.ts`).** The RIK API signs only the request path, not the body, so it offers no server-side idempotency — every booking tool had to hand-roll its own "did I already book this?" scan of the ledger, and subtle divergences between those copies (deleted-journal handling, in-run vs cross-run dedup, sentinel journal ids) were the dominant duplicate-booking bug class. `BookingGuard` loads one journal snapshot per run and exposes two lanes: Lane A for namespaced `document_number` keys (`FX:{id}`, `LY:{ref}`) with `find`/`record`/`createJournalOnce`, and Lane B for structural inter-account transfers (`sourceDim|targetDim|amount|date` with reference disambiguation and an optional nearest-first date window). Migrated `reconcile_currency_rounding` (Lane A), the Lightyear buy/sell/cash-equivalent/distribution booking sites (Lane A, preserving the legacy bare-reference date-cross-check), and the Wise and bank-reconciliation inter-account paths (Lane B). Behavior is preserved, with two incidental hardening improvements: `reconcile_currency_rounding` now treats a concurrently-created `FX:` journal as already-reconciled instead of double-posting, and Lightyear booking now dedups repeated references within a single CSV. Lane-A-only callers use the cheaper `listAll` (no per-journal posting fetches); Lane B loads postings only when bank dimensions are supplied.
+
 ## [0.19.1] - 2026-07-10
 
 ### Fixed

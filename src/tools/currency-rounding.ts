@@ -12,6 +12,7 @@ import {
   DEFAULT_LIABILITY_ACCOUNT,
 } from "../accounting-defaults.js";
 import type { PurchaseInvoice, Transaction } from "../types/api.js";
+import { BookingGuard } from "../booking-guard.js";
 
 const SMALL_ROUNDING_THRESHOLD = 0.10; // up to 10 cents → in-place fix
 const FX_DIFFERENCE_LIMIT = 1.00;      // up to 1 EUR → FX journal posting
@@ -94,22 +95,17 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
       );
       if (max_candidates !== undefined) partiallyPaid = partiallyPaid.slice(0, max_candidates);
 
-      // An FX journal is stamped with document_number "FX:{invoice_id}". Collect
-      // the invoice IDs that already carry one so we never post a second FX
-      // journal for the same residual (the diff does not clear when the journal
-      // is booked, so execute is otherwise not idempotent).
-      const fxReconciledInvoiceIds = new Set<number>();
-      for (const j of await api.journals.listAll()) {
-        // A deleted/invalidated FX journal must not block re-booking — the
-        // residual is still open, so the operator invalidated it precisely to
-        // re-post it. Mirrors the is_deleted filter in the Lightyear guard.
-        if (j.is_deleted) continue;
-        const dn = j.document_number;
-        if (typeof dn === "string" && dn.startsWith("FX:")) {
-          const invId = Number(dn.slice(3));
-          if (Number.isInteger(invId)) fxReconciledInvoiceIds.add(invId);
-        }
-      }
+      // An FX journal is stamped with document_number "FX:{invoice_id}". The
+      // BookingGuard snapshots the ledger once and exposes idempotent lookup
+      // (`find`) + guarded create (`createJournalOnce`) so we never post a
+      // second FX journal for the same residual (the diff does not clear when
+      // the journal is booked, so execute is otherwise not idempotent). Its
+      // default `not_deleted` liveness means a deleted/invalidated FX journal
+      // does NOT block re-booking — the residual is still open, so the operator
+      // invalidated it precisely to re-post it.
+      const guard = await BookingGuard.load(api);
+      const isFxReconciled = (invoiceId: number): boolean =>
+        guard.find({ ns: "FX", id: String(invoiceId) }) !== undefined;
 
       const candidates: ReconcileCandidate[] = [];
 
@@ -181,7 +177,7 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
           // loss (D 8600) and credit liability.
           const isOverstated = diff > 0;
           const fxAccount = isOverstated ? fxGainAccount : fxLossAccount;
-          if (fxReconciledInvoiceIds.has(full.id!)) {
+          if (isFxReconciled(full.id!)) {
             proposedAction = `Already reconciled — an FX journal (FX:${full.id}) exists for this invoice; skipping to avoid a duplicate.`;
           } else {
             proposedAction = `Book ${Math.abs(diff).toFixed(2)} EUR FX adjustment journal: ${isOverstated ? `D ${liabilityAccount} / C ${fxAccount} (FX gain — booked liability higher than Wise settlement)` : `D ${fxAccount} / C ${liabilityAccount} (FX loss — booked liability lower than Wise settlement)`}.`;
@@ -210,7 +206,7 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
           proposed_base_net_price: proposedBaseNetPrice,
           proposed_base_vat_price: proposedBaseVatPrice,
           linked_transaction_ids: txIds,
-          already_reconciled: category === "fx_difference" && fxReconciledInvoiceIds.has(full.id!),
+          already_reconciled: category === "fx_difference" && isFxReconciled(full.id!),
         });
       }
 
@@ -260,31 +256,42 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
               const isOverstated = c.diff_eur > 0;
               const fxAccount = isOverstated ? fxGainAccount : fxLossAccount;
               const journalDate = c.invoice_date ?? new Date().toISOString().slice(0, 10);
-              const journal = await api.journals.create({
-                effective_date: journalDate,
-                title: `FX kursivahe ostuarvele ${c.invoice_number}`,
-                document_number: `FX:${c.invoice_id}`,
-                cl_currencies_id: "EUR",
-                postings: isOverstated
-                  ? [
-                      { accounts_id: liabilityAccount, type: "D", amount: absDiff }, // reduce payable
-                      { accounts_id: fxAccount, type: "C", amount: absDiff },          // FX gain
-                    ]
-                  : [
-                      { accounts_id: fxAccount, type: "D", amount: absDiff },          // FX loss
-                      { accounts_id: liabilityAccount, type: "C", amount: absDiff }, // increase payable
-                    ],
-              });
-              if (journal.created_object_id) {
-                try {
-                  await api.journals.confirm(journal.created_object_id);
-                } catch {
-                  // Leave journal in PROJECT for the operator to inspect if confirm fails
-                }
+              // Guarded write: find-then-create against the run snapshot. The
+              // guard stamps document_number "FX:{invoice_id}", best-effort
+              // confirms, and records the journal so a duplicate can never be
+              // posted for the same residual (within or across runs).
+              const outcome = await guard.createJournalOnce(
+                { ns: "FX", id: String(c.invoice_id) },
+                {
+                  effective_date: journalDate,
+                  title: `FX kursivahe ostuarvele ${c.invoice_number}`,
+                  cl_currencies_id: "EUR",
+                  postings: isOverstated
+                    ? [
+                        { accounts_id: liabilityAccount, type: "D", amount: absDiff }, // reduce payable
+                        { accounts_id: fxAccount, type: "C", amount: absDiff },          // FX gain
+                      ]
+                    : [
+                        { accounts_id: fxAccount, type: "D", amount: absDiff },          // FX loss
+                        { accounts_id: liabilityAccount, type: "C", amount: absDiff }, // increase payable
+                      ],
+                },
+              );
+              if (outcome.status === "duplicate") {
+                // A concurrent run (or an in-snapshot journal the pre-scan
+                // missed) already booked this residual — treat as already
+                // reconciled rather than double-posting.
+                applied.push({
+                  invoice_id: c.invoice_id,
+                  category: c.category,
+                  action: `Already reconciled — FX journal (FX:${c.invoice_id}, id ${outcome.journal_id}) exists; skipped to avoid a duplicate.`,
+                  result: "success",
+                });
+                continue;
               }
               logAudit({
                 tool: "reconcile_currency_rounding", action: "CREATED", entity_type: "journal",
-                entity_id: journal.created_object_id,
+                entity_id: outcome.journal_id,
                 summary: `FX kursivahe journal for invoice ${c.invoice_number}: ${absDiff.toFixed(2)} EUR ${isOverstated ? "gain" : "loss"}`,
                 details: { invoice_id: c.invoice_id, diff_eur: c.diff_eur, fx_account: fxAccount, liability_account: liabilityAccount },
               });

@@ -1,0 +1,325 @@
+import type { ApiContext } from "./tools/crud-tools.js";
+import type { Journal } from "./types/api.js";
+import { roundMoney } from "./money.js";
+import {
+  buildInterAccountJournalIndex,
+  findMatchingJournal,
+  toUtcDay,
+  UNKNOWN_JOURNAL_ID,
+  type InterAccountJournalEntry,
+} from "./tools/inter-account-utils.js";
+
+/**
+ * BookingGuard — a single-snapshot idempotency layer for journal creation.
+ *
+ * The RIK e-Financials API signs only the request path (not the body), so it
+ * offers no server-side idempotency: a retried or re-run POST creates a second
+ * journal. Every booking tool therefore has to detect "did I already book
+ * this?" against the existing ledger before writing. Historically each tool
+ * grew its own scan of `journals.listAll()`, its own `document_number`
+ * convention, and its own create/confirm/record dance — with subtle
+ * divergences (deleted-journal handling, in-run vs cross-run dedup, sentinel
+ * journal ids) that were the dominant source of duplicate-booking bugs.
+ *
+ * BookingGuard centralises that into one snapshot loaded per run, with two
+ * lanes:
+ *
+ *   Lane A — namespaced `document_number` keys (`FX:{id}`, `LY:{ref}`, …).
+ *            Exact-key dedup: one document_number ⇒ at most one live journal.
+ *
+ *   Lane B — structural inter-account transfers keyed
+ *            `sourceDim|targetDim|amount|date` with reference disambiguation.
+ *            Delegates to the existing inter-account-utils index/matcher.
+ *
+ * `createJournalOnce` is the guarded write: find first, create with the
+ * document_number stamped, best-effort confirm, then record into the in-run
+ * index so a second call in the same run is also deduped.
+ *
+ * NOTE: the network-level verify-then-retry (re-scan after a network error to
+ * recover a journal that may have been created despite a failed response) is
+ * intentionally deferred to the http-client migration step. Today the
+ * http-client does not retry non-idempotent POSTs at all, so a POST either
+ * succeeds (we see the id) or throws (nothing created). The guard's find pass
+ * still protects against cross-run and in-run duplicates.
+ */
+
+export type DocNamespace = "FX" | "LY";
+
+export interface DocKey {
+  ns: DocNamespace;
+  /** The identifier within the namespace — invoice id, Lightyear reference, … */
+  id: string;
+}
+
+/** "FX:123" / "LY:OR-EVN9C76R7A" */
+export function formatDocNumber(key: DocKey): string {
+  return `${key.ns}:${key.id}`;
+}
+
+const KNOWN_NAMESPACES: readonly DocNamespace[] = ["FX", "LY"];
+
+/**
+ * Parse a raw `document_number` into a DocKey, or `undefined` when it does not
+ * carry a known namespace prefix (manual journals, legacy entries, …).
+ *
+ * Only the first ":" is treated as the separator, so a reference that itself
+ * contains a colon (unusual, but possible for external ids) round-trips.
+ */
+export function parseDocNumber(raw: string | null | undefined): DocKey | undefined {
+  if (typeof raw !== "string") return undefined;
+  const sep = raw.indexOf(":");
+  if (sep <= 0) return undefined;
+  const ns = raw.slice(0, sep);
+  const id = raw.slice(sep + 1);
+  if (id === "") return undefined;
+  if (!(KNOWN_NAMESPACES as readonly string[]).includes(ns)) return undefined;
+  return { ns: ns as DocNamespace, id };
+}
+
+export interface ExistingArtifact {
+  journal_id: number;
+  document_number: string;
+  registered: boolean;
+  is_deleted: boolean;
+}
+
+/**
+ * Liveness filter applied at `find` time.
+ * - `any`             — every artifact, including deleted/invalidated ones.
+ * - `not_deleted`     — exclude deleted/invalidated journals (default). A
+ *                       deleted FX/LY journal means the operator invalidated it
+ *                       to re-post, so it must NOT block re-booking.
+ * - `registered_only` — only confirmed, non-deleted journals.
+ */
+export type Liveness = "any" | "not_deleted" | "registered_only";
+
+function passesLiveness(a: ExistingArtifact, liveness: Liveness): boolean {
+  switch (liveness) {
+    case "any":
+      return true;
+    case "registered_only":
+      return a.registered && !a.is_deleted;
+    case "not_deleted":
+    default:
+      return !a.is_deleted;
+  }
+}
+
+export interface InterAccountQuery {
+  sourceDim: number;
+  targetDim: number;
+  amount: number;
+  date: string;
+  /** Optional +/- day window around `date` (default 0 — exact date only). */
+  maxGapDays?: number;
+  /** Reference number for disambiguating same-amount/date/dims transfers. */
+  reference?: string | null;
+}
+
+export interface CreateOnceOptions {
+  /** Liveness used for the pre-create dedup check (default `not_deleted`). */
+  liveness?: Liveness;
+  /** Attempt to confirm/register the created journal (default true). */
+  confirm?: boolean;
+}
+
+export type CreateOnceResult =
+  | { status: "created"; journal_id: number; registered: boolean }
+  | { status: "duplicate"; journal_id: number };
+
+function interAccountKey(sourceDim: number, targetDim: number, amount: number, date: string): string {
+  return `${sourceDim}|${targetDim}|${roundMoney(amount)}|${date}`;
+}
+
+export class BookingGuard {
+  /** The raw snapshot, exposed read-only for callers that still scan directly. */
+  readonly journals: readonly Journal[];
+
+  private readonly api: ApiContext;
+  private readonly ownDimensionIds: Set<number>;
+
+  // Lane A: document_number -> artifacts (arrays, since duplicates can exist).
+  private readonly docIndex = new Map<string, ExistingArtifact[]>();
+
+  // Lane B: bidirectional "sourceDim|targetDim|amount|date" -> journal entries.
+  private readonly interAccountIndex: Map<string, InterAccountJournalEntry[]>;
+
+  private constructor(api: ApiContext, journals: Journal[], ownDimensionIds: Set<number>) {
+    this.api = api;
+    this.journals = journals;
+    this.ownDimensionIds = ownDimensionIds;
+    this.interAccountIndex = buildInterAccountJournalIndex(journals, ownDimensionIds);
+
+    for (const j of journals) {
+      if (j.id == null) continue;
+      const key = parseDocNumber(j.document_number);
+      if (!key) continue;
+      const dn = formatDocNumber(key);
+      const artifact: ExistingArtifact = {
+        journal_id: j.id,
+        document_number: dn,
+        registered: j.registered === true,
+        is_deleted: j.is_deleted === true,
+      };
+      const existing = this.docIndex.get(dn);
+      if (existing) existing.push(artifact);
+      else this.docIndex.set(dn, [artifact]);
+    }
+  }
+
+  /**
+   * Load one snapshot of all journals (with postings, needed for Lane B) and
+   * build both indexes. `ownDimensionIds` is only required for Lane B
+   * inter-account matching — Lane A works without it.
+   */
+  static async load(
+    api: ApiContext,
+    opts?: { ownDimensionIds?: Set<number> },
+  ): Promise<BookingGuard> {
+    const ownDimensionIds = opts?.ownDimensionIds ?? new Set<number>();
+    // Lane B (inter-account) needs postings to find the two bank legs, and it
+    // is only meaningful when the caller supplies its own bank dimension ids.
+    // Lane A only reads document_number/id/registered/is_deleted, all of which
+    // the cheaper list endpoint carries — so a Lane-A-only caller avoids the
+    // per-journal posting fetches that listAllWithPostings performs.
+    const needsPostings = ownDimensionIds.size > 0;
+    const journals = needsPostings
+      ? await api.journals.listAllWithPostings()
+      : await api.journals.listAll();
+    return new BookingGuard(api, journals, ownDimensionIds);
+  }
+
+  // ---- Lane A: namespaced document_number keys ---------------------------
+
+  /** First artifact for `key` passing `liveness` (default `not_deleted`). */
+  find(key: DocKey, liveness: Liveness = "not_deleted"): ExistingArtifact | undefined {
+    const artifacts = this.docIndex.get(formatDocNumber(key));
+    if (!artifacts) return undefined;
+    return artifacts.find(a => passesLiveness(a, liveness));
+  }
+
+  /** Record a freshly-created journal into the in-run Lane A index. */
+  record(
+    key: DocKey,
+    journalId: number,
+    meta?: { registered?: boolean; is_deleted?: boolean },
+  ): void {
+    const dn = formatDocNumber(key);
+    const artifact: ExistingArtifact = {
+      journal_id: journalId,
+      document_number: dn,
+      registered: meta?.registered ?? true,
+      is_deleted: meta?.is_deleted ?? false,
+    };
+    const existing = this.docIndex.get(dn);
+    if (existing) existing.push(artifact);
+    else this.docIndex.set(dn, [artifact]);
+  }
+
+  /**
+   * Guarded journal write. Returns `duplicate` (with the existing journal id)
+   * when a live artifact already carries this key; otherwise creates the
+   * journal with the document_number stamped, best-effort confirms it (unless
+   * `confirm:false`), records it, and returns `created`.
+   *
+   * The caller's `payload.document_number` is ignored — the guard stamps it
+   * from `key` so the key and the stored document_number can never diverge.
+   */
+  async createJournalOnce(
+    key: DocKey,
+    payload: Omit<Partial<Journal>, "document_number">,
+    opts?: CreateOnceOptions,
+  ): Promise<CreateOnceResult> {
+    const existing = this.find(key, opts?.liveness ?? "not_deleted");
+    if (existing) return { status: "duplicate", journal_id: existing.journal_id };
+
+    const created = await this.api.journals.create({
+      ...payload,
+      document_number: formatDocNumber(key),
+    });
+    const journalId = created.created_object_id;
+
+    const wantConfirm = opts?.confirm !== false;
+    let registered = false;
+    if (journalId != null && wantConfirm) {
+      try {
+        await this.api.journals.confirm(journalId);
+        registered = true;
+      } catch {
+        // Leave the journal in PROJECT for the operator to inspect if confirm
+        // fails — mirrors the established currency-rounding / Lightyear path.
+      }
+    }
+
+    if (journalId != null) {
+      this.record(key, journalId, { registered, is_deleted: false });
+      return { status: "created", journal_id: journalId, registered };
+    }
+
+    // The API accepted the create but returned no object id. We cannot dedup a
+    // future run against an unknown id, but we still record the key so a second
+    // call within THIS run is deduped.
+    this.record(key, UNKNOWN_JOURNAL_ID, { registered, is_deleted: false });
+    return { status: "created", journal_id: UNKNOWN_JOURNAL_ID, registered };
+  }
+
+  // ---- Lane B: structural inter-account transfers ------------------------
+
+  /**
+   * Find an existing inter-account journal for the given transfer, or
+   * `undefined`. Delegates candidate selection to `findMatchingJournal`
+   * (reference disambiguation). When `maxGapDays > 0`, scans the exact date
+   * first, then outward day-by-day within the window.
+   */
+  findInterAccount(q: InterAccountQuery): number | undefined {
+    const gap = Math.max(0, Math.floor(q.maxGapDays ?? 0));
+    for (const date of this.candidateDates(q.date, gap)) {
+      const key = interAccountKey(q.sourceDim, q.targetDim, q.amount, date);
+      const match = findMatchingJournal(this.interAccountIndex.get(key), q.reference);
+      if (match !== undefined) return match;
+    }
+    return undefined;
+  }
+
+  /** Record a freshly-created inter-account journal into the Lane B index. */
+  recordInterAccount(
+    q: Pick<InterAccountQuery, "sourceDim" | "targetDim" | "amount" | "date" | "reference">,
+    journalId: number | undefined,
+  ): void {
+    const entry: InterAccountJournalEntry = {
+      journal_id: journalId ?? UNKNOWN_JOURNAL_ID,
+      document_number: q.reference ?? null,
+    };
+    const amount = roundMoney(q.amount);
+    const key1 = `${q.sourceDim}|${q.targetDim}|${amount}|${q.date}`;
+    const key2 = `${q.targetDim}|${q.sourceDim}|${amount}|${q.date}`;
+    for (const key of [key1, key2]) {
+      const existing = this.interAccountIndex.get(key);
+      if (existing) existing.push(entry);
+      else this.interAccountIndex.set(key, [entry]);
+    }
+  }
+
+  /**
+   * Candidate ISO dates around `date`, ordered nearest-first: the exact date,
+   * then -1/+1, -2/+2, … out to `gap` days. Uses UTC day arithmetic so the
+   * offsets never drift across DST or timezones.
+   */
+  private candidateDates(date: string, gap: number): string[] {
+    if (gap === 0) return [date];
+    const baseMs = toUtcDay(date); // UTC-midnight epoch millis
+    if (!Number.isFinite(baseMs)) return [date];
+    const DAY_MS = 86400000;
+    const dates = [date];
+    for (let d = 1; d <= gap; d++) {
+      dates.push(msToIso(baseMs - d * DAY_MS));
+      dates.push(msToIso(baseMs + d * DAY_MS));
+    }
+    return dates;
+  }
+}
+
+/** Epoch millis at UTC midnight -> "YYYY-MM-DD". */
+function msToIso(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}

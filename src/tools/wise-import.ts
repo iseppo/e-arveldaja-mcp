@@ -14,7 +14,7 @@ import { isNonVoidTransaction } from "../transaction-status.js";
 import { parseCSV } from "../csv.js";
 import { roundMoney } from "../money.js";
 import { normalizeCompanyName } from "../company-name.js";
-import { buildInterAccountJournalIndex, findMatchingJournal, UNKNOWN_JOURNAL_ID, type InterAccountJournalEntry } from "./inter-account-utils.js";
+import { BookingGuard } from "../booking-guard.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { roundTo } from "../money.js";
 import type { PurchaseInvoice } from "../types/api.js";
@@ -749,10 +749,10 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
           const targetDim = allAccountDimensions.find(d => d.id === targetDimensionId && !d.is_deleted);
 
           if (targetDim) {
-            // Build index of existing inter-account journals to detect duplicates
+            // Load one BookingGuard snapshot to detect existing inter-account
+            // journals (Lane B) and to record newly-confirmed legs in-run.
             const ownDimensionIds = new Set([accounts_dimensions_id, targetDimensionId]);
-            const allJournals = await api.journals.listAllWithPostings();
-            const existingInterAccountKeys = buildInterAccountJournalIndex(allJournals, ownDimensionIds);
+            const guard = await BookingGuard.load(api, { ownDimensionIds });
 
             // Resolve company client for setting clients_id
             let companyClientId: number | undefined;
@@ -765,17 +765,18 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
 
             for (const entry of transferEntries) {
               const roundedAmount = roundMoney(entry.amount);
-              // Check both directions for existing journal. The Wise ID acts
-              // as a per-transfer reference — findMatchingJournal will only
-              // suppress the confirmation when an existing journal's
-              // document_number carries the same reference (or no reference
-              // at all, preserving pre-disambiguation behaviour).
-              const key1 = `${accounts_dimensions_id}|${targetDimensionId}|${roundedAmount}|${entry.date}`;
-              const key2 = `${targetDimensionId}|${accounts_dimensions_id}|${roundedAmount}|${entry.date}`;
-              const existingJournal = findMatchingJournal(
-                existingInterAccountKeys.get(key1) ?? existingInterAccountKeys.get(key2),
-                entry.wise_id,
-              );
+              // Check both directions for an existing journal. The Wise ID acts
+              // as a per-transfer reference — the guard only suppresses the
+              // confirmation when an existing journal's document_number carries
+              // the same reference (or no reference at all, preserving
+              // pre-disambiguation behaviour).
+              const existingJournal = guard.findInterAccount({
+                sourceDim: accounts_dimensions_id,
+                targetDim: targetDimensionId,
+                amount: roundedAmount,
+                date: entry.date,
+                reference: entry.wise_id,
+              });
 
               if (existingJournal) {
                 interAccountResults.push({
@@ -800,15 +801,13 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                   // Record the new journal into the in-run index so the opposite
                   // leg of this same transfer, if also queued in this batch, is
                   // detected as already journalized instead of double-confirmed.
-                  const newEntry: InterAccountJournalEntry = {
-                    journal_id: confirmResult?.created_object_id ?? UNKNOWN_JOURNAL_ID,
-                    document_number: entry.wise_id,
-                  };
-                  for (const key of [key1, key2]) {
-                    const existing = existingInterAccountKeys.get(key);
-                    if (existing) existing.push(newEntry);
-                    else existingInterAccountKeys.set(key, [newEntry]);
-                  }
+                  guard.recordInterAccount({
+                    sourceDim: accounts_dimensions_id,
+                    targetDim: targetDimensionId,
+                    amount: roundedAmount,
+                    date: entry.date,
+                    reference: entry.wise_id,
+                  }, confirmResult?.created_object_id);
                   logAudit({
                     tool: "import_wise_transactions", action: "CONFIRMED", entity_type: "transaction",
                     entity_id: entry.api_id!,

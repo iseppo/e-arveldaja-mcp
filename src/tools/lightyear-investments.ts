@@ -13,6 +13,8 @@ import { parseCSV } from "../csv.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT } from "../accounting-defaults.js";
+import { BookingGuard } from "../booking-guard.js";
+import type { Journal } from "../types/api.js";
 
 const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -477,13 +479,17 @@ interface LightyearRefLookup {
   date: string;
 }
 
-async function findExistingJournalsByRef(
-  api: ApiContext,
+// Scans a pre-loaded journal snapshot (from the BookingGuard) rather than
+// issuing its own listAll — this keeps the legacy raw-ref date-cross-check
+// (which the guard's LY:-prefix Lane A does not model) while sharing the single
+// per-run snapshot. The guard handles the canonical LY: prefix at create time;
+// this function additionally catches legacy journals booked with a bare ref.
+function findExistingJournalsByRef(
+  allJournals: readonly Journal[],
   lookups: LightyearRefLookup[],
-): Promise<Set<string>> {
+): Set<string> {
   if (lookups.length === 0) return new Set();
 
-  const allJournals = await api.journals.listAll();
   const existing = new Set<string>();
 
   // Two document_number forms:
@@ -900,9 +906,13 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         gainsMap = matchSellsToCapitalGains(sells, gainsRows, gainsWarnings);
       }
 
-      // Check for duplicates
+      // Check for duplicates. Load one BookingGuard snapshot for the whole run:
+      // findExistingJournalsByRef reads it for legacy raw-ref detection, and the
+      // create sites below use guard.createJournalOnce for LY:-prefix idempotency
+      // (incl. in-run dedup of duplicate references within a single CSV).
+      const guard = await BookingGuard.load(api);
       const allRefs = trades.map(t => ({ reference: t.reference, date: t.date }));
-      const existingRefs = await findExistingJournalsByRef(api, allRefs);
+      const existingRefs = findExistingJournalsByRef(guard.journals, allRefs);
 
       const newTrades = trades.filter(t => !existingRefs.has(t.reference));
       const duplicates = trades.filter(t => existingRefs.has(t.reference));
@@ -1024,16 +1034,14 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
             const title = `Lightyear Cash-Equivalent Sell: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo}`;
 
-            const journal = await api.journals.create({
-              title,
-              effective_date: trade.date,
-              cl_currencies_id: "EUR",
-              document_number: `LY:${trade.reference}`,
-              postings,
-            });
+            const outcome = await guard.createJournalOnce(
+              { ns: "LY", id: trade.reference },
+              { title, effective_date: trade.date, cl_currencies_id: "EUR", postings },
+              { confirm: false }, // Lightyear journals stay in PROJECT for review
+            );
             logAudit({
               tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
-              entity_id: journal.created_object_id,
+              entity_id: outcome.journal_id,
               summary: `Lightyear cash-equivalent sell: ${trade.ticker} ${trade.quantity} @ ${proceeds} EUR`,
               details: {
                 effective_date: trade.date, ticker: trade.ticker, type: "Sell",
@@ -1042,7 +1050,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               },
             });
 
-            resultEntry.journal_id = journal.created_object_id;
+            resultEntry.journal_id = outcome.journal_id;
             results.push(resultEntry);
             continue;
           }
@@ -1124,16 +1132,14 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
           const title = `Lightyear Sell: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo} kasum/kahjum ${gainLoss >= 0 ? "+" : ""}${gainLoss} EUR`;
 
-          const journal = await api.journals.create({
-            title,
-            effective_date: trade.date,
-            cl_currencies_id: "EUR",
-            document_number: `LY:${trade.reference}`,
-            postings,
-          });
+          const outcome = await guard.createJournalOnce(
+            { ns: "LY", id: trade.reference },
+            { title, effective_date: trade.date, cl_currencies_id: "EUR", postings },
+            { confirm: false }, // Lightyear journals stay in PROJECT for review
+          );
           logAudit({
             tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
-            entity_id: journal.created_object_id,
+            entity_id: outcome.journal_id,
             summary: `Lightyear Sell: ${trade.ticker} ${trade.quantity} @ ${proceeds} EUR, gain/loss ${gainLoss} EUR`,
             details: {
               effective_date: trade.date, ticker: trade.ticker, type: "Sell",
@@ -1142,7 +1148,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             },
           });
 
-          resultEntry.journal_id = journal.created_object_id;
+          resultEntry.journal_id = outcome.journal_id;
           results.push(resultEntry);
           continue;
         }
@@ -1161,16 +1167,14 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             status: "would_create",
           });
         } else {
-          const journal = await api.journals.create({
-            title,
-            effective_date: trade.date,
-            cl_currencies_id: "EUR",
-            document_number: `LY:${trade.reference}`,
-            postings,
-          });
+          const outcome = await guard.createJournalOnce(
+            { ns: "LY", id: trade.reference },
+            { title, effective_date: trade.date, cl_currencies_id: "EUR", postings },
+            { confirm: false }, // Lightyear journals stay in PROJECT for review
+          );
           logAudit({
             tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
-            entity_id: journal.created_object_id,
+            entity_id: outcome.journal_id,
             summary: `Lightyear Buy: ${trade.ticker} ${trade.quantity} @ ${trade.eur_amount} EUR`,
             details: {
               effective_date: trade.date, ticker: trade.ticker, type: "Buy",
@@ -1186,7 +1190,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             date: trade.date,
             eur_amount: trade.eur_amount,
             status: "created",
-            journal_id: journal.created_object_id,
+            journal_id: outcome.journal_id,
           });
         }
       }
@@ -1289,9 +1293,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         });
       }
 
-      // Check duplicates
+      // Check duplicates — one snapshot for the run (see book_lightyear_trades).
+      const guard = await BookingGuard.load(api);
       const allRefs = distributions.map(d => ({ reference: d.reference, date: d.date }));
-      const existingRefs = await findExistingJournalsByRef(api, allRefs);
+      const existingRefs = findExistingJournalsByRef(guard.journals, allRefs);
 
       const newDist = distributions.filter(d => !existingRefs.has(d.reference));
       const duplicates = distributions.filter(d => existingRefs.has(d.reference));
@@ -1347,16 +1352,14 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             status: "would_create",
           });
         } else {
-          const journal = await api.journals.create({
-            title,
-            effective_date: dist.date,
-            cl_currencies_id: "EUR",
-            document_number: `LY:${dist.reference}`,
-            postings,
-          });
+          const outcome = await guard.createJournalOnce(
+            { ns: "LY", id: dist.reference },
+            { title, effective_date: dist.date, cl_currencies_id: "EUR", postings },
+            { confirm: false }, // Lightyear journals stay in PROJECT for review
+          );
           logAudit({
             tool: "book_lightyear_distributions", action: "CREATED", entity_type: "journal",
-            entity_id: journal.created_object_id,
+            entity_id: outcome.journal_id,
             summary: `Lightyear distribution: ${dist.ticker || "interest"} gross ${dist.gross_amount} EUR`,
             details: {
               effective_date: dist.date, ticker: dist.ticker,
@@ -1374,7 +1377,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             fee: dist.fee,
             net_amount: dist.net_amount,
             status: "created",
-            journal_id: journal.created_object_id,
+            journal_id: outcome.journal_id,
           });
         }
       }

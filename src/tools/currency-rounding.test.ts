@@ -37,6 +37,7 @@ function setupTool(options: SetupOptions) {
     },
     journals: {
       listAll: vi.fn().mockResolvedValue(options.existingJournals ?? []),
+      listAllWithPostings: vi.fn().mockResolvedValue(options.existingJournals ?? []),
       create:
         options.journalCreate ??
         vi.fn().mockResolvedValue({ created_object_id: 555 }),
