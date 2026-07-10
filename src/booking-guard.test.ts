@@ -422,3 +422,159 @@ describe("BookingGuard Lane B — findInterAccount", () => {
     expect(guard.findInterAccount({ sourceDim: 20, targetDim: 10, amount: 750, date: "2026-03-01" })).toBe(88);
   });
 });
+
+describe("BookingGuard Lane B — resolveInterAccount (cardinality-aware)", () => {
+  const ownDims = new Set([10, 20]);
+
+  // A confirmed inter-account journal between dims 10 and 20. `ref` becomes the
+  // journal's document_number (native e-arveldaja confirmations carry null).
+  function interAccountJournal(
+    id: number,
+    ref: string | null,
+    opts: { amount?: number; date?: string } = {},
+  ): Journal {
+    const amount = opts.amount ?? 500;
+    return journal({
+      id,
+      document_number: ref,
+      effective_date: opts.date ?? "2026-01-01",
+      registered: true,
+      postings: [bankPosting(10, "C", amount), bankPosting(20, "D", amount)],
+    });
+  }
+
+  const q = (over: Partial<Parameters<BookingGuard["resolveInterAccount"]>[0]> = {}) => ({
+    sourceDim: 10,
+    targetDim: 20,
+    amount: 500,
+    date: "2026-01-01",
+    ...over,
+  });
+
+  // 1. Exact-ref snapshot match → matched(reference), and NOT consumed: a
+  //    same-ref re-import must keep being suppressed indefinitely.
+  it("exact-ref match returns matched(reference) and never consumes", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, "REF-A")], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    const first = guard.resolveInterAccount(q({ reference: "REF-A" }));
+    expect(first).toEqual({ status: "matched", journal_id: 1, matched_on: "reference", pool: "snapshot" });
+    // Re-query with the same ref still matches — the reference entry stays live.
+    const second = guard.resolveInterAccount(q({ reference: "REF-A" }));
+    expect(second).toEqual({ status: "matched", journal_id: 1, matched_on: "reference", pool: "snapshot" });
+  });
+
+  // 2. Ref-less snapshot match → matched(refless) then consumed. A SECOND
+  //    identical ref-less transfer no longer finds a live journal → none (book).
+  //    This is the core no-over-suppression fix: J prior-run journals suppress
+  //    exactly J transfers, not unlimited same-key transfers.
+  it("ref-less snapshot match consumes; a second same-key transfer books", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, null)], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    const first = guard.resolveInterAccount(q());
+    expect(first).toEqual({ status: "matched", journal_id: 1, matched_on: "refless", pool: "snapshot" });
+    // The single snapshot journal is now consumed — the mirror books.
+    expect(guard.resolveInterAccount(q())).toEqual({ status: "none" });
+  });
+
+  // 3. Cardinality: two ref-less snapshot journals absorb exactly two transfers;
+  //    the third books. Proves no-miss AND no-over-suppression together.
+  it("two ref-less snapshot journals absorb exactly two transfers, then book", async () => {
+    const { api } = setup({
+      journals: [interAccountJournal(1, null), interAccountJournal(2, null)],
+      ownDimensionIds: ownDims,
+    });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    const a = guard.resolveInterAccount(q());
+    const b = guard.resolveInterAccount(q());
+    const c = guard.resolveInterAccount(q());
+    expect(a.status).toBe("matched");
+    expect(b.status).toBe("matched");
+    // Distinct journals were consumed, not the same one twice.
+    expect((a as { journal_id: number }).journal_id).not.toBe((b as { journal_id: number }).journal_id);
+    expect(c).toEqual({ status: "none" });
+  });
+
+  // 4. Differing-ref against a labelled candidate → none (book). A mismatched
+  //    label is stronger evidence of a distinct transfer than the shared key.
+  it("returns none when a labelled candidate carries a different reference", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, "REF-A")], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    expect(guard.resolveInterAccount(q({ reference: "REF-B" }))).toEqual({ status: "none" });
+  });
+
+  // 5. Ref-less match landing only on an in_run journal → ambiguous_refless. We
+  //    cannot tell a genuine second transfer from a duplicate re-import of the
+  //    first, so the caller must surface it for review.
+  it("ref-less match on an in_run-only journal is ambiguous_refless", async () => {
+    const { api } = setup({ ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    guard.recordInterAccount(q(), 77); // in_run, ref-less
+    expect(guard.resolveInterAccount(q())).toEqual({ status: "ambiguous_refless" });
+  });
+
+  // 6. Snapshot preferred over in_run: a ref-less query consumes the snapshot
+  //    first; only once it is exhausted does the in_run leftover turn ambiguous.
+  it("consumes the snapshot before the in_run entry turns a re-query ambiguous", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, null)], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    guard.recordInterAccount(q(), 77); // an in_run entry now co-exists with the snapshot
+    // First query consumes the snapshot journal (id 1), not the in_run one.
+    expect(guard.resolveInterAccount(q())).toEqual({
+      status: "matched", journal_id: 1, matched_on: "refless", pool: "snapshot",
+    });
+    // Snapshot exhausted; only the in_run entry remains → ambiguous.
+    expect(guard.resolveInterAccount(q())).toEqual({ status: "ambiguous_refless" });
+  });
+
+  // 7. consume:false is a non-destructive probe (dry-run / candidate scoring):
+  //    the snapshot stays live so a later real resolution can still match it.
+  it("consume:false leaves the snapshot entry live for a later resolution", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, null)], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    expect(guard.resolveInterAccount(q(), { consume: false }).status).toBe("matched");
+    // Not consumed — a subsequent consuming resolution still matches the same journal.
+    expect(guard.resolveInterAccount(q())).toEqual({
+      status: "matched", journal_id: 1, matched_on: "refless", pool: "snapshot",
+    });
+    // Now it is consumed.
+    expect(guard.resolveInterAccount(q())).toEqual({ status: "none" });
+  });
+
+  // 8. Consumption is bidirectional: the entry object is shared across both
+  //    directional keys, so consuming it via (10→20) also clears (20→10).
+  it("consuming a match clears it in both directions", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, null)], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    expect(guard.resolveInterAccount(q({ sourceDim: 10, targetDim: 20 })).status).toBe("matched");
+    // The reverse-direction lookup sees the same consumed entry → none.
+    expect(guard.resolveInterAccount(q({ sourceDim: 20, targetDim: 10 }))).toEqual({ status: "none" });
+  });
+
+  // 9. Reference match is never consumed even at default consume=true: a labelled
+  //    journal is an identity, so repeated same-ref imports all suppress.
+  it("a reference match survives repeated resolutions (never consumed)", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, "REF-A")], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    for (let i = 0; i < 3; i++) {
+      expect(guard.resolveInterAccount(q({ reference: "REF-A" }))).toEqual({
+        status: "matched", journal_id: 1, matched_on: "reference", pool: "snapshot",
+      });
+    }
+  });
+
+  // 10. maxGapDays window: a ref-less snapshot within the window matches and is
+  //     consumed, so a second windowed query for the same transfer books.
+  it("matches and consumes a ref-less snapshot within the maxGapDays window", async () => {
+    const { api } = setup({
+      journals: [interAccountJournal(1, null, { date: "2026-01-01" })],
+      ownDimensionIds: ownDims,
+    });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    // Journal on 01-01; query on 01-03 with a 2-day window matches nearest-first.
+    expect(guard.resolveInterAccount(q({ date: "2026-01-03", maxGapDays: 2 }))).toEqual({
+      status: "matched", journal_id: 1, matched_on: "refless", pool: "snapshot",
+    });
+    // Consumed across the window too — the mirror books.
+    expect(guard.resolveInterAccount(q({ date: "2026-01-03", maxGapDays: 2 }))).toEqual({ status: "none" });
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal } from "./inter-account-utils.js";
+import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal, findMatchingJournalEntry } from "./inter-account-utils.js";
 import type { BankAccount, AccountDimension, Journal, Posting } from "../types/api.js";
 
 // --- Helpers ---
@@ -484,5 +484,74 @@ describe("findMatchingJournal", () => {
     // human-entered refs, so they remain a distinct reference class.
     expect(findMatchingJournal(candidates, "NA")).toBeUndefined();
     expect(findMatchingJournal(candidates, "-")).toBeUndefined();
+  });
+});
+
+describe("findMatchingJournalEntry", () => {
+  it("tags an exact reference match as matchedOn=reference", () => {
+    const candidates = [
+      { journal_id: 1, document_number: "REF-A" },
+      { journal_id: 2, document_number: "REF-B" },
+    ];
+    expect(findMatchingJournalEntry(candidates, "REF-B")).toEqual({
+      entry: candidates[1],
+      matchedOn: "reference",
+    });
+  });
+
+  it("tags a no-reference loose match as matchedOn=refless", () => {
+    const candidates = [{ journal_id: 1, document_number: null }];
+    expect(findMatchingJournalEntry(candidates)).toEqual({
+      entry: candidates[0],
+      matchedOn: "refless",
+    });
+  });
+
+  it("returns the legacy-migration ref-less fallback tagged refless", () => {
+    // Input carries a ref but every candidate is ref-less → catch-all fallback.
+    const candidates = [{ journal_id: 9, document_number: null }];
+    expect(findMatchingJournalEntry(candidates, "WISE-REAL")).toEqual({
+      entry: candidates[0],
+      matchedOn: "refless",
+    });
+  });
+
+  it("returns undefined when a labelled candidate carries a different reference", () => {
+    const candidates = [{ journal_id: 1, document_number: "REF-A" }];
+    expect(findMatchingJournalEntry(candidates, "REF-B")).toBeUndefined();
+  });
+
+  it("skips consumed entries when picking a match", () => {
+    const consumed = { journal_id: 1, document_number: null, consumed: true };
+    const live = { journal_id: 2, document_number: null };
+    // The first live (non-consumed) entry is chosen, never the consumed one.
+    expect(findMatchingJournalEntry([consumed, live])).toEqual({
+      entry: live,
+      matchedOn: "refless",
+    });
+  });
+
+  it("returns undefined when every candidate is already consumed", () => {
+    const candidates = [
+      { journal_id: 1, document_number: null, consumed: true },
+      { journal_id: 2, document_number: null, consumed: true },
+    ];
+    expect(findMatchingJournalEntry(candidates)).toBeUndefined();
+  });
+
+  it("still finds a live exact-ref match past a consumed same-ref entry", () => {
+    const candidates = [
+      { journal_id: 1, document_number: "REF-A", consumed: true },
+      { journal_id: 2, document_number: "REF-A" },
+    ];
+    expect(findMatchingJournalEntry(candidates, "REF-A")).toEqual({
+      entry: candidates[1],
+      matchedOn: "reference",
+    });
+  });
+
+  it("returns undefined for empty / undefined candidate lists", () => {
+    expect(findMatchingJournalEntry(undefined)).toBeUndefined();
+    expect(findMatchingJournalEntry([])).toBeUndefined();
   });
 });

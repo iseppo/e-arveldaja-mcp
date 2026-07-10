@@ -5,6 +5,7 @@ import { roundMoney } from "./money.js";
 import {
   buildInterAccountJournalIndex,
   findMatchingJournal,
+  findMatchingJournalEntry,
   toUtcDay,
   UNKNOWN_JOURNAL_ID,
   type InterAccountJournalEntry,
@@ -105,6 +106,18 @@ function passesLiveness(a: ExistingArtifact, liveness: Liveness): boolean {
       return !a.is_deleted;
   }
 }
+
+/**
+ * Outcome of {@link BookingGuard.resolveInterAccount}.
+ * - `matched`   — a journal already covers this transfer; do NOT book.
+ * - `ambiguous_refless` — a ref-less same-key collision that cannot be safely
+ *   resolved; surface for operator review rather than booking or skipping.
+ * - `none`      — no journal covers this transfer; safe to book.
+ */
+export type InterAccountResolution =
+  | { status: "matched"; journal_id: number; matched_on: "reference" | "refless"; pool: "snapshot" | "in_run" }
+  | { status: "ambiguous_refless" }
+  | { status: "none" };
 
 export interface InterAccountQuery {
   sourceDim: number;
@@ -345,6 +358,51 @@ export class BookingGuard {
     return undefined;
   }
 
+  /**
+   * Resolve a transfer against the Lane B index with cardinality awareness.
+   *
+   * `findInterAccount` answers a boolean "does a journal exist for this key?",
+   * which lets a single journal suppress unlimited same-key transfers. That is
+   * fine when references disambiguate, but natively-confirmed inter-account
+   * journals carry NO document_number (verified against the API), so two
+   * distinct ref-less same-day/same-amount transfers collide. This method
+   * disambiguates by consuming matched journals and by the entry's origin:
+   *
+   * - `reference` match → `matched` (never consumed: a same-ref re-import must
+   *   keep being suppressed).
+   * - ref-less match on a `snapshot` journal → `matched`, and the entry is
+   *   consumed (default), so J prior-run journals suppress exactly J transfers.
+   * - ref-less match landing only on an `in_run` journal → `ambiguous_refless`:
+   *   we cannot tell a genuine second transfer from a duplicate re-import of the
+   *   first, so the caller must surface it for review rather than guess.
+   * - no live candidate → `none` (safe to book).
+   */
+  resolveInterAccount(
+    q: InterAccountQuery,
+    opts?: { consume?: boolean },
+  ): InterAccountResolution {
+    const consume = opts?.consume !== false;
+    const gap = Math.max(0, Math.floor(q.maxGapDays ?? 0));
+    for (const date of this.candidateDates(q.date, gap)) {
+      const key = interAccountKey(q.sourceDim, q.targetDim, q.amount, date);
+      const match = findMatchingJournalEntry(this.interAccountIndex.get(key), q.reference);
+      if (!match) continue;
+      const pool = match.entry.origin ?? "snapshot";
+      if (match.matchedOn === "reference") {
+        return { status: "matched", journal_id: match.entry.journal_id, matched_on: "reference", pool };
+      }
+      // ref-less match
+      if (pool === "in_run") {
+        // The only live same-key journal was created THIS run; a ref-less
+        // collision here is indistinguishable from a duplicate re-import.
+        return { status: "ambiguous_refless" };
+      }
+      if (consume) match.entry.consumed = true;
+      return { status: "matched", journal_id: match.entry.journal_id, matched_on: "refless", pool };
+    }
+    return { status: "none" };
+  }
+
   /** Record a freshly-created inter-account journal into the Lane B index. */
   recordInterAccount(
     q: Pick<InterAccountQuery, "sourceDim" | "targetDim" | "amount" | "date" | "reference">,
@@ -353,6 +411,7 @@ export class BookingGuard {
     const entry: InterAccountJournalEntry = {
       journal_id: journalId ?? UNKNOWN_JOURNAL_ID,
       document_number: q.reference ?? null,
+      origin: "in_run",
     };
     const amount = roundMoney(q.amount);
     const key1 = `${q.sourceDim}|${q.targetDim}|${amount}|${q.date}`;

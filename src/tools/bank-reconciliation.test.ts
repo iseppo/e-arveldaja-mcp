@@ -1232,13 +1232,16 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.one_sided[0]!.match_reasons).toContain("counterparty_iban_is_own_account");
   });
 
-  it("does not confirm both legs of one transfer in a single execute run (in-run journal index)", async () => {
+  it("never double-confirms a ref-less second same-key leg; routes it to review instead", async () => {
     // Two one-sided legs of the SAME inter-account transfer (dim 100 <-> dim 200,
-    // same amount/date, no leg-specific reference) both reach Phase 2. Confirming
-    // the first creates a journal touching both dimensions; the second must be
-    // detected as already-journalized rather than confirmed into a duplicate.
-    // Before the in-run index update, existingInterAccountKeys was built once at
-    // the top of the run and never refreshed, so both legs confirmed.
+    // same amount/date, NO leg-specific reference) both reach Phase 2. Confirming
+    // the first creates a journal touching both dimensions (recorded in-run).
+    // The second ref-less leg matches only that in-run journal — and a ref-less
+    // same-key collision is provably indistinguishable from a genuine SECOND
+    // transfer, so it is routed to the ambiguous_refless review bucket rather
+    // than auto-skipped (which could miss a real second transfer) or
+    // auto-confirmed (which would double-book). The anti-duplicate invariant —
+    // exactly one confirm — is preserved either way.
     const { handler, api } = setupInterAccountTool({
       companyName: "Test OÜ",
       transactions: [
@@ -1253,13 +1256,13 @@ describe("reconcile_inter_account_transfers", () => {
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.matched_one_sided).toBe(1);
-    expect(payload.skipped_already_handled).toBe(1);
-    // Exactly one journal is created for the transfer, not two.
+    expect(payload.skipped_already_handled).toBe(0);
+    // The critical invariant: exactly one journal is created, never two.
     expect((api.transactions.confirm as any).mock.calls.length).toBe(1);
-    expect(payload.already_handled[0]!.reason).toMatch(/already journalized/i);
-    // The confirm mock returns no created_object_id, so the recorded entry must
-    // report the "unknown journal id" sentinel (-1) — never the transaction id.
-    expect(payload.already_handled[0]!.existing_journal_id).toBe(-1);
+    // The second ref-less leg is surfaced for review, not silently skipped.
+    expect(payload.needs_review_ambiguous_refless).toBe(1);
+    expect(payload.ambiguous_refless[0]!.transaction_ids).toContain(602);
+    expect(payload.ambiguous_refless[0]!.reason).toMatch(/ref-less/i);
   });
 
   it("does not suppress distinct one-sided transfers just because both counterparty IBANs are own accounts", async () => {

@@ -14,7 +14,7 @@ import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
 import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
-import { BookingGuard } from "../booking-guard.js";
+import { BookingGuard, type InterAccountResolution } from "../booking-guard.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -688,6 +688,17 @@ export function registerBankReconciliationTools(
         transaction_id: number; amount: number; date: string;
         source_account: string; existing_journal_id: number; reason: string;
       }> = [];
+      // Ref-less same-key collisions the guard cannot safely resolve: an
+      // existing journal covers a transfer with these (dims, amount, date) but
+      // carries no reference, so we cannot tell whether this transaction is a
+      // genuine second transfer (needs booking) or a duplicate re-import of the
+      // first (already booked). Surfaced for inline operator confirmation
+      // rather than silently skipped (would miss a real transfer) or
+      // auto-confirmed (would double-book).
+      const ambiguousRefless: Array<{
+        transaction_ids: number[]; amount: number; date: string;
+        source_account: string; target_account: string; reason: string;
+      }> = [];
       const errors: Array<{ transaction_ids: number[]; reason: string }> = [];
       const consumedTxIds = new Set<number>();
       const blockedOneSidedTxIds = new Set<number>();
@@ -706,13 +717,20 @@ export function registerBankReconciliationTools(
        * suppress each other. `maxGapDays` widens the match to a date window
        * (nearest-first) via the guard's Lane B lookup.
        */
-      function findExistingJournal(
+      // Cardinality-aware resolution: consumes a matched journal so it cannot
+      // suppress a second same-key transfer, and reports `ambiguous_refless`
+      // when the only cover is a ref-less journal created THIS run (which may
+      // be a distinct transfer or a re-import — indistinguishable). `consume`
+      // must be true only when we COMMIT to a decision (once per chosen pair),
+      // never while probing multiple candidates, or we would over-consume.
+      function resolveExistingJournal(
         sourceDim: number, targetDim: number, amount: number, date: string, maxGapDays: number,
-        referenceNumber?: string | null,
-      ): number | undefined {
-        return guard.findInterAccount({
-          sourceDim, targetDim, amount, date, maxGapDays, reference: referenceNumber,
-        });
+        referenceNumber: string | null | undefined, consume: boolean,
+      ): InterAccountResolution {
+        return guard.resolveInterAccount(
+          { sourceDim, targetDim, amount, date, maxGapDays, reference: referenceNumber },
+          { consume },
+        );
       }
 
       /**
@@ -929,7 +947,7 @@ export function registerBankReconciliationTools(
           txIn: Transaction;
           confidence: number;
           reasons: string[];
-          existingJournalId?: number;
+          comparableAmount: number;
         }> = [];
 
         for (const txIn of incoming) {
@@ -1008,14 +1026,9 @@ export function registerBankReconciliationTools(
             txIn,
             confidence: Math.min(confidence, 100),
             reasons,
-            existingJournalId: findExistingJournal(
-              txOut.accounts_dimensions_id,
-              txIn.accounts_dimensions_id,
-              txOutComparableAmount,
-              txOut.date,
-              maxGap,
-              txOut.bank_ref_number ?? txOut.ref_number,
-            ),
+            // Resolve after the best candidate is chosen (below), never here —
+            // probing every candidate with consume would over-consume journals.
+            comparableAmount: txOutComparableAmount,
           });
         }
 
@@ -1050,18 +1063,34 @@ export function registerBankReconciliationTools(
         const bestCandidate = topCandidates[0]!;
         const txIn = bestCandidate.txIn;
 
-        if (bestCandidate.existingJournalId) {
+        const fromTitle = dimensionToTitle.get(txOut.accounts_dimensions_id) ?? `dim:${txOut.accounts_dimensions_id}`;
+        const toTitle = dimensionToTitle.get(txIn.accounts_dimensions_id) ?? `dim:${txIn.accounts_dimensions_id}`;
+
+        // Resolve once for the chosen pair, consuming the matched journal.
+        const resolution = resolveExistingJournal(
+          txOut.accounts_dimensions_id, txIn.accounts_dimensions_id,
+          bestCandidate.comparableAmount, txOut.date, maxGap,
+          txOut.bank_ref_number ?? txOut.ref_number, true,
+        );
+        if (resolution.status === "matched") {
           consumedTxIds.add(txOut.id);
           consumedTxIds.add(txIn.id!);
           skippedAlreadyHandled.push(
-            { transaction_id: txOut.id, amount: txOut.amount, date: txOut.date, source_account: dimensionToTitle.get(txOut.accounts_dimensions_id) ?? "", existing_journal_id: bestCandidate.existingJournalId, reason: "Already journalized" },
-            { transaction_id: txIn.id!, amount: txIn.amount, date: txIn.date, source_account: dimensionToTitle.get(txIn.accounts_dimensions_id) ?? "", existing_journal_id: bestCandidate.existingJournalId, reason: "Already journalized" },
+            { transaction_id: txOut.id, amount: txOut.amount, date: txOut.date, source_account: dimensionToTitle.get(txOut.accounts_dimensions_id) ?? "", existing_journal_id: resolution.journal_id, reason: "Already journalized" },
+            { transaction_id: txIn.id!, amount: txIn.amount, date: txIn.date, source_account: dimensionToTitle.get(txIn.accounts_dimensions_id) ?? "", existing_journal_id: resolution.journal_id, reason: "Already journalized" },
           );
           continue;
         }
-
-        const fromTitle = dimensionToTitle.get(txOut.accounts_dimensions_id) ?? `dim:${txOut.accounts_dimensions_id}`;
-        const toTitle = dimensionToTitle.get(txIn.accounts_dimensions_id) ?? `dim:${txIn.accounts_dimensions_id}`;
+        if (resolution.status === "ambiguous_refless") {
+          consumedTxIds.add(txOut.id);
+          consumedTxIds.add(txIn.id!);
+          ambiguousRefless.push({
+            transaction_ids: [txOut.id, txIn.id!], amount: txOut.amount, date: txOut.date,
+            source_account: fromTitle, target_account: toTitle,
+            reason: "A ref-less journal for this amount/date/accounts was already booked this run; cannot tell a genuine second transfer from a duplicate. Confirm inline if this is a real second transfer.",
+          });
+          continue;
+        }
 
         consumedTxIds.add(txOut.id);
         consumedTxIds.add(txIn.id!);
@@ -1149,7 +1178,7 @@ export function registerBankReconciliationTools(
           counterpart: Transaction;
           confidence: number;
           reasons: string[];
-          existingJournalId?: number;
+          comparableAmount: number;
         }> = [];
 
         for (const other of phaseOneRemaining) {
@@ -1176,14 +1205,8 @@ export function registerBankReconciliationTools(
             counterpart: other,
             confidence: Math.min(compatibility.confidence + reciprocalEvidence.confidenceBonus, 100),
             reasons: [...compatibility.reasons, ...reciprocalEvidence.reasons],
-            existingJournalId: findExistingJournal(
-              tx.accounts_dimensions_id,
-              other.accounts_dimensions_id,
-              compatibility.txAComparableAmount,
-              tx.date,
-              maxGap,
-              tx.bank_ref_number ?? tx.ref_number,
-            ),
+            // Resolved once after selection (below), not per-candidate.
+            comparableAmount: compatibility.txAComparableAmount,
           });
         }
 
@@ -1219,7 +1242,16 @@ export function registerBankReconciliationTools(
           continue;
         }
 
-        if (bestCandidate.existingJournalId) {
+        const fromTitleEarly = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;
+        const toTitleEarly = dimensionToTitle.get(counterpart.accounts_dimensions_id) ?? `dim:${counterpart.accounts_dimensions_id}`;
+
+        // Resolve once for the chosen pair, consuming the matched journal.
+        const resolution = resolveExistingJournal(
+          tx.accounts_dimensions_id, counterpart.accounts_dimensions_id,
+          bestCandidate.comparableAmount, tx.date, maxGap,
+          tx.bank_ref_number ?? tx.ref_number, true,
+        );
+        if (resolution.status === "matched") {
           consumedTxIds.add(tx.id);
           consumedTxIds.add(counterpart.id);
           skippedAlreadyHandled.push(
@@ -1228,7 +1260,7 @@ export function registerBankReconciliationTools(
               amount: tx.amount,
               date: tx.date,
               source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? "",
-              existing_journal_id: bestCandidate.existingJournalId,
+              existing_journal_id: resolution.journal_id,
               reason: "Already journalized",
             },
             {
@@ -1236,10 +1268,20 @@ export function registerBankReconciliationTools(
               amount: counterpart.amount,
               date: counterpart.date,
               source_account: dimensionToTitle.get(counterpart.accounts_dimensions_id) ?? "",
-              existing_journal_id: bestCandidate.existingJournalId,
+              existing_journal_id: resolution.journal_id,
               reason: "Already journalized",
             },
           );
+          continue;
+        }
+        if (resolution.status === "ambiguous_refless") {
+          consumedTxIds.add(tx.id);
+          consumedTxIds.add(counterpart.id);
+          ambiguousRefless.push({
+            transaction_ids: [tx.id, counterpart.id], amount: tx.amount, date: tx.date,
+            source_account: fromTitleEarly, target_account: toTitleEarly,
+            reason: "A ref-less journal for this amount/date/accounts was already booked this run; cannot tell a genuine second transfer from a duplicate. Confirm inline if this is a real second transfer.",
+          });
           continue;
         }
 
@@ -1343,29 +1385,40 @@ export function registerBankReconciliationTools(
 
         if (confidence < 50 || !targetDimension) continue;
 
-        // Check if this transfer is already journalized from the other side
-        const existingJournalId = findExistingJournal(
+        const sourceTitle = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;
+        const targetTitle = dimensionToTitle.get(targetDimension) ?? `dim:${targetDimension}`;
+
+        // Check if this transfer is already journalized from the other side.
+        const resolution = resolveExistingJournal(
           tx.accounts_dimensions_id,
           targetDimension,
           comparableTransactionAmount(tx),
           tx.date,
           maxGap,
           tx.bank_ref_number ?? tx.ref_number,
+          true,
         );
-        if (existingJournalId) {
+        if (resolution.status === "matched") {
           consumedTxIds.add(tx.id);
           skippedAlreadyHandled.push({
             transaction_id: tx.id, amount: tx.amount, date: tx.date,
-            source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
-            existing_journal_id: existingJournalId,
+            source_account: sourceTitle,
+            existing_journal_id: resolution.journal_id,
             reason: "Already journalized from the other account side",
+          });
+          continue;
+        }
+        if (resolution.status === "ambiguous_refless") {
+          consumedTxIds.add(tx.id);
+          ambiguousRefless.push({
+            transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
+            source_account: sourceTitle, target_account: targetTitle,
+            reason: "A ref-less inter-account journal for this amount/date/accounts was already booked this run; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
           });
           continue;
         }
 
         consumedTxIds.add(tx.id);
-        const sourceTitle = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;
-        const targetTitle = dimensionToTitle.get(targetDimension) ?? `dim:${targetDimension}`;
 
         if (dryRun) {
           matchedOneSided.push({
@@ -1415,6 +1468,7 @@ export function registerBankReconciliationTools(
         matched_one_sided: matchedOneSided.length,
         skipped_ambiguous: ambiguousPairs.length,
         skipped_already_handled: skippedAlreadyHandled.length,
+        needs_review_ambiguous_refless: ambiguousRefless.length,
         error_count: errors.length,
       };
 
@@ -1430,6 +1484,7 @@ export function registerBankReconciliationTools(
             matched_one_sided: summary.matched_one_sided,
             skipped_ambiguous: summary.skipped_ambiguous,
             skipped_already_handled: summary.skipped_already_handled,
+            needs_review_ambiguous_refless: summary.needs_review_ambiguous_refless,
             own_bank_accounts: [...dimensionToIban.entries()].map(([dimId, iban]) => ({
               accounts_dimensions_id: dimId,
               iban,
@@ -1439,12 +1494,13 @@ export function registerBankReconciliationTools(
             ambiguous_pairs: ambiguousPairs,
             one_sided: matchedOneSided,
             already_handled: skippedAlreadyHandled,
+            ambiguous_refless: ambiguousRefless,
             errors,
             execution: buildBatchExecutionContract({
               mode,
               summary,
               results: [...matchedPairs, ...matchedOneSided],
-              skipped: [...ambiguousPairs, ...skippedAlreadyHandled],
+              skipped: [...ambiguousPairs, ...skippedAlreadyHandled, ...ambiguousRefless],
               errors,
             }),
           }),

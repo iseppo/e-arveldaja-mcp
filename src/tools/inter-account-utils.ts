@@ -52,6 +52,32 @@ export function buildBankAccountLookups(
 export interface InterAccountJournalEntry {
   journal_id: number;
   document_number?: string | null;
+  /**
+   * Where this entry came from. `snapshot` = a journal that already existed
+   * when the run started (loaded by buildInterAccountJournalIndex). `in_run` =
+   * a journal recorded after a confirmation during this run. Absent on bare
+   * test fixtures; treated as `snapshot` by consumers that care. Used by
+   * BookingGuard.resolveInterAccount to tell a genuine cross-run duplicate
+   * (snapshot) apart from an ambiguous same-run ref-less collision (in_run).
+   */
+  origin?: "snapshot" | "in_run";
+  /**
+   * Mutable flag: set once this entry has been matched-and-consumed by a
+   * reconciliation query so it cannot suppress a second same-key transfer.
+   * The entry object is shared across both directional keys, so consuming it
+   * removes it from both lookups at once.
+   */
+  consumed?: boolean;
+}
+
+/**
+ * Result of matching a transfer against a key's candidate journals.
+ * `matchedOn` distinguishes an authoritative reference match from the weaker
+ * ref-less amount+date+dims catch-all, which callers treat differently.
+ */
+export interface JournalMatch {
+  entry: InterAccountJournalEntry;
+  matchedOn: "reference" | "refless";
 }
 
 /**
@@ -120,6 +146,7 @@ export function buildInterAccountJournalIndex(
     const entry: InterAccountJournalEntry = {
       journal_id: j.id,
       document_number: j.document_number,
+      origin: "snapshot",
     };
     // Insert in both directions so we catch it regardless of which side we're checking from
     const key1 = `${credit.accounts_dimensions_id}|${debit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
@@ -158,20 +185,37 @@ export function findMatchingJournal(
   candidates: InterAccountJournalEntry[] | undefined,
   referenceNumber?: string | null,
 ): number | undefined {
-  if (!candidates || candidates.length === 0) return undefined;
-  const ref = normalizeReference(referenceNumber);
-  if (!ref) return candidates[0]!.journal_id;
+  return findMatchingJournalEntry(candidates, referenceNumber)?.entry.journal_id;
+}
 
-  const exactMatch = candidates.find(c => normalizeReference(c.document_number) === ref);
-  if (exactMatch) return exactMatch.journal_id;
+/**
+ * Like {@link findMatchingJournal}, but returns the matched entry plus HOW it
+ * matched (`reference` vs the weaker `refless` catch-all), and skips entries
+ * already marked `consumed`. This is the richer primitive
+ * BookingGuard.resolveInterAccount builds on; `findMatchingJournal` is the
+ * thin journal-id-only wrapper kept for existing callers.
+ */
+export function findMatchingJournalEntry(
+  candidates: InterAccountJournalEntry[] | undefined,
+  referenceNumber?: string | null,
+): JournalMatch | undefined {
+  if (!candidates || candidates.length === 0) return undefined;
+  const live = candidates.filter(c => !c.consumed);
+  if (live.length === 0) return undefined;
+
+  const ref = normalizeReference(referenceNumber);
+  if (!ref) return { entry: live[0]!, matchedOn: "refless" };
+
+  const exactMatch = live.find(c => normalizeReference(c.document_number) === ref);
+  if (exactMatch) return { entry: exactMatch, matchedOn: "reference" };
 
   // No candidate matches the supplied reference. Only fall back to a
   // ref-less candidate when ALL candidates are ref-less (legacy-migration
   // path: nothing in the pool has an identifier, so the ref-less journal is
   // the only plausible duplicate). If any candidate carries a reference that
   // differs from the input, treat the input as a distinct transfer.
-  const anyHasRef = candidates.some(c => normalizeReference(c.document_number).length > 0);
+  const anyHasRef = live.some(c => normalizeReference(c.document_number).length > 0);
   if (anyHasRef) return undefined;
 
-  return candidates[0]!.journal_id;
+  return { entry: live[0]!, matchedOn: "refless" };
 }
