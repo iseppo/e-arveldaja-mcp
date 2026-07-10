@@ -1,5 +1,6 @@
 import type { ApiContext } from "./tools/crud-tools.js";
-import type { Journal } from "./types/api.js";
+import type { Journal, ApiResponse } from "./types/api.js";
+import { HttpError } from "./http-client.js";
 import { roundMoney } from "./money.js";
 import {
   buildInterAccountJournalIndex,
@@ -124,7 +125,7 @@ export interface CreateOnceOptions {
 }
 
 export type CreateOnceResult =
-  | { status: "created"; journal_id: number; registered: boolean }
+  | { status: "created"; journal_id: number; registered: boolean; recovered?: boolean }
   | { status: "duplicate"; journal_id: number };
 
 function interAccountKey(sourceDim: number, targetDim: number, amount: number, date: string): string {
@@ -230,16 +231,53 @@ export class BookingGuard {
     payload: Omit<Partial<Journal>, "document_number">,
     opts?: CreateOnceOptions,
   ): Promise<CreateOnceResult> {
-    const existing = this.find(key, opts?.liveness ?? "not_deleted");
+    const liveness = opts?.liveness ?? "not_deleted";
+    const existing = this.find(key, liveness);
     if (existing) return { status: "duplicate", journal_id: existing.journal_id };
 
-    const created = await this.api.journals.create({
-      ...payload,
-      document_number: formatDocNumber(key),
-    });
+    const stamped: Partial<Journal> = { ...payload, document_number: formatDocNumber(key) };
+    const wantConfirm = opts?.confirm !== false;
+
+    let created: ApiResponse;
+    try {
+      created = await this.api.journals.create(stamped);
+    } catch (err) {
+      // Only a network error is ambiguous — the POST may or may not have
+      // committed. An HTTP status (4xx/5xx with a body) means the server saw
+      // and rejected the request, so nothing was created: propagate as-is.
+      if (!(err instanceof HttpError) || err.status !== "network") throw err;
+
+      // The document_number is a checkable key, so re-scan the server to see
+      // whether the ambiguous write actually landed. create() only invalidates
+      // its cache on success, so bust the stale journals cache first — the
+      // snapshot could otherwise predate the write we are verifying.
+      this.api.journals.invalidateListCache();
+      const found = BookingGuard.findKeyInJournals(await this.api.journals.listAll(), key);
+      if (found) {
+        // The ambiguous write DID commit — recover its id, do NOT retry. create()
+        // does not auto-confirm, so the recovered journal is typically left in
+        // PROJECT; confirm it now (when wanted) exactly as a fresh create would.
+        let registered = found.registered;
+        if (!registered && wantConfirm) {
+          try {
+            await this.api.journals.confirm(found.journal_id);
+            registered = true;
+          } catch {
+            // Leave the recovered journal in PROJECT for the operator to inspect.
+          }
+        }
+        this.record(key, found.journal_id, { registered, is_deleted: false });
+        return { status: "created", journal_id: found.journal_id, registered, recovered: true };
+      }
+      // The write did not commit — safe to retry exactly once. A second
+      // network failure propagates; the key is not double-booked because the
+      // next run's find pass (or another recovery) catches it by its
+      // document_number.
+      created = await this.api.journals.create(stamped);
+    }
+
     const journalId = created.created_object_id;
 
-    const wantConfirm = opts?.confirm !== false;
     let registered = false;
     if (journalId != null && wantConfirm) {
       try {
@@ -261,6 +299,32 @@ export class BookingGuard {
     // call within THIS run is deduped.
     this.record(key, UNKNOWN_JOURNAL_ID, { registered, is_deleted: false });
     return { status: "created", journal_id: UNKNOWN_JOURNAL_ID, registered };
+  }
+
+  /**
+   * Scan a raw journal array for the first live (not-deleted) journal carrying
+   * `key`'s document_number. Used by the verify-then-retry path against a
+   * freshly-fetched snapshot, so it applies the same parse + `not_deleted`
+   * liveness that `find` uses without disturbing the in-memory index.
+   */
+  private static findKeyInJournals(
+    journals: readonly Journal[],
+    key: DocKey,
+  ): ExistingArtifact | undefined {
+    const target = formatDocNumber(key);
+    for (const j of journals) {
+      if (j.id == null) continue;
+      const k = parseDocNumber(j.document_number);
+      if (!k || formatDocNumber(k) !== target) continue;
+      if (j.is_deleted === true) continue;
+      return {
+        journal_id: j.id,
+        document_number: target,
+        registered: j.registered === true,
+        is_deleted: false,
+      };
+    }
+    return undefined;
   }
 
   // ---- Lane B: structural inter-account transfers ------------------------

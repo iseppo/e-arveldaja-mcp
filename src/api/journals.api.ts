@@ -60,4 +60,18 @@ export class JournalsApi extends BaseResource<Journal> {
     return result;
   }
 
+  /**
+   * Force-drop the journals list cache so the next `listAll()` /
+   * `listAllWithPostings()` re-reads from the server.
+   *
+   * `create()` only invalidates the cache *after* a successful POST, so a
+   * create that fails with a network error never clears it and the cached
+   * snapshot can still predate the ambiguous write. BookingGuard's
+   * verify-then-retry calls this before re-scanning to check whether the
+   * ambiguous journal actually committed.
+   */
+  invalidateListCache(): void {
+    this.invalidateCache();
+  }
+
 }

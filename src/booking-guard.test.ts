@@ -5,8 +5,11 @@ import {
   parseDocNumber,
   type DocKey,
 } from "./booking-guard.js";
+import { HttpError } from "./http-client.js";
 import type { ApiContext } from "./tools/crud-tools.js";
 import type { Journal, Posting } from "./types/api.js";
+
+const networkError = () => new HttpError("fetch failed", "network", "POST", "/journals");
 
 // ---- helpers ------------------------------------------------------------
 
@@ -48,12 +51,13 @@ function setup(options: SetupOptions = {}) {
     : vi.fn().mockResolvedValue({});
   const listAll = vi.fn().mockResolvedValue(options.journals ?? []);
   const listAllWithPostings = vi.fn().mockResolvedValue(options.journals ?? []);
+  const invalidateListCache = vi.fn();
 
   const api = {
-    journals: { create, confirm, listAll, listAllWithPostings },
+    journals: { create, confirm, listAll, listAllWithPostings, invalidateListCache },
   } as unknown as ApiContext;
 
-  return { api, create, confirm, listAll, listAllWithPostings };
+  return { api, create, confirm, listAll, listAllWithPostings, invalidateListCache };
 }
 
 // ---- document_number parsing -------------------------------------------
@@ -241,6 +245,124 @@ describe("BookingGuard Lane A — createJournalOnce", () => {
     const second = await guard.createJournalOnce({ ns: "FX", id: "1" }, { effective_date: "2026-01-01", postings: [] });
     expect(second.status).toBe("duplicate");
     expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---- Lane A: createJournalOnce verify-then-retry -----------------------
+
+describe("BookingGuard.createJournalOnce — verify-then-retry", () => {
+  it("recovers the committed journal when a network error is ambiguous (no retry)", async () => {
+    const { api, create, confirm, listAll, invalidateListCache } = setup();
+    const guard = await BookingGuard.load(api); // loads with []
+
+    // The create POST times out ambiguously...
+    create.mockRejectedValueOnce(networkError());
+    // ...but the re-scan shows it actually committed as journal 4242.
+    listAll.mockResolvedValueOnce([
+      journal({ id: 4242, document_number: "FX:9", registered: true }),
+    ]);
+
+    const result = await guard.createJournalOnce(
+      { ns: "FX", id: "9" },
+      { effective_date: "2026-01-01", postings: [] },
+    );
+
+    expect(result).toEqual({ status: "created", journal_id: 4242, registered: true, recovered: true });
+    expect(invalidateListCache).toHaveBeenCalledTimes(1); // busted the stale cache
+    expect(create).toHaveBeenCalledTimes(1); // NOT retried — already committed
+    expect(confirm).not.toHaveBeenCalled(); // recovered journal, not re-confirmed
+    // Recorded in-run: a second call is deduped.
+    const second = await guard.createJournalOnce({ ns: "FX", id: "9" }, { effective_date: "2026-01-01", postings: [] });
+    expect(second).toEqual({ status: "duplicate", journal_id: 4242 });
+  });
+
+  it("confirms a recovered journal that committed in PROJECT state", async () => {
+    const { api, create, confirm, listAll } = setup();
+    const guard = await BookingGuard.load(api);
+
+    create.mockRejectedValueOnce(networkError());
+    // The committed journal exists but was never confirmed (create doesn't
+    // auto-confirm, and the network error cut off before our confirm call).
+    listAll.mockResolvedValueOnce([
+      journal({ id: 55, document_number: "FX:9", registered: false }),
+    ]);
+
+    const result = await guard.createJournalOnce(
+      { ns: "FX", id: "9" },
+      { effective_date: "2026-01-01", postings: [] },
+    );
+
+    expect(result).toEqual({ status: "created", journal_id: 55, registered: true, recovered: true });
+    expect(confirm).toHaveBeenCalledWith(55); // recovered PROJECT journal is confirmed
+    expect(create).toHaveBeenCalledTimes(1); // still not retried
+  });
+
+  it("does not confirm a recovered journal when confirm:false", async () => {
+    const { api, confirm, create, listAll } = setup();
+    const guard = await BookingGuard.load(api);
+
+    create.mockRejectedValueOnce(networkError());
+    listAll.mockResolvedValueOnce([
+      journal({ id: 55, document_number: "LY:R1", registered: false }),
+    ]);
+
+    const result = await guard.createJournalOnce(
+      { ns: "LY", id: "R1" },
+      { effective_date: "2026-01-01", postings: [] },
+      { confirm: false },
+    );
+
+    expect(result).toEqual({ status: "created", journal_id: 55, registered: false, recovered: true });
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("retries exactly once when the ambiguous write did not commit", async () => {
+    const { api, create, confirm, listAll } = setup();
+    const guard = await BookingGuard.load(api);
+
+    create
+      .mockRejectedValueOnce(networkError()) // first attempt: ambiguous failure
+      .mockResolvedValueOnce({ created_object_id: 7 }); // retry: succeeds
+    listAll.mockResolvedValueOnce([]); // re-scan: nothing committed
+
+    const result = await guard.createJournalOnce(
+      { ns: "FX", id: "9" },
+      { effective_date: "2026-01-01", postings: [] },
+    );
+
+    expect(result).toEqual({ status: "created", journal_id: 7, registered: true });
+    expect(create).toHaveBeenCalledTimes(2); // retried once
+    expect(confirm).toHaveBeenCalledWith(7);
+  });
+
+  it("propagates a second network failure without a further retry", async () => {
+    const { api, create, listAll } = setup();
+    const guard = await BookingGuard.load(api);
+
+    create
+      .mockRejectedValueOnce(networkError())
+      .mockRejectedValueOnce(networkError()); // retry also fails
+    listAll.mockResolvedValueOnce([]);
+
+    await expect(
+      guard.createJournalOnce({ ns: "FX", id: "9" }, { effective_date: "2026-01-01", postings: [] }),
+    ).rejects.toThrow(HttpError);
+    expect(create).toHaveBeenCalledTimes(2); // one retry, then give up
+  });
+
+  it("does not verify or retry on a non-network HTTP error", async () => {
+    const { api, create, listAll, invalidateListCache } = setup();
+    const guard = await BookingGuard.load(api);
+
+    const badRequest = new HttpError("bad request", 400, "POST", "/journals");
+    create.mockRejectedValueOnce(badRequest);
+
+    await expect(
+      guard.createJournalOnce({ ns: "FX", id: "9" }, { effective_date: "2026-01-01", postings: [] }),
+    ).rejects.toThrow(badRequest);
+    expect(create).toHaveBeenCalledTimes(1); // no retry
+    expect(invalidateListCache).not.toHaveBeenCalled(); // no verify
+    expect(listAll).toHaveBeenCalledTimes(1); // only the initial load
   });
 });
 
