@@ -1,4 +1,5 @@
 import type { HttpClient } from "../http-client.js";
+import { HttpError } from "../http-client.js";
 import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice, ApiResponse } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
 
@@ -51,6 +52,29 @@ export class TransactionsApi extends BaseResource<Transaction> {
       this.invalidateCache("/journals");
       return result;
     } catch (error) {
+      // A network error on the register PATCH is ambiguous: the registration
+      // creates a journal server-side, so a lost response may mean it actually
+      // committed. Re-read the transaction (busting the stale cache — the
+      // failed PATCH never reached its own invalidateCache) and check its
+      // status before deciding. If it is CONFIRMED the registration landed, so
+      // we must NOT roll back clients_id (that would corrupt the committed
+      // journal's buyer/supplier) and must report success instead of a false
+      // failure that invites a duplicating retry.
+      if (error instanceof HttpError && error.status === "network") {
+        this.invalidateCache();
+        let confirmed = false;
+        try {
+          confirmed = (await this.get(id)).status === "CONFIRMED";
+        } catch {
+          // Re-read failed — fall through to the rollback + rethrow path.
+        }
+        if (confirmed) {
+          this.invalidateCache("/journals");
+          // The tx re-read does not carry the new journal id; callers already
+          // tolerate an absent created_object_id (recording the sentinel id).
+          return { code: 200, messages: ["Registration recovered after network error"] };
+        }
+      }
       if (clientsIdWasSet) {
         try {
           await this.update(id, { clients_id: null } as Partial<Transaction>);

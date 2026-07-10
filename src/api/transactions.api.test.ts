@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TransactionsApi } from "./transactions.api.js";
 import { cache } from "./base-resource.js";
 import type { HttpClient } from "../http-client.js";
+import { HttpError } from "../http-client.js";
 
 vi.mock("../logger.js", () => ({ log: vi.fn() }));
 vi.mock("../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(undefined) }));
@@ -158,6 +159,103 @@ describe("TransactionsApi.confirm", () => {
 
     expect(cache.get("test:/journals:list:page=1")).toBeUndefined();
     expect(cache.get("test:/transactions:list:page=1")).toBeUndefined();
+  });
+
+  it("recovers a committed registration on a network error without rolling back clients_id", async () => {
+    let txReads = 0;
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/6") {
+          txReads += 1;
+          // First read (auto-fix check) sees no client; the post-error re-read
+          // sees the registration committed (CONFIRMED) with the client set.
+          return txReads === 1
+            ? { id: 6, clients_id: null }
+            : { id: 6, clients_id: 42, status: "CONFIRMED" };
+        }
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path }) => {
+        if (path === "/transactions/6/register") {
+          throw new HttpError("fetch failed", "network", "PATCH", "/transactions/6/register");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    const result = await api.confirm(6, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]);
+
+    // Reports success (recovered) rather than throwing; no created_object_id.
+    expect(result.created_object_id).toBeUndefined();
+    // clients_id auto-fix + register attempt, but NO rollback (no clients_id:null).
+    expect(patchCalls).toEqual([
+      { path: "/transactions/6", body: { clients_id: 42 } },
+      { path: "/transactions/6/register", body: expect.any(Array) },
+    ]);
+  });
+
+  it("rolls back and rethrows when the re-read shows the registration did not commit", async () => {
+    let txReads = 0;
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/7") {
+          txReads += 1;
+          return txReads === 1
+            ? { id: 7, clients_id: null }
+            : { id: 7, clients_id: 42, status: "PROJECT" };
+        }
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path }) => {
+        if (path === "/transactions/7/register") {
+          throw new HttpError("fetch failed", "network", "PATCH", "/transactions/7/register");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(7, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toThrow(HttpError);
+
+    // Not committed → clients_id is rolled back to null.
+    expect(patchCalls).toEqual([
+      { path: "/transactions/7", body: { clients_id: 42 } },
+      { path: "/transactions/7/register", body: expect.any(Array) },
+      { path: "/transactions/7", body: { clients_id: null } },
+    ]);
+  });
+
+  it("does not verify or recover on a non-network HTTP error", async () => {
+    let txReads = 0;
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/8") {
+          txReads += 1;
+          return { id: 8, clients_id: null };
+        }
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path }) => {
+        if (path === "/transactions/8/register") {
+          throw new HttpError("bad request", 400, "PATCH", "/transactions/8/register");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(8, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toThrow(HttpError);
+
+    // Only the auto-fix read happened — no post-error re-read for verification.
+    expect(txReads).toBe(1);
+    // Rollback still occurs on the definite failure.
+    expect(patchCalls).toContainEqual({ path: "/transactions/8", body: { clients_id: null } });
   });
 });
 
