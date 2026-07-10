@@ -321,6 +321,42 @@ describe("reconcile_currency_rounding", () => {
     expect(payload.candidates[0].already_reconciled).toBe(true);
   });
 
+  it("re-books an FX journal when the existing one was deleted/invalidated", async () => {
+    const journalCreate = vi.fn().mockResolvedValue({ created_object_id: 888 });
+    const { handler } = setupTool({
+      invoices: [
+        {
+          id: 102,
+          number: "USD-002",
+          client_name: "Anthropic",
+          status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID",
+          cl_currencies_id: "USD",
+          net_price: 100,
+          vat_price: 0,
+          gross_price: 100,
+          base_gross_price: 90.50,
+          create_date: "2026-05-01",
+          transactions: [202],
+        },
+      ],
+      transactionsById: {
+        202: { id: 202, status: "CONFIRMED", amount: 90.00, cl_currencies_id: "EUR" },
+      },
+      // The prior FX journal was invalidated (is_deleted) — the residual is open
+      // again, so it must not suppress a fresh FX adjustment.
+      existingJournals: [{ id: 777, document_number: "FX:102", is_deleted: true }],
+      journalCreate,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.candidates[0].already_reconciled).toBe(false);
+    expect(payload.summary.fx_difference).toBe(1);
+    expect(journalCreate).toHaveBeenCalledTimes(1);
+  });
+
   it("posts D 8600 / C 2310 when liability is understated (paid more than booked)", async () => {
     const journalCreate = vi.fn().mockResolvedValue({ created_object_id: 778 });
     const { handler } = setupTool({

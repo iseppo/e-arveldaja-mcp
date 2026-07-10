@@ -54,6 +54,15 @@ export interface InterAccountJournalEntry {
   document_number?: string | null;
 }
 
+/**
+ * Placeholder journal id for an entry recorded into the in-run index after a
+ * confirm whose API response did not return a `created_object_id`. The key is
+ * still recorded so in-run duplicate detection works; this value only signals
+ * that the concrete journal id is unknown, so callers never mistake a
+ * transaction id for a journal id in "already journalized" reports.
+ */
+export const UNKNOWN_JOURNAL_ID = -1;
+
 // Bank-provided "I don't have a reference" sentinels (ISO 20022 / SEPA).
 // Different clearing systems fill in different placeholders when the
 // originator omitted a reference; treating any of them as a real ref would

@@ -13,7 +13,7 @@ import { buildWorkflowEnvelope, remapHiddenGranularWorkflowEnvelope } from "../w
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
-import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal, toUtcDay, type InterAccountJournalEntry } from "./inter-account-utils.js";
+import { buildBankAccountLookups, buildInterAccountJournalIndex, findMatchingJournal, toUtcDay, UNKNOWN_JOURNAL_ID, type InterAccountJournalEntry } from "./inter-account-utils.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -741,12 +741,16 @@ export function registerBankReconciliationTools(
        */
       function recordInterAccountJournal(
         sourceDim: number | undefined, targetDim: number | undefined,
-        amount: number, date: string, journalId: number, referenceNumber?: string | null,
+        amount: number, date: string, journalId: number | undefined, referenceNumber?: string | null,
       ): void {
         if (sourceDim === undefined || targetDim === undefined) return;
         const roundedAmount = roundMoney(amount);
         const entry: InterAccountJournalEntry = {
-          journal_id: journalId,
+          // Never fall back to the transaction id — that would report a tx id as
+          // a journal id in "already journalized" results. Use the sentinel when
+          // the confirm response omitted created_object_id; the key is still
+          // recorded so in-run dedup works.
+          journal_id: journalId ?? UNKNOWN_JOURNAL_ID,
           document_number: referenceNumber ?? undefined,
         };
         for (const key of [
@@ -1111,7 +1115,7 @@ export function registerBankReconciliationTools(
             const confirmResult = await api.transactions.confirm(txOut.id, [buildAccountDistribution(txIn.accounts_dimensions_id, txOut.amount)]);
             recordInterAccountJournal(
               txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, comparableTransactionAmount(txOut), txOut.date,
-              confirmResult?.created_object_id ?? txOut.id, txOut.bank_ref_number ?? txOut.ref_number,
+              confirmResult?.created_object_id, txOut.bank_ref_number ?? txOut.ref_number,
             );
             logAudit({
               tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
@@ -1297,7 +1301,7 @@ export function registerBankReconciliationTools(
             const confirmResult = await api.transactions.confirm(tx.id, [buildAccountDistribution(counterpart.accounts_dimensions_id, tx.amount)]);
             recordInterAccountJournal(
               tx.accounts_dimensions_id, counterpart.accounts_dimensions_id, comparableTransactionAmount(tx), tx.date,
-              confirmResult?.created_object_id ?? tx.id, tx.bank_ref_number ?? tx.ref_number,
+              confirmResult?.created_object_id, tx.bank_ref_number ?? tx.ref_number,
             );
             logAudit({
               tool: "reconcile_inter_account_transfers",
@@ -1405,7 +1409,7 @@ export function registerBankReconciliationTools(
             // journalized instead of being confirmed into a duplicate.
             recordInterAccountJournal(
               tx.accounts_dimensions_id, targetDimension, comparableTransactionAmount(tx), tx.date,
-              confirmResult?.created_object_id ?? tx.id, tx.bank_ref_number ?? tx.ref_number,
+              confirmResult?.created_object_id, tx.bank_ref_number ?? tx.ref_number,
             );
             logAudit({
               tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",

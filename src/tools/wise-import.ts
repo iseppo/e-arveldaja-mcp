@@ -14,7 +14,7 @@ import { isNonVoidTransaction } from "../transaction-status.js";
 import { parseCSV } from "../csv.js";
 import { roundMoney } from "../money.js";
 import { normalizeCompanyName } from "../company-name.js";
-import { buildInterAccountJournalIndex, findMatchingJournal } from "./inter-account-utils.js";
+import { buildInterAccountJournalIndex, findMatchingJournal, UNKNOWN_JOURNAL_ID, type InterAccountJournalEntry } from "./inter-account-utils.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { roundTo } from "../money.js";
 import type { PurchaseInvoice } from "../types/api.js";
@@ -791,12 +791,24 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                   if (companyClientId) {
                     await api.transactions.update(entry.api_id!, { clients_id: companyClientId });
                   }
-                  await api.transactions.confirm(entry.api_id!, [{
+                  const confirmResult = await api.transactions.confirm(entry.api_id!, [{
                     related_table: "accounts",
                     related_id: targetDim.accounts_id,
                     related_sub_id: targetDim.id!,
                     amount: entry.amount,
                   }]);
+                  // Record the new journal into the in-run index so the opposite
+                  // leg of this same transfer, if also queued in this batch, is
+                  // detected as already journalized instead of double-confirmed.
+                  const newEntry: InterAccountJournalEntry = {
+                    journal_id: confirmResult?.created_object_id ?? UNKNOWN_JOURNAL_ID,
+                    document_number: entry.wise_id,
+                  };
+                  for (const key of [key1, key2]) {
+                    const existing = existingInterAccountKeys.get(key);
+                    if (existing) existing.push(newEntry);
+                    else existingInterAccountKeys.set(key, [newEntry]);
+                  }
                   logAudit({
                     tool: "import_wise_transactions", action: "CONFIRMED", entity_type: "transaction",
                     entity_id: entry.api_id!,

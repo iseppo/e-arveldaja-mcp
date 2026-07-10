@@ -100,6 +100,10 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
       // is booked, so execute is otherwise not idempotent).
       const fxReconciledInvoiceIds = new Set<number>();
       for (const j of await api.journals.listAll()) {
+        // A deleted/invalidated FX journal must not block re-booking — the
+        // residual is still open, so the operator invalidated it precisely to
+        // re-post it. Mirrors the is_deleted filter in the Lightyear guard.
+        if (j.is_deleted) continue;
         const dn = j.document_number;
         if (typeof dn === "string" && dn.startsWith("FX:")) {
           const invId = Number(dn.slice(3));

@@ -1257,6 +1257,9 @@ describe("reconcile_inter_account_transfers", () => {
     // Exactly one journal is created for the transfer, not two.
     expect((api.transactions.confirm as any).mock.calls.length).toBe(1);
     expect(payload.already_handled[0]!.reason).toMatch(/already journalized/i);
+    // The confirm mock returns no created_object_id, so the recorded entry must
+    // report the "unknown journal id" sentinel (-1) — never the transaction id.
+    expect(payload.already_handled[0]!.existing_journal_id).toBe(-1);
   });
 
   it("does not suppress distinct one-sided transfers just because both counterparty IBANs are own accounts", async () => {
