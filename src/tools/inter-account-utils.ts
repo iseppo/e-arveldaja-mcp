@@ -204,17 +204,32 @@ export function findMatchingJournal(
  * already marked `consumed`. This is the richer primitive
  * BookingGuard.resolveInterAccount builds on; `findMatchingJournal` is the
  * thin journal-id-only wrapper kept for existing callers.
+ *
+ * `opts.reflessSkipsLabelled` opts into identity-only semantics for labelled
+ * journals: a ref-less query then makes its catch-all match against the first
+ * live *ref-less* candidate, never a labelled one (which is an identity matched
+ * only by its exact reference). Without it, a ref-less query loosely matches
+ * `live[0]` regardless of label. Only BookingGuard.resolveInterAccount sets
+ * this; the id-only `findMatchingJournal` wrapper (and thus wise-import via
+ * `findInterAccount`) keeps the historical loose semantics.
  */
 export function findMatchingJournalEntry(
   candidates: InterAccountJournalEntry[] | undefined,
   referenceNumber?: string | null,
+  opts?: { reflessSkipsLabelled?: boolean },
 ): JournalMatch | undefined {
   if (!candidates || candidates.length === 0) return undefined;
   const live = candidates.filter(c => !c.consumed);
   if (live.length === 0) return undefined;
 
   const ref = normalizeReference(referenceNumber);
-  if (!ref) return { entry: live[0]!, matchedOn: "refless" };
+  if (!ref) {
+    // Ref-less query: pick the ref-less catch-all. With reflessSkipsLabelled,
+    // a labelled journal is identity-only and must not absorb this leg (else it
+    // masks the genuine ref-less journal / in-run marker behind it).
+    const target = opts?.reflessSkipsLabelled ? live.find(isReflessEntry) : live[0];
+    return target ? { entry: target, matchedOn: "refless" } : undefined;
+  }
 
   const exactMatch = live.find(c => normalizeReference(c.document_number) === ref);
   if (exactMatch) return { entry: exactMatch, matchedOn: "reference" };

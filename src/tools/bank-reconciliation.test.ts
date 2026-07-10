@@ -1674,6 +1674,49 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.already_handled[0]!.existing_journal_id).toBe(999);
     });
 
+    it("never double-books when BOTH legs of an already-journalized transfer reach Phase 2", async () => {
+      // Regression: an existing ref-less snapshot journal (id 999) already covers
+      // a 100<->300 transfer, and BOTH of its bank legs are still PROJECT rows
+      // with no IBAN signal, so each falls to Phase 2 as a one-sided transfer.
+      // Leg 1 matches and consumes the snapshot; the naive consume-only design
+      // then left leg 2 with no cover → it confirmed a DUPLICATE journal. The
+      // consume-and-drop-a-marker fix makes leg 2 resolve to ambiguous_refless
+      // (review) instead. The invariant: ZERO confirms — one journal, not two.
+      const twoAccounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+        { id: 2, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+      ];
+
+      const { handler, api } = setupInterAccountTool({
+        transactions: [
+          { id: 40, status: "PROJECT", is_deleted: false, type: "C", amount: 800, date: "2025-12-05", accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null },
+          { id: 41, status: "PROJECT", is_deleted: false, type: "D", amount: 800, date: "2025-12-05", accounts_dimensions_id: 100, bank_account_name: "Test OÜ", bank_account_no: null },
+        ],
+        bankAccounts: twoAccounts,
+        companyName: "Test OÜ",
+        journals: [{
+          id: 999, effective_date: "2025-12-05", is_deleted: false, registered: true,
+          postings: [
+            { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 800, is_deleted: false },
+            { accounts_id: 1020, accounts_dimensions_id: 300, type: "D", amount: 800, is_deleted: false },
+          ],
+        }],
+      });
+
+      const result = await handler({ execute: true });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      // The critical invariant: the pre-existing journal covers the transfer, so
+      // NEITHER leg may confirm a second journal.
+      expect((api.transactions.confirm as any).mock.calls.length).toBe(0);
+      expect(payload.matched_one_sided).toBe(0);
+      // Leg 1 recognized as already journalized against snapshot 999…
+      expect(payload.skipped_already_handled).toBe(1);
+      expect(payload.already_handled[0]!.existing_journal_id).toBe(999);
+      // …and leg 2 surfaced for review instead of double-booked.
+      expect(payload.needs_review_ambiguous_refless).toBe(1);
+    });
+
     it("detects already-journalized FX transfers using the transaction base amount", async () => {
       const twoAccounts = [
         { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },

@@ -463,22 +463,26 @@ describe("BookingGuard Lane B — resolveInterAccount (cardinality-aware)", () =
     expect(second).toEqual({ status: "matched", journal_id: 1, matched_on: "reference", pool: "snapshot" });
   });
 
-  // 2. Ref-less snapshot match → matched(refless) then consumed. A SECOND
-  //    identical ref-less transfer no longer finds a live journal → none (book).
-  //    This is the core no-over-suppression fix: J prior-run journals suppress
-  //    exactly J transfers, not unlimited same-key transfers.
-  it("ref-less snapshot match consumes; a second same-key transfer books", async () => {
+  // 2. Ref-less snapshot match → matched(refless), consumed, AND a ref-less
+  //    in-run marker is dropped. A SECOND same-key ref-less row (the mirror leg
+  //    of this transfer, OR a genuine second transfer — structurally identical)
+  //    hits that marker → ambiguous_refless (review), never a silent duplicate.
+  //    One journal spans two legs, so one prior-run journal suppresses exactly
+  //    one leg and turns any further same-key row into a review item.
+  it("ref-less snapshot match consumes and drops a marker; the second same-key row goes to review", async () => {
     const { api } = setup({ journals: [interAccountJournal(1, null)], ownDimensionIds: ownDims });
     const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
     const first = guard.resolveInterAccount(q());
     expect(first).toEqual({ status: "matched", journal_id: 1, matched_on: "refless", pool: "snapshot" });
-    // The single snapshot journal is now consumed — the mirror books.
-    expect(guard.resolveInterAccount(q())).toEqual({ status: "none" });
+    // The snapshot is consumed and a tripwire marker remains — the mirror leg is
+    // surfaced for review rather than silently booked into a duplicate journal.
+    expect(guard.resolveInterAccount(q())).toEqual({ status: "ambiguous_refless" });
   });
 
-  // 3. Cardinality: two ref-less snapshot journals absorb exactly two transfers;
-  //    the third books. Proves no-miss AND no-over-suppression together.
-  it("two ref-less snapshot journals absorb exactly two transfers, then book", async () => {
+  // 3. Cardinality: two ref-less snapshot journals absorb exactly two rows (each
+  //    consumed via a DISTINCT journal — invariant "K=J re-import ⇒ no false
+  //    ambiguity"); the third same-key row exceeds the cover → review.
+  it("two ref-less snapshot journals absorb two rows via distinct journals, then review", async () => {
     const { api } = setup({
       journals: [interAccountJournal(1, null), interAccountJournal(2, null)],
       ownDimensionIds: ownDims,
@@ -489,9 +493,11 @@ describe("BookingGuard Lane B — resolveInterAccount (cardinality-aware)", () =
     const c = guard.resolveInterAccount(q());
     expect(a.status).toBe("matched");
     expect(b.status).toBe("matched");
-    // Distinct journals were consumed, not the same one twice.
+    // Distinct journals were consumed, not the same one twice, and neither of
+    // the two covered rows was spuriously flagged.
     expect((a as { journal_id: number }).journal_id).not.toBe((b as { journal_id: number }).journal_id);
-    expect(c).toEqual({ status: "none" });
+    // The third row exceeds the two-journal cover → review, not a silent book.
+    expect(c).toEqual({ status: "ambiguous_refless" });
   });
 
   // 4. Differing-ref against a labelled candidate → none (book). A mismatched
@@ -527,27 +533,31 @@ describe("BookingGuard Lane B — resolveInterAccount (cardinality-aware)", () =
   });
 
   // 7. consume:false is a non-destructive probe (dry-run / candidate scoring):
-  //    the snapshot stays live so a later real resolution can still match it.
-  it("consume:false leaves the snapshot entry live for a later resolution", async () => {
+  //    the snapshot stays live AND no marker is dropped, so a later real
+  //    resolution still matches it and only THEN arms the tripwire.
+  it("consume:false leaves the snapshot entry live and drops no marker", async () => {
     const { api } = setup({ journals: [interAccountJournal(1, null)], ownDimensionIds: ownDims });
     const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
     expect(guard.resolveInterAccount(q(), { consume: false }).status).toBe("matched");
-    // Not consumed — a subsequent consuming resolution still matches the same journal.
+    // Not consumed and no marker armed — a subsequent consuming resolution still
+    // matches the same journal (a probe must not have mutated any state).
     expect(guard.resolveInterAccount(q())).toEqual({
       status: "matched", journal_id: 1, matched_on: "refless", pool: "snapshot",
     });
-    // Now it is consumed.
-    expect(guard.resolveInterAccount(q())).toEqual({ status: "none" });
+    // That consuming resolution armed the marker — a further row goes to review.
+    expect(guard.resolveInterAccount(q())).toEqual({ status: "ambiguous_refless" });
   });
 
-  // 8. Consumption is bidirectional: the entry object is shared across both
-  //    directional keys, so consuming it via (10→20) also clears (20→10).
-  it("consuming a match clears it in both directions", async () => {
+  // 8. The mirror leg at the UNIT level: consuming a leg via (10→20) both clears
+  //    the shared entry in the reverse direction AND drops a bidirectional
+  //    marker, so the mirror leg queried as (20→10) resolves to review — never a
+  //    silent duplicate. (Marker anchoring is exercised in the maxGap test.)
+  it("consuming a leg surfaces the reverse-direction mirror leg for review", async () => {
     const { api } = setup({ journals: [interAccountJournal(1, null)], ownDimensionIds: ownDims });
     const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
     expect(guard.resolveInterAccount(q({ sourceDim: 10, targetDim: 20 })).status).toBe("matched");
-    // The reverse-direction lookup sees the same consumed entry → none.
-    expect(guard.resolveInterAccount(q({ sourceDim: 20, targetDim: 10 }))).toEqual({ status: "none" });
+    // The reverse-direction mirror leg: shared entry consumed + marker present → review.
+    expect(guard.resolveInterAccount(q({ sourceDim: 20, targetDim: 10 }))).toEqual({ status: "ambiguous_refless" });
   });
 
   // 9. Reference match is never consumed even at default consume=true: a labelled
@@ -562,9 +572,12 @@ describe("BookingGuard Lane B — resolveInterAccount (cardinality-aware)", () =
     }
   });
 
-  // 10. maxGapDays window: a ref-less snapshot within the window matches and is
-  //     consumed, so a second windowed query for the same transfer books.
-  it("matches and consumes a ref-less snapshot within the maxGapDays window", async () => {
+  // 10. maxGapDays MARKER ANCHORING (architect invariant #2): the marker must be
+  //     dropped at the date where the journal was FOUND (01-01), not the query
+  //     date (01-03). Leg 1 queries 01-03 and matches the 01-01 journal within a
+  //     2-day window; leg 2 queried at 01-03 must still find the marker at 01-01
+  //     inside its own window → review, never a silent book.
+  it("anchors the marker to the matched date so a windowed mirror leg is caught", async () => {
     const { api } = setup({
       journals: [interAccountJournal(1, null, { date: "2026-01-01" })],
       ownDimensionIds: ownDims,
@@ -574,22 +587,21 @@ describe("BookingGuard Lane B — resolveInterAccount (cardinality-aware)", () =
     expect(guard.resolveInterAccount(q({ date: "2026-01-03", maxGapDays: 2 }))).toEqual({
       status: "matched", journal_id: 1, matched_on: "refless", pool: "snapshot",
     });
-    // Consumed across the window too — the mirror books.
-    expect(guard.resolveInterAccount(q({ date: "2026-01-03", maxGapDays: 2 }))).toEqual({ status: "none" });
+    // The marker was anchored to 01-01; the second windowed query finds it → review.
+    expect(guard.resolveInterAccount(q({ date: "2026-01-03", maxGapDays: 2 }))).toEqual({ status: "ambiguous_refless" });
   });
 
-  // 11. Fix #1: a ref-less query loosely matches a LABELLED snapshot journal
-  //     (e.g. an FX: conversion between two bank accounts) but must NOT consume
-  //     it — the labelled journal is an identity that must stay matchable so its
-  //     own same-ref re-import keeps being suppressed.
-  it("does not consume a labelled snapshot journal matched by a ref-less query", async () => {
+  // 11. reflessSkipsLabelled (Fix A): a labelled snapshot journal (e.g. an FX:
+  //     conversion) is IDENTITY-ONLY — a ref-less query does NOT match it, so it
+  //     never masks a genuine ref-less journal/marker behind it. Its own exact
+  //     reference still matches.
+  it("a ref-less query does not match a labelled-only snapshot; its exact ref does", async () => {
     const { api } = setup({ journals: [interAccountJournal(1, "FX:USD-EUR")], ownDimensionIds: ownDims });
     const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
-    // A ref-less transfer loosely matches the labelled journal (loose match)…
-    expect(guard.resolveInterAccount(q())).toEqual({
-      status: "matched", journal_id: 1, matched_on: "refless", pool: "snapshot",
-    });
-    // …but the labelled entry stays live: its own same-ref re-import still matches.
+    // A ref-less transfer sharing the key with only a labelled journal is a
+    // distinct transfer → book, not suppressed against the FX identity.
+    expect(guard.resolveInterAccount(q())).toEqual({ status: "none" });
+    // The labelled journal is still suppressed by its own exact reference.
     expect(guard.resolveInterAccount(q({ reference: "FX:USD-EUR" }))).toEqual({
       status: "matched", journal_id: 1, matched_on: "reference", pool: "snapshot",
     });
@@ -613,5 +625,40 @@ describe("BookingGuard Lane B — resolveInterAccount (cardinality-aware)", () =
     const { api } = setup({ journals: [interAccountJournal(1, "REF-A")], ownDimensionIds: ownDims });
     const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
     expect(guard.resolveInterAccount(q({ reference: "REF-B" }))).toEqual({ status: "none" });
+  });
+
+  // 14. Labelled masking (architect invariant #4): under a key holding a labelled
+  //     journal ORDERED BEFORE a ref-less journal, a ref-less query must consume
+  //     the REF-LESS one (id 2), never loose-match the labelled catch-all (id 1)
+  //     which would mask it. A genuine second same-key row then hits the marker
+  //     → review; the labelled journal stays matchable by its exact ref.
+  it("a ref-less query consumes the ref-less journal, not a labelled one ordered before it", async () => {
+    const { api } = setup({
+      journals: [interAccountJournal(1, "FX:X"), interAccountJournal(2, null)],
+      ownDimensionIds: ownDims,
+    });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    // Ref-less query skips the labelled journal (id 1) and consumes the ref-less one (id 2).
+    expect(guard.resolveInterAccount(q())).toEqual({
+      status: "matched", journal_id: 2, matched_on: "refless", pool: "snapshot",
+    });
+    // The next same-key ref-less row is no longer masked by id 1 → review.
+    expect(guard.resolveInterAccount(q())).toEqual({ status: "ambiguous_refless" });
+    // The labelled journal remains suppressed by its own exact reference.
+    expect(guard.resolveInterAccount(q({ reference: "FX:X" }))).toEqual({
+      status: "matched", journal_id: 1, matched_on: "reference", pool: "snapshot",
+    });
+  });
+
+  // 15. Marker hygiene (architect invariant #6): the tripwire marker is never
+  //     itself consumed and never surfaces a real journal id — every same-key
+  //     ref-less row after the first stays ambiguous_refless, indefinitely.
+  it("the tripwire marker persists — every subsequent same-key row stays review", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, null)], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    expect(guard.resolveInterAccount(q()).status).toBe("matched");
+    for (let i = 0; i < 3; i++) {
+      expect(guard.resolveInterAccount(q())).toEqual({ status: "ambiguous_refless" });
+    }
   });
 });

@@ -554,4 +554,41 @@ describe("findMatchingJournalEntry", () => {
     expect(findMatchingJournalEntry(undefined)).toBeUndefined();
     expect(findMatchingJournalEntry([])).toBeUndefined();
   });
+
+  // reflessSkipsLabelled: the opt-in identity-only semantics used by
+  // BookingGuard.resolveInterAccount. The DEFAULT (no opts) keeps the historical
+  // loose semantics that findMatchingJournal / findInterAccount / wise-import
+  // rely on — a ref-less query loose-matches live[0] even if it is labelled.
+  it("default (loose) ref-less query matches a labelled live[0]", () => {
+    const candidates = [
+      { journal_id: 1, document_number: "FX:X" },
+      { journal_id: 2, document_number: null },
+    ];
+    expect(findMatchingJournalEntry(candidates)).toEqual({
+      entry: candidates[0],
+      matchedOn: "refless",
+    });
+  });
+
+  it("reflessSkipsLabelled makes a ref-less query pick the first ref-less candidate", () => {
+    const candidates = [
+      { journal_id: 1, document_number: "FX:X" },
+      { journal_id: 2, document_number: null },
+    ];
+    expect(findMatchingJournalEntry(candidates, undefined, { reflessSkipsLabelled: true })).toEqual({
+      entry: candidates[1],
+      matchedOn: "refless",
+    });
+  });
+
+  it("reflessSkipsLabelled returns undefined when every live candidate is labelled", () => {
+    const candidates = [{ journal_id: 1, document_number: "FX:X" }];
+    // Identity-only: a ref-less query does not match a labelled-only pool.
+    expect(findMatchingJournalEntry(candidates, undefined, { reflessSkipsLabelled: true })).toBeUndefined();
+    // …but the same labelled journal is still matched by its exact reference.
+    expect(findMatchingJournalEntry(candidates, "FX:X", { reflessSkipsLabelled: true })).toEqual({
+      entry: candidates[0],
+      matchedOn: "reference",
+    });
+  });
 });

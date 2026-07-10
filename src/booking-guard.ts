@@ -372,11 +372,16 @@ export class BookingGuard {
    * - `reference` match → `matched` (never consumed: a same-ref re-import must
    *   keep being suppressed).
    * - ref-less match on a ref-less `snapshot` journal → `matched`, and the entry
-   *   is consumed (default), so J prior-run journals suppress exactly J transfers.
-   * - ref-less match landing on a `snapshot` journal that itself carries a
-   *   reference (e.g. an `FX:` conversion between two bank accounts) → `matched`
-   *   but NOT consumed: a labelled journal is an identity that must stay
-   *   matchable for its own same-ref re-import.
+   *   is consumed (default) AND a ref-less in-run marker is dropped on the key.
+   *   One inter-account journal spans TWO bank legs, so the next same-key ref-less
+   *   row (the mirror leg, or a genuine second transfer — structurally identical)
+   *   hits that marker and resolves to `ambiguous_refless` rather than silently
+   *   booking a duplicate. So one prior-run journal suppresses exactly one leg and
+   *   turns any further same-key rows into review items.
+   * - ref-less query against a labelled `snapshot` journal (e.g. an `FX:`
+   *   conversion) → not matched at all: a labelled journal is identity-only,
+   *   suppressed only by its own exact reference (`reflessSkipsLabelled`), so it
+   *   never masks a genuine ref-less journal or marker behind it.
    * - any match on an `in_run` journal via the ref-less catch-all → `ambiguous_refless`:
    *   we cannot tell a genuine second transfer from a duplicate re-import of the
    *   first, so the caller must surface it for review rather than guess.
@@ -384,8 +389,8 @@ export class BookingGuard {
    *   a *different* reference → `ambiguous_refless`: the two legs of one transfer
    *   legitimately carry different bank refs, so a differing-ref same-run
    *   collision is indistinguishable from a genuine second transfer.
-   * - no live candidate (or only differing-ref `snapshot` journals, which are
-   *   distinct prior-run identities) → `none` (safe to book).
+   * - no live candidate (or only differing-ref / labelled `snapshot` journals,
+   *   which are distinct prior-run identities) → `none` (safe to book).
    */
   resolveInterAccount(
     q: InterAccountQuery,
@@ -396,7 +401,7 @@ export class BookingGuard {
     for (const date of this.candidateDates(q.date, gap)) {
       const key = interAccountKey(q.sourceDim, q.targetDim, q.amount, date);
       const candidates = this.interAccountIndex.get(key);
-      const match = findMatchingJournalEntry(candidates, q.reference);
+      const match = findMatchingJournalEntry(candidates, q.reference, { reflessSkipsLabelled: true });
       if (!match) {
         // No reference/ref-less match. If a same-key journal was booked THIS
         // run (an in_run entry that a differing ref caused us to reject), the
@@ -416,10 +421,19 @@ export class BookingGuard {
         // collision here is indistinguishable from a duplicate re-import.
         return { status: "ambiguous_refless" };
       }
-      // Only consume a genuinely ref-less snapshot entry. A labelled snapshot
-      // journal loosely matched by a ref-less query stays live so its own
-      // same-ref re-import keeps being suppressed.
-      if (consume && isReflessEntry(match.entry)) match.entry.consumed = true;
+      // A ref-less snapshot journal covers this leg. Consume it (a ref-less
+      // journal answers exactly one leg) AND drop a ref-less in-run marker on
+      // the SAME key so the NEXT same-key ref-less row — which may be this
+      // transfer's mirror leg (one journal spans two bank legs) or a genuine
+      // second transfer, structurally indistinguishable — resolves to
+      // ambiguous_refless (review) instead of silently booking a duplicate.
+      // The marker is anchored to `date` (where the journal was actually found,
+      // which under maxGapDays may differ from q.date), so the mirror leg's own
+      // nearest-first window finds it exactly where this leg found the journal.
+      if (consume && isReflessEntry(match.entry)) {
+        match.entry.consumed = true;
+        this.recordConsumedMarker(q.sourceDim, q.targetDim, q.amount, date);
+      }
       return { status: "matched", journal_id: match.entry.journal_id, matched_on: "refless", pool };
     }
     return { status: "none" };
@@ -428,6 +442,29 @@ export class BookingGuard {
   /** True when `candidates` holds a live (un-consumed) in-run journal entry. */
   private hasLiveInRunEntry(candidates: InterAccountJournalEntry[] | undefined): boolean {
     return (candidates ?? []).some(c => !c.consumed && (c.origin ?? "snapshot") === "in_run");
+  }
+
+  /**
+   * Drop a ref-less in-run "tripwire" marker under both directional keys for
+   * `date`, recorded when a ref-less snapshot journal is consumed. It carries no
+   * reference (so any subsequent same-key row hits the in_run → ambiguous_refless
+   * branch regardless of that row's reference) and the sentinel journal id (so no
+   * real journal id is ever surfaced from it and it is never itself consumed).
+   */
+  private recordConsumedMarker(sourceDim: number, targetDim: number, amount: number, date: string): void {
+    const marker: InterAccountJournalEntry = {
+      journal_id: UNKNOWN_JOURNAL_ID,
+      document_number: null,
+      origin: "in_run",
+    };
+    const amt = roundMoney(amount);
+    const key1 = `${sourceDim}|${targetDim}|${amt}|${date}`;
+    const key2 = `${targetDim}|${sourceDim}|${amt}|${date}`;
+    for (const key of [key1, key2]) {
+      const existing = this.interAccountIndex.get(key);
+      if (existing) existing.push(marker);
+      else this.interAccountIndex.set(key, [marker]);
+    }
   }
 
   /** Record a freshly-created inter-account journal into the Lane B index. */
