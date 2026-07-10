@@ -105,11 +105,21 @@ const GARBAGE_REF_SENTINELS = new Set([
   "N/A",
 ]);
 
-function normalizeReference(ref?: string | null): string {
+export function normalizeReference(ref?: string | null): string {
   const trimmed = (ref ?? "").trim();
   if (trimmed === "") return "";
   if (GARBAGE_REF_SENTINELS.has(trimmed.toUpperCase())) return "";
   return trimmed;
+}
+
+/**
+ * True when a journal entry carries no usable reference — an empty/absent
+ * `document_number`, or an ISO 20022 garbage sentinel. Ref-less entries are the
+ * only ones {@link BookingGuard.resolveInterAccount} may *consume* for
+ * cardinality: a labelled journal is an identity and must stay matchable.
+ */
+export function isReflessEntry(entry: Pick<InterAccountJournalEntry, "document_number">): boolean {
+  return normalizeReference(entry.document_number) === "";
 }
 
 /**

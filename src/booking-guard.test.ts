@@ -577,4 +577,41 @@ describe("BookingGuard Lane B — resolveInterAccount (cardinality-aware)", () =
     // Consumed across the window too — the mirror books.
     expect(guard.resolveInterAccount(q({ date: "2026-01-03", maxGapDays: 2 }))).toEqual({ status: "none" });
   });
+
+  // 11. Fix #1: a ref-less query loosely matches a LABELLED snapshot journal
+  //     (e.g. an FX: conversion between two bank accounts) but must NOT consume
+  //     it — the labelled journal is an identity that must stay matchable so its
+  //     own same-ref re-import keeps being suppressed.
+  it("does not consume a labelled snapshot journal matched by a ref-less query", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, "FX:USD-EUR")], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    // A ref-less transfer loosely matches the labelled journal (loose match)…
+    expect(guard.resolveInterAccount(q())).toEqual({
+      status: "matched", journal_id: 1, matched_on: "refless", pool: "snapshot",
+    });
+    // …but the labelled entry stays live: its own same-ref re-import still matches.
+    expect(guard.resolveInterAccount(q({ reference: "FX:USD-EUR" }))).toEqual({
+      status: "matched", journal_id: 1, matched_on: "reference", pool: "snapshot",
+    });
+  });
+
+  // 12. Fix #2: two legs of one transfer legitimately carry DIFFERENT bank refs.
+  //     After leg A books (in_run ref A), a differing-ref same-key leg B must
+  //     resolve to ambiguous_refless — indistinguishable from a real second
+  //     transfer — rather than booking a duplicate.
+  it("differing-ref collision against an in_run journal is ambiguous, not a book", async () => {
+    const { api } = setup({ ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    guard.recordInterAccount(q({ reference: "LEG-A" }), 55); // in_run, ref A
+    expect(guard.resolveInterAccount(q({ reference: "LEG-B" }))).toEqual({ status: "ambiguous_refless" });
+  });
+
+  // 13. Fix #2 boundary: a differing-ref SNAPSHOT journal is a distinct
+  //     prior-run identity and must NOT block — a genuinely different transfer
+  //     books rather than being forced to review.
+  it("differing-ref collision against a snapshot journal still books", async () => {
+    const { api } = setup({ journals: [interAccountJournal(1, "REF-A")], ownDimensionIds: ownDims });
+    const guard = await BookingGuard.load(api, { ownDimensionIds: ownDims });
+    expect(guard.resolveInterAccount(q({ reference: "REF-B" }))).toEqual({ status: "none" });
+  });
 });

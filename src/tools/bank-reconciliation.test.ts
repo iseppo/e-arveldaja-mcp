@@ -1262,7 +1262,35 @@ describe("reconcile_inter_account_transfers", () => {
     // The second ref-less leg is surfaced for review, not silently skipped.
     expect(payload.needs_review_ambiguous_refless).toBe(1);
     expect(payload.ambiguous_refless[0]!.transaction_ids).toContain(602);
-    expect(payload.ambiguous_refless[0]!.reason).toMatch(/ref-less/i);
+    expect(payload.ambiguous_refless[0]!.reason).toMatch(/does not disambiguate/i);
+  });
+
+  it("never double-confirms two same-key legs carrying DIFFERENT bank refs; routes the mirror to review", async () => {
+    // The two legs of one internal transfer are booked by different banks, so
+    // each carries its own distinct bank_ref_number. Both reach Phase 2 as
+    // one-sided legs. Leg A books (recorded in-run under ref A); leg B's
+    // differing ref B must NOT be treated as a distinct transfer and booked
+    // into a duplicate — a differing-ref same-run collision is indistinguishable
+    // from a genuine second transfer, so it is surfaced for review. Exactly one
+    // journal is created.
+    const { handler, api } = setupInterAccountTool({
+      companyName: "Test OÜ",
+      transactions: [
+        { id: 701, status: "PROJECT", is_deleted: false, type: "C", amount: 250, base_amount: 250, cl_currencies_id: "EUR", date: "2026-03-21", accounts_dimensions_id: 100, bank_account_name: "Test OÜ", bank_ref_number: "OUT-AAA" },
+        { id: 702, status: "PROJECT", is_deleted: false, type: "D", amount: 250, base_amount: 250, cl_currencies_id: "EUR", date: "2026-03-21", accounts_dimensions_id: 200, bank_account_name: "Test OÜ", bank_ref_number: "IN-BBB" },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_one_sided).toBe(1);
+    // The critical invariant: exactly one journal, never two.
+    expect((api.transactions.confirm as any).mock.calls.length).toBe(1);
+    // The differing-ref mirror leg is surfaced for review, not double-booked.
+    expect(payload.needs_review_ambiguous_refless).toBe(1);
+    expect(payload.ambiguous_refless[0]!.transaction_ids).toContain(702);
   });
 
   it("does not suppress distinct one-sided transfers just because both counterparty IBANs are own accounts", async () => {

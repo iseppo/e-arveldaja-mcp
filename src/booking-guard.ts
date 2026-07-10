@@ -6,6 +6,7 @@ import {
   buildInterAccountJournalIndex,
   findMatchingJournal,
   findMatchingJournalEntry,
+  isReflessEntry,
   toUtcDay,
   UNKNOWN_JOURNAL_ID,
   type InterAccountJournalEntry,
@@ -370,12 +371,21 @@ export class BookingGuard {
    *
    * - `reference` match → `matched` (never consumed: a same-ref re-import must
    *   keep being suppressed).
-   * - ref-less match on a `snapshot` journal → `matched`, and the entry is
-   *   consumed (default), so J prior-run journals suppress exactly J transfers.
-   * - ref-less match landing only on an `in_run` journal → `ambiguous_refless`:
+   * - ref-less match on a ref-less `snapshot` journal → `matched`, and the entry
+   *   is consumed (default), so J prior-run journals suppress exactly J transfers.
+   * - ref-less match landing on a `snapshot` journal that itself carries a
+   *   reference (e.g. an `FX:` conversion between two bank accounts) → `matched`
+   *   but NOT consumed: a labelled journal is an identity that must stay
+   *   matchable for its own same-ref re-import.
+   * - any match on an `in_run` journal via the ref-less catch-all → `ambiguous_refless`:
    *   we cannot tell a genuine second transfer from a duplicate re-import of the
    *   first, so the caller must surface it for review rather than guess.
-   * - no live candidate → `none` (safe to book).
+   * - no direct match, but a live `in_run` journal exists on this exact key with
+   *   a *different* reference → `ambiguous_refless`: the two legs of one transfer
+   *   legitimately carry different bank refs, so a differing-ref same-run
+   *   collision is indistinguishable from a genuine second transfer.
+   * - no live candidate (or only differing-ref `snapshot` journals, which are
+   *   distinct prior-run identities) → `none` (safe to book).
    */
   resolveInterAccount(
     q: InterAccountQuery,
@@ -385,22 +395,39 @@ export class BookingGuard {
     const gap = Math.max(0, Math.floor(q.maxGapDays ?? 0));
     for (const date of this.candidateDates(q.date, gap)) {
       const key = interAccountKey(q.sourceDim, q.targetDim, q.amount, date);
-      const match = findMatchingJournalEntry(this.interAccountIndex.get(key), q.reference);
-      if (!match) continue;
+      const candidates = this.interAccountIndex.get(key);
+      const match = findMatchingJournalEntry(candidates, q.reference);
+      if (!match) {
+        // No reference/ref-less match. If a same-key journal was booked THIS
+        // run (an in_run entry that a differing ref caused us to reject), the
+        // input is an indistinguishable mirror-vs-distinct case → review.
+        // A differing-ref *snapshot* journal is a distinct prior-run identity,
+        // so it does not block: keep scanning the remaining candidate dates.
+        if (this.hasLiveInRunEntry(candidates)) return { status: "ambiguous_refless" };
+        continue;
+      }
       const pool = match.entry.origin ?? "snapshot";
       if (match.matchedOn === "reference") {
         return { status: "matched", journal_id: match.entry.journal_id, matched_on: "reference", pool };
       }
-      // ref-less match
+      // ref-less catch-all match
       if (pool === "in_run") {
-        // The only live same-key journal was created THIS run; a ref-less
+        // The matched same-key journal was created THIS run; a ref-less
         // collision here is indistinguishable from a duplicate re-import.
         return { status: "ambiguous_refless" };
       }
-      if (consume) match.entry.consumed = true;
+      // Only consume a genuinely ref-less snapshot entry. A labelled snapshot
+      // journal loosely matched by a ref-less query stays live so its own
+      // same-ref re-import keeps being suppressed.
+      if (consume && isReflessEntry(match.entry)) match.entry.consumed = true;
       return { status: "matched", journal_id: match.entry.journal_id, matched_on: "refless", pool };
     }
     return { status: "none" };
+  }
+
+  /** True when `candidates` holds a live (un-consumed) in-run journal entry. */
+  private hasLiveInRunEntry(candidates: InterAccountJournalEntry[] | undefined): boolean {
+    return (candidates ?? []).some(c => !c.consumed && (c.origin ?? "snapshot") === "in_run");
   }
 
   /** Record a freshly-created inter-account journal into the Lane B index. */

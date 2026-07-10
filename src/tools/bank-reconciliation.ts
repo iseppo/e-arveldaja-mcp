@@ -1087,7 +1087,7 @@ export function registerBankReconciliationTools(
           ambiguousRefless.push({
             transaction_ids: [txOut.id, txIn.id!], amount: txOut.amount, date: txOut.date,
             source_account: fromTitle, target_account: toTitle,
-            reason: "A ref-less journal for this amount/date/accounts was already booked this run; cannot tell a genuine second transfer from a duplicate. Confirm inline if this is a real second transfer.",
+            reason: "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
           });
           continue;
         }
@@ -1280,7 +1280,7 @@ export function registerBankReconciliationTools(
           ambiguousRefless.push({
             transaction_ids: [tx.id, counterpart.id], amount: tx.amount, date: tx.date,
             source_account: fromTitleEarly, target_account: toTitleEarly,
-            reason: "A ref-less journal for this amount/date/accounts was already booked this run; cannot tell a genuine second transfer from a duplicate. Confirm inline if this is a real second transfer.",
+            reason: "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
           });
           continue;
         }
@@ -1413,7 +1413,7 @@ export function registerBankReconciliationTools(
           ambiguousRefless.push({
             transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
             source_account: sourceTitle, target_account: targetTitle,
-            reason: "A ref-less inter-account journal for this amount/date/accounts was already booked this run; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
+            reason: "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
           });
           continue;
         }
