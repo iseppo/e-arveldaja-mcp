@@ -265,6 +265,18 @@ export class HttpClient {
     );
   }
 
+  /**
+   * Only idempotent methods may be retried after a network error / timeout.
+   * A timed-out or connection-dropped POST/PATCH/DELETE is ambiguous: the
+   * server may have already committed the mutation, so a blind retry risks a
+   * duplicate booking (invoice, journal, transaction). GET and PUT (full
+   * replace) are safe to repeat. Mirrors the GET-only gate in
+   * shouldRetryStatus for 5xx responses.
+   */
+  private static isIdempotentMethod(method: HttpMethod): boolean {
+    return method === "GET" || method === "PUT";
+  }
+
   private static formatNetworkError(method: HttpMethod, path: string, error: unknown): HttpError {
     const suffix = error instanceof Error && error.message ? `: ${error.message}` : "";
     return new HttpError(
@@ -323,7 +335,11 @@ export class HttpClient {
             signal: controller.signal,
           });
         } catch (error) {
-          if (HttpClient.isRetryableError(error) && attempt < MAX_RETRIES) {
+          if (
+            HttpClient.isRetryableError(error) &&
+            HttpClient.isIdempotentMethod(method) &&
+            attempt < MAX_RETRIES
+          ) {
             this.assertRequestAllowed();
             await HttpClient.sleep(INITIAL_RETRY_DELAY_MS * (2 ** attempt));
             continue;

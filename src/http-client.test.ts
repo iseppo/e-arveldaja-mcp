@@ -63,26 +63,58 @@ describe("HttpClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("retries POST requests after network errors", async () => {
-    vi.useFakeTimers();
+  it("does not retry POST requests after network errors (ambiguous commit → duplicate-booking risk)", async () => {
+    // A timed-out or connection-dropped POST is ambiguous: the server may have
+    // already committed the mutation. Retrying would risk a duplicate booking,
+    // so the network-error path throws immediately for non-idempotent methods.
     const fetchMock = vi.fn()
-      .mockRejectedValueOnce(new TypeError("fetch failed"))
-      .mockRejectedValueOnce(new TypeError("fetch failed"))
-      .mockRejectedValueOnce(new TypeError("fetch failed"))
-      .mockRejectedValueOnce(new TypeError("fetch failed"));
+      .mockRejectedValue(new TypeError("fetch failed"));
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new HttpClient(config);
     let caughtError: Error | undefined;
-    const promise = client.post("/transactions", { amount: 10 }).catch((e: Error) => { caughtError = e; });
-
-    await vi.runAllTimersAsync();
-    await promise;
+    await client.post("/transactions", { amount: 10 }).catch((e: Error) => { caughtError = e; });
 
     expect(caughtError).toBeDefined();
     expect(caughtError!.message).toMatch(/API request failed: POST \/transactions → network error: fetch failed/);
-    expect(fetchMock).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
-    vi.useRealTimers();
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no retry for POST
+  });
+
+  it("does not retry PATCH mutations after network errors", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config);
+    await client.patch("/transactions/5/register", {}).catch(() => {});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry DELETE mutations after network errors", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config);
+    await client.delete("/transactions/5").catch(() => {});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still retries idempotent PUT requests after network errors", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config);
+    const promise = client.request<{ ok: boolean }>("/purchase_invoices/1/document_user", { method: "PUT", body: {} });
+
+    await vi.runAllTimersAsync();
+
+    await expect(promise).resolves.toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("does not retry POST requests after 5xx responses", async () => {

@@ -1145,4 +1145,38 @@ describe("update_* post-confirmation audit lock", () => {
     const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
     expect(body.details[0]).toMatch(/"journal_date".*CONFIRMED purchase_invoice.*invalidate_purchase_invoice/);
   });
+
+  it("update_purchase_invoice re-sends existing items when the caller omits them (PATCH requires items)", async () => {
+    const existingItems = [{ custom_title: "Item A", total_net_price: 100 }];
+    const updateMock = vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" });
+    const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", items: existingItems }),
+        update: updateMock,
+      },
+    });
+
+    await handler({ id: 7, data: '{"notes":"updated note"}' });
+
+    expect(updateMock).toHaveBeenCalledTimes(1);
+    const patch = updateMock.mock.calls[0]![1] as Record<string, unknown>;
+    expect(patch.notes).toBe("updated note");
+    expect(patch.items).toEqual(existingItems);
+  });
+
+  it("update_purchase_invoice keeps caller-supplied items when provided", async () => {
+    const callerItems = [{ custom_title: "New line", total_net_price: 50 }];
+    const updateMock = vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" });
+    const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", items: [{ custom_title: "Old", total_net_price: 1 }] }),
+        update: updateMock,
+      },
+    });
+
+    await handler({ id: 7, data: { items: callerItems } });
+
+    const patch = updateMock.mock.calls[0]![1] as Record<string, unknown>;
+    expect(patch.items).toEqual(callerItems);
+  });
 });

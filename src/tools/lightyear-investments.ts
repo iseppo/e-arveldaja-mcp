@@ -956,12 +956,14 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           const totalCashOutEur = roundMoney(trade.eur_amount + totalFees);
 
           if (totalFees > 0) {
-            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: trade.eur_amount });
+            // Capitalize the trade platform fee into the investment cost so the
+            // investment account matches the FIFO cost basis relieved on sell
+            // (the capital-gains report bakes the trade fee into cost basis).
+            // Only the FX conversion fee is expensed — the report excludes it,
+            // so capitalizing it would strand a residual on every sell.
+            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: investmentCostEur });
             if (trade.fx_fee_eur > 0) {
               postings.push({ accounts_id: feeAcct, type: "D", amount: trade.fx_fee_eur });
-            }
-            if (tradeFeeEur > 0) {
-              postings.push({ accounts_id: feeAcct, type: "D", amount: tradeFeeEur });
             }
             postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: totalCashOutEur });
           } else {

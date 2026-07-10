@@ -36,6 +36,12 @@ interface ReconcileCandidate {
   proposed_base_net_price?: number;
   proposed_base_vat_price?: number;
   linked_transaction_ids: number[];
+  // True when an FX-difference journal (document_number "FX:{invoice_id}")
+  // already exists for this invoice. The paid-vs-booked diff persists after the
+  // FX journal is posted (the journal touches the liability/P&L accounts, not
+  // the invoice's linked payments), so without this guard a second execute run
+  // would create a duplicate FX journal for the same residual.
+  already_reconciled?: boolean;
 }
 
 function effectiveBaseGross(inv: PurchaseInvoice): number | undefined {
@@ -87,6 +93,19 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
         inv.payment_status === "PARTIALLY_PAID" && inv.id !== undefined
       );
       if (max_candidates !== undefined) partiallyPaid = partiallyPaid.slice(0, max_candidates);
+
+      // An FX journal is stamped with document_number "FX:{invoice_id}". Collect
+      // the invoice IDs that already carry one so we never post a second FX
+      // journal for the same residual (the diff does not clear when the journal
+      // is booked, so execute is otherwise not idempotent).
+      const fxReconciledInvoiceIds = new Set<number>();
+      for (const j of await api.journals.listAll()) {
+        const dn = j.document_number;
+        if (typeof dn === "string" && dn.startsWith("FX:")) {
+          const invId = Number(dn.slice(3));
+          if (Number.isInteger(invId)) fxReconciledInvoiceIds.add(invId);
+        }
+      }
 
       const candidates: ReconcileCandidate[] = [];
 
@@ -158,7 +177,11 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
           // loss (D 8600) and credit liability.
           const isOverstated = diff > 0;
           const fxAccount = isOverstated ? fxGainAccount : fxLossAccount;
-          proposedAction = `Book ${Math.abs(diff).toFixed(2)} EUR FX adjustment journal: ${isOverstated ? `D ${liabilityAccount} / C ${fxAccount} (FX gain — booked liability higher than Wise settlement)` : `D ${fxAccount} / C ${liabilityAccount} (FX loss — booked liability lower than Wise settlement)`}.`;
+          if (fxReconciledInvoiceIds.has(full.id!)) {
+            proposedAction = `Already reconciled — an FX journal (FX:${full.id}) exists for this invoice; skipping to avoid a duplicate.`;
+          } else {
+            proposedAction = `Book ${Math.abs(diff).toFixed(2)} EUR FX adjustment journal: ${isOverstated ? `D ${liabilityAccount} / C ${fxAccount} (FX gain — booked liability higher than Wise settlement)` : `D ${fxAccount} / C ${liabilityAccount} (FX loss — booked liability lower than Wise settlement)`}.`;
+          }
         } else {
           proposedAction = `Flag for review — diff ${diff.toFixed(2)} EUR exceeds ${FX_DIFFERENCE_LIMIT.toFixed(2)} EUR FX threshold.`;
         }
@@ -183,6 +206,7 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
           proposed_base_net_price: proposedBaseNetPrice,
           proposed_base_vat_price: proposedBaseVatPrice,
           linked_transaction_ids: txIds,
+          already_reconciled: category === "fx_difference" && fxReconciledInvoiceIds.has(full.id!),
         });
       }
 
@@ -197,6 +221,10 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
       if (!dryRun) {
         for (const c of candidates) {
           if (c.category === "review") continue;
+          // Idempotency guard: an FX journal already exists for this invoice.
+          // The paid-vs-booked residual does not clear when the journal is
+          // posted, so re-running execute would otherwise double-book it.
+          if (c.already_reconciled) continue;
           try {
             if (c.category === "small_rounding") {
               const patch: Partial<PurchaseInvoice> = {};
@@ -274,7 +302,8 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
         total_partially_paid_scanned: partiallyPaid.length,
         candidates_with_diff: candidates.length,
         small_rounding: candidates.filter(c => c.category === "small_rounding").length,
-        fx_difference: candidates.filter(c => c.category === "fx_difference").length,
+        fx_difference: candidates.filter(c => c.category === "fx_difference" && !c.already_reconciled).length,
+        fx_already_reconciled: candidates.filter(c => c.already_reconciled).length,
         review: candidates.filter(c => c.category === "review").length,
         ...(dryRun ? {} : {
           applied_success: applied.filter(a => a.result === "success").length,

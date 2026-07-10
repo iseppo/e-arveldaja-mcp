@@ -339,6 +339,40 @@ describe("lightyear investments tools", () => {
     }));
   });
 
+  it("capitalizes the trade platform fee into the investment cost on a buy (not expensed)", async () => {
+    // EUR buy: gross 1000, trade fee 2.50, no FX conversion fee. The trade fee
+    // belongs in the investment cost basis (the capital-gains report relieves it
+    // on sell); expensing it would strand a 2.50 residual on the investment
+    // account after the position is fully sold.
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["10/03/2026 11:51:35", "OR-FEEBUY", "VUAA", "IE00BK5BQT80", "Buy", "10.000000000", "EUR", "100.000000000", "1000.00", "", "2.50", "1002.50", ""],
+    ]));
+
+    const createdPostings: unknown[][] = [];
+    const create = vi.fn(async (payload: any) => {
+      createdPostings.push(payload.postings);
+      return { created_object_id: 6000 + createdPostings.length };
+    });
+
+    const { handler } = setupLightyearTool("book_lightyear_trades", { createImpl: create });
+    const result = await handler({
+      file_path: "/tmp/lightyear.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      dry_run: false,
+    });
+
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(payload.created).toBe(1);
+    const buyPostings = createdPostings[0]!;
+    // Investment debit includes the trade fee (1000 + 2.50); broker credit is
+    // the full cash out (1002.50); no expense posting for the trade fee.
+    expect(buyPostings).toEqual([
+      { accounts_id: 1550, type: "D", amount: 1002.5 },
+      { accounts_id: 1120, type: "C", amount: 1002.5 },
+    ]);
+  });
+
   it("skips non-EUR cash-equivalent sells without cost basis to avoid FX drift", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv([
       ["10/11/2025 13:40:29", "CN-GZUJLSKLL2", "", "", "Conversion", "", "EUR", "", "1126.28", "1.15709", "", "1126.28", ""],

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-07-10
+
+### Fixed
+- **Duplicate-booking and balance-drift hardening (whole-codebase review).** Seven high-severity correctness fixes, each with regression tests:
+  - **Non-idempotent HTTP requests are no longer retried after a network error or timeout.** A `POST`/`PATCH`/`DELETE` that times out or drops its connection is ambiguous — the server may already have committed the mutation — so retrying risked a duplicate invoice, journal, or transaction. Only `GET` and `PUT` (full replace) retry now; the 5xx retry path was already `GET`-only.
+  - **`update_purchase_invoice` re-sends the existing line items when the caller updates header fields only.** The API rejects an item-less PATCH with "Products/services are missing", so every metadata-only update (notes, dates, bank refs) previously failed; the handler now backfills `items` from the current invoice, while a caller that supplies items to change the lines keeps theirs.
+  - **The single-PDF flow now applies the same self-supplier defenses as the receipt batch.** `extract_pdf_invoice` resolves the active company's own VAT number and registry code and excludes them from the extracted supplier fields, and `resolve_supplier` threads them into resolution so the previously-dormant self-match guards fire — refusing to resolve or auto-create the buyer's own company as a supplier, which would otherwise book a purchase against self.
+  - **`reconcile_currency_rounding` FX-difference journals are now idempotent.** The paid-vs-booked residual does not clear when the `FX:{invoice_id}` journal is posted, so a second `execute` run re-detected the same difference and double-booked it; the tool now skips any invoice that already carries an `FX:` journal.
+  - **Inter-account reconciliation no longer confirms both legs of one transfer in a single run.** The in-run journal index was built once at the start and never refreshed, so confirming one leg left the opposite leg looking un-journalized and it was confirmed into a duplicate; each newly-created journal is now recorded into the index immediately.
+  - **Receipt auto-link skips cross-currency (base-amount-only) transaction matches.** When a match survived only on base-currency evidence, the transaction amount is in a different currency than the invoice gross, so auto-confirming posted the wrong distribution amount; the guard the sibling bank-reconciliation path already applied now covers the receipt path too, routing such matches to manual review.
+  - **Lightyear buy trades capitalize the trade platform fee into investment cost.** The fee was expensed instead of added to cost basis, contradicting the FIFO capital-gains report (which bakes the trade fee into cost basis) and stranding a residual on the investment account after every full sell; only the FX conversion fee — which the report excludes — is expensed.
+
 ## [0.19.0] - 2026-07-10
 
 ### Added

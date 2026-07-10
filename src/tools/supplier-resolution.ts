@@ -299,6 +299,21 @@ export async function resolveSupplierInternal(
     };
   }
 
+  // A reg-code/VAT self-match reached the create path because a name was also
+  // present (clientName is truthy). Even though the preview has our own VAT and
+  // registry code stripped, persisting a client named after the active company
+  // itself would let a later step book a purchase against self. Refuse to
+  // create; return the stripped preview so the operator can review instead.
+  if (selfMatchBlocked) {
+    return {
+      found: false,
+      created: false,
+      preview_client: previewClient,
+      registry_data: registryData,
+      self_match_blocked: true,
+    };
+  }
+
   const created = await api.clients.create(previewClient as Client);
   const createdId = created.created_object_id;
   const client = createdId ? await api.clients.get(createdId) : undefined;

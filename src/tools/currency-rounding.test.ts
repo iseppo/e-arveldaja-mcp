@@ -8,6 +8,7 @@ interface SetupOptions {
   journalCreate?: ReturnType<typeof vi.fn>;
   journalConfirm?: ReturnType<typeof vi.fn>;
   invoiceUpdate?: ReturnType<typeof vi.fn>;
+  existingJournals?: Array<Record<string, unknown>>;
 }
 
 function setupTool(options: SetupOptions) {
@@ -35,6 +36,7 @@ function setupTool(options: SetupOptions) {
       get: txGet,
     },
     journals: {
+      listAll: vi.fn().mockResolvedValue(options.existingJournals ?? []),
       create:
         options.journalCreate ??
         vi.fn().mockResolvedValue({ created_object_id: 555 }),
@@ -276,6 +278,47 @@ describe("reconcile_currency_rounding", () => {
     ]);
     expect(payload.summary.applied_success).toBe(1);
     expect(payload.summary.applied_errors).toBe(0);
+  });
+
+  it("does not post a second FX journal when one already exists (idempotent execute)", async () => {
+    const journalCreate = vi.fn().mockResolvedValue({ created_object_id: 999 });
+    const journalConfirm = vi.fn().mockResolvedValue({});
+    const { handler } = setupTool({
+      invoices: [
+        {
+          id: 102,
+          number: "USD-002",
+          client_name: "Anthropic",
+          status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID",
+          cl_currencies_id: "USD",
+          net_price: 100,
+          vat_price: 0,
+          gross_price: 100,
+          base_gross_price: 90.50,
+          create_date: "2026-05-01",
+          transactions: [202],
+        },
+      ],
+      transactionsById: {
+        202: { id: 202, status: "CONFIRMED", amount: 90.00, cl_currencies_id: "EUR" },
+      },
+      // The paid-vs-booked residual persists after the FX journal is posted, so
+      // the invoice is still PARTIALLY_PAID with the same diff on the next run.
+      existingJournals: [{ id: 777, document_number: "FX:102" }],
+      journalCreate,
+      journalConfirm,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    // The candidate is recognised as already reconciled and not re-posted.
+    expect(journalCreate).not.toHaveBeenCalled();
+    expect(payload.summary.fx_difference).toBe(0);
+    expect(payload.summary.fx_already_reconciled).toBe(1);
+    expect(payload.summary.applied_success).toBe(0);
+    expect(payload.candidates[0].already_reconciled).toBe(true);
   });
 
   it("posts D 8600 / C 2310 when liability is understated (paid more than booked)", async () => {

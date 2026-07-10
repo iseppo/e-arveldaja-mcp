@@ -912,3 +912,48 @@ describe("pdf workflow tools", () => {
     expect(payload.llm_fallback.confidence_signals).not.toContain("low_ocr_confidence");
   });
 });
+
+describe("resolve_supplier self-supplier guard", () => {
+  it("refuses when the supplied VAT number matches the active company's own VAT", async () => {
+    const { handler, api } = setupPdfWorkflowTool("resolve_supplier", {
+      clients: {
+        listAll: vi.fn().mockResolvedValue([
+          { id: 7, name: "Supplier OÜ", code: "12345678", invoice_vat_no: "EE999999999", is_deleted: false },
+        ]),
+        create: vi.fn(),
+      },
+      readonly: {
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+      },
+    });
+
+    const response = await handler({ name: "My Own Company OÜ", vat_no: "EE123456789", auto_create: true });
+    const payload = parseMcpResponse(response.content[0]!.text) as Record<string, unknown>;
+
+    expect(payload.self_match_blocked).toBe(true);
+    expect(payload.found).toBe(false);
+    expect(payload.created).toBe(false);
+    // The self-match must be caught before any client is created.
+    expect(api.clients.create).not.toHaveBeenCalled();
+  });
+
+  it("resolves a genuine supplier normally when identifiers differ from own", async () => {
+    const { handler } = setupPdfWorkflowTool("resolve_supplier", {
+      clients: {
+        listAll: vi.fn().mockResolvedValue([
+          { id: 7, name: "Supplier OÜ", code: "12345678", invoice_vat_no: "EE999999999", is_deleted: false },
+        ]),
+        create: vi.fn(),
+      },
+      readonly: {
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+      },
+    });
+
+    const response = await handler({ vat_no: "EE999999999" });
+    const payload = parseMcpResponse(response.content[0]!.text) as Record<string, unknown>;
+
+    expect(payload.found).toBe(true);
+    expect(payload.match_type).toBe("vat_no");
+  });
+});

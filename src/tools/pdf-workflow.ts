@@ -20,6 +20,8 @@ import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { computeMinOcrConfidence, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, LOW_OCR_CONFIDENCE_THRESHOLD, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
 import type { ExtractionConfidenceSignals } from "../invoice-extraction-fallback.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
+import { resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
+import { detectSelfVatOnly, detectSelfRegCodeOnly } from "./receipt-inbox.js";
 import { detectVatDeductionNotes, standardVatRateOn } from "../estonian-tax-rules.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
@@ -128,7 +130,26 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const parsedDocument = await parseDocument(resolved);
         const allTextItems = textItemsWithPageNums(parsedDocument.result?.pages);
         const minOcrConfidence = computeMinOcrConfidence(allTextItems);
-        const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved), { textItems: allTextItems });
+        // Resolve the active company's own identifiers so extraction excludes
+        // them from supplier fields — otherwise an invoice header carrying the
+        // buyer's own VAT / registry code could surface as the "supplier",
+        // leading a later booking step to post a purchase against the company
+        // itself. Best-effort by design: extract_pdf_invoice must still work as
+        // pure OCR when no connection is configured, so a failed lookup simply
+        // runs the extractor without the exclusions (its prior behaviour).
+        let ownCompanyVat: string | undefined;
+        let ownCompanyRegistryCode: string | undefined;
+        try {
+          const clients = await api.clients.listAll();
+          ({ ownCompanyVat, ownCompanyRegistryCode } = await resolveOwnCompanyIdentifiers(api, clients));
+        } catch {
+          // Offline / unconfigured connection — extract without self-exclusions.
+        }
+        const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved), {
+          textItems: allTextItems,
+          ownCompanyVat,
+          ownCompanyRegistryCode,
+        });
         // `extractReceiptFieldsFromText` already ran `extractIdentifiers` on the
         // same text + textItems and spread the result onto `extracted`; reuse
         // those identifiers rather than recomputing them (#14).
@@ -141,6 +162,11 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const signals: ExtractionConfidenceSignals = {};
         if (parsedDocument.ocrPartialFailure) signals.partial_ocr_failure = true;
         if (minOcrConfidence !== undefined && minOcrConfidence < LOW_OCR_CONFIDENCE_THRESHOLD) signals.low_ocr_confidence = true;
+        // The only VAT / registry code on the page was the buyer's own → the
+        // supplier fields are suspect. Surface as a review signal so the
+        // operator verifies the supplier before booking (mirrors receipt_batch).
+        if (detectSelfVatOnly(extracted, ownCompanyVat)) signals.self_vat_detected = true;
+        if (detectSelfRegCodeOnly(extracted, ownCompanyRegistryCode)) signals.self_reg_code_detected = true;
         // #1: an echo-only supplier identifier (coordinate_confirmed_echo) is
         // kept but UNCONFIRMED — surface it as a review signal so the operator
         // verifies the supplier before booking rather than trusting it.
@@ -445,6 +471,12 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     { ...create, title: "Find or Create Supplier" },
     async ({ name, reg_code, vat_no, iban, auto_create, country, is_physical_entity }) => {
       const allClients = await api.clients.listAll();
+      // Activate resolveSupplierInternal's self-match guards: without the
+      // active company's own VAT/registry code, a header identifier the OCR
+      // mistook for the supplier would resolve (or auto-create) the buyer's
+      // own company as a supplier and book a purchase against self. The
+      // receipt-batch flow already threads these through; do the same here.
+      const { ownCompanyVat, ownCompanyRegistryCode } = await resolveOwnCompanyIdentifiers(api, allClients);
       const resolution = await resolveSupplierInternal(
         api,
         allClients,
@@ -455,8 +487,27 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           supplier_iban: iban,
         },
         auto_create === true,
-        { _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity } },
+        {
+          ownCompanyVat,
+          ownCompanyRegistryCode,
+          _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity },
+        },
       );
+
+      if (resolution.self_match_blocked) {
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson({
+              found: false,
+              created: false,
+              self_match_blocked: true,
+              suggestion:
+                "The supplied registry code / VAT number matches the active company's own identifiers — refusing to resolve or create a supplier that is the buyer itself. Re-check the supplier fields extracted from the invoice header before booking.",
+            }),
+          }],
+        };
+      }
 
       if (resolution.found) {
         return {

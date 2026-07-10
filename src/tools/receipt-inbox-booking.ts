@@ -319,10 +319,25 @@ export async function createAndMaybeMatchPurchaseInvoice(
   };
   const matchResult = findBestTransactionMatch(bankTransactions, matchedInvoice, consumedTransactionIds);
   const matchedCandidate = matchResult.candidate;
-  const canAutoLink = matchedCandidate !== undefined && matchedCandidate.confidence >= EXACT_MATCH_THRESHOLD;
+  // Cross-currency guard: when the match survived only on base-currency evidence
+  // (base amounts equal but nominal amounts differ), the transaction amount is
+  // in a different currency than the invoice gross. Auto-confirming would post
+  // the invoice's EUR figure against a foreign-currency transaction — the wrong
+  // distribution amount. Surface for manual review instead. Same guard the
+  // sibling bank-reconciliation auto-confirm path applies.
+  const crossCurrencyMatch =
+    matchedCandidate !== undefined &&
+    matchedCandidate.reasons.includes("exact_base_amount") &&
+    !matchedCandidate.reasons.includes("exact_amount");
+  const canAutoLink =
+    matchedCandidate !== undefined &&
+    matchedCandidate.confidence >= EXACT_MATCH_THRESHOLD &&
+    !crossCurrencyMatch;
   let linked = false;
   if (matchResult.ambiguous) {
     notes.push(`Skipped bank match because ${matchResult.tiedCount} candidate transactions tied at confidence ${matchResult.topConfidence}; invoice was created without bank link.`);
+  } else if (crossCurrencyMatch && matchedCandidate) {
+    notes.push(`Skipped auto-link of transaction ${matchedCandidate.transaction_id}: cross-currency match (base-amount only). Compute the correct distribution amount manually before confirming; invoice was created without bank link.`);
   }
   if (createdInvoice.id && matchedCandidate && canAutoLink) {
     try {
@@ -350,7 +365,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
       // Wrap the untrusted API-error fragment interpolated into this note (#9).
       notes.push(`Could not link matched transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}: ${wrapUntrustedOcr(message) ?? message}. Invoice was kept without bank link.`);
     }
-  } else if (matchedCandidate) {
+  } else if (matchedCandidate && !crossCurrencyMatch) {
     notes.push(`Found transaction candidate ${matchedCandidate.transaction_id}, but confidence ${matchedCandidate.confidence} was below auto-link threshold ${EXACT_MATCH_THRESHOLD}.`);
   }
 

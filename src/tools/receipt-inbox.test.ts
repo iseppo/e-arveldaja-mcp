@@ -321,6 +321,97 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
       expect.stringContaining("Non-EUR receipt currency USD requires an explicit currency_rate"),
     ]));
   });
+
+  function buildCreateConfirmArgs(bankTransactions: any[]) {
+    const createdInvoice = {
+      id: 900,
+      number: "INV-EUR",
+      clients_id: 7,
+      client_name: "Supplier OÜ",
+      cl_currencies_id: "EUR",
+      create_date: "2026-03-22",
+      gross_price: 100,
+      base_gross_price: 100,
+      bank_ref_number: "REF1",
+      status: "PROJECT",
+    };
+    const api = {
+      purchaseInvoices: {
+        createAndSetTotals: vi.fn().mockResolvedValue(createdInvoice),
+        uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
+        confirmWithTotals: vi.fn().mockResolvedValue({ ok: true }),
+        invalidate: vi.fn(),
+      },
+      transactions: {
+        get: vi.fn().mockImplementation((id: number) =>
+          Promise.resolve(bankTransactions.find(t => t.id === id) ?? { id, status: "PROJECT" })),
+        confirm: vi.fn().mockResolvedValue({ created_object_id: 1 }),
+      },
+    } as any;
+    return {
+      api,
+      call: () => createAndMaybeMatchPurchaseInvoice(
+        api,
+        { clients: [], purchaseInvoices: [], purchaseArticlesWithVat: [], accounts: [], isVatRegistered: true },
+        { name: "receipt.pdf", path: "/tmp/receipt.pdf", extension: ".pdf", file_type: "pdf", size_bytes: 123, modified_at: "2026-03-22T00:00:00.000Z" },
+        {
+          supplier_name: "Supplier OÜ",
+          invoice_number: "INV-EUR",
+          invoice_date: "2026-03-22",
+          total_net: 100,
+          total_vat: 0,
+          total_gross: 100,
+          currency: "EUR",
+          description: "Subscription",
+          ref_number: "REF1",
+        } as any,
+        {
+          found: true, created: false, match_type: "exact_name",
+          client: { id: 7, name: "Supplier OÜ", is_supplier: true, is_client: false, cl_code_country: "EE", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false },
+        } as any,
+        { source: "supplier_history", item: { custom_title: "Subscription", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230, vat_rate_dropdown: "-" } } as any,
+        bankTransactions,
+        "create_and_confirm",
+        false,
+        new Set(),
+      ),
+    };
+  }
+
+  it("does not auto-link a cross-currency (base-amount-only) transaction match", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/receipt.pdf");
+    mockedReadFile.mockResolvedValue(Buffer.from("bytes") as any);
+    // USD transaction whose EUR base_amount equals the EUR invoice gross, but
+    // whose nominal USD amount differs. Confidence is high (base+client+date+ref
+    // ≥ 90) so only the cross-currency guard — not a low score — stops the link.
+    const { api, call } = buildCreateConfirmArgs([
+      { id: 501, status: "PROJECT", type: "C", amount: 108, base_amount: 100, cl_currencies_id: "USD", date: "2026-03-22", clients_id: 7, ref_number: "REF1" },
+    ]);
+
+    const result = await call();
+
+    expect(result.status).toBe("created");
+    expect(result.bank_match?.linked ?? false).toBe(false);
+    // The foreign-currency transaction must not be confirmed against the invoice.
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    expect(result.notes).toEqual(expect.arrayContaining([
+      expect.stringContaining("cross-currency match"),
+    ]));
+  });
+
+  it("still auto-links a same-currency exact-amount transaction match", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/receipt.pdf");
+    mockedReadFile.mockResolvedValue(Buffer.from("bytes") as any);
+    const { api, call } = buildCreateConfirmArgs([
+      { id: 502, status: "PROJECT", type: "C", amount: 100, base_amount: 100, cl_currencies_id: "EUR", date: "2026-03-22", clients_id: 7, ref_number: "REF1" },
+    ]);
+
+    const result = await call();
+
+    expect(result.status).toBe("matched");
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(api.transactions.confirm.mock.calls[0]![1][0].amount).toBe(100);
+  });
 });
 
 describe("buildReceiptBatchSummary", () => {

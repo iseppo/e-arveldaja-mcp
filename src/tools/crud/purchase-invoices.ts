@@ -150,6 +150,15 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     if (updateErrors.length > 0) {
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
+    // The API rejects a metadata-only PATCH with "Products/services are
+    // missing" — every update must carry the full item list. When the caller
+    // changes header fields (notes, dates, bank refs) and omits items, re-send
+    // the existing lines so the update succeeds. Mirrors confirmAndSetTotals,
+    // which PATCHes with the fetched invoice.items. A caller that supplies
+    // items to change the lines keeps theirs.
+    if (parsed.items === undefined && current.items !== undefined) {
+      parsed.items = current.items;
+    }
     const result = await api.purchaseInvoices.update(id, parsed);
     logAudit({
       tool: "update_purchase_invoice", action: "UPDATED", entity_type: "purchase_invoice", entity_id: id,

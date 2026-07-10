@@ -1232,6 +1232,33 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.one_sided[0]!.match_reasons).toContain("counterparty_iban_is_own_account");
   });
 
+  it("does not confirm both legs of one transfer in a single execute run (in-run journal index)", async () => {
+    // Two one-sided legs of the SAME inter-account transfer (dim 100 <-> dim 200,
+    // same amount/date, no leg-specific reference) both reach Phase 2. Confirming
+    // the first creates a journal touching both dimensions; the second must be
+    // detected as already-journalized rather than confirmed into a duplicate.
+    // Before the in-run index update, existingInterAccountKeys was built once at
+    // the top of the run and never refreshed, so both legs confirmed.
+    const { handler, api } = setupInterAccountTool({
+      companyName: "Test OÜ",
+      transactions: [
+        { id: 601, status: "PROJECT", is_deleted: false, type: "C", amount: 100, base_amount: 100, cl_currencies_id: "EUR", date: "2026-03-20", accounts_dimensions_id: 100, bank_account_name: "Test OÜ" },
+        { id: 602, status: "PROJECT", is_deleted: false, type: "D", amount: 100, base_amount: 100, cl_currencies_id: "EUR", date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Test OÜ" },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.matched_one_sided).toBe(1);
+    expect(payload.skipped_already_handled).toBe(1);
+    // Exactly one journal is created for the transfer, not two.
+    expect((api.transactions.confirm as any).mock.calls.length).toBe(1);
+    expect(payload.already_handled[0]!.reason).toMatch(/already journalized/i);
+  });
+
   it("does not suppress distinct one-sided transfers just because both counterparty IBANs are own accounts", async () => {
     const { handler } = setupInterAccountTool({
       transactions: [
