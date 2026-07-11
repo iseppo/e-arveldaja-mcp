@@ -264,6 +264,31 @@ describe("compute_account_balance tool", () => {
     expect(data.debit_total).toBe(100);
   });
 
+  it("computes the correct net balance from raw D/C sums instead of drifting ±0.01 (D 1.005 / C 0.004)", async () => {
+    // Raw D 1.005 / C 0.004 nets to 1.001, which rounds once to 1.00.
+    // Rounding debitTotal (1.005 -> 1.01) and creditTotal (0.004 -> 0.00)
+    // independently before subtracting would wrongly report 1.01.
+    const journals = [
+      journal({ id: 1, postings: [posting(ACCOUNT_ID, "D", 1.005)] }),
+      journal({ id: 2, postings: [posting(ACCOUNT_ID, "C", 0.004)] }),
+    ];
+    const handler = setup(journals, D_ACCOUNT);
+    const result = await handler({ account_id: ACCOUNT_ID });
+    const data = parse((result.content[0] as { text: string }).text);
+    expect(data.balance).toBe(1.00);
+  });
+
+  it("computes the correct net balance from raw D/C sums for C-type accounts too (C 1.005 / D 0.004)", async () => {
+    const journals = [
+      journal({ id: 1, postings: [posting(ACCOUNT_ID, "C", 1.005)] }),
+      journal({ id: 2, postings: [posting(ACCOUNT_ID, "D", 0.004)] }),
+    ];
+    const handler = setup(journals, C_ACCOUNT);
+    const result = await handler({ account_id: ACCOUNT_ID });
+    const data = parse((result.content[0] as { text: string }).text);
+    expect(data.balance).toBe(1.00);
+  });
+
   it("skips postings for other accounts", async () => {
     const journals = [
       journal({

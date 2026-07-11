@@ -61,6 +61,23 @@ function bucketLabel(days: number): string {
   return "90+";
 }
 
+// Credit invoices (SaleInvoice.sale_invoice_type === "CREDIT_INVOICE") are
+// sometimes stored with a positive gross_price, which would inflate AR
+// instead of reducing it. Normalize to a negative contribution using the
+// same -Math.abs() convention as estonian-tax.ts's saleInvoiceTurnoverAmount.
+// PurchaseInvoice has no equivalent type field — purchase-side credit notes
+// are already represented with a negative gross_price by the API (see
+// createAndSetTotals/confirmWithTotals), so this is a no-op for payables.
+function signedEffectiveGross(inv: {
+  base_gross_price?: number | null;
+  gross_price?: number | null;
+  id?: number;
+  sale_invoice_type?: string;
+}): number {
+  const amount = effectiveGross(inv);
+  return inv.sale_invoice_type === "CREDIT_INVOICE" ? -Math.abs(amount) : amount;
+}
+
 export function registerAgingTools(
   server: McpServer,
   api: ApiContext,
@@ -76,24 +93,31 @@ export function registerAgingTools(
     },
     { ...readOnly, title: "Receivables Aging Report" },
     async ({ as_of_date }) => {
-      const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
+      const actualToday = new Date().toISOString().split("T")[0]!;
+      const today = as_of_date ?? actualToday;
 
 
       const allSales = await api.saleInvoices.listAll();
       const unpaid = allSales.filter((inv: SaleInvoice) =>
-        inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
+        inv.payment_status !== "PAID" && inv.status === "CONFIRMED" &&
+        // Exclude future-dated invoices: an invoice issued after the as-of-date
+        // cutoff must not appear in that historical aging snapshot.
+        (inv.create_date == null || inv.create_date <= today)
       );
       const partiallyPaidCount = unpaid.filter((inv: SaleInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
+      const missingTermDaysCount = unpaid.filter((inv: SaleInvoice) => inv.term_days == null).length;
 
       const buckets = new Map<string, AgingBucket>();
       const byClient = new Map<number, { name: string; total: number; oldest_days: number }>();
       const unmatched = { count: 0, total: 0, oldest_days: 0 };
 
       for (const inv of unpaid) {
-        const dueDateStr = addDaysToDate(inv.create_date, inv.term_days);
+        // Missing term_days defaults to 0 (due on issue date) instead of
+        // producing an invalid due date that would abort the whole report.
+        const dueDateStr = addDaysToDate(inv.create_date, inv.term_days ?? 0);
         const daysOverdue = daysBetween(dueDateStr, today);
         const label = bucketLabel(daysOverdue);
-        const amount = effectiveGross(inv);
+        const amount = signedEffectiveGross(inv);
 
         const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };
         bucket.count++;
@@ -140,15 +164,21 @@ export function registerAgingTools(
       if (partiallyPaidCount > 0) {
         warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
       }
+      if (missingTermDaysCount > 0) {
+        warnings.push(`${missingTermDaysCount} invoice(s) have no term_days set — treated as due on the issue date (term_days=0) for aging purposes.`);
+      }
       if (unmatched.count > 0) {
         warnings.push(`${unmatched.count} invoice(s) have no clients_id (totaling ${roundMoney(unmatched.total)} EUR). Reported under unmatched_client_invoices; investigate and link to a client for accurate debtor reports.`);
+      }
+      if (as_of_date && as_of_date !== actualToday) {
+        warnings.push(`as_of_date=${as_of_date} excludes invoices issued after that date and affects day-counting, but payment_status still reflects the CURRENT state — invoices settled after ${as_of_date} may be under-counted as still outstanding since the API does not expose historical payment state.`);
       }
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             as_of_date: today,
-            total_unpaid_face_value: unpaid.reduce((s: number, inv: SaleInvoice) => roundMoney(s + effectiveGross(inv)), 0),
+            total_unpaid_face_value: unpaid.reduce((s: number, inv: SaleInvoice) => roundMoney(s + signedEffectiveGross(inv)), 0),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sanitizeAgingBucketsForOutput(sortedBuckets),
@@ -170,24 +200,31 @@ export function registerAgingTools(
     },
     { ...readOnly, title: "Payables Aging Report" },
     async ({ as_of_date }) => {
-      const today = as_of_date ?? new Date().toISOString().split("T")[0]!;
+      const actualToday = new Date().toISOString().split("T")[0]!;
+      const today = as_of_date ?? actualToday;
 
 
       const allPurchases = await api.purchaseInvoices.listAll();
       const unpaid = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
+        inv.payment_status !== "PAID" && inv.status === "CONFIRMED" &&
+        // Exclude future-dated invoices: an invoice issued after the as-of-date
+        // cutoff must not appear in that historical aging snapshot.
+        (inv.create_date == null || inv.create_date <= today)
       );
       const partiallyPaidCount = unpaid.filter((inv: PurchaseInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
+      const missingTermDaysCount = unpaid.filter((inv: PurchaseInvoice) => inv.term_days == null).length;
 
       const buckets = new Map<string, AgingBucket>();
       const bySupplier = new Map<number, { name: string; total: number; oldest_days: number }>();
       const unmatched = { count: 0, total: 0, oldest_days: 0 };
 
       for (const inv of unpaid) {
-        const dueDateStr = addDaysToDate(inv.create_date, inv.term_days);
+        // Missing term_days defaults to 0 (due on issue date) instead of
+        // producing an invalid due date that would abort the whole report.
+        const dueDateStr = addDaysToDate(inv.create_date, inv.term_days ?? 0);
         const daysOverdue = daysBetween(dueDateStr, today);
         const label = bucketLabel(daysOverdue);
-        const amount = effectiveGross(inv);
+        const amount = signedEffectiveGross(inv);
 
         const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };
         bucket.count++;
@@ -232,15 +269,21 @@ export function registerAgingTools(
       if (partiallyPaidCount > 0) {
         warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
       }
+      if (missingTermDaysCount > 0) {
+        warnings.push(`${missingTermDaysCount} invoice(s) have no term_days set — treated as due on the issue date (term_days=0) for aging purposes.`);
+      }
       if (unmatched.count > 0) {
         warnings.push(`${unmatched.count} invoice(s) have no clients_id (totaling ${roundMoney(unmatched.total)} EUR). Reported under unmatched_supplier_invoices; investigate and link to a supplier for accurate creditor reports.`);
+      }
+      if (as_of_date && as_of_date !== actualToday) {
+        warnings.push(`as_of_date=${as_of_date} excludes invoices issued after that date and affects day-counting, but payment_status still reflects the CURRENT state — invoices settled after ${as_of_date} may be under-counted as still outstanding since the API does not expose historical payment state.`);
       }
       return {
         content: [{
           type: "text",
           text: toMcpJson({
             as_of_date: today,
-            total_unpaid_face_value: unpaid.reduce((s: number, inv: PurchaseInvoice) => roundMoney(s + effectiveGross(inv)), 0),
+            total_unpaid_face_value: unpaid.reduce((s: number, inv: PurchaseInvoice) => roundMoney(s + signedEffectiveGross(inv)), 0),
             total_invoices: unpaid.length,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sanitizeAgingBucketsForOutput(sortedBuckets),

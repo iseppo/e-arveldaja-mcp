@@ -229,6 +229,42 @@ describe("TransactionsApi.confirm", () => {
     ]);
   });
 
+  it("does NOT roll back clients_id when the state is indeterminate (re-read also fails)", async () => {
+    // Network error on register AND the status re-read throws → we cannot tell
+    // whether the journal committed. Rolling back clients_id could corrupt a
+    // committed journal's buyer/supplier, so it must be LEFT AS SET and the
+    // error must flag the indeterminate state (never a silent rollback).
+    let txReads = 0;
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/9") {
+          txReads += 1;
+          if (txReads === 1) return { id: 9, clients_id: null }; // pre-fix read
+          throw new HttpError("fetch failed", "network", "GET", "/transactions/9"); // re-read fails
+        }
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path }) => {
+        if (path === "/transactions/9/register") {
+          throw new HttpError("fetch failed", "network", "PATCH", "/transactions/9/register");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(9, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toThrow(/indeterminate/i);
+
+    // clients_id was set by the auto-fix, register was attempted, but there is
+    // NO rollback patch ({ clients_id: null }) — the mutation stays intact.
+    expect(patchCalls).toEqual([
+      { path: "/transactions/9", body: { clients_id: 42 } },
+      { path: "/transactions/9/register", body: expect.any(Array) },
+    ]);
+  });
+
   it("does not verify or recover on a non-network HTTP error", async () => {
     let txReads = 0;
     const { client, patchCalls } = makeClient({

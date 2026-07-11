@@ -21,6 +21,17 @@ export interface AccountBalance {
   balance: number;
 }
 
+/**
+ * `computeAllBalances`'s return value: the per-account balances array, plus
+ * the RAW (pre-rounding) debit/credit grand totals rounded once, attached as
+ * extra properties on the array. Summing the already-rounded per-account
+ * `debit_total`/`credit_total` fields instead (independent per-account
+ * rounding × N accounts) can drift the trial-balance check by more than a
+ * cent even though the underlying ledger is perfectly balanced — see
+ * `totalDebit`/`totalCredit` usage in `compute_trial_balance`.
+ */
+export type AccountBalancesResult = AccountBalance[] & { totalDebit: number; totalCredit: number };
+
 export async function computeAllBalances(
   api: ApiContext,
   dateFrom?: string,
@@ -30,12 +41,14 @@ export async function computeAllBalances(
     preloadedJournals?: Journal[];
     journalFilter?: (journal: Journal) => boolean;
   },
-): Promise<AccountBalance[]> {
+): Promise<AccountBalancesResult> {
   const accounts = options?.preloadedAccounts ?? await api.readonly.getAccounts();
   const allJournals = options?.preloadedJournals ?? await api.journals.listAllWithPostings();
   const journalFilter = options?.journalFilter;
 
   const balances = new Map<number, { debit: number; credit: number }>();
+  let totalDebitRaw = 0;
+  let totalCreditRaw = 0;
 
   for (const journal of allJournals) {
     if (journal.is_deleted) continue;
@@ -55,9 +68,16 @@ export async function computeAllBalances(
 
       // Accumulate unrounded; the output mapping below rounds once. Rounding
       // on every posting drifts 0.005 EUR per entry, producing false trial-
-      // balance mismatches on high-volume accounts.
-      if (posting.type === "D") entry.debit += amount;
-      else entry.credit += amount;
+      // balance mismatches on high-volume accounts. The grand totals below
+      // are accumulated from these same raw amounts (not from the per-account
+      // rounded fields) so the trial-balance check rounds once too.
+      if (posting.type === "D") {
+        entry.debit += amount;
+        totalDebitRaw += amount;
+      } else {
+        entry.credit += amount;
+        totalCreditRaw += amount;
+      }
 
       balances.set(posting.accounts_id, entry);
     }
@@ -87,7 +107,11 @@ export async function computeAllBalances(
   }
 
   result.sort((a, b) => a.account_id - b.account_id);
-  return result;
+
+  const withTotals = result as AccountBalancesResult;
+  withTotals.totalDebit = roundMoney(totalDebitRaw);
+  withTotals.totalCredit = roundMoney(totalCreditRaw);
+  return withTotals;
 }
 
 /**
@@ -134,8 +158,12 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const balances = await computeAllBalances(api, date_from, date_to);
 
-      const totalDebit = balances.reduce((s, b) => s + b.debit_total, 0);
-      const totalCredit = balances.reduce((s, b) => s + b.credit_total, 0);
+      // Use the raw-accumulated grand totals from computeAllBalances, not a
+      // sum of the already-rounded per-account debit_total/credit_total —
+      // summing N independently-rounded per-account fields can drift the
+      // trial-balance check even though the ledger is perfectly balanced.
+      const totalDebit = balances.totalDebit;
+      const totalCredit = balances.totalCredit;
 
       return {
         content: [{

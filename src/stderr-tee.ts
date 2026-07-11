@@ -1,4 +1,4 @@
-import { openSync, writeSync, closeSync, fstatSync, statSync } from "node:fs";
+import { openSync, writeSync, closeSync, fstatSync, statSync, fchmodSync } from "node:fs";
 import { resolve } from "node:path";
 
 let installed = false;
@@ -73,6 +73,17 @@ export function installStderrTee(env: NodeJS.ProcessEnv = process.env): StderrTe
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`WARNING: EARVELDAJA_LOG_FILE fstat failed (${path}): ${message}\n`);
     return { enabled: false, path, error: message };
+  }
+
+  // Tighten permissions to 0600 on the OPEN fd. `openSync(..., "a", 0o600)`
+  // applies its mode only when creating the file, so an existing world-readable
+  // (0644) log would otherwise keep leaking any secret-bearing line to other
+  // local users. fchmod acts on the verified fd (no TOCTOU re-path).
+  try {
+    fchmodSync(openedFd, 0o600);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`WARNING: EARVELDAJA_LOG_FILE could not be made private (0600) (${path}): ${message}\n`);
   }
 
   fd = openedFd;

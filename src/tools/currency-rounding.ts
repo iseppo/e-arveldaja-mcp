@@ -28,6 +28,8 @@ interface ReconcileCandidate {
   gross_price?: number;
   base_gross_price?: number;
   invoice_date?: string;
+  /** Latest linked-payment date; the FX journal is posted here (settlement period). */
+  settlement_date?: string;
   paid_eur: number;
   diff_eur: number;
   category: "small_rounding" | "fx_difference" | "review";
@@ -51,12 +53,15 @@ function effectiveBaseGross(inv: PurchaseInvoice): number | undefined {
   return undefined;
 }
 
-function transactionEurAmount(tx: Transaction): number {
+function transactionEurAmount(tx: Transaction): number | undefined {
   if (tx.base_amount !== undefined && tx.base_amount !== null && Number.isFinite(tx.base_amount)) return tx.base_amount;
   const currency = (tx.cl_currencies_id ?? "EUR").toUpperCase();
   if (currency === "EUR") return tx.amount;
   if (tx.currency_rate && Number.isFinite(tx.currency_rate)) return roundMoney(tx.amount * tx.currency_rate);
-  return tx.amount;
+  // Foreign-currency payment with neither a base_amount nor a rate: we cannot
+  // convert it to EUR. Returning undefined (rather than treating the raw foreign
+  // amount as EUR) lets the caller mark the paid total unreliable → review.
+  return undefined;
 }
 
 function categorizeDiff(diff: number): "small_rounding" | "fx_difference" | "review" {
@@ -113,14 +118,27 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
         const full = await api.purchaseInvoices.get(inv.id!);
         const txIds = full.transactions ?? [];
         let paidEur = 0;
+        let hadLoadFailure = false;
+        let settlementDate: string | undefined;
         for (const txId of txIds) {
           try {
             const tx = await api.transactions.get(txId);
             if (tx.status === "VOID" || tx.is_deleted) continue;
-            paidEur += transactionEurAmount(tx);
+            const eur = transactionEurAmount(tx);
+            if (eur === undefined) {
+              // Foreign payment we cannot convert to EUR — the paid total is
+              // now unreliable, so this invoice must fall to review.
+              hadLoadFailure = true;
+              continue;
+            }
+            paidEur += eur;
+            // Track the latest payment date — the FX difference belongs in the
+            // settlement period, not the (possibly prior-year) invoice period.
+            if (tx.date && (settlementDate === undefined || tx.date > settlementDate)) settlementDate = tx.date;
           } catch {
-            // Transaction unreachable — skip; the invoice can still be flagged
-            // but we can't confidently propose an action without all payments.
+            // Transaction unreachable — the paid total is incomplete, so we
+            // cannot confidently propose an auto-fix; force review below.
+            hadLoadFailure = true;
           }
         }
         paidEur = roundMoney(paidEur);
@@ -130,9 +148,15 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
         const diff = roundMoney(bookedEur - paidEur);
         if (diff === 0) continue;
 
-        const category = categorizeDiff(diff);
         const currency = (full.cl_currencies_id ?? "EUR").toUpperCase();
         const isForeignCurrency = currency !== "EUR";
+        let category = categorizeDiff(diff);
+        // An EUR invoice has no exchange-rate difference: a 0.10–1.00 EUR
+        // residual is a genuine over/under-payment, never an FX rounding artifact
+        // — do not auto-book it as an FX journal.
+        if (category === "fx_difference" && !isForeignCurrency) category = "review";
+        // Incomplete/unconvertible payments ⇒ the diff itself is untrustworthy.
+        if (hadLoadFailure) category = "review";
 
         let proposedAction: string;
         let proposedCurrencyRate: number | undefined;
@@ -183,7 +207,11 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
             proposedAction = `Book ${Math.abs(diff).toFixed(2)} EUR FX adjustment journal: ${isOverstated ? `D ${liabilityAccount} / C ${fxAccount} (FX gain — booked liability higher than Wise settlement)` : `D ${fxAccount} / C ${liabilityAccount} (FX loss — booked liability lower than Wise settlement)`}.`;
           }
         } else {
-          proposedAction = `Flag for review — diff ${diff.toFixed(2)} EUR exceeds ${FX_DIFFERENCE_LIMIT.toFixed(2)} EUR FX threshold.`;
+          proposedAction = hadLoadFailure
+            ? `Flag for review — could not load or EUR-convert every linked payment, so the paid total (${paidEur.toFixed(2)} EUR) may be incomplete.`
+            : !isForeignCurrency
+              ? `Flag for review — EUR invoice residual ${diff.toFixed(2)} EUR is a genuine over/under-payment, not an FX rounding difference.`
+              : `Flag for review — diff ${diff.toFixed(2)} EUR exceeds ${FX_DIFFERENCE_LIMIT.toFixed(2)} EUR FX threshold.`;
         }
 
         candidates.push({
@@ -197,6 +225,7 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
           gross_price: full.gross_price,
           base_gross_price: full.base_gross_price,
           invoice_date: full.create_date,
+          settlement_date: settlementDate,
           paid_eur: paidEur,
           diff_eur: diff,
           category,
@@ -255,7 +284,10 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
               // reduce liability (D) and post the windfall as FX gain (C 8500).
               const isOverstated = c.diff_eur > 0;
               const fxAccount = isOverstated ? fxGainAccount : fxLossAccount;
-              const journalDate = c.invoice_date ?? new Date().toISOString().slice(0, 10);
+              // Post the FX difference in the SETTLEMENT period (latest payment
+              // date), not the invoice date — a Dec invoice paid in Jan books the
+              // rate difference in Jan. Fall back to invoice date, then today.
+              const journalDate = c.settlement_date ?? c.invoice_date ?? new Date().toISOString().slice(0, 10);
               // Guarded write: find-then-create against the run snapshot. The
               // guard stamps document_number "FX:{invoice_id}", best-effort
               // confirms, and records the journal so a duplicate can never be

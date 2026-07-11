@@ -75,6 +75,36 @@ describe("audit log date filters", () => {
     expect(filtered).not.toContain("#2");
   });
 
+  it("truncates an oversized entry to stay within PIPE_BUF (cross-process write atomicity)", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    const huge = "X".repeat(20_000);
+    auditLog.logAudit({
+      tool: "reconcile_currency_rounding",
+      action: "CREATED",
+      entity_type: "journal",
+      entity_id: 1,
+      summary: huge,
+      details: { blob: huge },
+    });
+
+    const content = auditLog.getAuditLog({});
+    // The oversized entry is trimmed with a marker, not written whole.
+    expect(content).toContain("audit entry truncated to preserve cross-process write atomicity");
+    expect(content).not.toContain(huge);
+
+    // The persisted entry stays within PIPE_BUF so the O_APPEND write is atomic.
+    const entries = await readdir(tempDir, { recursive: true });
+    const mdFiles = entries
+      .filter((e) => String(e).endsWith(".md"))
+      .map((e) => join(tempDir!, String(e)));
+    expect(mdFiles.length).toBeGreaterThan(0);
+    const sizes = await Promise.all(mdFiles.map(async (f) => (await stat(f)).size));
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(4096);
+  });
+
   it("treats timezone-less ISO date-times as UTC to match audit headings", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
     const auditLog = await loadAuditLogModule(tempDir);

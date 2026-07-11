@@ -63,10 +63,12 @@ export class TransactionsApi extends BaseResource<Transaction> {
       if (error instanceof HttpError && error.status === "network") {
         this.invalidateCache();
         let confirmed = false;
+        let reReadOk = false;
         try {
           confirmed = (await this.get(id)).status === "CONFIRMED";
+          reReadOk = true;
         } catch {
-          // Re-read failed — fall through to the rollback + rethrow path.
+          // Re-read failed — commit state is indeterminate (handled below).
         }
         if (confirmed) {
           this.invalidateCache("/journals");
@@ -74,6 +76,19 @@ export class TransactionsApi extends BaseResource<Transaction> {
           // tolerate an absent created_object_id (recording the sentinel id).
           return { code: 200, messages: ["Registration recovered after network error"] };
         }
+        if (!reReadOk) {
+          // Indeterminate: the register PATCH may have committed a journal
+          // server-side, but we could not confirm. Rolling back clients_id now
+          // would corrupt that committed journal's buyer/supplier, so we leave
+          // clients_id AS SET and surface the ambiguity. Never roll back or
+          // blindly retry on an unknown commit state.
+          throw new Error(
+            `Transaction ${id} registration hit a network error and the status re-read also failed; ` +
+            `commit state is indeterminate. clients_id left as set (a rollback could corrupt a committed ` +
+            `journal). Verify the transaction in e-arveldaja before any retry.`
+          );
+        }
+        // reReadOk && !confirmed → the register did NOT commit → safe to roll back.
       }
       if (clientsIdWasSet) {
         try {

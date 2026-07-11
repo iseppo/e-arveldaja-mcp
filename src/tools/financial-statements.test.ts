@@ -305,6 +305,37 @@ describe("compute_trial_balance", () => {
     });
   });
 
+  it("total debits equal total credits when sub-cent postings split across accounts round differently per-account (raw-sum rounding)", async () => {
+    // Three separate D-type accounts each receive a single 0.005 posting;
+    // one C-type account receives three matching 0.005 credits. The ledger
+    // is balanced at the raw level (0.015 D == 0.015 C), but each D account
+    // independently rounds 0.005 -> 0.01, so naively summing the three
+    // per-account debit_total fields gives 0.03 while the single C account's
+    // credit_total (rounded once from its own raw 0.015) is 0.02 — a false
+    // ±0.01 trial-balance mismatch. Rounding the RAW grand totals once
+    // instead must agree: both round to 0.02.
+    const handler = setupTool("compute_trial_balance", {
+      accounts: [
+        makeAccount(1000, "D", "Varad", "A"),
+        makeAccount(1001, "D", "Varad", "B"),
+        makeAccount(1002, "D", "Varad", "C"),
+        makeAccount(9000, "C", "Tulud", "Revenue"),
+      ],
+      journals: [
+        makeJournal("2024-06-01", [makePosting(1000, "D", 0.005), makePosting(9000, "C", 0.005)]),
+        makeJournal("2024-06-02", [makePosting(1001, "D", 0.005), makePosting(9000, "C", 0.005)]),
+        makeJournal("2024-06-03", [makePosting(1002, "D", 0.005), makePosting(9000, "C", 0.005)]),
+      ],
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.totals.debit).toBe(0.02);
+    expect(payload.totals.credit).toBe(0.02);
+    expect(payload.totals.difference).toBe(0);
+  });
+
   it("reports difference when journals are unbalanced (data integrity check)", async () => {
     const handler = setupTool("compute_trial_balance", {
       accounts: [makeAccount(1000, "D", "Varad", "Bank")],

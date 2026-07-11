@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { resolve, win32 } from "path";
-import { readFileSync, existsSync, statSync, readdirSync, realpathSync, lstatSync, writeFileSync, mkdirSync, chmodSync } from "fs";
+import { readFileSync, existsSync, statSync, readdirSync, realpathSync, lstatSync, writeFileSync, mkdirSync, chmodSync, renameSync, unlinkSync } from "fs";
 import { homedir } from "os";
 export interface Config {
   apiKeyId: string;
@@ -707,11 +707,20 @@ function writePrivateEnvFile(filePath: string, content: string): void {
   }
 
   mkdirSync(resolve(filePath, ".."), { recursive: true, mode: 0o700 });
-  writeFileSync(filePath, content, { mode: 0o600 });
+  // Atomic + private write: create a 0600 temp in the same directory, enforce
+  // its mode explicitly, then rename over the target. This guarantees the secret
+  // is never briefly present in a world-readable (0644) file — as it would be if
+  // we wrote content into an existing 0644 file and chmod'd it AFTER — and a
+  // failed permission tightening aborts loudly rather than silently leaving the
+  // password world-readable.
+  const tmpPath = `${filePath}.tmp-${process.pid}`;
   try {
-    chmodSync(filePath, 0o600);
-  } catch {
-    // Best effort on platforms with limited chmod support.
+    writeFileSync(tmpPath, content, { mode: 0o600 });
+    chmodSync(tmpPath, 0o600); // enforce even if the temp already existed (mode is ignored on reopen)
+    renameSync(tmpPath, filePath);
+  } catch (error) {
+    try { unlinkSync(tmpPath); } catch { /* temp may not exist */ }
+    throw error;
   }
 }
 

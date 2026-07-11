@@ -81,20 +81,25 @@ export async function computeAccountBalance(
     }
   }
 
-  debitTotal = roundMoney(debitTotal);
-  creditTotal = roundMoney(creditTotal);
-
   const balanceType = account?.balance_type ?? "D";
 
   // For D-type accounts (assets, expenses): balance = debit - credit
   // For C-type accounts (liabilities, equity, income): balance = credit - debit
-  // Round the result: debitTotal/creditTotal are each rounded, but subtracting
-  // two 2dp floats reintroduces sub-cent noise (~1e-12) that can flip an
-  // exact-boundary comparison in a consumer — e.g. the §157 retained-earnings
-  // check compares this balance directly against the gross dividend.
+  // Compute the balance from the RAW (unrounded) summed debits/credits and
+  // round ONCE at the end. Rounding debitTotal/creditTotal independently
+  // before subtracting them can introduce up to ±0.01 EUR of drift vs. the
+  // true single-rounded net (e.g. raw D 1.005 / C 0.004 would wrongly report
+  // 1.01 instead of the correct 1.00) — this balance is compared directly
+  // against other rounded figures, e.g. the §157 retained-earnings check
+  // against the gross dividend.
   const balance = roundMoney(
     balanceType === "D" ? debitTotal - creditTotal : creditTotal - debitTotal,
   );
+
+  // Round debitTotal/creditTotal now, for display only — `balance` above was
+  // already derived from the raw (pre-rounding) sums.
+  debitTotal = roundMoney(debitTotal);
+  creditTotal = roundMoney(creditTotal);
 
   // Sort by date
   entries.sort((a, b) => a.date.localeCompare(b.date));

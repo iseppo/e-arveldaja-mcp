@@ -278,7 +278,15 @@ export class HttpClient {
   }
 
   private static formatNetworkError(method: HttpMethod, path: string, error: unknown): HttpError {
-    const suffix = error instanceof Error && error.message ? `: ${error.message}` : "";
+    // Only surface the error NAME and a known error CODE — never the raw
+    // message. Node's fetch echoes offending values into the message for some
+    // failures (e.g. an invalid header value includes the header content), so a
+    // malformed apiPublicValue / signature could otherwise leak into
+    // HttpError.message, stderr, and the stderr tee.
+    const name = error instanceof Error ? error.name : "";
+    const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "";
+    const detail = [name, code].filter(Boolean).join(" ");
+    const suffix = detail ? `: ${detail}` : "";
     return new HttpError(
       `API request failed: ${method} ${path} → network error${suffix}`,
       "network",
@@ -333,6 +341,11 @@ export class HttpClient {
             headers,
             body: body !== undefined ? JSON.stringify(body) : undefined,
             signal: controller.signal,
+            // Never auto-follow redirects: fetch would forward the custom
+            // X-AUTH-* headers (public value + HMAC signature) to the redirect
+            // target, and the signature — which signs only the ORIGINAL path —
+            // could be captured/replayed. A trusted HTTPS API does not redirect.
+            redirect: "manual",
           });
         } catch (error) {
           if (
@@ -345,6 +358,18 @@ export class HttpClient {
             continue;
           }
           throw HttpClient.formatNetworkError(method, path, error);
+        }
+
+        // With redirect:"manual", a 3xx is surfaced (not followed) as an opaque
+        // redirect or a bare 3xx status. Refuse it explicitly rather than let it
+        // fall through as a generic error — the auth headers were NOT forwarded.
+        if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
+          throw new HttpError(
+            `API request failed: ${method} ${path} → unexpected redirect refused (auth headers not forwarded)`,
+            response.status || 502,
+            method,
+            path,
+          );
         }
 
         if (!response.ok) {
@@ -393,7 +418,17 @@ export class HttpClient {
 
         const contentType = response.headers.get("content-type") ?? "";
         if (contentType.includes("application/json")) {
-          return response.json() as Promise<T>;
+          // `await` (not a bare `return response.json()`) so the 60s timeout in
+          // `finally` clears only AFTER the body is fully read — otherwise a
+          // stalled body hangs forever. A body-read failure (connection dropped
+          // mid-body after a committed mutation) is classified as a network
+          // error so ambiguous-write recovery (TransactionsApi.confirm) treats
+          // it as an indeterminate commit rather than a raw TypeError.
+          try {
+            return await response.json() as T;
+          } catch (bodyError) {
+            throw HttpClient.formatNetworkError(method, path, bodyError);
+          }
         }
 
         // Binary response (e.g. PDF document download) — return as ApiFile-compatible object.

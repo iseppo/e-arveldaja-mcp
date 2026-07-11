@@ -56,7 +56,7 @@ import { registerDynamicResources } from "./resources/dynamic-resources.js";
 import { registerAccountingKnowledgeResources } from "./resources/accounting-knowledge-resources.js";
 import { registerPrompts } from "./prompts.js";
 import { toolError } from "./tool-error.js";
-import { toMcpJson, wrapUntrustedOcr } from "./mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr, capUntrustedText, MAX_UNTRUSTED_TEXT_CHARS } from "./mcp-json.js";
 import { setLogger, log } from "./logger.js";
 import {
   maybeImportCredentialsOnStartup,
@@ -237,7 +237,11 @@ function buildSetupInstructionsPayload(
 }
 
 async function verifyImportedCredentials(config: Config): Promise<{ companyName: string | null; verifiedAt: string }> {
-  const readonly = new ReferenceDataApi(new HttpClient(config, "setup-import"));
+  // Namespace the verify cache by the credential identity. A fixed
+  // "setup-import" namespace keys the cached invoice-info by path only, so
+  // verifying company B within the cache TTL of company A would reuse A's
+  // response — falsely "verifying" B (or mislabelling its company name).
+  const readonly = new ReferenceDataApi(new HttpClient(config, `setup-import:${config.apiKeyId}`));
   const invoiceInfo = await readonly.getInvoiceInfo();
   return {
     companyName: normalizeAuditCompanyName(invoiceInfo.invoice_company_name),
@@ -790,11 +794,21 @@ async function main() {
       // route for injection. Wrap the whole markdown so any untrusted fragment
       // inside the rendered text stays inside nonce delimiters. "No entries"
       // is developer-controlled and not worth wrapping.
-      const body = content || "No audit log entries found.";
+      if (!content) {
+        return { content: [{ type: "text", text: "No audit log entries found." }] };
+      }
+      // Cap the (untrusted, potentially large) audit blob before wrapping so a
+      // long log — especially with no explicit limit — cannot flood the
+      // consuming LLM's context. The truncation notice sits OUTSIDE the sandbox.
+      const capped = capUntrustedText(content, MAX_UNTRUSTED_TEXT_CHARS);
+      const wrapped = wrapUntrustedOcr(capped.text) ?? capped.text ?? content;
+      const suffix = capped.truncated
+        ? `\n[audit log truncated: ${MAX_UNTRUSTED_TEXT_CHARS} of ${capped.original_length} chars — narrow with date_from / date_to / limit]`
+        : "";
       return {
         content: [{
           type: "text",
-          text: content ? (wrapUntrustedOcr(body) ?? body) : body,
+          text: wrapped + suffix,
         }],
       };
     }

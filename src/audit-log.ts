@@ -675,6 +675,20 @@ function renderEntry(entry: AuditEntry): string {
  */
 const LINUX_PIPE_BUF_BYTES = 4096;
 
+/** Longest prefix of `s` whose UTF-8 encoding fits in `maxBytes`, cut on a char boundary. */
+function truncateToBytes(s: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  if (Buffer.byteLength(s, "utf-8") <= maxBytes) return s;
+  let lo = 0;
+  let hi = s.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(s.slice(0, mid), "utf-8") <= maxBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  return s.slice(0, lo);
+}
+
 export function logAudit(
   entry: Omit<AuditEntry, "timestamp">,
   opts?: { connectionName?: string },
@@ -687,13 +701,18 @@ export function logAudit(
     if (!existsSync(LOGS_DIR)) {
       mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
     }
-    const md = renderEntry(full) + ENTRY_SEPARATOR;
+    let md = renderEntry(full) + ENTRY_SEPARATOR;
     if (Buffer.byteLength(md, "utf-8") > LINUX_PIPE_BUF_BYTES) {
-      // Size-warn (not block) so operators notice when cross-process writers
-      // might interleave. Single-process audit logging stays atomic.
+      // Truncate so the append stays a single atomic O_APPEND write (<= PIPE_BUF)
+      // and cannot interleave with a concurrent cross-process writer, which would
+      // corrupt BOTH records. Data is trimmed but the entry stays intact and
+      // parseable — better than a warned-but-unbounded write that can shred the log.
+      const notice = "\n_[audit entry truncated to preserve cross-process write atomicity]_";
+      const budget = LINUX_PIPE_BUF_BYTES - Buffer.byteLength(notice + ENTRY_SEPARATOR, "utf-8");
+      md = truncateToBytes(renderEntry(full), budget) + notice + ENTRY_SEPARATOR;
       process.stderr.write(
-        `[audit] entry size ${Buffer.byteLength(md, "utf-8")}B exceeds PIPE_BUF (${LINUX_PIPE_BUF_BYTES}B); ` +
-        `across-process atomicity not guaranteed for tool="${entry.tool}" action="${entry.action}"\n`,
+        `[audit] entry exceeded PIPE_BUF (${LINUX_PIPE_BUF_BYTES}B) and was truncated to stay atomic ` +
+        `for tool="${entry.tool}" action="${entry.action}"\n`,
       );
     }
     appendPrivateTextFile(filePath, md);

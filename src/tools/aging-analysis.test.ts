@@ -328,3 +328,81 @@ describe("invoice filtering", () => {
     expect(warnings?.some(w => w.includes("partially paid"))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// as_of_date membership: future-dated invoices excluded, and a warning is
+// emitted when as_of_date is a back-dated cutoff (differs from today) since
+// payment_status still reflects the CURRENT state, not the historical one.
+// ---------------------------------------------------------------------------
+
+describe("as_of_date membership", () => {
+  it("excludes an invoice issued after a back-dated as_of_date", async () => {
+    const invoices = [
+      invoice({ id: 1, create_date: "2024-01-01", gross_price: 100 }),
+      // Issued after the as_of_date cutoff — must not appear in a report as-of 2024-01-15.
+      invoice({ id: 2, create_date: "2024-02-01", gross_price: 200 }),
+    ];
+    const handler = setupReceivables(invoices);
+    const result = await handler({ as_of_date: "2024-01-15" });
+    const data = parse((result.content[0] as { text: string }).text);
+    expect(data.total_invoices).toBe(1);
+    expect(data.total_unpaid_face_value).toBe(100);
+  });
+
+  it("emits a warning when as_of_date differs from today", async () => {
+    const inv = invoice({ id: 1, create_date: "2024-01-01", gross_price: 100 });
+    const handler = setupReceivables([inv]);
+    // Any back-dated as_of_date differs from the real "today" at test-run time.
+    const result = await handler({ as_of_date: "2024-01-31" });
+    const data = parse((result.content[0] as { text: string }).text);
+    const warnings = data.warnings as string[] | undefined;
+    expect(warnings?.some(w => w.includes("CURRENT state"))).toBe(true);
+  });
+
+  it("does not emit the as_of_date warning when as_of_date is omitted", async () => {
+    const today = new Date().toISOString().split("T")[0]!;
+    const inv = invoice({ id: 1, create_date: today, gross_price: 100 });
+    const handler = setupReceivables([inv]);
+    const result = await handler({});
+    const data = parse((result.content[0] as { text: string }).text);
+    const warnings = data.warnings as string[] | undefined;
+    expect(warnings?.some(w => w.includes("CURRENT state")) ?? false).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CREDIT_INVOICE sign normalization
+// ---------------------------------------------------------------------------
+
+describe("CREDIT_INVOICE sign normalization", () => {
+  it("normalizes a positive-priced credit invoice to a negative contribution, reducing the total", async () => {
+    const invoices = [
+      invoice({ id: 1, gross_price: 500 }),
+      // Positive-priced credit invoice should subtract, not add, to the total.
+      invoice({ id: 2, sale_invoice_type: "CREDIT_INVOICE", gross_price: 200 }),
+    ];
+    const handler = setupReceivables(invoices);
+    const result = await handler({ as_of_date: "2024-01-31" });
+    const data = parse((result.content[0] as { text: string }).text);
+    expect(data.total_unpaid_face_value).toBe(300);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Missing term_days does not abort the report
+// ---------------------------------------------------------------------------
+
+describe("missing term_days", () => {
+  it("defaults missing term_days to 0 (due on issue date) instead of throwing", async () => {
+    const inv = invoice({ id: 1, create_date: "2024-01-01", gross_price: 100 });
+    delete (inv as Partial<SaleInvoice>).term_days;
+    const handler = setupReceivables([inv]);
+    const result = await handler({ as_of_date: "2024-01-01" });
+    const data = parse((result.content[0] as { text: string }).text);
+    expect(data.total_invoices).toBe(1);
+    const buckets = data.aging_buckets as Array<{ label: string }>;
+    expect(buckets.find(b => b.label === "current")).toBeDefined();
+    const warnings = data.warnings as string[] | undefined;
+    expect(warnings?.some(w => w.includes("term_days"))).toBe(true);
+  });
+});

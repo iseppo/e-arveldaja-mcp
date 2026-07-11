@@ -497,6 +497,88 @@ describe("reconcile_currency_rounding", () => {
     expect(payload.candidates[0].diff_eur).toBeCloseTo(0.03, 2);
   });
 
+  it("routes a 0.10–1.00 EUR residual on an EUR invoice to review, never an FX journal", async () => {
+    // An EUR invoice has no exchange-rate difference, so a 0.50 EUR residual is a
+    // genuine short-payment — it must be surfaced for review, not auto-booked as
+    // an FX gain (which only makes sense for a foreign-currency invoice).
+    const journalCreate = vi.fn();
+    const { handler } = setupTool({
+      invoices: [
+        {
+          id: 150, number: "EUR-050", client_name: "Vendor", status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID", cl_currencies_id: "EUR",
+          net_price: 100.50, gross_price: 100.50, base_gross_price: 100.50,
+          create_date: "2026-05-01", transactions: [250],
+        },
+      ],
+      transactionsById: {
+        250: { id: 250, status: "CONFIRMED", amount: 100.00, cl_currencies_id: "EUR", date: "2026-05-02" },
+      },
+      journalCreate,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.candidates[0].category).toBe("review");
+    expect(payload.summary.fx_difference).toBe(0);
+    expect(journalCreate).not.toHaveBeenCalled();
+  });
+
+  it("posts the FX journal on the settlement (payment) date, not the invoice date", async () => {
+    const journalCreate = vi.fn().mockResolvedValue({ created_object_id: 811 });
+    const { handler } = setupTool({
+      invoices: [
+        {
+          id: 160, number: "USD-060", client_name: "Anthropic", status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD",
+          net_price: 100, vat_price: 0, gross_price: 100, base_gross_price: 90.50,
+          create_date: "2026-12-20", transactions: [260],
+        },
+      ],
+      transactionsById: {
+        260: { id: 260, status: "CONFIRMED", amount: 90.00, cl_currencies_id: "EUR", date: "2027-01-15" },
+      },
+      journalCreate,
+    });
+
+    await handler({ execute: true });
+
+    expect(journalCreate).toHaveBeenCalledTimes(1);
+    // Dec invoice, Jan payment → the FX difference belongs in the January period.
+    expect(journalCreate.mock.calls[0]![0].effective_date).toBe("2027-01-15");
+  });
+
+  it("routes to review when a foreign payment cannot be EUR-converted (no base_amount/rate)", async () => {
+    // A foreign payment with neither base_amount nor currency_rate must NOT be
+    // treated as if its raw foreign amount were EUR (which here would look like a
+    // 0.50 EUR fx_difference and auto-book a journal). It falls to review.
+    const journalCreate = vi.fn();
+    const invoiceUpdate = vi.fn();
+    const { handler } = setupTool({
+      invoices: [
+        {
+          id: 170, number: "USD-070", client_name: "Vendor", status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD",
+          net_price: 100, vat_price: 0, gross_price: 100, base_gross_price: 90.50,
+          create_date: "2026-05-01", transactions: [270],
+        },
+      ],
+      transactionsById: {
+        270: { id: 270, status: "CONFIRMED", amount: 90.00, cl_currencies_id: "USD" },
+      },
+      journalCreate,
+      invoiceUpdate,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.candidates[0].category).toBe("review");
+    expect(journalCreate).not.toHaveBeenCalled();
+    expect(invoiceUpdate).not.toHaveBeenCalled();
+  });
+
   it("dry run never mutates anything", async () => {
     const invoiceUpdate = vi.fn();
     const journalCreate = vi.fn();

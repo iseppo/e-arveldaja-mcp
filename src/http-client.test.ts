@@ -76,8 +76,29 @@ describe("HttpClient", () => {
     await client.post("/transactions", { amount: 10 }).catch((e: Error) => { caughtError = e; });
 
     expect(caughtError).toBeDefined();
-    expect(caughtError!.message).toMatch(/API request failed: POST \/transactions → network error: fetch failed/);
+    // The message carries the error NAME/CODE only — never the raw fetch
+    // message, which for some failures (invalid header value) echoes the
+    // offending value and could leak the auth public value / signature.
+    expect(caughtError!.message).toMatch(/API request failed: POST \/transactions → network error: TypeError/);
     expect(fetchMock).toHaveBeenCalledTimes(1); // no retry for POST
+  });
+
+  it("does not leak a raw fetch error message (only the error name/code)", async () => {
+    // Node echoes the offending header value into an invalid-header error's
+    // message; surfacing it would leak the public value / HMAC signature.
+    const fetchMock = vi.fn().mockRejectedValue(
+      new TypeError("Invalid header value SECRETpublicvalue:SIGNATUREbase64=="),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HttpClient(config);
+    let caught: Error | undefined;
+    // POST: non-idempotent, so it throws immediately (no retry/timer dance).
+    await client.post("/transactions", { amount: 1 }).catch((e: Error) => { caught = e; });
+
+    expect(caught).toBeDefined();
+    expect(caught!.message).not.toMatch(/SECRET|SIGNATURE/);
+    expect(caught!.message).toContain("network error: TypeError");
   });
 
   it("does not retry PATCH mutations after network errors", async () => {

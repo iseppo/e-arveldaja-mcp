@@ -104,6 +104,17 @@ function getFilePathCandidates(filePath: string): string[] {
 /**
  * Validate a file path: extension check, symlink resolution, allowed directory,
  * size limit. Returns the resolved real path.
+ *
+ * TOCTOU note: this returns a validated *path*, which the caller reopens to
+ * read. Callers MUST read the returned realpath (not the original input) — that
+ * already defeats a symlink swapped in at the input path after validation,
+ * since the returned value is the symlink-free resolved path. The residual race
+ * (an attacker replacing the resolved inode itself between here and the caller's
+ * read) requires write access to the exact realpath — at which point they could
+ * equally have planted malicious content up front — so the extension/root/size
+ * guarantees are best-effort against a local racer, not a hard sandbox. A
+ * complete fix would return an open fd for the caller to read from; that is a
+ * cross-cutting refactor of every reader and is intentionally deferred.
  */
 export async function validateFilePath(
   filePath: string,
