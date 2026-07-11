@@ -565,7 +565,19 @@ export function extractAmountsFromLine(line: string, documentContext?: string): 
       const next = line.slice((match.index ?? 0) + raw.length).trimStart();
       return !next.startsWith("%");
     })
-    .map(match => parseAmount(match[0] ?? "", line, documentContext))
+    .map(match => {
+      const raw = match[0] ?? "";
+      const parsed = parseAmount(raw, line, documentContext);
+      if (parsed === undefined) return undefined;
+      // Accounting-style parenthesised negatives: "(124.00)" means -124. Only
+      // negate when the numeric token is immediately wrapped in parentheses,
+      // i.e. the parenthesised content is itself the number — this leaves a
+      // number embedded in prose like "(see note 3)" (space before the digit)
+      // untouched.
+      const start = match.index ?? 0;
+      const parenWrapped = line[start - 1] === "(" && line[start + raw.length] === ")";
+      return parenWrapped && parsed > 0 ? -parsed : parsed;
+    })
     .filter((value): value is number => value !== undefined && value !== 0);
 
   return [...new Set(amounts)];

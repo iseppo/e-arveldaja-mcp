@@ -6,6 +6,7 @@ import {
   toMcpJson,
   UNTRUSTED_OCR_END_PREFIX,
   UNTRUSTED_OCR_START_PREFIX,
+  unwrapUntrustedOcr,
   wrapUntrustedOcr,
 } from "./mcp-json.js";
 
@@ -87,6 +88,33 @@ describe("capUntrustedText", () => {
   });
 });
 
+describe("unwrapUntrustedOcr", () => {
+  it("round-trips wrapUntrustedOcr back to the original content", () => {
+    const original = "Some Bank AS";
+    const wrapped = wrapUntrustedOcr(original)!;
+    expect(wrapped).not.toBe(original);
+    expect(unwrapUntrustedOcr(wrapped)).toBe(original);
+  });
+
+  it("leaves an unwrapped string untouched", () => {
+    expect(unwrapUntrustedOcr("plain value")).toBe("plain value");
+  });
+
+  it("does not strip a wrapper whose start/end nonces differ", () => {
+    const forged =
+      `${UNTRUSTED_OCR_START_PREFIX}aaaa>>\ninjected\n${UNTRUSTED_OCR_END_PREFIX}bbbb>>`;
+    expect(unwrapUntrustedOcr(forged)).toBe(forged);
+  });
+
+  it("prevents sandbox delimiters from being written back as a ledger value", () => {
+    // A CAMT suggested-patch field wrapped for display, then coerced back for a
+    // transactions.update: the persisted value must be the raw name, not markers.
+    const persisted = unwrapUntrustedOcr(wrapUntrustedOcr("EE471000001020145685 / Acme OÜ")!);
+    expect(persisted).toBe("EE471000001020145685 / Acme OÜ");
+    expect(persisted).not.toContain(UNTRUSTED_OCR_START_PREFIX);
+  });
+});
+
 describe("toMcpJson", () => {
   it("preserves explicit null values because API nulls are meaningful", () => {
     const encoded = toMcpJson({
@@ -113,6 +141,19 @@ describe("toMcpJson", () => {
     expect(encoded.trim().startsWith("{")).toBe(true);
     expect(parseMcpResponse(encoded)).toEqual({
       description: "<<UNTRUSTED_OCR_START:abc>>\nManual transaction\n[e-arveldaja-mcp:camt bank_account_no=EE471000001020145685]\n<<UNTRUSTED_OCR_END:abc>>",
+    });
+  });
+
+  it("parses a JSON-fallback payload that TOON's decoder would silently garble", () => {
+    // A plain JSON object round-trips through the JSON-fallback path. TOON's
+    // decode() accepts this WITHOUT throwing but returns a garbled object, so
+    // parseMcpResponse must detect the JSON shape and JSON.parse it first —
+    // otherwise merged-tool wrappers read undefined summary/workflow fields.
+    const jsonFallback = '{"summary":"done","workflow":"receipt_batch","count":3}';
+    expect(parseMcpResponse(jsonFallback)).toEqual({
+      summary: "done",
+      workflow: "receipt_batch",
+      count: 3,
     });
   });
 });

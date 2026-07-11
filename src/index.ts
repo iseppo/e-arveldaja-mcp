@@ -241,7 +241,15 @@ async function verifyImportedCredentials(config: Config): Promise<{ companyName:
   // "setup-import" namespace keys the cached invoice-info by path only, so
   // verifying company B within the cache TTL of company A would reuse A's
   // response — falsely "verifying" B (or mislabelling its company name).
-  const readonly = new ReferenceDataApi(new HttpClient(config, `setup-import:${config.apiKeyId}`));
+  // Keying by apiKeyId alone is also insufficient: re-importing the SAME
+  // apiKeyId with a corrected public value or password would reuse the earlier
+  // verification response, storing non-working credentials as "verified". Hash
+  // the FULL credential identity (never log or expose the secret itself).
+  const identityHash = createHash("sha256")
+    .update(`${config.apiKeyId}:${config.apiPublicValue}:${config.apiPassword}`)
+    .digest("hex")
+    .slice(0, 16);
+  const readonly = new ReferenceDataApi(new HttpClient(config, `setup-import:${identityHash}`));
   const invoiceInfo = await readonly.getInvoiceInfo();
   return {
     companyName: normalizeAuditCompanyName(invoiceInfo.invoice_company_name),
@@ -465,6 +473,11 @@ async function main() {
     await pending;
   }
 
+  // toolExposure decides which optional/redundant tools enter tools/list;
+  // resolved here (before the server instructions) so both the setup-mode
+  // instruction text and the setup-tool gating below can use it.
+  const toolExposure = getToolExposureConfig();
+
   const server = new McpServer({
     name: "e-arveldaja",
     version: PKG_VERSION,
@@ -478,7 +491,7 @@ async function main() {
   }, {
     instructions: setupMode ? `Setup mode:
 - No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.
-- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, receipt_batch (mode="scan"), parse_lightyear_statement, and parse_lightyear_capital_gains remain available.
+- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, receipt_batch (mode="scan")${toolExposure.enableLightyear ? ", parse_lightyear_statement, and parse_lightyear_capital_gains" : ""} remain available.
 - Call get_setup_instructions for the exact credential setup steps.
 - list_connections returns the currently configured connections (0 until credentials are added).
 - Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.
@@ -496,10 +509,6 @@ async function main() {
   });
 
   // --- Multi-account tools ---
-
-  // toolExposure decides which optional/redundant tools enter tools/list;
-  // resolved here (before the credential tools) so setup-tool gating can use it.
-  const toolExposure = getToolExposureConfig();
 
   registerTool(server, "get_setup_instructions",
     "Show how to configure e-arveldaja API credentials when the server is running without connections.",

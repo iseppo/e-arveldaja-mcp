@@ -146,6 +146,18 @@ export async function createAndMaybeMatchPurchaseInvoice(
 
   if (dryRun) {
     if (candidate) {
+      // Reserve the candidate the same way execute does (consumedTransactionIds)
+      // when it would meet the execute-time auto-link criteria, so a second
+      // receipt in the same dry-run can't also preview linking this exact
+      // transaction. Mirror the execute-path canAutoLink guard (#2).
+      const crossCurrencyMatch =
+        candidate.reasons.includes("exact_base_amount") &&
+        !candidate.reasons.includes("exact_amount");
+      const wouldAutoLink =
+        candidate.confidence >= EXACT_MATCH_THRESHOLD && !crossCurrencyMatch;
+      if (wouldAutoLink) {
+        consumedTransactionIds.add(candidate.transaction_id);
+      }
       notes.push(`Dry run: matched candidate transaction ${candidate.transaction_id} at confidence ${candidate.confidence}.`);
     } else if (dryRunMatch?.ambiguous) {
       notes.push(`Dry run: ${dryRunMatch.tiedCount} bank transactions tied at confidence ${dryRunMatch.topConfidence}; no candidate auto-selected.`);

@@ -1186,6 +1186,29 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.matched_one_sided).toBe(0);
   });
 
+  it("routes an FX pair whose confirmed leg is foreign to cross-currency review instead of booking the nominal amount", async () => {
+    // Outgoing (confirmed) leg is 100 USD / base 90 EUR; incoming is 90 EUR.
+    // They match on base (90) only. Confirming the outgoing side would distribute
+    // its foreign nominal 100 to the EUR target — booking 100 instead of 90. The
+    // amount is currency-model-dependent, so this must go to review, not confirm.
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 201, status: "PROJECT", is_deleted: false, type: "C", amount: 100, base_amount: 90, cl_currencies_id: "USD", date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
+        { id: 202, status: "PROJECT", is_deleted: false, type: "D", amount: 90, base_amount: 90, cl_currencies_id: "EUR", date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+      ],
+      bankAccounts,
+    });
+
+    const result = await handler({ execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.needs_review_cross_currency).toBe(1);
+    expect(payload.cross_currency_review[0]!.transaction_ids).toEqual([201, 202]);
+    // The wrong-amount booking never happens.
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
   it("still allows a valid one-sided own-IBAN match when an unrelated opposite-side transaction shares the nominal amount", async () => {
     const { handler } = setupInterAccountTool({
       transactions: [
@@ -1795,6 +1818,23 @@ describe("reconcile_inter_account_transfers", () => {
   });
 });
 
+describe("min_confidence bounds", () => {
+  it.each(["reconcile_transactions", "auto_confirm_exact_matches", "reconcile_bank_transactions"])(
+    "%s rejects an out-of-range min_confidence (0-100)",
+    (toolName) => {
+      const options = getReconciliationToolOptions(toolName);
+      // Isolate the min_confidence field schema so required siblings (e.g. mode)
+      // don't confound the bound check.
+      const field = (options.inputSchema as Record<string, z.ZodType>).min_confidence;
+      // A negative threshold would otherwise admit zero-confidence matches;
+      // >100 would suppress perfect ones. Both must be rejected at the schema.
+      expect(field.safeParse(-5).success).toBe(false);
+      expect(field.safeParse(150).success).toBe(false);
+      expect(field.safeParse(90).success).toBe(true);
+    },
+  );
+});
+
 describe("matchScore", () => {
   const baseTx = {
     id: 1,
@@ -1829,6 +1869,18 @@ describe("matchScore", () => {
     const invoice = { gross_price: 100, base_gross_price: 92 };
     const result = matchScore(tx, invoice, 1000);
     expect(result.reasons).toContain("exact_base_amount");
+  });
+
+  it("flags a coincidental cross-currency nominal match as a conflict, not exact_amount", () => {
+    // tx is 100 USD (base 90 EUR); invoice gross is 100 EUR (base 100). The
+    // nominal figures collide at 100 but the base amounts differ — distributing
+    // tx.amount would book 100 against a payment actually worth 90 EUR. This must
+    // NOT score exact_amount (which bypasses the cross-currency distribution
+    // guard); it must be flagged for review instead.
+    const tx = { ...baseTx, amount: 100, base_amount: 90, cl_currencies_id: "USD" };
+    const result = matchScore(tx, { gross_price: 100 }, 100);
+    expect(result.reasons).toContain("cross_currency_conflict");
+    expect(result.reasons).not.toContain("exact_amount");
   });
 
   it("adds ref_number score when references match", () => {

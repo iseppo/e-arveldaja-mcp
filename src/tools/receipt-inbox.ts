@@ -3,6 +3,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { HttpError } from "../http-client.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { roundMoney } from "../money.js";
@@ -1586,6 +1587,14 @@ export function registerReceiptInboxTools(
             accounts_dimensions_id,
             summary,
             workflow,
+            // TOCTOU warning: create/create_and_confirm rescans the folder at
+            // execution time (there is no manifest/hash carried over from the
+            // dry-run preview), so any file replaced or added since the preview
+            // is processed as-is. Surface this so the operator re-reviews when
+            // the folder may have changed between preview and execution.
+            ...(dryRun ? {} : {
+              warning: "Folder was RE-SCANNED at execution time; files changed or added since the dry-run preview were processed as-is. Re-review the results below if the folder may have changed since the preview.",
+            }),
             skipped: scan.skipped,
             results: sanitizedResults,
             execution: buildReceiptBatchExecution({
@@ -1732,6 +1741,10 @@ export function registerReceiptInboxTools(
       // never participates in server-side lookups.
       const sanitizedGroups = classifiedGroups.map(g => ({
         ...g,
+        // normalized_counterparty is derived from imported bank-statement text
+        // and would otherwise leak unwrapped via the `...g` spread. Wrap it with
+        // the same OCR sandbox as display_counterparty.
+        normalized_counterparty: wrapUntrustedOcr(g.normalized_counterparty) ?? g.normalized_counterparty,
         display_counterparty: wrapUntrustedOcr(g.display_counterparty) ?? g.display_counterparty,
         transactions: g.transactions.map(t => ({
           ...t,
@@ -1821,8 +1834,16 @@ export function registerReceiptInboxTools(
                 continue;
               }
               freshTransactions.push(transaction);
-            } catch {
-              notes.push(`Transaction ${transactionStub.id} no longer exists.`);
+            } catch (error) {
+              // Only a confirmed 404 means the transaction is genuinely gone.
+              // A transient 503/timeout/network error must NOT be swallowed as a
+              // benign skip — rethrow so it surfaces as a real group failure and
+              // is counted, instead of silently dropping a valid PROJECT tx.
+              if (error instanceof HttpError && error.status === 404) {
+                notes.push(`Transaction ${transactionStub.id} no longer exists.`);
+              } else {
+                throw error;
+              }
             }
           }
 

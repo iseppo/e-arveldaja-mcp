@@ -187,7 +187,20 @@ export function matchScore(
   const invoiceAmount = invoice.gross_price ?? 0;
   const baseAmount = tx.base_amount ?? txAmount;
   const baseInvoiceAmount = getComparableBaseInvoiceAmount(invoice) ?? invoiceAmount;
-  if (Math.abs(txAmount - invoiceAmount) < 0.01) {
+  // A coincidental cross-currency nominal match (e.g. tx 100 USD / base 90 EUR
+  // vs invoice gross 100 EUR / base 100 EUR) would otherwise score "exact_amount"
+  // and bypass the cross-currency distribution guard, booking the wrong figure.
+  // When the nominal amounts match but the base amounts meaningfully conflict,
+  // flag it so the guard routes it to manual review instead.
+  const nominalMatch = Math.abs(txAmount - invoiceAmount) < 0.01;
+  const baseMatch = Math.abs(baseAmount - baseInvoiceAmount) < 0.01;
+  const txHasMeaningfulBase = Math.abs(baseAmount - txAmount) >= 0.01;
+  const invoiceHasMeaningfulBase = Math.abs(baseInvoiceAmount - invoiceAmount) >= 0.01;
+  const conflictingBase = nominalMatch && !baseMatch && (txHasMeaningfulBase || invoiceHasMeaningfulBase);
+  if (conflictingBase) {
+    confidence += 40;
+    reasons.push("cross_currency_conflict");
+  } else if (nominalMatch) {
     confidence += 40;
     reasons.push("exact_amount");
   } else if (Math.abs(baseAmount - baseInvoiceAmount) < 0.01 && baseAmount !== txAmount) {
@@ -276,7 +289,7 @@ export function registerBankReconciliationTools(
     "Match unconfirmed bank transactions to open sale/purchase invoices. " +
     "Returns suggested matches with confidence scores and ready-to-use distribution data.",
     {
-      min_confidence: z.number().optional().describe("Minimum confidence threshold 0-100 (default 50)"),
+      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence threshold 0-100 (default 50)"),
     },
     { ...readOnly, title: "Reconcile Transactions" },
     async ({ min_confidence }) => {
@@ -356,7 +369,8 @@ export function registerBankReconciliationTools(
           // book the wrong figure. Skip the auto-distribution and flag for
           // manual review; the match is still surfaced so a human can decide.
           const crossCurrency =
-            bestMatch.match_reasons.includes("exact_base_amount") &&
+            (bestMatch.match_reasons.includes("exact_base_amount") ||
+              bestMatch.match_reasons.includes("cross_currency_conflict")) &&
             !bestMatch.match_reasons.includes("exact_amount");
           const distribution = crossCurrency
             ? undefined
@@ -423,7 +437,7 @@ export function registerBankReconciliationTools(
     "Batch-confirm bank transactions with a single high-confidence match (>=90). DRY RUN by default — set execute=true to confirm.",
     {
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),
-      min_confidence: z.number().optional().describe("Minimum confidence (default 90)"),
+      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence (default 90)"),
     },
     { ...batch, title: "Auto-Confirm Bank Matches" },
     async ({ execute, min_confidence }) => {
@@ -512,7 +526,8 @@ export function registerBankReconciliationTools(
           // gross. Distributing tx.amount as-is books the wrong figure — same
           // guard that reconcile_transactions applies. Surface for manual review.
           const crossCurrency =
-            match.match_reasons.includes("exact_base_amount") &&
+            (match.match_reasons.includes("exact_base_amount") ||
+              match.match_reasons.includes("cross_currency_conflict")) &&
             !match.match_reasons.includes("exact_amount");
           if (crossCurrency) {
             skipped.push({
@@ -697,6 +712,10 @@ export function registerBankReconciliationTools(
       // auto-confirmed (would double-book).
       const ambiguousRefless: Array<{
         transaction_ids: number[]; amount: number; date: string;
+        source_account: string; target_account: string; reason: string;
+      }> = [];
+      const crossCurrencyPairs: Array<{
+        transaction_ids: number[]; amount_out: number; amount_in: number; date: string;
         source_account: string; target_account: string; reason: string;
       }> = [];
       const errors: Array<{ transaction_ids: number[]; reason: string }> = [];
@@ -1095,6 +1114,28 @@ export function registerBankReconciliationTools(
         consumedTxIds.add(txOut.id);
         consumedTxIds.add(txIn.id!);
 
+        // Cross-currency pair: the legs matched on base amount only. Confirming
+        // the outgoing side distributes txOut.amount to the target account. When
+        // the CONFIRMED (outgoing) leg is itself foreign — its nominal amount
+        // differs from its EUR base — distributing that foreign nominal misbooks
+        // the target leg (e.g. 100 USD/base 90 → target booked as 100, not 90).
+        // The safe amount is currency-model-dependent, so route to review rather
+        // than auto-confirm. If the confirmed leg is EUR (nominal == base), the
+        // txOut.amount distribution is already correct, so let it proceed.
+        const crossCurrencyPair =
+          bestCandidate.reasons.includes("exact_base_amount") &&
+          !bestCandidate.reasons.includes("exact_amount") &&
+          hasMeaningfulComparableAmount(txOut);
+        if (crossCurrencyPair) {
+          crossCurrencyPairs.push({
+            transaction_ids: [txOut.id, txIn.id!],
+            amount_out: txOut.amount, amount_in: txIn.amount, date: txOut.date,
+            source_account: fromTitle, target_account: toTitle,
+            reason: "Cross-currency inter-account pair matched on base amount only; the legs have different nominal amounts. Auto-distributing the outgoing nominal amount would misbook the target leg. Confirm inline with the correct per-account amounts.",
+          });
+          continue;
+        }
+
         // ONE confirm per pair: confirming the outgoing side with a distribution
         // to the target bank dimension creates a journal that touches BOTH bank
         // accounts (per CLAUDE.md: "confirming one side creates a journal touching
@@ -1291,6 +1332,24 @@ export function registerBankReconciliationTools(
         consumedTxIds.add(tx.id);
         consumedTxIds.add(counterpart.id);
 
+        // Cross-currency pair guard (same rationale as Phase 1): matched on base
+        // only, and the CONFIRMED leg (tx) is itself foreign, so distributing
+        // tx.amount would misbook the target leg. Route to review. An EUR
+        // confirmed leg (nominal == base) distributes correctly, so allow it.
+        const crossCurrencyPair =
+          bestCandidate.reasons.includes("exact_base_amount") &&
+          !bestCandidate.reasons.includes("exact_amount") &&
+          hasMeaningfulComparableAmount(tx);
+        if (crossCurrencyPair) {
+          crossCurrencyPairs.push({
+            transaction_ids: [tx.id, counterpart.id],
+            amount_out: tx.amount, amount_in: counterpart.amount, date: tx.date,
+            source_account: fromTitle, target_account: toTitle,
+            reason: "Cross-currency inter-account pair matched on base amount only; the legs have different nominal amounts. Auto-distributing the outgoing nominal amount would misbook the target leg. Confirm inline with the correct per-account amounts.",
+          });
+          continue;
+        }
+
         // Same single-confirm policy as Phase 1: one journal per pair. The
         // reciprocal same-type counterpart is a duplicate record of the same
         // physical movement, so delete it after tx confirms successfully.
@@ -1469,6 +1528,7 @@ export function registerBankReconciliationTools(
         skipped_ambiguous: ambiguousPairs.length,
         skipped_already_handled: skippedAlreadyHandled.length,
         needs_review_ambiguous_refless: ambiguousRefless.length,
+        needs_review_cross_currency: crossCurrencyPairs.length,
         error_count: errors.length,
       };
 
@@ -1485,6 +1545,7 @@ export function registerBankReconciliationTools(
             skipped_ambiguous: summary.skipped_ambiguous,
             skipped_already_handled: summary.skipped_already_handled,
             needs_review_ambiguous_refless: summary.needs_review_ambiguous_refless,
+            needs_review_cross_currency: summary.needs_review_cross_currency,
             own_bank_accounts: [...dimensionToIban.entries()].map(([dimId, iban]) => ({
               accounts_dimensions_id: dimId,
               iban,
@@ -1495,12 +1556,13 @@ export function registerBankReconciliationTools(
             one_sided: matchedOneSided,
             already_handled: skippedAlreadyHandled,
             ambiguous_refless: ambiguousRefless,
+            cross_currency_review: crossCurrencyPairs,
             errors,
             execution: buildBatchExecutionContract({
               mode,
               summary,
               results: [...matchedPairs, ...matchedOneSided],
-              skipped: [...ambiguousPairs, ...skippedAlreadyHandled, ...ambiguousRefless],
+              skipped: [...ambiguousPairs, ...skippedAlreadyHandled, ...ambiguousRefless, ...crossCurrencyPairs],
               errors,
             }),
           }),
@@ -1536,7 +1598,7 @@ export function registerBankReconciliationTools(
       mode: z.enum(["suggest", "dry_run_auto_confirm", "execute_auto_confirm", "inter_account_dry_run"])
         .optional()
         .describe("Workflow phase to run. Defaults to suggest."),
-      min_confidence: z.number().optional().describe("Minimum confidence threshold for invoice matching modes."),
+      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence threshold for invoice matching modes."),
       max_date_gap: z.number().int().min(0).max(MAX_INTER_ACCOUNT_DATE_GAP_DAYS).optional()
         .describe(`Maximum days between inter-account transfer legs (default 1, max ${MAX_INTER_ACCOUNT_DATE_GAP_DAYS}).`),
       target_accounts_dimensions_id: z.number().optional().describe(

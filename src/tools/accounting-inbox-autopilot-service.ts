@@ -1,4 +1,4 @@
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import {
   buildCamtDuplicateReviewGuidance,
@@ -471,17 +471,21 @@ export async function runAccountingInboxDryRunPipeline({
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // Import-step errors (Wise/CAMT parsing) can embed raw counterparty-
+      // controlled CSV cell/header bytes in their message. Cap and sandbox-wrap
+      // it before it reaches MCP output so it cannot smuggle instructions.
+      const safeMessage = wrapUntrustedOcr(capUntrustedText(message).text) ?? message;
       executedSteps.push({
         step: step.step,
         tool: step.tool,
         status: "failed",
         purpose: step.purpose,
-        summary: message,
+        summary: safeMessage,
         suggested_args: step.suggested_args,
       });
       needsAccountantReview.push({
         source: step.tool,
-        summary: `${step.tool} failed during autopilot dry run: ${message}`,
+        summary: `${step.tool} failed during autopilot dry run: ${safeMessage}`,
         recommendation: "Inspect this specific step before relying on the automatic first pass.",
       });
       if (isMaterializationStep(step.tool) && materializationBlockReason === undefined) {

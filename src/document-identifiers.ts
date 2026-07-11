@@ -177,7 +177,10 @@ export interface ExtractVatNumberOptions {
 // Estonian reg-code label variants seen on real invoices:
 //   "Reg. nr", "Reg. Nr", "Reg kood", "Registrikood", "Registry code",
 //   "Rg-kood" (abbreviated, Printimiskeskus), "Rg-kood:" with colon
-const REG_CODE_LABEL_RE = /(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry\s*code|Rg[-\s]?kood)\.?[:\s]*(\d{8})/gi;
+// The `(?<!\d)` / `(?!\d)` boundaries around the 8-digit group stop a longer
+// digit run (e.g. a 9-digit "Registrikood: 171334169") from matching its
+// 8-digit prefix — mirroring the trailing boundary VAT_LABEL_RE already uses.
+const REG_CODE_LABEL_RE = /(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry\s*code|Rg[-\s]?kood)\.?[:\s]*(?<!\d)(\d{8})(?!\d)/gi;
 
 // Estonian VAT label variants seen on real invoices:
 //   "KMKR", "KMKR nr", "KMKR nr.", "KM nr", "KM-number", "KM Reg. Nr.",

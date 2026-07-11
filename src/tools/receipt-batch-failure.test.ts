@@ -1047,7 +1047,9 @@ describe("process_receipt_batch rollback handling", () => {
     expect(payload.results[0]!.status).toBe("created");
     expect(payload.results[0]!.created_invoice).toEqual(expect.objectContaining({
       id: 9001,
-      number: "POS-23-081972",
+      // created_invoice.number echoes the OCR-extracted invoice number, so it is
+      // sandbox-wrapped at output; assert the raw value is present inside.
+      number: expect.stringContaining("POS-23-081972"),
       status: "PROJECT",
       confirmed: false,
       uploaded_document: true,
@@ -1206,7 +1208,9 @@ describe("process_receipt_batch rollback handling", () => {
     expect(payload.results[0]!.status).toBe("created");
     expect(payload.results[0]!.created_invoice).toEqual(expect.objectContaining({
       id: 9001,
-      number: "POS-23-081972",
+      // created_invoice.number echoes the OCR-extracted invoice number, so it is
+      // sandbox-wrapped at output; assert the raw value is present inside.
+      number: expect.stringContaining("POS-23-081972"),
       status: "CONFIRMED",
       confirmed: true,
       uploaded_document: true,

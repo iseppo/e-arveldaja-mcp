@@ -30,6 +30,11 @@ const xmlParser = new XMLParser({
   attributeNamePrefix: "@_",
   processEntities: false,
   trimValues: true,
+  // Strip XML namespace prefixes so a namespace-qualified statement
+  // (<ns:Document>…) parses under the same unprefixed keys (Document, Stmt, …)
+  // this code navigates by. Without it, valid prefixed CAMT files fail with
+  // "Expected exactly one <Stmt>, found 0".
+  removeNSPrefix: true,
 });
 
 type XmlRecord = Record<string, unknown>;

@@ -1448,6 +1448,22 @@ describe("parseAmount — comma thousands and negative signs (Codex review 6)", 
     const amounts = extractAmountsFromLine("1,234.56", "Subtotal 10.00\n1,234.56");
     expect(amounts).toContain(1234.56);
   });
+
+  it("treats an accounting-style parenthesised '(124.00)' as -124", () => {
+    expect(extractAmountsFromLine("Total (124.00) EUR")).toContain(-124);
+  });
+
+  it("keeps a normal '124.00' positive", () => {
+    const amounts = extractAmountsFromLine("Total 124.00 EUR");
+    expect(amounts).toContain(124);
+    expect(amounts).not.toContain(-124);
+  });
+
+  it("does not negate a number embedded in prose parentheses like '(see note 3)'", () => {
+    // The parenthesised content is not itself a number, so the 3 must not be
+    // turned into a negative amount.
+    expect(extractAmountsFromLine("(see note 3)")).not.toContain(-3);
+  });
 });
 
 // ---------------------------------------------------------------------------

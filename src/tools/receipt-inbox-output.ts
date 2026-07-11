@@ -1,4 +1,11 @@
-import { wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
+import { wrapUntrustedOcr, capUntrustedText, MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
+
+// Cap an OCR-derived string to the untrusted-text budget before it is wrapped,
+// so a pathological (e.g. 30k-char) supplier name or note cannot flood the
+// consuming LLM's context the way the raw_text blob is already capped.
+function capThenWrap(value: string | undefined): string | undefined {
+  return wrapUntrustedOcr(capUntrustedText(value, MAX_UNTRUSTED_TEXT_CHARS).text);
+}
 import type { ReceiptBatchFileResult } from "./receipt-inbox-types.js";
 
 // Wrap free-form OCR-derived fields with untrusted-OCR delimiters at MCP
@@ -21,15 +28,18 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
           ...next.extracted,
           ...(raw_text !== undefined && { raw_text: wrapUntrustedOcr(cappedRaw.text) }),
           ...(cappedRaw.truncated && { raw_text_truncated: true, raw_text_length: cappedRaw.original_length }),
-          ...(description !== undefined && { description: wrapUntrustedOcr(description) }),
-          ...(supplier_name !== undefined && { supplier_name: wrapUntrustedOcr(supplier_name) }),
+          // Cap the other OCR-derived strings too before wrapping (#4) — only
+          // raw_text was capped previously, so a pathological supplier name /
+          // note / provenance value could still flood the consuming LLM.
+          ...(description !== undefined && { description: capThenWrap(description) }),
+          ...(supplier_name !== undefined && { supplier_name: capThenWrap(supplier_name) }),
           ...(hasExtractionNotes && {
-            extraction_notes: extraction_notes!.map(entry => wrapUntrustedOcr(entry) ?? entry),
+            extraction_notes: extraction_notes!.map(entry => capThenWrap(entry) ?? entry),
           }),
           ...(hasProvenance && {
             field_provenance: field_provenance!.map(entry => ({
               ...entry,
-              value: typeof entry.value === "string" ? wrapUntrustedOcr(entry.value) ?? entry.value : entry.value,
+              value: typeof entry.value === "string" ? capThenWrap(entry.value) ?? entry.value : entry.value,
             })),
           }),
         },
@@ -73,6 +83,19 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
       referenced_invoice: {
         ...next.referenced_invoice,
         invoice_number: wrapUntrustedOcr(next.referenced_invoice.invoice_number) ?? next.referenced_invoice.invoice_number,
+      },
+    };
+  }
+
+  // created_invoice.number echoes extracted.invoice_number (OCR-derived), so it
+  // must be wrapped at output too (#3) — otherwise an invoice number smuggled
+  // from a scanned receipt reaches the LLM unwrapped via this field.
+  if (next.created_invoice?.number !== undefined) {
+    next = {
+      ...next,
+      created_invoice: {
+        ...next.created_invoice,
+        number: wrapUntrustedOcr(next.created_invoice.number) ?? next.created_invoice.number,
       },
     };
   }

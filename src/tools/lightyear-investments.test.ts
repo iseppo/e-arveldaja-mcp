@@ -1,6 +1,7 @@
 import { readFile } from "fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { logAudit } from "../audit-log.js";
 import { resolveFileInput } from "../file-validation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { registerLightyearTools, tradeFeeInEur } from "./lightyear-investments.js";
@@ -497,6 +498,94 @@ describe("lightyear investments tools", () => {
     expect(secondPayload.created).toBe(0);
     expect(secondPayload.duplicates_skipped).toBe(1);
     expect(secondRun.api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("dedupes two rows sharing a reference within one CSV to exactly one created journal (trades)", async () => {
+    // Regression: two statement rows carrying the SAME reference must resolve to
+    // ONE journal, one CREATED audit event, and the second row reported as a
+    // duplicate — in both dry-run and execute. Previously the second row was
+    // counted as a fresh creation (the code ignored the guard's duplicate outcome
+    // and did not dedupe within the CSV), overstating the dry-run preview and
+    // double-counting the audit/report on execute.
+    const csvBytes = buildStatementCsv([
+      ["10/03/2026 11:51:35", "OR-DUP-REF", "VUAA", "IE00BK5BQT80", "Buy", "10.000000000", "EUR", "100.000000000", "1000.00", "", "0.00", "1000.00", ""],
+      ["10/03/2026 11:51:35", "OR-DUP-REF", "VUAA", "IE00BK5BQT80", "Buy", "10.000000000", "EUR", "100.000000000", "1000.00", "", "0.00", "1000.00", ""],
+    ]);
+
+    // Dry run — the preview must not overstate creations.
+    mockedReadFile.mockResolvedValue(csvBytes);
+    const dryRun = setupLightyearTool("book_lightyear_trades");
+    const dryResult = await dryRun.handler({
+      file_path: "/tmp/lightyear.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      dry_run: true,
+    });
+    const dryPayload = parseMcpResponse(dryResult.content[0]!.text) as any;
+    expect(dryRun.api.journals.create).not.toHaveBeenCalled();
+    expect(dryPayload.total_trades).toBe(2);
+    expect(dryPayload.new_entries).toBe(1);
+    expect(dryPayload.created).toBe(1); // would_create count — only the first row
+    expect(dryPayload.duplicates_skipped).toBe(1);
+    expect(dryPayload.duplicate_refs).toEqual([
+      { reference: "OR-DUP-REF", ticker: "VUAA", date: "2026-03-10" },
+    ]);
+
+    // Execute — exactly one journal created, one CREATED audit, second row duplicate.
+    vi.mocked(logAudit).mockClear();
+    mockedReadFile.mockResolvedValue(csvBytes);
+    const execRun = setupLightyearTool("book_lightyear_trades");
+    const execResult = await execRun.handler({
+      file_path: "/tmp/lightyear.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      dry_run: false,
+    });
+    const execPayload = parseMcpResponse(execResult.content[0]!.text) as any;
+    expect(execRun.api.journals.create).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logAudit)).toHaveBeenCalledTimes(1);
+    expect(execPayload.created).toBe(1);
+    expect(execPayload.duplicates_skipped).toBe(1);
+    expect(execPayload.results.filter((r: any) => r.status === "created")).toHaveLength(1);
+  });
+
+  it("dedupes two rows sharing a reference within one CSV to exactly one created journal (distributions)", async () => {
+    const csvBytes = buildStatementCsv([
+      ["2026-03-01", "DIV-DUP", "VWCE", "IE00BK5BQT80", "Dividend", "0", "EUR", "0", "10.00", "1", "0", "10.00", "0"],
+      ["2026-03-01", "DIV-DUP", "VWCE", "IE00BK5BQT80", "Dividend", "0", "EUR", "0", "10.00", "1", "0", "10.00", "0"],
+    ]);
+
+    // Dry run.
+    mockedReadFile.mockResolvedValue(csvBytes);
+    const dryRun = setupLightyearTool("book_lightyear_distributions");
+    const dryResult = await dryRun.handler({
+      file_path: "/tmp/lightyear.csv",
+      broker_account: 1120,
+      income_account: 8320,
+      dry_run: true,
+    });
+    const dryPayload = parseMcpResponse(dryResult.content[0]!.text) as any;
+    expect(dryRun.api.journals.create).not.toHaveBeenCalled();
+    expect(dryPayload.total_distributions).toBe(2);
+    expect(dryPayload.new_entries).toBe(1);
+    expect(dryPayload.duplicates_skipped).toBe(1);
+
+    // Execute.
+    vi.mocked(logAudit).mockClear();
+    mockedReadFile.mockResolvedValue(csvBytes);
+    const execRun = setupLightyearTool("book_lightyear_distributions");
+    const execResult = await execRun.handler({
+      file_path: "/tmp/lightyear.csv",
+      broker_account: 1120,
+      income_account: 8320,
+      dry_run: false,
+    });
+    const execPayload = parseMcpResponse(execResult.content[0]!.text) as any;
+    expect(execRun.api.journals.create).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logAudit)).toHaveBeenCalledTimes(1);
+    expect(execPayload.new_entries).toBe(1);
+    expect(execPayload.duplicates_skipped).toBe(1);
+    expect(execPayload.results.filter((r: any) => r.status === "created")).toHaveLength(1);
   });
 
   it("does NOT treat a hand-entered journal sharing a raw OR reference as a duplicate when the date differs", async () => {

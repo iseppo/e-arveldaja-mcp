@@ -914,8 +914,22 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const allRefs = trades.map(t => ({ reference: t.reference, date: t.date }));
       const existingRefs = findExistingJournalsByRef(guard.journals, allRefs);
 
-      const newTrades = trades.filter(t => !existingRefs.has(t.reference));
-      const duplicates = trades.filter(t => existingRefs.has(t.reference));
+      // Dedupe against existing journals AND within this CSV. Two rows sharing a
+      // reference must resolve to ONE journal, so the first occurrence books and
+      // any later same-ref row is a duplicate — mirroring the existing-journal
+      // dedup. Doing it here keeps the dry-run preview counts matching what
+      // execution actually creates (the loop only ever sees the first occurrence).
+      const seenRefs = new Set<string>();
+      const newTrades: typeof trades = [];
+      const duplicates: typeof trades = [];
+      for (const t of trades) {
+        if (existingRefs.has(t.reference) || seenRefs.has(t.reference)) {
+          duplicates.push(t);
+        } else {
+          seenRefs.add(t.reference);
+          newTrades.push(t);
+        }
+      }
 
       const results: Array<{
         reference: string;
@@ -1039,6 +1053,15 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               { title, effective_date: trade.date, cl_currencies_id: "EUR", postings },
               { confirm: false }, // Lightyear journals stay in PROJECT for review
             );
+            resultEntry.journal_id = outcome.journal_id;
+            if (outcome.status === "duplicate") {
+              // The guard found an existing journal for this key (already booked
+              // this run or a prior run) — do NOT log a second CREATED audit event
+              // or report a fresh creation. Report it as a duplicate instead.
+              resultEntry.status = "duplicate";
+              results.push(resultEntry);
+              continue;
+            }
             logAudit({
               tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
               entity_id: outcome.journal_id,
@@ -1050,7 +1073,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
               },
             });
 
-            resultEntry.journal_id = outcome.journal_id;
             results.push(resultEntry);
             continue;
           }
@@ -1137,6 +1159,13 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             { title, effective_date: trade.date, cl_currencies_id: "EUR", postings },
             { confirm: false }, // Lightyear journals stay in PROJECT for review
           );
+          resultEntry.journal_id = outcome.journal_id;
+          if (outcome.status === "duplicate") {
+            // Existing journal for this key — skip the CREATED audit and report a duplicate.
+            resultEntry.status = "duplicate";
+            results.push(resultEntry);
+            continue;
+          }
           logAudit({
             tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
             entity_id: outcome.journal_id,
@@ -1148,7 +1177,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             },
           });
 
-          resultEntry.journal_id = outcome.journal_id;
           results.push(resultEntry);
           continue;
         }
@@ -1172,26 +1200,39 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             { title, effective_date: trade.date, cl_currencies_id: "EUR", postings },
             { confirm: false }, // Lightyear journals stay in PROJECT for review
           );
-          logAudit({
-            tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
-            entity_id: outcome.journal_id,
-            summary: `Lightyear Buy: ${trade.ticker} ${trade.quantity} @ ${trade.eur_amount} EUR`,
-            details: {
-              effective_date: trade.date, ticker: trade.ticker, type: "Buy",
-              amount: trade.eur_amount,
-              postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-            },
-          });
+          if (outcome.status === "duplicate") {
+            // Existing journal for this key — skip the CREATED audit and report a duplicate.
+            results.push({
+              reference: trade.reference,
+              ticker: trade.ticker,
+              type: trade.type,
+              date: trade.date,
+              eur_amount: trade.eur_amount,
+              status: "duplicate",
+              journal_id: outcome.journal_id,
+            });
+          } else {
+            logAudit({
+              tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
+              entity_id: outcome.journal_id,
+              summary: `Lightyear Buy: ${trade.ticker} ${trade.quantity} @ ${trade.eur_amount} EUR`,
+              details: {
+                effective_date: trade.date, ticker: trade.ticker, type: "Buy",
+                amount: trade.eur_amount,
+                postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+              },
+            });
 
-          results.push({
-            reference: trade.reference,
-            ticker: trade.ticker,
-            type: trade.type,
-            date: trade.date,
-            eur_amount: trade.eur_amount,
-            status: "created",
-            journal_id: outcome.journal_id,
-          });
+            results.push({
+              reference: trade.reference,
+              ticker: trade.ticker,
+              type: trade.type,
+              date: trade.date,
+              eur_amount: trade.eur_amount,
+              status: "created",
+              journal_id: outcome.journal_id,
+            });
+          }
         }
       }
 
@@ -1298,8 +1339,20 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const allRefs = distributions.map(d => ({ reference: d.reference, date: d.date }));
       const existingRefs = findExistingJournalsByRef(guard.journals, allRefs);
 
-      const newDist = distributions.filter(d => !existingRefs.has(d.reference));
-      const duplicates = distributions.filter(d => existingRefs.has(d.reference));
+      // Dedupe against existing journals AND within this CSV (see book_lightyear_trades):
+      // the first occurrence of a reference books, later same-ref rows are duplicates,
+      // so dry-run counts match what execution creates.
+      const seenRefs = new Set<string>();
+      const newDist: typeof distributions = [];
+      const duplicates: typeof distributions = [];
+      for (const d of distributions) {
+        if (existingRefs.has(d.reference) || seenRefs.has(d.reference)) {
+          duplicates.push(d);
+        } else {
+          seenRefs.add(d.reference);
+          newDist.push(d);
+        }
+      }
 
       const results: Array<{
         reference: string;
@@ -1357,28 +1410,43 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             { title, effective_date: dist.date, cl_currencies_id: "EUR", postings },
             { confirm: false }, // Lightyear journals stay in PROJECT for review
           );
-          logAudit({
-            tool: "book_lightyear_distributions", action: "CREATED", entity_type: "journal",
-            entity_id: outcome.journal_id,
-            summary: `Lightyear distribution: ${dist.ticker || "interest"} gross ${dist.gross_amount} EUR`,
-            details: {
-              effective_date: dist.date, ticker: dist.ticker,
-              total_gross: dist.gross_amount, tax_amount: dist.tax_amount, fee: dist.fee, net_amount: dist.net_amount,
-              postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-            },
-          });
+          if (outcome.status === "duplicate") {
+            // Existing journal for this key — skip the CREATED audit and report a duplicate.
+            results.push({
+              reference: dist.reference,
+              ticker: dist.ticker,
+              date: dist.date,
+              gross_amount: dist.gross_amount,
+              tax_amount: dist.tax_amount,
+              fee: dist.fee,
+              net_amount: dist.net_amount,
+              status: "duplicate",
+              journal_id: outcome.journal_id,
+            });
+          } else {
+            logAudit({
+              tool: "book_lightyear_distributions", action: "CREATED", entity_type: "journal",
+              entity_id: outcome.journal_id,
+              summary: `Lightyear distribution: ${dist.ticker || "interest"} gross ${dist.gross_amount} EUR`,
+              details: {
+                effective_date: dist.date, ticker: dist.ticker,
+                total_gross: dist.gross_amount, tax_amount: dist.tax_amount, fee: dist.fee, net_amount: dist.net_amount,
+                postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+              },
+            });
 
-          results.push({
-            reference: dist.reference,
-            ticker: dist.ticker,
-            date: dist.date,
-            gross_amount: dist.gross_amount,
-            tax_amount: dist.tax_amount,
-            fee: dist.fee,
-            net_amount: dist.net_amount,
-            status: "created",
-            journal_id: outcome.journal_id,
-          });
+            results.push({
+              reference: dist.reference,
+              ticker: dist.ticker,
+              date: dist.date,
+              gross_amount: dist.gross_amount,
+              tax_amount: dist.tax_amount,
+              fee: dist.fee,
+              net_amount: dist.net_amount,
+              status: "created",
+              journal_id: outcome.journal_id,
+            });
+          }
         }
       }
 

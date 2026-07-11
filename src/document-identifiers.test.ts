@@ -53,6 +53,13 @@ describe("extractRegistryCode", () => {
   it("does not match fewer than 8 digits", () => {
     expect(extractRegistryCode("Reg. nr: 1234567")).toBeUndefined();
   });
+
+  it("does not resolve a 9-digit labeled number to its 8-digit prefix", () => {
+    // "171334169" is 9 digits; the 8-digit prefix "17133416" is checksum-valid,
+    // so without a trailing digit boundary the labeled regex used to wrongly
+    // resolve it. A longer digit run must not match.
+    expect(extractRegistryCode("Registrikood: 171334169")).toBeUndefined();
+  });
 });
 
 describe("extractVatNumber", () => {

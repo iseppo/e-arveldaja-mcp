@@ -3,7 +3,7 @@ import { open, readdir, realpath, stat } from "fs/promises";
 import { basename, extname, resolve } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, unwrapUntrustedOcr } from "../mcp-json.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
@@ -846,7 +846,10 @@ function extractTransactionPatchFields(record: Record<string, unknown> | undefin
     // values instead of turning them into junk like "[object Object]".
     if (value === undefined || value === null) continue;
     const coerced = typeof value === "string"
-      ? value
+      // The value round-tripped through the LLM as a sandbox-wrapped review
+      // field; strip the display-only delimiters before it is written to the
+      // ledger, otherwise the literal <<UNTRUSTED_OCR_START:…>> markers persist.
+      ? unwrapUntrustedOcr(value)
       : (typeof value === "number" && Number.isFinite(value))
         ? String(value)
         : typeof value === "bigint"

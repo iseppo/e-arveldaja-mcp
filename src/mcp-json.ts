@@ -18,6 +18,26 @@ export function wrapUntrustedOcr(text: string | undefined | null): string | unde
   return `${UNTRUSTED_OCR_START_PREFIX}${nonce}>>\n${text}\n${UNTRUSTED_OCR_END_PREFIX}${nonce}>>`;
 }
 
+// Matches a single well-formed sandbox wrapper produced by wrapUntrustedOcr:
+// the start/end nonces must be identical (\1 back-reference).
+const UNTRUSTED_OCR_WRAPPER_RE =
+  /^<<UNTRUSTED_OCR_START:([0-9a-f]+)>>\n([\s\S]*)\n<<UNTRUSTED_OCR_END:\1>>$/;
+
+/**
+ * Reverse wrapUntrustedOcr: if `text` is exactly one well-formed sandbox
+ * wrapper, return the inner content; otherwise return `text` unchanged.
+ *
+ * Needed at mutation boundaries: a wrapped value (e.g. a CAMT
+ * `suggested_patch_missing_fields` entry) round-trips through the LLM as a
+ * review item and is later written back to the ledger. The sandbox delimiters
+ * are a display-only guard and must be stripped before the value is persisted,
+ * otherwise the literal `<<UNTRUSTED_OCR_START:…>>` markers land in the field.
+ */
+export function unwrapUntrustedOcr(text: string): string {
+  const m = UNTRUSTED_OCR_WRAPPER_RE.exec(text);
+  return m ? m[2]! : text;
+}
+
 /**
  * Default character budget for OCR-derived free text inlined into an MCP
  * response. Booking decisions use the structured `extracted` fields, not the
@@ -75,6 +95,21 @@ export function toMcpJson(obj: unknown): string {
 
 /** Parse a TOON- or JSON-encoded MCP response back into an object. For use in tests and wrappers. */
 export function parseMcpResponse(text: string): unknown {
+  // toMcpJson emits TOON, or falls back to a raw JSON string when TOON would
+  // round-trip lossily (see the catch in toMcpJson). Critically, TOON's decode()
+  // does NOT throw on JSON input — it silently returns a garbled object — so we
+  // cannot simply "try decode, then JSON". TOON never emits a leading '{', '['
+  // or '"' for its object/array/string encodings, so a JSON-shaped prefix
+  // unambiguously marks the JSON fallback path; try JSON there first.
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith("\"")) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      // Not valid JSON after all (e.g. a TOON tabular array `[3]{...}`); fall
+      // through to the TOON decoder below.
+    }
+  }
   try {
     return decode(text);
   } catch {
