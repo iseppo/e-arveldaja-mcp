@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-120 tools by default (115 with Lightyear disabled; up to 133 with the optional granular and setup tools exposed — see Tool exposure below), 16 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
+121 tools by default (116 with Lightyear disabled; up to 134 with the optional granular and setup tools exposed — see Tool exposure below), 16 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -133,9 +133,9 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The default surface is 120 tools; `DISABLE_LIGHTYEAR` drops it to 115.
+The default surface is 121 tools; `DISABLE_LIGHTYEAR` drops it to 116.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both raises it to the full 133. The five opt-out
+credential tools; enabling both raises it to the full 134. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−3),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
@@ -401,5 +401,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 120 tools (default exposure)
+const { tools } = await client.listTools(); // 121 tools (default exposure)
 ```
