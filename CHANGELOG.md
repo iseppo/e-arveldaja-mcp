@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-07-11
+
+### Fixed
+- **Full-codebase security & correctness review (7-pass Codex review, verified).** Every finding was checked against the actual code before acting; roughly eighteen were dropped as false positives and none survived as high-severity. The confirmed defects are fixed, each with regression tests:
+  - **Network-error messages no longer leak the auth public value / HMAC signature.** `formatNetworkError` now emits only the error name and code (never the raw fetch message, which for some failures echoes the offending header value). The HTTP client also refuses unexpected 3xx redirects (`redirect: "manual"`) and classifies a failed/timed-out response-body read as a network error.
+  - **`TransactionsApi.confirm` no longer rolls back a possibly-committed registration when the post-network-error re-read itself fails.** It now throws an explicit indeterminate-state error instead of blindly reverting `clients_id`.
+  - **Aging analysis** signs credit-invoice gross, separates the `as_of_date` cutoff from the actual current date, excludes future-dated invoices, and warns on missing `term_days`.
+  - **Account-balance and financial-statement totals are computed from raw sums and rounded once**, eliminating ±0.01 debit/credit rounding drift, including `compute_client_debt`.
+  - **`reconcile_currency_rounding`** routes unconvertible-foreign / EUR-residual / rate-load failures to the review bucket and dates FX journals to the settlement date.
+  - **Cross-currency inter-account transfers whose confirmed leg is foreign now route to a `cross_currency_review` bucket** instead of auto-distributing the foreign nominal amount to the target account (which booked the wrong figure). EUR-leg FX pairs (`nominal == base`) still auto-confirm. A coincidental cross-currency nominal match against an invoice is likewise flagged for review instead of scoring `exact_amount`. `min_confidence` is bounded to 0–100.
+  - **Untrusted-text sandbox holes closed.** A CAMT duplicate-cleanup patch that round-tripped through the LLM as sandbox-wrapped review text is now unwrapped (`unwrapUntrustedOcr`) before write-back, so the `<<UNTRUSTED_OCR_START…>>` delimiters can never be persisted into a ledger field. Failed import/parse-step error messages are capped and wrapped before reaching MCP output. `created_invoice.number`, `normalized_counterparty`, and other OCR-derived output strings are now wrapped and length-capped.
+  - **`parseMcpResponse` parses JSON-shaped input as JSON first** — TOON's `decode()` silently garbles a JSON string without throwing, which corrupted merged-tool reporting on the JSON-fallback path.
+  - **CAMT parsing** strips XML namespace prefixes (`removeNSPrefix`) so a namespace-qualified `<ns:Document>` statement parses instead of failing with "found 0 <Stmt>".
+  - **Receipt/invoice extraction** honours accounting-style parenthesised negatives (`(124.00)` → −124); the labelled Estonian registry-code regex gained a digit boundary so a 9-digit number no longer matches an 8-digit prefix.
+  - **Lightyear import** deduplicates repeated references within one CSV and branches on the `createJournalOnce` duplicate outcome, so a guarded duplicate is no longer double-counted in the audit log or report.
+  - **Setup-mode credential verification** keys its cache by a hash of the full credential identity (not just the key id), so re-importing the same key id with a corrected password re-verifies instead of reusing the stale result; setup instructions no longer advertise the Lightyear parsers when that group is disabled.
+  - **Receipt-inbox orchestration** propagates a non-404 transaction-lookup error as a real failure (instead of silently skipping a valid transaction), reserves dry-run bank-match candidates so two receipts cannot both preview the same transaction, and warns that create mode re-scans the folder at execution time.
+
 ## [0.20.0] - 2026-07-10
 
 ### Added
