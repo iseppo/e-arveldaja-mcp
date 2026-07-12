@@ -117,6 +117,7 @@ interface YearEndCloseAnalysis {
     document_number: string | null | undefined;
     registered: boolean;
   }>;
+  statutory_reminders: string[];
   execution_status: {
     can_execute: boolean;
     recommended_to_execute: boolean;
@@ -597,6 +598,13 @@ async function analyzeYearEndClose(api: ApiContext, year: number): Promise<YearE
           ? "Execution is technically possible, but unresolved documents or balance-sheet issues should be fixed first."
           : "Ready to execute.",
     },
+    // Statutory duties the ledger cannot verify — surface them so the operator
+    // confirms each before treating the year as closed.
+    statutory_reminders: [
+      "RPS § 15: inventeeri aastaaruande koostamisel varade ja kohustiste saldod (pangasaldod, nõuded/kohustused saldokinnitustega, laoseis, põhivara olemasolu ja väärtus).",
+      `ÄS § 179: kinnitatud majandusaasta aruanne tuleb esitada äriregistrile 6 kuu jooksul majandusaasta lõpust (${year} → ${year + 1}-06-30 tavapärase kalendriaasta puhul).`,
+      "RPS § 12: algdokumente säilitatakse 7 aastat majandusaasta lõpust — kontrolli, et kanded kannavad alusdokumente (find_missing_documents).",
+    ],
     warnings,
   };
 }

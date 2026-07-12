@@ -96,6 +96,75 @@ export function representationMonthlyLimitOn(dateISO: string | undefined | null)
   return period ? period.amount : null;
 }
 
+// ---------------------------------------------------------------------------
+// Corporate income tax (CIT) on distributed profits — TuMS § 50.
+// ---------------------------------------------------------------------------
+
+export interface CitRatePeriod {
+  /** Inclusive start date (YYYY-MM-DD). */
+  from: string;
+  /** Inclusive end date (YYYY-MM-DD), or null while still in force. */
+  to: string | null;
+  /** Numerator of the net-basis rate (e.g. 22 in 22/78). */
+  num: number;
+  /** Denominator of the net-basis rate (e.g. 78 in 22/78). */
+  den: number;
+}
+
+/**
+ * CIT rate timeline on distributed profits (TuMS § 50, rate per TuMS § 4).
+ * 21/79 → 20/80 (1.01.2015) → 22/78 (1.01.2025). The tax is computed on the
+ * NET distribution (rate × net) and is the company's own current-period
+ * income-tax expense — it is not part of the distribution itself.
+ */
+export const CIT_RATE_TIMELINE: readonly CitRatePeriod[] = [
+  { from: "2015-01-01", to: "2024-12-31", num: 20, den: 80 },
+  { from: "2025-01-01", to: null, num: 22, den: 78 },
+];
+
+export interface CitRate {
+  num: number;
+  den: number;
+  formatted: string;
+}
+
+/**
+ * Estonian corporate income tax rate on distributed profits (TuMS § 50) in
+ * force on the given date. ISO-date string compare is only safe for strict
+ * YYYY-MM-DD, so anything else is rejected defensively — a DD.MM.YYYY value
+ * would compare lexically wrong and silently pick 20/80 for a 2025
+ * distribution. Dates before the first timeline period use the earliest
+ * period's rate (pre-2015 distributions are out of scope for this server).
+ */
+export function getCitRateForDate(effective_date: string): CitRate {
+  if (!isStrictIsoDate(effective_date)) {
+    throw new Error(`getCitRateForDate requires YYYY-MM-DD; got ${JSON.stringify(effective_date)}`);
+  }
+  const period =
+    CIT_RATE_TIMELINE.find(p => effective_date >= p.from && (p.to === null || effective_date <= p.to))
+    ?? CIT_RATE_TIMELINE[0];
+  return { num: period.num, den: period.den, formatted: `${period.num}/${period.den}` };
+}
+
+/** The CIT rate currently in force (the timeline's open-ended period). Used to render tool descriptions from data. */
+export function currentCitRate(): CitRate {
+  const period = CIT_RATE_TIMELINE[CIT_RATE_TIMELINE.length - 1];
+  return { num: period.num, den: period.den, formatted: `${period.num}/${period.den}` };
+}
+
+/** The representation monthly allowance (€/month) currently in force. Used to render tool descriptions from data. */
+export function currentRepresentationMonthlyLimit(): number {
+  return REPRESENTATION_MONTHLY_LIMIT_TIMELINE[REPRESENTATION_MONTHLY_LIMIT_TIMELINE.length - 1].amount;
+}
+
+/**
+ * VAT registration threshold (KMS § 19 lg 1): registration duty arises when
+ * taxable/0% turnover (plus non-incidental real-estate, insurance, and
+ * financial turnover under the 2025 composition rules) exceeds this within a
+ * calendar year.
+ */
+export const VAT_REGISTRATION_THRESHOLD_EUR = 40000;
+
 export interface TaxRuleReference {
   /** Statutory code, e.g. "TuMS § 49 lg 4". */
   code: string;
@@ -142,24 +211,109 @@ export const DEDUCTION_AND_LIMIT_RULES: readonly TaxRuleReference[] = [
       "Tulumaksusoodustusega nimekirja kantud ühingutele tehtud kingitused/annetused on maksuvabad kuni 3% kalendriaasta sotsiaalmaksuga maksustatud väljamaksetest VÕI 10% eelmise majandusaasta kasumist (maksumaksja valib ühe piirmäära). Ületav osa maksustatakse 22/78. Soodustust on pikendatud kuni 31.12.2027.",
     basis: "TuMS § 49 lg 2",
   },
+  {
+    code: "TuMS § 48",
+    title: "Erisoodustused — töötajale antud rahaliselt hinnatav hüve maksustatakse",
+    summary:
+      "Töötajale antud rahaliselt hinnatav hüve (nt tööandja auto erakasutus, töötajate toitlustus, kingitused töötajale) on erisoodustus: tööandja maksab tulumaksu 22/78 ja sotsiaalmaksu 33%. Sõiduauto erakasutuse hind on 1,96 €/kW kuus (üle 5 aasta vanusel autol 1,47 €/kW). Deklareeritakse TSD lisal 4. Nõuandev viide — erisoodustuse arvestust see server ei tee.",
+    basis: "TuMS § 48",
+  },
 ];
+
+/**
+ * Profit-distribution (dividend) rules. Surfaced read-only via the
+ * `earveldaja://tax_rules` resource and enforced/echoed by
+ * `prepare_dividend_package`: the retained-earnings ceiling is NET-based
+ * (the tax is not part of the distribution), the net-assets floor is
+ * gross-based (the tax liability does reduce net assets).
+ */
+export const PROFIT_DISTRIBUTION_RULES: readonly TaxRuleReference[] = [
+  {
+    code: "ÄS § 157 lg 1",
+    title: "Dividendi allikas ja ülempiir — jaotamata kasum kinnitatud aruande alusel",
+    summary:
+      "Osanikele võib teha väljamakseid puhaskasumist või eelmiste majandusaastate jaotamata kasumist, millest on maha arvatud eelmiste aastate katmata kahjum, KINNITATUD majandusaasta aruande alusel ja kasumi jaotamise otsusega. Ülempiir kehtib väljamakse (netodividendi) kohta: kogu jaotamata kasumi võib netodividendina välja maksta, sest dividendi tulumaks on ettevõtte enda jooksva perioodi kulu, mitte osa väljamaksest.",
+    basis: "ÄS § 157 lg 1",
+  },
+  {
+    code: "ÄS § 157 lg 2",
+    title: "Netovara piir — osakapital + mittejaotatavad reservid",
+    summary:
+      "Väljamakset ei tohi teha, kui netovara on või jääks väiksemaks osakapitali ja seaduse/põhikirja järgi mittejaotatavate reservide (nt reservkapital) kogusummast. Kontroll on brutopõhine: väljamaksega tekib ka tulumaksukohustus, seega netovara väheneb neto + maksu võrra.",
+    basis: "ÄS § 157 lg 2",
+  },
+  {
+    code: "TuMS § 50",
+    title: "Dividendi tulumaks — 22/78 netolt, jooksva perioodi kulu",
+    summary:
+      "Residendist äriühing maksab jaotatud kasumilt tulumaksu 22/78 netodividendilt (kuni 2024: 20/80). Raamatupidamises (Eesti finantsaruandluse standard) kajastatakse maks tulumaksukuluna dividendi väljakuulutamise perioodil — jaotamata kasumit deebetitakse ainult netodividendiga. Maks deklareeritakse TSD lisal 7 ja tasutakse väljamakse kuule järgneva kuu 10. kuupäevaks.",
+    basis: "TuMS § 50; TuMS § 54",
+  },
+];
+
+/**
+ * Accounting-process rules from the Estonian Accounting Act (RPS) that the
+ * booking/close tools reference at the relevant moment. Advisory: e-arveldaja
+ * itself stores the ledger; these exist so the agent can surface the statutory
+ * duty instead of silently skipping it.
+ */
+export const ACCOUNTING_PROCESS_RULES: readonly TaxRuleReference[] = [
+  {
+    code: "RPS § 10",
+    title: "Paranduskanded peavad jääma tuvastatavaks",
+    summary:
+      "Raamatupidamisregistris tehtud parandus ei tohi muuta algset kirjendit tuvastamatuks: paranduse sisu, tegemise aeg ja alusdokument (parandusdokument või viide algdokumendile) peavad olema tuvastatavad. Praktikas: kande tühistamisel/asendamisel dokumenteeri, miks ja millega see asendati.",
+    basis: "RPS § 10",
+  },
+  {
+    code: "RPS § 15",
+    title: "Inventuur aastaaruande koostamisel",
+    summary:
+      "Raamatupidamise aastaaruande koostamisel inventeeritakse varade ja kohustiste saldod (sh pangasaldod, laenud, nõuded/kohustused saldokinnitustega, laoseis, põhivara). Aastaaruanne esitatakse äriregistrile 6 kuu jooksul majandusaasta lõpust.",
+    basis: "RPS § 15; ÄS § 179",
+  },
+  {
+    code: "RPS § 12",
+    title: "Algdokumentide säilitamine 7 aastat",
+    summary:
+      "Raamatupidamise algdokumente säilitatakse seitse aastat majandusaasta lõpust. e-arveldaja säilitab kinnitatud kanded ja manused; jälgi, et igal kandel oleks algdokument küljes (find_missing_documents).",
+    basis: "RPS § 12",
+  },
+];
+
+/**
+ * When the figures in this module were last verified against EMTA /
+ * Riigi Teataja. Bump on every verification pass so the pull resource tells
+ * the operator how fresh the reference data is.
+ */
+export const TAX_RULES_VERIFIED_AT = "2026-06";
 
 export interface TaxRulesReference {
   note: string;
+  verified_at: string;
   standard_vat_rate_timeline: readonly VatRatePeriod[];
   reduced_vat_rates: readonly ReducedVatRate[];
+  cit_rate_timeline: readonly CitRatePeriod[];
+  vat_registration_threshold_eur: number;
   deduction_and_limit_rules: readonly TaxRuleReference[];
+  profit_distribution_rules: readonly TaxRuleReference[];
+  accounting_process_rules: readonly TaxRuleReference[];
 }
 
 /** Bundle the full Estonian tax reference dataset for the pull resource. */
 export function buildTaxRulesReference(): TaxRulesReference {
   return {
     note:
-      "Estonian VAT / income-tax reference for booking. Figures verified against EMTA / Riigi Teataja. " +
+      "Estonian VAT / income-tax / accounting reference for booking. Figures verified against EMTA / Riigi Teataja. " +
       "Notes are advisory — confirm with the user before applying a restriction; the cumulative TuMS § 49 limits require the company's year-to-date payroll/profit to compute the taxable excess.",
+    verified_at: TAX_RULES_VERIFIED_AT,
     standard_vat_rate_timeline: STANDARD_VAT_RATE_TIMELINE,
     reduced_vat_rates: REDUCED_VAT_RATES,
+    cit_rate_timeline: CIT_RATE_TIMELINE,
+    vat_registration_threshold_eur: VAT_REGISTRATION_THRESHOLD_EUR,
     deduction_and_limit_rules: DEDUCTION_AND_LIMIT_RULES,
+    profit_distribution_rules: PROFIT_DISTRIBUTION_RULES,
+    accounting_process_rules: ACCOUNTING_PROCESS_RULES,
   };
 }
 

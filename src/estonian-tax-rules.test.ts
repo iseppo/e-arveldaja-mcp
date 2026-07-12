@@ -6,8 +6,14 @@ import {
   buildTaxRulesReference,
   computeRepresentationCostLimit,
   computeDonationLimit,
+  getCitRateForDate,
+  currentCitRate,
+  currentRepresentationMonthlyLimit,
   STANDARD_VAT_RATE_TIMELINE,
   REDUCED_VAT_RATES,
+  CIT_RATE_TIMELINE,
+  VAT_REGISTRATION_THRESHOLD_EUR,
+  TAX_RULES_VERIFIED_AT,
 } from "./estonian-tax-rules.js";
 
 describe("standardVatRateOn", () => {
@@ -145,6 +151,59 @@ describe("buildTaxRulesReference", () => {
     const donations = ref.deduction_and_limit_rules.find(r => r.code === "TuMS § 49 lg 2");
     expect(donations?.summary).toContain("3%");
     expect(donations?.summary).toContain("10%");
+  });
+
+  it("bundles the CIT timeline, VAT threshold, profit-distribution and RPS process rules", () => {
+    const ref = buildTaxRulesReference();
+    expect(ref.cit_rate_timeline).toBe(CIT_RATE_TIMELINE);
+    expect(ref.vat_registration_threshold_eur).toBe(VAT_REGISTRATION_THRESHOLD_EUR);
+    expect(ref.verified_at).toBe(TAX_RULES_VERIFIED_AT);
+
+    const distributionCodes = ref.profit_distribution_rules.map(r => r.code);
+    expect(distributionCodes).toEqual(
+      expect.arrayContaining(["ÄS § 157 lg 1", "ÄS § 157 lg 2", "TuMS § 50"]),
+    );
+    // The core answer the agent must be able to give: the whole retained-
+    // earnings balance is distributable as NET dividend; the tax comes on top.
+    const lg1 = ref.profit_distribution_rules.find(r => r.code === "ÄS § 157 lg 1");
+    expect(lg1?.summary).toContain("kogu jaotamata kasumi");
+    expect(lg1?.summary).toContain("netodividendina");
+    expect(lg1?.summary).toContain("KINNITATUD");
+    const tums50 = ref.profit_distribution_rules.find(r => r.code === "TuMS § 50");
+    expect(tums50?.summary).toContain("TSD lisal 7");
+
+    const processCodes = ref.accounting_process_rules.map(r => r.code);
+    expect(processCodes).toEqual(
+      expect.arrayContaining(["RPS § 10", "RPS § 12", "RPS § 15"]),
+    );
+    // Fringe benefits are at least referenced in the deduction catalogue.
+    expect(ref.deduction_and_limit_rules.map(r => r.code)).toContain("TuMS § 48");
+  });
+});
+
+describe("getCitRateForDate", () => {
+  it("is 20/80 through 2024 and 22/78 from 2025-01-01 (inclusive boundary)", () => {
+    expect(getCitRateForDate("2024-12-31")).toEqual({ num: 20, den: 80, formatted: "20/80" });
+    expect(getCitRateForDate("2025-01-01")).toEqual({ num: 22, den: 78, formatted: "22/78" });
+    expect(getCitRateForDate("2026-06-15").formatted).toBe("22/78");
+  });
+
+  it("rejects non-ISO and impossible dates (a DD.MM.YYYY value would compare lexically wrong)", () => {
+    expect(() => getCitRateForDate("31.12.2025")).toThrow(/YYYY-MM-DD/);
+    expect(() => getCitRateForDate("2025-02-31")).toThrow(/YYYY-MM-DD/);
+  });
+
+  it("keeps the timeline contiguous and exposes the current rates for tool descriptions", () => {
+    for (let i = 1; i < CIT_RATE_TIMELINE.length; i++) {
+      const prevTo = CIT_RATE_TIMELINE[i - 1].to;
+      expect(prevTo).not.toBeNull();
+      const next = new Date(`${prevTo}T00:00:00Z`);
+      next.setUTCDate(next.getUTCDate() + 1);
+      expect(next.toISOString().slice(0, 10)).toBe(CIT_RATE_TIMELINE[i].from);
+    }
+    expect(CIT_RATE_TIMELINE[CIT_RATE_TIMELINE.length - 1].to).toBeNull();
+    expect(currentCitRate().formatted).toBe("22/78");
+    expect(currentRepresentationMonthlyLimit()).toBe(50);
   });
 });
 

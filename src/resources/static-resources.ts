@@ -108,7 +108,7 @@ export function registerResources(server: McpServer, api: ApiContext): void {
   registerResource(server,
     "tax_rules",
     "earveldaja://tax_rules",
-    { description: "Estonian VAT / income-tax reference: standard VAT-rate timeline, reduced rates, and input-VAT deduction & tax-free-limit rules (KMS § 30, § 30 lg 4; TuMS § 49)", mimeType: "text/plain" },
+    { description: "Estonian VAT / income-tax / accounting reference: standard VAT-rate and dividend-CIT timelines, reduced rates, input-VAT deduction & tax-free-limit rules (KMS § 30, § 30 lg 4; TuMS § 48–49), profit-distribution rules (ÄS § 157; TuMS § 50), and RPS process rules (corrections, inventory, retention)", mimeType: "text/plain" },
     async (uri) => {
       return {
         contents: [{

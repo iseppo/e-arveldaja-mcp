@@ -210,7 +210,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     });
 
   registerTool(server, "invalidate_purchase_invoice",
-    "Return a confirmed purchase invoice to draft status for editing.",
+    "Return a confirmed purchase invoice to draft status for editing. RPS § 10: corrections must stay traceable — record why and what replaces it.",
     idParam.shape, { ...mutate, title: "Invalidate Purchase Invoice" }, async ({ id }) => {
       const result = await api.purchaseInvoices.invalidate(id);
       logAudit({

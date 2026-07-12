@@ -157,7 +157,7 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
   });
 
   registerTool(server, "invalidate_sale_invoice",
-    "Return a confirmed sale invoice to draft status for editing. Required before delete_sale_invoice against a CONFIRMED invoice.",
+    "Return a confirmed sale invoice to draft status for editing. Required before delete_sale_invoice against a CONFIRMED invoice. RPS § 10: corrections must stay traceable — record why and what replaces it.",
     idParam.shape, { ...mutate, title: "Invalidate Sale Invoice" }, async ({ id }) => {
       const result = await api.saleInvoices.invalidate(id);
       logAudit({

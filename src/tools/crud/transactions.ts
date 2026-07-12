@@ -258,7 +258,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
   });
 
   registerTool(server, "invalidate_transaction",
-    "Invalidate (unconfirm) a confirmed transaction. Returns it to unconfirmed status for editing or deletion.",
+    "Invalidate (unconfirm) a confirmed transaction. Returns it to unconfirmed status for editing or deletion. RPS § 10: corrections must stay traceable — record why and what replaces it.",
     idParam.shape, { ...mutate, title: "Invalidate Transaction" }, async ({ id }) => {
       const result = await api.transactions.invalidate(id);
       logAudit({

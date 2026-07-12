@@ -323,7 +323,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     });
 
   registerTool(server, "invalidate_journal",
-    "Invalidate (reverse) a confirmed journal entry. Returns it to unconfirmed status for editing or deletion.",
+    "Invalidate (reverse) a confirmed journal entry. Returns it to unconfirmed status for editing or deletion. RPS § 10: corrections must stay traceable — tell the user to record why the entry was reversed and what replaces it.",
     idParam.shape, { ...mutate, title: "Invalidate Journal" }, async ({ id }) => {
       const result = await api.journals.invalidate(id);
       logAudit({

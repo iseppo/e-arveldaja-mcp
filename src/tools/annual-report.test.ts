@@ -312,6 +312,18 @@ describe("buildAnnualReportData", () => {
     expect(payload.unresolved_items.total_issues).toBe(0);
   });
 
+  it("prepare_year_end_close surfaces the RPS/ÄS statutory reminders (inventory, filing deadline, retention)", async () => {
+    const handler = setupTool("prepare_year_end_close", { journals: baseJournals });
+
+    const result = await handler({ year: 2025 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    const reminders = payload.statutory_reminders as string[];
+    expect(reminders.some(r => r.includes("RPS § 15") && r.includes("inventeeri"))).toBe(true);
+    expect(reminders.some(r => r.includes("ÄS § 179") && r.includes("6 kuu"))).toBe(true);
+    expect(reminders.some(r => r.includes("RPS § 12") && r.includes("7 aastat"))).toBe(true);
+  });
+
   it("prepare_year_end_close uses the standard 2970 current-year profit account by default", async () => {
     const handler = setupTool("prepare_year_end_close", {
       journals: baseJournals,

@@ -6,7 +6,16 @@ import { type ApiContext, isCompanyVatRegistered, coerceId } from "./crud-tools.
 import { computeAllBalances, sumCategory, type AccountBalance } from "./financial-statements.js";
 import { roundMoney } from "../money.js";
 import { create, readOnly } from "../annotations.js";
-import { computeRepresentationCostLimit, computeDonationLimit, classifyExpenseForVat } from "../estonian-tax-rules.js";
+import {
+  computeRepresentationCostLimit,
+  computeDonationLimit,
+  classifyExpenseForVat,
+  getCitRateForDate,
+  currentCitRate,
+  currentRepresentationMonthlyLimit,
+  CIT_RATE_TIMELINE,
+  VAT_REGISTRATION_THRESHOLD_EUR,
+} from "../estonian-tax-rules.js";
 import { logAudit } from "../audit-log.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
@@ -41,7 +50,14 @@ function isValidIsoDate(s: string): boolean {
 const isoDateSchema = (description: string) =>
   z.string().refine(isValidIsoDate, { message: "Expected valid YYYY-MM-DD date" }).describe(description);
 
-const VAT_REGISTRATION_THRESHOLD_EUR = 40000;
+/**
+ * Round DOWN to whole cents. Used for the reported maximum distributable
+ * dividend so that booking exactly the reported maximum always passes the
+ * legality checks it was derived from (round-half-up could overshoot by a cent).
+ */
+function floorMoney(x: number): number {
+  return Math.floor(x * 100 + 1e-9) / 100;
+}
 
 function saleInvoiceTurnoverAmount(invoice: SaleInvoice): number {
   const raw = invoice.base_net_price ?? invoice.net_price ?? invoice.base_gross_price ?? invoice.gross_price;
@@ -65,22 +81,9 @@ function thresholdStatus(input: {
   return "ok";
 }
 
-/**
- * Estonian corporate income tax rate on distributed profits (TuMS § 50).
- * Rate changed from 20/80 to 22/78 on 2025-01-01. ISO-date string compare is
- * only safe for strict YYYY-MM-DD, so we reject anything else defensively —
- * a DD.MM.YYYY value would compare lexically wrong and silently pick 20/80
- * for a 2025 distribution.
- */
-export function getCitRateForDate(effective_date: string): { num: number; den: number; formatted: string } {
-  if (!isValidIsoDate(effective_date)) {
-    throw new Error(`getCitRateForDate requires YYYY-MM-DD; got ${JSON.stringify(effective_date)}`);
-  }
-  if (effective_date < "2025-01-01") {
-    return { num: 20, den: 80, formatted: "20/80" };
-  }
-  return { num: 22, den: 78, formatted: "22/78" };
-}
+// The CIT rate timeline (TuMS § 50) lives in estonian-tax-rules.ts with the
+// other date-gated statutory data; re-exported here for existing importers.
+export { getCitRateForDate } from "../estonian-tax-rules.js";
 
 /**
  * Resolve the profit-and-loss income-tax-expense account (the "Tulumaks" line)
@@ -107,7 +110,10 @@ export function resolveIncomeTaxExpenseAccount(accounts: Account[], override?: n
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "prepare_dividend_package",
-    "Calculate dividend CIT (22/78 from 2025-01-01, 20/80 before) and create draft journal entries. Only the NET dividend debits retained earnings (Jaotamata kasum); the CIT books as a current-period income-tax expense (P&L 'Tulumaks' line), never a direct reduction of retained earnings. Hard-blocks distributions that lack retained earnings or would push net assets below share capital (ÄS § 157) unless force=true.",
+    `Calculate dividend CIT (${currentCitRate().formatted} from ${CIT_RATE_TIMELINE[CIT_RATE_TIMELINE.length - 1].from}; earlier dates date-gated) and create draft journal entries. ` +
+    "Only the NET dividend debits retained earnings (Jaotamata kasum); the CIT books as a current-period income-tax expense (P&L 'Tulumaks' line), never a direct reduction of retained earnings — so the ENTIRE retained-earnings balance is distributable as net dividend (ÄS § 157 lg 1). " +
+    "Hard-blocks a net dividend exceeding retained earnings, or a distribution whose gross effect (net + CIT) would push net assets below share capital + restricted reserves (ÄS § 157 lg 2), unless force=true. Reports max_net_dividend. " +
+    "Requires an approved annual report and a profit-distribution decision — attach the decision to the journal with attach_document.",
     {
       net_dividend: z.number().finite().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: coerceId.describe("Shareholder client ID"),
@@ -276,12 +282,43 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         );
       }
 
-      const retainedShortfall = retainedBalance < grossDividend;
+      // ÄS § 157 lg 1 ceiling is NET-based: the statutory limit applies to the
+      // distribution decided by the shareholders (the net dividend). The CIT is
+      // the company's own current-period income-tax expense (TuMS § 50, booked
+      // to the P&L "Tulumaks" line below), not part of the payout — so the
+      // ENTIRE retained-earnings balance is distributable as net dividend.
+      // The § 157 lg 2 net-assets floor below stays GROSS-based, because the
+      // payout does create both a dividend payable and a tax liability.
+      const retainedShortfall = retainedBalance < net_dividend;
       const netAssetsBreach = netAssetsAfterDistribution < legalCapitalFloor - 0.01;
       // Report the same verdict the block uses (same 0.01 tolerance), so the
       // echoed net_assets_check.sufficient never says "false" on a distribution
       // the tool actually books, or vice versa.
       const netAssetsSufficient = !netAssetsBreach;
+
+      // Maximum lawful NET dividend under both § 157 clauses, floored to whole
+      // cents so booking exactly this amount always passes both checks:
+      //  - lg 1: net ≤ retained earnings;
+      //  - lg 2: netAssetsBefore − net×(1+rate) ≥ floor  ⇔  net ≤ (netAssetsBefore − floor)/(1+rate).
+      const maxNetByRetained = Math.max(0, retainedBalance);
+      const maxNetByNetAssets = Math.max(0, (netAssetsBeforeDistribution - legalCapitalFloor) / (1 + taxRate));
+      const maxNetDividend = floorMoney(Math.min(maxNetByRetained, maxNetByNetAssets));
+      const maximumDistributable = {
+        max_net_dividend: maxNetDividend,
+        limited_by: maxNetByRetained <= maxNetByNetAssets ? "retained_earnings" : "net_assets",
+        max_net_by_retained_earnings: floorMoney(maxNetByRetained),
+        max_net_by_net_assets: floorMoney(maxNetByNetAssets),
+        note:
+          "Largest lawful NET dividend on this ledger: min(retained earnings [ÄS § 157 lg 1], " +
+          `(net assets − §157 lg 2 floor) × ${citRate.den}/${citRate.den + citRate.num} [tax comes on top of the payout]).`,
+      };
+
+      // Statutory prerequisites the ledger cannot prove — surfaced on every
+      // path (blocked, dry-run, executed) so the operator confirms them.
+      const complianceNotes = [
+        "ÄS § 157 lg 1: väljamakse eeldab KINNITATUD majandusaasta aruannet ja kasumi jaotamise otsust. Kontrolli, et mõlemad on olemas, ja lisa osanike otsus kandele (attach_document, entity_type='journal').",
+        `TuMS § 50: dividendi tulumaks (${citRate.formatted}) deklareeritakse TSD lisal 7 ja tasutakse väljamakse kuule järgneva kuu 10. kuupäevaks.`,
+      ];
 
       // Opening-balance caveat: share capital and retained earnings are commonly
       // entered as "Algbilansi kanded" (opening-balance entries), which the
@@ -321,8 +358,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           ...(retainedShortfall && {
             retained_earnings_check: {
               balance: retainedBalance,
-              gross_dividend_required: roundMoney(grossDividend),
-              shortfall: roundMoney(grossDividend - retainedBalance),
+              net_dividend_required: net_dividend,
+              shortfall: roundMoney(net_dividend - retainedBalance),
+              note: "ÄS § 157 lg 1 limit is NET-based: the CIT is a current-period expense, not part of the distribution.",
             },
           }),
           ...(netAssetsBreach && {
@@ -338,25 +376,27 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               shortfall: roundMoney(legalCapitalFloor - netAssetsAfterDistribution),
             },
           }),
+          maximum_distributable: maximumDistributable,
           calculation: { net_dividend, cit_rate: citRate.formatted, cit_amount: cit, gross_dividend: roundMoney(grossDividend) },
           // Surface non-blocking warnings (esp. the opening-balance caveat) on the
           // blocked path too: a "0 retained earnings" block is often exactly the
           // symptom of opening balances the /journals API omits, so the operator
           // must see that the check may have run on incomplete data.
           ...(warnings.length > 0 && { warnings }),
+          compliance_notes: complianceNotes,
           hint:
             retainedShortfall && netAssetsBreach
-              ? "Both retained-earnings and § 157 net-assets clauses fail. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action)."
+              ? `Both retained-earnings and § 157 net-assets clauses fail (max lawful net dividend: ${maxNetDividend} EUR). Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).`
               : retainedShortfall
-                ? "Retained earnings are insufficient. Distribution may be unlawful per ÄS § 157. Set force=true to create the journal anyway."
-                : "Distribution would push net assets below the ÄS § 157 floor (share capital + restricted reserves). Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).",
+                ? `Net dividend exceeds retained earnings (ÄS § 157 lg 1). Max lawful net dividend on this ledger: ${maxNetDividend} EUR. Set force=true to create the journal anyway.`
+                : `Distribution would push net assets below the ÄS § 157 lg 2 floor (share capital + restricted reserves; the check is gross-based because the CIT liability also reduces net assets). Max lawful net dividend on this ledger: ${maxNetDividend} EUR. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).`,
         });
       }
 
       if (retainedShortfall) {
         warnings.push(
-          `Retained earnings balance (${retainedBalance} EUR) is less than gross dividend (${roundMoney(grossDividend)} EUR). ` +
-          `Verify that distribution is lawful per ÄS § 157. Journal created because force=true.`
+          `Retained earnings balance (${retainedBalance} EUR) is less than the net dividend (${net_dividend} EUR). ` +
+          `Verify that distribution is lawful per ÄS § 157 lg 1. Journal created because force=true.`
         );
       }
       if (netAssetsBreach) {
@@ -377,8 +417,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // reduction of retained earnings, so it debits the income-tax-expense
       // account. Credits go to dividend payable and the tax liability. Net
       // assets still fall by the full gross (both a dividend payable and a tax
-      // liability arise), which is why the § 157 / retained-earnings checks
-      // above stay gross-based.
+      // liability arise), which is why the § 157 lg 2 net-assets check above is
+      // gross-based — while the § 157 lg 1 retained-earnings ceiling is
+      // net-based, since the tax is not part of the distribution.
       const postings = [
         { accounts_id: retainedAccount, type: "D" as const, amount: net_dividend },
         { accounts_id: incomeTaxExpenseAccount, type: "D" as const, amount: cit },
@@ -429,8 +470,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               retained_earnings_check: {
                 account: retainedAccount,
                 balance_before: retainedBalance,
-                sufficient: retainedBalance >= grossDividend,
+                net_dividend_required: net_dividend,
+                sufficient: !retainedShortfall,
               },
+              maximum_distributable: maximumDistributable,
               net_assets_check: {
                 net_assets_before_distribution: netAssetsBeforeDistribution,
                 gross_dividend: roundMoney(grossDividend),
@@ -443,6 +486,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
                 sufficient: netAssetsSufficient,
               },
               ...(warnings.length > 0 && { warnings }),
+              compliance_notes: complianceNotes,
               note: "No journal created. Set dry_run=false to execute.",
             }),
           }],
@@ -482,7 +526,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             retained_earnings_check: {
               account: retainedAccount,
               balance_before: retainedBalance,
-              sufficient: retainedBalance >= grossDividend,
+              net_dividend_required: net_dividend,
+              sufficient: !retainedShortfall,
             },
             net_assets_check: {
               net_assets_before_distribution: netAssetsBeforeDistribution,
@@ -495,6 +540,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               minimum_net_assets: legalCapitalFloor,
               sufficient: netAssetsSufficient,
             },
+            maximum_distributable: maximumDistributable,
             shareholder: { id: shareholder_client_id, name: shareholder.name },
             journal_entry: {
               api_response: result,
@@ -506,6 +552,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
               ],
             },
             ...(warnings.length > 0 && { warnings }),
+            compliance_notes: complianceNotes,
           }),
         }],
       };
@@ -756,7 +803,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "check_vat_registration_threshold",
-    "Check whether a non-VAT-registered Estonian company may be approaching or exceeding the 40 000 EUR VAT registration threshold under the 2025 rules. Read-only advisory: confirmed sale invoices provide the taxable/0% turnover base, while real-estate, insurance, and financial turnover are supplied separately so the operator can decide whether they are non-incidental and count toward the threshold.",
+    `Check whether a non-VAT-registered Estonian company may be approaching or exceeding the ${VAT_REGISTRATION_THRESHOLD_EUR} EUR VAT registration threshold under the 2025 rules. Read-only advisory: confirmed sale invoices provide the taxable/0% turnover base, while real-estate, insurance, and financial turnover are supplied separately so the operator can decide whether they are non-incidental and count toward the threshold.`,
     {
       year: z.number().int().min(2000).max(2100).optional().describe("Calendar year to check. Defaults to the current year."),
       taxable_turnover_adjustment: z.number().finite().optional().describe("Manual EUR adjustment to confirmed sale-invoice turnover. Use negative values to exclude fixed-asset disposals, non-Estonian-place turnover, or other amounts that should not count; use positive values for taxable/0% turnover not represented by sale invoices."),
@@ -878,7 +925,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "check_tax_free_limits",
-    "Compute cumulative TuMS § 49 tax-free limits (representation 50 €/month + 2% of payroll; donations 3% of payroll or 10% of prior-year profit) and the 22/78 income tax on any excess. Pure calculator over caller-supplied year-to-date figures (payroll from the TSD declaration, prior-year profit from compute_profit_and_loss); it does not read the ledger.",
+    `Compute cumulative TuMS § 49 tax-free limits (representation ${currentRepresentationMonthlyLimit()} €/month + 2% of payroll; donations 3% of payroll or 10% of prior-year profit) and the ${currentCitRate().formatted} income tax on any excess (rates date-gated). Pure calculator over caller-supplied year-to-date figures (payroll from the TSD declaration, prior-year profit from compute_profit_and_loss); it does not read the ledger.`,
     {
       as_of_date: isoDateSchema("Date the cumulative figures are taken as of (YYYY-MM-DD). Sets the 22/78 rate and the default months elapsed."),
       ytd_social_taxed_payroll: z.number().describe("Year-to-date payments subject to social tax (the 2%/3% base)."),

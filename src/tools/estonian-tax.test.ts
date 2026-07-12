@@ -423,7 +423,8 @@ describe("prepare_dividend_package", () => {
   // -------------------------------------------------------------------------
 
   it("returns error when retained earnings are insufficient (no force)", async () => {
-    // Net dividend 10 000 → gross ~12 820.51, but retained earnings only 5 000
+    // Net dividend 10 000, but retained earnings only 5 000 — the ÄS § 157
+    // lg 1 ceiling is NET-based, so 10 000 > 5 000 blocks.
     const journals = [
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 5000),
@@ -450,6 +451,15 @@ describe("prepare_dividend_package", () => {
     const text = r.content[0].text;
     expect(text).toContain("Insufficient retained earnings");
     expect(text).toContain("5000");
+    const data = parseResult(result);
+    const check = data.retained_earnings_check as { net_dividend_required: number; shortfall: number };
+    expect(check.net_dividend_required).toBe(10000);
+    expect(check.shortfall).toBe(5000);
+    // Net assets 7 500, floor 2 500 → net-assets headroom (7 500 − 2 500) × 78/100
+    // = 3 900 binds below the 5 000 retained balance.
+    const max = data.maximum_distributable as { max_net_dividend: number; limited_by: string };
+    expect(max.max_net_dividend).toBe(3900);
+    expect(max.limited_by).toBe("net_assets");
   });
 
   it("proceeds with warning when retained earnings are insufficient and force=true", async () => {
@@ -517,6 +527,116 @@ describe("prepare_dividend_package", () => {
     expect(check.sufficient).toBe(true);
   });
 
+  it("allows distributing the ENTIRE retained-earnings balance as net dividend (§ 157 lg 1 is net-based)", async () => {
+    // Retained 20 000, share capital 2 500, current-year profit 10 000.
+    // Net 20 000 → gross 25 641.03 EXCEEDS retained earnings — lawful anyway:
+    // the CIT is a current-period expense (TuMS § 50), not part of the
+    // distribution. Net assets before = 32 500; after = 6 858.97 ≥ floor 2 500.
+    // This is the exact scenario the old gross-based check wrongly blocked.
+    const accounts = [
+      ...makeStandardAccounts(),
+      makeAccount(4000, "C", "Tulud", "Müügitulu", "Sales revenue"),
+    ];
+    const journals = [
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]),
+      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(3000, "C", 2500)]),
+      makeJournal("2026-02-01", [makePosting(1000, "D", 10000), makePosting(4000, "C", 10000)]),
+    ];
+    api = makeApi(journals, accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 20000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    const check = data.retained_earnings_check as { sufficient: boolean; net_dividend_required: number };
+    expect(check.sufficient).toBe(true);
+    expect(check.net_dividend_required).toBe(20000);
+    const calc = data.calculation as { gross_dividend: number };
+    expect(calc.gross_dividend).toBe(25641.03); // gross > retained is fine
+    const warnings = (data.warnings ?? []) as string[];
+    expect(warnings.filter(w => w.includes("Retained earnings"))).toHaveLength(0);
+    expect(vi.mocked(api.journals.create)).toHaveBeenCalledOnce();
+  });
+
+  it("blocks a net dividend exceeding retained earnings and reports the retained-limited maximum", async () => {
+    // Retained 5 000 with a large net-assets buffer (profit 50 000): the
+    // retained-earnings clause is the binding limit, not net assets.
+    const accounts = [
+      ...makeStandardAccounts(),
+      makeAccount(4000, "C", "Tulud", "Müügitulu", "Sales revenue"),
+    ];
+    const journals = [
+      makeJournal("2024-01-01", [makePosting(1000, "D", 5000), makePosting(3020, "C", 5000)]),
+      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(3000, "C", 2500)]),
+      makeJournal("2026-02-01", [makePosting(1000, "D", 50000), makePosting(4000, "C", 50000)]),
+    ];
+    api = makeApi(journals, accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({
+      net_dividend: 6000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(String(data.error)).toContain("Insufficient retained earnings");
+    const max = data.maximum_distributable as { max_net_dividend: number; limited_by: string };
+    expect(max.max_net_dividend).toBe(5000);
+    expect(max.limited_by).toBe("retained_earnings");
+    expect(String(data.hint)).toContain("5000");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("surfaces statutory compliance notes (approved report + decision, TSD annex 7) on every path", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    const preview = parseResult(await cb({
+      net_dividend: 100,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+      dry_run: true,
+    }));
+    const previewNotes = preview.compliance_notes as string[];
+    expect(previewNotes.some(n => n.includes("KINNITATUD majandusaasta aruannet"))).toBe(true);
+    expect(previewNotes.some(n => n.includes("attach_document"))).toBe(true);
+    expect(previewNotes.some(n => n.includes("TSD lisal 7"))).toBe(true);
+
+    const executed = parseResult(await cb({
+      net_dividend: 100,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    }));
+    expect((executed.compliance_notes as string[]).some(n => n.includes("TSD lisal 7"))).toBe(true);
+  });
+
+  it("renders tool descriptions from the statutory data (rates and thresholds never hand-maintained)", () => {
+    const { server, configs } = makeMockServer();
+    registerEstonianTaxTools(server, makeApi(makeHealthyJournals(), makeStandardAccounts()));
+
+    const dividendMeta = toolMetadataText(configs.get("prepare_dividend_package")!);
+    expect(dividendMeta).toContain("22/78");
+    expect(dividendMeta).toContain("2025-01-01");
+    expect(dividendMeta).toContain("distributable as net dividend");
+    expect(dividendMeta).toContain("max_net_dividend");
+
+    const limitsMeta = toolMetadataText(configs.get("check_tax_free_limits")!);
+    expect(limitsMeta).toContain("50 €/month");
+    expect(limitsMeta).toContain("22/78");
+
+    const vatMeta = toolMetadataText(configs.get("check_vat_registration_threshold")!);
+    expect(vatMeta).toContain("40000 EUR");
+  });
+
   // -------------------------------------------------------------------------
   // Net assets rule (ÄS §157)
   // -------------------------------------------------------------------------
@@ -561,6 +681,10 @@ describe("prepare_dividend_package", () => {
     expect(isError(result)).toBe(true);
     const data = parseResult(result);
     expect(data.error).toBe("ÄS § 157 net assets breach");
+    // Net assets 7 000, floor 5 000 → max net = (7000 − 5000) × 78/100 = 1560.
+    const max = data.maximum_distributable as { max_net_dividend: number; limited_by: string };
+    expect(max.max_net_dividend).toBe(1560);
+    expect(max.limited_by).toBe("net_assets");
   });
 
   it("does not let a negative restricted-reserve balance lower the § 157 floor (clamped to ≥ 0)", async () => {

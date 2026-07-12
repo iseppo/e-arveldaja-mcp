@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-12
+
+### Fixed
+- **`prepare_dividend_package` retained-earnings ceiling is now NET-based (ÄS § 157 lg 1).** The check previously required retained earnings to cover the GROSS distribution (net + CIT), which wrongly blocked distributing the full retained-earnings balance as net dividend — under the prevailing reading of ÄS § 157 lg 1 the statutory ceiling applies to the distribution decided by the shareholders (the net dividend), while the 22/78 income tax is the company's own current-period expense (TuMS § 50), not part of the payout. The § 157 lg 2 net-assets floor stays gross-based, because the payout does create both a dividend payable and a tax liability. Regression tests cover the exact previously-blocked scenario (net dividend == full retained earnings, gross above it).
+
+### Added
+- **`maximum_distributable.max_net_dividend` on every `prepare_dividend_package` path** (blocked, dry-run, executed): the largest lawful net dividend on the current ledger, min(retained earnings [lg 1], (net assets − § 157 lg 2 floor) × 78/100), floored to whole cents so booking exactly the reported maximum always passes both checks, with `limited_by` naming the binding clause.
+- **`compliance_notes` on `prepare_dividend_package`**: ÄS § 157 lg 1 requires an approved annual report and a profit-distribution decision (attach the decision to the journal via `attach_document`), and the CIT is declared on TSD annex 7 by the 10th of the month following the payout (TuMS § 54).
+- **`earveldaja://tax_rules` now covers profit distribution and RPS process rules.** New `profit_distribution_rules` (ÄS § 157 lg 1 net-based ceiling incl. the "entire retained earnings distributable as net dividend" statement, ÄS § 157 lg 2 net-assets floor, TuMS § 50 rate/booking/declaration) and `accounting_process_rules` (RPS § 10 traceable corrections, RPS § 12 seven-year retention, RPS § 15 inventory duty + ÄS § 179 six-month filing deadline) catalogues, a TuMS § 48 fringe-benefit reference entry, the CIT rate timeline, the VAT registration threshold, and a `verified_at` freshness stamp (`TAX_RULES_VERIFIED_AT`).
+- **`prepare_year_end_close` returns `statutory_reminders`** — RPS § 15 inventory of asset/liability balances, ÄS § 179 six-month annual-report filing deadline, RPS § 12 seven-year source-document retention.
+- **RPS § 10 correction-traceability note on the four `invalidate_*` tool descriptions** (journal, transaction, purchase invoice, sale invoice).
+
+### Changed
+- **All date-gated statutory figures now live in `src/estonian-tax-rules.ts`.** The dividend CIT rate moved there as a `CIT_RATE_TIMELINE` (matching the VAT-rate timeline pattern; `getCitRateForDate` is re-exported from `src/tools/estonian-tax.ts` for existing importers), and `VAT_REGISTRATION_THRESHOLD_EUR` moved alongside it. The Estonian-tax tool descriptions (`prepare_dividend_package`, `check_tax_free_limits`, `check_vat_registration_threshold`) render their rates/limits from these constants instead of hardcoded strings, with tests pinning the rendered values, so a future law change is a one-module edit.
+
 ## [0.20.1] - 2026-07-11
 
 ### Fixed
