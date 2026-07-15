@@ -146,8 +146,17 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const current = await api.purchaseInvoices.get(id);
-    const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed: current.status === "CONFIRMED" });
+    const isConfirmed = current.status === "CONFIRMED";
+    const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed });
     if (updateErrors.length > 0) {
+      if (isConfirmed && Object.keys(parsed).length > 0) {
+        return toolError({
+          category: "confirmed_record_immutable",
+          error: "Confirmed purchase_invoice update contains ledger-bearing fields",
+          details: updateErrors,
+          next_action: "invalidate_purchase_invoice, fetch the draft, update it, then explicitly re-confirm",
+        });
+      }
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
     // The API rejects a metadata-only PATCH with "Products/services are
@@ -157,7 +166,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     // which PATCHes with the fetched invoice.items. A caller that supplies
     // items to change the lines keeps theirs.
     if (parsed.items === undefined && current.items !== undefined) {
-      parsed.items = current.items;
+      parsed.items = current.items.map(item => ({ ...item }));
     }
     const result = await api.purchaseInvoices.update(id, parsed);
     logAudit({

@@ -11,6 +11,7 @@ import {
   coerceNumericFields,
   MAX_JSON_INPUT_SIZE,
   registerCrudTools,
+  validateUpdateFields,
 } from "./crud-tools.js";
 import { registerClientTools } from "./crud/clients.js";
 import { registerJournalTools } from "./crud/journals.js";
@@ -1284,5 +1285,260 @@ describe("update_* post-confirmation audit lock", () => {
 
     const patch = updateMock.mock.calls[0]![1] as Record<string, unknown>;
     expect(patch.items).toEqual(callerItems);
+  });
+});
+
+describe("H04 confirmed accounting record update boundaries", () => {
+  it.each([
+    { entity: "journal" as const, field: "postings", value: [{ accounts_id: 4000, type: "D", amount: 10 }] },
+    { entity: "journal" as const, field: "effective_date", value: "2026-07-15" },
+    { entity: "journal" as const, field: "document_number", value: "DOC-7" },
+    { entity: "journal" as const, field: "clients_id", value: 17 },
+    { entity: "journal" as const, field: "is_deleted", value: true },
+    { entity: "journal" as const, field: "registered", value: true },
+    { entity: "journal" as const, field: "status", value: "CONFIRMED" },
+    { entity: "purchase_invoice" as const, field: "items", value: [{ custom_title: "Hosting", total_net_price: 10 }] },
+    { entity: "purchase_invoice" as const, field: "gross_price", value: 12.2 },
+    { entity: "purchase_invoice" as const, field: "clients_id", value: 17 },
+    { entity: "purchase_invoice" as const, field: "liability_accounts_id", value: 2310 },
+    { entity: "purchase_invoice" as const, field: "is_deleted", value: true },
+    { entity: "purchase_invoice" as const, field: "status", value: "CONFIRMED" },
+    { entity: "purchase_invoice" as const, field: "registered", value: true },
+    { entity: "purchase_invoice" as const, field: "payment_status", value: "PAID" },
+    { entity: "sale_invoice" as const, field: "items", value: [{ products_id: 1, custom_title: "Service", amount: 1 }] },
+    { entity: "sale_invoice" as const, field: "gross_price", value: 122 },
+    { entity: "sale_invoice" as const, field: "clients_id", value: 17 },
+    { entity: "sale_invoice" as const, field: "receivable_accounts_id", value: 1300 },
+    { entity: "sale_invoice" as const, field: "is_deleted", value: true },
+    { entity: "sale_invoice" as const, field: "status", value: "CONFIRMED" },
+    { entity: "sale_invoice" as const, field: "registered", value: true },
+    { entity: "sale_invoice" as const, field: "payment_status", value: "PAID" },
+  ])("H04 validator rejects $entity field $field on confirmed records", ({ entity, field, value }) => {
+    const errors = validateUpdateFields({ [field]: value }, entity, { isConfirmed: true });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(`\"${field}\"`);
+    expect(errors[0]).toContain(`invalidate_${entity}`);
+  });
+
+  it.each([
+    { entity: "journal" as const, field: "title", value: "Corrected description" },
+    { entity: "purchase_invoice" as const, field: "notes", value: "Internal note" },
+    { entity: "sale_invoice" as const, field: "notes", value: "Internal note" },
+    { entity: "sale_invoice" as const, field: "invoice_info", value: "Shown on invoice" },
+    { entity: "sale_invoice" as const, field: "payment_description", value: "Use reference number" },
+    { entity: "sale_invoice" as const, field: "additional_info_content", value: "Additional terms" },
+  ])("H04 validator allows confirmed metadata $entity field $field", ({ entity, field, value }) => {
+    expect(validateUpdateFields({ [field]: value }, entity, { isConfirmed: true })).toEqual([]);
+  });
+
+  it("H04 confirmed journal rejects postings with classified recovery guidance and no update", async () => {
+    const { api, handler } = getCrudToolHarness("update_journal", {
+      journals: { get: vi.fn().mockResolvedValue({ id: 7, registered: true }) },
+    });
+
+    const result = await handler({
+      id: 7,
+      data: { postings: [{ accounts_id: 4000, type: "D", amount: 10 }] },
+    }) as { content: Array<{ text: string }> };
+    const body = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(api.journals.update).not.toHaveBeenCalled();
+    expect(body).toMatchObject({
+      error: "Confirmed journal update contains ledger-bearing fields",
+      category: "confirmed_record_immutable",
+      next_action: "invalidate_journal, fetch the draft, update it, then explicitly re-confirm",
+    });
+    expect(body.details).toEqual([expect.stringContaining("invalidate_journal")]);
+  });
+
+  it("H04 confirmed purchase invoice rejects caller items unchanged before transport completion", async () => {
+    const callerItems = [{ custom_title: "Replacement line", total_net_price: 50 }];
+    const originalItems = callerItems.map(item => ({ ...item }));
+    const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({
+          id: 7,
+          status: "CONFIRMED",
+          items: [{ custom_title: "Current line", total_net_price: 10 }],
+        }),
+      },
+    });
+
+    const result = await handler({ id: 7, data: { items: callerItems } }) as { content: Array<{ text: string }> };
+    const body = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(callerItems).toEqual(originalItems);
+    expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
+    expect(body).toMatchObject({
+      error: "Confirmed purchase_invoice update contains ledger-bearing fields",
+      category: "confirmed_record_immutable",
+      next_action: "invalidate_purchase_invoice, fetch the draft, update it, then explicitly re-confirm",
+    });
+    expect(body.details).toEqual([expect.stringContaining("invalidate_purchase_invoice")]);
+  });
+
+  it("H04 confirmed sale invoice rejects items with classified recovery guidance and no update", async () => {
+    const { api, handler } = getCrudToolHarness("update_sale_invoice", {
+      saleInvoices: { get: vi.fn().mockResolvedValue({ id: 7, status: "CONFIRMED" }) },
+    });
+
+    const result = await handler({
+      id: 7,
+      data: { items: [{ products_id: 1, custom_title: "Service", amount: 1 }] },
+    }) as { content: Array<{ text: string }> };
+    const body = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(api.saleInvoices.update).not.toHaveBeenCalled();
+    expect(body).toMatchObject({
+      error: "Confirmed sale_invoice update contains ledger-bearing fields",
+      category: "confirmed_record_immutable",
+      next_action: "invalidate_sale_invoice, fetch the draft, update it, then explicitly re-confirm",
+    });
+    expect(body.details).toEqual([expect.stringContaining("invalidate_sale_invoice")]);
+  });
+
+  it("H04 confirmed journal forwards title metadata exactly", async () => {
+    const { api, handler } = getCrudToolHarness("update_journal", {
+      journals: {
+        get: vi.fn().mockResolvedValue({ id: 7, registered: true }),
+        update: vi.fn().mockResolvedValue({ id: 7, registered: true }),
+      },
+    });
+
+    await handler({ id: 7, data: { title: "Corrected description" } });
+
+    expect(api.journals.update).toHaveBeenCalledWith(7, { title: "Corrected description" });
+  });
+
+  it("H04 confirmed purchase notes clone the current item array and every item object", async () => {
+    const currentItems = [
+      { custom_title: "Hosting", total_net_price: 10 },
+      { custom_title: "Support", total_net_price: 20 },
+    ];
+    const update = vi.fn().mockResolvedValue({ id: 7, status: "CONFIRMED" });
+    const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "CONFIRMED", items: currentItems }),
+        update,
+      },
+    });
+
+    await handler({ id: 7, data: { notes: "Internal note" } });
+
+    expect(update).toHaveBeenCalledTimes(1);
+    const patch = update.mock.calls[0]![1] as { notes: string; items: Array<Record<string, unknown>> };
+    expect(patch).toEqual({ notes: "Internal note", items: currentItems });
+    expect(patch.items).not.toBe(currentItems);
+    patch.items.forEach((item, index) => expect(item).not.toBe(currentItems[index]));
+  });
+
+  it("H04 confirmed sale invoice forwards the complete allowed metadata patch", async () => {
+    const patch = {
+      notes: "Internal note",
+      invoice_info: "Shown on invoice",
+      payment_description: "Use reference number",
+      additional_info_content: "Additional terms",
+    };
+    const { api, handler } = getCrudToolHarness("update_sale_invoice", {
+      saleInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "CONFIRMED" }),
+        update: vi.fn().mockResolvedValue({ id: 7, status: "CONFIRMED" }),
+      },
+    });
+
+    await handler({ id: 7, data: patch });
+
+    expect(api.saleInvoices.update).toHaveBeenCalledWith(7, patch);
+  });
+
+  it("H04 draft journal blocked registered field retains Invalid update fields", async () => {
+    const { api, handler } = getCrudToolHarness("update_journal", {
+      journals: { get: vi.fn().mockResolvedValue({ id: 7, registered: false }) },
+    });
+
+    const result = await handler({ id: 7, data: { registered: true } }) as { content: Array<{ text: string }> };
+    const body = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(api.journals.update).not.toHaveBeenCalled();
+    expect(body.error).toBe("Invalid update fields");
+    expect(body).not.toHaveProperty("category", "confirmed_record_immutable");
+  });
+
+  it("H04 draft purchase invoice blocked payment status retains Invalid update fields", async () => {
+    const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: { get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }) },
+    });
+
+    const result = await handler({ id: 7, data: { payment_status: "PAID" } }) as { content: Array<{ text: string }> };
+    const body = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
+    expect(body.error).toBe("Invalid update fields");
+    expect(body).not.toHaveProperty("category", "confirmed_record_immutable");
+  });
+
+  it("H04 draft sale invoice blocked status retains Invalid update fields", async () => {
+    const { api, handler } = getCrudToolHarness("update_sale_invoice", {
+      saleInvoices: { get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }) },
+    });
+
+    const result = await handler({ id: 7, data: { status: "CONFIRMED" } }) as { content: Array<{ text: string }> };
+    const body = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(api.saleInvoices.update).not.toHaveBeenCalled();
+    expect(body.error).toBe("Invalid update fields");
+    expect(body).not.toHaveProperty("category", "confirmed_record_immutable");
+  });
+
+  it("H04 draft journal forwards effective date and postings exactly", async () => {
+    const patch = {
+      effective_date: "2026-07-15",
+      postings: [{ accounts_id: 4000, type: "D", amount: 10 }],
+    };
+    const { api, handler } = getCrudToolHarness("update_journal", {
+      journals: {
+        get: vi.fn().mockResolvedValue({ id: 7, registered: false }),
+        update: vi.fn().mockResolvedValue({ id: 7, registered: false }),
+      },
+    });
+
+    await handler({ id: 7, data: patch });
+
+    expect(api.journals.update).toHaveBeenCalledWith(7, patch);
+  });
+
+  it("H04 draft purchase invoice forwards journal date and caller items exactly", async () => {
+    const patch = {
+      journal_date: "2026-07-15",
+      items: [{ custom_title: "Hosting", total_net_price: 10 }],
+    };
+    const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", items: [{ custom_title: "Old" }] }),
+        update: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
+      },
+    });
+
+    await handler({ id: 7, data: patch });
+
+    expect(api.purchaseInvoices.update).toHaveBeenCalledWith(7, patch);
+  });
+
+  it("H04 draft sale invoice forwards journal date and items exactly", async () => {
+    const patch = {
+      journal_date: "2026-07-15",
+      items: [{ products_id: 1, custom_title: "Service", amount: 1 }],
+    };
+    const { api, handler } = getCrudToolHarness("update_sale_invoice", {
+      saleInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
+        update: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
+      },
+    });
+
+    await handler({ id: 7, data: patch });
+
+    expect(api.saleInvoices.update).toHaveBeenCalledWith(7, patch);
   });
 });

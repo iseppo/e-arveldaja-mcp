@@ -105,8 +105,17 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const current = await api.saleInvoices.get(id);
-    const updateErrors = validateUpdateFields(parsed, "sale_invoice", { isConfirmed: current.status === "CONFIRMED" });
+    const isConfirmed = current.status === "CONFIRMED";
+    const updateErrors = validateUpdateFields(parsed, "sale_invoice", { isConfirmed });
     if (updateErrors.length > 0) {
+      if (isConfirmed && Object.keys(parsed).length > 0) {
+        return toolError({
+          category: "confirmed_record_immutable",
+          error: "Confirmed sale_invoice update contains ledger-bearing fields",
+          details: updateErrors,
+          next_action: "invalidate_sale_invoice, fetch the draft, update it, then explicitly re-confirm",
+        });
+      }
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
     const result = await api.saleInvoices.update(id, parsed);

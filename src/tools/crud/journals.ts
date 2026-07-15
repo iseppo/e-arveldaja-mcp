@@ -187,8 +187,17 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
     const parsed = parseJsonObject(data, "data");
     const current = await api.journals.get(id);
-    const updateErrors = validateUpdateFields(parsed, "journal", { isConfirmed: current.registered === true });
+    const isConfirmed = current.registered === true;
+    const updateErrors = validateUpdateFields(parsed, "journal", { isConfirmed });
     if (updateErrors.length > 0) {
+      if (isConfirmed && Object.keys(parsed).length > 0) {
+        return toolError({
+          category: "confirmed_record_immutable",
+          error: "Confirmed journal update contains ledger-bearing fields",
+          details: updateErrors,
+          next_action: "invalidate_journal, fetch the draft, update it, then explicitly re-confirm",
+        });
+      }
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
     const result = await api.journals.update(id, parsed);

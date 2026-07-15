@@ -7,7 +7,15 @@ import type { TransactionsApi } from "../../api/transactions.api.js";
 import type { SaleInvoicesApi } from "../../api/sale-invoices.api.js";
 import type { PurchaseInvoicesApi } from "../../api/purchase-invoices.api.js";
 import type { ReferenceDataApi } from "../../api/readonly.api.js";
-import type { Posting, TransactionDistribution, SaleInvoiceItem, PurchaseInvoiceItem } from "../../types/api.js";
+import type {
+  Journal,
+  Posting,
+  PurchaseInvoice,
+  PurchaseInvoiceItem,
+  SaleInvoice,
+  SaleInvoiceItem,
+  TransactionDistribution,
+} from "../../types/api.js";
 
 export interface ApiContext {
   clients: ClientsApi;
@@ -273,21 +281,35 @@ export function validateTransactionUpdateData(data: Record<string, unknown>): st
  * but denylist-style so we don't have to track every legitimately-updatable
  * field as the API surface grows.
  */
-const UPDATE_BLOCKED_FIELDS: Record<string, { fields: string[]; alt: string; post_confirm_fields?: string[] }> = {
+const UPDATE_BLOCKED_FIELDS: Record<string, { fields: string[]; alt: string }> = {
   client:           { fields: ["id", "is_active", "deactivated_date"],
                        alt: "use deactivate_client / reactivate_client to change activation state" },
   product:          { fields: ["id", "is_active", "deactivated_date"],
                        alt: "use deactivate_product / reactivate_product to change activation state" },
   journal:          { fields: ["id", "registered", "register_date", "status"],
-                       alt: "use confirm_journal / invalidate_journal to change registration state",
-                       post_confirm_fields: ["effective_date"] },
+                       alt: "use confirm_journal / invalidate_journal to change registration state" },
   sale_invoice:     { fields: ["id", "status", "registered", "register_date"],
-                       alt: "use confirm_sale_invoice / invalidate_sale_invoice to change registration state",
-                       post_confirm_fields: ["create_date", "journal_date"] },
+                       alt: "use confirm_sale_invoice / invalidate_sale_invoice to change registration state" },
   purchase_invoice: { fields: ["id", "status", "registered", "register_date", "payment_status"],
-                       alt: "use confirm_purchase_invoice / invalidate_purchase_invoice to change registration state",
-                       post_confirm_fields: ["create_date", "journal_date"] },
+                       alt: "use confirm_purchase_invoice / invalidate_purchase_invoice to change registration state" },
 };
+
+type ConfirmableEntity = "journal" | "purchase_invoice" | "sale_invoice";
+type ConfirmedMetadataMatrix = {
+  journal: readonly (keyof Journal)[];
+  purchase_invoice: readonly (keyof PurchaseInvoice)[];
+  sale_invoice: readonly (keyof SaleInvoice)[];
+};
+
+export const CONFIRMED_UPDATE_METADATA = {
+  journal: ["title"],
+  purchase_invoice: ["notes"],
+  sale_invoice: ["notes", "invoice_info", "payment_description", "additional_info_content"],
+} as const satisfies ConfirmedMetadataMatrix;
+
+function isConfirmableEntity(entity: keyof typeof UPDATE_BLOCKED_FIELDS): entity is ConfirmableEntity {
+  return entity === "journal" || entity === "purchase_invoice" || entity === "sale_invoice";
+}
 
 export function validateUpdateFields(
   data: Record<string, unknown>,
@@ -295,28 +317,29 @@ export function validateUpdateFields(
   opts?: { isConfirmed?: boolean },
 ): string[] {
   const errors: string[] = [];
-  if (Object.keys(data).length === 0) {
+  const fields = Object.keys(data);
+  if (fields.length === 0) {
     errors.push(`update_${entity}: provide at least one field to update.`);
     return errors;
   }
+
+  if (opts?.isConfirmed && isConfirmableEntity(entity)) {
+    const allowedFields: readonly string[] = CONFIRMED_UPDATE_METADATA[entity];
+    for (const field of fields) {
+      if (!allowedFields.includes(field)) {
+        errors.push(
+          `Field "${field}" cannot be edited on a CONFIRMED ${entity} — ` +
+          `invalidate_${entity}, fetch the draft, edit it, then explicitly re-confirm.`
+        );
+      }
+    }
+    return errors;
+  }
+
   const entry = UPDATE_BLOCKED_FIELDS[entity]!;
   for (const field of entry.fields) {
     if (field in data) {
       errors.push(`Field "${field}" cannot be set via update_${entity} — ${entry.alt}.`);
-    }
-  }
-  // Post-confirmation audit-trail protection: once a journal is registered or
-  // an invoice is CONFIRMED, certain fields (dates) are audit-locked. Edits
-  // must go through invalidate -> edit -> re-confirm so the audit trail
-  // records the reversal explicitly.
-  if (opts?.isConfirmed && entry.post_confirm_fields) {
-    for (const field of entry.post_confirm_fields) {
-      if (field in data) {
-        errors.push(
-          `Field "${field}" cannot be edited on a CONFIRMED ${entity} — ` +
-          `invalidate_${entity} first, then edit, then re-confirm. Preserves the audit trail.`
-        );
-      }
     }
   }
   return errors;
