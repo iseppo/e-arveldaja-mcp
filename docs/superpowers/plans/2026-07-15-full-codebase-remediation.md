@@ -2423,69 +2423,167 @@ Append the M02 ledger row and require a clean worktree. Then run `npm run valida
 ### Task 9: H05 — Preserve approved purchase-invoice totals by default
 
 **Files:**
-- Modify: `src/api/purchase-invoices.api.ts:180-235`
+- Modify: `src/api/purchase-invoices.api.ts`
 - Modify: `src/api/purchase-invoices.api.test.ts`
-- Modify: `src/tools/pdf-workflow.ts:750-790`
+- Modify: `src/tools/crud/purchase-invoices.ts`
+- Modify: `src/tools/crud-tools.test.ts`
+- Modify: `src/tools/receipt-inbox-booking.ts`
+- Modify: `src/tools/receipt-inbox.ts`
+- Modify: `src/tools/receipt-batch-failure.test.ts`
+- Modify: `src/tools/receipt-inbox-tools.test.ts`
 - Modify: `src/tools/pdf-workflow.test.ts`
 
-**Interfaces:**
-- Consumes: `ConfirmPurchaseInvoiceOptions`.
-- Produces: `ConfirmPurchaseInvoiceOptions.recalculateTotals?: boolean`; default `false`, replacing opt-in preservation with opt-in correction.
+**Exact scope:** H05 changes exactly the nine paths above. `create_purchase_invoice_from_pdf` only creates/uploads a `PROJECT` invoice and never calls `confirmWithTotals`, so `src/tools/pdf-workflow.ts` is explicitly out of scope. Its test-only regression proves the document workflow passes exact supplier totals into draft creation and hands the ID to the ordinary default-preserving confirmation path. `src/tools/receipt-inbox-tools.test.ts` is required even though its paired production file already appears in scope: it owns the exact-arguments regression for the classification-created invoice caller, while `src/tools/receipt-batch-failure.test.ts` owns the receipt-batch caller. Do not change workflow Markdown/mirrors, shared CRUD helpers, invoice types, cache infrastructure, or any H07 code.
 
-- [ ] **Step 1: Write failing regressions**
+**Decision and compatibility boundary:** Merely flipping the API default would preserve totals but would leave the old public confirm tool able to repair them without showing the change. Removing repair entirely would strand legitimate malformed drafts. Use two distinct public calls instead: the new read-only `preview_purchase_invoice_totals_correction { id }` returns a no-mutation approval snapshot, while destructive `confirm_purchase_invoice { id, recalculate_totals: true, approved_correction: <exact preview> }` may apply only that exact fresh-approved snapshot and then confirm. Ordinary `confirm_purchase_invoice { id }` never recalculates. The internal `preserveExistingTotals` option is private and has exactly two production callers, so migrate both to the safe default and remove the alias rather than retaining two opposite flags.
 
-```ts
-it("preserves an approved one-cent supplier rounding difference by default", async () => {
-  get.mockResolvedValue({ id: 7, gross_price: 100.01, vat_price: 18.04, items: [{ total_net_price: 81.97, vat_amount: 18.03 }] });
-  await api.confirmWithTotals(7, true);
-  expect(patch).not.toHaveBeenCalledWith("/purchase_invoices/7", expect.objectContaining({ gross_price: 100 }));
-  expect(patch).toHaveBeenCalledWith("/purchase_invoices/7/register", {});
-});
-```
+**Interfaces and exact contracts:**
 
 ```ts
-it("PDF confirmation does not request recalculation", async () => {
-  await callTool("create_purchase_invoice_from_pdf", approvedArgs);
-  expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(expect.any(Number), true, { recalculateTotals: false });
-});
-```
+export interface PurchaseInvoiceTotalsCorrectionPreview {
+  invoice_id: number;
+  is_vat_registered: boolean;
+  current_vat_price: number | null;
+  current_gross_price: number | null;
+  proposed_vat_price: number;
+  proposed_gross_price: number;
+  correction_required: boolean;
+  approval_digest: string; // lowercase SHA-256, 64 hex characters
+}
 
-- [ ] **Step 2: Prove red**
-
-Run: `npx vitest run src/api/purchase-invoices.api.test.ts src/tools/pdf-workflow.test.ts -t "rounding difference|does not request recalculation"`
-
-Expected: FAIL because default confirmation recalculates and the PDF call does not express the approved mode.
-
-- [ ] **Step 3: Make correction explicit and previewed**
-
-```ts
-export interface ConfirmPurchaseInvoiceOptions { recalculateTotals?: boolean }
-
-if (options.recalculateTotals !== true && hasInvoiceGross && (hasInvoiceVat || !isVatRegistered)) {
-  return this.confirm(id);
+interface ConfirmPurchaseInvoiceOptions {
+  recalculateTotals?: boolean;
+  approvedCorrection?: PurchaseInvoiceTotalsCorrectionPreview;
 }
 ```
 
-At the PDF call site:
+- Default/false `recalculateTotals` with no approval calls `/purchase_invoices/:id/register` without a prerequisite GET or totals PATCH for all currencies, including complete totals, one-cent rounding differences, missing totals, non-VAT invoices, reverse-charge invoices, and non-EUR invoices. This is the H05 preservation rule: if required totals are missing, the upstream register may reject, and the caller may repair them only through the documented preview-then-approved-correction path below; default confirmation must never manufacture unapproved values. At the API boundary, `approvedCorrection` without `recalculateTotals: true` and `recalculateTotals: true` without `approvedCorrection` both reject before GET/PATCH rather than silently selecting a branch.
+- A correction preview invalidates the current connection's `/purchase_invoices` cache, performs a fresh GET, and rejects unless `status === "PROJECT"`. It also rejects missing/empty items, reverse-charge items, and any currency other than EUR. These failures occur before POST/PATCH/DELETE and before any audit write. An eligible preview calculates VAT/gross with the existing `roundMoney` rules and likewise performs no mutation or audit write.
+- The preview has exactly eight fields: the seven business fields `invoice_id`, `is_vat_registered`, `current_vat_price`, `current_gross_price`, `proposed_vat_price`, `proposed_gross_price`, and `correction_required`, plus `approval_digest`. `approval_digest` is SHA-256 over one exact snapshot containing `invoice_id`, `is_vat_registered`, fresh `status`, `net_price`, `vat_price`, `gross_price`, `cl_currencies_id`, `currency_rate`, `base_net_price`, `base_vat_price`, `base_gross_price`, `proposed_vat_price`, `proposed_gross_price`, `correction_required`, and the complete ordered `items` array. Normalize `undefined` to `null` recursively, sort object keys recursively, and preserve array/item order before JSON serialization. This binds status, every nominal/base total and currency scalar, the VAT mode, proposed values, and every full item field/order rather than only the visible current VAT/gross fields.
+- Explicit correction application again invalidates `/purchase_invoices`, performs a fresh GET, recomputes the complete preview, and requires every supplied preview field plus the digest to equal that fresh preview. Missing, malformed, foreign-invoice-ID, wrong-VAT-status, or stale approval throws/returns an actionable `correction_preview_mismatch` before totals PATCH or register. The same preview object cannot apply after total/item drift.
+- Correction application repeats the same eligibility checks before approval comparison: fresh status must still be `PROJECT`, currency must still be EUR, items must remain non-empty, and no item may be reverse charge. A `PROJECT` -> `CONFIRMED` transition after preview is therefore stale approval and rejects before totals PATCH/register/audit even if every total and item is otherwise unchanged. A matching approval updates only `{ vat_price: proposed_vat_price, gross_price: proposed_gross_price, items: freshItems }` when `correction_required` is true, then confirms. A matching no-op preview skips the update and confirms. Existing mutation ambiguity/cache behavior remains inherited from `BaseResource`.
+- Register `preview_purchase_invoice_totals_correction` separately with `{ ...readOnly, title: "Preview Purchase Invoice Totals Correction" }` and schema `{ id: coerceId }`. Its exact success envelope is `action: "previewed"`, `entity: "purchase_invoice"`, the invoice ID, the exact eight-field preview in `raw`, and `next_actions` containing one instruction to obtain approval and resubmit the preview unchanged to `confirm_purchase_invoice`.
+- Keep `confirm_purchase_invoice` destructive. Its schema adds `recalculate_totals?: boolean` and exactly one representation of `approved_correction`: a strict `z.object({...}).strict()` with the eight fields above, nullable finite current totals, finite proposed totals, positive integer invoice ID, boolean fields, and `/^[0-9a-f]{64}$/` digest. Do not accept a JSON string or coerce approval fields. `approved_correction` without `recalculate_totals: true`, or `recalculate_totals: true` without `approved_correction`, is rejected before API calls. Extra, missing, wrong-type, non-finite, or malformed-digest fields fail schema validation before the handler.
+- Use one exported API/tool-boundary `PurchaseInvoiceTotalsCorrectionError` carrying one of these exact codes: `correction_invoice_not_project`, `correction_currency_not_supported`, `correction_reverse_charge_not_supported`, `correction_items_missing`, `correction_preview_required`, or `correction_preview_mismatch`. Each instance also carries the exact `error` and `next_action` strings from this table:
 
-```ts
-const confirmationMode = { recalculateTotals: false } as const;
-// include confirmationMode in preview.raw and audit details
-await api.purchaseInvoices.confirmWithTotals(result.id, isVatRegistered, confirmationMode);
-```
+  | `code` | `error` | `next_action` |
+  | --- | --- | --- |
+  | `correction_invoice_not_project` | `Purchase invoice totals correction requires a PROJECT draft.` | `Fetch the invoice; if it is confirmed, invalidate it explicitly, then request and approve a new correction preview.` |
+  | `correction_currency_not_supported` | `Automatic purchase invoice totals correction supports EUR invoices only.` | `Review the currency and base totals manually; do not use automatic totals correction.` |
+  | `correction_reverse_charge_not_supported` | `Automatic totals correction is disabled for reverse-charge purchase invoices.` | `Review and preserve the reverse-charge totals manually, then confirm without recalculation only after approval.` |
+  | `correction_items_missing` | `Purchase invoice totals correction requires at least one item.` | `Add or repair the invoice items, then request and approve a new correction preview.` |
+  | `correction_preview_required` | `An exact approved purchase invoice totals correction preview is required.` | `Call preview_purchase_invoice_totals_correction, obtain approval, and resubmit that preview unchanged.` |
+  | `correction_preview_mismatch` | `The approved purchase invoice totals correction preview no longer matches fresh invoice state.` | `Call preview_purchase_invoice_totals_correction again and obtain approval for the new snapshot.` |
 
-- [ ] **Step 4: Prove green and review**
+  Both public handlers catch **only** `PurchaseInvoiceTotalsCorrectionError` and return `toolError({ category: "purchase_invoice_totals_correction", code: error.code, error: error.message, next_action: error.nextAction })`. All other errors rethrow unchanged so transport/ambiguity handling is not converted into an apparently safe domain rejection. Apply-time status/currency/item drift uses the corresponding eligibility code; approval field/digest drift uses `correction_preview_mismatch`. Every domain error rejects before a totals PATCH/register and before a confirmation audit.
+- Preview never writes an audit. Only successful confirmation writes `CONFIRMED`: the default path preserves the existing empty `details`, while approved correction writes `details: { recalculate_totals: true, approval_digest: approved_correction.approval_digest }`. Preview rejection, stale approval, validation failure, update failure, and register failure must not produce a successful confirmation audit.
 
-Run: `npx vitest run src/api/purchase-invoices.api.test.ts src/tools/pdf-workflow.test.ts && npm run build && git diff --check`
+- [ ] **Step 1: Baseline and current-consumer proof**
 
-Expected: source totals survive default/document confirmation; explicit `recalculateTotals: true` repairs missing/corrupt totals. Package the listed files and obtain independent `APPROVED`.
-
-- [ ] **Step 5: Commit H05**
+Run:
 
 ```bash
-git add src/api/purchase-invoices.api.ts src/api/purchase-invoices.api.test.ts src/tools/pdf-workflow.ts src/tools/pdf-workflow.test.ts
+git status --short
+rg -n "preserveExistingTotals|confirmWithTotals\\(" src/api src/tools
+npx vitest run src/api/purchase-invoices.api.test.ts src/tools/crud-tools.test.ts src/tools/pdf-workflow.test.ts src/tools/receipt-batch-failure.test.ts src/tools/receipt-inbox-tools.test.ts src/tools/receipt-inbox.test.ts
+```
+
+Require a clean worktree. Record the passing baseline count and the two production preservation callers: `src/tools/receipt-inbox-booking.ts` and the classification flow in `src/tools/receipt-inbox.ts`. Record the existing `confirm_purchase_invoice` tool inventory entry, prove `preview_purchase_invoice_totals_correction` is not yet registered, and confirm again that PDF creation does not call confirmation.
+
+- [ ] **Step 2: RED-A — API default and approval-binding matrix**
+
+In `src/api/purchase-invoices.api.test.ts`, add table-driven `H05 default preservation` cases for: VAT-registered complete totals with a one-cent supplier rounding difference; missing VAT; missing gross; non-VAT with item VAT; reverse charge; and non-EUR. Each calls `confirmWithTotals(id, isVatRegistered)` and asserts exactly one register PATCH, no invoice totals PATCH, and no prerequisite GET. The missing-VAT and missing-gross rows explicitly prove the safe default delegates validation to register rather than silently repairing; their repair is covered only by the approved correction rows.
+
+Add `H05 correction approval` tests that use sequential fresh GET responses and prove:
+
+1. `previewTotalsCorrection` fresh-reads after invalidating stale cached invoice/list entries, requires fresh `status: "PROJECT"`, returns the exact seven business fields plus a 64-hex digest, and makes no PATCH.
+2. Missing/empty items, non-`PROJECT` status, reverse-charge items, and non-EUR currency each reject without PATCH/register.
+3. `confirmWithTotals(..., { recalculateTotals: true })` rejects without update/register because approval is absent.
+4. A matching VAT-registered approval performs one totals PATCH with the fresh items and then register; a matching non-VAT approval proposes VAT 0 and payable gross using item VAT.
+5. A matching preview with `correction_required: false` skips totals PATCH and registers.
+6. A table-driven fresh-state drift matrix changes exactly one digest-bound scalar per row: `status`, `net_price`, `vat_price`, `gross_price`, `cl_currencies_id`, `currency_rate`, `base_net_price`, `base_vat_price`, or `base_gross_price`. Include `undefined` -> concrete and concrete -> `null` rows to prove the consistent null normalization. Every row rejects before update/register; status/currency eligibility failures use their exact code and all other scalar drift uses `correction_preview_mismatch`.
+7. Additional rows change the VAT-registration mode, proposed totals through item amount/VAT changes, an item's title/account field while keeping proposed totals unchanged, and item order. Every row rejects before update/register, proving the digest binds ID/VAT mode, proposed fields, and the full ordered items rather than only monetary output.
+8. The `status` matrix row specifically changes only `PROJECT` at preview to `CONFIRMED` at apply and proves status-bound approval rejects before update/register.
+9. Tampered invoice ID, VAT-registration flag, proposed value, digest, missing field, extra field, and non-finite value are rejected before mutation.
+
+Name both groups with the `H05` prefix so the focused RED selects them.
+
+- [ ] **Step 3: RED-B — public preview/apply, PDF handoff, and caller migration**
+
+In `src/tools/crud-tools.test.ts`, add `H05 correction tool inventory and workflow` tests:
+
+- tool inventory contains exactly one `preview_purchase_invoice_totals_correction` registration annotated read-only and retains destructive `confirm_purchase_invoice`;
+- preview `{ id }` calls only `previewTotalsCorrection`, returns `action: "previewed"` plus the exact eight-field preview and one approval next action, and writes no audit;
+- preview rejects non-`PROJECT`, reverse-charge, and non-EUR invoices with zero mutation/audit calls;
+- default confirm `{ id }` calls `confirmWithTotals(id, isVatRegistered)` with no third argument and writes one ordinary confirmation audit with existing empty details;
+- confirm with `recalculate_totals: true` but no approval, or approval without the flag, returns an actionable tool error with zero preview/confirm/audit calls;
+- an exact strict `approved_correction` object is forwarded as `{ recalculateTotals: true, approvedCorrection }`, confirms, and audits exactly `{ recalculate_totals: true, approval_digest }`;
+- JSON-string, extra/missing/wrong-type/non-finite/malformed-digest approvals fail the strict object schema with zero preview/confirm/audit calls;
+- a preview followed by fresh `PROJECT` -> `CONFIRMED` drift and a preview followed by EUR -> non-EUR drift both return an actionable error with zero update/register/audit calls.
+
+Invoke both registered handlers directly with `PurchaseInvoiceTotalsCorrectionError` rejections from their API mocks. For every exact code, assert `isError: true` and the exact `{ category: "purchase_invoice_totals_correction", code, error, next_action }` payload, with zero update/register/audit calls. Add a non-domain `Error("transport failed")` row for each handler and assert it rejects rather than returning `toolError`; this proves the catch boundary is limited to the typed correction error.
+
+In `src/tools/pdf-workflow.test.ts`, extend the creation fixture with a `confirmWithTotals` spy and add `H05 PDF handoff preserves approved supplier totals`: call `create_purchase_invoice_from_pdf` with a one-cent invoice rounding difference, assert the exact `vat_price`/`gross_price` reach `createAndSetTotals`, no confirmation method is called, and the returned draft note names plain `confirm_purchase_invoice` without requesting correction.
+
+In `src/tools/receipt-batch-failure.test.ts`, change the create-and-confirm expectation to the two-argument default call. In `src/tools/receipt-inbox-tools.test.ts`, add the same exact-arguments assertion for classification-created invoices. Keeping these in their owning suites is why both test paths are in the nine-file scope. These must initially fail while the two production receipt callers still pass `{ preserveExistingTotals: true }`.
+
+- [ ] **Step 4: Prove honest RED**
+
+Run separately:
+
+```bash
+npx vitest run src/api/purchase-invoices.api.test.ts -t "H05 default preservation"
+npx vitest run src/api/purchase-invoices.api.test.ts -t "H05 correction approval"
+npx vitest run src/tools/crud-tools.test.ts src/tools/pdf-workflow.test.ts -t "H05"
+npx vitest run src/tools/receipt-batch-failure.test.ts src/tools/receipt-inbox-tools.test.ts -t "H05"
+```
+
+Expected: behavior assertions fail because default API confirmation still recalculates, the separate preview tool/approval contract does not exist, and both receipt callers still pass the preservation alias. The PDF no-confirmation check may pass as a negative control; at least one runtime behavior assertion in every other focused group must fail for the intended reason. Zero selected tests, source-text-only assertions, or compile-only failures are not sufficient RED.
+
+- [ ] **Step 5: Implement minimal GREEN**
+
+In `src/api/purchase-invoices.api.ts`, import `createHash`, remove `preserveExistingTotals`, add the exact eight-field preview/options interfaces and exported typed correction error, deterministic recursive null-normalizing/key-sorting snapshot construction, the exact digest field list above, a cache-invalidating fresh-read helper, one calculation helper, `previewTotalsCorrection`, and approval equality checking. Put the default branch first so it calls `confirm(id)` without GET for every currency and regardless of total completeness. Preview and explicit apply must independently fresh-read, require `PROJECT`, reject reverse charge/non-EUR/missing items, and use the same snapshot builder. The explicit branch verifies the complete freshly recomputed preview before `update`, uses only fresh items, and then calls `confirm`.
+
+In `src/tools/crud/purchase-invoices.ts`, define one reusable strict Zod object schema for the exact eight-field approval and register `preview_purchase_invoice_totals_correction` with the read-only annotation before the destructive confirm tool. Add `recalculate_totals` and that object-only `approved_correction` to confirm. Wrap only each handler's correction API call in a typed-error catch that emits the exact structured `toolError` above; rethrow every other error. Preserve the existing default response/audit contract; only approved correction adds the exact digest audit details. Do not accept strings, do not let preview output claim confirmation, and do not audit preview or failed/stale correction.
+
+Remove the third argument from `confirmWithTotals` in `src/tools/receipt-inbox-booking.ts` and `src/tools/receipt-inbox.ts`; update the two exact caller tests. Do not alter their rollback, partial-mutation, transaction-confirmation, or audit sequencing. Do not edit `src/tools/pdf-workflow.ts`.
+
+- [ ] **Step 6: Focused and compatibility verification**
+
+Run in order:
+
+```bash
+npx vitest run src/api/purchase-invoices.api.test.ts -t "H05"
+npx vitest run src/tools/crud-tools.test.ts src/tools/pdf-workflow.test.ts -t "H05"
+npx vitest run src/tools/receipt-batch-failure.test.ts src/tools/receipt-inbox-tools.test.ts -t "H05"
+npx vitest run src/api/purchase-invoices.api.test.ts src/tools/crud-tools.test.ts src/tools/pdf-workflow.test.ts src/tools/receipt-batch-failure.test.ts src/tools/receipt-inbox-tools.test.ts src/tools/receipt-inbox.test.ts
+if rg -n "preserveExistingTotals" src; then exit 1; fi
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+```
+
+Require all focused/affected/full unit, build, release, and integration gates; only documented integration skips are allowed. Record exact counts. Confirm default confirmation has no GET/totals update for complete, missing-total, reverse-charge, or non-EUR rows; the separately registered read-only preview has no mutation/audit; non-`PROJECT`, non-EUR, reverse-charge, and stale approval have no mutation/audit; explicit approved EUR `PROJECT` correction updates then registers; both old preservation callers use the new default; and `preserveExistingTotals` has no remaining source match.
+
+- [ ] **Step 7: Freeze exact scope and obtain ordered independent reviews**
+
+Require exactly the nine tracked paths listed above and an empty real index. Copy the real index to `/tmp/h05-review-index`; with `GIT_INDEX_FILE=/tmp/h05-review-index`, add exactly those nine paths and write the staged binary diff to `.omc/reviews/H05.diff`. Require the artifact to be non-empty and byte-identical to `env GIT_INDEX_FILE=/tmp/h05-review-index git diff --cached --binary`, while `git diff --cached --name-only` on the real index remains empty.
+
+Give the frozen artifact, H05 spec row, RED outputs, GREEN/full outputs, scope list, and this contract to a fresh spec reviewer; require exact `SPEC COMPLIANCE: APPROVED`. Only after that approval, give the same frozen artifact/evidence to a different fresh quality reviewer; require exact `CODE QUALITY: APPROVED`. Any code/test edit invalidates the artifact and both verdicts and restarts Step 6 plus both reviews in order.
+
+- [ ] **Step 8: Final primary verification, commit, ledger, and clean handoff**
+
+After both approvals, rerun the Step 6 commands from the primary agent, `git diff --check`, the exact-scope check, and artifact byte comparison. Then:
+
+```bash
+git add src/api/purchase-invoices.api.ts src/api/purchase-invoices.api.test.ts src/tools/crud/purchase-invoices.ts src/tools/crud-tools.test.ts src/tools/receipt-inbox-booking.ts src/tools/receipt-inbox.ts src/tools/receipt-batch-failure.test.ts src/tools/receipt-inbox-tools.test.ts src/tools/pdf-workflow.test.ts
+git diff --cached --name-only
 git commit -m "fix(H05): preserve approved invoice totals"
 ```
+
+Require the staged list to equal the nine approved paths exactly. Append the H05 ledger row only after the commit succeeds, then require `git status --short` to be empty before beginning H07. Do not push.
 
 ### Task 10: H07 — Use invoice liability and allocated payment amount
 
