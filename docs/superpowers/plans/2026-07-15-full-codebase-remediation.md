@@ -76,11 +76,17 @@ Every independent review step below means all of the following, in this order:
 
 ```ts
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getProjectRoot } from "./paths.js";
 
 describe("getProjectRoot", () => {
+  it("does not depend on the Node 20 import.meta.dirname extension", () => {
+    const source = readFileSync(new URL("./paths.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("import.meta.dirname");
+  });
+
   it("derives the root through Node 18 ESM APIs", () => {
     const sourceUrl = pathToFileURL(resolve(process.cwd(), "src/paths.ts"));
     expect(getProjectRoot(sourceUrl)).toBe(process.cwd());
@@ -92,7 +98,7 @@ describe("getProjectRoot", () => {
 
 Run: `npx vitest run src/paths.test.ts`
 
-Expected: FAIL because `getProjectRoot` does not accept a source URL and the module still contains Node-20-only `import.meta.dirname`.
+Expected: FAIL because `src/paths.ts` still contains the Node-20-only `import.meta.dirname` expression. The behavioral assertion may already pass on Node 22; the source assertion is the required local RED, while the packed Node 18 smoke below is the runtime proof.
 
 - [ ] **Step 3: Implement the Node 18 path derivation**
 
@@ -162,9 +168,9 @@ Add `workflow_dispatch:` under `on:` and this separate job to `.github/workflows
 
 - [ ] **Step 5: Prove green and independently review**
 
-Run: `npx vitest run src/paths.test.ts src/release-metadata.test.ts && npm run build && PACK_DIR="$(mktemp -d)" && npm pack --ignore-scripts --pack-destination "$PACK_DIR" && INSTALL_DIR="$(mktemp -d)" && npm install --prefix "$INSTALL_DIR" --ignore-scripts --no-audit --no-fund "$PACK_DIR"/*.tgz && node scripts/smoke-node18-paths.mjs "$INSTALL_DIR/node_modules/e-arveldaja-mcp" && git diff --check`
+Run: `npx vitest run src/paths.test.ts src/release-metadata.test.ts && npm run build && PACK_DIR="$(mktemp -d)" && npm pack --ignore-scripts --pack-destination "$PACK_DIR" && INSTALL_DIR="$(mktemp -d)" && npm install --prefix "$INSTALL_DIR" --ignore-scripts --no-audit --no-fund "$PACK_DIR"/*.tgz && node scripts/smoke-node18-paths.mjs "$INSTALL_DIR/node_modules/e-arveldaja-mcp" && npx --yes node@18 scripts/smoke-node18-paths.mjs "$INSTALL_DIR/node_modules/e-arveldaja-mcp" && git diff --check`
 
-Expected: both suites PASS, build/pack/install/path-resource smoke PASS on the current Node, no whitespace errors, and `rg -n "import.meta.dirname" src dist` returns no match after build. Write `.omc/reviews/H01.diff` and obtain both required fresh-reviewer verdicts.
+Expected: both suites PASS, build/pack/install/path-resource smoke PASS on the current Node and the downloaded Node 18 binary, no whitespace errors, and `rg -n "import.meta.dirname" src dist` returns no match after build. Network approval may be required for the one-time `node@18` package download. Write `.omc/reviews/H01.diff` and obtain both required fresh-reviewer verdicts.
 
 - [ ] **Step 6: Commit H01**
 
@@ -173,9 +179,9 @@ git add src/paths.ts src/paths.test.ts src/release-metadata.test.ts scripts/smok
 git commit -m "fix(H01): support Node 18 project paths"
 ```
 
-- [ ] **Step 7: Prove Node 18 before closing H01, then ledger and clean**
+- [ ] **Step 7: Record Node 18 proof, then ledger and clean**
 
-Push the committed branch, run `gh workflow run ci.yml --ref fix/code-review-remediation`, locate the dispatched run with `gh run list --workflow=ci.yml --branch=fix/code-review-remediation --limit=1`, and run `gh run watch <run-id> --exit-status`. Do not close H01 until `package-path-smoke-node18` is green and its log contains `Node v18` plus `packed path/resource smoke passed`. Append the H01 ledger row with the run URL, then require `git status --short` to be empty. D02 later replaces this narrow smoke with the full packed-runtime validator; it does not defer H01's Node 18 proof.
+Append the H01 ledger row only after the local `npx --yes node@18` smoke reports `Node v18` plus `packed path/resource smoke passed`; then require `git status --short` to be empty. The committed CI lane preserves the same proof for future pushes, but this task does not authorize or require a push. D02 later replaces this narrow smoke with the full packed-runtime validator; it does not defer H01's Node 18 proof.
 
 ### Task 2: H02 — Lossless TOON emission
 
