@@ -2587,74 +2587,290 @@ Require the staged list to equal the nine approved paths exactly. Append the H05
 
 ### Task 10: H07 — Use invoice liability and allocated payment amount
 
-**Files:**
-- Modify: `src/tools/currency-rounding.ts:35-145,250-360`
+**Exact tracked scope (freeze before review):**
+- Modify: `src/tools/currency-rounding.ts`
 - Modify: `src/tools/currency-rounding.test.ts`
 
-**Interfaces:**
-- Consumes: transaction `distributions`, purchase invoice `items`, posting/account dimensions.
-- Produces: `resolveInvoiceSettlementProvenance(invoice, transactions): { liabilityAccountId: number; liabilityDimensionId?: number; paidEur: number } | { reviewReason: string }`.
+Do not change `src/types/api.ts`, accounting defaults, `BookingGuard`, purchase-invoice APIs, transaction APIs, audit infrastructure, workflow Markdown/mirrors, or any H16 code. `TransactionItem.relation_table` and `relation_id` are the canonical response-side relation fields; the public confirmation request's `related_table` spelling is not used here.
 
-- [ ] **Step 1: Write the failing regression**
+**Authoritative contracts:**
+- The invoice header is the liability source of truth. `liability_accounts_id` must be a positive integer. `liability_accounts_dimensions_id === null || liability_accounts_dimensions_id === undefined` means a valid account-level posting; a positive integer dimension is included on the liability posting; zero, negative, fractional, non-finite, or otherwise malformed account/dimension values force review.
+- Keep the existing public `liability_accounts_id` argument for compatibility, but relabel it as a deprecated assertion. It never supplies a missing invoice account and never overrides the invoice. Omitted or exactly matching values proceed; a mismatch forces review. Remove `DEFAULT_LIABILITY_ACCOUNT` from this tool's production decision path.
+- Preserve the invoice's raw `transactions` array in `linked_transaction_ids` for output compatibility. Resolve/fetch each distinct positive integer ID only once. A malformed linked ID forces review. A fetched transaction whose `id` is present but differs from the requested ID forces review.
+- Ignore a linked transaction only when `is_deleted === true` or `status === "VOID"`. Every other linked transaction must load, have `status === "CONFIRMED"`, have `type === "C"`, and contain at least one item with `relation_table === "purchase_invoices" && relation_id === invoice.id`. `PROJECT`, absent/unknown statuses, non-`C` directions, load errors, and missing canonical invoice relations force review for the entire invoice; never fall back to the whole transaction.
+- Sum **all** canonical matching items across all distinct active linked transactions. Multiple allocations for the same invoice in one transaction are legitimate rows and are all counted. Repeated transaction IDs are counted once. At least one active contributing allocation is required; an empty link array or links containing only deleted/VOID transactions force review.
+- For each active transaction, require finite positive `tx.amount`; when `tx.base_amount` or `tx.currency_rate` is present, it must also be finite and positive. For each matching item, require a finite positive `amount`; when `item.base_amount` or `item.currency_rate` is present, it must likewise be finite and positive even if another higher-precedence value is available. Normalize currency with `trim().toUpperCase()`, without defaulting to EUR. The item currency, when present, must equal the non-empty transaction currency; missing or conflicting source currency forces review.
+- Build the following EUR evidence in exact precedence order: (1) `item.base_amount`; (2) `item.amount` when the resolved source currency is EUR; (3) `item.amount * item.currency_rate`; (4) `item.amount * tx.currency_rate`; (5) `item.amount * tx.base_amount / tx.amount`. Round each evidence value with `roundMoney`. The first available value is authoritative, but every additional available evidence value must agree with it within `0.01`; contradictory evidence forces review. If none of the five derivations is available, return `allocation_eur_evidence_missing`. Also reject matching nominal allocations whose sum exceeds the transaction amount by more than `0.01`, or whose resolved matching EUR allocations exceed a present transaction base amount by more than `0.01`.
+- Sum the per-item EUR allocations and round the final `paidEur`. `settlementDate` is the latest valid date among contributing active transactions only; deleted, VOID, unconfirmed, relationless, or otherwise rejected transactions never influence it. Keep the existing invoice-date/today fallback only when every monetary/account provenance check passed but contributing transactions supplied no date.
+- `effectiveBaseGross` is required. Missing/non-finite booked base evidence creates a review candidate instead of silently skipping the invoice. A fully valid settlement whose rounded booked-minus-paid difference is zero remains omitted, preserving current output behavior.
+- Missing or conflicting provenance always emits a review candidate and blocks both mutation branches. Its `paid_eur` and `diff_eur` are `null` because neither a partial sum nor a fabricated difference is authoritative. It has no proposed patch/journal, never calls `purchaseInvoices.update`, `BookingGuard.createJournalOnce`, journal create/confirm, or `logAudit`, even with `execute: true`.
+- Choose error codes deterministically in this order: booked base; liability account; liability dimension; deprecated assertion; linked-array/ID validity; load/identity; liveness; confirmed status; outgoing direction; canonical relation; transaction/item amount; currency; rate/base validity; missing EUR evidence; redundant/total conflicts; no active allocation. The resolver validates all distinct requested links into read-only evidence/error records before selecting the result. It first selects the earliest error class in this precedence list; when more than one error has that code, an error without `transaction_id` sorts first and otherwise the smallest requested linked transaction ID wins. Do not let response order, asynchronous completion, or exception timing choose the public error. Successful `contributingTransactionIds` are unique and sorted numerically ascending; keep only `linked_transaction_ids` in the invoice's original raw order.
 
-```ts
-it("uses the invoice liability dimension and only its transaction allocation", async () => {
-  const { handler, api } = setupTool({
-    invoices: [{ id: 7, status: "CONFIRMED", payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD", base_gross_price: 90, transactions: [11], liability_accounts_id: 2120, liability_accounts_dimensions_id: 44 }],
-    transactionsById: { 11: { id: 11, amount: 100, base_amount: 90, items: [{ relation_table: "purchase_invoices", relation_id: 7, amount: 50, base_amount: 45 }] } },
-  });
-  await handler({ execute: true });
-  expect(api.journals.create).toHaveBeenCalledWith(expect.objectContaining({ postings: expect.arrayContaining([
-    expect.objectContaining({ accounts_id: 2120, accounts_dimensions_id: 44, amount: 45 }),
-  ]) }));
-});
-```
-
-- [ ] **Step 2: Prove red**
-
-Run: `npx vitest run src/tools/currency-rounding.test.ts -t "only its transaction allocation"`
-
-Expected: FAIL because the default liability account and full `base_amount` are used.
-
-- [ ] **Step 3: Resolve explicit provenance or require review**
+Define and use these exact local/exported interfaces so the output and tests cannot collapse back to an unstructured string:
 
 ```ts
-export function allocationEurForInvoice(tx: Transaction, invoiceId: number): number | undefined {
-  const distribution = tx.items?.find(d => d.relation_table === "purchase_invoices" && d.relation_id === invoiceId);
-  if (!distribution) return undefined;
-  if (distribution.base_amount !== undefined && Number.isFinite(distribution.base_amount)) return roundMoney(distribution.base_amount);
-  if ((distribution.cl_currencies_id ?? tx.cl_currencies_id ?? "EUR") === "EUR" && distribution.amount !== undefined) return roundMoney(distribution.amount);
-  if (distribution.amount !== undefined && tx.base_amount !== undefined && tx.amount !== 0) return roundMoney(distribution.amount * tx.base_amount / tx.amount);
-  return undefined;
+export type SettlementProvenanceErrorCode =
+  | "booked_base_missing_or_invalid"
+  | "invoice_liability_account_missing_or_invalid"
+  | "invoice_liability_dimension_invalid"
+  | "liability_account_assertion_conflict"
+  | "linked_transactions_missing"
+  | "linked_transaction_id_invalid"
+  | "linked_transaction_load_failed"
+  | "linked_transaction_identity_conflict"
+  | "linked_transaction_not_confirmed"
+  | "linked_transaction_direction_conflict"
+  | "invoice_distribution_missing"
+  | "allocation_amount_invalid"
+  | "allocation_currency_missing"
+  | "allocation_currency_conflict"
+  | "allocation_rate_invalid"
+  | "allocation_base_invalid"
+  | "allocation_eur_evidence_missing"
+  | "allocation_base_conflict"
+  | "no_active_settlement_allocation";
+
+export interface SettlementProvenanceError {
+  code: SettlementProvenanceErrorCode;
+  message: string;
+  transaction_id?: number;
 }
 
-const liability = full.liability_accounts_id === undefined ? undefined : {
-  accounts_id: full.liability_accounts_id,
-  accounts_dimensions_id: full.liability_accounts_dimensions_id ?? undefined,
+export const SETTLEMENT_PROVENANCE_MESSAGES: Record<SettlementProvenanceErrorCode, string> = {
+  booked_base_missing_or_invalid: "The invoice has no finite positive booked EUR gross amount.",
+  invoice_liability_account_missing_or_invalid: "The invoice liability account is missing or invalid.",
+  invoice_liability_dimension_invalid: "The invoice liability dimension is invalid.",
+  liability_account_assertion_conflict: "The deprecated liability account assertion conflicts with the invoice liability account.",
+  linked_transactions_missing: "The partially paid invoice has no linked transactions.",
+  linked_transaction_id_invalid: "A linked transaction ID is invalid.",
+  linked_transaction_load_failed: "A linked transaction could not be loaded.",
+  linked_transaction_identity_conflict: "A loaded transaction identity conflicts with the requested linked transaction ID.",
+  linked_transaction_not_confirmed: "An active linked transaction is not confirmed.",
+  linked_transaction_direction_conflict: "An active linked transaction is not an outgoing supplier payment.",
+  invoice_distribution_missing: "An active linked transaction has no canonical allocation to this purchase invoice.",
+  allocation_amount_invalid: "An invoice allocation amount is missing, non-finite, non-positive, or exceeds its transaction.",
+  allocation_currency_missing: "An invoice allocation has no explicit source currency.",
+  allocation_currency_conflict: "Invoice allocation and transaction currencies conflict.",
+  allocation_rate_invalid: "An invoice allocation exchange rate is non-finite or non-positive.",
+  allocation_base_invalid: "An allocation or transaction base amount is non-finite or non-positive.",
+  allocation_eur_evidence_missing: "An invoice allocation has no authoritative EUR amount evidence.",
+  allocation_base_conflict: "Available EUR allocation evidence conflicts by more than one cent or exceeds its transaction base.",
+  no_active_settlement_allocation: "No active linked transaction provides a valid allocation to this purchase invoice.",
 };
-const allocated = txIds.map(id => allocationEurForInvoice(await api.transactions.get(id), full.id!));
-if (!liability || allocated.some(value => value === undefined)) {
-  category = "review";
-  provenance_error = "Invoice liability account/dimension or allocated base amount is missing or conflicting.";
-} else {
-  paidEur = roundMoney(allocated.reduce((sum, value) => sum + value!, 0));
-  liabilityAccount = liability.accounts_id;
-  liabilityDimension = liability.accounts_dimensions_id;
-}
+
+export type InvoiceSettlementProvenance =
+  | {
+      ok: true;
+      liabilityAccountId: number;
+      liabilityDimensionId?: number;
+      paidEur: number;
+      settlementDate?: string;
+      contributingTransactionIds: number[];
+    }
+  | {
+      ok: false;
+      error: SettlementProvenanceError;
+      contributingTransactionIds: number[];
+    };
+
+export async function resolveInvoiceSettlementProvenance(
+  invoice: PurchaseInvoice,
+  loadTransaction: (id: number) => Promise<Transaction>,
+  liabilityAccountAssertion?: number,
+): Promise<InvoiceSettlementProvenance>;
 ```
 
-- [ ] **Step 4: Prove green and review**
+Every error message comes only from `SETTLEMENT_PROVENANCE_MESSAGES`; use `transaction_id` for row identity rather than interpolating IDs or upstream exception text into `message`. Normal candidates add `liability_account_id: number`, `liability_account_dimension_id: number | null`, and deduplicated `contributing_transaction_ids: number[]`. Change `ReconcileCandidate.paid_eur` and `.diff_eur` to `number | null`, add `provenance_error?: SettlementProvenanceError`, and keep `linked_transaction_ids: number[]` exactly as supplied by the invoice. Review candidates use `liability_account_id: number | null` and `liability_account_dimension_id: number | null` so independently proven header values survive while invalid values remain explicitly null; they set both monetary fields to null and carry only fully validated contributing IDs accumulated before failure. That partial list is diagnostic only and is never summed or mutated from. Successful FX-journal liability postings include the invoice dimension only when present. Both successful FX audit details and successful small-rounding audit details include `liability_account_id`, `liability_account_dimension_id`, `linked_transaction_ids`, `contributing_transaction_ids`, and `paid_eur`; audit only after the existing mutation succeeds.
 
-Run: `npx vitest run src/tools/currency-rounding.test.ts && npm run build && git diff --check`
+- [ ] **Step 1: Record the clean H07 baseline**
 
-Expected: account/dimension/allocation assertions PASS; missing provenance becomes review and creates nothing. Package the listed files and obtain independent `APPROVED`.
-
-- [ ] **Step 5: Commit H07**
+Before editing either file, require `git status --short` to be empty and run:
 
 ```bash
+npx vitest run src/tools/currency-rounding.test.ts
+npm run build
+git diff --check
+```
+
+Expected: the existing currency-rounding suite, build, and diff check pass. Record exact test counts for the ledger. If the baseline is not green, stop and diagnose rather than mixing an existing failure into H07.
+
+- [ ] **Step 2: Add canonical fixture support and the account/allocation RED matrix**
+
+Mock `logAudit` at module scope in `src/tools/currency-rounding.test.ts`. Update every legacy invoice fixture in this suite with a valid positive `liability_accounts_id` and either `liability_accounts_dimensions_id: null` for account-level posting or a valid positive integer dimension. Update every legacy transaction fixture to describe the accounting evidence it previously implied: a confirmed outgoing `type: "C"` transaction, a non-empty normalized currency, and one canonical matching `items` row for its invoice. Use explicit item `base_amount` for foreign/base fixtures and EUR item `amount` for EUR fixtures. Do not weaken production validation or make either test helper silently synthesize missing liability/allocation provenance; failure-matrix rows must be able to omit or corrupt each field deliberately.
+
+Add `H07 valid provenance` tests proving:
+1. An invoice on liability account `2120`, dimension `44`, with one transaction whose total is `100 USD / 90 EUR`, two matching allocations totalling `50 USD / 45 EUR`, and another invoice's allocation uses only `45 EUR`; a `0.50 EUR` residual posts the liability leg to `2120/44`, not `2310`, and never uses the whole `90 EUR` transaction.
+2. Multiple matching rows and multiple distinct transactions/currencies sum all per-invoice EUR allocations; a duplicate linked transaction ID is fetched and counted once. The candidate preserves the raw linked-ID order while emitting unique contributing IDs in ascending numeric order.
+3. Each derivation path works independently: explicit item base, EUR nominal, item rate, transaction rate, and proportional transaction base/nominal.
+4. Redundant agreeing evidence is accepted to the cent; `null`/`undefined` liability dimension produces an account-level posting without an `accounts_dimensions_id` property.
+5. An omitted deprecated account assertion and an exactly matching assertion produce identical invoice-derived postings. A conflicting assertion produces review and no mutation.
+6. The latest settlement date comes from a contributing transaction, while a later deleted/VOID link cannot move the journal date.
+7. The candidate and successful audit carry the exact invoice liability account/dimension, raw linked IDs, deduplicated contributing IDs, allocated paid EUR, and no default-account value.
+
+- [ ] **Step 3: Add the fail-closed RED matrix**
+
+Tag every new case with `H07`. Use table-driven tests where possible. For every review row invoke both dry-run and `execute: true`, assert the exact `provenance_error.code` and stable human-readable `message`, `paid_eur === null`, `diff_eur === null`, `category === "review"`, and zero calls to invoice update, guarded journal creation, journal create/confirm, and `logAudit`.
+
+| Matrix | Required rows | Why the pre-H07 implementation must fail |
+|---|---|---|
+| Booked/liability | missing/non-finite booked base; missing/zero/fractional/non-finite liability account; zero/negative/fractional/non-finite dimension; conflicting deprecated assertion | It skips missing booked base and otherwise uses a caller/default liability account without validating header provenance. |
+| Link identity/load | empty links; malformed ID; load rejection; fetched-ID mismatch | It sums whole fetched transactions and converts load failure into a generic partial-total review. |
+| Liveness/status/direction | only deleted; only VOID; PROJECT; missing/unknown status; incoming `D`; valid active plus an invalid active link | It ignores only deleted/VOID, does not require confirmed outgoing settlement evidence, and may mutate from the remaining partial sum. |
+| Relations | absent `items`; no canonical invoice relation; wrong `relation_table`; wrong `relation_id` | It never requires relation evidence and uses the entire transaction. |
+| Amount/currency | zero/negative/NaN/infinite item amount; missing transaction currency; conflicting item/transaction currency; zero/negative/NaN/infinite present item or transaction rate | It defaults missing currency to EUR and does not validate allocation fields. |
+| Base evidence | invalid present item base; invalid present transaction amount/base; foreign allocation with no item base, EUR nominal, item rate, transaction rate, or proportional transaction base; explicit-base vs EUR/item-rate/transaction-rate/proportional disagreement over `0.01`; matching nominal/base sums exceeding transaction totals | It accepts the whole transaction's base/rate and never compares redundant allocation evidence or reports missing EUR evidence precisely. |
+| Mutation/output | missing provenance that numerically resembles `small_rounding`; missing provenance that resembles `fx_difference`; review in execute mode | It can update an invoice or create an FX journal from incomplete/defaulted evidence and does not expose exact structured provenance errors. |
+
+Add deterministic-selection regressions with the raw links deliberately reversed and transaction loads completed out of order: two failures with the same code select the smaller requested transaction ID; failures with different codes select the earlier error class even when its transaction ID is larger; and successful contributors are sorted numerically while `linked_transaction_ids` remains raw. Add an explicit foreign-allocation row with no available derivation and require exactly `allocation_eur_evidence_missing` plus its mapped message.
+
+Keep two explicit negative controls in the same tagged block: a valid zero-difference settlement is omitted as before, and deleted/VOID links alongside one valid contributing transaction are ignored without contaminating its amount/date. These controls may already pass and must be reported separately from intended RED assertions.
+
+- [ ] **Step 4: Prove honest RED**
+
+Run:
+
+```bash
+npx vitest run src/tools/currency-rounding.test.ts -t "H07"
+```
+
+Expected: every new account/allocation/provenance assertion intended to expose H07 fails against the old production code for the stated reason; only the declared zero-difference and ignored-liveness negative controls may pass. Record exact failing/passing counts and inspect each failure. If a supposed regression passes, strengthen its fixture/assertion before production edits instead of treating an unexercised test as RED.
+
+- [ ] **Step 5: Implement the minimal provenance resolver and candidate integration**
+
+In `src/tools/currency-rounding.ts`, remove only `DEFAULT_LIABILITY_ACCOUNT` from the import/use path, update the argument description to deprecated assertion semantics, add the exact types above, and implement small helpers for positive-integer validation, currency normalization, cent agreement, per-row EUR evidence, and `resolveInvoiceSettlementProvenance`. The resolver must perform the contracts in the stated order, fetch each unique link once, retain transaction-rate evidence, collect read-only validation results before deterministic error selection, sort successful contributing IDs numerically, sum all matching rows, and return a discriminated result; it must not catch unrelated errors outside the transaction-load boundary or mutate/audit.
+
+Validate booked base before calling the resolver, then integrate the resolver before categorization. Build a structured review candidate immediately for invalid booked base or a resolver error, respecting the exact precedence above. For a successful result, calculate the existing diff/categories from allocated `paidEur`, preserve zero-diff omission, and carry liability/dimension/contributing IDs through preview and execute. Delete the old `transactionEurAmount` whole-transaction fallback and the default/caller-selected `liabilityAccount` variable. In the FX branch, construct the liability posting from `c.liability_account_id` and conditionally spread `accounts_dimensions_id`; never put the liability dimension on the FX gain/loss leg. Extend successful audit details with the exact provenance fields. Keep threshold classification, VAT/base patch arithmetic, `BookingGuard` idempotency, gain/loss account overrides/defaults, and unrelated response fields unchanged.
+
+- [ ] **Step 6: Prove GREEN and affected behavior**
+
+Run in order:
+
+```bash
+npx vitest run src/tools/currency-rounding.test.ts -t "H07"
+npx vitest run src/tools/currency-rounding.test.ts
+npm run build
+git diff --check
+```
+
+Expected: all H07 rows and the complete legacy suite pass; TypeScript accepts nullable review amounts and narrowed executable candidates; no default liability import/use remains in `currency-rounding.ts`; diff check is empty. Confirm with:
+
+```bash
+rg -n "DEFAULT_LIABILITY_ACCOUNT|liabilityAccount = liability_accounts_id" src/tools/currency-rounding.ts
+```
+
+Expected: no output.
+
+- [ ] **Step 7: Full repository verification**
+
+Run each command freshly and retain exact counts/output:
+
+```bash
+npm run validate:release
+npm test
+npm run test:integration
+git diff --check
+```
+
+Require release metadata, full unit, and integration PASS with only documented baseline skips. A failure must be diagnosed and fixed within the exact two-file scope or escalated before review.
+
+- [ ] **Step 8: Freeze the exact two-file review artifact without touching the real index**
+
+First prove exact tracked scope:
+
+```bash
+H07_EXPECTED="$(mktemp)"
+H07_ACTUAL="$(mktemp)"
+printf '%s\n' \
+  src/tools/currency-rounding.test.ts \
+  src/tools/currency-rounding.ts | sort -u > "$H07_EXPECTED"
+{
+  git diff --name-only HEAD
+  git ls-files --others --exclude-standard
+} | sort -u > "$H07_ACTUAL"
+diff -u "$H07_EXPECTED" "$H07_ACTUAL"
+rm -f "$H07_EXPECTED" "$H07_ACTUAL"
+git diff --cached --quiet
+```
+
+Expected: the comparison and real-index check exit 0 with no output. Then package through a copied temporary index:
+
+```bash
+mkdir -p .omc/reviews
+H07_INDEX="$(mktemp)"
+cp "$(git rev-parse --git-path index)" "$H07_INDEX"
+GIT_INDEX_FILE="$H07_INDEX" git add -- \
+  src/tools/currency-rounding.ts \
+  src/tools/currency-rounding.test.ts
+GIT_INDEX_FILE="$H07_INDEX" git diff --cached --binary --output=/tmp/H07.frozen.diff
+GIT_INDEX_FILE="$H07_INDEX" git diff --cached --check
+GIT_INDEX_FILE="$H07_INDEX" git diff --cached --name-only
+rm -f "$H07_INDEX"
+git diff --cached --quiet
+```
+
+Expected: temporary staged names are exactly the two H07 paths, the frozen diff is non-empty, its diff check passes, and the real index remains empty. Use `apply_patch` to create/replace ignored `.omc/reviews/H07.diff` with the exact `/tmp/H07.frozen.diff` content, then require:
+
+```bash
+test -s .omc/reviews/H07.diff
+cmp /tmp/H07.frozen.diff .omc/reviews/H07.diff
+```
+
+Expected: byte equality. Do not review an ordinary working-tree diff or a stale artifact.
+
+- [ ] **Step 9: Independent SPEC review**
+
+Give a fresh non-author reviewer the H07 spec row, this complete Task 10, `.omc/reviews/H07.diff`, baseline output, honest RED matrix/counts, and all GREEN/full verification. Require exactly:
+
+```text
+SPEC COMPLIANCE: APPROVED
+```
+
+The spec pass must audit invoice-header liability authority; deprecated assertion-only compatibility; optional-dimension semantics; raw/unique/contributing transaction IDs; deleted/VOID handling; confirmed outgoing status; canonical response-side relation names; all-row/multi-transaction allocation; exact item-base/EUR/item-rate/transaction-rate/proportional EUR evidence precedence and redundant-evidence conflict; the precise missing-evidence code/message; precedence-ranked and smallest-ID-stable error selection; numerically sorted contributing IDs with raw linked-ID compatibility; missing booked base; structured nullable review output; valid zero-diff omission; settlement-date provenance; no mutation/audit for review; invoice account/dimension on only the liability leg; successful audit provenance; preserved gain/loss/idempotency behavior; and exact two-file scope.
+
+- [ ] **Step 10: Independent QUALITY review**
+
+Only after SPEC approval, give a different fresh non-author reviewer the same frozen artifact and evidence. Require exactly:
+
+```text
+CODE QUALITY: APPROVED
+```
+
+The quality pass must inspect finite/positive guards before arithmetic, including present transaction rates; currency normalization without EUR default; exact item-base/EUR/item-rate/transaction-rate/proportional precedence; cent-consistency comparisons across every redundant evidence source; summing all matching rows without double-counting repeated IDs; precedence-ranked errors with smallest-ID tie-breaking independent of async completion; numerically sorted unique contributing IDs; partial diagnostic IDs never becoming executable totals; discriminated-union narrowing; deterministic exact error code/message selection including `allocation_eur_evidence_missing`; settlement-date contribution rules; conditional dimension spread; no broad catch/default fallback; explicit valid liability fields in every legacy invoice fixture; dry-run/execute mutation counts; audit timing/details; public output compatibility; and exact two-file scope. Any rejection or code/test edit invalidates both approvals: rerun Steps 6-8, overwrite the artifact, then restart SPEC followed by QUALITY with fresh reviewers.
+
+- [ ] **Step 11: Final primary verification, exact staging, and commit**
+
+After both approvals, rerun:
+
+```bash
+npx vitest run src/tools/currency-rounding.test.ts
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+cmp /tmp/H07.frozen.diff .omc/reviews/H07.diff
+```
+
+Repeat the Step 8 exact-scope comparison. Only then run:
+
+```bash
+git status --short
 git add src/tools/currency-rounding.ts src/tools/currency-rounding.test.ts
+git diff --cached --name-only
 git commit -m "fix(H07): reconcile allocated invoice settlement"
 ```
+
+Expected: staged names are exactly the two reviewed paths. Do not stage ignored review/ledger artifacts and do not push.
+
+- [ ] **Step 12: Ledger and clean sequential handoff**
+
+Use `apply_patch` to append one H07 row to `.omc/full-codebase-remediation-ledger.md` containing baseline counts, intended RED failures and two negative controls, focused/build/full/integration/release/diff results, byte-matching artifact evidence, ordered fresh SPEC and QUALITY verdicts, and the commit hash. Then run:
+
+```bash
+git status --short
+```
+
+Expected: empty output. Do not begin H16 or any later finding until the H07 row is complete and the worktree is clean.
 
 ### Task 11: H16 — Carry explicit Lightyear FX orientation
 
