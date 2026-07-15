@@ -2874,94 +2874,299 @@ Expected: empty output. Do not begin H16 or any later finding until the H07 row 
 
 ### Task 11: H16 — Carry explicit Lightyear FX orientation
 
-**Files:**
-- Modify: `src/tools/lightyear-investments.ts:30-230,336-445`
+**Exact tracked scope (freeze before review):**
+- Modify: `src/tools/lightyear-investments.ts`
 - Modify: `src/tools/lightyear-investments.test.ts`
 
-**Interfaces:**
-- Consumes: paired EUR/foreign conversion rows.
-- Produces: `FxRateOrientation`, `resolveFxPair(eurNet, foreignNet, rates)`, `InvestmentTrade.fx_orientation`, and orientation-aware `tradeFeeInEur`.
+Do not change CSV parsing, shared money utilities, public tool schemas, workflow Markdown/mirrors, accounting defaults, `BookingGuard`, audit infrastructure, distribution extraction/booking, gains matching, portfolio classification, or any H17/H18/M26 behavior. H16 may update every existing `tradeFeeInEur` consumer in this source file because they all depend on the corrected return contract, but it must not otherwise redesign their output.
 
-- [ ] **Step 1: Write the failing regression**
+**Authoritative contracts:**
+- `AccountStatementRow.fee` is denominated in that row's `ccy`; the existing `InvestmentTrade.fee_eur` name is retained only for output/internal compatibility. For a EUR trade the fee is already EUR. For a foreign trade it is unbookable until a fully reconciled conversion pair proves both a rate and its orientation. Never return or book the raw foreign fee as though it were EUR.
+- Export `FxRateOrientation = "eur_per_foreign" | "foreign_per_eur"`. `eur_per_foreign` converts a foreign amount with multiplication; `foreign_per_eur` converts it with division. Add `fx_orientation: FxRateOrientation | null` and `fx_review_reason: FxReviewReason | null` to `InvestmentTrade`; initialize both to `null`. Successful EUR trades keep a null rate/orientation/review reason.
+- Shortlist a conversion reference when at least one of its foreign-currency rows is on the trade's statement date and its absolute gross amount matches the trade's absolute gross amount within `0.01`. Zero shortlisted references produce `invalid_conversion_pair`; more than one shortlisted reference retains the existing ambiguous-match stop even if one candidate later appears better. A shortlisted reference is valid only when it contains exactly two rows total: one EUR conversion row and one row in the trade currency. Missing, duplicate, or third rows make that reference review-required rather than allowing `.find()` to pick one.
+- Before rate inference, require finite positive absolute gross and net amounts on both conversion rows; finite non-negative fees; gross and net with the same sign on each row; and opposite signs across the EUR and foreign net rows. On each row, `abs(abs(gross_amount) - abs(net_amount))` must equal `abs(fee)` within `0.01`. Both sides carrying a non-zero fee is ambiguous and stops for review. The trade row itself must have finite positive absolute gross/net values, finite non-negative fee, and Buy/Sell gross/net/fee arithmetic agreeing within `0.01`: Buy cash net is gross plus fee, Sell cash net is gross minus fee. A zero trade fee is valid.
+- `resolveFxPair(eurNet, foreignNet, rates)` takes positive absolute **net** amounts. A blank CSV rate is represented by zero and is absent, not invalid. Any supplied non-zero rate must be finite and at least `MIN_FX_RATE`; otherwise return `invalid_rate`. At least one supplied rate is required.
+- Derive candidates in amount space, never by array order: for each distinct supplied rate, `foreignNet * rate` is the `eur_per_foreign` candidate and `foreignNet / rate` is the `foreign_per_eur` candidate. A direction qualifies only when its rounded EUR result agrees with rounded `eurNet` within `0.01`. A rate qualifying in both directions is `ambiguous_orientation`; a supplied rate qualifying in neither is `contradictory_rate`. Collapse exact duplicate rate values before selection.
+- Within one orientation, select the candidate with the smallest unrounded absolute EUR residual. If two distinct rates tie within `1e-12 * max(1, eurNet)` for best residual, return `ambiguous_rate`; exact duplicates were already collapsed and do not create ambiguity. If only one orientation survives, use it. If both survive, require the two selected rates to be reciprocal in amount space: converting `foreignNet` through each must agree within `0.01`; otherwise return `contradictory_rate`. When they agree, deterministically choose the canonical `eur_per_foreign` candidate. Thus `(1126.28, 1303.22, [1.15709, 0.86423])` resolves to `{ rate: 0.86423, orientation: "eur_per_foreign" }`, independent of input order; the current first-rate loop is forbidden.
+- `resolveFxPair` returns a discriminated result with a stable code/message. Missing both rates, invalid rate, invalid net evidence, contradictory rates, and ties/orientation ambiguity remain distinct. Do not include raw CSV content in the stable message.
+- Conversion-fee EUR uses the same resolved pair: an EUR-side fee is already EUR; a foreign-side fee uses multiply/divide according to the chosen orientation. Reconcile the converted foreign fee against gross-minus-net evidence. No independent `fgnConv.fx_rate`/`eurConv.fx_rate` preference or raw-fee fallback remains in `fxFeeToEur`.
+- A reference is added to `consumedConversionRefs`, and its row indexes are added to `conversion_row_indexes`, only after row cardinality, gross/net/fee arithmetic, rate/orientation, and FX-fee conversion all succeed. Any failure leaves `eur_amount === 0`, rate/orientation/conversion reference unset, sets a stable review reason, emits a warning, and keeps both conversion rows unconsumed/unhandled for review.
+- Redefine `tradeFeeInEur` to accept `{ ccy, fee_eur, fx_rate, fx_orientation }` and return `number | null`. It returns `0` for an exactly zero finite fee; returns the rounded fee for a EUR trade; converts a positive foreign fee using its proven orientation; and returns `null` for negative/non-finite fees or missing/invalid foreign provenance. No caller may coerce `null` through arithmetic. Booking skips the trade before journal creation/audit; statement and portfolio aggregation preserve their existing response shapes but exclude the unproven amount and carry a review warning instead of using the nominal fee.
+- Every warning interpolating a statement `reference` or conversion reference wraps it with `wrapUntrustedOcr`, including parse, booking, and portfolio warnings touched by this finding. Keep ticker/currency tokens and stable reason messages trusted. Preserve registered tool names/input schemas, successful result keys, journal posting semantics, duplicate handling, titles, audit timing, and successful EUR behavior.
+- Emit H16 review warnings through one helper in the stable form `<wrapped order ref>: FX review [<code>] <mapped message>` and append ` Conversion <wrapped conversion ref>.` only when a single reference was shortlisted. `parse_lightyear_statement` sets `needs_review: true` whenever any extracted trade has `fx_review_reason`, even if cash reconciliation happens to balance and no conversion row exists. Booking and portfolio reuse the same mapped reason instead of inventing a second explanation.
+- H16 exports the orientation/result types and `resolveFxPair` in a form H17 can reuse for distribution FX provenance. Do not add distribution fields, pair distributions to conversions, or change distribution journal amounts in this task.
 
-```ts
-it.each([
-  [{ fee_eur: 10, fx_rate: 0.9, fx_orientation: "eur_per_foreign" as const }, 9],
-  [{ fee_eur: 10, fx_rate: 1.111111, fx_orientation: "foreign_per_eur" as const }, 9],
-])("converts fee using explicit orientation", (trade, expected) => {
-  expect(tradeFeeInEur(trade)).toBeCloseTo(expected, 2);
-});
-```
-
-```ts
-it("derives orientation from paired net amounts and rejects contradictory rates", () => {
-  expect(resolveFxPair(1126.28, 1303.22, [1.15709, 0.86423])).toEqual({
-    rate: 0.86423, orientation: "eur_per_foreign",
-  });
-  expect(resolveFxPair(1126.28, 1303.22, [7, 8])).toBeUndefined();
-});
-```
-
-- [ ] **Step 2: Prove red**
-
-Run: `npx vitest run src/tools/lightyear-investments.test.ts -t "explicit orientation"`
-
-Expected: FAIL because `tradeFeeInEur` always divides and accepts no orientation.
-
-- [ ] **Step 3: Preserve and apply the orientation**
+Use these exact public/local shapes:
 
 ```ts
-type FxRateOrientation = "eur_per_foreign" | "foreign_per_eur";
+export type FxRateOrientation = "eur_per_foreign" | "foreign_per_eur";
 
-export function resolveFxPair(eurNet: number, foreignNet: number, rates: number[]):
-  { rate: number; orientation: FxRateOrientation } | undefined {
-  if (!(eurNet > 0) || !(foreignNet > 0)) return undefined;
-  for (const rate of rates.filter(value => Number.isFinite(value) && value >= MIN_FX_RATE)) {
-    if (Math.abs(roundMoney(foreignNet * rate) - roundMoney(eurNet)) <= 0.01) return { rate, orientation: "eur_per_foreign" };
-    if (Math.abs(roundMoney(foreignNet / rate) - roundMoney(eurNet)) <= 0.01) return { rate, orientation: "foreign_per_eur" };
-  }
-  return undefined;
+export type FxReviewCode =
+  | "invalid_net_amount"
+  | "missing_rate"
+  | "invalid_rate"
+  | "contradictory_rate"
+  | "ambiguous_orientation"
+  | "ambiguous_rate"
+  | "invalid_conversion_pair"
+  | "conversion_amount_conflict"
+  | "conversion_fee_conflict"
+  | "trade_amount_conflict"
+  | "trade_fee_unresolved";
+
+export interface FxReviewReason {
+  code: FxReviewCode;
+  message: string;
 }
 
-export function tradeFeeInEur(trade: { fee_eur: number; fx_rate: number | null; fx_orientation: FxRateOrientation | null }): number {
-  if (!(trade.fee_eur > 0)) return 0;
-  if (trade.fx_rate === null || trade.fx_orientation === null || !Number.isFinite(trade.fx_rate) || trade.fx_rate < MIN_FX_RATE) return trade.fee_eur;
-  return roundMoney(trade.fx_orientation === "eur_per_foreign" ? trade.fee_eur * trade.fx_rate : trade.fee_eur / trade.fx_rate);
-}
+export type FxPairResolution =
+  | { ok: true; rate: number; orientation: FxRateOrientation }
+  | { ok: false; reason: FxReviewReason };
+
+export const FX_REVIEW_MESSAGES: Record<FxReviewCode, string> = {
+  invalid_net_amount: "The conversion pair has missing or invalid net amount evidence.",
+  missing_rate: "The conversion pair has no exchange-rate evidence.",
+  invalid_rate: "The conversion pair contains an invalid exchange rate.",
+  contradictory_rate: "The conversion rates contradict the paired EUR and foreign net amounts.",
+  ambiguous_orientation: "A conversion rate fits both exchange-rate orientations.",
+  ambiguous_rate: "Multiple exchange rates fit equally well and cannot be selected deterministically.",
+  invalid_conversion_pair: "The conversion reference does not contain one unambiguous EUR/foreign row pair.",
+  conversion_amount_conflict: "The conversion gross, net, sign, or fee arithmetic is inconsistent.",
+  conversion_fee_conflict: "The conversion fee cannot be attributed and converted to EUR unambiguously.",
+  trade_amount_conflict: "The trade gross, net, or fee arithmetic is inconsistent.",
+  trade_fee_unresolved: "The foreign-currency trade fee has no proven EUR conversion.",
+};
+
+export function resolveFxPair(
+  eurNet: number,
+  foreignNet: number,
+  rates: number[],
+): FxPairResolution;
+
+export function tradeFeeInEur(trade: {
+  ccy: string;
+  fee_eur: number;
+  fx_rate: number | null;
+  fx_orientation: FxRateOrientation | null;
+}): number | null;
 ```
 
-Replace the successful candidate branch with:
+Every review reason uses only `FX_REVIEW_MESSAGES[code]`. Conversion/trade references are separate wrapped warning context, never interpolated into `message`.
 
-```ts
-const fx = resolveFxPair(Math.abs(best.eurConv.net_amount), Math.abs(best.fgnConv.net_amount), [best.eurConv.fx_rate, best.fgnConv.fx_rate]);
-if (!fx) {
-  fxWarnings.push(`${wrapUntrustedOcr(row.reference) ?? ""}: conversion ${wrapUntrustedOcr(best.ref) ?? ""} has contradictory net amounts/rates; trade left unbookable.`);
-} else {
-  trade.eur_amount = Math.abs(best.eurConv.net_amount);
-  trade.fx_rate = fx.rate;
-  trade.fx_orientation = fx.orientation;
-  trade.fx_fee_eur = fxFeeToEur(best.eurConv, best.fgnConv);
-  trade.conversion_ref = best.ref;
-  trade.conversion_row_indexes = [best.eurConv.row_index, best.fgnConv.row_index];
-  consumedConversions.add(best.ref);
-  fxMatched = true;
-}
-```
+- [ ] **Step 1: Record the clean H16 baseline**
 
-Add `fx_orientation: FxRateOrientation | null` to `InvestmentTrade`, initialize it to `null`, and pass it at every `tradeFeeInEur` call. Existing EUR trades retain `null`.
-
-- [ ] **Step 4: Prove green and review**
-
-Run: `npx vitest run src/tools/lightyear-investments.test.ts && npm run build && git diff --check`
-
-Expected: multiply/divide, paired-net derivation, contradictory-pair skip, and existing Lightyear booking tests PASS. Write `.omc/reviews/H16.diff` and obtain both verdicts.
-
-- [ ] **Step 5: Commit H16**
+Before editing either file, require an empty worktree and run:
 
 ```bash
+git status --short
+npx vitest run src/tools/lightyear-investments.test.ts
+npm run build
+git diff --check
+```
+
+Expected at plan time: `src/tools/lightyear-investments.test.ts` passes **24/24**, the build passes, and the diff check is empty. Re-record the actual counts at execution time for the ledger. If baseline state differs, stop and diagnose instead of mixing it into H16.
+
+- [ ] **Step 2: Add the rate-orientation and fee-conversion RED matrix**
+
+Change the test import to a namespace import so the old module can load while the not-yet-exported resolver is asserted dynamically:
+
+```ts
+import * as lightyearInvestments from "./lightyear-investments.js";
+
+const { registerLightyearTools, tradeFeeInEur } = lightyearInvestments;
+```
+
+Tag every new test with `H16`. Add direct tests that prove:
+1. `tradeFeeInEur` multiplies `10` by `0.9` for `eur_per_foreign` and divides `10` by `1.111111...` for `foreign_per_eur`, returning `9` in each case.
+2. EUR fee `1.50` with null rate/orientation remains `1.50`; an exact zero remains zero. These are negative controls.
+3. A positive USD fee with missing rate, missing orientation, invalid/near-zero/non-finite rate, or ambiguous provenance returns `null`, never the raw fee. Negative/non-finite fees also return `null` rather than silently becoming zero.
+4. Every current consumer is exercised: `parse_lightyear_statement` ticker totals, `book_lightyear_trades` buy and sell postings, and `lightyear_portfolio_summary` cost/proceeds. Use one coherent pair for each orientation and assert the exact converted fee, not just a successful status.
+
+Use `(eurNet=1126.28, foreignNet=1303.22)` for resolver regressions. Through `(lightyearInvestments as any).resolveFxPair`, assert:
+- `[1.15709, 0.86423]` and its reverse both choose `{ rate: 0.86423, orientation: "eur_per_foreign" }`;
+- `[0.86423]` chooses multiply and `[1.15709]` chooses divide;
+- duplicate `[0.86423, 0.86423]` is accepted once;
+- no rates or `[0, 0]` return `missing_rate`; negative/near-zero/non-finite non-zero rates return `invalid_rate`; `[7]` and `[0.86423, 7]` return `contradictory_rate`;
+- a near-parity amount/rate that qualifies in both directions returns `ambiguous_orientation`;
+- two distinct same-orientation rates with an equal best residual return `ambiguous_rate` rather than depending on array order;
+- zero, negative, NaN, or infinite EUR/foreign nets return `invalid_net_amount`;
+- a valid reciprocal pair whose two directions disagree by more than a cent is rejected. Do not assert only truthiness: assert the entire discriminant, code, and stable mapped message.
+
+- [ ] **Step 3: Add extraction, provenance, and fail-closed RED integration tests**
+
+Build coherent CSV fixtures whose economics are explicit:
+
+```ts
+const coherentSellPair = [
+  ["10/11/2025 13:40:29", "CN-GZUJLSKLL2", "", "", "Conversion", "", "EUR", "", "1126.28", "1.15709", "0.00", "1126.28", ""],
+  ["10/11/2025 13:40:29", "CN-GZUJLSKLL2", "", "", "Conversion", "", "USD", "", "-1307.80", "0.86423", "4.58", "-1303.22", ""],
+  ["10/11/2025 08:51:32", "OR-ARAW6RQL67", "VUAA", "IE00BK5BQT80", "Sell", "10", "USD", "130.78", "1307.80", "", "0.00", "1307.80", ""],
+];
+```
+
+For a buy fixture, use opposite conversion signs and amounts/rates that reconcile to the same cent; do not retain the current incoherent `1307.80 EUR / 1131.92 USD` idempotency fixture. Update that legacy fixture's amounts only so its duplicate-guard purpose survives H16.
+
+Add handler-level tests proving:
+1. A fully coherent pair exposes no H16 warning, consumes exactly its two conversion rows, preserves the EUR net amount, converts the foreign conversion fee using the resolved orientation, converts the trade fee using that same orientation, and produces exact balanced buy/sell postings.
+2. Net rather than gross amounts drive rate orientation. The `1126.28/1303.22` example must choose `0.86423 eur_per_foreign`, while the `4.58 USD` conversion fee becomes `3.96 EUR`; gross/net/fee reconciliation remains separately asserted.
+3. Missing one rate succeeds when the other rate proves one direction; both rates missing stop. Reciprocal rate pairs are order-independent; exact duplicate rates are harmless.
+4. Missing EUR or foreign row, duplicate EUR or foreign rows, any third row under the same conversion reference, same-sign pair rows, zero net evidence, negative fees, gross/net/fee mismatch, both conversion rows charging a fee, contradictory rates, ambiguous orientation/rate, and foreign trade gross not matching the conversion all leave the trade unbookable. Non-finite amounts/rates are tested directly on the pure resolver/converter because `parseNumber` rejects them before extraction; do not weaken CSV parsing merely to reach H16.
+5. Buy `net = gross + fee` and Sell `net = gross - fee` are accepted to one cent; contradictions in either direction stop. EUR trades remain bookable without FX provenance, but malformed EUR trade fee arithmetic stops instead of bypassing H16.
+6. Each stopped case emits the exact stable reason code/message in wrapped warning context; leaves rate/orientation/ref/indexes unset; does not add the conversion ref to consumed refs; leaves conversion rows in `unhandled`; sets `needs_review`; and, for `book_lightyear_trades` with `dry_run: false`, creates no journal and writes no audit event.
+7. `parse_lightyear_statement`, `book_lightyear_trades`, and `lightyear_portfolio_summary` never add a raw foreign fee when `tradeFeeInEur` is null. Their output shapes and successful keys stay unchanged; affected totals omit the unproven amount and warnings identify review rather than fabricating EUR.
+8. Every warning path touched here wraps both the order reference and conversion reference with `UNTRUSTED_OCR` delimiters. Add an injection-shaped value for each and assert raw text never appears outside a wrapper.
+
+Keep explicit negative controls for a valid EUR trade with a fee, a valid foreign trade with zero fee, exact duplicate rate values, a valid single-rate pair, and the existing multiple-conversion-reference ambiguity behavior. Controls may pass against old code and must be reported separately from intended RED cases.
+
+- [ ] **Step 4: Prove honest RED against old production**
+
+Run:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts -t "H16"
+```
+
+Expected: the missing dynamic `resolveFxPair` export, multiply orientation, null-on-unproven-fee, pair reconciliation, fee provenance, consumption, and no-booking assertions fail for their stated H16 reasons. Only the declared EUR/zero-fee/legacy ambiguity negative controls may pass. Record exact pass/fail counts and inspect every failure. If an intended regression passes because the fixture does not reach the vulnerable arithmetic, strengthen the test before editing production.
+
+- [ ] **Step 5: Implement the minimal orientation/provenance resolver**
+
+In `src/tools/lightyear-investments.ts`, add the exact exported types/messages/signatures above near `InvestmentTrade`. Implement small pure helpers for normalized currency, finite positive/non-negative values, cent agreement, foreign-to-EUR conversion, trade gross/net/fee validation, conversion-row validation, deterministic best-rate selection, and pair reconciliation.
+
+Replace `fxFeeToEur(eurConv, fgnConv)` with a resolver that accepts the already proven `FxPairResolution & { ok: true }`, rejects dual/unreconciled fees, and uses the chosen orientation for a foreign fee. Replace the unconditional divide in `tradeFeeInEur` with the exact nullable contract. Do not throw or return a nominal fallback for bad foreign provenance.
+
+In `extractTrades`, retain date+foreign-gross candidate matching but validate row cardinality explicitly, call the pair/fee resolvers, and set `eur_amount`, `fx_rate`, `fx_orientation`, `fx_fee_eur`, `conversion_ref`, indexes, and consumed ref atomically only after full success. On failure set `fx_review_reason`, emit one stable wrapped warning for that trade/ref, and leave all monetary/provenance defaults untouched. Do not mark a failed candidate consumed.
+
+Update every `tradeFeeInEur` call in the statement summary, booking loop, and portfolio summary. Narrow `number | null` explicitly before arithmetic. Booking treats `fx_review_reason !== null`, missing foreign orientation, or null trade-fee conversion as review/skipped before building postings or auditing. Summary/portfolio retain existing payload shapes and existing H16 warnings, but use zero only as an explicitly review-marked display aggregate after excluding the unproven fee; they never claim the raw nominal amount is EUR. Wrap references in the portfolio warning and all new warnings. Keep successful EUR, gain/cost-basis, FX-expense, idempotency, progress, and duplicate paths unchanged.
+
+- [ ] **Step 6: Prove focused GREEN and call-site coverage**
+
+Run in order:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts -t "H16"
+npx vitest run src/tools/lightyear-investments.test.ts
+npm run build
+git diff --check
+rg -n "tradeFeeInEur\(" src/tools/lightyear-investments.ts
+```
+
+Expected: all H16 and legacy Lightyear tests pass; build/diff check pass; the search shows the function definition plus exactly the statement-summary, booking, portfolio-buy, and portfolio-sell consumers, and manual inspection confirms every consumer narrows null before arithmetic. Also run:
+
+```bash
+rg -n "fee_eur / rate|return trade\.fee_eur|fgnConv\.fx_rate|eurConv\.fx_rate" src/tools/lightyear-investments.ts
+```
+
+Expected: no unconditional-divide/raw-fee fallback or row-order fee conversion remains. A legitimate orientation-specific division inside the new conversion helper is allowed only if this search pattern is adjusted and inspected explicitly rather than waived broadly.
+
+- [ ] **Step 7: Full repository verification**
+
+Run freshly and retain exact counts/output:
+
+```bash
+npm run validate:release
+npm test
+npm run test:integration
+git diff --check
+```
+
+Require release metadata, full unit, and integration PASS with only documented baseline skips. Diagnose any failure; do not expand beyond the exact two-file H16 scope without stopping for plan review.
+
+- [ ] **Step 8: Freeze the exact two-file artifact without touching the real index**
+
+Prove exact tracked scope:
+
+```bash
+H16_EXPECTED="$(mktemp)"
+H16_ACTUAL="$(mktemp)"
+printf '%s\n' \
+  src/tools/lightyear-investments.test.ts \
+  src/tools/lightyear-investments.ts | sort -u > "$H16_EXPECTED"
+{
+  git diff --name-only HEAD
+  git ls-files --others --exclude-standard
+} | sort -u > "$H16_ACTUAL"
+diff -u "$H16_EXPECTED" "$H16_ACTUAL"
+rm -f "$H16_EXPECTED" "$H16_ACTUAL"
+git diff --cached --quiet
+```
+
+Expected: comparison and real-index check exit 0 silently. Package with a copied temporary index:
+
+```bash
+mkdir -p .omc/reviews
+H16_INDEX="$(mktemp)"
+cp "$(git rev-parse --git-path index)" "$H16_INDEX"
+GIT_INDEX_FILE="$H16_INDEX" git add -- \
+  src/tools/lightyear-investments.ts \
+  src/tools/lightyear-investments.test.ts
+GIT_INDEX_FILE="$H16_INDEX" git diff --cached --binary --output=/tmp/H16.frozen.diff
+GIT_INDEX_FILE="$H16_INDEX" git diff --cached --check
+GIT_INDEX_FILE="$H16_INDEX" git diff --cached --name-only
+rm -f "$H16_INDEX"
+git diff --cached --quiet
+```
+
+Expected: temporary staged names are exactly the two H16 paths, the artifact is non-empty, and the real index remains empty. Use `apply_patch` to create/replace ignored `.omc/reviews/H16.diff` with the exact `/tmp/H16.frozen.diff` bytes, then require:
+
+```bash
+test -s .omc/reviews/H16.diff
+cmp /tmp/H16.frozen.diff .omc/reviews/H16.diff
+```
+
+- [ ] **Step 9: Independent SPEC review**
+
+Give a fresh non-author reviewer the H16 spec row, this complete Task 11, `.omc/reviews/H16.diff`, baseline output, honest RED counts/matrix, and all GREEN/full verification. Require exactly:
+
+```text
+SPEC COMPLIANCE: APPROVED
+```
+
+The SPEC pass must audit exact two-file scope; net-based rate inference; finite/positive amounts/rates; blank-versus-invalid rate semantics; exact duplicate handling; smallest-residual selection; deterministic canonical EUR-per-foreign preference for the `1126.28/1303.22` reciprocal pair independent of rate order; reciprocal consistency; tie/orientation ambiguity; gross/net/sign/fee reconciliation; one/both missing rates; contradiction stop; orientation-aware trade and conversion fees; no raw foreign-fee fallback; atomic consumed conversion provenance; wrapped warnings; no journal/audit on review; all four `tradeFeeInEur` consumers; successful EUR/output/idempotency compatibility; and reusable H17 types without H17 implementation.
+
+- [ ] **Step 10: Independent QUALITY review**
+
+Only after SPEC approval, give a different fresh non-author reviewer the same frozen artifact and evidence. Require exactly:
+
+```text
+CODE QUALITY: APPROVED
+```
+
+The QUALITY pass must inspect discriminated-union narrowing; finite guards before arithmetic; cent comparisons in amount space; exact-duplicate collapse; deterministic residual/tie ordering; no rate-array-order dependency; reciprocal canonicalization; cardinality checks instead of `.find()`; Buy/Sell and conversion gross/net/fee rules; atomic provenance assignment/consumption; nullable fee conversion at every call site; no broad catch or nominal fallback; stable mapped reason messages; untrusted reference wrapping; focused fixtures that fail old production; successful response/schema compatibility; and exact two-file scope. Any rejection or code/test edit invalidates both approvals: rerun Steps 6-8, overwrite the artifact, then restart SPEC followed by QUALITY with fresh reviewers.
+
+- [ ] **Step 11: Final primary verification, exact staging, and commit**
+
+After both approvals, rerun:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+cmp /tmp/H16.frozen.diff .omc/reviews/H16.diff
+```
+
+Repeat the Step 8 exact-scope comparison. Only then run:
+
+```bash
+git status --short
 git add src/tools/lightyear-investments.ts src/tools/lightyear-investments.test.ts
+git diff --cached --name-only
 git commit -m "fix(H16): preserve Lightyear FX orientation"
 ```
+
+Expected: staged names are exactly the two reviewed H16 paths. Do not stage ignored review/ledger artifacts and do not push.
+
+- [ ] **Step 12: Ledger and clean sequential handoff**
+
+Use `apply_patch` to append one H16 row to `.omc/full-codebase-remediation-ledger.md` containing the baseline count, intended RED failures and negative controls, focused/build/full/integration/release/diff evidence, byte-matching artifact evidence, ordered fresh SPEC and QUALITY verdicts, and the commit hash. Then run:
+
+```bash
+git status --short
+```
+
+Expected: empty output. Do not begin H17 or any later finding until H16 is committed, recorded, and clean.
 
 ### Task 12: H17 — Preserve distribution currency and EUR values
 
