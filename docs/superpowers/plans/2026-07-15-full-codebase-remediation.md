@@ -941,306 +941,637 @@ Expected: both outputs are empty before Task 5 begins.
 - Modify: `src/booking-guard.test.ts`
 - Modify: `src/tools/estonian-tax.ts:450-525`
 - Modify: `src/tools/estonian-tax.test.ts`
+- Modify: `src/tools/currency-rounding.test.ts`
+- Modify: `src/tools/lightyear-investments.test.ts`
 
-**Interfaces:**
-- Consumes: H03 `MutationIndeterminateError`/`isMutationIndeterminate`, raw network `HttpError`, `api.journals.listAll()`, and cache invalidation.
-- Produces: `buildConnectionFingerprint(config)` from non-secret stable connection identity; `HttpClient.connectionFingerprint`; `BaseResource.connectionFingerprint`.
-- Produces: `acquireOwnedFileLock(lockPath, options): Promise<OwnedFileLock>` with async deadline/polling; only a well-formed owner whose PID is definitely dead may be reclaimed, while empty/malformed/live owners remain busy; `withOwnedFileLock` adds an in-process FIFO per lock path; `withBookingKeyLock<T>(connectionFingerprint, key, fn)`.
-- Produces: `BookingGuard.createJournalOnce(...)` fresh-checks inside that lock, recovers raw and structured ambiguous creates without retry, and never suppresses an ambiguous confirmation.
+**Contract and scope:**
+- This task consumes H03 `MutationIndeterminateError`, `isMutationIndeterminate`, and `describeMutationCause`; raw network ambiguity remains `HttpError.status === "network"`.
+- The cross-process key is `SHA-256(connectionFingerprint + NUL + "journal" + NUL + canonicalDocumentNumber)`. `cacheNamespace`, connection-array order, and `apiPassword` are deliberately excluded. The same fingerprint helper must initialize `HttpClient.connectionFingerprint` in its constructor and populate the audit-label fingerprint map in `index.ts`.
+- `JournalsApi.invalidateListCache()` is already the required public cache boundary. H06 does not widen `BaseResource.invalidateCache`; it exposes only a read-only `BaseResource.connectionFingerprint` getter and uses the existing public journals invalidator before every verification read.
+- Lock acquisition uses a fully-written owner candidate plus atomic hard-link publication. Empty/malformed owners and well-formed owners whose PID is live or cannot be proved dead remain busy until the deadline. Only a well-formed `ESRCH` main owner may be reclaimed after this process publishes a previously absent, independently owned reclaim guard; an already-existing reclaim guard is never auto-reclaimed. Timeout is the stable `lock_busy` category from the approved spec, not `lock_timeout`.
+- `createJournalOnce` performs a cache invalidation and fresh upstream lookup *after* entering the keyed lock. Raw or structured ambiguous creates, absent `created_object_id`, and failed verification reads never trigger a second create. Confirmation ambiguity is verified by the known journal ID; an inconclusive or failed verification throws `MutationIndeterminateError` with that ID.
+- Dividend identity remains backward compatible: its canonical stored number and lock business key are exactly `DIV-<effective_date>-<validated shareholder_client_id>`. Do not introduce a colon-form `DIV:` number, use `shareholder.id`, or add the amount to the key. Existing created-path response fields and `CREATED` audit summary/details remain stable; the duplicate path is explicitly reported without claiming a second create.
+- H06 may modify exactly the fifteen paths listed above. The five new files are untracked until commit, so all verification/review packaging must use a copied temporary index.
 
-- [ ] **Step 1: Write deterministic concurrency regressions**
+- [ ] **Step 1: Verify the clean fifteen-file scope**
+
+Run:
+
+```bash
+git status --short
+git diff --name-only
+git ls-files --others --exclude-standard
+```
+
+Expected: all outputs are empty. Do not begin H06 if H04 is not committed, its ledger row is incomplete, or the worktree is dirty.
+
+- [ ] **Step 2: RED-A — specify one stable connection fingerprint**
+
+Create `src/connection-fingerprint.test.ts` with test titles containing `H06-A`. Cover all of these assertions:
 
 ```ts
-it("uses the same fingerprint across process-local cache namespaces", () => {
-  const config = { baseUrl: "https://ariregister.rik.ee/est/api", apiKeyId: "id", apiPublicValue: "public" };
-  expect(buildConnectionFingerprint(config)).toBe(buildConnectionFingerprint(config));
-  expect(new HttpClient({ ...config, apiPassword: "one" }, "connection:0").connectionFingerprint)
-    .toBe(new HttpClient({ ...config, apiPassword: "two" }, "connection:9").connectionFingerprint);
+const config = {
+  baseUrl: "https://rmp-api.rik.ee/v1/",
+  apiKeyId: "key-id",
+  apiPublicValue: "public-value",
+  apiPassword: "password-one",
+};
+
+it("H06-A normalizes the URL and excludes process-local and secret values", () => {
+  const expected = createHash("sha256")
+    .update("https://rmp-api.rik.ee/v1\nkey-id\npublic-value")
+    .digest("hex");
+  const rotatedConfig = {
+    ...config,
+    baseUrl: " https://rmp-api.rik.ee/v1 ",
+    apiPassword: "password-two",
+  };
+  expect(buildConnectionFingerprint(config)).toBe(expected);
+  expect(buildConnectionFingerprint(rotatedConfig)).toBe(expected);
 });
 
-it("reclaims only a well-formed owner whose PID is definitely dead", async () => {
-  const lockPath = resolve(tempDir, "booking.lock");
-  await writeFile(lockPath, JSON.stringify({ pid: 99999999, nonce: "dead", createdAt: "2026-01-01T00:00:00.000Z" }), { mode: 0o600 });
-  const lock = await acquireOwnedFileLock(lockPath, { timeoutMs: 250, pollMs: 5 });
-  await lock.release();
+it("H06-A initializes equal clients independently of cache namespace and password", () => {
+  const a = new HttpClient(config, "connection:0");
+  const b = new HttpClient({ ...config, apiPassword: "rotated" }, "connection:9");
+  expect(a.connectionFingerprint).toBe(buildConnectionFingerprint(config));
+  expect(b.connectionFingerprint).toBe(a.connectionFingerprint);
 });
 
-it.each(["not-json", ""])("treats malformed or empty owner token %j as busy", async (token) => {
-  const lockPath = resolve(tempDir, "booking.lock");
-  await writeFile(lockPath, token, { mode: 0o600 });
-  await expect(acquireOwnedFileLock(lockPath, { timeoutMs: 30, pollMs: 5 }))
-    .rejects.toMatchObject({ category: "lock_timeout" });
-  expect(await readFile(lockPath, "utf8")).toBe(token);
+it("H06-A makes BaseResource expose the client fingerprint read-only", () => {
+  const resource = new BaseResource<{ id: number }>(new HttpClient(config), "/items");
+  expect(resource.connectionFingerprint).toBe(buildConnectionFingerprint(config));
 });
 
-it("leaves a live owner until deadline", async () => {
-  const lockPath = resolve(tempDir, "booking.lock");
-  await writeFile(lockPath, JSON.stringify({ pid: process.pid, nonce: "live", createdAt: new Date().toISOString() }), { mode: 0o600 });
-  await expect(acquireOwnedFileLock(lockPath, { timeoutMs: 30, pollMs: 5 }))
-    .rejects.toMatchObject({ category: "lock_timeout" });
+it("H06-A makes index audit initialization reuse the shared helper", () => {
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  expect(source).toContain("buildConnectionFingerprint(config.config)");
+  expect(source).not.toMatch(/function buildConnectionFingerprint\s*\(/);
 });
 ```
 
-Create `src/__fixtures__/booking-guard-child.ts`: it builds a fake journals API backed by a shared JSON state file, uses the supplied stable fingerprint and `EARVELDAJA_LOCK_DIR`, calls `BookingGuard.load(...).createJournalOnce({ ns: "FX", id: "child-proof" }, payload, { confirm: false })`, and prints the status. The fake `create` waits 75 ms and appends one journal. In `booking-guard.test.ts`, spawn two independent processes with `process.execPath`, `--import`, `tsx`, and the fixture path; impose a 5-second timeout on each, require exit code 0, require statuses `created` and `duplicate`, and assert the shared state contains exactly one journal. This is the cross-process proof; an in-process `Promise.all` test alone is insufficient.
+The last assertion is intentionally source-level: `index.ts` does not export startup internals, and the requirement is specifically that audit initialization cannot drift to a second implementation. In `src/api/base-resource.test.ts`, update `makeClient` to include a deterministic `connectionFingerprint` and add an `H06-A` getter assertion so structural fakes remain type-honest.
 
-Add API ambiguity tests using the existing `setup` helper:
+- [ ] **Step 3: Prove RED-A**
 
-```ts
-it.each([networkError(), new MutationIndeterminateError({
-  operation: "create", entity: "journal", businessKey: "/journals:create",
-  affectedCaches: ["/journals"], cause: networkError(), nextAction: "Fresh read required.",
-})])("recovers %s without a second create", async (ambiguous) => {
-  const { api, create, listAll } = setup({
-    createImpl: vi.fn().mockRejectedValue(ambiguous),
-    journals: [],
-  });
-  listAll.mockResolvedValueOnce([]).mockResolvedValueOnce([journal({ id: 91, document_number: "FX:7", registered: false })]);
-  const result = await (await BookingGuard.load(api)).createJournalOnce({ ns: "FX", id: "7" }, { effective_date: "2026-01-01", postings: [] }, { confirm: false });
-  expect(result).toMatchObject({ status: "created", journal_id: 91, recovered: true });
-  expect(create).toHaveBeenCalledTimes(1);
-});
+Run:
 
-it("surfaces ambiguous confirmation with the created journal ID", async () => {
-  const { api } = setup({ confirmImpl: async () => { throw networkError(); } });
-  await expect((await BookingGuard.load(api)).createJournalOnce(
-    { ns: "FX", id: "8" }, { effective_date: "2026-01-01", postings: [] },
-  )).rejects.toMatchObject({ category: "mutation_indeterminate", operation: "confirm", entityId: 999 });
-});
+```bash
+npx vitest run src/connection-fingerprint.test.ts src/api/base-resource.test.ts -t "H06-A"
 ```
 
-- [ ] **Step 2: Prove red**
+Expected: FAIL because the module and both public properties do not exist and `index.ts` still owns a private duplicate helper. A missing-module/compiler failure is acceptable for this first create-file RED; zero selected tests is not.
 
-Run: `npx vitest run src/connection-fingerprint.test.ts src/file-lock.test.ts src/booking-guard.test.ts src/tools/estonian-tax.test.ts -t "fingerprint|well-formed owner|malformed or empty|live owner|cross-process|without a second create|ambiguous confirmation|dividend"`
+- [ ] **Step 4: GREEN-A — implement and reuse the fingerprint**
 
-Expected: FAIL because the current key is process-local, lock acquisition is synchronous/non-waiting, no cross-process queue exists, structured ambiguity is not recognized, confirmation ambiguity is swallowed, and dividends bypass the guard.
-
-- [ ] **Step 3: Implement keyed locking and route dividends through it**
+Create `src/connection-fingerprint.ts`:
 
 ```ts
-// src/connection-fingerprint.ts
 import { createHash } from "node:crypto";
 import type { Config } from "./config.js";
-export function buildConnectionFingerprint(config: Pick<Config, "baseUrl" | "apiKeyId" | "apiPublicValue">): string {
+
+export function buildConnectionFingerprint(
+  config: Pick<Config, "baseUrl" | "apiKeyId" | "apiPublicValue">,
+): string {
+  const baseUrl = config.baseUrl.trim().replace(/\/+$/, "");
   return createHash("sha256")
-    .update(`${config.baseUrl.trim().replace(/\/$/, "")}\n${config.apiKeyId}\n${config.apiPublicValue}`)
+    .update(`${baseUrl}\n${config.apiKeyId}\n${config.apiPublicValue}`)
     .digest("hex");
 }
 ```
 
-`HttpClient` initializes `public readonly connectionFingerprint = buildConnectionFingerprint(config)` independently of `cacheNamespace`; move `index.ts` audit fingerprinting to that same helper. Add `get connectionFingerprint(): string { return this.client.connectionFingerprint; }` to `BaseResource` and prove two clients with different process-local namespaces and passwords have the same fingerprint.
-
-Create `src/file-lock.ts` with this complete atomic-candidate, async-deadline implementation. Linking a fully written candidate removes the empty/partial-owner race:
+In `src/http-client.ts`, import the helper, declare `public readonly connectionFingerprint: string`, and assign it exactly once in the constructor body:
 
 ```ts
-import { randomUUID } from "node:crypto";
-import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+constructor(
+  private config: Config,
+  public readonly cacheNamespace = "connection:0",
+  private readonly requestGuard?: () => void,
+) {
+  this.connectionFingerprint = buildConnectionFingerprint(config);
+}
+```
 
-interface OwnerToken { pid: number; nonce: string; createdAt: string }
-type ObservedOwner = { kind: "valid"; token: OwnerToken } | { kind: "invalid" };
+In `src/api/base-resource.ts`, add only:
+
+```ts
+get connectionFingerprint(): string {
+  return this.client.connectionFingerprint;
+}
+```
+
+In `src/index.ts`, import the shared helper, delete the local helper, and build the audit map with:
+
+```ts
+const connectionFingerprints = Object.fromEntries(
+  allConfigs.map((config) => [config.name, buildConnectionFingerprint(config.config)]),
+);
+```
+
+Keep the existing `createHash` import because credential-verification identity still uses it elsewhere in `index.ts`.
+
+Run:
+
+```bash
+npx vitest run src/connection-fingerprint.test.ts src/api/base-resource.test.ts -t "H06-A"
+npx tsc --ignoreConfig --noEmit --target ES2022 --module Node16 --moduleResolution Node16 --strict --esModuleInterop --skipLibCheck --forceConsistentCasingInFileNames --resolveJsonModule src/connection-fingerprint.test.ts src/api/base-resource.test.ts
+```
+
+Expected: all `H06-A` tests PASS and the explicit TypeScript 7 test-file typecheck PASS. Normal Vitest runs transpile tests without typechecking them, so this separate command is required and must not be omitted.
+
+- [ ] **Step 5: RED-B — specify atomic ownership, reclaim, release, and FIFO**
+
+Create `src/file-lock.test.ts`. Use one temporary directory per test (`mkdtemp`), remove it in `afterEach`, and give every test an `H06-B` title. Cover:
+
+1. publication exposes a complete parseable token and mode no broader than `0600`;
+2. a valid owner using PID `2147483646` is reclaimed and replaced;
+3. `""`, `"not-json"`, a partial JSON token, PID 0, an empty nonce, and an invalid date each time out with `{ category: "lock_busy", mutationMayHaveOccurred: false, lockPath }` and remain byte-for-byte unchanged;
+4. `process.pid` and a mocked `process.kill` `EPERM` owner remain unchanged and busy;
+5. two simultaneous reclaimers of one dead owner cannot both enter (use two `acquireOwnedFileLock` calls, hold the winner, prove the other waits, release the winner, and then prove the waiter acquires);
+6. any existing `${lockPath}.reclaim` guard — malformed, live, or dead — keeps even a valid-dead main owner busy and byte-for-byte unchanged until the deadline; after the test explicitly removes the reclaim guard, acquisition may publish its own guard and reclaim the main owner;
+7. `release()` is idempotent and deletes its own token;
+8. replacing the lock contents with a foreign valid token before `release()` leaves the foreign token untouched;
+9. `withOwnedFileLock` runs three queued callbacks in call order, even when the first is held by a deferred promise;
+10. a rejecting callback releases the file and advances the next FIFO waiter;
+11. one caller holds the in-process predecessor beyond a queued caller's total timeout: the queued caller rejects with `LockBusyError` within that entry-to-deadline budget, its callback never runs, and a later queued caller proceeds after the holder releases.
+
+The owner-policy assertions must call the exported policy helpers directly as well as through acquisition:
+
+```ts
+expect(parseOwner("not-json")).toEqual({ kind: "invalid" });
+expect(ownerDefinitelyDead(parseOwner(JSON.stringify(deadOwner)))).toBe(true);
+expect(ownerDefinitelyDead(parseOwner(JSON.stringify(liveOwner)))).toBe(false);
+```
+
+Run:
+
+```bash
+npx vitest run src/file-lock.test.ts -t "H06-B"
+```
+
+Expected: FAIL because `src/file-lock.ts` does not exist. Zero selected tests is not acceptable.
+
+- [ ] **Step 6: GREEN-B — implement the hard-link lock and per-path FIFO**
+
+Create `src/file-lock.ts` with these public types and stable busy error:
+
+```ts
+export interface OwnerToken { pid: number; nonce: string; createdAt: string }
+export type ObservedOwner =
+  | { kind: "valid"; token: OwnerToken }
+  | { kind: "invalid" };
 export interface LockOptions { timeoutMs?: number; pollMs?: number }
 export interface OwnedFileLock { token: OwnerToken; release(): Promise<void> }
-const queues = new Map<string, Promise<void>>();
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-function parseOwner(text: string): ObservedOwner {
-  if (!text) return { kind: "invalid" };
-  try {
-    const value = JSON.parse(text) as Partial<OwnerToken>;
-    return Number.isInteger(value.pid) && (value.pid ?? 0) > 0 && typeof value.nonce === "string" && value.nonce.length > 0 && typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt))
-      ? { kind: "valid", token: value as OwnerToken } : { kind: "invalid" };
-  } catch { return { kind: "invalid" }; }
+export class LockBusyError extends Error {
+  readonly category = "lock_busy" as const;
+  readonly mutationMayHaveOccurred = false;
+  readonly nextAction: string;
+  constructor(readonly lockPath: string, readonly timeoutMs: number) {
+    super(`Timed out after ${timeoutMs}ms waiting for lock ${lockPath}.`);
+    this.name = "LockBusyError";
+    this.nextAction = `If no e-arveldaja process owns ${lockPath}, inspect its owner token before manual removal.`;
+  }
 }
+```
 
-function ownerDefinitelyDead(owner: ObservedOwner): boolean {
-  if (owner.kind === "invalid") return false;
-  try { process.kill(owner.token.pid, 0); return false; }
-  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
-}
+Export `parseOwner(text)` and `ownerDefinitelyDead(owner)`. Parsing is strict about positive integer PID, non-empty nonce, and parseable timestamp. `ownerDefinitelyDead` returns true only when `process.kill(pid, 0)` throws `ESRCH`; invalid, live, `EPERM`, and every other result are false.
 
-async function readText(path: string): Promise<string | undefined> {
-  try { return await readFile(path, "utf8"); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-}
+Use these private operations:
 
-async function linkOwnedPath(path: string, text: string): Promise<boolean> {
+```ts
+async function publishOwnedPath(path: string, text: string): Promise<boolean> {
   const candidate = `${path}.${process.pid}.${randomUUID()}.candidate`;
   await writeFile(candidate, text, { flag: "wx", mode: 0o600 });
   try {
-    await link(candidate, path);
+    await link(candidate, path); // atomic winner; candidate is already complete
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
-  } finally { await rm(candidate, { force: true }); }
-}
-
-async function releaseIfOwned(path: string, text: string): Promise<void> {
-  if (await readText(path) === text) await rm(path, { force: true });
-}
-
-async function reclaimIfStale(lockPath: string, observed: string): Promise<void> {
-  const reclaimPath = `${lockPath}.reclaim`;
-  const guard: OwnerToken = { pid: process.pid, nonce: randomUUID(), createdAt: new Date().toISOString() };
-  const guardText = JSON.stringify(guard);
-  if (!await linkOwnedPath(reclaimPath, guardText)) {
-    const currentGuard = await readText(reclaimPath);
-    if (currentGuard !== undefined && ownerDefinitelyDead(parseOwner(currentGuard))) await rm(reclaimPath, { force: true });
-    return;
-  }
-  try {
-    const current = await readText(lockPath);
-    if (current === observed && ownerDefinitelyDead(parseOwner(current))) await rm(lockPath, { force: true });
-  } finally { await releaseIfOwned(reclaimPath, guardText); }
-}
-
-export async function acquireOwnedFileLock(lockPath: string, options: LockOptions = {}): Promise<OwnedFileLock> {
-  const timeoutMs = options.timeoutMs ?? 30_000;
-  const pollMs = options.pollMs ?? 25;
-  const deadline = Date.now() + timeoutMs;
-  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
-  const token: OwnerToken = { pid: process.pid, nonce: randomUUID(), createdAt: new Date().toISOString() };
-  const text = JSON.stringify(token);
-  while (true) {
-    if (await linkOwnedPath(lockPath, text)) {
-      return { token, release: () => releaseIfOwned(lockPath, text) };
-    }
-    const observed = await readText(lockPath);
-    if (observed === undefined) continue;
-    if (ownerDefinitelyDead(parseOwner(observed))) await reclaimIfStale(lockPath, observed);
-    if (Date.now() >= deadline) {
-      throw Object.assign(new Error(`Timed out waiting for lock ${lockPath}`), { category: "lock_timeout", lockPath, timeoutMs });
-    }
-    await delay(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+  } finally {
+    await rm(candidate, { force: true });
   }
 }
 
-async function inProcessQueue<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const previous = (queues.get(key) ?? Promise.resolve()).catch(() => undefined);
-  let releaseTurn!: () => void;
-  const turn = new Promise<void>(resolve => { releaseTurn = resolve; });
-  const tail = previous.then(() => turn);
-  queues.set(key, tail);
-  await previous;
-  try { return await fn(); }
-  finally {
-    releaseTurn();
-    if (queues.get(key) === tail) queues.delete(key);
-  }
-}
-
-export async function withOwnedFileLock<T>(lockPath: string, fn: () => Promise<T>, options?: LockOptions): Promise<T> {
-  return inProcessQueue(lockPath, async () => {
-    const lock = await acquireOwnedFileLock(lockPath, options);
-    try { return await fn(); } finally { await lock.release(); }
-  });
+async function releaseIfOwned(path: string, ownerText: string): Promise<void> {
+  if (await readText(path) === ownerText) await rm(path, { force: true });
 }
 ```
 
-In `booking-guard.ts`, extend `DocNamespace`/`KNOWN_NAMESPACES` with `"DIV"`, derive the SHA-256 lock name from `connectionFingerprint + NUL + document_number`, and call `withOwnedFileLock`. Replace `createJournalOnce` with this locked fresh-check implementation (the helper `ambiguousMutation` is exact and shared by create/confirm):
+Reclamation must itself acquire an *absent* `${lockPath}.reclaim` through `publishOwnedPath`. Never auto-reclaim, replace, or remove an existing reclaim guard, regardless of whether its contents are malformed or its recorded PID appears live or dead; any existing reclaim guard remains busy until the acquisition deadline and requires manual inspection/removal. Only after this process atomically publishes the previously absent reclaim guard may it re-read `lockPath`, remove the main lock only if the bytes still equal the originally observed valid-dead token and a second liveness probe is still `ESRCH`, and then release its own reclaim guard with `releaseIfOwned`. Release normal paths with `releaseIfOwned` as well, so a foreign replacement is never removed.
 
-```ts
-function ambiguousMutation(error: unknown): boolean {
-  return isMutationIndeterminate(error) || error instanceof HttpError && error.status === "network";
-}
+`acquireOwnedFileLock` validates non-negative finite `timeoutMs` and positive finite `pollMs`, creates the parent directory with `0700`, publishes one JSON token, derives an absolute deadline from the budget it receives, and throws `LockBusyError` without deleting an unproved owner. `withOwnedFileLock` starts one absolute deadline when the function is entered and maintains `Map<string, Promise<void>>` tails. Waiting for the predecessor is deadline-aware; after that wait, file acquisition receives only the remaining budget, never a fresh timeout. On queued timeout or any other failure, resolve this caller's own queue turn in `finally` so successors are not poisoned, and delete the map entry only if it still points at this tail. After acquisition, call `fn`, release in `finally`, and advance the queue even when `fn` rejects.
 
-export async function withBookingKeyLock<T>(connectionFingerprint: string, key: DocKey, fn: () => Promise<T>): Promise<T> {
-  const lockDir = process.env.EARVELDAJA_LOCK_DIR ?? resolve(tmpdir(), "e-arveldaja-mcp-locks");
-  const digest = createHash("sha256").update(`${connectionFingerprint}\0${formatDocNumber(key)}`).digest("hex");
-  return withOwnedFileLock(resolve(lockDir, `${digest}.lock`), fn, { timeoutMs: 30_000, pollMs: 25 });
-}
+Run:
 
-async createJournalOnce(key: DocKey, payload: Omit<Partial<Journal>, "document_number">, opts?: CreateOnceOptions): Promise<CreateOnceResult> {
-  return withBookingKeyLock(this.api.journals.connectionFingerprint, key, async () => {
-    const liveness = opts?.liveness ?? "not_deleted";
-    this.api.journals.invalidateListCache();
-    const fresh = await this.api.journals.listAll();
-    const existing = BookingGuard.findKeyInJournals(fresh, key);
-    if (existing && passesLiveness(existing, liveness)) return { status: "duplicate", journal_id: existing.journal_id };
-
-    const stamped: Partial<Journal> = { ...payload, document_number: formatDocNumber(key) };
-    const wantConfirm = opts?.confirm !== false;
-    let journalId: number;
-    let recovered = false;
-    try {
-      const created = await this.api.journals.create(stamped);
-      if (created.created_object_id === undefined) throw new MutationIndeterminateError({
-        operation: "create", entity: "journal", businessKey: formatDocNumber(key), affectedCaches: ["/journals"],
-        cause: new Error("Create succeeded without created_object_id"),
-        nextAction: `Freshly search document_number ${formatDocNumber(key)} before any retry.`,
-      });
-      journalId = created.created_object_id;
-    } catch (error) {
-      if (!ambiguousMutation(error)) throw error;
-      this.api.journals.invalidateListCache();
-      let found: ExistingArtifact | undefined;
-      try { found = BookingGuard.findKeyInJournals(await this.api.journals.listAll(), key); }
-      catch (verificationError) {
-        throw new MutationIndeterminateError({
-          operation: "create", entity: "journal", businessKey: formatDocNumber(key), affectedCaches: ["/journals"],
-          cause: error,
-          nextAction: `Create and verification were ambiguous (${describeMutationCause(verificationError).message}); freshly search ${formatDocNumber(key)} before any retry.`,
-        });
-      }
-      if (!found) throw new MutationIndeterminateError({
-        operation: "create", entity: "journal", businessKey: formatDocNumber(key), affectedCaches: ["/journals"],
-        cause: error, nextAction: `Freshly search document_number ${formatDocNumber(key)} before a newly approved create.`,
-      });
-      journalId = found.journal_id;
-      recovered = true;
-    }
-
-    let registered = false;
-    if (wantConfirm) {
-      try { await this.api.journals.confirm(journalId); registered = true; }
-      catch (error) {
-        if (!ambiguousMutation(error)) throw Object.assign(error as object, { createdJournalId: journalId });
-        this.api.journals.invalidateListCache();
-        const confirmed = BookingGuard.findKeyInJournals(await this.api.journals.listAll(), key);
-        if (!confirmed?.registered) throw new MutationIndeterminateError({
-          operation: "confirm", entity: "journal", entityId: journalId,
-          businessKey: formatDocNumber(key), affectedCaches: ["/journals"], cause: error,
-          nextAction: `Freshly read journal ${journalId}; do not confirm or recreate it without new approval.`,
-        });
-        registered = true;
-      }
-    }
-    this.record(key, journalId, { registered, is_deleted: false });
-    return { status: "created", journal_id: journalId, registered, ...(recovered ? { recovered: true } : {}) };
-  });
-}
+```bash
+npx vitest run src/file-lock.test.ts -t "H06-B"
 ```
 
-Replace the dividend create with:
+Expected: all `H06-B` tests PASS, with no lock, reclaim, or candidate file left in any cleaned temporary directory.
+
+- [ ] **Step 7: RED-C — migrate the create-once contract and add the two-process proof**
+
+In `src/booking-guard.test.ts`, import H03 mutation outcomes and `withOwnedFileLock` from the now-green file-lock module. Do not import the not-yet-created `withBookingKeyLock` during RED. For the inside-lock regression, derive the required path in the test from `SHA-256(fingerprint + NUL + "journal" + NUL + formatDocNumber(key))`, hold it with `withOwnedFileLock`, and prove current `createJournalOnce` ignores that held path. Update `setup` before adding tests:
+
+- expose `connectionFingerprint: "test-connection-fingerprint"`, `invalidateListCache`, `listAll`, `listAllWithPostings`, `get`, `create`, and `confirm` on the journals fake;
+- make list state explicit so a successful create can be observed by the next fresh list; do not rely on the old process-local `guard.record()` shortcut;
+- reset list/invalidator spies after `BookingGuard.load` in assertions that reason about the critical section;
+- keep `listAllWithPostings` behavior unchanged for Lane B tests.
+
+Replace the incompatible legacy expectations rather than keeping contradictory tests:
+
+- replace `"leaves the journal in PROJECT when confirm throws"` with `"H06-C propagates a definite confirm rejection with createdJournalId"`, using an HTTP 400 and asserting the created ID is attached;
+- replace `"retries exactly once when the ambiguous write did not commit"` with `"H06-C absent verification stays indeterminate and never retries"`, asserting one create;
+- replace `"propagates a second network failure without a further retry"` with the verification-read-failure case, again asserting one create;
+- update existing success/recovered tests for the additional fresh pre-check and exact-ID confirmation verification; direct-create results use `toMatchObject` and separately assert the retained `upstream_response`. No legacy test may continue to require a second POST or swallowed confirm error.
+
+Add `H06-C` tests for this complete matrix:
+
+1. the fresh pre-check occurs inside the lock. Derive and acquire the required external lock first, reset the critical-section spies, and make the fake `create` resolve a `createStarted` deferred/signal when entered. Start `createJournalOnce`, then use a short bounded `Promise.race` between `createStarted` and a real timer so the observation cannot be an immediate, vacuous `not.toHaveBeenCalled()` check. While the external holder is still active, assert the desired invariant from RED onward: `invalidateListCache`, `listAll`, and `create` are all untouched. The current implementation must fail this invariant specifically because the bounded observation sees `create` run. Put cleanup in `finally`: add a matching live journal to the shared list, release the external holder, await the holder promise, and `await Promise.allSettled([pendingCreateOnce])` so intentional RED cannot leave either operation or its lock alive. After GREEN the bounded observation times out without any critical operation, cleanup releases the holder, and the settled result is asserted `duplicate`; also assert `invalidateListCache` precedes `listAll` and `create` never runs;
+2. raw network and structural H03 create ambiguity, each with fresh verification found, absent, and throwing; all six cases call create once, found returns `{ recovered: true }`, and the other four throw `mutation_indeterminate`;
+3. a definite HTTP 400 create rejection performs no ambiguity verification and calls create once;
+4. missing `created_object_id` with verification found recovers the ID; missing ID with absent or failed verification is indeterminate and never records sentinel `-1`;
+5. raw network and structural H03 confirm ambiguity, each with exact `journals.get(createdId)` showing registered true, false, and throwing; true recovers, while false/throwing reject with `{ category: "mutation_indeterminate", operation: "confirm", entityId: createdId, businessKey, affectedCaches: ["/journals"] }`;
+6. a definite confirm rejection and an unexpected non-HTTP error are not swallowed; both carry `createdJournalId`;
+7. all verification branches call the public `invalidateListCache()` immediately before `listAll()` or exact-ID `get()`.
+
+Create `src/__fixtures__/booking-guard-child.ts`. Arguments are `<statePath> <fingerprint>`. The fixture:
+
+- reads a JSON journal array from `statePath` for `listAll`;
+- exposes the supplied fingerprint and a no-op public invalidator;
+- on create, waits 75 ms, writes the next full state to a unique sibling temporary file, renames it atomically over `statePath`, and returns the created ID;
+- calls `BookingGuard.load(api).createJournalOnce({ ns: "FX", id: "child-proof" }, payload, { confirm: false })`;
+- prints exactly one JSON line containing the result and sets a non-zero exit code on error.
+
+The atomic rename is required because each child performs the initial `BookingGuard.load` before it acquires the booking lock; a late child must see either the old or new complete state, never half-written JSON.
+
+In the parent `H06-C cross-process` test, initialize `statePath` to `[]`, set a unique `EARVELDAJA_LOCK_DIR`, and spawn two processes with:
 
 ```ts
-const guard = await BookingGuard.load(api);
-const result = await guard.createJournalOnce(
-  { ns: "DIV", id: `${effective_date}:${shareholder.id}:${roundMoney(grossDividend)}` },
-  journalData,
-  { confirm: false },
-);
-const createdId = result.journal_id;
-logAudit({
-  tool: "prepare_dividend_package", action: result.status === "created" ? "CREATED" : "UPDATED",
-  entity_type: "journal", entity_id: createdId,
-  summary: result.status === "created" ? `Dividend journal ${createdId} created` : `Dividend journal ${createdId} already existed`,
-  details: { booking_key: formatDocNumber({ ns: "DIV", id: `${effective_date}:${shareholder.id}:${roundMoney(grossDividend)}` }) },
+spawn(process.execPath, ["--import", "tsx", fixturePath, statePath, fingerprint], {
+  env: { ...process.env, EARVELDAJA_LOCK_DIR: lockDir },
+  stdio: ["ignore", "pipe", "pipe"],
 });
 ```
 
-- [ ] **Step 4: Prove green and review**
+The child helper must capture stdout/stderr, use an explicit test timeout of at least 15 seconds, clear each child's five-second timer on both `error` and `close`, send `SIGKILL` on timeout, and include stderr in failures. Save the prior `EARVELDAJA_LOCK_DIR` value before the test; in `finally`, restore it when it existed or delete it when it did not. Track both child handles and their close promises. In test `finally`, kill every child whose `exitCode` and `signalCode` are both `null`, await all close promises, restore/delete the environment variable, and only then remove the state and lock directories. Require exit code 0, statuses exactly `created` and `duplicate` in either order, and one journal in final state. This is the required process proof; `Promise.all` in one process is insufficient.
 
-Run: `npx vitest run src/connection-fingerprint.test.ts src/file-lock.test.ts src/booking-guard.test.ts src/tools/estonian-tax.test.ts && npm run build && git diff --check`
-
-Expected: child processes prove one create; equal connections share a stable fingerprint; live, malformed, and empty owners stay busy until deadline; only well-formed definitely-dead owners are reclaimed; raw/structured ambiguous creates do not retry; ambiguous confirmation remains visible with ID; dividends deduplicate. Write `.omc/reviews/H06.diff` and obtain both verdicts.
-
-- [ ] **Step 5: Commit H06**
+Run:
 
 ```bash
-git add src/connection-fingerprint.ts src/connection-fingerprint.test.ts src/file-lock.ts src/file-lock.test.ts src/__fixtures__/booking-guard-child.ts src/http-client.ts src/index.ts src/api/base-resource.ts src/api/base-resource.test.ts src/booking-guard.ts src/booking-guard.test.ts src/tools/estonian-tax.ts src/tools/estonian-tax.test.ts
+npx vitest run src/booking-guard.test.ts -t "H06-C"
+```
+
+Expected: FAIL because there is no keyed booking lock: the held-lock invariant deterministically observes `create` start while the external holder is active and the `create`-untouched assertion fails. The remaining RED cases also expose the process-local pre-check, raw ambiguity retry, unrecognized structural ambiguity, sentinel `-1`, and swallowed confirmation failures. Fixture import/setup failures are not acceptable RED evidence.
+
+- [ ] **Step 8: GREEN-C — lock the fresh check and make ambiguity fail closed**
+
+In `src/booking-guard.ts`:
+
+1. Add `"DIV"` to `DocNamespace`, but preserve its legacy spelling:
+
+```ts
+export function formatDocNumber(key: DocKey): string {
+  return key.ns === "DIV" ? `DIV-${key.id}` : `${key.ns}:${key.id}`;
+}
+
+export function parseDocNumber(raw: string | null | undefined): DocKey | undefined {
+  if (typeof raw !== "string") return undefined;
+  if (raw.startsWith("DIV-") && raw.length > 4) return { ns: "DIV", id: raw.slice(4) };
+  // retain the existing first-colon FX/LY parser unchanged
+}
+```
+
+Do not accept or emit `DIV:`. Add parser round-trip coverage for `DIV-2026-06-01-42`.
+
+2. Export the keyed wrapper. Including the literal artifact type prevents a future non-journal key from colliding:
+
+```ts
+export async function withBookingKeyLock<T>(
+  connectionFingerprint: string,
+  key: DocKey,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const lockDir = process.env.EARVELDAJA_LOCK_DIR ?? resolve(tmpdir(), "e-arveldaja-mcp-locks");
+  const digest = createHash("sha256")
+    .update(`${connectionFingerprint}\0journal\0${formatDocNumber(key)}`)
+    .digest("hex");
+  return withOwnedFileLock(resolve(lockDir, `${digest}.lock`), fn, {
+    timeoutMs: 30_000,
+    pollMs: 25,
+  });
+}
+```
+
+3. Define ambiguity structurally and use it for create and confirm:
+
+```ts
+function isAmbiguousMutation(error: unknown): boolean {
+  return isMutationIndeterminate(error) ||
+    (error instanceof HttpError && error.status === "network");
+}
+```
+
+4. Replace `createJournalOnce` with one `withBookingKeyLock(this.api.journals.connectionFingerprint, key, async () => ...)` critical section. Its exact order is:
+
+```text
+invalidateListCache -> listAll -> liveness-aware exact key check -> create once
+```
+
+After any ambiguous create or missing ID, repeat `invalidateListCache -> listAll` once. If the key is found, recover its ID; if absent or the read throws, throw a new create `MutationIndeterminateError`. Never call create again in a catch branch. Do not use `UNKNOWN_JOURNAL_ID` for create responses.
+
+Make the fresh scanner accept `liveness` and construct the artifact before applying `passesLiveness`; do not keep its current hard-coded `is_deleted` skip, which would make `liveness: "any"` ineffective. Extend only the created branch of `CreateOnceResult` with `upstream_response?: ApiResponse`. A direct successful create returns the exact upstream response in that field; recovered creates omit it. Existing Lightyear/currency consumers continue to use `status`/`journal_id` unchanged.
+
+For confirmation, retain the known `journalId`. After raw/structured ambiguity, run `invalidateListCache -> get(journalId)` and accept success only when that exact object says `registered === true`. False, missing, or read failure becomes a confirm `MutationIndeterminateError` with `entityId: journalId`. A definite/upstream or unexpected confirm error is rethrown after attaching `createdJournalId` without overwriting existing error fields. Record into the in-run index only after a proven create/recovery outcome; an indeterminate branch records nothing.
+
+Update only the shared journal fakes in `src/tools/currency-rounding.test.ts` and `src/tools/lightyear-investments.test.ts` for the newly required guarded API surface: add a deterministic `connectionFingerprint` and a no-op/spy `invalidateListCache`. Preserve their existing `listAll`, `listAllWithPostings`, `create`, `confirm`, fixture state, and all behavioral assertions unchanged; these two files are compatibility adaptations, not new currency or investment behavior.
+
+Run:
+
+```bash
+npx vitest run src/booking-guard.test.ts -t "H06-C"
+npx vitest run src/booking-guard.test.ts
+```
+
+Expected: selected and complete booking-guard suites PASS. The cross-process test terminates both children and leaves no fixture lock/candidate/reclaim files.
+
+- [ ] **Step 9: RED-D — specify backward-compatible dividend deduplication**
+
+In `src/tools/estonian-tax.test.ts`, make the shared `makeApi` journals fake compatible with the guarded path:
+
+- retain the supplied accounting journals for `listAllWithPostings` so existing legality calculations do not change;
+- maintain a separate stateful Lane-A journal list for `listAll`/`create`;
+- expose `connectionFingerprint`, `invalidateListCache`, and `get`;
+- have create append a correctly shaped draft journal carrying the submitted `document_number`.
+
+Do not change the 43 existing dividend expectations except where direct access to the create payload now comes through the stateful fake. Add these `H06-D` regressions:
+
+```ts
+it("H06-D preserves the legacy dividend number and uses the validated client id", async () => {
+  // clients.get(42) deliberately returns { id: 999, name: "Test Shareholder" }
+  // The preview and executed payload must both remain DIV-2026-06-01-42,
+  // clients_id and both preview/executed shareholder.id fields must remain 42.
+});
+
+it("H06-D deduplicates the same company/date/shareholder across calls", async () => {
+  // Invoke the registered callback twice with identical approved input.
+  // Assert journals.create once, both results name journal 42, and the second
+  // result reports booking_status: "duplicate".
+});
+
+it("H06-D keeps created-path response and audit behavior compatible", async () => {
+  // Assert journal_entry.api_response still has code/messages/created_object_id,
+  // created_object_id is the guarded journal ID, and the first audit entry keeps
+  // action CREATED, the existing summary wording, and all existing detail fields.
+});
+```
+
+Mock `logAudit` with a hoisted Vitest mock for the final audit assertion. Add a separate assertion that a duplicate audit entry cannot use `CREATED`; it must identify the existing journal and carry `booking_key: "DIV-2026-06-01-42"` plus `booking_status: "duplicate"`.
+
+Run:
+
+```bash
+npx vitest run src/tools/estonian-tax.test.ts -t "H06-D"
+```
+
+Expected: FAIL because dividends call `api.journals.create` directly and have no guarded duplicate outcome. The pre-existing legacy document-number test may already pass and is compatibility evidence, not sufficient RED by itself.
+
+- [ ] **Step 10: GREEN-D — route dividends through the same guard without changing identity**
+
+In `src/tools/estonian-tax.ts`, import `BookingGuard`, `formatDocNumber`, and `DocKey`. After fetching the validated shareholder, define:
+
+```ts
+const dividendKey: DocKey = {
+  ns: "DIV",
+  id: `${effective_date}-${shareholder_client_id}`,
+};
+const documentNumber = formatDocNumber(dividendKey);
+```
+
+Build the executable payload without `document_number`; build `proposed_journal` for dry run as `{ ...journalPayload, document_number: documentNumber }`. This keeps preview/execution spelling identical while letting the guard be the sole stamper.
+
+Render `shareholder: { id: shareholder_client_id, name: shareholder.name }` on both dry-run and executed responses. The fetched object supplies descriptive data only; its optional `id` cannot replace the already validated input identity.
+
+On execution:
+
+```ts
+const guard = await BookingGuard.load(api);
+const booking = await guard.createJournalOnce(dividendKey, journalPayload, { confirm: false });
+const createdId = booking.journal_id;
+```
+
+Preserve `journal_entry.api_response` as an object with `code`, `messages`, and `created_object_id`; set `created_object_id` to `createdId`, and add sibling `booking_status`/`recovered` fields rather than replacing the established response object with `CreateOnceResult`. For a direct create, read `code/messages` from `booking.upstream_response`; for recovered/duplicate outcomes use `code: 200` and an explicit informational message. Do not synthesize `CREATED` audit evidence for a duplicate.
+
+For `booking.status === "created"`, keep the existing `CREATED` action, summary text, and detail fields exactly, adding only `booking_key` and `booking_status`. For a duplicate, write a distinct non-`CREATED` audit entry (use `UPDATED`), identify `createdId`, state that the existing dividend journal was reused, and include the same calculation details plus the canonical booking key/status. Return the same calculation, legality, shareholder, posting, warning, and compliance fields on both paths.
+
+Run:
+
+```bash
+npx vitest run src/tools/estonian-tax.test.ts -t "H06-D"
+npx vitest run src/tools/estonian-tax.test.ts
+```
+
+Expected: selected and complete Estonian-tax suites PASS; the legacy document number remains exactly `DIV-2026-06-01-42`, the validated input ID wins over an inconsistent fetched object ID, and two identical executions create once.
+
+- [ ] **Step 11: Focused and full verification**
+
+Before running any Step 11 verification, compare the exact fifteen-path manifest against the complete tracked-plus-untracked H06 change set. `diff -u` must fail on either a missing required path or any extra path:
+
+```bash
+H06_EXPECTED="$(mktemp)"
+H06_ACTUAL="$(mktemp)"
+printf '%s\n' \
+  src/__fixtures__/booking-guard-child.ts \
+  src/api/base-resource.test.ts \
+  src/api/base-resource.ts \
+  src/booking-guard.test.ts \
+  src/booking-guard.ts \
+  src/connection-fingerprint.test.ts \
+  src/connection-fingerprint.ts \
+  src/file-lock.test.ts \
+  src/file-lock.ts \
+  src/http-client.ts \
+  src/index.ts \
+  src/tools/currency-rounding.test.ts \
+  src/tools/estonian-tax.test.ts \
+  src/tools/estonian-tax.ts \
+  src/tools/lightyear-investments.test.ts | sort -u > "$H06_EXPECTED"
+{
+  git diff --name-only HEAD
+  git ls-files --others --exclude-standard
+} | sort -u > "$H06_ACTUAL"
+diff -u "$H06_EXPECTED" "$H06_ACTUAL"
+rm -f "$H06_EXPECTED" "$H06_ACTUAL"
+```
+
+Expected: `diff -u` exits 0 with no output. Stop immediately on a non-zero result; do not silently filter or amend the manifest.
+
+Then run:
+
+```bash
+npx vitest run src/connection-fingerprint.test.ts src/file-lock.test.ts src/api/base-resource.test.ts src/booking-guard.test.ts src/tools/currency-rounding.test.ts src/tools/estonian-tax.test.ts src/tools/lightyear-investments.test.ts
+npx tsc --ignoreConfig --noEmit --target ES2022 --module Node16 --moduleResolution Node16 --strict --esModuleInterop --skipLibCheck --forceConsistentCasingInFileNames --resolveJsonModule src/connection-fingerprint.test.ts src/api/base-resource.test.ts
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+H06_INDEX="$(mktemp)"
+cp "$(git rev-parse --git-path index)" "$H06_INDEX"
+GIT_INDEX_FILE="$H06_INDEX" git add -- \
+  src/connection-fingerprint.ts src/connection-fingerprint.test.ts \
+  src/file-lock.ts src/file-lock.test.ts \
+  src/__fixtures__/booking-guard-child.ts \
+  src/http-client.ts src/index.ts \
+  src/api/base-resource.ts src/api/base-resource.test.ts \
+  src/booking-guard.ts src/booking-guard.test.ts \
+  src/tools/currency-rounding.test.ts \
+  src/tools/estonian-tax.ts src/tools/estonian-tax.test.ts \
+  src/tools/lightyear-investments.test.ts
+GIT_INDEX_FILE="$H06_INDEX" git diff --cached --check
+GIT_INDEX_FILE="$H06_INDEX" git diff --cached --name-only
+rm -f "$H06_INDEX"
+git diff --cached --quiet
+```
+
+Expected: the exact-scope comparison, explicit TypeScript 7 test-file typecheck, and all focused/full checks PASS with only documented integration skips. The temporary-index name list contains exactly these fifteen H06 paths, including all five untracked files, and the real index remains empty:
+
+```text
+src/__fixtures__/booking-guard-child.ts
+src/api/base-resource.test.ts
+src/api/base-resource.ts
+src/booking-guard.test.ts
+src/booking-guard.ts
+src/connection-fingerprint.test.ts
+src/connection-fingerprint.ts
+src/file-lock.test.ts
+src/file-lock.ts
+src/http-client.ts
+src/index.ts
+src/tools/currency-rounding.test.ts
+src/tools/estonian-tax.test.ts
+src/tools/estonian-tax.ts
+src/tools/lightyear-investments.test.ts
+```
+
+- [ ] **Step 12: Build the complete review artifact**
+
+Run:
+
+```bash
+mkdir -p .omc/reviews
+H06_INDEX="$(mktemp)"
+cp "$(git rev-parse --git-path index)" "$H06_INDEX"
+GIT_INDEX_FILE="$H06_INDEX" git add -- \
+  src/connection-fingerprint.ts src/connection-fingerprint.test.ts \
+  src/file-lock.ts src/file-lock.test.ts \
+  src/__fixtures__/booking-guard-child.ts \
+  src/http-client.ts src/index.ts \
+  src/api/base-resource.ts src/api/base-resource.test.ts \
+  src/booking-guard.ts src/booking-guard.test.ts \
+  src/tools/currency-rounding.test.ts \
+  src/tools/estonian-tax.ts src/tools/estonian-tax.test.ts \
+  src/tools/lightyear-investments.test.ts
+GIT_INDEX_FILE="$H06_INDEX" git diff --cached \
+  --output=.omc/reviews/H06.diff -- \
+  src/connection-fingerprint.ts src/connection-fingerprint.test.ts \
+  src/file-lock.ts src/file-lock.test.ts \
+  src/__fixtures__/booking-guard-child.ts \
+  src/http-client.ts src/index.ts \
+  src/api/base-resource.ts src/api/base-resource.test.ts \
+  src/booking-guard.ts src/booking-guard.test.ts \
+  src/tools/currency-rounding.test.ts \
+  src/tools/estonian-tax.ts src/tools/estonian-tax.test.ts \
+  src/tools/lightyear-investments.test.ts
+test -s .omc/reviews/H06.diff
+GIT_INDEX_FILE="$H06_INDEX" git diff --cached --stat
+rm -f "$H06_INDEX"
+git diff --cached --quiet
+```
+
+Expected: the artifact includes all fifteen reviewed paths across tracked and untracked changes, including both dependent-tool fake adaptations, and packaging leaves the real index untouched.
+
+- [ ] **Step 13: Independent SPEC review**
+
+Give a fresh non-author reviewer the H06 design row, this Task 5, `.omc/reviews/H06.diff`, RED-A/B/C/D evidence, and all green output. Require exactly:
+
+```text
+SPEC COMPLIANCE: APPROVED
+```
+
+The spec pass must audit stable connection/audit identity, lock publication and reclaim races, invalid/live/dead policy, release ownership, FIFO, process cleanup, fresh lookup inside lock, every ambiguity/missing-ID branch, public cache use, legacy dividend identity, validated client ID, audit compatibility, both dependent-tool fake adaptations, and exact fifteen-file scope.
+
+- [ ] **Step 14: Independent QUALITY review**
+
+Only after SPEC approval, give a second fresh non-author reviewer the same evidence and require exactly:
+
+```text
+CODE QUALITY: APPROVED
+```
+
+The quality pass must inspect candidate/reclaim cleanup, deadline behavior, promise-tail cleanup, child timer/process cleanup, test determinism, error field preservation, mutation-count assertions, public response compatibility, behavior-preserving fake adaptations, and the exact fifteen-file scope. Any rejection requires an in-scope fix, rerunning Step 11, overwriting `H06.diff`, then restarting both reviews in order.
+
+- [ ] **Step 15: Commit H06**
+
+Immediately before real staging, repeat the failing exact fifteen-path comparison against the union of tracked and untracked changes:
+
+```bash
+H06_EXPECTED="$(mktemp)"
+H06_ACTUAL="$(mktemp)"
+printf '%s\n' \
+  src/__fixtures__/booking-guard-child.ts \
+  src/api/base-resource.test.ts \
+  src/api/base-resource.ts \
+  src/booking-guard.test.ts \
+  src/booking-guard.ts \
+  src/connection-fingerprint.test.ts \
+  src/connection-fingerprint.ts \
+  src/file-lock.test.ts \
+  src/file-lock.ts \
+  src/http-client.ts \
+  src/index.ts \
+  src/tools/currency-rounding.test.ts \
+  src/tools/estonian-tax.test.ts \
+  src/tools/estonian-tax.ts \
+  src/tools/lightyear-investments.test.ts | sort -u > "$H06_EXPECTED"
+{
+  git diff --name-only HEAD
+  git ls-files --others --exclude-standard
+} | sort -u > "$H06_ACTUAL"
+diff -u "$H06_EXPECTED" "$H06_ACTUAL"
+rm -f "$H06_EXPECTED" "$H06_ACTUAL"
+```
+
+Expected: `diff -u` exits 0 with no output. Only then run:
+
+```bash
+git status --short
+git add \
+  src/connection-fingerprint.ts src/connection-fingerprint.test.ts \
+  src/file-lock.ts src/file-lock.test.ts \
+  src/__fixtures__/booking-guard-child.ts \
+  src/http-client.ts src/index.ts \
+  src/api/base-resource.ts src/api/base-resource.test.ts \
+  src/booking-guard.ts src/booking-guard.test.ts \
+  src/tools/currency-rounding.test.ts \
+  src/tools/estonian-tax.ts src/tools/estonian-tax.test.ts \
+  src/tools/lightyear-investments.test.ts
+git diff --cached --name-only
 git commit -m "fix(H06): serialize create-once bookings"
 ```
+
+Expected: staged names are exactly the fifteen reviewed paths. Do not stage ignored review/ledger artifacts.
+
+- [ ] **Step 16: Ledger and clean status**
+
+Append one H06 ledger row containing RED-A/B/C/D commands/results, focused/build/full/integration/release/diff results, both ordered review verdicts, and the commit hash. Then run:
+
+```bash
+git status --short
+```
+
+Expected: empty output. Do not begin H14 until the H06 row is complete and the worktree is clean.
 
 ### Task 6: H14 — Preserve post-create receipt recovery state
 
