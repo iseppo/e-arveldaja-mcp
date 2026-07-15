@@ -2342,70 +2342,83 @@ Expected staged names: exactly the eleven-path allowlist. Append one M01 row to 
 
 ### Task 8: M02 — Fail closed on malformed pagination
 
-**Files:**
-- Modify: `src/api/base-resource.ts:45-120`
+**Exact tracked scope:**
+- Modify: `src/cache.ts`
+- Modify: `src/cache.test.ts`
+- Modify: `src/api/base-resource.ts`
 - Modify: `src/api/base-resource.test.ts`
 
-**Interfaces:**
-- Consumes: `PaginatedResponse<T>`.
-- Produces: `validatePage<T>(response, requestedPage): void`; invalid metadata never enters per-page or aggregate cache.
+**Contracts and boundaries:**
+- Add a private `PaginationMetadataError` and `validatePage<T>(response, requestedPage): PaginatedResponse<T>`. It rejects a non-object/null/array response, non-array `items`, a requested page that is not a positive integer, `current_page` that is not exactly the requested positive integer, and `total_pages` that is not a positive integer or is less than the requested page. Pinned-total drift uses the same typed error. Every message begins `Pagination page <requestedPage>:` and names the invalid field/value; never classify errors by message text.
+- Add `Cache.invalidateExact(key): void`: increment the generation once and delete only the exact key, whether or not it currently exists, so an in-flight stale writer from the prior generation cannot repopulate it. It must not use prefix matching.
+- `list()` derives `requestedPage = params?.page ?? 1` and rejects an invalid requested page before cache or transport access. It validates cached hits before returning them and validates fresh responses before `setIfSameGeneration`. On cached or fresh page-validation failure, call `cache.invalidateExact(cacheKey)`, rethrow the same typed error object, and preserve valid sibling page/resource/namespace entries.
+- `listAll()` pins page 1's `total_pages`. Every later page must report the same total; shrink or expansion is unstable continuation metadata and rejects before appending that page's items. On any validation/continuation failure, invalidate the current connection/resource prefix so valid page caches accumulated earlier in that failed traversal and any aggregate cache are removed. Preserve unrelated resources and connection namespaces.
+- `listAllCached()` may cache only a fully successful aggregate; a failed traversal leaves no `${basePath}:listAll` or per-page entry for that resource. Preserve current max-page, max-item, timeout, progress, and `setIfSameGeneration` behavior.
+- Deliberate exclusion: cross-page snapshot consistency during a concurrent valid mutation is not M02; this task validates response metadata and cache hygiene only.
 
-- [ ] **Step 1: Write failing regressions**
+- [ ] **Step 1: Establish baseline**
 
-```ts
-it.each([
-  [{ current_page: 1, total_pages: 3, items: [] }, 2, "current_page"],
-  [{ current_page: 1, total_pages: Number.NaN, items: [] }, 1, "total_pages"],
-  [{ current_page: 2, total_pages: 1, items: [] }, 2, "total_pages"],
-])("rejects malformed page metadata", async (response, page, message) => {
-  const client = makeClient();
-  vi.mocked(client.get).mockResolvedValue(response as never);
-  const resource = new BaseResource<Item>(client, "/items");
-  await expect(resource.listAll(undefined, 10)).rejects.toThrow(message);
-  expect(cache.get(`${client.cacheNamespace}:/items:listAll`)).toBeUndefined();
-});
-```
+Run `git status --short` and `npx vitest run src/cache.test.ts src/api/base-resource.test.ts`; require a clean worktree and record the passing count.
 
-- [ ] **Step 2: Prove red**
+- [ ] **Step 2: RED-A — page-shape and cache-entry matrix**
 
-Run: `npx vitest run src/api/base-resource.test.ts -t "malformed page metadata"`
+In `src/cache.test.ts`, RED-test `invalidateExact` with keys `...:list:`, `...:list:page=1`, `...:list:page=10`, and `...:listAll`: removing each chosen key affects no prefix-colliding sibling, increments generation exactly once even for an absent key, and blocks `setIfSameGeneration` using the prior generation.
 
-Expected: FAIL because malformed continuation returns and may cache a partial list.
+In `src/api/base-resource.test.ts`, add table-driven `M02` tests for fresh and manually seeded cached responses covering: null/non-object/array response, missing/non-array `items`, `requestedPage` 0, negative, fractional, `NaN`, and `Infinity`, mismatched/repeated/noninteger `current_page`, and `total_pages` values 0, below requested, fractional, `NaN`, and `Infinity`. Invalid requested-page rows make zero transport calls. Other fresh rows make one; cached rows make zero. Assert the exact failing page/field/value, the malformed exact cache key is absent afterward, no malformed return/write occurs, and prefix-colliding default/page-1/page-10, aggregate, `/products`, and `connection:1` entries remain unless one is the exact malformed key.
 
-- [ ] **Step 3: Validate before caching or appending**
+- [ ] **Step 3: RED-B — traversal stability and cleanup**
 
-```ts
-function validatePage<T>(response: PaginatedResponse<T>, requestedPage: number): void {
-  if (!response || !Array.isArray(response.items)) throw new Error(`Pagination page ${requestedPage}: items must be an array`);
-  if (!Number.isInteger(response.current_page) || response.current_page !== requestedPage) {
-    throw new Error(`Pagination page ${requestedPage}: current_page was ${String(response.current_page)}`);
-  }
-  if (!Number.isInteger(response.total_pages) || response.total_pages < requestedPage || response.total_pages < 1) {
-    throw new Error(`Pagination page ${requestedPage}: invalid total_pages ${String(response.total_pages)}`);
-  }
-}
+Add fresh and fully cached `listAll` variants for page-1 total 3 followed by total 2, page-1 total 2 followed by total 3, and repeated page metadata (`current_page: 1` for requested page 2). Fresh variants make exactly two transport calls; fully cached variants pre-seed both exact page keys and make zero. For total drift, give page 2 an array whose `Symbol.iterator` is spied; assert it is never iterated, proving comparison happens before `allItems.push`. Before calling `listAll`, seed a `${basePath}:listAll` sentinel and assert typed failure removes that aggregate plus all `/items` page caches while preserving `/products` and `connection:1:/items`.
 
-const result = await this.client.get<PaginatedResponse<T>>(this.basePath, params as Record<string, string | number>);
-validatePage(result, params?.page ?? 1);
-cache.setIfSameGeneration(cacheKey, result, gen, 120);
-```
+For `listAllCached`, start without an aggregate cache entry, trigger the same typed traversal failure, and assert it rejects and never writes `${basePath}:listAll`. Do not pre-seed that aggregate when calling `listAllCached`, because that would bypass traversal.
 
-- [ ] **Step 4: Prove green and independently review**
+Add negative-control tests with resource cache sentinels for a raw upstream rejection, `reportProgress` rejection, deadline timeout, max-page breach, and max-item breach. Each must retain its original error identity/message and must not invoke resource-prefix cleanup; valid cache entries remain. Use fake time/bounded limits rather than real waiting.
 
-Run: `npx vitest run src/api/base-resource.test.ts && npm run build && git diff --check`
+- [ ] **Step 4: Prove honest RED**
 
-Expected: malformed/cyclic pages reject and no partial aggregate is cached. Write `.omc/reviews/M02.diff` and obtain both verdicts.
-
-- [ ] **Step 5: Commit M02**
+Run:
 
 ```bash
-git add src/api/base-resource.ts src/api/base-resource.test.ts
+npx vitest run src/cache.test.ts -t "M02 exact invalidation"
+npx vitest run src/api/base-resource.test.ts -t "M02 page validation"
+npx vitest run src/api/base-resource.test.ts -t "M02 traversal stability"
+```
+
+Expected: behavior assertions fail because malformed pages are returned/cached, unstable totals are accepted, or failed traversal page caches remain. Zero selected tests or compile-only failure is not sufficient.
+
+- [ ] **Step 5: Implement minimal GREEN**
+
+Implement and unit-test `Cache.invalidateExact` first. Then implement the typed validator near `BaseResource`. Validate requested page before any lookup/request, then cached and fresh results before return/write; catch only `PaginationMetadataError` to call `cache.invalidateExact(cacheKey)` and rethrow the same object. In `listAll`, pin the first total and compare every later response before touching its items; catch only `PaginationMetadataError`, call `this.invalidateCache()` once to remove all current-namespace resource pages/aggregate, and rethrow the same object. Do not catch or convert upstream, progress, timeout, max-page, or max-item failures. Preserve `setIfSameGeneration` and existing limit/progress ordering outside these typed boundaries.
+
+- [ ] **Step 6: Focused and full verification**
+
+Run in order:
+
+```bash
+npx vitest run src/api/base-resource.test.ts -t "M02"
+npx vitest run src/cache.test.ts src/api/base-resource.test.ts
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+```
+
+Require all unit/build/release gates and only documented integration skips. Record exact counts.
+
+- [ ] **Step 7: Freeze scope and ordered reviews**
+
+Require exactly the four tracked paths above and an empty real index. Build `.omc/reviews/M02.diff` through a copied temporary index containing exactly those paths; require a non-empty byte-matching artifact. Obtain a fresh `SPEC COMPLIANCE: APPROVED`, then a different fresh `CODE QUALITY: APPROVED`. Any edit restarts verification, artifact creation, and both reviews in order.
+
+- [ ] **Step 8: Commit, ledger, and Wave 2 gate**
+
+```bash
+git add src/cache.ts src/cache.test.ts src/api/base-resource.ts src/api/base-resource.test.ts
+git diff --cached --name-only
 git commit -m "fix(M02): reject malformed pagination"
 ```
 
-- [ ] **Step 6: Append ledger, prove clean, then pass Wave 2**
-
-Append M02, require empty `git status --short`, then run `npm run validate:release && git diff --check && npm run build && npm test && npm run test:integration`; require PASS with baseline skips only.
+Append the M02 ledger row and require a clean worktree. Then run `npm run validate:release && git diff --check && npm run build && npm test && npm run test:integration`; require PASS with documented skips only before starting H05.
 
 ### Task 9: H05 — Preserve approved purchase-invoice totals by default
 
