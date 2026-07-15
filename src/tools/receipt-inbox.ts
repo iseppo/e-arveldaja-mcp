@@ -4,6 +4,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { HttpError } from "../http-client.js";
+import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { roundMoney } from "../money.js";
@@ -81,7 +82,6 @@ import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import {
   buildDryRunCreatedInvoicePreview,
   createAndMaybeMatchPurchaseInvoice,
-  invalidateAndReport,
 } from "./receipt-inbox-booking.js";
 import {
   buildReceiptBatchExecution,
@@ -156,6 +156,44 @@ interface ClassifiedTransactionGroupResult {
     accounts_dimensions_id: number;
     clients_id?: number | null;
   }>;
+}
+
+type PartialClassificationStatus = "PROJECT" | "CONFIRMED" | "VOID" | "UNKNOWN";
+
+interface PartialClassificationMutation {
+  category: "mutation_indeterminate" | "mutation_failed";
+  mutation_may_have_occurred: true;
+  failed_stage:
+    | "transaction_reread"
+    | "invoice_invalidation"
+    | "invoice_confirmation"
+    | "transaction_confirmation";
+  created_invoice_id: number;
+  created_invoice_status: PartialClassificationStatus;
+  attempted_transaction_id: number;
+  transaction_status: PartialClassificationStatus;
+  next_action: string;
+}
+
+function invoiceClassificationStatus(status: unknown): PartialClassificationStatus {
+  return status === "PROJECT" || status === "CONFIRMED" ? status : "UNKNOWN";
+}
+
+function transactionClassificationStatus(
+  transaction: Pick<Transaction, "status" | "is_deleted">,
+): PartialClassificationStatus {
+  if (transaction.is_deleted === true) return "UNKNOWN";
+  return transaction.status === "PROJECT" ||
+    transaction.status === "CONFIRMED" ||
+    transaction.status === "VOID"
+    ? transaction.status
+    : "UNKNOWN";
+}
+
+function isAmbiguousPostCreateFailure(error: unknown): boolean {
+  return isMutationIndeterminate(error) || (
+    error instanceof HttpError && error.status === "network"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1803,6 +1841,7 @@ export function registerReceiptInboxTools(
         transactions: number[];
         created_invoice_ids?: number[];
         linked_transaction_ids?: number[];
+        partial_mutations?: PartialClassificationMutation[];
       }> = [];
 
       for (let index = 0; index < groups.length; index++) {
@@ -1810,6 +1849,11 @@ export function registerReceiptInboxTools(
         await reportProgress(index, groups.length);
         const notes: string[] = [];
         const transactionIds = group.transactions.map(transaction => transaction.id).filter((id): id is number => id !== undefined);
+        const createdInvoiceIds: number[] = [];
+        const linkedTransactionIds: number[] = [];
+        const partialMutations: PartialClassificationMutation[] = [];
+        let wouldCreateCount = 0;
+        let attemptedCreateCount = 0;
 
         try {
           const freshTransactions: Transaction[] = [];
@@ -1882,11 +1926,6 @@ export function registerReceiptInboxTools(
             });
             continue;
           }
-
-          const createdInvoiceIds: number[] = [];
-          const linkedTransactionIds: number[] = [];
-          let wouldCreateCount = 0;
-          let attemptedCreateCount = 0;
 
           for (const transaction of freshTransactions) {
             const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun, group.category);
@@ -1987,69 +2026,148 @@ export function registerReceiptInboxTools(
               grossAmount,
               isVatRegistered,
             );
+            const invoiceId = invoice.id;
+            if (!invoiceId) {
+              throw new Error("createAndSetTotals resolved without a purchase invoice ID");
+            }
             attemptedCreateCount += 1;
+            createdInvoiceIds.push(invoiceId);
+            let observedInvoiceStatus = invoiceClassificationStatus(invoice.status);
             logAudit({
               tool: "apply_transaction_classifications", action: "CREATED", entity_type: "purchase_invoice",
-              entity_id: invoice.id,
+              entity_id: invoiceId,
               summary: `Auto-booked purchase invoice from transaction ${transaction.id} (${group.display_counterparty})`,
               details: { supplier_name: supplier.name, invoice_number: `AUTO-TX-${transaction.id}`, date: transaction.date, total_gross: grossAmount },
             });
 
-            if (invoice.id) {
-              const invalidateAutoCreatedInvoice = async (reason: string) => {
-                await invalidateAndReport(api, invoice, notes, {
-                  reason,
-                  onInvalidated: invoiceId => `Invalidated auto-created purchase invoice ${invoiceId} because ${reason}.`,
-                  onInvalidationFailed: (invoiceId, invalidateMessage) =>
-                    `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${wrapUntrustedOcr(invalidateMessage) ?? invalidateMessage}.`,
-                });
-              };
+            type InvoiceInvalidationOutcome =
+              | { ok: true }
+              | { ok: false; error: unknown };
 
-              const freshTransaction = await api.transactions.get(transaction.id!);
-              if (!isProjectTransaction(freshTransaction)) {
-                await invalidateAutoCreatedInvoice(`transaction ${transaction.id} is no longer bookable (status ${freshTransaction.status ?? "UNKNOWN"})`);
-                continue;
-              }
-
+            const invalidateAutoCreatedInvoice = async (
+              reason: string,
+            ): Promise<InvoiceInvalidationOutcome> => {
               try {
-                await api.purchaseInvoices.confirmWithTotals(invoice.id, isVatRegistered, {
-                  preserveExistingTotals: true,
-                });
-                logAudit({
-                  tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "purchase_invoice",
-                  entity_id: invoice.id,
-                  summary: `Auto-confirmed purchase invoice ${invoice.id} for transaction ${transaction.id}`,
-                  details: { invoice_id: invoice.id, transaction_id: transaction.id },
-                });
-                await api.transactions.confirm(transaction.id!, [{
-                  related_table: "purchase_invoices",
-                  related_id: invoice.id,
-                  amount: transaction.amount,
-                }]);
-                logAudit({
-                  tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
-                  entity_id: transaction.id!,
-                  summary: `Auto-confirmed transaction ${transaction.id} against invoice ${invoice.id}`,
-                  details: { amount: transaction.amount, invoice_id: invoice.id },
-                });
+                await api.purchaseInvoices.invalidate(invoiceId);
+                notes.push(`Invalidated auto-created purchase invoice ${invoiceId} because ${reason}.`);
+                return { ok: true };
               } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
-                await invalidateAutoCreatedInvoice(`automation failed after creation: ${message}`);
-                continue;
+                notes.push(
+                  `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${wrapUntrustedOcr(message) ?? message}.`,
+                );
+                return { ok: false, error };
               }
+            };
 
-              createdInvoiceIds.push(invoice.id);
-              linkedTransactionIds.push(transaction.id!);
+            const recordPostCreateFailure = (
+              error: unknown,
+              failedStage: PartialClassificationMutation["failed_stage"],
+              createdInvoiceStatus: PartialClassificationStatus,
+              transactionStatus: PartialClassificationStatus,
+            ): void => {
+              const ambiguous = isAmbiguousPostCreateFailure(error);
+              const nextAction = failedStage === "transaction_reread"
+                ? `Use existing purchase invoice ${invoiceId}. Freshly read transaction ${transaction.id}, then continue only after explicit approval.`
+                : failedStage === "invoice_invalidation"
+                  ? `Freshly read existing purchase invoice ${invoiceId} before any further action, then continue only after explicit approval.`
+                  : failedStage === "invoice_confirmation"
+                    ? `Use existing purchase invoice ${invoiceId}. Freshly read that invoice and transaction ${transaction.id}, then continue only after explicit approval.`
+                    : `Use existing confirmed purchase invoice ${invoiceId}. Freshly read transaction ${transaction.id}, then continue only after explicit approval.`;
+              partialMutations.push({
+                category: ambiguous ? "mutation_indeterminate" : "mutation_failed",
+                mutation_may_have_occurred: true,
+                failed_stage: failedStage,
+                created_invoice_id: invoiceId,
+                created_invoice_status: createdInvoiceStatus,
+                attempted_transaction_id: transaction.id!,
+                transaction_status: transactionStatus,
+                next_action: nextAction,
+              });
+              notes.push(nextAction);
+            };
+
+            let freshTransaction: Transaction;
+            try {
+              freshTransaction = await api.transactions.get(transaction.id!);
+            } catch (error) {
+              recordPostCreateFailure(error, "transaction_reread", observedInvoiceStatus, "UNKNOWN");
+              continue;
             }
+
+            if (!isProjectTransaction(freshTransaction)) {
+              const invalidation = await invalidateAutoCreatedInvoice(
+                `transaction ${transaction.id} is no longer bookable (status ${freshTransaction.status ?? "UNKNOWN"})`,
+              );
+              if (invalidation.ok) {
+                const createdIndex = createdInvoiceIds.lastIndexOf(invoiceId);
+                if (createdIndex >= 0) createdInvoiceIds.splice(createdIndex, 1);
+              } else {
+                recordPostCreateFailure(
+                  invalidation.error,
+                  "invoice_invalidation",
+                  isAmbiguousPostCreateFailure(invalidation.error) ? "UNKNOWN" : observedInvoiceStatus,
+                  transactionClassificationStatus(freshTransaction),
+                );
+              }
+              continue;
+            }
+
+            try {
+              await api.purchaseInvoices.confirmWithTotals(invoiceId, isVatRegistered, {
+                preserveExistingTotals: true,
+              });
+              observedInvoiceStatus = "CONFIRMED";
+              logAudit({
+                tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "purchase_invoice",
+                entity_id: invoiceId,
+                summary: `Auto-confirmed purchase invoice ${invoiceId} for transaction ${transaction.id}`,
+                details: { invoice_id: invoiceId, transaction_id: transaction.id },
+              });
+            } catch (error) {
+              recordPostCreateFailure(
+                error,
+                "invoice_confirmation",
+                isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : observedInvoiceStatus,
+                "PROJECT",
+              );
+              continue;
+            }
+
+            try {
+              await api.transactions.confirm(transaction.id!, [{
+                related_table: "purchase_invoices",
+                related_id: invoiceId,
+                amount: transaction.amount,
+              }]);
+              logAudit({
+                tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
+                entity_id: transaction.id!,
+                summary: `Auto-confirmed transaction ${transaction.id} against invoice ${invoiceId}`,
+                details: { amount: transaction.amount, invoice_id: invoiceId },
+              });
+            } catch (error) {
+              recordPostCreateFailure(
+                error,
+                "transaction_confirmation",
+                "CONFIRMED",
+                isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : "PROJECT",
+              );
+              continue;
+            }
+
+            linkedTransactionIds.push(transaction.id!);
           }
 
           const status = dryRun
             ? (wouldCreateCount > 0 ? "dry_run_preview" : "skipped")
-            : (attemptedCreateCount > 0 && createdInvoiceIds.length === attemptedCreateCount
+            : partialMutations.length > 0
+              ? "failed"
+              : attemptedCreateCount > 0 && linkedTransactionIds.length === attemptedCreateCount
                 ? "applied"
                 : attemptedCreateCount > 0
                   ? "failed"
-                  : "skipped");
+                  : "skipped";
 
           if (status === "failed" && linkedTransactionIds.length > 0) {
             notes.push(
@@ -2065,14 +2183,20 @@ export function registerReceiptInboxTools(
             transactions: transactionIds,
             created_invoice_ids: dryRun ? undefined : createdInvoiceIds,
             linked_transaction_ids: dryRun ? undefined : linkedTransactionIds,
+            partial_mutations: partialMutations.length > 0 ? partialMutations : undefined,
           });
         } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          notes.push(message);
           results.push({
             category: group.category,
             counterparty: group.display_counterparty,
             status: "failed",
-            notes: [error instanceof Error ? error.message : String(error)],
+            notes,
             transactions: transactionIds,
+            created_invoice_ids: dryRun ? undefined : createdInvoiceIds,
+            linked_transaction_ids: dryRun ? undefined : linkedTransactionIds,
+            partial_mutations: partialMutations.length > 0 ? partialMutations : undefined,
           });
         }
       }
