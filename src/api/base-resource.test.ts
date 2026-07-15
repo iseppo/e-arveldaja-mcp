@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { BaseResource, cache } from "./base-resource.js";
 import type { PaginatedResponse, ApiResponse } from "../types/api.js";
-import type { HttpClient } from "../http-client.js";
+import { HttpError, type HttpClient } from "../http-client.js";
+import { MutationIndeterminateError } from "../mutation-outcome.js";
+import { ClientsApi } from "./clients.api.js";
+import { ProductsApi } from "./products.api.js";
+import { JournalsApi } from "./journals.api.js";
+import { TransactionsApi } from "./transactions.api.js";
+import { SaleInvoicesApi } from "./sale-invoices.api.js";
+import { PurchaseInvoicesApi } from "./purchase-invoices.api.js";
 
 // Mock logger and progress so tests don't write to stderr or fail on missing context
 vi.mock("../logger.js", () => ({ log: vi.fn() }));
@@ -17,6 +24,7 @@ function makeClient(namespace = "connection:0"): HttpClient {
     post: vi.fn(),
     patch: vi.fn(),
     delete: vi.fn(),
+    request: vi.fn(),
   } as unknown as HttpClient;
 }
 
@@ -351,6 +359,284 @@ describe("BaseResource", () => {
       // connection:1 cache still intact
       await resourceB.list();
       expect(clientB.get).toHaveBeenCalledTimes(1); // not called again
+    });
+  });
+
+  describe("M01 ambiguous inherited mutations", () => {
+    it("M01 evicts only the affected namespace resource caches after a raw network update", async () => {
+      const client = makeClient();
+      const resource = new ClientsApi(client);
+      cache.set("connection:0:/clients:list:page=1", "client-list");
+      cache.set("connection:0:/clients:listAll", "all-clients");
+      cache.set("connection:0:/clients:5", "client-five");
+      cache.set("connection:0:/products:list:", "products");
+      cache.set("connection:1:/clients:list:", "other-company-clients");
+      const networkError = new HttpError(
+        "request failed after retries",
+        "network",
+        "PATCH",
+        "/clients/5",
+      );
+      vi.mocked(client.patch).mockRejectedValueOnce(networkError);
+
+      const thrown = await resource.update(5, { name: "updated" }).catch(error => error);
+
+      expect(thrown).toBeInstanceOf(MutationIndeterminateError);
+      expect(thrown).toMatchObject({
+        category: "mutation_indeterminate",
+        mutationMayHaveOccurred: true,
+        operation: "update",
+        entity: "client",
+        entityId: 5,
+        businessKey: "/clients:5",
+        affectedCaches: ["/clients"],
+        cause: {
+          name: "HttpError",
+          message: "request failed after retries",
+          status: "network",
+          method: "PATCH",
+          path: "/clients/5",
+        },
+      });
+      expect(cache.get("connection:0:/clients:list:page=1")).toBeUndefined();
+      expect(cache.get("connection:0:/clients:listAll")).toBeUndefined();
+      expect(cache.get("connection:0:/clients:5")).toBeUndefined();
+      expect(cache.get("connection:0:/products:list:")).toBe("products");
+      expect(cache.get("connection:1:/clients:list:")).toBe("other-company-clients");
+    });
+
+    const inheritedCases = [
+      {
+        label: "create",
+        operation: "create",
+        entityId: undefined,
+        businessKey: "/clients:create",
+        method: "POST",
+        path: "/clients",
+        invoke: (resource: ClientsApi) => resource.create({ name: "new" }),
+        requestMock: (client: HttpClient) => client.post,
+      },
+      {
+        label: "update",
+        operation: "update",
+        entityId: 5,
+        businessKey: "/clients:5",
+        method: "PATCH",
+        path: "/clients/5",
+        invoke: (resource: ClientsApi) => resource.update(5, { name: "updated" }),
+        requestMock: (client: HttpClient) => client.patch,
+      },
+      {
+        label: "delete",
+        operation: "delete",
+        entityId: 5,
+        businessKey: "/clients:5",
+        method: "DELETE",
+        path: "/clients/5",
+        invoke: (resource: ClientsApi) => resource.delete(5),
+        requestMock: (client: HttpClient) => client.delete,
+      },
+      {
+        label: "upload document",
+        operation: "upload",
+        entityId: 5,
+        businessKey: "/clients:5:document_user",
+        method: "PUT",
+        path: "/clients/5/document_user",
+        invoke: (resource: ClientsApi) => resource.uploadDocument(5, "scan.pdf", "base64"),
+        requestMock: (client: HttpClient) => client.request,
+      },
+      {
+        label: "delete document",
+        operation: "delete",
+        entityId: 5,
+        businessKey: "/clients:5:document_user",
+        method: "DELETE",
+        path: "/clients/5/document_user",
+        invoke: (resource: ClientsApi) => resource.deleteDocument(5),
+        requestMock: (client: HttpClient) => client.delete,
+      },
+    ] as const;
+
+    it.each(inheritedCases)("M01 serializes raw network metadata for inherited $label", async row => {
+      const client = makeClient();
+      const resource = new ClientsApi(client);
+      cache.set("connection:0:/clients:list:", "clients");
+      cache.set("connection:0:/products:list:", "products");
+      const networkError = new HttpError("ambiguous transport", "network", row.method, row.path);
+      vi.mocked(row.requestMock(client)).mockRejectedValueOnce(networkError);
+
+      const thrown = await row.invoke(resource).catch(error => error);
+
+      expect(thrown).toBeInstanceOf(MutationIndeterminateError);
+      expect(thrown).toMatchObject({
+        operation: row.operation,
+        entity: "client",
+        businessKey: row.businessKey,
+        affectedCaches: ["/clients"],
+        cause: {
+          name: "HttpError",
+          message: "ambiguous transport",
+          status: "network",
+          method: row.method,
+          path: row.path,
+        },
+      });
+      expect(thrown.entityId).toBe(row.entityId);
+      expect(thrown.nextAction).toContain(row.businessKey);
+      expect(thrown.nextAction).toMatch(/do not repeat/i);
+      expect(row.requestMock(client)).toHaveBeenCalledTimes(1);
+      expect(cache.get("connection:0:/clients:list:")).toBeUndefined();
+      expect(cache.get("connection:0:/products:list:")).toBe("products");
+    });
+
+    it.each([
+      ["400", new HttpError("bad request", 400, "PATCH", "/clients/5")],
+      ["409", new HttpError("conflict", 409, "PATCH", "/clients/5")],
+      ["503", new HttpError("unavailable", 503, "PATCH", "/clients/5")],
+      ["ordinary", new Error("ordinary failure")],
+    ] as const)("M01 preserves a definite %s failure without cache eviction", async (_label, failure) => {
+      const client = makeClient();
+      const resource = new ClientsApi(client);
+      cache.set("connection:0:/clients:list:", "clients");
+      const generation = cache.generation;
+      vi.mocked(client.patch).mockRejectedValueOnce(failure);
+
+      const thrown = await resource.update(5, { name: "updated" }).catch(error => error);
+
+      expect(thrown).toBe(failure);
+      expect(cache.get("connection:0:/clients:list:")).toBe("clients");
+      expect(cache.generation).toBe(generation);
+    });
+
+    it("M01 rethrows structured ambiguity by identity and invalidates the deduplicated cache union", async () => {
+      const client = makeClient();
+      const resource = new ClientsApi(client);
+      cache.set("connection:0:/clients:list:", "clients");
+      cache.set("connection:0:/products:list:", "products");
+      cache.set("connection:0:/journals:list:", "journals");
+      const structured = new MutationIndeterminateError({
+        operation: "update",
+        entity: "client",
+        entityId: 5,
+        businessKey: "external-client-key",
+        affectedCaches: ["/clients", "/products", "/products"],
+        cause: new HttpError("socket closed", "network", "PATCH", "/clients/5"),
+        nextAction: "Use the original recovery action.",
+      });
+      const originalFields = {
+        entityId: structured.entityId,
+        businessKey: structured.businessKey,
+        cause: structured.cause,
+        nextAction: structured.nextAction,
+        affectedCaches: [...structured.affectedCaches],
+      };
+      const generation = cache.generation;
+      vi.mocked(client.patch).mockRejectedValueOnce(structured);
+
+      const thrown = await resource.update(5, { name: "updated" }).catch(error => error);
+
+      expect(thrown).toBe(structured);
+      expect(structured).toMatchObject(originalFields);
+      expect(structured.affectedCaches).toEqual(["/clients", "/products", "/products"]);
+      expect(cache.generation).toBe(generation + 2);
+      expect(cache.get("connection:0:/clients:list:")).toBeUndefined();
+      expect(cache.get("connection:0:/products:list:")).toBeUndefined();
+      expect(cache.get("connection:0:/journals:list:")).toBe("journals");
+    });
+
+    it("M01 ignores empty unknown and noncanonical declared cache prefixes", async () => {
+      const client = makeClient();
+      const resource = new ClientsApi(client);
+      cache.set("connection:0:/clients:list:", "clients");
+      cache.set("connection:0:/products:list:", "products");
+      cache.set("connection:0:/journals:list:", "journals");
+      cache.set("connection:1:/clients:list:", "other-company-clients");
+      const structural = {
+        category: "mutation_indeterminate",
+        mutationMayHaveOccurred: true,
+        operation: "update",
+        entity: "client",
+        entityId: 5,
+        businessKey: "external-client-key",
+        affectedCaches: [
+          "",
+          "/",
+          "/unknown",
+          "connection:0:",
+          "/products/5",
+          "/products",
+          "/products",
+        ],
+        cause: { name: "HttpError", message: "network", status: "network" },
+        nextAction: "Inspect state.",
+      };
+      const generation = cache.generation;
+      vi.mocked(client.patch).mockRejectedValueOnce(structural);
+
+      const thrown = await resource.update(5, { name: "updated" }).catch(error => error);
+
+      expect(thrown).toBe(structural);
+      expect(cache.generation).toBe(generation + 2);
+      expect(cache.get("connection:0:/clients:list:")).toBeUndefined();
+      expect(cache.get("connection:0:/products:list:")).toBeUndefined();
+      expect(cache.get("connection:0:/journals:list:")).toBe("journals");
+      expect(cache.get("connection:1:/clients:list:")).toBe("other-company-clients");
+    });
+
+    it("M01 invalidates the mandatory local prefix when affectedCaches access throws", async () => {
+      const client = makeClient();
+      const resource = new ClientsApi(client);
+      cache.set("connection:0:/clients:list:", "clients");
+      cache.set("connection:0:/products:list:", "products");
+      const structural = {
+        category: "mutation_indeterminate",
+        mutationMayHaveOccurred: true,
+        operation: "update",
+        entity: "client",
+        entityId: 5,
+        businessKey: "external-client-key",
+        get affectedCaches(): string[] {
+          throw new Error("malicious cache getter");
+        },
+        cause: { name: "HttpError", message: "network", status: "network" },
+        nextAction: "Inspect state.",
+      };
+      const generation = cache.generation;
+      vi.mocked(client.patch).mockRejectedValueOnce(structural);
+
+      const thrown = await resource.update(5, { name: "updated" }).catch(error => error);
+
+      expect(thrown).toBe(structural);
+      expect(cache.generation).toBe(generation + 1);
+      expect(cache.get("connection:0:/clients:list:")).toBeUndefined();
+      expect(cache.get("connection:0:/products:list:")).toBe("products");
+    });
+
+    it.each([
+      [ClientsApi, "/clients", "client"],
+      [ProductsApi, "/products", "product"],
+      [JournalsApi, "/journals", "journal"],
+      [TransactionsApi, "/transactions", "transaction"],
+      [SaleInvoicesApi, "/sale_invoices", "sale_invoice"],
+      [PurchaseInvoicesApi, "/purchase_invoices", "purchase_invoice"],
+    ] as const)("M01 maps inherited ambiguity for %s to singular %s metadata", async (Api, path, entity) => {
+      const client = makeClient();
+      const resource = new Api(client);
+      vi.mocked(client.patch).mockRejectedValueOnce(
+        new HttpError("network ambiguity", "network", "PATCH", `${path}/5`),
+      );
+
+      const thrown = await resource.update(5, {}).catch(error => error);
+
+      expect(thrown).toBeInstanceOf(MutationIndeterminateError);
+      expect(thrown).toMatchObject({
+        operation: "update",
+        entity,
+        entityId: 5,
+        businessKey: `${path}:5`,
+        affectedCaches: [path],
+      });
     });
   });
 });

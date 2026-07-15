@@ -764,4 +764,101 @@ describe("audit log labels", () => {
     // misfiled on the wrong company.
     expect(auditLog.getAuditLog()).not.toContain("CONNECTION_SWITCH_INTERRUPTED");
   });
+
+  it.each([
+    ["et", "mutatsiooni tulemus määramatu"],
+    ["en", "mutation outcome indeterminate"],
+  ] as const)("M01 renders the localized MUTATION_INDETERMINATE action in %s", async (lang, label) => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-m01-label-"));
+    const previousLang = process.env.EARVELDAJA_AUDIT_LANG;
+    process.env.EARVELDAJA_AUDIT_LANG = lang;
+    try {
+      const auditLog = await loadAuditLogModule(tempDir);
+      auditLog.initAuditLog(() => "original-company");
+
+      expect(auditLog.AuditAction.parse("MUTATION_INDETERMINATE"))
+        .toBe("MUTATION_INDETERMINATE");
+      expect(auditLog.logAudit({
+        tool: "update_client",
+        action: "MUTATION_INDETERMINATE",
+        entity_type: "client",
+        entity_id: 5,
+        summary: "Mutation outcome is indeterminate.",
+        details: { category: "mutation_indeterminate" },
+      }, { connectionName: "original-company" })).toBe(true);
+
+      const humanReadable = auditLog.getAuditLogByConnection("original-company")
+        .split("<!-- audit:")[0]!;
+      expect(humanReadable).toContain(label);
+      expect(humanReadable).not.toContain("MUTATION_INDETERMINATE");
+    } finally {
+      if (previousLang === undefined) delete process.env.EARVELDAJA_AUDIT_LANG;
+      else process.env.EARVELDAJA_AUDIT_LANG = previousLang;
+    }
+  });
+
+  it("M01 persists every flattened mutation recovery field through the real Markdown log", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-m01-fields-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "currently-active-company");
+
+    const persisted = auditLog.logAudit({
+      tool: "update_client",
+      action: "MUTATION_INDETERMINATE",
+      entity_type: "client",
+      entity_id: 5,
+      summary: "Mutation outcome is indeterminate; inspect remote state before retrying.",
+      details: {
+        category: "mutation_indeterminate",
+        mutation_may_have_occurred: true,
+        operation: "update",
+        business_key: "/clients:5",
+        affected_caches: "/clients,/products",
+        cause_name: "HttpError",
+        cause_message: "connection reset after request body",
+        cause_status: "network",
+        cause_method: "PATCH",
+        cause_path: "/clients/5",
+        next_action: "Re-read client 5 before deciding whether to retry.",
+      },
+    }, { connectionName: "original-company" });
+
+    expect(persisted).toBe(true);
+    const markdown = auditLog.getAuditLogByConnection("original-company");
+    for (const value of [
+      "mutation\\_indeterminate",
+      "true",
+      "update",
+      "/clients:5",
+      "/clients,/products",
+      "HttpError",
+      "connection reset after request body",
+      "network",
+      "PATCH",
+      "/clients/5",
+      "Re-read client 5 before deciding whether to retry.",
+    ]) {
+      expect(markdown).toContain(value);
+    }
+    expect(auditLog.getAuditLogByConnection("currently-active-company")).toBe("");
+  });
+
+  it("M01 returns false without throwing when the production append fails", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-m01-failure-"));
+    const auditLog = await loadAuditLogModule(tempDir, {
+      appendFileSync: vi.fn(() => {
+        throw new Error("simulated append failure");
+      }) as unknown as typeof import("fs").appendFileSync,
+    });
+    auditLog.initAuditLog(() => "original-company");
+
+    expect(auditLog.logAudit({
+      tool: "update_client",
+      action: "MUTATION_INDETERMINATE",
+      entity_type: "client",
+      entity_id: 5,
+      summary: "Mutation outcome is indeterminate.",
+      details: { category: "mutation_indeterminate" },
+    })).toBe(false);
+  });
 });

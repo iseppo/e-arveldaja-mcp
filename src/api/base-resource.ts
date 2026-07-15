@@ -1,10 +1,36 @@
-import type { HttpClient } from "../http-client.js";
+import { HttpError, type HttpClient } from "../http-client.js";
 import type { ApiFile, ApiResponse, PaginatedResponse } from "../types/api.js";
 import { Cache } from "../cache.js";
 import { log } from "../logger.js";
 import { reportProgress } from "../progress.js";
+import type { AuditEntityType } from "../audit-log.js";
+import {
+  isMutationIndeterminate,
+  MutationIndeterminateError,
+  type MutationOperation,
+} from "../mutation-outcome.js";
 
 export const cache = new Cache(300);
+
+const MUTATION_ENTITY_BY_PATH = {
+  "/clients": "client",
+  "/products": "product",
+  "/journals": "journal",
+  "/transactions": "transaction",
+  "/sale_invoices": "sale_invoice",
+  "/purchase_invoices": "purchase_invoice",
+} as const satisfies Record<string, AuditEntityType>;
+const KNOWN_MUTATION_CACHE_PREFIXES = new Set<string>(
+  Object.keys(MUTATION_ENTITY_BY_PATH),
+);
+
+function safelyIsMutationIndeterminate(error: unknown): boolean {
+  try {
+    return isMutationIndeterminate(error);
+  } catch {
+    return false;
+  }
+}
 
 export interface ListParams {
   page?: number;
@@ -40,6 +66,72 @@ export class BaseResource<T> {
 
   protected invalidateCache(pattern = this.basePath): void {
     cache.invalidate(this.cacheKey(pattern));
+  }
+
+  protected async mutate<R>(
+    operation: MutationOperation,
+    entityId: number | undefined,
+    businessKey: string,
+    affectedPatterns: readonly string[],
+    request: () => Promise<R>,
+  ): Promise<R> {
+    try {
+      const result = await request();
+      for (const pattern of new Set(affectedPatterns)) {
+        this.invalidateCache(pattern);
+      }
+      return result;
+    } catch (error) {
+      if (safelyIsMutationIndeterminate(error)) {
+        const invalidatedPatterns = new Set<string>();
+        for (const pattern of affectedPatterns) {
+          if (invalidatedPatterns.has(pattern)) continue;
+          this.invalidateCache(pattern);
+          invalidatedPatterns.add(pattern);
+        }
+
+        try {
+          const declaredPatterns = (error as { affectedCaches?: unknown }).affectedCaches;
+          if (Array.isArray(declaredPatterns)) {
+            for (const pattern of declaredPatterns) {
+              if (
+                typeof pattern !== "string" ||
+                !KNOWN_MUTATION_CACHE_PREFIXES.has(pattern) ||
+                invalidatedPatterns.has(pattern)
+              ) {
+                continue;
+              }
+              this.invalidateCache(pattern);
+              invalidatedPatterns.add(pattern);
+            }
+          }
+        } catch {
+          throw error;
+        }
+        throw error;
+      }
+
+      if (error instanceof HttpError && error.status === "network") {
+        for (const pattern of new Set(affectedPatterns)) {
+          this.invalidateCache(pattern);
+        }
+        const entity = MUTATION_ENTITY_BY_PATH[
+          this.basePath as keyof typeof MUTATION_ENTITY_BY_PATH
+        ];
+        if (!entity) throw error;
+        throw new MutationIndeterminateError({
+          operation,
+          entity,
+          entityId,
+          businessKey,
+          affectedCaches: [...affectedPatterns],
+          cause: error,
+          nextAction: `Re-read ${entity} state for business key "${businessKey}" before deciding whether to retry; do not repeat the mutation blindly.`,
+        });
+      }
+
+      throw error;
+    }
   }
 
   async list(params?: ListParams): Promise<PaginatedResponse<T>> {
@@ -133,21 +225,33 @@ export class BaseResource<T> {
   }
 
   async create(data: Partial<T>): Promise<ApiResponse> {
-    const result = await this.client.post<ApiResponse>(this.basePath, data);
-    this.invalidateCache();
-    return result;
+    return this.mutate(
+      "create",
+      undefined,
+      `${this.basePath}:create`,
+      [this.basePath],
+      () => this.client.post<ApiResponse>(this.basePath, data),
+    );
   }
 
   async update(id: number, data: Partial<T>): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`${this.basePath}/${id}`, data);
-    this.invalidateCache();
-    return result;
+    return this.mutate(
+      "update",
+      id,
+      `${this.basePath}:${id}`,
+      [this.basePath],
+      () => this.client.patch<ApiResponse>(`${this.basePath}/${id}`, data),
+    );
   }
 
   async delete(id: number): Promise<ApiResponse> {
-    const result = await this.client.delete<ApiResponse>(`${this.basePath}/${id}`);
-    this.invalidateCache();
-    return result;
+    return this.mutate(
+      "delete",
+      id,
+      `${this.basePath}:${id}`,
+      [this.basePath],
+      () => this.client.delete<ApiResponse>(`${this.basePath}/${id}`),
+    );
   }
 
   // === User-uploaded source document (document_user) ===
@@ -161,18 +265,26 @@ export class BaseResource<T> {
   }
 
   async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-    const result = await this.client.request<ApiResponse>(`${this.basePath}/${id}/document_user`, {
-      method: "PUT",
-      body: { name, contents },
-    });
-    this.invalidateCache();
-    return result;
+    return this.mutate(
+      "upload",
+      id,
+      `${this.basePath}:${id}:document_user`,
+      [this.basePath],
+      () => this.client.request<ApiResponse>(`${this.basePath}/${id}/document_user`, {
+        method: "PUT",
+        body: { name, contents },
+      }),
+    );
   }
 
   async deleteDocument(id: number): Promise<ApiResponse> {
-    const result = await this.client.delete<ApiResponse>(`${this.basePath}/${id}/document_user`);
-    this.invalidateCache();
-    return result;
+    return this.mutate(
+      "delete",
+      id,
+      `${this.basePath}:${id}:document_user`,
+      [this.basePath],
+      () => this.client.delete<ApiResponse>(`${this.basePath}/${id}/document_user`),
+    );
   }
 
   // restore/reactivate is only supported by clients and products — implemented in those subclasses

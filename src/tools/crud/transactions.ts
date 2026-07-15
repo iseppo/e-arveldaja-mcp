@@ -8,6 +8,7 @@ import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { HttpError } from "../../http-client.js";
 import { MutationIndeterminateError, isMutationIndeterminate } from "../../mutation-outcome.js";
+import { getNormalizedNetworkCause } from "../../api/transactions.api.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
 import type { Transaction } from "../../types/api.js";
@@ -217,6 +218,20 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         try {
           await api.transactions.update(id, { clients_id: null } as Partial<Transaction>);
         } catch (cleanupError) {
+          const normalizedNetworkCause = getNormalizedNetworkCause(cleanupError);
+          if (normalizedNetworkCause) {
+            api.transactions.invalidateTransactionsAfterAmbiguousCleanup();
+            throw new MutationIndeterminateError({
+              operation: "rollback",
+              entity: "transaction",
+              entityId: id,
+              businessKey: "transaction:" + id,
+              affectedCaches: ["/transactions"],
+              cause: normalizedNetworkCause,
+              nextAction: "Freshly read transaction " + id +
+                "; clients_id cleanup may or may not have committed.",
+            });
+          }
           if (
             cleanupError instanceof HttpError &&
             cleanupError.status === "network"

@@ -413,6 +413,7 @@ describe("TransactionsApi.confirm", () => {
           method: "PATCH",
           path: "/transactions/12",
         },
+        nextAction: "Freshly read transaction 12; clients_id cleanup may or may not have committed.",
       });
 
     expect(patchCalls).toEqual([
@@ -421,6 +422,101 @@ describe("TransactionsApi.confirm", () => {
       { path: "/transactions/12", body: { clients_id: null } },
     ]);
     expect(cache.get("test:/transactions:12")).toBeUndefined();
+  });
+
+  it("M01 H03 leaves an incomplete structural cleanup ambiguity on the compound-failure path", async () => {
+    const incomplete = Object.assign(new Error("incomplete cleanup ambiguity"), {
+      category: "mutation_indeterminate" as const,
+      mutationMayHaveOccurred: true as const,
+      operation: "update" as const,
+      entity: "transaction",
+      entityId: 13,
+      businessKey: "/transactions:13",
+      affectedCaches: ["/transactions"],
+      cause: {
+        name: "HttpError",
+        message: "cleanup lost",
+        status: "network" as const,
+        method: "TRACE",
+        path: "/transactions/13",
+      },
+      nextAction: "Intermediate M01 recovery.",
+    });
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/13") return { id: 13, clients_id: null };
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path, body }) => {
+        if (path === "/transactions/13/register") {
+          throw new HttpError("rejected", 409, "PATCH", "/transactions/13/register");
+        }
+        if (path === "/transactions/13" && (body as Record<string, unknown>).clients_id === null) {
+          throw incomplete;
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(13, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toThrow(
+        /Transaction 13 confirmation failed: rejected.*Rollback of clients_id also failed: incomplete cleanup ambiguity.*manual review required/s,
+      );
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/13", body: { clients_id: 42 } },
+      { path: "/transactions/13/register", body: expect.any(Array) },
+      { path: "/transactions/13", body: { clients_id: null } },
+    ]);
+  });
+
+  it("M01 H03 contains a throwing cleanup cause getter on the compound-failure path", async () => {
+    const getterBacked = Object.assign(new Error("getter-backed cleanup ambiguity"), {
+      category: "mutation_indeterminate" as const,
+      mutationMayHaveOccurred: true as const,
+      operation: "update" as const,
+      entity: "transaction",
+      entityId: 14,
+      businessKey: "/transactions:14",
+      affectedCaches: ["/transactions"],
+      nextAction: "Intermediate M01 recovery.",
+    });
+    Object.defineProperty(getterBacked, "cause", {
+      enumerable: false,
+      get() {
+        throw new Error("malicious cause getter");
+      },
+    });
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/14") return { id: 14, clients_id: null };
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path, body }) => {
+        if (path === "/transactions/14/register") {
+          throw new HttpError("rejected", 409, "PATCH", "/transactions/14/register");
+        }
+        if (path === "/transactions/14" && (body as Record<string, unknown>).clients_id === null) {
+          throw getterBacked;
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(14, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toThrow(
+        /Transaction 14 confirmation failed: rejected.*Rollback of clients_id also failed: getter-backed cleanup ambiguity.*manual review required/s,
+      );
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/14", body: { clients_id: 42 } },
+      { path: "/transactions/14/register", body: expect.any(Array) },
+      { path: "/transactions/14", body: { clients_id: null } },
+    ]);
   });
 
   it("does not verify or recover on a non-network HTTP error", async () => {

@@ -1069,9 +1069,137 @@ describe("confirm_transaction", () => {
         method: "PATCH",
         path: "/transactions/1",
       },
+      nextAction: "Freshly read transaction 1; clients_id cleanup may or may not have committed.",
     });
     expect(api.transactions.update).toHaveBeenNthCalledWith(1, 1, { clients_id: 99 });
     expect(api.transactions.update).toHaveBeenNthCalledWith(2, 1, { clients_id: null });
+  });
+
+  it("H03 CRUD normalizes structured explicit-client cleanup ambiguity as rollback", async () => {
+    const confirmError = new HttpError("rejected", 409, "PATCH", "/transactions/1/register");
+    const cleanupError = new MutationIndeterminateError({
+      operation: "update",
+      entity: "transaction",
+      entityId: 1,
+      businessKey: "/transactions:1",
+      affectedCaches: ["/transactions"],
+      cause: new HttpError("cleanup lost", "network", "PATCH", "/transactions/1"),
+      nextAction: "Intermediate M01 recovery.",
+    });
+    const invalidateTransactionsAfterAmbiguousCleanup = vi.fn();
+    const { api, handler } = getCrudToolHarness("confirm_transaction", {
+      transactions: {
+        get: vi.fn().mockResolvedValue({ id: 1, clients_id: null }),
+        update: vi.fn()
+          .mockResolvedValueOnce({})
+          .mockRejectedValueOnce(cleanupError),
+        confirm: vi.fn().mockRejectedValue(confirmError),
+        invalidateTransactionsAfterAmbiguousCleanup,
+      },
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([
+          { id: 4000, account_code: "4000", allows_dimensions: false, is_valid: true },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+    });
+
+    const outcome = await handler({
+      id: 1,
+      clients_id: 99,
+      distributions: [{ related_table: "accounts", related_id: 4000, amount: 12 }],
+    }).catch(error => error);
+
+    expect(outcome).toBeInstanceOf(MutationIndeterminateError);
+    expect(outcome).toMatchObject({
+      category: "mutation_indeterminate",
+      mutationMayHaveOccurred: true,
+      operation: "rollback",
+      entity: "transaction",
+      entityId: 1,
+      businessKey: "transaction:1",
+      affectedCaches: ["/transactions"],
+      cause: {
+        name: "HttpError",
+        message: "cleanup lost",
+        status: "network",
+        method: "PATCH",
+        path: "/transactions/1",
+      },
+      nextAction: "Freshly read transaction 1; clients_id cleanup may or may not have committed.",
+    });
+    expect(outcome).not.toBe(cleanupError);
+    expect(api.transactions.update).toHaveBeenCalledTimes(2);
+    expect(api.transactions.update).toHaveBeenNthCalledWith(1, 1, { clients_id: 99 });
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(api.transactions.confirm).toHaveBeenCalledWith(1, [
+      { related_table: "accounts", related_id: 4000, amount: 12 },
+    ]);
+    expect(api.transactions.update).toHaveBeenNthCalledWith(2, 1, { clients_id: null });
+    expect(invalidateTransactionsAfterAmbiguousCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      label: "incomplete cause",
+      cleanupError: Object.assign(new Error("incomplete cleanup ambiguity"), {
+        category: "mutation_indeterminate" as const,
+        mutationMayHaveOccurred: true as const,
+        cause: {
+          name: "HttpError",
+          message: "cleanup lost",
+          status: "network" as const,
+          method: "TRACE",
+          path: "/transactions/1",
+        },
+      }),
+    },
+    {
+      label: "throwing cause getter",
+      cleanupError: (() => {
+        const error = Object.assign(new Error("getter-backed cleanup ambiguity"), {
+          category: "mutation_indeterminate" as const,
+          mutationMayHaveOccurred: true as const,
+        });
+        Object.defineProperty(error, "cause", {
+          enumerable: false,
+          get() {
+            throw new Error("malicious cause getter");
+          },
+        });
+        return error;
+      })(),
+    },
+  ])("H03 CRUD preserves non-normalizable explicit-client cleanup: $label", async ({ cleanupError }) => {
+    const confirmError = new HttpError("rejected", 409, "PATCH", "/transactions/1/register");
+    const invalidateTransactionsAfterAmbiguousCleanup = vi.fn();
+    const { api, handler } = getCrudToolHarness("confirm_transaction", {
+      transactions: {
+        get: vi.fn().mockResolvedValue({ id: 1, clients_id: null }),
+        update: vi.fn()
+          .mockResolvedValueOnce({})
+          .mockRejectedValueOnce(cleanupError),
+        confirm: vi.fn().mockRejectedValue(confirmError),
+        invalidateTransactionsAfterAmbiguousCleanup,
+      },
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([
+          { id: 4000, account_code: "4000", allows_dimensions: false, is_valid: true },
+        ]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+    });
+
+    const outcome = await handler({
+      id: 1,
+      clients_id: 99,
+      distributions: [{ related_table: "accounts", related_id: 4000, amount: 12 }],
+    }).catch(error => error);
+
+    expect(outcome).toBe(cleanupError);
+    expect(api.transactions.update).toHaveBeenCalledTimes(2);
+    expect(api.transactions.update).toHaveBeenNthCalledWith(2, 1, { clients_id: null });
+    expect(invalidateTransactionsAfterAmbiguousCleanup).not.toHaveBeenCalled();
   });
 });
 

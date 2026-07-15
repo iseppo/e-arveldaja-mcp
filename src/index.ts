@@ -79,6 +79,7 @@ import {
   AuditAction,
 } from "./audit-log.js";
 import { buildAuditLogLabels } from "./audit-log-labels.js";
+import { serializeToolMutationError } from "./mutation-audit.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
@@ -380,6 +381,7 @@ async function main() {
   }
 
   const setupInfo = getCredentialSetupInfo();
+  const connectionNames = Object.freeze(allConfigs.map(config => config.name));
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
   const connectionFingerprints = Object.fromEntries(
     allConfigs.map((config) => [config.name, buildConnectionFingerprint(config.config)]),
@@ -924,7 +926,13 @@ async function main() {
             hint: error.hint,
           }));
         }
-        return toolError(error);
+        return serializeToolMutationError({
+          toolName,
+          error,
+          trackMutation,
+          snapshotIndex: snapshot.index,
+          connectionNames,
+        });
       } finally {
         if (trackMutation) {
           inFlightMutations.delete(snapshot);
