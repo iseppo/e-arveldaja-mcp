@@ -21,6 +21,7 @@ import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
 import { OPENING_BALANCE_API_LIMITATION_WARNING } from "../opening-balance-limitations.js";
+import { BookingGuard, formatDocNumber, type DocKey } from "../booking-guard.js";
 import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, INCOME_TAX_EXPENSE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_RESTRICTED_RESERVE_ACCOUNTS, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
 import type { Account, SaleInvoice } from "../types/api.js";
 import {
@@ -409,6 +410,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       }
 
       const shareholder = await api.clients.get(shareholder_client_id);
+      const dividendKey: DocKey = {
+        ns: "DIV",
+        id: `${effective_date}-${shareholder_client_id}`,
+      };
+      const documentNumber = formatDocNumber(dividendKey);
 
       // Journal entry (Estonian GAAP / RTJ): the NET dividend is the only debit
       // to retained earnings (Jaotamata kasum) — it is what the resolution
@@ -437,9 +443,6 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         effective_date,
         clients_id: shareholder_client_id,
         cl_currencies_id: "EUR",
-        // Include shareholder ID so same-day distributions to different
-        // shareholders don't collide on document_number.
-        document_number: `DIV-${effective_date}-${shareholder_client_id}`,
         postings,
       };
 
@@ -462,8 +465,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
                 income_tax_expense_debit: cit,
                 note: "Only the net dividend drains retained earnings; the CIT is booked as income-tax expense (P&L 'Tulumaks').",
               },
-              proposed_journal: journalData,
-              shareholder: { id: shareholder.id, name: shareholder.name },
+              proposed_journal: { ...journalData, document_number: documentNumber },
+              shareholder: { id: shareholder_client_id, name: shareholder.name },
               // Mirror the executed path so the preview doesn't hide legality
               // context: an operator running dry_run with force=true must see
               // the same § 157 / retained-earnings signals they would on execute.
@@ -493,15 +496,36 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         };
       }
 
-      const result = await api.journals.create(journalData);
+      const guard = await BookingGuard.load(api);
+      const booking = await guard.createJournalOnce(dividendKey, journalData, { confirm: false });
+      const createdId = booking.journal_id;
+      const apiResponse = booking.status === "created" && booking.upstream_response
+        ? {
+            code: booking.upstream_response.code,
+            messages: booking.upstream_response.messages,
+            created_object_id: createdId,
+          }
+        : {
+            code: 200,
+            messages: [booking.status === "duplicate"
+              ? `Existing dividend journal ${createdId} reused.`
+              : `Dividend journal ${createdId} recovered after an ambiguous create.`],
+            created_object_id: createdId,
+          };
       logAudit({
-        tool: "prepare_dividend_package", action: "CREATED", entity_type: "journal",
-        entity_id: result.created_object_id,
-        summary: `Dividend journal: ${net_dividend} EUR net to ${shareholder.name}, CIT ${cit} EUR`,
+        tool: "prepare_dividend_package",
+        action: booking.status === "created" ? "CREATED" : "UPDATED",
+        entity_type: "journal",
+        entity_id: createdId,
+        summary: booking.status === "created"
+          ? `Dividend journal: ${net_dividend} EUR net to ${shareholder.name}, CIT ${cit} EUR`
+          : `Existing dividend journal ${createdId} reused for ${net_dividend} EUR net to ${shareholder.name}`,
         details: {
           effective_date, client_name: shareholder.name, amount: grossDividend,
           total_net: net_dividend, total_gross: roundMoney(grossDividend),
           postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+          booking_key: documentNumber,
+          booking_status: booking.status,
           ...(warnings.length > 0 && { warnings }),
         },
       });
@@ -543,7 +567,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             maximum_distributable: maximumDistributable,
             shareholder: { id: shareholder_client_id, name: shareholder.name },
             journal_entry: {
-              api_response: result,
+              api_response: apiResponse,
+              booking_status: booking.status,
+              ...(booking.status === "created" && booking.recovered ? { recovered: true } : {}),
               postings: [
                 { account: retainedAccount, type: "D", amount: net_dividend, description: `Dividend to ${shareholder.name} (net) — Jaotamata kasum` },
                 { account: incomeTaxExpenseAccount, type: "D", amount: cit, description: `Tulumaksukulu ${citRate.formatted}, dividend to ${shareholder.name}` },

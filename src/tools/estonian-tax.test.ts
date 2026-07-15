@@ -7,6 +7,9 @@ import { roundMoney } from "../money.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 
+const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
+vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
+
 // Standard chart of accounts used across tests
 function makeStandardAccounts(): Account[] {
   return [
@@ -76,6 +79,7 @@ function makeApi(
   } = {},
 ): ApiContext {
   const { vatRegistered = false, clientName = "Test Shareholder", saleInvoices = [] } = options;
+  const bookingJournals: Journal[] = [];
 
   return {
     readonly: {
@@ -91,8 +95,16 @@ function makeApi(
       listAll: vi.fn(async () => []),
     },
     journals: {
+      connectionFingerprint: "estonian-tax-test-connection",
+      invalidateListCache: vi.fn(),
+      listAll: vi.fn(async () => bookingJournals),
       listAllWithPostings: vi.fn(async () => journals),
-      create: vi.fn(async (data: unknown) => ({ code: 200, created_object_id: 42, messages: [], ...data })),
+      get: vi.fn(async (id: number) => bookingJournals.find(item => item.id === id)),
+      create: vi.fn(async (data: Partial<Journal>) => {
+        bookingJournals.push({ ...data, id: 42, registered: false, is_deleted: false } as Journal);
+        return { code: 200, created_object_id: 42, messages: [] };
+      }),
+      confirm: vi.fn(async () => ({ code: 200, messages: [] })),
     },
     saleInvoices: { listAll: vi.fn(async () => saleInvoices) },
     purchaseInvoices: { listAll: vi.fn(async () => []) },
@@ -143,6 +155,7 @@ describe("prepare_dividend_package", () => {
   }
 
   beforeEach(() => {
+    mockedLogAudit.mockClear();
     const mock = makeMockServer();
     tools = mock.tools;
     api = makeApi(makeHealthyJournals(), makeStandardAccounts());
@@ -416,6 +429,57 @@ describe("prepare_dividend_package", () => {
 
     const createCall = vi.mocked(api.journals.create).mock.calls[0]?.[0] as { document_number: string };
     expect(createCall.document_number).toBe("DIV-2026-06-01-42");
+  });
+
+  it("H06-D preserves the legacy dividend number and uses the validated client id", async () => {
+    vi.mocked(api.clients.get).mockResolvedValue({ id: 999, name: "Test Shareholder" } as never);
+    const cb = tools.get("prepare_dividend_package")!;
+    const preview = parseResult(await cb({
+      net_dividend: 1000, shareholder_client_id: 42, effective_date: "2026-06-01", dry_run: true,
+    }));
+    expect((preview.proposed_journal as { document_number: string; clients_id: number }).document_number)
+      .toBe("DIV-2026-06-01-42");
+    expect((preview.proposed_journal as { clients_id: number }).clients_id).toBe(42);
+    expect((preview.shareholder as { id: number }).id).toBe(42);
+
+    const executed = parseResult(await cb({
+      net_dividend: 1000, shareholder_client_id: 42, effective_date: "2026-06-01",
+    }));
+    const createPayload = vi.mocked(api.journals.create).mock.calls[0]![0] as Journal;
+    expect(createPayload.document_number).toBe("DIV-2026-06-01-42");
+    expect(createPayload.clients_id).toBe(42);
+    expect((executed.shareholder as { id: number }).id).toBe(42);
+  });
+
+  it("H06-D deduplicates the same company date and shareholder across calls", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    const input = { net_dividend: 1000, shareholder_client_id: 42, effective_date: "2026-06-01" };
+    const first = parseResult(await cb(input));
+    const second = parseResult(await cb(input));
+    expect(api.journals.create).toHaveBeenCalledTimes(1);
+    expect(((first.journal_entry as Record<string, unknown>).api_response as { created_object_id: number }).created_object_id).toBe(42);
+    expect(((second.journal_entry as Record<string, unknown>).api_response as { created_object_id: number }).created_object_id).toBe(42);
+    expect((second.journal_entry as { booking_status: string }).booking_status).toBe("duplicate");
+  });
+
+  it("H06-D keeps created response and created audit compatible, while duplicate audit is UPDATED", async () => {
+    const cb = tools.get("prepare_dividend_package")!;
+    const input = { net_dividend: 1000, shareholder_client_id: 42, effective_date: "2026-06-01" };
+    const first = parseResult(await cb(input));
+    await cb(input);
+    expect((first.journal_entry as { api_response: unknown }).api_response).toEqual({
+      code: 200, messages: [], created_object_id: 42,
+    });
+    expect(mockedLogAudit.mock.calls[0]![0]).toMatchObject({
+      action: "CREATED", entity_id: 42,
+      summary: "Dividend journal: 1000 EUR net to Test Shareholder, CIT 282.05 EUR",
+      details: { effective_date: "2026-06-01", client_name: "Test Shareholder", amount: 1282.05,
+        total_net: 1000, total_gross: 1282.05, booking_key: "DIV-2026-06-01-42", booking_status: "created" },
+    });
+    expect(mockedLogAudit.mock.calls[1]![0]).toMatchObject({
+      action: "UPDATED", entity_id: 42,
+      details: { booking_key: "DIV-2026-06-01-42", booking_status: "duplicate" },
+    });
   });
 
   // -------------------------------------------------------------------------

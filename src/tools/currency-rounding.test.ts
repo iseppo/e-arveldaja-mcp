@@ -36,6 +36,8 @@ function setupTool(options: SetupOptions) {
       get: txGet,
     },
     journals: {
+      connectionFingerprint: "currency-rounding-test-connection",
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.existingJournals ?? []),
       listAllWithPostings: vi.fn().mockResolvedValue(options.existingJournals ?? []),
       create:

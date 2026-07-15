@@ -30,6 +30,10 @@ export class BaseResource<T> {
     protected basePath: string,
   ) {}
 
+  get connectionFingerprint(): string {
+    return this.client.connectionFingerprint;
+  }
+
   protected cacheKey(key: string): string {
     return `${this.client.cacheNamespace}:${key}`;
   }

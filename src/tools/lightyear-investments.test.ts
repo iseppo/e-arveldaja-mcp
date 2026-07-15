@@ -6,7 +6,8 @@ import { resolveFileInput } from "../file-validation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { registerLightyearTools, tradeFeeInEur } from "./lightyear-investments.js";
 
-vi.mock("fs/promises", () => ({
+vi.mock("fs/promises", async importOriginal => ({
+  ...(await importOriginal<typeof import("fs/promises")>()),
   readFile: vi.fn(),
 }));
 
@@ -73,6 +74,8 @@ function setupLightyearTool(
       ]),
     },
     journals: {
+      connectionFingerprint: "lightyear-test-connection",
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.journals ?? []),
       create,
     },

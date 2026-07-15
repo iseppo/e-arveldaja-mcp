@@ -1,3 +1,10 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { text as consumeText } from "node:stream/consumers";
+import { spawn, type ChildProcess } from "node:child_process";
 import { describe, it, expect, vi } from "vitest";
 import {
   BookingGuard,
@@ -6,10 +13,48 @@ import {
   type DocKey,
 } from "./booking-guard.js";
 import { HttpError } from "./http-client.js";
+import { MutationIndeterminateError } from "./mutation-outcome.js";
+import { withOwnedFileLock } from "./file-lock.js";
 import type { ApiContext } from "./tools/crud-tools.js";
 import type { Journal, Posting } from "./types/api.js";
 
 const networkError = () => new HttpError("fetch failed", "network", "POST", "/journals");
+
+interface ChildObservation {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function observeChild(child: ChildProcess, timeoutMs: number): Promise<ChildObservation> {
+  return new Promise((resolveObserved, rejectObserved) => {
+    let recordedError: Error | undefined;
+    const streamsDone = Promise.all([
+      child.stdout ? consumeText(child.stdout) : Promise.resolve(""),
+      child.stderr ? consumeText(child.stderr) : Promise.resolve(""),
+    ]).catch(error => {
+      recordedError ??= error instanceof Error ? error : new Error(String(error));
+      return ["", ""] as const;
+    });
+    const timer = setTimeout(() => {
+      recordedError ??= new Error(`child timeout after ${timeoutMs}ms`);
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.once("error", error => {
+      recordedError ??= error;
+    });
+    child.once("close", code => {
+      clearTimeout(timer);
+      void streamsDone.then(([stdout, stderr]) => {
+        if (recordedError) {
+          if (stderr) recordedError.message += `; stderr: ${stderr}`;
+          rejectObserved(recordedError);
+        }
+        else resolveObserved({ code, stdout, stderr });
+      });
+    });
+  });
+}
 
 // ---- helpers ------------------------------------------------------------
 
@@ -43,21 +88,32 @@ interface SetupOptions {
 }
 
 function setup(options: SetupOptions = {}) {
-  const create = options.createImpl
-    ? vi.fn(options.createImpl)
-    : vi.fn().mockResolvedValue(options.createResult ?? { created_object_id: 999 });
+  const state = [...(options.journals ?? [])];
+  const create = vi.fn(async (data: Partial<Journal>) => {
+    const result = options.createImpl
+      ? await options.createImpl(data)
+      : (options.createResult ?? { code: 200, messages: [], created_object_id: 999 });
+    if (result.created_object_id != null) {
+      state.push(journal({ ...data, id: result.created_object_id, registered: false, is_deleted: false }));
+    }
+    return result;
+  });
   const confirm = options.confirmImpl
     ? vi.fn(options.confirmImpl)
     : vi.fn().mockResolvedValue({});
-  const listAll = vi.fn().mockResolvedValue(options.journals ?? []);
-  const listAllWithPostings = vi.fn().mockResolvedValue(options.journals ?? []);
+  const listAll = vi.fn(async () => state);
+  const listAllWithPostings = vi.fn(async () => state);
+  const get = vi.fn(async (id: number) => state.find(item => item.id === id));
   const invalidateListCache = vi.fn();
 
   const api = {
-    journals: { create, confirm, listAll, listAllWithPostings, invalidateListCache },
+    journals: {
+      connectionFingerprint: "test-connection-fingerprint",
+      create, confirm, listAll, listAllWithPostings, get, invalidateListCache,
+    },
   } as unknown as ApiContext;
 
-  return { api, create, confirm, listAll, listAllWithPostings, invalidateListCache };
+  return { api, state, create, confirm, get, listAll, listAllWithPostings, invalidateListCache };
 }
 
 // ---- document_number parsing -------------------------------------------
@@ -176,7 +232,8 @@ describe("BookingGuard Lane A — createJournalOnce", () => {
       { effective_date: "2026-02-02", title: "FX", document_number: "IGNORED" as never, postings: [] },
     );
 
-    expect(result).toEqual({ status: "created", journal_id: 555, registered: true });
+    expect(result).toMatchObject({ status: "created", journal_id: 555, registered: true });
+    expect(result.status === "created" && result.upstream_response).toEqual({ created_object_id: 555 });
     expect(create).toHaveBeenCalledTimes(1);
     // Caller-provided document_number is overwritten from the key.
     expect(create.mock.calls[0]![0].document_number).toBe("FX:77");
@@ -204,23 +261,21 @@ describe("BookingGuard Lane A — createJournalOnce", () => {
     });
     const guard = await BookingGuard.load(api);
     const result = await guard.createJournalOnce({ ns: "FX", id: "100" }, { effective_date: "2026-01-01", postings: [] });
-    expect(result).toEqual({ status: "created", journal_id: 1001, registered: true });
+    expect(result).toMatchObject({ status: "created", journal_id: 1001, registered: true });
     expect(create).toHaveBeenCalledTimes(1);
   });
 
-  it("leaves the journal in PROJECT when confirm throws", async () => {
+  it("H06-C propagates a definite confirm rejection with createdJournalId", async () => {
     const { api } = setup({
       createResult: { created_object_id: 200 },
       confirmImpl: async () => {
-        throw new Error("confirm failed");
+        throw new HttpError("confirm failed", 400, "PATCH", "/journals/200/register");
       },
     });
     const guard = await BookingGuard.load(api);
-    const result = await guard.createJournalOnce({ ns: "FX", id: "1" }, { effective_date: "2026-01-01", postings: [] });
-    expect(result).toEqual({ status: "created", journal_id: 200, registered: false });
-    // registered=false ⇒ registered_only find misses, not_deleted find hits.
-    expect(guard.find({ ns: "FX", id: "1" }, "registered_only")).toBeUndefined();
-    expect(guard.find({ ns: "FX", id: "1" }, "not_deleted")?.journal_id).toBe(200);
+    await expect(guard.createJournalOnce(
+      { ns: "FX", id: "1" }, { effective_date: "2026-01-01", postings: [] },
+    )).rejects.toMatchObject({ status: 400, createdJournalId: 200 });
   });
 
   it("does not confirm when confirm:false", async () => {
@@ -231,19 +286,16 @@ describe("BookingGuard Lane A — createJournalOnce", () => {
       { effective_date: "2026-01-01", postings: [] },
       { confirm: false },
     );
-    expect(result).toEqual({ status: "created", journal_id: 300, registered: false });
+    expect(result).toMatchObject({ status: "created", journal_id: 300, registered: false });
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it("records the key with a sentinel id when the API returns no object id", async () => {
+  it("H06-C rejects indeterminately rather than recording a sentinel when the API returns no object id", async () => {
     const { api, create } = setup({ createResult: {} });
     const guard = await BookingGuard.load(api);
-    const result = await guard.createJournalOnce({ ns: "FX", id: "1" }, { effective_date: "2026-01-01", postings: [] });
-    expect(result.status).toBe("created");
-    expect(result.journal_id).toBe(-1); // UNKNOWN_JOURNAL_ID
-    // Still deduped in-run so a retry does not double-create.
-    const second = await guard.createJournalOnce({ ns: "FX", id: "1" }, { effective_date: "2026-01-01", postings: [] });
-    expect(second.status).toBe("duplicate");
+    await expect(guard.createJournalOnce(
+      { ns: "FX", id: "1" }, { effective_date: "2026-01-01", postings: [] },
+    )).rejects.toMatchObject({ category: "mutation_indeterminate", operation: "create" });
     expect(create).toHaveBeenCalledTimes(1);
   });
 });
@@ -252,13 +304,13 @@ describe("BookingGuard Lane A — createJournalOnce", () => {
 
 describe("BookingGuard.createJournalOnce — verify-then-retry", () => {
   it("recovers the committed journal when a network error is ambiguous (no retry)", async () => {
-    const { api, create, confirm, listAll, invalidateListCache } = setup();
+    const { api, state, create, confirm, listAll, invalidateListCache } = setup();
     const guard = await BookingGuard.load(api); // loads with []
 
     // The create POST times out ambiguously...
     create.mockRejectedValueOnce(networkError());
     // ...but the re-scan shows it actually committed as journal 4242.
-    listAll.mockResolvedValueOnce([
+    listAll.mockResolvedValueOnce([]).mockResolvedValueOnce([
       journal({ id: 4242, document_number: "FX:9", registered: true }),
     ]);
 
@@ -268,10 +320,11 @@ describe("BookingGuard.createJournalOnce — verify-then-retry", () => {
     );
 
     expect(result).toEqual({ status: "created", journal_id: 4242, registered: true, recovered: true });
-    expect(invalidateListCache).toHaveBeenCalledTimes(1); // busted the stale cache
+    expect(invalidateListCache).toHaveBeenCalledTimes(2); // fresh check + ambiguity verification
     expect(create).toHaveBeenCalledTimes(1); // NOT retried — already committed
     expect(confirm).not.toHaveBeenCalled(); // recovered journal, not re-confirmed
-    // Recorded in-run: a second call is deduped.
+    state.push(journal({ id: 4242, document_number: "FX:9", registered: true }));
+    // A second fresh upstream check is deduped.
     const second = await guard.createJournalOnce({ ns: "FX", id: "9" }, { effective_date: "2026-01-01", postings: [] });
     expect(second).toEqual({ status: "duplicate", journal_id: 4242 });
   });
@@ -283,7 +336,7 @@ describe("BookingGuard.createJournalOnce — verify-then-retry", () => {
     create.mockRejectedValueOnce(networkError());
     // The committed journal exists but was never confirmed (create doesn't
     // auto-confirm, and the network error cut off before our confirm call).
-    listAll.mockResolvedValueOnce([
+    listAll.mockResolvedValueOnce([]).mockResolvedValueOnce([
       journal({ id: 55, document_number: "FX:9", registered: false }),
     ]);
 
@@ -302,7 +355,7 @@ describe("BookingGuard.createJournalOnce — verify-then-retry", () => {
     const guard = await BookingGuard.load(api);
 
     create.mockRejectedValueOnce(networkError());
-    listAll.mockResolvedValueOnce([
+    listAll.mockResolvedValueOnce([]).mockResolvedValueOnce([
       journal({ id: 55, document_number: "LY:R1", registered: false }),
     ]);
 
@@ -316,38 +369,31 @@ describe("BookingGuard.createJournalOnce — verify-then-retry", () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it("retries exactly once when the ambiguous write did not commit", async () => {
-    const { api, create, confirm, listAll } = setup();
-    const guard = await BookingGuard.load(api);
-
-    create
-      .mockRejectedValueOnce(networkError()) // first attempt: ambiguous failure
-      .mockResolvedValueOnce({ created_object_id: 7 }); // retry: succeeds
-    listAll.mockResolvedValueOnce([]); // re-scan: nothing committed
-
-    const result = await guard.createJournalOnce(
-      { ns: "FX", id: "9" },
-      { effective_date: "2026-01-01", postings: [] },
-    );
-
-    expect(result).toEqual({ status: "created", journal_id: 7, registered: true });
-    expect(create).toHaveBeenCalledTimes(2); // retried once
-    expect(confirm).toHaveBeenCalledWith(7);
-  });
-
-  it("propagates a second network failure without a further retry", async () => {
+  it("H06-C absent verification stays indeterminate and never retries", async () => {
     const { api, create, listAll } = setup();
     const guard = await BookingGuard.load(api);
 
-    create
-      .mockRejectedValueOnce(networkError())
-      .mockRejectedValueOnce(networkError()); // retry also fails
-    listAll.mockResolvedValueOnce([]);
+    create.mockRejectedValueOnce(networkError());
+    listAll.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+
+    await expect(guard.createJournalOnce(
+      { ns: "FX", id: "9" },
+      { effective_date: "2026-01-01", postings: [] },
+    )).rejects.toMatchObject({ category: "mutation_indeterminate", operation: "create" });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("H06-C verification-read failure stays indeterminate without a retry", async () => {
+    const { api, create, listAll } = setup();
+    const guard = await BookingGuard.load(api);
+
+    create.mockRejectedValueOnce(networkError());
+    listAll.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("verify read failed"));
 
     await expect(
       guard.createJournalOnce({ ns: "FX", id: "9" }, { effective_date: "2026-01-01", postings: [] }),
-    ).rejects.toThrow(HttpError);
-    expect(create).toHaveBeenCalledTimes(2); // one retry, then give up
+    ).rejects.toMatchObject({ category: "mutation_indeterminate", operation: "create" });
+    expect(create).toHaveBeenCalledTimes(1);
   });
 
   it("does not verify or retry on a non-network HTTP error", async () => {
@@ -361,8 +407,280 @@ describe("BookingGuard.createJournalOnce — verify-then-retry", () => {
       guard.createJournalOnce({ ns: "FX", id: "9" }, { effective_date: "2026-01-01", postings: [] }),
     ).rejects.toThrow(badRequest);
     expect(create).toHaveBeenCalledTimes(1); // no retry
-    expect(invalidateListCache).not.toHaveBeenCalled(); // no verify
-    expect(listAll).toHaveBeenCalledTimes(1); // only the initial load
+    expect(invalidateListCache).toHaveBeenCalledTimes(1); // guarded fresh pre-check only
+    expect(listAll).toHaveBeenCalledTimes(2); // initial load + guarded fresh pre-check
+  });
+});
+
+const structuredAmbiguity = (operation: "create" | "confirm" = "create") =>
+  new MutationIndeterminateError({
+    operation,
+    entity: "journal",
+    businessKey: "upstream-key",
+    affectedCaches: ["/journals"],
+    cause: new Error("ambiguous"),
+    nextAction: "verify",
+  });
+
+describe("H06-C cross-process create-once", () => {
+  it("H06-C keeps the fresh pre-check inside the booking-key lock", async () => {
+    const prior = process.env.EARVELDAJA_LOCK_DIR;
+    const lockDir = await mkdtemp(resolve(tmpdir(), "h06-booking-held-"));
+    process.env.EARVELDAJA_LOCK_DIR = lockDir;
+    const key: DocKey = { ns: "FX", id: "held" };
+    const { api, state, create, listAll, invalidateListCache } = setup();
+    const guard = await BookingGuard.load(api);
+    listAll.mockClear();
+    invalidateListCache.mockClear();
+    create.mockClear();
+    const digest = createHash("sha256")
+      .update(`test-connection-fingerprint\0journal\0${formatDocNumber(key)}`)
+      .digest("hex");
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>(resolveHeld => { release = resolveHeld; });
+    const acquired = new Promise<void>(resolveAcquired => { entered = resolveAcquired; });
+    const holder = withOwnedFileLock(resolve(lockDir, `${digest}.lock`), async () => {
+      entered();
+      await held;
+    });
+    await acquired;
+    let createStarted!: () => void;
+    const createSignal = new Promise<void>(resolveCreate => { createStarted = resolveCreate; });
+    create.mockImplementationOnce(async data => {
+      createStarted();
+      return { code: 200, messages: [], created_object_id: 999 };
+    });
+    const pending = guard.createJournalOnce(key, { effective_date: "2026-01-01", postings: [] }, { confirm: false });
+    let settled: PromiseSettledResult<Awaited<typeof pending>> | undefined;
+    try {
+      const ran = await Promise.race([
+        createSignal.then(() => true),
+        new Promise<false>(resolveTimer => setTimeout(() => resolveTimer(false), 75)),
+      ]);
+      expect(ran).toBe(false);
+      expect(invalidateListCache).not.toHaveBeenCalled();
+      expect(listAll).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      state.push(journal({ id: 42, document_number: "FX:held", registered: true }));
+      release();
+      await holder;
+      [settled] = await Promise.allSettled([pending]);
+      if (prior === undefined) delete process.env.EARVELDAJA_LOCK_DIR;
+      else process.env.EARVELDAJA_LOCK_DIR = prior;
+      await rm(lockDir, { recursive: true, force: true });
+    }
+    expect(settled).toMatchObject({ status: "fulfilled", value: { status: "duplicate", journal_id: 42 } });
+    expect(invalidateListCache.mock.invocationCallOrder[0]).toBeLessThan(listAll.mock.invocationCallOrder[0]!);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it.each(["raw", "structured"])("H06-C recovers a found %s ambiguous create without retry", async kind => {
+    const { api, create, listAll, invalidateListCache } = setup();
+    const guard = await BookingGuard.load(api);
+    listAll.mockReset()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([journal({ id: 77, document_number: "FX:amb", registered: true })]);
+    create.mockRejectedValueOnce(kind === "raw" ? networkError() : structuredAmbiguity());
+    const result = await guard.createJournalOnce({ ns: "FX", id: "amb" }, { effective_date: "2026-01-01", postings: [] });
+    expect(result).toMatchObject({ status: "created", journal_id: 77, recovered: true });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(invalidateListCache).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["raw", "absent"], ["raw", "throwing"], ["structured", "absent"], ["structured", "throwing"],
+  ])("H06-C makes a %s ambiguous create with %s verification indeterminate", async (kind, verification) => {
+    const { api, create, listAll } = setup();
+    const guard = await BookingGuard.load(api);
+    listAll.mockReset().mockResolvedValueOnce([]);
+    if (verification === "throwing") listAll.mockRejectedValueOnce(new Error("verify failed"));
+    else listAll.mockResolvedValueOnce([]);
+    create.mockRejectedValueOnce(kind === "raw" ? networkError() : structuredAmbiguity());
+    await expect(guard.createJournalOnce(
+      { ns: "FX", id: "absent" }, { effective_date: "2026-01-01", postings: [] },
+    )).rejects.toMatchObject({ category: "mutation_indeterminate", operation: "create", businessKey: "FX:absent" });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("H06-C does not ambiguity-verify a definite create rejection", async () => {
+    const { api, create, listAll, invalidateListCache } = setup();
+    const guard = await BookingGuard.load(api);
+    listAll.mockClear();
+    invalidateListCache.mockClear();
+    const error = new HttpError("bad", 400, "POST", "/journals");
+    create.mockRejectedValueOnce(error);
+    await expect(guard.createJournalOnce(
+      { ns: "FX", id: "bad" }, { effective_date: "2026-01-01", postings: [] },
+    )).rejects.toBe(error);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(listAll).toHaveBeenCalledTimes(1);
+    expect(invalidateListCache).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["found", "absent", "throwing"])("H06-C handles missing created id with %s verification", async verification => {
+    const { api, create, listAll } = setup({ createResult: {} });
+    const guard = await BookingGuard.load(api);
+    listAll.mockReset().mockResolvedValueOnce([]);
+    if (verification === "found") {
+      listAll.mockResolvedValueOnce([journal({ id: 88, document_number: "FX:no-id", registered: false })]);
+    } else if (verification === "throwing") {
+      listAll.mockRejectedValueOnce(new Error("verify failed"));
+    } else {
+      listAll.mockResolvedValueOnce([]);
+    }
+    const promise = guard.createJournalOnce(
+      { ns: "FX", id: "no-id" }, { effective_date: "2026-01-01", postings: [] }, { confirm: false },
+    );
+    if (verification === "found") {
+      await expect(promise).resolves.toMatchObject({ journal_id: 88, recovered: true });
+    } else {
+      await expect(promise).rejects.toMatchObject({ category: "mutation_indeterminate", operation: "create" });
+    }
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(guard.find({ ns: "FX", id: "no-id" }, "any")?.journal_id).not.toBe(-1);
+  });
+
+  it.each(["raw", "structured"])("H06-C verifies exact-id %s confirm ambiguity", async kind => {
+    const { api, create, confirm, get, invalidateListCache } = setup({ createResult: { created_object_id: 66 } });
+    const guard = await BookingGuard.load(api);
+    confirm.mockRejectedValueOnce(kind === "raw" ? networkError() : structuredAmbiguity("confirm"));
+    get.mockResolvedValueOnce(journal({ id: 66, document_number: "FX:confirm", registered: true }));
+    const result = await guard.createJournalOnce(
+      { ns: "FX", id: "confirm" }, { effective_date: "2026-01-01", postings: [] },
+    );
+    expect(result).toMatchObject({ journal_id: 66, registered: true, recovered: true });
+    expect(result.status === "created" && result.upstream_response).toEqual({ created_object_id: 66 });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith(66);
+    const lastInvalidation = invalidateListCache.mock.invocationCallOrder.at(-1)!;
+    expect(get.mock.invocationCallOrder.at(-1)).toBe(lastInvalidation + 1);
+  });
+
+  it.each([
+    ["raw", "false"],
+    ["raw", "throwing"],
+    ["structured", "false"],
+    ["structured", "throwing"],
+  ])("H06-C makes %s confirm ambiguity with %s verification indeterminate", async (kind, outcome) => {
+    const { api, create, confirm, get, invalidateListCache } = setup({ createResult: { created_object_id: 67 } });
+    const guard = await BookingGuard.load(api);
+    confirm.mockRejectedValueOnce(kind === "raw" ? networkError() : structuredAmbiguity("confirm"));
+    if (outcome === "throwing") get.mockRejectedValueOnce(new Error("get failed"));
+    else get.mockResolvedValueOnce(journal({ id: 67, document_number: "FX:c", registered: false }));
+    await expect(guard.createJournalOnce(
+      { ns: "FX", id: "c" }, { effective_date: "2026-01-01", postings: [] },
+    )).rejects.toMatchObject({
+      category: "mutation_indeterminate", operation: "confirm", entityId: 67,
+      businessKey: "FX:c", affectedCaches: ["/journals"],
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith(67);
+    const lastInvalidation = invalidateListCache.mock.invocationCallOrder.at(-1)!;
+    expect(get.mock.invocationCallOrder.at(-1)).toBe(lastInvalidation + 1);
+  });
+
+  it.each(["http", "unexpected"])("H06-C propagates definite %s confirm errors with createdJournalId", async kind => {
+    const error = kind === "http" ? new HttpError("bad", 400, "PATCH", "/journals/68/register") : new Error("boom");
+    const { api, confirm } = setup({ createResult: { created_object_id: 68 } });
+    const guard = await BookingGuard.load(api);
+    confirm.mockRejectedValueOnce(error);
+    await expect(guard.createJournalOnce(
+      { ns: "FX", id: "def" }, { effective_date: "2026-01-01", postings: [] },
+    )).rejects.toMatchObject({ createdJournalId: 68 });
+  });
+
+  it("H06-C supports legacy DIV spelling only", () => {
+    const key: DocKey = { ns: "DIV", id: "2026-06-01-42" };
+    expect(formatDocNumber(key)).toBe("DIV-2026-06-01-42");
+    expect(parseDocNumber("DIV-2026-06-01-42")).toEqual(key);
+    expect(parseDocNumber("DIV:2026-06-01-42")).toBeUndefined();
+  });
+
+  it("H06-C settles a timed-out child observer only after close", async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let closeFired = false;
+    child.once("close", () => { closeFired = true; });
+    const observed = observeChild(child, 25);
+    try {
+      await expect(observed).rejects.toThrow("child timeout");
+      expect(closeFired).toBe(true);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await Promise.allSettled([observed]);
+    }
+  });
+
+  it("H06-C captures one stdout line from each concurrent child", async () => {
+    const children = ["first", "second"].map(value => spawn(
+      process.execPath,
+      ["-e", `process.stdout.write(${JSON.stringify(`${value}\n`)})`],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    ));
+    const observed = children.map(child => observeChild(child, 1_000));
+    try {
+      const outcomes = await Promise.all(observed);
+      expect(outcomes.map(outcome => outcome.stdout.trim())).toEqual(["first", "second"]);
+    } finally {
+      for (const child of children) {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }
+      await Promise.allSettled(observed);
+    }
+  });
+
+  it("H06-C creates at most one journal across two processes", { timeout: 15_000 }, async () => {
+    const prior = process.env.EARVELDAJA_LOCK_DIR;
+    const stateDir = await mkdtemp(resolve(tmpdir(), "h06-child-state-"));
+    const lockDir = await mkdtemp(resolve(tmpdir(), "h06-child-lock-"));
+    const statePath = resolve(stateDir, "journals.json");
+    const fixture = fileURLToPath(new URL("./__fixtures__/booking-guard-child.ts", import.meta.url));
+    await writeFile(statePath, "[]");
+    process.env.EARVELDAJA_LOCK_DIR = lockDir;
+    const children: ChildProcess[] = [];
+    const closes: Promise<ChildObservation>[] = [];
+    const runChild = () => {
+      const child = spawn(process.execPath, ["--import", "tsx", fixture, statePath, "child-fingerprint"], {
+        env: { ...process.env, EARVELDAJA_LOCK_DIR: lockDir }, stdio: ["ignore", "pipe", "pipe"],
+      });
+      children.push(child);
+      const closed = observeChild(child, 5_000);
+      closes.push(closed);
+      return closed;
+    };
+    try {
+      const firstChild = runChild();
+      await new Promise(resolveTurn => setImmediate(resolveTurn));
+      const secondChild = runChild();
+      const outcomes = await Promise.all([firstChild, secondChild]);
+      for (const outcome of outcomes) expect(outcome.code, outcome.stderr).toBe(0);
+      const statuses = outcomes.map((outcome, index) => {
+        const lines = outcome.stdout.split(/\r?\n/).filter(line => line.trim() !== "");
+        expect(lines, `child ${index + 1} must emit exactly one JSON line; stderr: ${outcome.stderr}`)
+          .toHaveLength(1);
+        try {
+          return (JSON.parse(lines[0]!) as { status: string }).status;
+        } catch (error) {
+          throw new Error(
+            `child ${index + 1} emitted invalid JSON ${JSON.stringify(lines[0])}; stderr: ${outcome.stderr}`,
+            { cause: error },
+          );
+        }
+      }).sort();
+      expect(statuses).toEqual(["created", "duplicate"]);
+      expect(JSON.parse(await readFile(statePath, "utf8"))).toHaveLength(1);
+    } finally {
+      for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await Promise.allSettled(closes);
+      if (prior === undefined) delete process.env.EARVELDAJA_LOCK_DIR;
+      else process.env.EARVELDAJA_LOCK_DIR = prior;
+      await rm(stateDir, { recursive: true, force: true });
+      await rm(lockDir, { recursive: true, force: true });
+    }
   });
 });
 

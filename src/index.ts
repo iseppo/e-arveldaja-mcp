@@ -24,6 +24,7 @@ import {
 } from "./config.js";
 import { runWithExtra } from "./progress.js";
 import { HttpClient } from "./http-client.js";
+import { buildConnectionFingerprint } from "./connection-fingerprint.js";
 import { ClientsApi } from "./api/clients.api.js";
 import { ProductsApi } from "./api/products.api.js";
 import { JournalsApi } from "./api/journals.api.js";
@@ -216,12 +217,6 @@ function normalizeAuditCompanyName(companyName: string | null | undefined): stri
   return normalized || null;
 }
 
-function buildConnectionFingerprint(namedConfig: NamedConfig): string {
-  return createHash("sha256")
-    .update(`${namedConfig.config.baseUrl}\n${namedConfig.config.apiKeyId}\n${namedConfig.config.apiPublicValue}`)
-    .digest("hex");
-}
-
 function buildSetupInstructionsPayload(
   setupInfo: ReturnType<typeof getCredentialSetupInfo>,
   isSetupMode: boolean,
@@ -387,7 +382,7 @@ async function main() {
   const setupInfo = getCredentialSetupInfo();
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
   const connectionFingerprints = Object.fromEntries(
-    allConfigs.map((config) => [config.name, buildConnectionFingerprint(config)]),
+    allConfigs.map((config) => [config.name, buildConnectionFingerprint(config.config)]),
   );
   initAuditLog(
     () => allConfigs[connectionState.activeIndex]?.name ?? "setup",

@@ -12,6 +12,7 @@ type Item = { id: number; name: string };
 function makeClient(namespace = "connection:0"): HttpClient {
   return {
     cacheNamespace: namespace,
+    connectionFingerprint: "test-connection-fingerprint",
     get: vi.fn(),
     post: vi.fn(),
     patch: vi.fn(),
@@ -30,6 +31,11 @@ function apiResponse(): ApiResponse {
 describe("BaseResource", () => {
   beforeEach(() => {
     cache.invalidate(); // clear all entries between tests
+  });
+
+  it("H06-A exposes the client connection fingerprint", () => {
+    expect(new BaseResource<Item>(makeClient(), "/items").connectionFingerprint)
+      .toBe("test-connection-fingerprint");
   });
 
   // ── list() caching ────────────────────────────────────────────────────────
