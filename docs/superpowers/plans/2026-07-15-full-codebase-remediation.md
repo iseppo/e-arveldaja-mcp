@@ -282,109 +282,155 @@ Expected: release validation, 1,754-or-more unit tests, build, and integration s
 
 ### Task 3: H03 — Preserve transaction client on indeterminate confirmation
 
+**Goal:** Permit cleanup only after a proven confirmation rejection. Ambiguous register, reread, or cleanup outcomes preserve clients_id and the transaction ID, invalidate every affected cache, and expose neutral recovery data without another speculative mutation.
+
 **Files:**
-- Create: `src/mutation-outcome.ts`
-- Create: `src/mutation-outcome.test.ts`
-- Modify: `src/tool-error.test.ts`
-- Modify: `src/api/transactions.api.ts:40-112`
-- Modify: `src/tools/crud/transactions.ts:180-230`
-- Modify: `src/api/transactions.api.test.ts`
-- Modify: `src/tools/crud-tools.test.ts`
+- Create: src/mutation-outcome.ts
+- Create: src/mutation-outcome.test.ts
+- Modify: src/tool-error.test.ts
+- Modify: src/api/transactions.api.ts
+- Modify: src/tools/crud/transactions.ts
+- Modify: src/api/transactions.api.test.ts
+- Modify: src/tools/crud-tools.test.ts
 
-**Interfaces:**
-- Consumes: `HttpError.status === "network"` and BaseResource cache invalidation.
-- Produces neutral `src/mutation-outcome.ts`: `MutationOperation`, serializable `MutationCause`, `MutationIndeterminateError` with `category`, `mutationMayHaveOccurred`, `operation`, `entity`, `entityId`, `businessKey`, `affectedCaches`, `cause`, and `nextAction`; `isMutationIndeterminate(error): boolean`.
-- Preserves both sources of temporary `clients_id`: API auto-resolution from an invoice and explicit tool input.
+This seven-file source/test list is exact. Do not change src/tool-error.ts, src/api/base-resource.ts, or any other source/test file for H03. Ignored .omc review and ledger evidence is not part of the commit.
 
-- [ ] **Step 1: Write failing regressions**
+**Acceptance contract:**
+- Preserve API-auto-set and explicit tool-set clients_id on indeterminate confirmation.
+- A definite HTTP rejection or fresh PROJECT reread may use the existing safe cleanup path.
+- Register network error plus failed reread, or a reread status other than CONFIRMED/PROJECT, returns MutationIndeterminateError for operation confirm and performs no clear.
+- A network-ambiguous cleanup returns MutationIndeterminateError for operation rollback and retains entityId/businessKey.
+- Every register catch invalidates /transactions before recovery. If a fresh reread returns neither CONFIRMED nor PROJECT, re-invalidate /transactions after that reread and before invalidating /journals and throwing, because get(id) repopulates the transaction cache. Every ambiguous confirmation invalidates /journals. Public TransactionsApi.invalidateTransactionsAfterAmbiguousCleanup() invalidates /transactions for both API-auto and explicit tool cleanup ambiguity.
+- CONFIRMED reread still returns recovered success. Existing compound warning/error behavior for non-network rollback failure remains unchanged.
+- toolError serializes every neutral field, including the serializable cause.
 
-```ts
-it("keeps API-auto-set clients_id and the transaction ID when register and reread are ambiguous", async () => {
-  const { client, patchCalls } = makeClient({
-    getById: (path) => {
-      if (path === "/transactions/9" && patchCalls.length === 0) return { id: 9, clients_id: null };
-      if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
-      if (path === "/transactions/9") throw new HttpError("reread lost", "network", "GET", path);
-    },
-    patchHandler: ({ path }) => {
-      if (path === "/transactions/9/register") throw new HttpError("register lost", "network", "PATCH", path);
-      return { code: 200, messages: [] };
-    },
-  });
-  const api = new TransactionsApi(client);
-  await expect(api.confirm(9, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
-    .rejects.toMatchObject({
-      category: "mutation_indeterminate", operation: "confirm", entity: "transaction",
-      entityId: 9, businessKey: "transaction:9", mutationMayHaveOccurred: true,
+- [ ] **Step 1: Baseline**
+
+Run:
+
+~~~bash
+git status --short
+npx vitest run src/tool-error.test.ts src/api/transactions.api.test.ts src/tools/crud-tools.test.ts
+~~~
+
+Expected: clean status and all existing suites PASS. Record the output. Do not use the old -t "indeterminate" command: it selects only the existing textual test and produces a false green.
+
+- [ ] **Step 2: RED-A — add only the missing neutral-module tests**
+
+Create src/mutation-outcome.test.ts before any other suite imports the new module:
+
+~~~ts
+import { describe, expect, it } from "vitest";
+import { HttpError } from "./http-client.js";
+import {
+  MutationIndeterminateError,
+  describeMutationCause,
+  isMutationIndeterminate,
+  type MutationOperation,
+} from "./mutation-outcome.js";
+
+describe("H03 mutation outcome", () => {
+  it("H03 mutation outcome exposes serializable recovery and HttpError cause fields", () => {
+    const operation: MutationOperation = "confirm";
+    const error = new MutationIndeterminateError({
+      operation,
+      entity: "transaction",
+      entityId: 7,
+      businessKey: "transaction:7",
       affectedCaches: ["/transactions", "/journals"],
+      cause: new HttpError("lost", "network", "PATCH", "/transactions/7/register"),
+      nextAction: "Freshly read transaction 7 before any retry.",
     });
-  expect(patchCalls).toEqual([
-    { path: "/transactions/9", body: { clients_id: 42 } },
-    { path: "/transactions/9/register", body: expect.any(Array) },
-  ]);
-});
-```
-
-```ts
-it.each([
-  [new HttpError("rejected", 409, "PATCH", "/transactions/7/register"), 2, { status: 409 }],
-  [new MutationIndeterminateError({ operation: "confirm", entity: "transaction", entityId: 7,
-    businessKey: "transaction:7", affectedCaches: ["/transactions", "/journals"],
-    cause: new HttpError("lost", "network", "PATCH", "/transactions/7/register"),
-    nextAction: "Freshly read transaction 7 before any retry." }), 1,
-    { category: "mutation_indeterminate", entityId: 7 }],
-])("cleans up a tool-set clients_id only after a proven rejection", async (confirmError, expectedUpdates, expectedError) => {
-  const { api, handler } = getCrudToolHarness("confirm_transaction", {
-    transactions: {
-      get: vi.fn().mockResolvedValue({ id: 7, clients_id: null }),
-      update: vi.fn().mockResolvedValue({ code: 200, messages: [] }),
-      confirm: vi.fn().mockRejectedValue(confirmError),
-    },
+    expect(error).toMatchObject({
+      name: "MutationIndeterminateError",
+      category: "mutation_indeterminate",
+      mutationMayHaveOccurred: true,
+      operation: "confirm",
+      entity: "transaction",
+      entityId: 7,
+      businessKey: "transaction:7",
+      affectedCaches: ["/transactions", "/journals"],
+      cause: {
+        name: "HttpError",
+        message: "lost",
+        status: "network",
+        method: "PATCH",
+        path: "/transactions/7/register",
+      },
+      nextAction: "Freshly read transaction 7 before any retry.",
+    });
+    expect(JSON.parse(JSON.stringify(error.cause))).toEqual({
+      name: "HttpError",
+      message: "lost",
+      status: "network",
+      method: "PATCH",
+      path: "/transactions/7/register",
+    });
   });
-  await expect(handler({
-    id: 7, clients_id: 42,
-    distributions: [{ related_table: "accounts", related_id: 4000, amount: 10 }],
-  })).rejects.toMatchObject(expectedError);
-  expect(api.transactions.update).toHaveBeenCalledTimes(expectedUpdates);
-  expect(api.transactions.update).toHaveBeenNthCalledWith(1, 7, { clients_id: 42 });
-  if (expectedUpdates === 2) expect(api.transactions.update).toHaveBeenNthCalledWith(2, 7, { clients_id: null });
-  else expect(api.transactions.update).not.toHaveBeenCalledWith(7, { clients_id: null });
-});
 
-it("surfaces ambiguous clients_id cleanup as rollback, preserving the transaction ID", async () => {
-  const { api, handler } = getCrudToolHarness("confirm_transaction", {
-    transactions: {
-      get: vi.fn().mockResolvedValue({ id: 7, clients_id: null }),
-      update: vi.fn()
-        .mockResolvedValueOnce({ code: 200, messages: [] })
-        .mockRejectedValueOnce(new HttpError("cleanup lost", "network", "PATCH", "/transactions/7")),
-      confirm: vi.fn().mockRejectedValue(new HttpError("register rejected", 409, "PATCH", "/transactions/7/register")),
-    },
+  it("H03 mutation outcome normalizes ordinary and non-Error causes", () => {
+    expect(describeMutationCause(new TypeError("bad shape"))).toEqual({
+      name: "TypeError",
+      message: "bad shape",
+    });
+    expect(describeMutationCause({ code: "ODD" })).toEqual({
+      name: "UnknownThrownValue",
+      message: "[object Object]",
+    });
   });
-  await expect(handler({
-    id: 7, clients_id: 42,
-    distributions: [{ related_table: "accounts", related_id: 4000, amount: 10 }],
-  })).rejects.toMatchObject({
-    category: "mutation_indeterminate", operation: "rollback", entity: "transaction", entityId: 7,
+
+  it("H03 mutation outcome recognizes instances and serialized errors safely", () => {
+    const instance = new MutationIndeterminateError({
+      operation: "rollback",
+      entity: "transaction",
+      entityId: 7,
+      businessKey: "transaction:7",
+      affectedCaches: ["/transactions"],
+      cause: new Error("cleanup lost"),
+      nextAction: "Freshly read transaction 7.",
+    });
+    expect(isMutationIndeterminate(instance)).toBe(true);
+    expect(isMutationIndeterminate({
+      category: "mutation_indeterminate",
+      mutationMayHaveOccurred: true,
+    })).toBe(true);
+    expect(isMutationIndeterminate({
+      category: "mutation_indeterminate",
+      mutationMayHaveOccurred: false,
+    })).toBe(false);
+    expect(isMutationIndeterminate({ category: "mutation_indeterminate" })).toBe(false);
+    expect(isMutationIndeterminate(null)).toBe(false);
   });
-  expect(api.transactions.update).toHaveBeenCalledTimes(2);
 });
-```
+~~~
 
-- [ ] **Step 2: Prove red**
+Run:
 
-Run: `npx vitest run src/api/transactions.api.test.ts src/tools/crud-tools.test.ts -t "indeterminate"`
+~~~bash
+npx vitest run src/mutation-outcome.test.ts -t "H03 mutation outcome"
+~~~
 
-Expected: FAIL because the tool catch always clears `clients_id`, cleanup ambiguity is swallowed, and the error has no neutral structured recovery fields.
+Expected RED-A: module resolution fails because mutation-outcome.ts does not exist. This is the deliberate compile RED. Do not add dependent imports before recording it.
 
-- [ ] **Step 3: Add the neutral mutation outcome and guarded cleanup**
+- [ ] **Step 3: GREEN-A — implement the neutral outcome**
 
-```ts
-// src/mutation-outcome.ts
+Create src/mutation-outcome.ts:
+
+~~~ts
 import { HttpError } from "./http-client.js";
 
-export type MutationOperation = "create" | "update" | "delete" | "upload" | "confirm" | "invalidate" | "rollback";
-export interface MutationCause { name: string; message: string; status?: number | "network"; method?: string; path?: string }
+export type MutationOperation =
+  | "create" | "update" | "delete" | "upload"
+  | "confirm" | "invalidate" | "rollback";
+
+export interface MutationCause {
+  name: string;
+  message: string;
+  status?: number | "network";
+  method?: string;
+  path?: string;
+}
+
 export interface MutationIndeterminateContext {
   operation: MutationOperation;
   entity: string;
@@ -396,9 +442,15 @@ export interface MutationIndeterminateContext {
 }
 
 export function describeMutationCause(cause: unknown): MutationCause {
-  if (cause instanceof HttpError) return {
-    name: cause.name, message: cause.message, status: cause.status, method: cause.method, path: cause.path,
-  };
+  if (cause instanceof HttpError) {
+    return {
+      name: cause.name,
+      message: cause.message,
+      status: cause.status,
+      method: cause.method,
+      path: cause.path,
+    };
+  }
   if (cause instanceof Error) return { name: cause.name, message: cause.message };
   return { name: "UnknownThrownValue", message: String(cause) };
 }
@@ -413,9 +465,14 @@ export class MutationIndeterminateError extends Error {
   readonly affectedCaches: string[];
   readonly cause: MutationCause;
   readonly nextAction: string;
+
   constructor(context: MutationIndeterminateContext) {
     const serializableCause = describeMutationCause(context.cause);
-    super(`${context.operation} ${context.businessKey} is indeterminate. ${context.nextAction}`, { cause: serializableCause });
+    super(
+      context.operation + " " + context.businessKey + " is indeterminate. " +
+        context.nextAction,
+      { cause: serializableCause },
+    );
     this.name = "MutationIndeterminateError";
     this.operation = context.operation;
     this.entity = context.entity;
@@ -426,41 +483,143 @@ export class MutationIndeterminateError extends Error {
     this.nextAction = context.nextAction;
   }
 }
-export const isMutationIndeterminate = (error: unknown): error is MutationIndeterminateError =>
-  error instanceof MutationIndeterminateError || (
-    typeof error === "object" && error !== null &&
+
+export function isMutationIndeterminate(
+  error: unknown,
+): error is MutationIndeterminateError {
+  return error instanceof MutationIndeterminateError || (
+    typeof error === "object" &&
+    error !== null &&
     (error as { category?: unknown }).category === "mutation_indeterminate" &&
     (error as { mutationMayHaveOccurred?: unknown }).mutationMayHaveOccurred === true
   );
-```
+}
+~~~
 
-In `TransactionsApi.confirm`, replace the unreadable-state `Error` with:
+Run:
 
-```ts
-this.invalidateCache();
-this.invalidateCache("/journals");
-throw new MutationIndeterminateError({
-  operation: "confirm", entity: "transaction", entityId: id, businessKey: `transaction:${id}`,
-  affectedCaches: ["/transactions", "/journals"],
-  cause: error,
-  nextAction: `Freshly read transaction ${id}; if still PROJECT, obtain new approval before retrying confirmation.`,
-});
-```
+~~~bash
+npx vitest run src/mutation-outcome.test.ts -t "H03 mutation outcome"
+~~~
 
-In the tool catch:
+Expected GREEN-A: all three selected tests PASS.
 
-```ts
+- [ ] **Step 4: Characterize toolError**
+
+Add the MutationIndeterminateError import and one test named H03 toolError serializes every neutral mutation field to src/tool-error.test.ts. Construct the same network PATCH error used above and assert exact equality for error, name, category, mutationMayHaveOccurred, operation, entity, entityId, businessKey, affectedCaches, cause.name/message/status/method/path, and nextAction.
+
+Run:
+
+~~~bash
+npx vitest run src/tool-error.test.ts -t "H03 toolError"
+~~~
+
+Expected: PASS without changing src/tool-error.ts. This is a compatibility characterization, not another RED.
+
+- [ ] **Step 5: RED-B — add the API cases**
+
+In src/api/transactions.api.test.ts, replace the existing text-only indeterminate test with a structured H03 API test and add three adjacent tests. Every name must contain H03 API so the command below selects exactly these four cases:
+
+1. API-auto-set purchase-invoice client; register PATCH and reread GET both return network HttpError. Assert confirm outcome fields, GET cause, no clients_id:null patch, and seeded /transactions plus /journals cache entries are absent.
+2. Already-set client, representing explicit tool state on entry to TransactionsApi.confirm; the same ambiguity returns structured confirm outcome and the only PATCH is register.
+3. Network register plus a fresh VOID status; assert structured confirm outcome, no cleanup, both caches invalidated.
+4. Definite register 409 followed by network-ambiguous API-auto cleanup; seed a transaction cache entry immediately before throwing cleanup HttpError, assert structured rollback outcome with transaction ID/key/cause, and assert the cache is absent after invalidateTransactionsAfterAmbiguousCleanup() runs.
+
+Keep the existing CONFIRMED recovery, PROJECT cleanup, definite HTTP rejection, successful cache invalidation, and compound non-network rollback-failure tests unchanged.
+
+Run:
+
+~~~bash
+npx vitest run src/api/transactions.api.test.ts -t "H03 API"
+~~~
+
+Expected RED-B: exactly four tests run and fail for the intended neutral-field, unsafe-cleanup, or cache assertions.
+
+- [ ] **Step 6: GREEN-B — implement one API state machine**
+
+Import MutationIndeterminateError in src/api/transactions.api.ts. Add this public method to TransactionsApi so both the API and tool cleanup paths use the same cache-invalidating seam:
+
+~~~ts
+public invalidateTransactionsAfterAmbiguousCleanup(): void {
+  this.invalidateCache();
+}
+~~~
+
+Then replace the entire confirm catch, with these exact branches:
+
+1. Call this.invalidateCache() immediately on every register error.
+2. For register HttpError status network, perform one fresh get(id).
+3. Reread failure: invalidate /journals and throw confirm MutationIndeterminateError whose cause is the read error.
+4. Fresh CONFIRMED: invalidate /journals and return the existing recovered-success response.
+5. Fresh PROJECT: registration is proven rejected; continue to safe cleanup.
+6. Any other/absent status: call this.invalidateCache() again after the reread and immediately before invalidating /journals and throwing confirm MutationIndeterminateError. The fresh get(id) repopulates /transactions, so the second transaction invalidation is required. Do not clean clients_id.
+7. If API auto-set clientsIdWasSet, attempt the existing clear only after definite HTTP rejection or fresh PROJECT.
+8. Cleanup network HttpError: call this.invalidateTransactionsAfterAmbiguousCleanup() immediately before throwing rollback MutationIndeterminateError. BaseResource.update invalidates only on success, so this explicit call is required.
+9. Cleanup non-network failure: preserve the existing stderr warning and compound Error containing both register and rollback messages.
+10. Otherwise rethrow the original definite rejection.
+
+Use affectedCaches ["/transactions", "/journals"] for confirm ambiguity and ["/transactions"] for rollback ambiguity. Include entity transaction, entityId id, businessKey transaction:id, the serializable cause, and a nextAction requiring a fresh read before retry.
+
+Run:
+
+~~~bash
+npx vitest run src/mutation-outcome.test.ts -t "H03 mutation outcome"
+npx vitest run src/api/transactions.api.test.ts
+~~~
+
+Expected GREEN-B: neutral and complete API suites PASS, including all pre-existing compatibility cases.
+
+- [ ] **Step 7: RED-C — add explicit tool-set cases**
+
+Add HttpError and MutationIndeterminateError imports to src/tools/crud-tools.test.ts. Inside describe("confirm_transaction"), add:
+
+- One it.each test named H03 CRUD cleans a tool-set client only after proven rejection:
+  - HttpError 409 expects the initial clients_id set plus one cleanup.
+  - MutationIndeterminateError confirm expects only the initial set and explicitly forbids clients_id:null.
+- One test named H03 CRUD exposes ambiguous explicit-client cleanup as rollback:
+  - confirm rejects with HttpError 409.
+  - initial update resolves and cleanup update rejects with network HttpError.
+  - override invalidateTransactionsAfterAmbiguousCleanup with vi.fn().
+  - assert rollback neutral fields, entityId/key, affected transaction cache list, and cause path.
+  - assert api.transactions.invalidateTransactionsAfterAmbiguousCleanup was called exactly once before the rollback error is observed.
+
+Every new case uses account distribution 4000 and must override readonly.getAccounts with one active non-dimensioned account 4000 and readonly.getAccountDimensions with an empty array. Otherwise the test fails in validation before reaching H03 behavior.
+
+Run:
+
+~~~bash
+npx vitest run src/tools/crud-tools.test.ts -t "H03 CRUD"
+~~~
+
+Expected RED-C: exactly three cases run. The structured confirmation case performs an unwanted clear and cleanup ambiguity is swallowed; failures are not dimension-validation errors.
+
+- [ ] **Step 8: GREEN-C — guard tool cleanup**
+
+In src/tools/crud/transactions.ts import MutationIndeterminateError and isMutationIndeterminate. Replace only the confirm_transaction catch:
+
+~~~ts
 } catch (error) {
   if (clientsIdWasSet && !isMutationIndeterminate(error)) {
     try {
-      await api.transactions.update(id, { clients_id: null } as Partial<Transaction>);
+      await api.transactions.update(
+        id,
+        { clients_id: null } as Partial<Transaction>,
+      );
     } catch (cleanupError) {
-      if (cleanupError instanceof HttpError && cleanupError.status === "network") {
+      if (
+        cleanupError instanceof HttpError &&
+        cleanupError.status === "network"
+      ) {
+        api.transactions.invalidateTransactionsAfterAmbiguousCleanup();
         throw new MutationIndeterminateError({
-          operation: "rollback", entity: "transaction", entityId: id,
-          businessKey: `transaction:${id}`, affectedCaches: ["/transactions"],
+          operation: "rollback",
+          entity: "transaction",
+          entityId: id,
+          businessKey: "transaction:" + id,
+          affectedCaches: ["/transactions"],
           cause: cleanupError,
-          nextAction: `Freshly read transaction ${id}; clients_id cleanup may or may not have committed.`,
+          nextAction: "Freshly read transaction " + id +
+            "; clients_id cleanup may or may not have committed.",
         });
       }
       throw cleanupError;
@@ -468,91 +627,122 @@ In the tool catch:
   }
   throw error;
 }
-```
+~~~
 
-Replace `TransactionsApi.confirm`'s full catch with this code; it returns recovered success only after a confirmed reread, performs cleanup only after a proven PROJECT reread or definite register rejection, and preserves both the register and cleanup ambiguity:
+The explicit public method call is required here even though confirm invalidates earlier: cache state can be repopulated between the register rejection and cleanup failure. Both API-auto and tool-set cleanup ambiguity must invoke the same method immediately before throwing the rollback outcome.
 
-```ts
-} catch (error) {
-  if (error instanceof HttpError && error.status === "network") {
-    this.invalidateCache();
-    let fresh: Transaction;
-    try {
-      fresh = await this.get(id);
-    } catch (readError) {
-      this.invalidateCache("/journals");
-      throw new MutationIndeterminateError({
-        operation: "confirm", entity: "transaction", entityId: id,
-        businessKey: `transaction:${id}`, affectedCaches: ["/transactions", "/journals"],
-        cause: readError,
-        nextAction: `Registration response and status reread were lost. Freshly read transaction ${id}; do not clear clients_id or retry confirmation without new approval.`,
-      });
-    }
-    if (fresh.status === "CONFIRMED") {
-      this.invalidateCache("/journals");
-      return { code: 200, messages: ["Registration recovered after network error"] };
-    }
-    if (fresh.status !== "PROJECT") {
-      throw new MutationIndeterminateError({
-        operation: "confirm", entity: "transaction", entityId: id,
-        businessKey: `transaction:${id}`, affectedCaches: ["/transactions", "/journals"],
-        cause: error,
-        nextAction: `Transaction ${id} reread returned status ${fresh.status ?? "UNKNOWN"}; inspect it before any cleanup or retry.`,
-      });
-    }
-  }
-  if (clientsIdWasSet) {
-    try {
-      await this.update(id, { clients_id: null } as Partial<Transaction>);
-    } catch (cleanupError) {
-      if (cleanupError instanceof HttpError && cleanupError.status === "network") {
-        throw new MutationIndeterminateError({
-          operation: "rollback", entity: "transaction", entityId: id,
-          businessKey: `transaction:${id}`, affectedCaches: ["/transactions"],
-          cause: cleanupError,
-          nextAction: `Freshly read transaction ${id}; clients_id cleanup may or may not have committed.`,
-        });
-      }
-      throw cleanupError;
-    }
-  }
-  throw error;
-}
-```
+Run:
 
-In `src/tool-error.test.ts`, add the complete wrapper serialization regression:
+~~~bash
+npx vitest run src/tools/crud-tools.test.ts -t "H03 CRUD"
+npx vitest run src/tools/crud-tools.test.ts
+~~~
 
-```ts
-it("serializes every neutral mutation field through toolError", () => {
-  const error = new MutationIndeterminateError({
-    operation: "confirm", entity: "transaction", entityId: 7,
-    businessKey: "transaction:7", affectedCaches: ["/transactions", "/journals"],
-    cause: new HttpError("lost", "network", "PATCH", "/transactions/7/register"),
-    nextAction: "Freshly read transaction 7 before any retry.",
-  });
-  const payload = parseMcpResponse(toolError(error).content[0]!.text);
-  expect(payload).toMatchObject({
-    category: "mutation_indeterminate", mutationMayHaveOccurred: true,
-    operation: "confirm", entity: "transaction", entityId: 7,
-    businessKey: "transaction:7", affectedCaches: ["/transactions", "/journals"],
-    cause: { status: "network", method: "PATCH", path: "/transactions/7/register" },
-    nextAction: "Freshly read transaction 7 before any retry.",
-  });
-});
-```
+Expected GREEN-C: selected and complete CRUD suites PASS.
 
-- [ ] **Step 4: Prove green and review**
+- [ ] **Step 9: Focused and full verification**
 
-Run: `npx vitest run src/mutation-outcome.test.ts src/tool-error.test.ts src/api/transactions.api.test.ts src/tools/crud-tools.test.ts && npm run build && git diff --check`
+Run:
 
-Expected: all suites PASS; API-auto-set and tool-set IDs are retained; definite rejection cleans up once; ambiguous confirmation or cleanup never triggers another speculative mutation. Write `.omc/reviews/H03.diff` and obtain both required verdicts.
+~~~bash
+npx vitest run src/mutation-outcome.test.ts src/tool-error.test.ts src/api/transactions.api.test.ts src/tools/crud-tools.test.ts
+npm run build
+npm test
+npm run test:integration
+git diff --check
+H03_INDEX="$(mktemp)"
+cp "$(git rev-parse --git-path index)" "$H03_INDEX"
+GIT_INDEX_FILE="$H03_INDEX" git add -- \
+  src/api/transactions.api.test.ts src/api/transactions.api.ts \
+  src/mutation-outcome.test.ts src/mutation-outcome.ts \
+  src/tool-error.test.ts src/tools/crud-tools.test.ts \
+  src/tools/crud/transactions.ts
+GIT_INDEX_FILE="$H03_INDEX" git diff --cached --check
+GIT_INDEX_FILE="$H03_INDEX" git diff --cached --name-only
+rm -f "$H03_INDEX"
+git diff --cached --quiet
+~~~
 
-- [ ] **Step 5: Commit H03**
+Expected: all focused/full checks PASS with only baseline skips. The temporary-index git diff --cached --name-only includes tracked and untracked work and prints exactly:
 
-```bash
-git add src/mutation-outcome.ts src/mutation-outcome.test.ts src/tool-error.test.ts src/api/transactions.api.ts src/tools/crud/transactions.ts src/api/transactions.api.test.ts src/tools/crud-tools.test.ts
+~~~text
+src/api/transactions.api.test.ts
+src/api/transactions.api.ts
+src/mutation-outcome.test.ts
+src/mutation-outcome.ts
+src/tool-error.test.ts
+src/tools/crud-tools.test.ts
+src/tools/crud/transactions.ts
+~~~
+
+The temporary index is deleted afterward, and git diff --cached --quiet proves the real index remains empty. Do not use git add -N or any other real-index staging before Step 11.
+
+- [ ] **Step 10: Independent review**
+
+Run:
+
+~~~bash
+mkdir -p .omc/reviews
+H03_INDEX="$(mktemp)"
+cp "$(git rev-parse --git-path index)" "$H03_INDEX"
+GIT_INDEX_FILE="$H03_INDEX" git add -- \
+  src/api/transactions.api.test.ts src/api/transactions.api.ts \
+  src/mutation-outcome.test.ts src/mutation-outcome.ts \
+  src/tool-error.test.ts src/tools/crud-tools.test.ts \
+  src/tools/crud/transactions.ts
+GIT_INDEX_FILE="$H03_INDEX" git diff --cached \
+  --output=.omc/reviews/H03.diff -- \
+  src/api/transactions.api.test.ts src/api/transactions.api.ts \
+  src/mutation-outcome.test.ts src/mutation-outcome.ts \
+  src/tool-error.test.ts src/tools/crud-tools.test.ts \
+  src/tools/crud/transactions.ts
+test -s .omc/reviews/H03.diff
+GIT_INDEX_FILE="$H03_INDEX" git diff --cached --stat -- \
+  src/api/transactions.api.test.ts src/api/transactions.api.ts \
+  src/mutation-outcome.test.ts src/mutation-outcome.ts \
+  src/tool-error.test.ts src/tools/crud-tools.test.ts \
+  src/tools/crud/transactions.ts
+rm -f "$H03_INDEX"
+git diff --cached --quiet
+~~~
+
+The copied temporary index makes both new untracked mutation-outcome files visible in the review artifact and stat. Removing it and passing git diff --cached --quiet prove that review packaging did not alter the real index; Step 11 remains the first real staging operation.
+
+Give a fresh non-author reviewer the approved H03 design row, H03.diff, RED-A/B/C evidence, and all green output. Require exact verdicts:
+
+~~~text
+SPEC COMPLIANCE: APPROVED
+CODE QUALITY: APPROVED
+~~~
+
+The review must explicitly cover both client sources, definite rejection versus ambiguous register/reread/cleanup, cache invalidation matching affectedCaches, toolError serialization, compound non-network rollback compatibility, and exact seven-file scope. Rejection requires an in-scope fix, full reverification, overwritten artifact, and a new reviewer.
+
+- [ ] **Step 11: Commit H03**
+
+Run:
+
+~~~bash
+git status --short
+git add \
+  src/api/transactions.api.test.ts src/api/transactions.api.ts \
+  src/mutation-outcome.test.ts src/mutation-outcome.ts \
+  src/tool-error.test.ts src/tools/crud-tools.test.ts \
+  src/tools/crud/transactions.ts
+git diff --cached --name-only
 git commit -m "fix(H03): preserve clients on ambiguous confirmation"
-```
+~~~
+
+Expected: staged names are exactly the seven approved paths. Do not stage ignored review or ledger artifacts.
+
+- [ ] **Step 12: Ledger and clean status**
+
+Append one H03 ledger row containing RED-A/B/C commands/results, focused/build/full/integration/diff results, both verdicts, and commit hash. Then run:
+
+~~~bash
+git status --short
+~~~
+
+Expected: empty output. Do not begin H04 until the H03 row is complete, both verdicts are recorded, and the worktree is clean.
 
 ### Task 4: H04 — Confirmed accounting records are immutable through generic updates
 
