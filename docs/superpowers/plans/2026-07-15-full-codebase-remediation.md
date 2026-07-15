@@ -1576,218 +1576,615 @@ Expected: empty output. Do not begin H14 until the H06 row is complete and the w
 ### Task 6: H14 — Preserve post-create receipt recovery state
 
 **Files:**
-- Modify: `src/tools/receipt-inbox.ts:1940-2040`
-- Modify: `src/tools/receipt-inbox-tools.test.ts`
+- Modify: `src/tools/receipt-inbox.ts:1-15,1777-2205`
+- Test: `src/tools/receipt-inbox-tools.test.ts`
+
+**Exact scope:** this finding changes exactly the two paths above. Do not change `src/api/purchase-invoices.ts`, `src/mutation-outcome.ts`, `src/workflow-response.ts`, audit infrastructure, fixtures, or any other source/test file.
 
 **Interfaces:**
-- Consumes: created purchase-invoice `id`, attempted transaction ID, and `MutationIndeterminateError` metadata from H03.
-- Produces: `PartialClassificationMutation` with `category`, `mutation_may_have_occurred`, `failed_stage`, `created_invoice_id`, `created_invoice_status`, `attempted_transaction_id`, `transaction_status`, and `next_action`; the existing granular and merged wrapper envelopes carry it unchanged.
+- Test code imports `MutationIndeterminateError`; production code imports `isMutationIndeterminate` from `../mutation-outcome.js`. Raw `HttpError.status === "network"` is the other ambiguous shape.
+- Production defines a local `PartialClassificationMutation`; no shared public type is added for this finding.
+- A proven-created invoice whose transaction reread, required invoice invalidation, invoice confirmation, or transaction confirmation does not complete is emitted in `partial_mutations`. The granular result, its `execution.errors` entry, and `classify_bank_transactions.result` carry the same object equality-equivalent through the existing `remapHiddenGranularWorkflowResult` spread.
+- `mutation_may_have_occurred` is always `true` in this envelope because purchase-invoice creation is already proven, even when the later failure itself is a definite rejection.
+- Category is `mutation_indeterminate` only when `isMutationIndeterminate(error)` is true or the thrown value is a raw network `HttpError`; all other thrown values, including HTTP 422/503 responses, are `mutation_failed`.
+- Statuses are evidence-based. The create response contributes `PROJECT` or `CONFIRMED` only when it says exactly that, otherwise `UNKNOWN`. A failed transaction reread makes transaction status `UNKNOWN`. A successful reread can prove transaction `PROJECT`, `CONFIRMED`, or `VOID` only when `is_deleted !== true`; any deleted transaction maps to `UNKNOWN` regardless of its raw status field, and every other status also maps to `UNKNOWN`. Failed ambiguous invoice invalidation makes invoice status `UNKNOWN`, while definite invalidation rejection preserves the observed create-response status. An ambiguous invoice confirmation makes invoice status `UNKNOWN`; a definite rejection preserves the pre-confirm create-response status. A proven successful invoice confirmation changes invoice status to `CONFIRMED`. An ambiguous transaction confirmation makes transaction status `UNKNOWN`; a definite rejection retains the last proven transaction status `PROJECT`.
+- The created ID is appended immediately and once after `invoice.id` is proven. A later thrown named stage never erases it, invalidates it, retries creation, rereads speculatively, or repeats a confirmation.
+- The only automatic invalidation retained is the existing safe branch where a successful post-create reread proves the transaction is no longer `PROJECT`. A successful invalidation removes that current invoice ID from the live-ID result and emits no partial. A failed invalidation keeps the ID, preserves the existing rollback-failure note, and emits an `invoice_invalidation` partial with the original thrown value classified normally.
+- Any group containing `partial_mutations` is `failed`, even if a later transaction succeeds. Successfully linked transaction IDs and created invoice IDs remain reported.
 
-- [ ] **Step 1: Write the failing regression**
+**Deliberate exclusions:** a create response without `invoice.id` is outside H14 because no created identity has been proven at this handler boundary; API-level create ambiguity/idempotency requires a separate design. Audit logging is also outside H14 because `logAudit` catches its own persistence errors and is not one of the three named mutation stages. Tests must always prove a concrete created ID and must not add missing-ID or audit-failure behavior.
 
-```ts
-it("keeps createAndSetTotals recovery state through the merged wrapper", async () => {
-  const tx = { id: 99, status: "PROJECT", is_deleted: false, type: "C", amount: 25,
-    date: "2026-03-22", accounts_dimensions_id: 100, bank_account_name: "OpenAI",
-    description: "Subscription", cl_currencies_id: "EUR", clients_id: 7 };
-  const getImpl = vi.fn()
-    .mockResolvedValueOnce(tx)
-    .mockRejectedValueOnce(new HttpError("post-create read lost", "network", "GET", "/transactions/99"));
-  const { handler, api } = setupReceiptTool("classify_bank_transactions", {
-    getImpl,
-    clients: [{ id: 7, name: "OpenAI Ireland Limited", is_supplier: true, is_client: false,
-      cl_code_country: "IE", is_member: false, send_invoice_to_email: false,
-      send_invoice_to_accounting_email: false, is_deleted: false }],
-    purchaseInvoices: [{ id: 88, status: "CONFIRMED", payment_status: "PAID", clients_id: 7,
-      client_name: "OpenAI Ireland Limited", create_date: "2026-02-22" }],
-    purchaseInvoiceDetails: { 88: { id: 88, number: "OLD-88", liability_accounts_id: 2310,
-      items: [{ custom_title: "Subscription", cl_purchase_articles_id: 501,
-        purchase_accounts_id: 5230, vat_rate_dropdown: "24", vat_accounts_id: 1510 }] } },
-    purchaseArticles: [{ id: 501, name_est: "Software", name_eng: "Software",
-      accounts_id: 5230, vat_accounts_id: 1510, is_disabled: false, priority: 1 }],
-    accounts: [{ id: 5230, name_est: "Software", name_eng: "Software",
-      account_type_est: "Kulud", account_type_eng: "Expenses" }],
-  });
-  api.purchaseInvoices.createAndSetTotals.mockResolvedValueOnce({
-    id: 701, status: "PROJECT", number: "AUTO-TX-99", clients_id: 7,
-    client_name: "OpenAI Ireland Limited", create_date: "2026-03-22",
-    journal_date: "2026-03-22", term_days: 0, cl_currencies_id: "EUR", items: [],
-  });
-  const classifications = [{ category: "saas_subscriptions", apply_mode: "purchase_invoice",
-    normalized_counterparty: "openai", display_counterparty: "OpenAI", recurring: true,
-    similar_amounts: true, total_amount: 25,
-    suggested_booking: { purchase_article_id: 501, purchase_article_name: "Software",
-      purchase_account_id: 5230, purchase_account_name: "Software", liability_account_id: 2310,
-      reason: "Recurring SaaS" }, reasons: ["keyword"], transactions: [tx] }];
+- [ ] **Step 1: Record the clean gate and the proven-stale baseline**
 
-  const response = await handler({ mode: "execute_apply", classifications_json: classifications });
-  const payload = parseMcpResponse(response.content[0]!.text) as any;
-  expect(payload).toMatchObject({
-    recommended_entry_point: "classify_bank_transactions", mode: "execute_apply",
-    delegated_tool: "apply_transaction_classifications",
-    result: { results: [{ status: "failed", created_invoice_ids: [701], partial_mutations: [{
-      category: "mutation_indeterminate", mutation_may_have_occurred: true,
-      failed_stage: "transaction_reread", created_invoice_id: 701, created_invoice_status: "PROJECT",
-      attempted_transaction_id: 99, transaction_status: "UNKNOWN",
-    }] }] },
-  });
-  expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
-  expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
-  expect(api.transactions.confirm).not.toHaveBeenCalled();
-});
+Run:
 
-it.each([
-  ["invoice_confirmation", "UNKNOWN", "PROJECT"],
-  ["transaction_confirmation", "CONFIRMED", "UNKNOWN"],
-] as const)("returns partial completion when %s fails ambiguously", async (failedStage, invoiceStatus, transactionStatus) => {
-  const tx = { id: 99, status: "PROJECT", is_deleted: false, type: "C", amount: 25,
-    date: "2026-03-22", accounts_dimensions_id: 100, bank_account_name: "OpenAI",
-    description: "Subscription", cl_currencies_id: "EUR", clients_id: 7 };
-  const { handler, api } = setupReceiptTool("apply_transaction_classifications", {
-    getImpl: vi.fn().mockResolvedValue(tx),
-    clients: [{ id: 7, name: "OpenAI Ireland Limited", is_supplier: true, is_client: false,
-      cl_code_country: "IE", is_member: false, send_invoice_to_email: false,
-      send_invoice_to_accounting_email: false, is_deleted: false }],
-    purchaseInvoices: [{ id: 88, status: "CONFIRMED", payment_status: "PAID", clients_id: 7,
-      client_name: "OpenAI Ireland Limited", create_date: "2026-02-22" }],
-    purchaseInvoiceDetails: { 88: { id: 88, number: "OLD-88", liability_accounts_id: 2310,
-      items: [{ custom_title: "Subscription", cl_purchase_articles_id: 501,
-        purchase_accounts_id: 5230, vat_rate_dropdown: "24", vat_accounts_id: 1510 }] } },
-    purchaseArticles: [{ id: 501, name_est: "Software", name_eng: "Software",
-      accounts_id: 5230, vat_accounts_id: 1510, is_disabled: false, priority: 1 }],
-    accounts: [{ id: 5230, name_est: "Software", name_eng: "Software",
-      account_type_est: "Kulud", account_type_eng: "Expenses" }],
-  });
-  api.purchaseInvoices.createAndSetTotals.mockResolvedValueOnce({
-    id: 701, status: "PROJECT", number: "AUTO-TX-99", clients_id: 7,
-    client_name: "OpenAI Ireland Limited", create_date: "2026-03-22",
-    journal_date: "2026-03-22", term_days: 0, cl_currencies_id: "EUR", items: [],
-  });
-  const ambiguous = new MutationIndeterminateError({
-    operation: "confirm", entity: failedStage === "invoice_confirmation" ? "purchase_invoice" : "transaction",
-    entityId: failedStage === "invoice_confirmation" ? 701 : 99,
-    businessKey: failedStage === "invoice_confirmation" ? "purchase_invoice:701" : "transaction:99",
-    affectedCaches: failedStage === "invoice_confirmation" ? ["/purchase_invoices"] : ["/transactions", "/journals"],
-    cause: new HttpError("response lost", "network", "PATCH", "/register"),
-    nextAction: "Fresh read required.",
-  });
-  if (failedStage === "invoice_confirmation") api.purchaseInvoices.confirmWithTotals.mockRejectedValueOnce(ambiguous);
-  else api.transactions.confirm.mockRejectedValueOnce(ambiguous);
-  const classifications = [{ category: "saas_subscriptions", apply_mode: "purchase_invoice",
-    normalized_counterparty: "openai", display_counterparty: "OpenAI", recurring: true,
-    similar_amounts: true, total_amount: 25,
-    suggested_booking: { purchase_article_id: 501, purchase_article_name: "Software",
-      purchase_account_id: 5230, purchase_account_name: "Software", liability_account_id: 2310,
-      reason: "Recurring SaaS" }, reasons: ["keyword"], transactions: [tx] }];
-
-  const response = await handler({ classifications_json: classifications, execute: true });
-  const payload = parseMcpResponse(response.content[0]!.text) as any;
-  expect(payload.results[0].partial_mutations[0]).toMatchObject({
-    category: "mutation_indeterminate", failed_stage: failedStage,
-    created_invoice_id: 701, created_invoice_status: invoiceStatus,
-    attempted_transaction_id: 99, transaction_status: transactionStatus,
-    next_action: expect.stringContaining("do not create another invoice"),
-  });
-  expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
-});
+```bash
+git status --short
+npx vitest run src/tools/receipt-inbox-tools.test.ts -t "reports failed when a draft invoice is invalidated after stale transaction detection|reports a group as failed when only part of it executes"
 ```
 
-- [ ] **Step 2: Prove red**
+Expected: clean worktree; both existing tests pass. Preserve their safe behavior: a successful reread of `VOID` causes exactly one invalidation, no confirmation, a failed group, and no live created invoice ID after successful invalidation.
 
-Run: `npx vitest run src/tools/receipt-inbox-tools.test.ts -t "createAndSetTotals recovery state|partial completion"`
+- [ ] **Step 2: Add exact H14 test imports and a compact scenario fixture**
 
-Expected: FAIL because the exception escapes without invoice ID or continuation data.
-
-- [ ] **Step 3: Return explicit partial completion**
+In `src/tools/receipt-inbox-tools.test.ts`, add the exact import:
 
 ```ts
+import { MutationIndeterminateError } from "../mutation-outcome.js";
+```
+
+Near `setupReceiptTool`, add one fixture builder using the existing `getImpl`, `clients`, `purchaseInvoices`, `purchaseInvoiceDetails`, `purchaseArticles`, and `accounts` option shapes. Keep the actual registered handler/API return shape `{ handler, api }`:
+
+```ts
+const H14_TX = {
+  id: 99, status: "PROJECT", is_deleted: false, type: "C", amount: 25,
+  date: "2026-03-22", accounts_dimensions_id: 100, bank_account_name: "OpenAI",
+  description: "Subscription", cl_currencies_id: "EUR", clients_id: 7,
+};
+
+const H14_CLASSIFICATION = {
+  category: "saas_subscriptions", apply_mode: "purchase_invoice",
+  normalized_counterparty: "openai", display_counterparty: "OpenAI",
+  recurring: true, similar_amounts: true, total_amount: 25,
+  suggested_booking: {
+    purchase_article_id: 501, purchase_article_name: "Software",
+    purchase_account_id: 5230, purchase_account_name: "Software",
+    liability_account_id: 2310, reason: "Recurring SaaS",
+  },
+  reasons: ["keyword"], transactions: [H14_TX],
+};
+
+const H14_INVOICE = {
+  id: 701, status: "PROJECT", number: "AUTO-TX-99", clients_id: 7,
+  client_name: "OpenAI Ireland Limited", create_date: "2026-03-22",
+  journal_date: "2026-03-22", term_days: 0, cl_currencies_id: "EUR", items: [],
+};
+
+function setupH14Tool(toolName: "apply_transaction_classifications" | "classify_bank_transactions") {
+  const setup = setupReceiptTool(toolName, {
+    getImpl: vi.fn().mockImplementation(async (id: number) =>
+      id === 100 ? { ...H14_TX, id: 100, date: "2026-03-23" } : H14_TX),
+    clients: [{ id: 7, name: "OpenAI Ireland Limited", is_supplier: true, is_client: false,
+      cl_code_country: "IE", is_member: false, send_invoice_to_email: false,
+      send_invoice_to_accounting_email: false, is_deleted: false }],
+    purchaseInvoices: [{ id: 88, status: "CONFIRMED", payment_status: "PAID", clients_id: 7,
+      client_name: "OpenAI Ireland Limited", create_date: "2026-02-22" }],
+    purchaseInvoiceDetails: { 88: { id: 88, number: "OLD-88", liability_accounts_id: 2310,
+      items: [{ custom_title: "Subscription", cl_purchase_articles_id: 501,
+        purchase_accounts_id: 5230, vat_rate_dropdown: "24", vat_accounts_id: 1510 }] } },
+    purchaseArticles: [{ id: 501, name_est: "Software", name_eng: "Software",
+      accounts_id: 5230, vat_accounts_id: 1510, is_disabled: false, priority: 1 }],
+    accounts: [{ id: 5230, name_est: "Software", name_eng: "Software",
+      account_type_est: "Kulud", account_type_eng: "Expenses" }],
+  });
+  setup.api.purchaseInvoices.createAndSetTotals.mockResolvedValue(H14_INVOICE);
+  return setup;
+}
+
+function h14StructuredAmbiguity(
+  stage: "transaction_reread" | "invoice_invalidation" | "invoice_confirmation" | "transaction_confirmation",
+) {
+  const entity = stage === "invoice_invalidation" || stage === "invoice_confirmation"
+    ? "purchase_invoice"
+    : "transaction";
+  const id = entity === "purchase_invoice" ? 701 : 99;
+  return new MutationIndeterminateError({
+    operation: stage === "transaction_reread"
+      ? "update"
+      : stage === "invoice_invalidation"
+        ? "invalidate"
+        : "confirm",
+    entity, entityId: id, businessKey: `${entity}:${id}`,
+    affectedCaches: entity === "purchase_invoice"
+      ? ["/purchase_invoices"] : ["/transactions", "/journals"],
+    cause: new HttpError(
+      "response lost",
+      "network",
+      "PATCH",
+      `/${entity}/${id}/${stage === "invoice_invalidation" ? "invalidate" : "register"}`,
+    ),
+    nextAction: "Fresh read required.",
+  });
+}
+```
+
+- [ ] **Step 3: RED-A — cover raw, structural, and definite failure at every post-create stage**
+
+Add a table-driven suite named exactly `H14 post-create recovery state`. Each row configures only the named mock, calls the granular handler with `{ classifications_json: [H14_CLASSIFICATION], execute: true }`, and asserts one exact partial plus exact mutation counts:
+
+| exact tagged case | create status | thrown value | stage | category | invoice status | transaction status | get/create/invoice-confirm/transaction-confirm |
+|---|---|---|---|---|---|---|---|
+| `H14 reread raw network` | `PROJECT` | network `HttpError` on second `get` | `transaction_reread` | `mutation_indeterminate` | `PROJECT` | `UNKNOWN` | `2/1/0/0` |
+| `H14 reread H03 structural` | `CONFIRMED` | `h14StructuredAmbiguity("transaction_reread")` | `transaction_reread` | `mutation_indeterminate` | `CONFIRMED` | `UNKNOWN` | `2/1/0/0` |
+| `H14 reread definite response` | `DRAFT` | HTTP 503 `HttpError` | `transaction_reread` | `mutation_failed` | `UNKNOWN` | `UNKNOWN` | `2/1/0/0` |
+| `H14 invoice confirm raw network` | `PROJECT` | network `HttpError` | `invoice_confirmation` | `mutation_indeterminate` | `UNKNOWN` | `PROJECT` | `2/1/1/0` |
+| `H14 invoice confirm H03 structural` | `PROJECT` | `h14StructuredAmbiguity("invoice_confirmation")` | `invoice_confirmation` | `mutation_indeterminate` | `UNKNOWN` | `PROJECT` | `2/1/1/0` |
+| `H14 invoice confirm definite PROJECT` | `PROJECT` | HTTP 422 `HttpError` | `invoice_confirmation` | `mutation_failed` | `PROJECT` | `PROJECT` | `2/1/1/0` |
+| `H14 invoice confirm definite CONFIRMED` | `CONFIRMED` | ordinary `Error` | `invoice_confirmation` | `mutation_failed` | `CONFIRMED` | `PROJECT` | `2/1/1/0` |
+| `H14 transaction confirm raw network` | `PROJECT` | network `HttpError` | `transaction_confirmation` | `mutation_indeterminate` | `CONFIRMED` | `UNKNOWN` | `2/1/1/1` |
+| `H14 transaction confirm H03 structural` | `PROJECT` | `h14StructuredAmbiguity("transaction_confirmation")` | `transaction_confirmation` | `mutation_indeterminate` | `CONFIRMED` | `UNKNOWN` | `2/1/1/1` |
+| `H14 transaction confirm definite` | `PROJECT` | HTTP 422 `HttpError` | `transaction_confirmation` | `mutation_failed` | `CONFIRMED` | `PROJECT` | `2/1/1/1` |
+
+For the three reread rows, set `api.transactions.get` to resolve the initial `H14_TX` and then reject. For confirmation rows, keep both `get` calls successful and reject exactly the relevant confirmation mock once. Override the create mock per row with `{ ...H14_INVOICE, status: createStatus }`. Use a network error shaped as `new HttpError("response lost", "network", method, path)` and definite HTTP errors with numeric status.
+
+Use these exact common assertions for every row:
+
+```ts
+expect(payload.summary).toMatchObject({ applied: 0, failed: 1 });
+expect(payload.results[0]).toMatchObject({
+  status: "failed",
+  created_invoice_ids: [701],
+  linked_transaction_ids: [],
+  partial_mutations: [{
+    category: expectedCategory,
+    mutation_may_have_occurred: true,
+    failed_stage: expectedStage,
+    created_invoice_id: 701,
+    created_invoice_status: expectedInvoiceStatus,
+    attempted_transaction_id: 99,
+    transaction_status: expectedTransactionStatus,
+    next_action: expect.stringContaining("purchase invoice 701"),
+  }],
+});
+const nextAction = payload.results[0].partial_mutations[0].next_action;
+expect(nextAction).toContain("explicit approval");
+expect(nextAction).not.toMatch(/create another|invalidate|retry/i);
+expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
+expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+expect(api.transactions.get).toHaveBeenCalledTimes(expectedGetCalls);
+expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledTimes(expectedInvoiceConfirmCalls);
+expect(api.transactions.confirm).toHaveBeenCalledTimes(expectedTransactionConfirmCalls);
+expect(payload.execution.errors[0].partial_mutations).toEqual(
+  payload.results[0].partial_mutations,
+);
+```
+
+Run:
+
+```bash
+npx vitest run src/tools/receipt-inbox-tools.test.ts -t "H14 post-create recovery state"
+```
+
+Expected: FAIL with missing `partial_mutations`/created IDs. Current reread errors reach the outer group catch without recovery state, while confirmation errors invalidate the proven-created invoice. The exact counts make this an honest RED for one create, no retry, and no invalidation.
+
+- [ ] **Step 4: RED-B — cover merged propagation, accumulator durability, partial success, and invalidation recovery**
+
+Add these tests with the exact tagged names:
+
+1. `H14 merged wrapper preserves granular partial mutations unchanged`: inject structural transaction-confirm ambiguity through `classify_bank_transactions` with `mode: "execute_apply"`; assert the exact expected partial in `payload.result.results[0].partial_mutations`, including category, boolean, IDs, statuses, stage, and safe `next_action`. Assert it also equals `payload.result.execution.errors[0].partial_mutations`. Do not modify the merged wrapper.
+2. `H14 later group error does not erase an earlier partial mutation`: one group contains transactions 99 and 100. Invoice 701 gets ambiguous invoice confirmation, then the second `createAndSetTotals` throws `new Error("second create rejected")`. Assert the failed group retains `created_invoice_ids: [701]`, one 701 partial, no linked IDs, both the safe continuation and later create-rejection notes, two create calls, one invoice-confirm call, zero transaction-confirm calls, and zero invalidations.
+3. `H14 multi-transaction partial plus success preserves both outcomes`: one group contains 99 and 100. Invoice 701 gets ambiguous invoice confirmation; invoice 702 then confirms and links transaction 100. Assert group/summary failed, `created_invoice_ids: [701, 702]`, `linked_transaction_ids: [100]`, exactly one partial for 701, and the existing note that transaction 100 was booked and left in place. Assert two creates, two invoice-confirm calls, one transaction-confirm call, four transaction reads, and zero invalidations.
+4. `H14 partial state is isolated across multiple groups`: use two one-transaction groups. Group 99 gets ambiguous transaction confirmation for invoice 701; group 100 succeeds with 702. Assert summary `{ applied: 1, failed: 1 }`, no cross-group IDs/partials, exactly two creates, two invoice confirmations, two transaction confirmations, and zero invalidations.
+5. Add a table suite named exactly `H14 failed stale invalidation retains partial recovery state`. Every row makes the initial transaction read return `H14_TX`, the one post-create reread return the listed non-bookable transaction, and `api.purchaseInvoices.invalidate(701)` reject once:
+
+| exact tagged case | fresh transaction | create status | invalidation error | note fragment | category | invoice status | transaction status |
+|---|---|---|---|---|---|---|---|
+| `H14 invalidation definite HTTP rejection` | `{ ...H14_TX, status: "VOID" }` | `CONFIRMED` | `new HttpError("invalidation rejected", 422, "PATCH", "/purchase_invoices/701/invalidate")` | `invalidation rejected` | `mutation_failed` | `CONFIRMED` | `VOID` |
+| `H14 invalidation raw network` | `{ ...H14_TX, status: "VOID" }` | `PROJECT` | `new HttpError("response lost", "network", "PATCH", "/purchase_invoices/701/invalidate")` | `response lost` | `mutation_indeterminate` | `UNKNOWN` | `VOID` |
+| `H14 invalidation H03 structural` | `{ ...H14_TX, status: "VOID" }` | `PROJECT` | `h14StructuredAmbiguity("invoice_invalidation")` | `is indeterminate` | `mutation_indeterminate` | `UNKNOWN` | `VOID` |
+| `H14 invalidation definite deleted transaction` | `{ ...H14_TX, status: "PROJECT", is_deleted: true }` | `PROJECT` | `new Error("invalidation rejected for deleted transaction")` | `invalidation rejected for deleted transaction` | `mutation_failed` | `PROJECT` | `UNKNOWN` |
+
+For every row assert group/summary failed, `created_invoice_ids: [701]`, `linked_transaction_ids: []`, and exactly one partial:
+
+```ts
+expect(payload.results[0]).toMatchObject({
+  status: "failed",
+  created_invoice_ids: [701],
+  linked_transaction_ids: [],
+  partial_mutations: [{
+    category: expectedCategory,
+    mutation_may_have_occurred: true,
+    failed_stage: "invoice_invalidation",
+    created_invoice_id: 701,
+    created_invoice_status: expectedInvoiceStatus,
+    attempted_transaction_id: 99,
+    transaction_status: expectedTransactionStatus,
+    next_action: expect.stringContaining("Freshly read existing purchase invoice 701"),
+  }],
+});
+const nextAction = payload.results[0].partial_mutations[0].next_action;
+expect(nextAction).toContain("explicit approval");
+expect(nextAction).not.toMatch(/create another|invalidate|retry/i);
+expect(payload.results[0].notes).toEqual(expect.arrayContaining([
+  expect.stringContaining(
+    `Auto-created purchase invoice 701 could not be kept because transaction 99 is no longer bookable (status ${freshTransaction.status}), and invalidation also failed:`,
+  ),
+]));
+expect(payload.results[0].notes.join("\n")).toContain(expectedErrorNote);
+expect(api.transactions.get).toHaveBeenCalledTimes(2); // initial read + one post-create reread
+expect(api.transactions.get).toHaveBeenNthCalledWith(1, 99);
+expect(api.transactions.get).toHaveBeenNthCalledWith(2, 99);
+expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+expect(api.purchaseInvoices.invalidate).toHaveBeenCalledTimes(1);
+expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(701);
+expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+expect(api.transactions.confirm).not.toHaveBeenCalled();
+```
+
+Use `const tx100 = { ...H14_TX, id: 100, date: "2026-03-23" }` and `const group100 = { ...H14_CLASSIFICATION, normalized_counterparty: "openai-two", transactions: [tx100] }`. Make `createAndSetTotals` return `{ ...H14_INVOICE, id: number.endsWith("100") ? 702 : 701, number }` based on the first argument's `number`; make confirmation behavior conditional on ID. Do not rely on global call order except where the outer-catch test deliberately makes the second create throw.
+
+Run:
+
+```bash
+npx vitest run src/tools/receipt-inbox-tools.test.ts -t "H14 merged wrapper|H14 later group error|H14 multi-transaction partial plus success|H14 partial state is isolated|H14 failed stale invalidation retains partial recovery state"
+```
+
+Expected: FAIL because current code has no partial contract, its outer catch discards prior group-local state, and its confirmation catch invalidates instead of preserving the partial invoice and continuing safely. Every failed-invalidation row is independently honest RED: current code does not append the proven created ID until after confirmation, reports `created_invoice_ids: []`, and the shared helper swallows the thrown error so no categorized `invoice_invalidation` partial exists.
+
+In the existing test named exactly `apply_transaction_classifications reports a group as failed when only part of it executes`, replace the shared fake ID with deterministic distinct IDs: return invoice 9001 for payload number `AUTO-TX-44` and invoice 9002 for `AUTO-TX-45`. Make these assertions mandatory:
+
+```ts
+expect(payload.results[0]!.created_invoice_ids).toEqual([9001]);
+expect(payload.results[0]!.linked_transaction_ids).toEqual([44]);
+expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(2);
+expect(api.transactions.get).toHaveBeenCalledTimes(4);
+expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledTimes(1);
+expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+expect(api.purchaseInvoices.invalidate).toHaveBeenCalledTimes(1);
+expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9002);
+```
+
+This existing regression must prove that successful invalidation removes exactly the current stale invoice 9002 while preserving the earlier successfully linked live invoice 9001. Do not leave the fake IDs aliased and do not make this adaptation optional.
+
+- [ ] **Step 5: Add the typed partial-mutation contract and durable group accumulators**
+
+In `src/tools/receipt-inbox.ts`, add the exact import:
+
+```ts
+import { isMutationIndeterminate } from "../mutation-outcome.js";
+```
+
+Define near the classification result types:
+
+```ts
+type PartialClassificationStatus = "PROJECT" | "CONFIRMED" | "VOID" | "UNKNOWN";
+
 interface PartialClassificationMutation {
   category: "mutation_indeterminate" | "mutation_failed";
   mutation_may_have_occurred: true;
-  failed_stage: "transaction_reread" | "invoice_confirmation" | "transaction_confirmation";
+  failed_stage:
+    | "transaction_reread"
+    | "invoice_invalidation"
+    | "invoice_confirmation"
+    | "transaction_confirmation";
   created_invoice_id: number;
-  created_invoice_status: "PROJECT" | "CONFIRMED" | "UNKNOWN";
+  created_invoice_status: PartialClassificationStatus;
   attempted_transaction_id: number;
-  transaction_status: "PROJECT" | "CONFIRMED" | "UNKNOWN";
+  transaction_status: PartialClassificationStatus;
   next_action: string;
 }
 
-const partialMutations: PartialClassificationMutation[] = [];
-if (invoice.id !== undefined) createdInvoiceIds.push(invoice.id);
+function invoiceClassificationStatus(status: unknown): PartialClassificationStatus {
+  return status === "PROJECT" || status === "CONFIRMED" ? status : "UNKNOWN";
+}
 
-function recordPostCreateFailure(
+function transactionClassificationStatus(
+  transaction: Pick<Transaction, "status" | "is_deleted">,
+): PartialClassificationStatus {
+  if (transaction.is_deleted === true) return "UNKNOWN";
+  return transaction.status === "PROJECT" ||
+    transaction.status === "CONFIRMED" ||
+    transaction.status === "VOID"
+    ? transaction.status
+    : "UNKNOWN";
+}
+
+function isAmbiguousPostCreateFailure(error: unknown): boolean {
+  return isMutationIndeterminate(error) || (
+    error instanceof HttpError && error.status === "network"
+  );
+}
+```
+
+Extend the local `results` element type with `partial_mutations?: PartialClassificationMutation[]`. Immediately after `notes`/`transactionIds`, but before the outer group `try`, declare:
+
+```ts
+const createdInvoiceIds: number[] = [];
+const linkedTransactionIds: number[] = [];
+const partialMutations: PartialClassificationMutation[] = [];
+let wouldCreateCount = 0;
+let attemptedCreateCount = 0;
+```
+
+Remove their current declarations from inside the `try`. In the outer group `catch`, preserve the accumulators instead of replacing them:
+
+```ts
+const message = error instanceof Error ? error.message : String(error);
+notes.push(message);
+results.push({
+  category: group.category,
+  counterparty: group.display_counterparty,
+  status: "failed",
+  notes,
+  transactions: transactionIds,
+  created_invoice_ids: dryRun ? undefined : createdInvoiceIds,
+  linked_transaction_ids: dryRun ? undefined : linkedTransactionIds,
+  partial_mutations: partialMutations.length > 0 ? partialMutations : undefined,
+});
+```
+
+This is required even though each named post-create stage is caught locally: a later transaction in the same group can still throw before proving its own create and must not erase earlier created/partial state. Do not wrap the four recorded post-create stages in another broad catch.
+
+- [ ] **Step 6: Record each proven create and preserve all four post-create failure outcomes**
+
+Immediately after `createAndSetTotals` resolves, require its proven ID and record it once before audit/reread work:
+
+```ts
+const invoiceId = invoice.id;
+if (!invoiceId) {
+  throw new Error("createAndSetTotals resolved without a purchase invoice ID");
+}
+attemptedCreateCount += 1;
+createdInvoiceIds.push(invoiceId);
+let observedInvoiceStatus = invoiceClassificationStatus(invoice.status);
+```
+
+The guard documents the production invariant; it is not a missing-ID recovery policy. Remove the old later `attemptedCreateCount += 1` and `createdInvoiceIds.push(invoice.id)` so the ID can never be duplicated.
+
+Remove `invalidateAndReport` from the `./receipt-inbox-booking.js` import because this H14-local path must retain the original thrown error for categorization. Define this discriminated local helper after `invoiceId` is proven. It reproduces the existing success/failure note text and continues wrapping untrusted upstream error text:
+
+```ts
+type InvoiceInvalidationOutcome =
+  | { ok: true }
+  | { ok: false; error: unknown };
+
+const invalidateAutoCreatedInvoice = async (
+  reason: string,
+): Promise<InvoiceInvalidationOutcome> => {
+  try {
+    await api.purchaseInvoices.invalidate(invoiceId);
+    notes.push(`Invalidated auto-created purchase invoice ${invoiceId} because ${reason}.`);
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    notes.push(
+      `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${wrapUntrustedOcr(message) ?? message}.`,
+    );
+    return { ok: false, error };
+  }
+};
+```
+
+Do not modify the shared `invalidateAndReport`: its string-only return is appropriate for existing consumers but cannot preserve the thrown value H14 needs.
+
+Inside the per-transaction scope, define:
+
+```ts
+const recordPostCreateFailure = (
   error: unknown,
   failedStage: PartialClassificationMutation["failed_stage"],
-  invoiceId: number,
-  transactionId: number,
-  invoiceWasConfirmed: boolean,
-): void {
-  const ambiguous = isMutationIndeterminate(error) || error instanceof HttpError && error.status === "network";
-  const createdInvoiceStatus = failedStage === "invoice_confirmation" && ambiguous
-    ? "UNKNOWN"
-    : invoiceWasConfirmed ? "CONFIRMED" : "PROJECT";
-  const transactionStatus = failedStage === "transaction_reread" || failedStage === "transaction_confirmation" && ambiguous
-    ? "UNKNOWN"
-    : "PROJECT";
+  createdInvoiceStatus: PartialClassificationStatus,
+  transactionStatus: PartialClassificationStatus,
+): void => {
+  const ambiguous = isAmbiguousPostCreateFailure(error);
   const nextAction = failedStage === "transaction_reread"
-    ? `Resume from purchase invoice ${invoiceId}; do not create another invoice. Freshly read transaction ${transactionId}, then approve a new continuation.`
+    ? `Use existing purchase invoice ${invoiceId}. Freshly read transaction ${transaction.id}, then continue only after explicit approval.`
+    : failedStage === "invoice_invalidation"
+      ? `Freshly read existing purchase invoice ${invoiceId} before any further action, then continue only after explicit approval.`
     : failedStage === "invoice_confirmation"
-      ? `Resume from purchase invoice ${invoiceId}; do not create another invoice or invalidate it. Freshly read invoice ${invoiceId} and transaction ${transactionId}, then approve a new continuation.`
-      : `Resume from confirmed purchase invoice ${invoiceId}; do not create another invoice or invalidate it. Freshly read transaction ${transactionId} before deciding whether confirmation needs a newly approved retry.`;
+      ? `Use existing purchase invoice ${invoiceId}. Freshly read that invoice and transaction ${transaction.id}, then continue only after explicit approval.`
+      : `Use existing confirmed purchase invoice ${invoiceId}. Freshly read transaction ${transaction.id}, then continue only after explicit approval.`;
   partialMutations.push({
     category: ambiguous ? "mutation_indeterminate" : "mutation_failed",
     mutation_may_have_occurred: true,
     failed_stage: failedStage,
     created_invoice_id: invoiceId,
     created_invoice_status: createdInvoiceStatus,
-    attempted_transaction_id: transactionId,
+    attempted_transaction_id: transaction.id!,
     transaction_status: transactionStatus,
     next_action: nextAction,
   });
   notes.push(nextAction);
+};
+```
+
+Replace the current reread, invalidation branch, and combined confirmation catch with four separately recorded stages:
+
+```ts
+let freshTransaction: Transaction;
+try {
+  freshTransaction = await api.transactions.get(transaction.id!);
+} catch (error) {
+  recordPostCreateFailure(error, "transaction_reread", observedInvoiceStatus, "UNKNOWN");
+  continue;
 }
 
-let freshTransaction: Transaction;
-try { freshTransaction = await api.transactions.get(transaction.id!); }
-catch (error) {
-  recordPostCreateFailure(error, "transaction_reread", invoice.id!, transaction.id!, false);
-  continue;
-}
 if (!isProjectTransaction(freshTransaction)) {
-  await invalidateAutoCreatedInvoice(`transaction ${transaction.id} is no longer bookable (status ${freshTransaction.status ?? "UNKNOWN"})`);
+  const invalidation = await invalidateAutoCreatedInvoice(
+    `transaction ${transaction.id} is no longer bookable (status ${freshTransaction.status ?? "UNKNOWN"})`,
+  );
+  if (invalidation.ok) {
+    // Remove the ID appended for this create, even if a test double reuses IDs.
+    const createdIndex = createdInvoiceIds.lastIndexOf(invoiceId);
+    if (createdIndex >= 0) createdInvoiceIds.splice(createdIndex, 1);
+  } else {
+    recordPostCreateFailure(
+      invalidation.error,
+      "invoice_invalidation",
+      isAmbiguousPostCreateFailure(invalidation.error) ? "UNKNOWN" : observedInvoiceStatus,
+      transactionClassificationStatus(freshTransaction),
+    );
+  }
   continue;
 }
+
 try {
-  await api.purchaseInvoices.confirmWithTotals(invoice.id!, isVatRegistered, { preserveExistingTotals: true });
+  await api.purchaseInvoices.confirmWithTotals(invoiceId, isVatRegistered, {
+    preserveExistingTotals: true,
+  });
+  observedInvoiceStatus = "CONFIRMED";
+  logAudit({
+    tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "purchase_invoice",
+    entity_id: invoiceId,
+    summary: `Auto-confirmed purchase invoice ${invoiceId} for transaction ${transaction.id}`,
+    details: { invoice_id: invoiceId, transaction_id: transaction.id },
+  });
 } catch (error) {
-  recordPostCreateFailure(error, "invoice_confirmation", invoice.id!, transaction.id!, false);
+  recordPostCreateFailure(
+    error,
+    "invoice_confirmation",
+    isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : observedInvoiceStatus,
+    "PROJECT",
+  );
   continue;
 }
+
 try {
   await api.transactions.confirm(transaction.id!, [{
-    related_table: "purchase_invoices", related_id: invoice.id!, amount: transaction.amount,
+    related_table: "purchase_invoices",
+    related_id: invoiceId,
+    amount: transaction.amount,
   }]);
+  logAudit({
+    tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
+    entity_id: transaction.id!,
+    summary: `Auto-confirmed transaction ${transaction.id} against invoice ${invoiceId}`,
+    details: { amount: transaction.amount, invoice_id: invoiceId },
+  });
 } catch (error) {
-  recordPostCreateFailure(error, "transaction_confirmation", invoice.id!, transaction.id!, true);
+  recordPostCreateFailure(
+    error,
+    "transaction_confirmation",
+    "CONFIRMED",
+    isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : "PROJECT",
+  );
   continue;
 }
+
 linkedTransactionIds.push(transaction.id!);
 ```
 
-Remove the later duplicate `createdInvoiceIds.push(invoice.id)` and the combined confirmation catch. Keep the stale-PROJECT reread branch's proven-safe invalidation, but do not invalidate after any thrown post-create read or confirmation failure. Add `partial_mutations?: PartialClassificationMutation[]` to the local result type and include `partial_mutations: partialMutations.length ? partialMutations : undefined` in the existing result. Compute `status` as `"failed"` whenever `partialMutations.length > 0`; otherwise use the current status expression. `classify_bank_transactions` carries the granular object as `payload.result`; do not flatten it.
+No failure branch in these four stages may reread, create, invalidate, or confirm again. `recordPostCreateFailure` records only the evidence already known; it does not inspect an error message to guess status. Successful invalidation alone removes the current ID and emits no partial; failed invalidation retains the ID and records exactly one partial in addition to its rollback-failure note.
 
-- [ ] **Step 4: Prove green and review**
+- [ ] **Step 7: Emit partials and compute completion status from actual links**
 
-Run: `npx vitest run src/tools/receipt-inbox-tools.test.ts && npm run build && git diff --check`
+Replace the execute-mode status calculation with:
 
-Expected: granular and merged envelopes retain invoice/transaction IDs and exact stage/status/recovery data for second-read, invoice-confirm, and transaction-confirm failures; ambiguous confirmation performs no invalidation or speculative retry; existing successful and proven-stale paths stay green. Write `.omc/reviews/H14.diff` and obtain both verdicts.
+```ts
+const status = dryRun
+  ? (wouldCreateCount > 0 ? "dry_run_preview" : "skipped")
+  : partialMutations.length > 0
+    ? "failed"
+    : attemptedCreateCount > 0 && linkedTransactionIds.length === attemptedCreateCount
+      ? "applied"
+      : attemptedCreateCount > 0
+        ? "failed"
+        : "skipped";
+```
 
-- [ ] **Step 5: Commit H14**
+This deliberately does not infer completion from `createdInvoiceIds.length`: partial failures retain a live created ID but are not applied. Include in the normal result:
+
+```ts
+partial_mutations: partialMutations.length > 0 ? partialMutations : undefined,
+```
+
+Leave `invokeCapturedTool` and `remapHiddenGranularWorkflowResult` unchanged; their object spreads already preserve unknown result fields. The merged test must prove this rather than adding wrapper-specific transformation code.
+
+- [ ] **Step 8: GREEN — run H14 and adjacent behavior**
+
+Run:
 
 ```bash
+npx vitest run src/tools/receipt-inbox-tools.test.ts -t "H14|reports failed when a draft invoice is invalidated after stale transaction detection|reports a group as failed when only part of it executes|still marks group applied"
+npx vitest run src/tools/receipt-inbox-tools.test.ts
+npm run build
+git diff --check
+```
+
+Expected: all pass. H14 rows retain exact IDs/statuses/stages/categories and safe continuation; call counts prove one create, one post-create operation per stage, and no speculative retry or compensating invalidation. The existing two-transaction stale-reread test uses mandatory distinct IDs, invalidates/removes only stale invoice 9002, and preserves live invoice 9001 plus linked transaction 44. Each failed-invalidation row keeps invoice 701 in `created_invoice_ids`, emits one categorized `invoice_invalidation` partial, preserves the wrapped rollback-failure note, calls invalidation exactly once, and performs no confirmation. Non-deleted `VOID` rereads report `VOID`; the deleted transaction whose raw status remains `PROJECT` reports `UNKNOWN`.
+
+- [ ] **Step 9: Full repository verification**
+
+Run each command freshly and retain output for the ledger/review handoff:
+
+```bash
+npm run validate:release
+npm test
+npm run test:integration
+git diff --check
+```
+
+Expected: release metadata passes; full unit suite passes; integration suite passes with only documented baseline skips; diff check is empty. A failure must be diagnosed and fixed within the two-file scope or escalated before review.
+
+- [ ] **Step 10: Build the complete two-file review artifact without touching the real index**
+
+First prove exact scope:
+
+```bash
+H14_EXPECTED="$(mktemp)"
+H14_ACTUAL="$(mktemp)"
+printf '%s\n' \
+  src/tools/receipt-inbox-tools.test.ts \
+  src/tools/receipt-inbox.ts | sort -u > "$H14_EXPECTED"
+{
+  git diff --name-only HEAD
+  git ls-files --others --exclude-standard
+} | sort -u > "$H14_ACTUAL"
+diff -u "$H14_EXPECTED" "$H14_ACTUAL"
+rm -f "$H14_EXPECTED" "$H14_ACTUAL"
+```
+
+Expected: no output. Then package the actual complete diff through a temporary index:
+
+```bash
+mkdir -p .omc/reviews
+H14_INDEX="$(mktemp)"
+rm -f "$H14_INDEX"
+GIT_INDEX_FILE="$H14_INDEX" git read-tree HEAD
+GIT_INDEX_FILE="$H14_INDEX" git add -f -- \
+  src/tools/receipt-inbox.ts \
+  src/tools/receipt-inbox-tools.test.ts
+GIT_INDEX_FILE="$H14_INDEX" git diff --cached --binary > .omc/reviews/H14.diff
+test -s .omc/reviews/H14.diff
+GIT_INDEX_FILE="$H14_INDEX" git diff --cached --name-only
+rm -f "$H14_INDEX"
+git diff --cached --quiet
+```
+
+Expected: artifact is non-empty, temporary staged names are exactly the two H14 paths, and the real index remains empty.
+
+- [ ] **Step 11: Independent SPEC review**
+
+Give a fresh non-author reviewer the H14 spec row, this Task 6, `.omc/reviews/H14.diff`, RED-A/RED-B output, baseline output, and all green verification. Require exactly:
+
+```text
+SPEC COMPLIANCE: APPROVED
+```
+
+The spec pass must audit transaction reread, invoice invalidation, invoice confirmation, and transaction confirmation; raw network and structural H03 ambiguity plus definite rejection evidence; `PROJECT`/`CONFIRMED`/`VOID`/`UNKNOWN` status mapping; mandatory `UNKNOWN` for every `is_deleted === true` transaction even when raw status is `PROJECT`; immediate/unique invoice ID recording; exact mutation counts; absence of speculative retry or compensating invalidation; safe continuation wording; successful stale invalidation removing exactly the current distinct ID while preserving an earlier live ID and emitting no partial; definite/raw-network/structural invalidation failures retaining the created ID, wrapped rollback note, and correctly categorized `invoice_invalidation` partial; outer-catch accumulator survival; multi-transaction partial-plus-success behavior; cross-group isolation; summary/result/execution consistency; unchanged merged-wrapper propagation; deliberate missing-ID/audit exclusions; and exact two-file scope.
+
+- [ ] **Step 12: Independent QUALITY review**
+
+Only after SPEC approval, give a second fresh non-author reviewer the same artifact and evidence. Require exactly:
+
+```text
+CODE QUALITY: APPROVED
+```
+
+The quality pass must inspect discriminated invalidation outcomes, preservation of the original thrown error, wrapped external error text, type narrowing, operator precedence in ambiguity detection, whole-transaction status mapping with deleted-first precedence, transitions including `VOID`, duplicate-ID prevention, per-group accumulator lifetime, `lastIndexOf` removal only after proven successful invalidation, retention/partial recording after failed invalidation, no broad catch that discards partials, deterministic distinct-ID mocks, one-create/no-retry counts, public response compatibility, and exact two-file scope. Any rejection requires an in-scope fix, rerunning Steps 8-10, overwriting `H14.diff`, then restarting both reviews in order.
+
+- [ ] **Step 13: Stage and commit exactly H14**
+
+Immediately before staging, repeat the Step 10 exact two-path comparison. Only then run:
+
+```bash
+git status --short
 git add src/tools/receipt-inbox.ts src/tools/receipt-inbox-tools.test.ts
+git diff --cached --name-only
 git commit -m "fix(H14): retain receipt partial-completion state"
 ```
+
+Expected: staged names are exactly the two reviewed paths. Do not stage ignored review or ledger artifacts.
+
+- [ ] **Step 14: Ledger and clean gate**
+
+Append one H14 row to `.omc/full-codebase-remediation-ledger.md` with baseline, RED-A, RED-B, focused/build/full/integration/release/diff results, the ordered SPEC and QUALITY verdicts, and the commit hash. Then run:
+
+```bash
+git status --short
+```
+
+Expected: empty output. Do not begin M01 until the H14 row is complete and the worktree is clean.
 
 ### Task 7: M01 — Cache invalidation and audit metadata for indeterminate mutations
 
