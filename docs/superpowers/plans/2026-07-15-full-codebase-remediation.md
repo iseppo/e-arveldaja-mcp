@@ -2198,6 +2198,8 @@ Expected: empty output. Do not begin M01 until the H14 row is complete and the w
 - Modify: `src/index.ts`
 - Modify: `src/api/transactions.api.ts`
 - Modify: `src/api/transactions.api.test.ts`
+- Modify: `src/tools/crud/transactions.ts`
+- Modify: `src/tools/crud-tools.test.ts`
 
 **Contracts and boundaries:**
 - Add protected `BaseResource.mutate<R>(operation, entityId, businessKey, affectedPatterns, request)` and route inherited `create`, `update`, `delete`, `uploadDocument`, and `deleteDocument` through it.
@@ -2211,6 +2213,7 @@ Expected: empty output. Do not begin M01 until the H14 row is complete and the w
 - Extract a small tested final-error seam `serializeToolMutationError`. It receives `toolName`, `error`, `trackMutation`, `snapshotIndex`, and connection names; only a tracked mutating indeterminate outcome with a valid entity and a resolvable non-empty original connection name is audited. Resolve the destination exclusively from `snapshotIndex`, never `connectionState.activeIndex`. An invalid/out-of-range snapshot skips persistence entirely. If the strict writer returns `false` or throws, emit one stable error log without raw cause data and still return `toolError(error)` for the original outcome.
 - Preserve specialized confirm/invalidate/deactivate/reactivate/deliver implementations. In particular, do not disturb H03's transaction-confirm recovery/cleanup state machine or H06's `BookingGuard` verification and structural ambiguity predicate. H06 compatibility is proven against the new structured inherited `JournalsApi.create`.
 - Preserve H03's public cleanup outcome when inherited `TransactionsApi.update` normalizes its raw network failure first. The H03-local cleanup catch must recognize `isMutationIndeterminate`, then runtime-narrow its serialized cause to `name === "HttpError"`, `status === "network"`, a non-empty `path`, and a method in the exported `HttpMethod` vocabulary before reconstructing `HttpError`. Only that complete network-cause shape is re-expressed as `operation: "rollback"` with H03's existing `transaction:${id}` business key, next action, affected cache, and complete original cause. Incomplete/foreign structural outcomes continue through the existing compound rollback-failure branch; do not use unsafe assertions/default metadata, special-case BaseResource business keys/payloads, or change `mutation-outcome.ts`.
+- Apply the same compatibility rule to the explicit-client cleanup in the public `confirm_transaction` handler. Export the fully guarded `getNormalizedNetworkCause(error): HttpError | undefined` helper from `src/api/transactions.api.ts` and import it in `src/tools/crud/transactions.ts`; do not duplicate its property-walking logic. The helper must contain all structural/getter access in `try/catch`, require `category: "mutation_indeterminate"`, `mutationMayHaveOccurred: true`, and the complete serialized network-`HttpError` cause above, and return `undefined` for incomplete, foreign, or accessor-throwing shapes. Each H03 cleanup catch remains responsible for constructing its own rollback outcome, so the exact H03 `operation`, entity/id, business key, affected cache, original serialized cause, and next action remain contextual and unchanged. Raw network `HttpError` compatibility remains intact. A successful cleanup still rethrows the original confirmation error by identity; a non-normalizable cleanup failure retains its established fallthrough behavior and must not trigger ambiguous-cleanup invalidation.
 
 - [ ] **Step 1: Establish the clean baseline**
 
@@ -2218,7 +2221,7 @@ Run before source edits:
 
 ```bash
 git status --short
-npx vitest run src/api/base-resource.test.ts src/api/transactions.api.test.ts src/booking-guard.test.ts src/audit-log.test.ts src/mutation-outcome.test.ts src/tool-error.test.ts
+npx vitest run src/api/base-resource.test.ts src/api/transactions.api.test.ts src/booking-guard.test.ts src/audit-log.test.ts src/mutation-outcome.test.ts src/tool-error.test.ts src/tools/crud-tools.test.ts
 ```
 
 Expected: empty status and all selected tests pass. Record exact counts. Stop if the baseline is not clean.
@@ -2252,6 +2255,12 @@ In `src/audit-log.test.ts`, assert the new Zod action parses and render it once 
 
 In `src/api/transactions.api.test.ts`, extend the H03 test `H03 API exposes ambiguous API-auto cleanup as rollback and invalidates transactions` as RED-C. Its cleanup must travel through production inherited `update`, then still expose the exact H03 rollback contract and complete original cleanup cause, including `nextAction: "Freshly read transaction 12; clients_id cleanup may or may not have committed."`; call the cleanup update once and evict the seeded transaction cache. Do not relax its expected operation, key, cause, next action, or patch sequence to accept M01's intermediate `operation: "update"` outcome.
 
+In `src/tools/crud-tools.test.ts`, extend the public `confirm_transaction` H03 coverage as RED-D:
+
+1. Set the explicit client successfully, reject confirmation with the existing definite `HttpError`, then make the cleanup update reject with a complete structured M01 ambiguity carrying intermediate `operation: "update"` and `businessKey: "/transactions:1"`, whose serialized cause is `{ name: "HttpError", message: "cleanup lost", status: "network", method: "PATCH", path: "/transactions/1" }`. Assert the public handler rejects with the exact H03 rollback contract: `operation: "rollback"`, `entity: "transaction"`, `entityId: 1`, `businessKey: "transaction:1"`, `affectedCaches: ["/transactions"]`, the complete cause above, and `nextAction: "Freshly read transaction 1; clients_id cleanup may or may not have committed."`. Assert the set-client update, confirmation, and cleanup update each occur exactly once and `invalidateTransactionsAfterAmbiguousCleanup()` occurs exactly once.
+2. Add table rows for an incomplete structural ambiguity (for example a missing path or invalid method) and an ambiguity whose category/cause accessor throws. Assert normalization is contained, invalidation is not called, and each cleanup error follows the handler's existing non-network fallthrough unchanged rather than being fabricated into an H03 rollback outcome.
+3. Keep the successful-cleanup regression identity-strict: when cleanup succeeds, the handler rethrows the original confirmation error object. Keep the raw network cleanup row green. Do not weaken either existing H03 assertion.
+
 - [ ] **Step 4: Prove honest RED**
 
 Run:
@@ -2260,9 +2269,10 @@ Run:
 npx vitest run src/api/base-resource.test.ts -t "M01"
 npx vitest run src/mutation-audit.test.ts src/audit-log.test.ts -t "M01|MUTATION_INDETERMINATE"
 npx vitest run src/api/transactions.api.test.ts -t "H03 API exposes ambiguous API-auto cleanup as rollback"
+npx vitest run src/tools/crud-tools.test.ts -t "H03 CRUD"
 ```
 
-Expected RED-A: assertion failures show stale caches/raw network errors and absent metadata. Expected RED-B: after minimal compile wiring, assertion failures show missing routing, failure containment, and labels. Expected RED-C after GREEN-A introduces inherited normalization: the H03 test receives the existing compound ordinary `Error`, whose diagnostic includes the intermediate `operation: "update"` ambiguity, instead of the required structured rollback outcome; the cleanup request still occurs once and the seeded transaction cache is evicted. An import/parse error alone is not sufficient RED evidence.
+Expected RED-A: assertion failures show stale caches/raw network errors and absent metadata. Expected RED-B: after minimal compile wiring, assertion failures show missing routing, failure containment, and labels. Expected RED-C after GREEN-A introduces inherited normalization: the H03 API test receives the existing compound ordinary `Error`, whose diagnostic includes the intermediate `operation: "update"` ambiguity, instead of the required structured rollback outcome; the cleanup request still occurs once and the seeded transaction cache is evicted. Expected RED-D: the public handler returns the intermediate structured `operation: "update"` outcome by identity and skips `invalidateTransactionsAfterAmbiguousCleanup()` instead of producing the H03 rollback outcome; the incomplete/getter rows prove the new normalizer must fail closed without leaking an accessor exception. An import/parse error alone is not sufficient RED evidence.
 
 - [ ] **Step 5: Implement minimal GREEN**
 
@@ -2282,7 +2292,9 @@ In `src/api/base-resource.ts`:
 
 In `src/audit-log.ts`, add the typed action and both labels, make `logAudit` return the strict boolean persistence signal, and keep its best-effort non-throwing contract. In `src/mutation-audit.ts`, implement runtime entity validation, flattened recovery details, the direct boolean writer, and the serialization seam. In `src/index.ts`, keep connection-switch/debug/setup handling intact and replace only the final `toolError(error)` path with the seam, passing `snapshot.index` and the immutable config-name list.
 
-In `src/api/transactions.api.ts`, add only the H03 compatibility adapter at the existing API-auto cleanup catch. Import `isMutationIndeterminate` and `HttpMethod`; use an explicit method guard for `GET|POST|PUT|PATCH|DELETE`. When the rollback is structurally indeterminate and its serialized cause passes the complete network-`HttpError` narrowing above, call `invalidateTransactionsAfterAmbiguousCleanup()`, rebuild the `HttpError`, and throw the established rollback `MutationIndeterminateError` using `transaction:${id}`, `["/transactions"]`, and the existing fresh-read next action. Otherwise fall through unchanged to the raw-network `HttpError` branch or existing compound rollback failure. The adapter is contextual to cleanup ambiguity and must not inspect or depend on M01's intermediate operation/business key.
+In `src/api/transactions.api.ts`, add only the H03 compatibility adapter at the existing API-auto cleanup catch. Import `isMutationIndeterminate` and `HttpMethod`; use an explicit method guard for `GET|POST|PUT|PATCH|DELETE`. Export the small, safe `getNormalizedNetworkCause` helper described above so the tool layer can reuse the exact same fully guarded shape validation. When the rollback is structurally indeterminate and its serialized cause passes that complete network-`HttpError` narrowing, call `invalidateTransactionsAfterAmbiguousCleanup()`, rebuild the H03 rollback `MutationIndeterminateError` using `transaction:${id}`, `["/transactions"]`, the complete original cause, and the existing fresh-read next action. Otherwise fall through unchanged to the raw-network `HttpError` branch or existing compound rollback failure. The adapter is contextual to cleanup ambiguity and must not inspect or depend on M01's intermediate operation/business key.
+
+In `src/tools/crud/transactions.ts`, import and call the exported `getNormalizedNetworkCause` only inside the explicit-client cleanup catch. A complete normalized cause takes the same path as the existing raw network cleanup failure: invalidate transaction caches once and throw the established H03 rollback `MutationIndeterminateError` with `transaction:${id}`, `["/transactions"]`, the reconstructed `HttpError`, and the exact current next action. Keep the raw `HttpError.status === "network"` branch and all non-normalizable fallthrough behavior. Do not move this policy into `mutation-outcome.ts`, weaken `isMutationIndeterminate`, or use assertions/default method/path values.
 
 - [ ] **Step 6: Prove focused GREEN and H03/H06 compatibility**
 
@@ -2292,13 +2304,14 @@ Run in order:
 npx vitest run src/api/base-resource.test.ts -t "M01"
 npx vitest run src/mutation-audit.test.ts src/audit-log.test.ts -t "M01|MUTATION_INDETERMINATE"
 npx vitest run src/api/transactions.api.test.ts -t "H03 API exposes ambiguous API-auto cleanup as rollback"
-npx vitest run src/api/base-resource.test.ts src/api/transactions.api.test.ts src/booking-guard.test.ts src/mutation-outcome.test.ts src/tool-error.test.ts src/mutation-audit.test.ts src/audit-log.test.ts
+npx vitest run src/tools/crud-tools.test.ts -t "H03 CRUD"
+npx vitest run src/api/base-resource.test.ts src/api/transactions.api.test.ts src/booking-guard.test.ts src/mutation-outcome.test.ts src/tool-error.test.ts src/mutation-audit.test.ts src/audit-log.test.ts src/tools/crud-tools.test.ts
 npx vitest run src/booking-guard.test.ts -t "recovers a found structured ambiguous create|makes a structured ambiguous create"
 npm run build
 git diff --check
 ```
 
-Expected: both RED groups pass; H03 neutral fields and cleanup semantics remain intact; H06 recognizes structured create ambiguity, verifies once, and never duplicates; build and diff check pass.
+Expected: all four RED groups pass; both API-auto and public-handler H03 rollback contracts remain exact; complete structured cleanup causes invalidate once, incomplete/getter shapes fail closed without invalidation, successful cleanup still rethrows the original confirmation error, and raw network cleanup remains compatible. H03 neutral fields remain intact; H06 recognizes structured create ambiguity, verifies once, and never duplicates; build and diff check pass.
 
 - [ ] **Step 7: Run full verification**
 
@@ -2313,19 +2326,19 @@ Expected: full unit, integration (only documented environment skips), release, a
 
 - [ ] **Step 8: Freeze exact scope and run ordered reviews**
 
-Require `git status --short` to contain exactly the nine tracked paths above and `git diff --cached --name-only` to be empty. Copy the real index to a temporary index, add exactly the nine paths there, and write non-empty `.omc/reviews/M01.diff`. Verify the temporary-index name list equals the nine-path allowlist, the artifact byte-matches its diff, and the real index stays empty.
+Require `git status --short` to contain exactly the eleven tracked paths above and `git diff --cached --name-only` to be empty. Copy the real index to a temporary index, add exactly the eleven paths there—including `src/tools/crud/transactions.ts` and `src/tools/crud-tools.test.ts`—and write non-empty `.omc/reviews/M01.diff`. Verify the temporary-index name list equals the exact eleven-path list under **Exact tracked scope**, the artifact byte-matches its diff, and the real index stays empty; a nine-file artifact is incomplete and must not be reviewed.
 
 Dispatch a fresh SPEC reviewer with the M01 spec row, this task, RED/GREEN evidence, and frozen artifact. Require exactly `SPEC COMPLIANCE: APPROVED`. After that only, dispatch a different fresh QUALITY reviewer and require exactly `CODE QUALITY: APPROVED`. Any code change invalidates both verdicts: rerun all gates, rebuild the artifact, then restart SPEC followed by QUALITY.
 
 - [ ] **Step 9: Commit and close the ledger gate**
 
 ```bash
-git add src/api/base-resource.ts src/api/base-resource.test.ts src/mutation-audit.ts src/mutation-audit.test.ts src/audit-log.ts src/audit-log.test.ts src/index.ts src/api/transactions.api.ts src/api/transactions.api.test.ts
+git add src/api/base-resource.ts src/api/base-resource.test.ts src/mutation-audit.ts src/mutation-audit.test.ts src/audit-log.ts src/audit-log.test.ts src/index.ts src/api/transactions.api.ts src/api/transactions.api.test.ts src/tools/crud/transactions.ts src/tools/crud-tools.test.ts
 git diff --cached --name-only
 git commit -m "fix(M01): invalidate caches on ambiguous mutations"
 ```
 
-Expected staged names: exactly the nine-path allowlist. Append one M01 row to `.omc/full-codebase-remediation-ledger.md` with baseline, RED-A, RED-B, RED-C H03 compatibility, focused/build/full/integration/release/diff results, ordered review verdicts, and commit hash. Require final `git status --short` empty. Do not begin M02 until the row is complete and the worktree is clean.
+Expected staged names: exactly the eleven-path allowlist. Append one M01 row to `.omc/full-codebase-remediation-ledger.md` with baseline, RED-A, RED-B, RED-C API-auto H03 compatibility, RED-D public-handler H03 compatibility/containment, focused/build/full/integration/release/diff results, ordered review verdicts, and commit hash. Require final `git status --short` empty. Do not begin M02 until the row is complete and the worktree is clean.
 
 ### Task 8: M02 — Fail closed on malformed pagination
 
