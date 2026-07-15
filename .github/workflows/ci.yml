@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches:
@@ -33,3 +34,23 @@ jobs:
 
       - name: Integration surface tests
         run: npm run test:integration
+
+  package-path-smoke-node18:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - id: pack
+        env:
+          PACK_JSON: ${{ runner.temp }}/pack.json
+        run: |
+          npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP" > "$PACK_JSON"
+          PACK_NAME="$(node --input-type=module --eval 'import { readFileSync } from "node:fs"; process.stdout.write(JSON.parse(readFileSync(process.env.PACK_JSON, "utf8"))[0].filename)')"
+          echo "tarball=$RUNNER_TEMP/$PACK_NAME" >> "$GITHUB_OUTPUT"
+      - run: mkdir -p "$RUNNER_TEMP/smoke" && npm install --prefix "$RUNNER_TEMP/smoke" --ignore-scripts --no-audit --no-fund "${{ steps.pack.outputs.tarball }}"
+      - run: node scripts/smoke-node18-paths.mjs "$RUNNER_TEMP/smoke/node_modules/e-arveldaja-mcp"
