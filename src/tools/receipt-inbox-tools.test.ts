@@ -1900,7 +1900,7 @@ describe("receipt inbox tool status handling", () => {
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
-  it("apply_transaction_classifications reports a group as failed when only part of it executes", async () => {
+  it("H05 apply_transaction_classifications uses the default-preserving confirmation call", async () => {
     const getCounts = new Map<number, number>();
     const getImpl = vi.fn().mockImplementation(async (id: number) => {
       const count = getCounts.get(id) ?? 0;
@@ -2045,6 +2045,7 @@ describe("receipt inbox tool status handling", () => {
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(2);
     expect(api.transactions.get).toHaveBeenCalledTimes(4);
     expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledTimes(1);
+    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(9001, true);
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.purchaseInvoices.invalidate).toHaveBeenCalledTimes(1);
     expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9002);

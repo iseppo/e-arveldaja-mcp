@@ -2114,9 +2114,7 @@ export function registerReceiptInboxTools(
             }
 
             try {
-              await api.purchaseInvoices.confirmWithTotals(invoiceId, isVatRegistered, {
-                preserveExistingTotals: true,
-              });
+              await api.purchaseInvoices.confirmWithTotals(invoiceId, isVatRegistered);
               observedInvoiceStatus = "CONFIRMED";
               logAudit({
                 tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "purchase_invoice",

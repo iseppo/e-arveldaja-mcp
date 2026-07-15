@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { HttpClient } from "../http-client.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
@@ -10,8 +11,117 @@ export class InvoiceCreationError extends Error {
   }
 }
 
+export interface PurchaseInvoiceTotalsCorrectionPreview {
+  invoice_id: number;
+  is_vat_registered: boolean;
+  current_vat_price: number | null;
+  current_gross_price: number | null;
+  proposed_vat_price: number;
+  proposed_gross_price: number;
+  correction_required: boolean;
+  approval_digest: string;
+}
+
 interface ConfirmPurchaseInvoiceOptions {
-  preserveExistingTotals?: boolean;
+  recalculateTotals?: boolean;
+  approvedCorrection?: PurchaseInvoiceTotalsCorrectionPreview;
+}
+
+export type PurchaseInvoiceTotalsCorrectionCode =
+  | "correction_invoice_not_project"
+  | "correction_currency_not_supported"
+  | "correction_reverse_charge_not_supported"
+  | "correction_items_missing"
+  | "correction_preview_required"
+  | "correction_preview_mismatch";
+
+const TOTALS_CORRECTION_ERRORS: Record<PurchaseInvoiceTotalsCorrectionCode, {
+  message: string;
+  nextAction: string;
+}> = {
+  correction_invoice_not_project: {
+    message: "Purchase invoice totals correction requires a PROJECT draft.",
+    nextAction: "Fetch the invoice; if it is confirmed, invalidate it explicitly, then request and approve a new correction preview.",
+  },
+  correction_currency_not_supported: {
+    message: "Automatic purchase invoice totals correction supports EUR invoices only.",
+    nextAction: "Review the currency and base totals manually; do not use automatic totals correction.",
+  },
+  correction_reverse_charge_not_supported: {
+    message: "Automatic totals correction is disabled for reverse-charge purchase invoices.",
+    nextAction: "Review and preserve the reverse-charge totals manually, then confirm without recalculation only after approval.",
+  },
+  correction_items_missing: {
+    message: "Purchase invoice totals correction requires at least one item.",
+    nextAction: "Add or repair the invoice items, then request and approve a new correction preview.",
+  },
+  correction_preview_required: {
+    message: "An exact approved purchase invoice totals correction preview is required.",
+    nextAction: "Call preview_purchase_invoice_totals_correction, obtain approval, and resubmit that preview unchanged.",
+  },
+  correction_preview_mismatch: {
+    message: "The approved purchase invoice totals correction preview no longer matches fresh invoice state.",
+    nextAction: "Call preview_purchase_invoice_totals_correction again and obtain approval for the new snapshot.",
+  },
+};
+
+export class PurchaseInvoiceTotalsCorrectionError extends Error {
+  readonly nextAction: string;
+
+  constructor(public readonly code: PurchaseInvoiceTotalsCorrectionCode) {
+    const contract = TOTALS_CORRECTION_ERRORS[code];
+    super(contract.message);
+    this.name = "PurchaseInvoiceTotalsCorrectionError";
+    this.nextAction = contract.nextAction;
+  }
+}
+
+function normalizeCorrectionSnapshot(value: unknown): unknown {
+  if (value === undefined) return null;
+  if (Array.isArray(value)) return value.map(normalizeCorrectionSnapshot);
+  if (value !== null && typeof value === "object") {
+    const normalized: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      normalized[key] = normalizeCorrectionSnapshot((value as Record<string, unknown>)[key]);
+    }
+    return normalized;
+  }
+  return value;
+}
+
+function canonicalCorrectionJson(value: unknown): string {
+  return JSON.stringify(normalizeCorrectionSnapshot(value));
+}
+
+const CORRECTION_PREVIEW_KEYS = [
+  "invoice_id",
+  "is_vat_registered",
+  "current_vat_price",
+  "current_gross_price",
+  "proposed_vat_price",
+  "proposed_gross_price",
+  "correction_required",
+  "approval_digest",
+] as const;
+
+function isFiniteNullableNumber(value: unknown): boolean {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function isCorrectionPreview(value: unknown): value is PurchaseInvoiceTotalsCorrectionPreview {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (keys.length !== CORRECTION_PREVIEW_KEYS.length ||
+      keys.some((key, index) => key !== [...CORRECTION_PREVIEW_KEYS].sort()[index])) return false;
+  return Number.isInteger(record.invoice_id) && (record.invoice_id as number) > 0 &&
+    typeof record.is_vat_registered === "boolean" &&
+    isFiniteNullableNumber(record.current_vat_price) &&
+    isFiniteNullableNumber(record.current_gross_price) &&
+    typeof record.proposed_vat_price === "number" && Number.isFinite(record.proposed_vat_price) &&
+    typeof record.proposed_gross_price === "number" && Number.isFinite(record.proposed_gross_price) &&
+    typeof record.correction_required === "boolean" &&
+    typeof record.approval_digest === "string" && /^[0-9a-f]{64}$/.test(record.approval_digest);
 }
 
 /**
@@ -188,42 +298,111 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     }
   }
 
-  /**
-   * Confirm a purchase invoice. Automatically fixes vat_price/gross_price when needed.
-   * For non-VAT companies: only fixes gross_price, leaves vat_price at 0.
-   */
+  private async getFreshInvoice(id: number): Promise<PurchaseInvoice> {
+    this.invalidateCache();
+    return this.get(id);
+  }
+
+  private buildTotalsCorrectionPreview(
+    id: number,
+    invoice: PurchaseInvoice,
+    isVatRegistered: boolean,
+  ): PurchaseInvoiceTotalsCorrectionPreview {
+    if (invoice.status !== "PROJECT") {
+      throw new PurchaseInvoiceTotalsCorrectionError("correction_invoice_not_project");
+    }
+    if (invoice.cl_currencies_id?.toUpperCase() !== "EUR") {
+      throw new PurchaseInvoiceTotalsCorrectionError("correction_currency_not_supported");
+    }
+    if (!invoice.items || invoice.items.length === 0) {
+      throw new PurchaseInvoiceTotalsCorrectionError("correction_items_missing");
+    }
+    if (invoice.items.some(item => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null)) {
+      throw new PurchaseInvoiceTotalsCorrectionError("correction_reverse_charge_not_supported");
+    }
+
+    const itemVat = roundMoney(invoice.items.reduce((sum, item) => sum + (item.vat_amount ?? 0), 0));
+    const itemNet = roundMoney(invoice.items.reduce((sum, item) => sum + (item.total_net_price ?? 0), 0));
+    const proposedVat = isVatRegistered ? itemVat : 0;
+    const proposedGross = roundMoney(itemNet + itemVat);
+    const currentVat = invoice.vat_price ?? null;
+    const currentGross = invoice.gross_price ?? null;
+    const correctionRequired =
+      currentVat === null || roundMoney(currentVat) !== proposedVat ||
+      currentGross === null || roundMoney(currentGross) !== proposedGross;
+
+    const digestSnapshot = {
+      invoice_id: id,
+      is_vat_registered: isVatRegistered,
+      status: invoice.status,
+      net_price: invoice.net_price,
+      vat_price: invoice.vat_price,
+      gross_price: invoice.gross_price,
+      cl_currencies_id: invoice.cl_currencies_id,
+      currency_rate: invoice.currency_rate,
+      base_net_price: invoice.base_net_price,
+      base_vat_price: invoice.base_vat_price,
+      base_gross_price: invoice.base_gross_price,
+      proposed_vat_price: proposedVat,
+      proposed_gross_price: proposedGross,
+      correction_required: correctionRequired,
+      items: invoice.items,
+    };
+    const approvalDigest = createHash("sha256")
+      .update(canonicalCorrectionJson(digestSnapshot))
+      .digest("hex");
+
+    return {
+      invoice_id: id,
+      is_vat_registered: isVatRegistered,
+      current_vat_price: currentVat,
+      current_gross_price: currentGross,
+      proposed_vat_price: proposedVat,
+      proposed_gross_price: proposedGross,
+      correction_required: correctionRequired,
+      approval_digest: approvalDigest,
+    };
+  }
+
+  async previewTotalsCorrection(
+    id: number,
+    isVatRegistered = true,
+  ): Promise<PurchaseInvoiceTotalsCorrectionPreview> {
+    const invoice = await this.getFreshInvoice(id);
+    return this.buildTotalsCorrectionPreview(id, invoice, isVatRegistered);
+  }
+
+  /** Confirm without changing totals unless an exact fresh correction preview was approved. */
   async confirmWithTotals(
     id: number,
     isVatRegistered = true,
     options: ConfirmPurchaseInvoiceOptions = {},
   ): Promise<ApiResponse> {
-    const invoice = await this.get(id);
-    const hasInvoiceGross = invoice.gross_price !== undefined && invoice.gross_price !== null;
-    const hasInvoiceVat = invoice.vat_price !== undefined && invoice.vat_price !== null;
-
-    const items = invoice.items;
-    const hasReverseCharge = items?.some(i => i.reversed_vat_id !== undefined && i.reversed_vat_id !== null) ?? false;
-
-    if (options.preserveExistingTotals && hasInvoiceGross && (hasInvoiceVat || !isVatRegistered)) {
-      return this.confirm(id);
-    }
-
-    if (hasReverseCharge) {
-      return this.confirm(id);
-    }
-
-    if (items) {
-      const itemVat = roundMoney(items.reduce((s, i) => s + (i.vat_amount ?? 0), 0));
-      const net = roundMoney(items.reduce((s, i) => s + (i.total_net_price ?? 0), 0));
-      const vat = isVatRegistered ? itemVat : 0;
-      const gross = roundMoney(net + itemVat);
-      const currentGross = invoice.gross_price;
-      const currentVat = invoice.vat_price;
-      const grossNeedsRepair = currentGross === undefined || currentGross === null || roundMoney(currentGross) !== roundMoney(gross);
-      const vatNeedsRepair = isVatRegistered && (currentVat === undefined || currentVat === null || roundMoney(currentVat) !== roundMoney(vat));
-      if (grossNeedsRepair || vatNeedsRepair) {
-        await this.update(id, { vat_price: vat, gross_price: gross, items } as Partial<PurchaseInvoice>);
+    if (!options.recalculateTotals) {
+      if (options.approvedCorrection !== undefined) {
+        throw new PurchaseInvoiceTotalsCorrectionError("correction_preview_mismatch");
       }
+      return this.confirm(id);
+    }
+    if (options.approvedCorrection === undefined) {
+      throw new PurchaseInvoiceTotalsCorrectionError("correction_preview_required");
+    }
+    if (!isCorrectionPreview(options.approvedCorrection)) {
+      throw new PurchaseInvoiceTotalsCorrectionError("correction_preview_mismatch");
+    }
+
+    const invoice = await this.getFreshInvoice(id);
+    const freshPreview = this.buildTotalsCorrectionPreview(id, invoice, isVatRegistered);
+    if (canonicalCorrectionJson(options.approvedCorrection) !== canonicalCorrectionJson(freshPreview)) {
+      throw new PurchaseInvoiceTotalsCorrectionError("correction_preview_mismatch");
+    }
+
+    if (freshPreview.correction_required) {
+      await this.update(id, {
+        vat_price: freshPreview.proposed_vat_price,
+        gross_price: freshPreview.proposed_gross_price,
+        items: invoice.items,
+      });
     }
     return this.confirm(id);
   }

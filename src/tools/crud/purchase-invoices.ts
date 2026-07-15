@@ -11,6 +11,10 @@ import { applyListView, viewParam } from "../../list-views.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "../purchase-vat-defaults.js";
 import { validateItemDimensions } from "../../account-validation.js";
 import type { CreatePurchaseInvoiceData } from "../../types/api.js";
+import {
+  PurchaseInvoiceTotalsCorrectionError,
+  type PurchaseInvoiceTotalsCorrectionPreview,
+} from "../../api/purchase-invoices.api.js";
 import type { ApiContext } from "./shared.js";
 import {
   coerceId,
@@ -26,6 +30,26 @@ import {
   tagNotes,
   validateUpdateFields,
 } from "./shared.js";
+
+const purchaseInvoiceTotalsCorrectionApprovalSchema = z.object({
+  invoice_id: z.number().int().positive(),
+  is_vat_registered: z.boolean(),
+  current_vat_price: z.number().nullable(),
+  current_gross_price: z.number().nullable(),
+  proposed_vat_price: z.number(),
+  proposed_gross_price: z.number(),
+  correction_required: z.boolean(),
+  approval_digest: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
+
+function totalsCorrectionToolError(error: PurchaseInvoiceTotalsCorrectionError) {
+  return toolError({
+    category: "purchase_invoice_totals_correction",
+    code: error.code,
+    error: error.message,
+    next_action: error.nextAction,
+  });
+}
 
 export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -199,15 +223,67 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     });
   });
 
-  registerTool(server, "confirm_purchase_invoice",
-    "Confirm and lock a purchase invoice. Automatically fixes vat_price/gross_price if missing or inconsistent with item totals.",
-    idParam.shape, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id }) => {
+  registerTool(server, "preview_purchase_invoice_totals_correction",
+    "Preview an explicit EUR draft totals correction without changing or confirming the purchase invoice.",
+    { id: coerceId }, { ...readOnly, title: "Preview Purchase Invoice Totals Correction" }, async ({ id }) => {
       const isVatReg = await isCompanyVatRegistered(api);
-      const result = await api.purchaseInvoices.confirmWithTotals(id, isVatReg);
+      let preview: PurchaseInvoiceTotalsCorrectionPreview;
+      try {
+        preview = await api.purchaseInvoices.previewTotalsCorrection(id, isVatReg);
+      } catch (error) {
+        if (error instanceof PurchaseInvoiceTotalsCorrectionError) {
+          return totalsCorrectionToolError(error);
+        }
+        throw error;
+      }
+      return toolResponse({
+        action: "previewed",
+        entity: "purchase_invoice",
+        id,
+        message: `Previewed purchase invoice ${id} totals correction.`,
+        raw: preview,
+        next_actions: [
+          "Obtain approval for this correction preview, then resubmit it unchanged to confirm_purchase_invoice with recalculate_totals=true.",
+        ],
+      });
+    });
+
+  registerTool(server, "confirm_purchase_invoice",
+    "Confirm and lock a purchase invoice without changing approved totals. Totals correction requires a fresh approved preview.",
+    {
+      ...idParam.shape,
+      recalculate_totals: z.boolean().optional(),
+      approved_correction: purchaseInvoiceTotalsCorrectionApprovalSchema.optional(),
+    }, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id, recalculate_totals, approved_correction }) => {
+      const hasApprovedCorrection = approved_correction !== undefined;
+      if ((recalculate_totals === true && !hasApprovedCorrection) ||
+          (recalculate_totals !== true && hasApprovedCorrection)) {
+        return totalsCorrectionToolError(
+          new PurchaseInvoiceTotalsCorrectionError("correction_preview_required"),
+        );
+      }
+
+      const isVatReg = await isCompanyVatRegistered(api);
+      let result;
+      try {
+        result = recalculate_totals === true
+          ? await api.purchaseInvoices.confirmWithTotals(id, isVatReg, {
+              recalculateTotals: true,
+              approvedCorrection: approved_correction,
+            })
+          : await api.purchaseInvoices.confirmWithTotals(id, isVatReg);
+      } catch (error) {
+        if (error instanceof PurchaseInvoiceTotalsCorrectionError) {
+          return totalsCorrectionToolError(error);
+        }
+        throw error;
+      }
       logAudit({
         tool: "confirm_purchase_invoice", action: "CONFIRMED", entity_type: "purchase_invoice", entity_id: id,
         summary: `Confirmed purchase invoice ${id}`,
-        details: {},
+        details: recalculate_totals === true && approved_correction
+          ? { recalculate_totals: true, approval_digest: approved_correction.approval_digest }
+          : {},
       });
       return toolResponse({
         action: "confirmed",

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { readFileSync, readdirSync } from "fs";
 import { z } from "zod";
 import {
@@ -23,6 +23,11 @@ import { parseMcpResponse } from "../mcp-json.js";
 import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
+import {
+  PurchaseInvoicesApi,
+  PurchaseInvoiceTotalsCorrectionError,
+  type PurchaseInvoiceTotalsCorrectionCode,
+} from "../api/purchase-invoices.api.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -45,6 +50,7 @@ function getCrudToolHarness(toolName: string, overrides?: {
     readonly: {
       getAccounts: vi.fn(),
       getAccountDimensions: vi.fn(),
+      getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       ...overrides?.readonly,
     },
     clients: {
@@ -68,6 +74,8 @@ function getCrudToolHarness(toolName: string, overrides?: {
     purchaseInvoices: {
       update: vi.fn(),
       get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
+      previewTotalsCorrection: vi.fn(),
+      confirmWithTotals: vi.fn().mockResolvedValue({ code: 200, messages: [] }),
       ...overrides?.purchaseInvoices,
     },
   };
@@ -195,6 +203,7 @@ describe("registerCrudTools", () => {
       "create_purchase_invoice",
       "update_purchase_invoice",
       "delete_purchase_invoice",
+      "preview_purchase_invoice_totals_correction",
       "confirm_purchase_invoice",
       "invalidate_purchase_invoice",
       "list_accounts",
@@ -1668,5 +1677,280 @@ describe("H04 confirmed accounting record update boundaries", () => {
     await handler({ id: 7, data: patch });
 
     expect(api.saleInvoices.update).toHaveBeenCalledWith(7, patch);
+  });
+});
+
+const h05Approval = {
+  invoice_id: 7,
+  is_vat_registered: true,
+  current_vat_price: 23.99,
+  current_gross_price: 123.99,
+  proposed_vat_price: 24,
+  proposed_gross_price: 124,
+  correction_required: true,
+  approval_digest: "a".repeat(64),
+};
+
+describe("H05 correction tool inventory and workflow", () => {
+  beforeEach(() => vi.mocked(logAudit).mockClear());
+
+  it("registers one read-only preview and keeps confirmation destructive", () => {
+    const server = { registerTool: vi.fn() };
+    const api = {
+      clients: {}, products: {}, journals: {}, transactions: {}, saleInvoices: {},
+      purchaseInvoices: {}, readonly: {},
+    };
+    registerCrudTools(server as never, api as never);
+
+    const preview = server.registerTool.mock.calls.filter(([name]) => name === "preview_purchase_invoice_totals_correction");
+    const confirm = server.registerTool.mock.calls.filter(([name]) => name === "confirm_purchase_invoice");
+    expect(preview).toHaveLength(1);
+    expect(preview[0]![1]).toMatchObject({
+      title: "Preview Purchase Invoice Totals Correction",
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    });
+    expect(confirm).toHaveLength(1);
+    expect(confirm[0]![1]).toMatchObject({ annotations: { destructiveHint: true, readOnlyHint: false } });
+  });
+
+  it("previews without mutation or audit and returns the exact approval snapshot", async () => {
+    const previewTotalsCorrection = vi.fn().mockResolvedValue(h05Approval);
+    const { api, handler } = getCrudToolHarness("preview_purchase_invoice_totals_correction", {
+      purchaseInvoices: { previewTotalsCorrection },
+    });
+
+    const result = await handler({ id: 7 }) as { content: Array<{ text: string }> };
+    const body = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(previewTotalsCorrection).toHaveBeenCalledWith(7, true);
+    expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(logAudit).not.toHaveBeenCalled();
+    expect(body).toMatchObject({
+      action: "previewed",
+      entity: "purchase_invoice",
+      id: 7,
+      raw: h05Approval,
+      next_actions: [expect.stringContaining("confirm_purchase_invoice")],
+    });
+  });
+
+  it("default confirmation uses two arguments and retains the empty audit details", async () => {
+    const { api, handler } = getCrudToolHarness("confirm_purchase_invoice");
+
+    await handler({ id: 7 });
+
+    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(7, true);
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "confirm_purchase_invoice",
+      action: "CONFIRMED",
+      entity_id: 7,
+      details: {},
+    }));
+  });
+
+  it.each([
+    ["missing approval", { id: 7, recalculate_totals: true }],
+    ["approval without flag", { id: 7, approved_correction: h05Approval }],
+  ])("rejects %s before API calls or audit", async (_label, args) => {
+    const { api, handler } = getCrudToolHarness("confirm_purchase_invoice");
+
+    const result = await handler(args) as { isError?: boolean; content: Array<{ text: string }> };
+    const body = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(result.isError).toBe(true);
+    expect(body).toMatchObject({
+      category: "purchase_invoice_totals_correction",
+      code: "correction_preview_required",
+    });
+    expect(api.purchaseInvoices.previewTotalsCorrection).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it("forwards exact approved correction and records only the digest", async () => {
+    const { api, handler } = getCrudToolHarness("confirm_purchase_invoice");
+
+    await handler({ id: 7, recalculate_totals: true, approved_correction: h05Approval });
+
+    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(7, true, {
+      recalculateTotals: true,
+      approvedCorrection: h05Approval,
+    });
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      details: { recalculate_totals: true, approval_digest: h05Approval.approval_digest },
+    }));
+  });
+
+  it.each([
+    {
+      label: "PROJECT to CONFIRMED",
+      drift: { status: "CONFIRMED" },
+      code: "correction_invoice_not_project",
+      error: "Purchase invoice totals correction requires a PROJECT draft.",
+      nextAction: "Fetch the invoice; if it is confirmed, invalidate it explicitly, then request and approve a new correction preview.",
+    },
+    {
+      label: "EUR to USD",
+      drift: { cl_currencies_id: "USD" },
+      code: "correction_currency_not_supported",
+      error: "Automatic purchase invoice totals correction supports EUR invoices only.",
+      nextAction: "Review the currency and base totals manually; do not use automatic totals correction.",
+    },
+  ] as const)("real public preview/apply rejects fresh $label drift without PATCH or audit", async ({ drift, code, error, nextAction }) => {
+    const initialInvoice = {
+      id: 7,
+      clients_id: 10,
+      client_name: "Supplier OÜ",
+      number: "PI-7",
+      create_date: "2026-03-01",
+      journal_date: "2026-03-01",
+      term_days: 0,
+      status: "PROJECT",
+      cl_currencies_id: "EUR",
+      net_price: 100,
+      vat_price: 23.99,
+      gross_price: 123.99,
+      currency_rate: 1,
+      base_net_price: 100,
+      base_vat_price: 23.99,
+      base_gross_price: 123.99,
+      items: [{
+        id: 11,
+        custom_title: "Consulting",
+        purchase_accounts_id: 5230,
+        amount: 1,
+        total_net_price: 100,
+        vat_amount: 24,
+        vat_rate_dropdown: "24",
+      }],
+    };
+    const get = vi.fn()
+      .mockResolvedValueOnce(initialInvoice)
+      .mockResolvedValueOnce({ ...initialInvoice, ...drift });
+    const patch = vi.fn().mockResolvedValue({ code: 200, messages: [] });
+    const purchaseInvoices = new PurchaseInvoicesApi({
+      cacheNamespace: `h05-public-${code}`,
+      get,
+      patch,
+    } as never);
+    const server = { registerTool: vi.fn() };
+    registerPurchaseInvoiceTools(server as never, {
+      purchaseInvoices,
+      readonly: { getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }) },
+    } as never);
+    const previewRegistration = server.registerTool.mock.calls.find(([name]) =>
+      name === "preview_purchase_invoice_totals_correction");
+    const confirmRegistration = server.registerTool.mock.calls.find(([name]) =>
+      name === "confirm_purchase_invoice");
+    if (!previewRegistration || !confirmRegistration) throw new Error("H05 correction tools were not registered");
+    const previewHandler = previewRegistration[2] as (args: { id: number }) => Promise<{
+      content: Array<{ text: string }>;
+    }>;
+    const confirmHandler = confirmRegistration[2] as (args: Record<string, unknown>) => Promise<{
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    }>;
+
+    const previewResult = await previewHandler({ id: 7 });
+    const previewBody = parseMcpResponse(previewResult.content[0]!.text) as { raw: typeof h05Approval };
+    expect(previewBody.raw).toMatchObject({
+      invoice_id: 7,
+      approval_digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+
+    const confirmResult = await confirmHandler({
+      id: 7,
+      recalculate_totals: true,
+      approved_correction: previewBody.raw,
+    });
+
+    expect(confirmResult.isError).toBe(true);
+    expect(parseMcpResponse(confirmResult.content[0]!.text)).toEqual({
+      category: "purchase_invoice_totals_correction",
+      code,
+      error,
+      next_action: nextAction,
+    });
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenNthCalledWith(1, "/purchase_invoices/7");
+    expect(get).toHaveBeenNthCalledWith(2, "/purchase_invoices/7");
+    expect(patch).not.toHaveBeenCalled();
+    expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["JSON string", JSON.stringify(h05Approval)],
+    ["extra field", { ...h05Approval, extra: true }],
+    ["missing field", (({ proposed_vat_price: _missing, ...rest }) => rest)(h05Approval)],
+    ["wrong type", { ...h05Approval, invoice_id: "7" }],
+    ["non-finite", { ...h05Approval, proposed_vat_price: Number.POSITIVE_INFINITY }],
+    ["malformed digest", { ...h05Approval, approval_digest: "xyz" }],
+  ])("strict schema rejects %s approval", (_label, approved_correction) => {
+    const { options } = getCrudToolHarness("confirm_purchase_invoice");
+    const schema = z.object(options.inputSchema as z.ZodRawShape);
+
+    expect(schema.safeParse({ id: 7, recalculate_totals: true, approved_correction }).success).toBe(false);
+  });
+
+  const correctionErrors: Array<[
+    PurchaseInvoiceTotalsCorrectionCode,
+    string,
+    string,
+  ]> = [
+    ["correction_invoice_not_project", "Purchase invoice totals correction requires a PROJECT draft.", "Fetch the invoice; if it is confirmed, invalidate it explicitly, then request and approve a new correction preview."],
+    ["correction_currency_not_supported", "Automatic purchase invoice totals correction supports EUR invoices only.", "Review the currency and base totals manually; do not use automatic totals correction."],
+    ["correction_reverse_charge_not_supported", "Automatic totals correction is disabled for reverse-charge purchase invoices.", "Review and preserve the reverse-charge totals manually, then confirm without recalculation only after approval."],
+    ["correction_items_missing", "Purchase invoice totals correction requires at least one item.", "Add or repair the invoice items, then request and approve a new correction preview."],
+    ["correction_preview_required", "An exact approved purchase invoice totals correction preview is required.", "Call preview_purchase_invoice_totals_correction, obtain approval, and resubmit that preview unchanged."],
+    ["correction_preview_mismatch", "The approved purchase invoice totals correction preview no longer matches fresh invoice state.", "Call preview_purchase_invoice_totals_correction again and obtain approval for the new snapshot."],
+  ];
+
+  it.each(correctionErrors)("preview maps %s to the exact domain error", async (code, error, nextAction) => {
+    const { handler } = getCrudToolHarness("preview_purchase_invoice_totals_correction", {
+      purchaseInvoices: {
+        previewTotalsCorrection: vi.fn().mockRejectedValue(new PurchaseInvoiceTotalsCorrectionError(code)),
+      },
+    });
+
+    const result = await handler({ id: 7 }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toEqual({
+      category: "purchase_invoice_totals_correction",
+      code,
+      error,
+      next_action: nextAction,
+    });
+    expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it.each(correctionErrors)("confirmation maps %s to the exact domain error", async (code, error, nextAction) => {
+    const { handler } = getCrudToolHarness("confirm_purchase_invoice", {
+      purchaseInvoices: {
+        confirmWithTotals: vi.fn().mockRejectedValue(new PurchaseInvoiceTotalsCorrectionError(code)),
+      },
+    });
+
+    const result = await handler({ id: 7 }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toEqual({
+      category: "purchase_invoice_totals_correction",
+      code,
+      error,
+      next_action: nextAction,
+    });
+    expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["preview_purchase_invoice_totals_correction", "previewTotalsCorrection"],
+    ["confirm_purchase_invoice", "confirmWithTotals"],
+  ])("%s rethrows non-domain transport errors", async (toolName, method) => {
+    const { handler } = getCrudToolHarness(toolName, {
+      purchaseInvoices: { [method]: vi.fn().mockRejectedValue(new Error("transport failed")) },
+    });
+
+    await expect(handler({ id: 7 })).rejects.toThrow("transport failed");
+    expect(logAudit).not.toHaveBeenCalled();
   });
 });

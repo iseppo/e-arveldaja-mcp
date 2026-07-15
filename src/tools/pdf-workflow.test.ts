@@ -79,6 +79,7 @@ function setupPdfWorkflowTool(
         id: 9001,
         number: "PI-9001",
       }),
+      confirmWithTotals: vi.fn().mockResolvedValue({ ok: true }),
       uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
       invalidate: vi.fn().mockResolvedValue({ ok: true }),
       ...options.purchaseInvoices,
@@ -154,6 +155,43 @@ afterEach(() => {
 });
 
 describe("pdf workflow tools", () => {
+  it("H05 PDF handoff preserves approved supplier totals", async () => {
+    const filePath = createTempInvoiceFile("invoice-rounding.pdf", "pdf-bytes");
+    mockedResolveFileInput.mockResolvedValue({ path: filePath });
+    const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
+
+    const response = await handler({
+      supplier_client_id: 7,
+      invoice_number: "PI-ROUNDING",
+      invoice_date: "2026-03-20",
+      journal_date: "2026-03-20",
+      term_days: 14,
+      items: JSON.stringify([{
+        cl_purchase_articles_id: 45,
+        custom_title: "Internet subscription",
+        purchase_accounts_id: 5230,
+        total_net_price: 100,
+        vat_rate_dropdown: "24",
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+      }]),
+      vat_price: 23.99,
+      gross_price: 123.99,
+      file_path: filePath,
+    });
+    const payload = parseMcpResponse(response.content[0]!.text);
+
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledWith(
+      expect.objectContaining({ number: "PI-ROUNDING" }),
+      23.99,
+      123.99,
+      true,
+    );
+    expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(payload.note).toContain("confirm_purchase_invoice");
+    expect(payload.note).not.toContain("correction");
+  });
+
   it("keeps PDF invoice creation metadata to direct-call invariants", () => {
     const { options } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
     const metadata = toolMetadataText(options);

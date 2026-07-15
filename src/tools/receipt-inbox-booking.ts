@@ -299,9 +299,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
 
   if (createdInvoice.id) {
     try {
-      await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered, {
-        preserveExistingTotals: true,
-      });
+      await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered);
       createdInvoice = {
         ...createdInvoice,
         status: "CONFIRMED",

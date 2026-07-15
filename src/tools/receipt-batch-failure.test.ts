@@ -1061,7 +1061,7 @@ describe("process_receipt_batch rollback handling", () => {
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
   });
 
-  it("execution_mode=create_and_confirm returns CONFIRMED invoice status after successful confirmation", async () => {
+  it("H05 execution_mode=create_and_confirm uses the default-preserving confirmation call", async () => {
     vi.mocked(realpath).mockImplementation(async (path) => String(path));
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
@@ -1215,9 +1215,7 @@ describe("process_receipt_batch rollback handling", () => {
       confirmed: true,
       uploaded_document: true,
     }));
-    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(9001, true, {
-      preserveExistingTotals: true,
-    });
+    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(9001, true);
   });
 
   it("preserves supplier-history VAT metadata when OCR misses invoice VAT totals", async () => {
