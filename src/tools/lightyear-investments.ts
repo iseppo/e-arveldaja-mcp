@@ -57,6 +57,44 @@ interface CapitalGainsRow {
   capital_gains_eur: number;
 }
 
+export type FxRateOrientation = "eur_per_foreign" | "foreign_per_eur";
+
+export type FxReviewCode =
+  | "invalid_net_amount"
+  | "missing_rate"
+  | "invalid_rate"
+  | "contradictory_rate"
+  | "ambiguous_orientation"
+  | "ambiguous_rate"
+  | "invalid_conversion_pair"
+  | "conversion_amount_conflict"
+  | "conversion_fee_conflict"
+  | "trade_amount_conflict"
+  | "trade_fee_unresolved";
+
+export interface FxReviewReason {
+  code: FxReviewCode;
+  message: string;
+}
+
+export type FxPairResolution =
+  | { ok: true; rate: number; orientation: FxRateOrientation }
+  | { ok: false; reason: FxReviewReason };
+
+export const FX_REVIEW_MESSAGES: Record<FxReviewCode, string> = {
+  invalid_net_amount: "The conversion pair has missing or invalid net amount evidence.",
+  missing_rate: "The conversion pair has no exchange-rate evidence.",
+  invalid_rate: "The conversion pair contains an invalid exchange rate.",
+  contradictory_rate: "The conversion rates contradict the paired EUR and foreign net amounts.",
+  ambiguous_orientation: "A conversion rate fits both exchange-rate orientations.",
+  ambiguous_rate: "Multiple exchange rates fit equally well and cannot be selected deterministically.",
+  invalid_conversion_pair: "The conversion reference does not contain one unambiguous EUR/foreign row pair.",
+  conversion_amount_conflict: "The conversion gross, net, sign, or fee arithmetic is inconsistent.",
+  conversion_fee_conflict: "The conversion fee cannot be attributed and converted to EUR unambiguously.",
+  trade_amount_conflict: "The trade gross, net, or fee arithmetic is inconsistent.",
+  trade_fee_unresolved: "The foreign-currency trade fee has no proven EUR conversion.",
+};
+
 interface InvestmentTrade {
   row_index: number;
   date: string;           // YYYY-MM-DD
@@ -72,6 +110,8 @@ interface InvestmentTrade {
   eur_amount: number;     // amount in EUR (after FX if applicable)
   fee_eur: number;
   fx_rate: number | null;
+  fx_orientation: FxRateOrientation | null;
+  fx_review_reason: FxReviewReason | null;
   fx_fee_eur: number;     // FX conversion fee
   conversion_ref: string | null;
   conversion_row_indexes: number[];
@@ -197,28 +237,169 @@ function isCashEquivalentTicker(ticker: string): boolean {
   return KNOWN_CASH_EQUIVALENT_TICKERS.has(ticker);
 }
 
-function fxFeeToEur(eurConv: AccountStatementRow, fgnConv: AccountStatementRow): number {
-  const eurSideFee = Math.abs(eurConv.fee);
-  if (eurSideFee > 0) return eurSideFee;
+const MIN_FX_RATE = 1e-4;
 
-  const foreignSideFee = Math.abs(fgnConv.fee);
-  if (foreignSideFee <= 0) return 0;
-
-  if (fgnConv.fx_rate > 0) return roundMoney(foreignSideFee * fgnConv.fx_rate);
-  if (eurConv.fx_rate > 0) return roundMoney(foreignSideFee / eurConv.fx_rate);
-  return 0;
+function fxReason(code: FxReviewCode): FxReviewReason {
+  return { code, message: FX_REVIEW_MESSAGES[code] };
 }
 
-// fee_eur on a foreign-currency trade is recorded in source currency; convert
-// to EUR via fx_rate. Reject implausible fx_rate values (NaN, ±Infinity, near
-// zero) so a corrupted CSV row cannot produce a multi-thousand-euro phantom
-// fee that silently rounds through and inflates the booking.
-const MIN_FX_RATE = 1e-4;
-export function tradeFeeInEur(trade: { fee_eur: number; fx_rate: number | null }): number {
-  if (!(trade.fee_eur > 0)) return 0;
+function normalizedCurrency(currency: string): string {
+  return currency.trim().toUpperCase();
+}
+
+function isFinitePositive(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
+function isFiniteNonNegative(value: number): boolean {
+  return Number.isFinite(value) && value >= 0;
+}
+
+function agreesToCent(left: number, right: number): boolean {
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  return Math.abs(roundMoney(left) - roundMoney(right)) <= 0.0100000001;
+}
+
+function convertForeignToEur(
+  amount: number,
+  rate: number,
+  orientation: FxRateOrientation,
+): number {
+  return orientation === "eur_per_foreign" ? amount * rate : amount / rate;
+}
+
+export function resolveFxPair(
+  eurNet: number,
+  foreignNet: number,
+  rates: number[],
+): FxPairResolution {
+  if (!isFinitePositive(eurNet) || !isFinitePositive(foreignNet)) {
+    return { ok: false, reason: fxReason("invalid_net_amount") };
+  }
+
+  const distinctRates: number[] = [];
+  for (const rate of rates) {
+    if (rate === 0) continue;
+    if (!Number.isFinite(rate) || rate < MIN_FX_RATE) {
+      return { ok: false, reason: fxReason("invalid_rate") };
+    }
+    if (!distinctRates.includes(rate)) distinctRates.push(rate);
+  }
+  if (distinctRates.length === 0) {
+    return { ok: false, reason: fxReason("missing_rate") };
+  }
+
+  type Candidate = {
+    rate: number;
+    orientation: FxRateOrientation;
+    convertedEur: number;
+    residual: number;
+  };
+  const byOrientation: Record<FxRateOrientation, Candidate[]> = {
+    eur_per_foreign: [],
+    foreign_per_eur: [],
+  };
+  let hasAmbiguousOrientation = false;
+  let hasContradictoryRate = false;
+
+  for (const rate of distinctRates) {
+    const multiplied = convertForeignToEur(foreignNet, rate, "eur_per_foreign");
+    const divided = convertForeignToEur(foreignNet, rate, "foreign_per_eur");
+    const multiplyFits = agreesToCent(multiplied, eurNet);
+    const divideFits = agreesToCent(divided, eurNet);
+
+    if (multiplyFits && divideFits) {
+      hasAmbiguousOrientation = true;
+      continue;
+    }
+    if (!multiplyFits && !divideFits) {
+      hasContradictoryRate = true;
+      continue;
+    }
+
+    const orientation: FxRateOrientation = multiplyFits ? "eur_per_foreign" : "foreign_per_eur";
+    const convertedEur = multiplyFits ? multiplied : divided;
+    byOrientation[orientation].push({
+      rate,
+      orientation,
+      convertedEur,
+      residual: Math.abs(convertedEur - eurNet),
+    });
+  }
+
+  // Classify the complete evidence set before returning. Orientation ambiguity
+  // is the more specific failure when mixed with a contradictory rate; this
+  // precedence keeps the result independent of CSV/rate array order.
+  if (hasAmbiguousOrientation) {
+    return { ok: false, reason: fxReason("ambiguous_orientation") };
+  }
+  if (hasContradictoryRate) {
+    return { ok: false, reason: fxReason("contradictory_rate") };
+  }
+
+  const chooseBest = (candidates: Candidate[]): Candidate | null | "ambiguous" => {
+    if (candidates.length === 0) return null;
+    const ordered = [...candidates].sort((left, right) =>
+      left.residual - right.residual || left.rate - right.rate
+    );
+    const best = ordered[0]!;
+    const tieTolerance = 1e-12 * Math.max(1, eurNet);
+    if (ordered.slice(1).some(candidate => Math.abs(candidate.residual - best.residual) <= tieTolerance)) {
+      return "ambiguous";
+    }
+    return best;
+  };
+
+  const multiply = chooseBest(byOrientation.eur_per_foreign);
+  const divide = chooseBest(byOrientation.foreign_per_eur);
+  if (multiply === "ambiguous" || divide === "ambiguous") {
+    return { ok: false, reason: fxReason("ambiguous_rate") };
+  }
+  if (multiply && divide) {
+    if (!agreesToCent(multiply.convertedEur, divide.convertedEur)) {
+      return { ok: false, reason: fxReason("contradictory_rate") };
+    }
+    return { ok: true, rate: multiply.rate, orientation: "eur_per_foreign" };
+  }
+  const selected = multiply || divide;
+  if (!selected) return { ok: false, reason: fxReason("contradictory_rate") };
+  return { ok: true, rate: selected.rate, orientation: selected.orientation };
+}
+
+function fxFeeToEur(
+  eurConv: AccountStatementRow,
+  foreignConv: AccountStatementRow,
+  resolution: FxPairResolution & { ok: true },
+): number | null {
+  const eurFee = eurConv.fee;
+  const foreignFee = foreignConv.fee;
+  if (!isFiniteNonNegative(eurFee) || !isFiniteNonNegative(foreignFee)) return null;
+  if (eurFee > 0 && foreignFee > 0) return null;
+  if (eurFee > 0) return roundMoney(eurFee);
+  if (foreignFee === 0) return 0;
+  const convertedFee = convertForeignToEur(foreignFee, resolution.rate, resolution.orientation);
+  return Number.isFinite(convertedFee) ? roundMoney(convertedFee) : null;
+}
+
+export function tradeFeeInEur(trade: {
+  ccy: string;
+  fee_eur: number;
+  fx_rate: number | null;
+  fx_orientation: FxRateOrientation | null;
+}): number | null {
+  if (!Number.isFinite(trade.fee_eur) || trade.fee_eur < 0) return null;
+  if (trade.fee_eur === 0) return 0;
+  if (normalizedCurrency(trade.ccy) === "EUR") return roundMoney(trade.fee_eur);
   const rate = trade.fx_rate;
-  if (rate === null || !Number.isFinite(rate) || rate < MIN_FX_RATE) return trade.fee_eur;
-  return trade.fee_eur / rate;
+  const orientation = trade.fx_orientation;
+  if (
+    rate === null ||
+    !Number.isFinite(rate) ||
+    rate < MIN_FX_RATE ||
+    (orientation !== "eur_per_foreign" && orientation !== "foreign_per_eur")
+  ) return null;
+  const convertedFee = convertForeignToEur(trade.fee_eur, rate, orientation);
+  return Number.isFinite(convertedFee) ? roundMoney(convertedFee) : null;
 }
 
 function getStatementRowCashDelta(row: AccountStatementRow): { currency: string; amount: number } | null {
@@ -339,6 +520,64 @@ interface TradeExtractionResult {
   consumedConversionRefs: Set<string>;
 }
 
+function validateTradeAmounts(row: AccountStatementRow): FxReviewReason | null {
+  const gross = Math.abs(row.gross_amount);
+  const net = Math.abs(row.net_amount);
+  if (!isFinitePositive(gross) || !isFinitePositive(net) || !isFiniteNonNegative(row.fee)) {
+    return fxReason("trade_amount_conflict");
+  }
+  if (Math.sign(row.gross_amount) !== Math.sign(row.net_amount)) {
+    return fxReason("trade_amount_conflict");
+  }
+  const expectedNet = row.type === "Buy" ? gross + row.fee : gross - row.fee;
+  if (!isFinitePositive(expectedNet) || !agreesToCent(net, expectedNet)) {
+    return fxReason("trade_amount_conflict");
+  }
+  return null;
+}
+
+function validateConversionAmounts(
+  eurConv: AccountStatementRow,
+  foreignConv: AccountStatementRow,
+): FxReviewReason | null {
+  const eurGross = Math.abs(eurConv.gross_amount);
+  const eurNet = Math.abs(eurConv.net_amount);
+  const foreignGross = Math.abs(foreignConv.gross_amount);
+  const foreignNet = Math.abs(foreignConv.net_amount);
+  if (!isFinitePositive(eurNet) || !isFinitePositive(foreignNet)) {
+    return fxReason("invalid_net_amount");
+  }
+  if (
+    !isFinitePositive(eurGross) ||
+    !isFinitePositive(foreignGross) ||
+    !isFiniteNonNegative(eurConv.fee) ||
+    !isFiniteNonNegative(foreignConv.fee) ||
+    Math.sign(eurConv.gross_amount) !== Math.sign(eurConv.net_amount) ||
+    Math.sign(foreignConv.gross_amount) !== Math.sign(foreignConv.net_amount) ||
+    Math.sign(eurConv.net_amount) === Math.sign(foreignConv.net_amount) ||
+    !agreesToCent(Math.abs(eurGross - eurNet), eurConv.fee) ||
+    !agreesToCent(Math.abs(foreignGross - foreignNet), foreignConv.fee)
+  ) {
+    return fxReason("conversion_amount_conflict");
+  }
+  if (eurConv.fee > 0 && foreignConv.fee > 0) {
+    return fxReason("conversion_fee_conflict");
+  }
+  return null;
+}
+
+function fxReviewWarning(
+  tradeReference: string,
+  reason: FxReviewReason,
+  conversionReference?: string,
+): string {
+  const orderContext = wrapUntrustedOcr(tradeReference) ?? "";
+  const conversionContext = conversionReference === undefined
+    ? ""
+    : ` Conversion ${wrapUntrustedOcr(conversionReference) ?? ""}.`;
+  return `${orderContext}: FX review [${reason.code}] ${reason.message}${conversionContext}`;
+}
+
 function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
   // Index conversion rows by reference for quick lookup
   const conversionsByRef = new Map<string, AccountStatementRow[]>();
@@ -374,67 +613,98 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
       eur_amount: 0,
       fee_eur: row.fee,
       fx_rate: null,
+      fx_orientation: null,
+      fx_review_reason: null,
       fx_fee_eur: 0,
       conversion_ref: null,
       conversion_row_indexes: [],
       cash_equivalent: isCashEquivalentTicker(row.ticker),
     };
 
-    if (row.ccy === "EUR") {
-      // EUR trade - amount is directly in EUR
-      trade.eur_amount = Math.abs(row.gross_amount);
-    } else {
-      // Foreign currency trade - find the paired Conversion entry
-      // Lightyear pairs: CN-xxx has two rows (EUR side + foreign currency side)
-      // The foreign currency amount matches the trade's gross_amount
-      let fxMatched = false;
-      const orderDatePrefix = row.date.split(/[\sT]/)[0]; // date portion (DD/MM/YYYY or ISO)
-
-      // Collect all candidate conversions to detect ambiguity
-      const candidates: Array<{ ref: string; eurConv: AccountStatementRow; fgnConv: AccountStatementRow }> = [];
-      for (const [ref, convRows] of conversionsByRef) {
-        if (consumedConversions.has(ref)) continue;
-
-        const eurConv = convRows.find(c => c.ccy === "EUR");
-        const fgnConv = convRows.find(c => c.ccy === row.ccy);
-
-        if (eurConv && fgnConv) {
-          const convDatePrefix = fgnConv.date.split(/[\sT]/)[0];
-          if (convDatePrefix !== orderDatePrefix) continue;
-
-          if (Math.abs(Math.abs(fgnConv.gross_amount) - Math.abs(row.gross_amount)) < 0.02) {
-            candidates.push({ ref, eurConv, fgnConv });
-          }
-        }
-      }
-
-      if (candidates.length > 1) {
-        // `reference` / `ref` are unvalidated CSV columns — wrap them so the
-        // warning string cannot smuggle attacker prose into the LLM's stream.
-        fxWarnings.push(
-          `${wrapUntrustedOcr(row.reference) ?? ""} (${row.ticker} ${row.ccy} ${Math.abs(row.gross_amount)}): ` +
-          `${candidates.length} FX conversions match by date+amount — SKIPPED (ambiguous). ` +
-          `Refs: ${candidates.map(c => wrapUntrustedOcr(c.ref) ?? "").join(", ")}`
-        );
-        // Do NOT pick a candidate — leave eur_amount = 0 so trade is flagged as unmatched
-      } else if (candidates.length === 1) {
-        const best = candidates[0]!;
-        // Use net_amount (gross minus FX fee) — the actual EUR leaving the account.
-        // gross_amount is the EUR equivalent before FX fee deduction.
-        trade.eur_amount = Math.abs(best.eurConv.net_amount);
-        trade.fx_rate = best.eurConv.fx_rate || best.fgnConv.fx_rate || null;
-        trade.fx_fee_eur = fxFeeToEur(best.eurConv, best.fgnConv);
-        trade.conversion_ref = best.ref;
-        trade.conversion_row_indexes = [best.eurConv.row_index, best.fgnConv.row_index];
-        consumedConversions.add(best.ref);
-        fxMatched = true;
-      }
-
-      if (!fxMatched) {
-        fxWarnings.push(`${wrapUntrustedOcr(trade.reference) ?? ""}: no FX conversion found for ${trade.ccy} trade`);
-      }
+    const tradeAmountFailure = validateTradeAmounts(row);
+    if (tradeAmountFailure) {
+      trade.fx_review_reason = tradeAmountFailure;
+      fxWarnings.push(fxReviewWarning(trade.reference, tradeAmountFailure));
+      trades.push(trade);
+      continue;
     }
 
+    if (normalizedCurrency(row.ccy) === "EUR") {
+      trade.eur_amount = Math.abs(row.gross_amount);
+      trades.push(trade);
+      continue;
+    }
+
+    const tradeCurrency = normalizedCurrency(row.ccy);
+    const orderDatePrefix = row.date.split(/[\sT]/)[0];
+    const shortlisted: Array<{ ref: string; rows: AccountStatementRow[] }> = [];
+    for (const [ref, conversionRows] of conversionsByRef) {
+      if (consumedConversions.has(ref)) continue;
+      const hasMatchingForeignRow = conversionRows.some(conversionRow =>
+        normalizedCurrency(conversionRow.ccy) === tradeCurrency &&
+        conversionRow.date.split(/[\sT]/)[0] === orderDatePrefix &&
+        agreesToCent(Math.abs(conversionRow.gross_amount), Math.abs(row.gross_amount))
+      );
+      if (hasMatchingForeignRow) shortlisted.push({ ref, rows: conversionRows });
+    }
+
+    if (shortlisted.length !== 1) {
+      const reason = fxReason("invalid_conversion_pair");
+      trade.fx_review_reason = reason;
+      fxWarnings.push(fxReviewWarning(trade.reference, reason));
+      trades.push(trade);
+      continue;
+    }
+
+    const candidate = shortlisted[0]!;
+    const eurRows = candidate.rows.filter(conversionRow => normalizedCurrency(conversionRow.ccy) === "EUR");
+    const foreignRows = candidate.rows.filter(conversionRow => normalizedCurrency(conversionRow.ccy) === tradeCurrency);
+    if (candidate.rows.length !== 2 || eurRows.length !== 1 || foreignRows.length !== 1) {
+      const reason = fxReason("invalid_conversion_pair");
+      trade.fx_review_reason = reason;
+      fxWarnings.push(fxReviewWarning(trade.reference, reason, candidate.ref));
+      trades.push(trade);
+      continue;
+    }
+
+    const eurConv = eurRows[0]!;
+    const foreignConv = foreignRows[0]!;
+    const conversionFailure = validateConversionAmounts(eurConv, foreignConv);
+    if (conversionFailure) {
+      trade.fx_review_reason = conversionFailure;
+      fxWarnings.push(fxReviewWarning(trade.reference, conversionFailure, candidate.ref));
+      trades.push(trade);
+      continue;
+    }
+
+    const resolution = resolveFxPair(
+      Math.abs(eurConv.net_amount),
+      Math.abs(foreignConv.net_amount),
+      [eurConv.fx_rate, foreignConv.fx_rate],
+    );
+    if (!resolution.ok) {
+      trade.fx_review_reason = resolution.reason;
+      fxWarnings.push(fxReviewWarning(trade.reference, resolution.reason, candidate.ref));
+      trades.push(trade);
+      continue;
+    }
+
+    const convertedFxFee = fxFeeToEur(eurConv, foreignConv, resolution);
+    if (convertedFxFee === null) {
+      const reason = fxReason("conversion_fee_conflict");
+      trade.fx_review_reason = reason;
+      fxWarnings.push(fxReviewWarning(trade.reference, reason, candidate.ref));
+      trades.push(trade);
+      continue;
+    }
+
+    trade.eur_amount = Math.abs(eurConv.net_amount);
+    trade.fx_rate = resolution.rate;
+    trade.fx_orientation = resolution.orientation;
+    trade.fx_fee_eur = convertedFxFee;
+    trade.conversion_ref = candidate.ref;
+    trade.conversion_row_indexes = [eurConv.row_index, foreignConv.row_index];
+    consumedConversions.add(candidate.ref);
     trades.push(trade);
   }
 
@@ -693,6 +963,20 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         skippedCashEquivalentByTicker.set(t.ticker, list);
       }
 
+      const tradeFeesInEur = new Map<InvestmentTrade, number | null>();
+      const unresolvedTradeFeeWarnings: string[] = [];
+      for (const trade of bookableTrades) {
+        const convertedFee = tradeFeeInEur(trade);
+        tradeFeesInEur.set(trade, convertedFee);
+        if (convertedFee === null && trade.fx_review_reason === null) {
+          unresolvedTradeFeeWarnings.push(fxReviewWarning(
+            trade.reference,
+            fxReason("trade_fee_unresolved"),
+            trade.conversion_ref ?? undefined,
+          ));
+        }
+      }
+
       const summary: Record<string, { buys: number; sells: number; total_invested_eur: number; total_sold_eur: number }> = {};
       for (const [ticker, tickerTrades] of byTicker) {
         const buys = tickerTrades.filter(t => t.type === "Buy");
@@ -701,7 +985,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           buys: buys.length,
           sells: sells.length,
           total_invested_eur: roundMoney(buys.reduce((s, t) => {
-            return s + t.eur_amount + tradeFeeInEur(t); // FX fee excluded (matches Lightyear CG report)
+            const convertedFee = tradeFeesInEur.get(t);
+            return s + t.eur_amount + (convertedFee === null || convertedFee === undefined ? 0 : convertedFee);
           }, 0)),
           total_sold_eur: roundMoney(sells.reduce((s, t) => s + t.eur_amount, 0)),
         };
@@ -714,7 +999,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         };
       }
 
-      const warnings: string[] = [...fxWarnings];
+      const warnings: string[] = [...fxWarnings, ...unresolvedTradeFeeWarnings];
       if (unmatchedFx.length > 0) {
         warnings.push(
           `${unmatchedFx.length} foreign currency trade(s) could not be matched to FX conversion entries: ` +
@@ -761,7 +1046,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             rows: unhandledSuggestions,
           },
         }),
-        ...((!cashReconciliation.is_balanced || unhandledSuggestions.length > 0) && {
+        ...((
+          !cashReconciliation.is_balanced ||
+          unhandledSuggestions.length > 0 ||
+          trades.some(trade => trade.fx_review_reason !== null) ||
+          unresolvedTradeFeeWarnings.length > 0
+        ) && {
           needs_review: true,
         }),
         ...(warnings.length > 0 && { warnings }),
@@ -950,8 +1240,23 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       for (let tradeIdx = 0; tradeIdx < newTrades.length; tradeIdx++) {
         const trade = newTrades[tradeIdx]!;
         await reportProgress(tradeIdx, totalNewTrades);
-        // Skip unmatched FX trades
-        if (trade.ccy !== "EUR" && trade.eur_amount === 0) {
+        const convertedTradeFee = tradeFeeInEur(trade);
+        const provenanceFailure = trade.fx_review_reason ?? (
+          normalizedCurrency(trade.ccy) !== "EUR" &&
+          (trade.eur_amount === 0 || trade.fx_rate === null || trade.fx_orientation === null)
+            ? fxReason("trade_fee_unresolved")
+            : convertedTradeFee === null
+              ? fxReason("trade_fee_unresolved")
+              : null
+        );
+        if (provenanceFailure || convertedTradeFee === null) {
+          if (trade.fx_review_reason === null) {
+            warnings.push(fxReviewWarning(
+              trade.reference,
+              provenanceFailure ?? fxReason("trade_fee_unresolved"),
+              trade.conversion_ref ?? undefined,
+            ));
+          }
           results.push({
             reference: trade.reference,
             ticker: trade.ticker,
@@ -959,14 +1264,14 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             date: trade.date,
             eur_amount: 0,
             status: "skipped",
-            skip_reason: `No matching FX conversion found for ${trade.ccy} trade`,
+            skip_reason: (provenanceFailure ?? fxReason("trade_fee_unresolved")).message,
           });
           continue;
         }
 
         // eur_amount is the EUR conversion net (after FX fee deduction).
         // fx_fee_eur is the FX conversion fee. trade.fee_eur is the trade platform fee.
-        const tradeFeeEur = roundMoney(tradeFeeInEur(trade));
+        const tradeFeeEur = roundMoney(convertedTradeFee);
         const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
 
         if (trade.type === "Buy") {
@@ -1479,16 +1784,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const rows = parseAccountStatement(csv);
       const { trades, warnings: fxWarnings } = extractTrades(rows);
 
-      // Check for unmatched FX trades that will have zero cost basis
-      const unmatchedFx = trades.filter(t => t.ccy !== "EUR" && t.eur_amount === 0);
       const portfolioWarnings: string[] = [...fxWarnings];
-      if (unmatchedFx.length > 0) {
-        portfolioWarnings.push(
-          `${unmatchedFx.length} foreign currency trade(s) have no matched FX conversion (eur_amount=0). ` +
-          `Holdings and cost basis for affected tickers may be understated: ` +
-          unmatchedFx.map(t => `${t.reference} (${t.ticker} ${t.type} ${t.quantity})`).join(", ")
-        );
-      }
 
       // Compute holdings using weighted average cost (WAC)
       const holdings = new Map<string, {
@@ -1517,12 +1813,28 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         if (trade.type === "Buy") {
           // Investment cost = eur_amount (conversion net) + trade fee.
           // FX fee is expensed, not part of cost basis (matches Lightyear CG report).
-          h.total_cost_eur += trade.eur_amount + tradeFeeInEur(trade);
+          const convertedTradeFee = tradeFeeInEur(trade);
+          if (convertedTradeFee === null && trade.fx_review_reason === null) {
+            portfolioWarnings.push(fxReviewWarning(
+              trade.reference,
+              fxReason("trade_fee_unresolved"),
+              trade.conversion_ref ?? undefined,
+            ));
+          }
+          h.total_cost_eur += trade.eur_amount + (convertedTradeFee ?? 0);
           h.quantity += trade.quantity;
           h.buy_count++;
         } else {
           // Sell: remove proportional cost basis using weighted average cost
-          const proceeds = trade.eur_amount - tradeFeeInEur(trade);
+          const convertedTradeFee = tradeFeeInEur(trade);
+          if (convertedTradeFee === null && trade.fx_review_reason === null) {
+            portfolioWarnings.push(fxReviewWarning(
+              trade.reference,
+              fxReason("trade_fee_unresolved"),
+              trade.conversion_ref ?? undefined,
+            ));
+          }
+          const proceeds = trade.eur_amount - (convertedTradeFee ?? 0);
           h.total_proceeds_eur += proceeds;
           h.sell_count++;
 
