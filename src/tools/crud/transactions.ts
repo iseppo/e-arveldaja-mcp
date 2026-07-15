@@ -7,6 +7,7 @@ import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { HttpError } from "../../http-client.js";
+import { MutationIndeterminateError, isMutationIndeterminate } from "../../mutation-outcome.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
 import type { Transaction } from "../../types/api.js";
@@ -212,10 +213,28 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     try {
       result = await api.transactions.confirm(id, dist);
     } catch (error) {
-      if (clientsIdWasSet) {
+      if (clientsIdWasSet && !isMutationIndeterminate(error)) {
         try {
           await api.transactions.update(id, { clients_id: null } as Partial<Transaction>);
-        } catch { /* best effort rollback */ }
+        } catch (cleanupError) {
+          if (
+            cleanupError instanceof HttpError &&
+            cleanupError.status === "network"
+          ) {
+            api.transactions.invalidateTransactionsAfterAmbiguousCleanup();
+            throw new MutationIndeterminateError({
+              operation: "rollback",
+              entity: "transaction",
+              entityId: id,
+              businessKey: "transaction:" + id,
+              affectedCaches: ["/transactions"],
+              cause: cleanupError,
+              nextAction: "Freshly read transaction " + id +
+                "; clients_id cleanup may or may not have committed.",
+            });
+          }
+          throw cleanupError;
+        }
       }
       throw error;
     }
