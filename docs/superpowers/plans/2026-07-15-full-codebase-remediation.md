@@ -747,62 +747,55 @@ Expected: empty output. Do not begin H04 until the H03 row is complete, both ver
 ### Task 4: H04 — Confirmed accounting records are immutable through generic updates
 
 **Files:**
-- Modify: `src/tools/crud/shared.ts:260-330`
-- Modify: `src/tools/crud/journals.ts:170-205`
-- Modify: `src/tools/crud/purchase-invoices.ts:145-175`
-- Modify: `src/tools/crud/sale-invoices.ts:100-125`
+- Modify: `src/tools/crud/shared.ts`
+- Modify: `src/tools/crud/journals.ts`
+- Modify: `src/tools/crud/purchase-invoices.ts`
+- Modify: `src/tools/crud/sale-invoices.ts`
 - Modify: `src/tools/crud-tools.test.ts`
 
-**Interfaces:**
-- Consumes: `validateUpdateFields(data, entity, { isConfirmed })`.
-- Produces: type-checked `CONFIRMED_UPDATE_METADATA` allowlist whose keys are actual `Journal`, `PurchaseInvoice`, and `SaleInvoice` fields; stable payload category `confirmed_record_immutable`.
+**Contract:** Confirmed journals and invoices accept only explicitly approved descriptive metadata. Ledger-bearing and lifecycle fields fail atomically with `category: "confirmed_record_immutable"` and invalidate-fetch-edit-reconfirm guidance. Draft/project ledger edits remain compatible, while draft blocked or empty patches retain `error: "Invalid update fields"`.
 
-- [ ] **Step 1: Write the failing table regression**
+- [ ] **Step 1: Verify the clean five-file scope**
 
-```ts
-it.each([
-  ["journal", "postings"], ["journal", "effective_date"], ["journal", "document_number"],
-  ["purchase_invoice", "items"], ["purchase_invoice", "gross_price"], ["purchase_invoice", "clients_id"], ["purchase_invoice", "liability_accounts_id"],
-  ["sale_invoice", "items"], ["sale_invoice", "gross_price"], ["sale_invoice", "clients_id"], ["sale_invoice", "receivable_accounts_id"],
-] as const)("rejects confirmed %s field %s", (entity, field) => {
-  expect(validateUpdateFields({ [field]: field === "items" || field === "postings" ? [] : 1 }, entity, { isConfirmed: true }))
-    .toEqual([expect.stringContaining(`Field "${field}"`)]);
-});
+Run:
 
-it("allows a confirmed journal title and returns a stable category for a blocked field", async () => {
-  const allowed = getCrudToolHarness("update_journal", { journals: {
-    get: vi.fn().mockResolvedValue({ id: 7, registered: true }),
-    update: vi.fn().mockResolvedValue({ code: 200, messages: [] }),
-  }});
-  await allowed.handler({ id: 7, data: { title: "Corrected display title" } });
-  expect(allowed.api.journals.update).toHaveBeenCalledWith(7, { title: "Corrected display title" });
+~~~bash
+git status --short
+git diff --name-only
+git ls-files --others --exclude-standard
+~~~
 
-  const blocked = await allowed.handler({ id: 7, data: { effective_date: "2026-05-01" } });
-  expect(parseMcpResponse(blocked.content[0]!.text)).toMatchObject({
-    category: "confirmed_record_immutable",
-    error: "Confirmed journal update contains ledger-bearing fields",
-  });
-});
+Expected: all outputs are empty. H04 may modify exactly the five paths above; `.omc` review and ledger files remain ignored and uncommitted.
 
-it.each([
-  ["update_journal", "journals", { registered: false }, { effective_date: "2026-05-01", postings: [] }],
-  ["update_purchase_invoice", "purchaseInvoices", { status: "PROJECT", items: [] }, { journal_date: "2026-05-01", items: [] }],
-  ["update_sale_invoice", "saleInvoices", { status: "PROJECT" }, { journal_date: "2026-05-01", items: [] }],
-] as const)("keeps %s draft updates compatible", async (tool, resource, current, data) => {
-  const update = vi.fn().mockResolvedValue({ code: 200, messages: [] });
-  const { handler } = getCrudToolHarness(tool, { [resource]: { get: vi.fn().mockResolvedValue({ id: 7, ...current }), update } });
-  await handler({ id: 7, data });
-  expect(update).toHaveBeenCalledWith(7, data);
-});
-```
+- [ ] **Step 2: Add the 41-case H04 RED suite**
 
-- [ ] **Step 2: Prove red**
+In `src/tools/crud-tools.test.ts`, import `validateUpdateFields` from the existing `./crud-tools.js` import; `crud-tools.ts` already re-exports `./crud/shared.js`. Add one table-driven suite with **exactly 41 expanded tests**. Every generated and non-table test title must contain `H04`, so the required selector cannot match legacy tests.
 
-Run: `npx vitest run src/tools/crud-tools.test.ts -t "ledger-bearing"`
+1. **23 confirmed validator rejections:**
+   - journal (7): `postings`, `effective_date`, `document_number`, `clients_id`, `is_deleted`, `registered`, `status`;
+   - purchase invoice (8): `items`, `gross_price`, `clients_id`, `liability_accounts_id`, `is_deleted`, `status`, `registered`, `payment_status`;
+   - sale invoice (8): `items`, `gross_price`, `clients_id`, `receivable_accounts_id`, `is_deleted`, `status`, `registered`, `payment_status`.
+2. A 6-row validator allow table for the complete approved metadata matrix: journal `title`; purchase invoice `notes`; sale invoice `notes`, `invoice_info`, `payment_description`, and `additional_info_content`.
+3. **3 confirmed handler rejections**, one per entity, using a non-allowlisted ledger field. Assert no `update`, the exact entity-specific error, category `confirmed_record_immutable`, details naming `invalidate_<entity>`, and `next_action` describing invalidate, fetch draft, edit, and explicitly re-confirm.
+4. **3 confirmed handler compatibility cases:** journal `title`; purchase `notes`; and one sale patch containing all four allowed fields. For purchase notes, assert the transport receives current items but a new array whose every object is a distinct shallow clone with equal values.
+5. **3 draft/project blocked cases:** journal `registered`, purchase `payment_status`, and sale `status`. Assert no mutation, `error: "Invalid update fields"`, and no `confirmed_record_immutable` category.
+6. **3 draft/project ledger compatibility cases:** journal `effective_date` plus `postings`, purchase `journal_date` plus caller-supplied `items`, and sale `journal_date` plus `items`; assert exact forwarding.
 
-Expected: FAIL because only date fields are post-confirm blocked, the title case is incorrectly mixed into a reject-all expectation, and the tool payload has no stable category.
+Use correctly shaped values: arrays for `items`/`postings`, booleans for `is_deleted`/`registered`, strings for statuses/dates/text, and numbers for IDs/totals. In the confirmed purchase caller-items rejection, prove validation happens before transport completion: the caller array is rejected unchanged and the API `update` is never called.
 
-- [ ] **Step 3: Implement per-entity immutable field sets**
+- [ ] **Step 3: Run the deterministic RED**
+
+Run:
+
+~~~bash
+npx vitest run src/tools/crud-tools.test.ts -t "H04"
+~~~
+
+Expected before production changes: **exactly 41 tests selected; 19 fail and 22 pass**. The failures are 15 newly unprotected confirmed validator fields, 3 handler-category cases, and the purchase deep-clone assertion. Zero selected tests or a validation/setup failure is not acceptable RED evidence.
+
+- [ ] **Step 4: Add the type-checked confirmed metadata allowlist**
+
+In `src/tools/crud/shared.ts`, add `Journal`, `PurchaseInvoice`, and `SaleInvoice` to the existing type-only import from `../../types/api.js`. Define:
 
 ```ts
 type ConfirmableEntity = "journal" | "purchase_invoice" | "sale_invoice";
@@ -821,40 +814,116 @@ export const CONFIRMED_UPDATE_METADATA = {
 function isConfirmableEntity(entity: keyof typeof UPDATE_BLOCKED_FIELDS): entity is ConfirmableEntity {
   return entity === "journal" || entity === "purchase_invoice" || entity === "sale_invoice";
 }
+```
 
-if (opts?.isConfirmed && isConfirmableEntity(entity)) {
-  const allowed = new Set<string>(CONFIRMED_UPDATE_METADATA[entity]);
-  return Object.keys(data)
-    .filter(field => !allowed.has(field))
-    .map(field => `Field "${field}" cannot be edited on a CONFIRMED ${entity}; invalidate_${entity}, fetch the draft, edit, then re-confirm.`);
+Keep the empty-object check first. For a non-empty confirmed confirmable entity, reject every caller key outside its allowlist, naming the field and exact `invalidate_<entity>` → fetch draft → edit → re-confirm recovery. Only draft/project and non-confirmable entities reach the existing generic denylist. Remove `post_confirm_fields` and the obsolete date-only confirmed branch.
+
+- [ ] **Step 5: Classify handler failures and clone purchase transport items**
+
+In each of `journals.ts`, `purchase-invoices.ts`, and `sale-invoices.ts`, compute `isConfirmed` once, pass it to `validateUpdateFields`, and branch immediately after validation:
+
+```ts
+if (updateErrors.length > 0) {
+  if (isConfirmed && Object.keys(parsed).length > 0) {
+    return toolError({
+      category: "confirmed_record_immutable",
+      error: `Confirmed ${entity} update contains ledger-bearing fields`,
+      details: updateErrors,
+      next_action: `invalidate_${entity}, fetch the draft, update it, then explicitly re-confirm`,
+    });
+  }
+  return toolError({ error: "Invalid update fields", details: updateErrors });
 }
 ```
 
-In all three update handlers, return:
+Use the literal entity in each file. Confirmed non-allowlisted or mixed patches return `confirmed_record_immutable`; empty and draft/project denylisted patches retain `Invalid update fields`; confirmed allowlisted metadata continues to the API.
+
+In `purchase-invoices.ts`, do API-required item completion **only after validation**, cloning both levels:
 
 ```ts
-return toolError({
-  category: "confirmed_record_immutable",
-  error: `Confirmed ${entity} update contains ledger-bearing fields`,
-  details: updateErrors,
-  next_action: `invalidate_${entity}, fetch the draft, update it, then explicitly re-confirm`,
-});
+if (parsed.items === undefined && current.items !== undefined) {
+  parsed.items = current.items.map(item => ({ ...item }));
+}
 ```
 
-Put this branch immediately after `validateUpdateFields` in all three handlers; retain the existing `Invalid update fields` category for draft/server-managed validation. For a confirmed purchase invoice metadata update, keep the existing API-required item re-send after validation, using an immutable copy (`parsed.items = current.items?.map(item => ({ ...item }))`) so the allowlist evaluates caller input, not the transport completion field.
+This ensures caller-supplied confirmed items are validated before any completion, while confirmed notes re-send independent item data without aliasing fetched state.
 
-- [ ] **Step 4: Prove green and review**
+- [ ] **Step 6: Prove focused GREEN, build, and full compatibility**
 
-Run: `npx vitest run src/tools/crud-tools.test.ts src/api/purchase-invoices.api.test.ts src/api/sale-invoices.api.test.ts && npm run build && git diff --check`
+Run:
 
-Expected: confirmed rows reject every non-allowlisted real API field tested, confirmed journal title and invoice notes remain compatible, draft date/item updates remain compatible, and category is stable. Write `.omc/reviews/H04.diff` and obtain both required verdicts.
+~~~bash
+npx vitest run src/tools/crud-tools.test.ts -t "H04"
+npx vitest run src/tools/crud-tools.test.ts src/api/purchase-invoices.api.test.ts src/api/sale-invoices.api.test.ts
+npm run build
+npm run validate:release
+npm test
+npm run test:integration
+git diff --check
+git diff --name-only
+git ls-files --others --exclude-standard
+~~~
 
-- [ ] **Step 5: Commit H04**
+Expected: **41/41 H04 tests pass**; all focused, build, release, full unit, and integration checks pass with only documented skips; `git diff --check` and untracked output are empty. `git diff --name-only` lists exactly the five H04 files in lexical order.
 
-```bash
-git add src/tools/crud/shared.ts src/tools/crud/journals.ts src/tools/crud/purchase-invoices.ts src/tools/crud/sale-invoices.ts src/tools/crud-tools.test.ts
+- [ ] **Step 7: Build the complete H04 review artifact**
+
+Create `.omc/reviews/H04.diff` from the complete unstaged `git diff --` for exactly these five files:
+
+~~~text
+src/tools/crud/shared.ts
+src/tools/crud/journals.ts
+src/tools/crud/purchase-invoices.ts
+src/tools/crud/sale-invoices.ts
+src/tools/crud-tools.test.ts
+~~~
+
+The artifact must also contain: the H04 spec row; the exact RED command and `19 failed | 22 passed`; `41/41` GREEN; focused/build/release/full/integration/diff-check outputs; `git diff --stat` for the same five paths; exact changed-name output; and evidence that untracked output and the real index were empty. Run `test -s .omc/reviews/H04.diff`. If any sixth implementation file or staged file exists, correct scope before review.
+
+- [ ] **Step 8: Obtain fresh sequential SPEC and QUALITY approval**
+
+Give a fresh non-author spec reviewer the H04 row, complete artifact, and verification evidence. Require exactly:
+
+~~~text
+SPEC COMPLIANCE: APPROVED
+~~~
+
+Only after SPEC approval, give a different fresh non-author quality reviewer the same evidence plus the SPEC verdict. Require exactly:
+
+~~~text
+CODE QUALITY: APPROVED
+~~~
+
+SPEC checks the full confirmed rejection matrix, six metadata allowances, invalidate-edit-reconfirm contract, draft behavior, and exact scope. QUALITY checks type safety, classification, atomicity, clone ownership, test determinism, and maintainability. Any rejection requires an in-scope fix, all Step 6 checks again, artifact replacement, and both fresh sequential reviews again.
+
+- [ ] **Step 9: Commit exactly the five H04 files**
+
+Run:
+
+~~~bash
+git add \
+  src/tools/crud/shared.ts \
+  src/tools/crud/journals.ts \
+  src/tools/crud/purchase-invoices.ts \
+  src/tools/crud/sale-invoices.ts \
+  src/tools/crud-tools.test.ts
+git diff --cached --name-only
+git diff --cached --check
 git commit -m "fix(H04): lock confirmed ledger content"
-```
+~~~
+
+Expected: staged names are exactly those five paths, cached diff-check passes, and the commit succeeds. Never stage `.omc` artifacts.
+
+- [ ] **Step 10: Record the ledger row and prove clean handoff**
+
+Append one H04 ledger row with the RED and GREEN counts, focused/build/release/full/integration evidence, both exact verdicts, five-file scope proof, and commit hash. Then run:
+
+~~~bash
+git status --short
+git ls-files --others --exclude-standard
+~~~
+
+Expected: both outputs are empty before Task 5 begins.
 
 ### Task 5: H06 — Cross-process create-once guard
 
