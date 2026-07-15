@@ -50,6 +50,64 @@ export interface ListParams {
   type?: string;
 }
 
+class PaginationMetadataError extends Error {
+  constructor(requestedPage: number, detail: string) {
+    super(`Pagination page ${String(requestedPage)}: ${detail}`);
+  }
+}
+
+function describeMetadataValue(value: unknown): string {
+  if (typeof value === "number" || value === undefined) return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function validateRequestedPage(requestedPage: number): void {
+  if (!Number.isInteger(requestedPage) || requestedPage < 1) {
+    throw new PaginationMetadataError(
+      requestedPage,
+      `requested page must be a positive integer; received ${describeMetadataValue(requestedPage)}`,
+    );
+  }
+}
+
+function validatePage<T>(response: unknown, requestedPage: number): PaginatedResponse<T> {
+  validateRequestedPage(requestedPage);
+  if (response === null || typeof response !== "object" || Array.isArray(response)) {
+    throw new PaginationMetadataError(
+      requestedPage,
+      `response must be a non-null object; received ${describeMetadataValue(response)}`,
+    );
+  }
+
+  const page = response as Partial<PaginatedResponse<T>>;
+  if (!Array.isArray(page.items)) {
+    throw new PaginationMetadataError(
+      requestedPage,
+      `items must be an array; received ${describeMetadataValue(page.items)}`,
+    );
+  }
+  if (page.current_page !== requestedPage) {
+    throw new PaginationMetadataError(
+      requestedPage,
+      `current_page must equal requested page ${requestedPage}; received ${describeMetadataValue(page.current_page)}`,
+    );
+  }
+  if (
+    !Number.isInteger(page.total_pages) ||
+    (page.total_pages as number) < requestedPage
+  ) {
+    throw new PaginationMetadataError(
+      requestedPage,
+      `total_pages must be a positive integer at least ${requestedPage}; received ${describeMetadataValue(page.total_pages)}`,
+    );
+  }
+  return page as PaginatedResponse<T>;
+}
+
 export class BaseResource<T> {
   constructor(
     protected client: HttpClient,
@@ -135,15 +193,34 @@ export class BaseResource<T> {
   }
 
   async list(params?: ListParams): Promise<PaginatedResponse<T>> {
+    const requestedPage = params?.page ?? 1;
+    validateRequestedPage(requestedPage);
     const sortedParams = params ? Object.keys(params).sort().map(k => `${k}=${(params as Record<string, unknown>)[k]}`).join("&") : "";
     const cacheKey = this.cacheKey(`${this.basePath}:list:${sortedParams}`);
     const cached = cache.get<PaginatedResponse<T>>(cacheKey);
-    if (cached) return cached;
+    if (cached !== undefined) {
+      try {
+        return validatePage<T>(cached, requestedPage);
+      } catch (error) {
+        if (error instanceof PaginationMetadataError) {
+          cache.invalidateExact(cacheKey);
+        }
+        throw error;
+      }
+    }
 
     const gen = cache.generation;
     const result = await this.client.get<PaginatedResponse<T>>(this.basePath, params as Record<string, string | number>);
-    cache.setIfSameGeneration(cacheKey, result, gen, 120);
-    return result;
+    try {
+      const validated = validatePage<T>(result, requestedPage);
+      cache.setIfSameGeneration(cacheKey, validated, gen, 120);
+      return validated;
+    } catch (error) {
+      if (error instanceof PaginationMetadataError) {
+        cache.invalidateExact(cacheKey);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -177,38 +254,54 @@ export class BaseResource<T> {
     const allItems: T[] = [];
     let page = 1;
     let totalPages = 1;
+    let pinnedTotalPages: number | undefined;
     const deadline = Date.now() + 300_000; // 5 minute overall timeout
 
-    do {
-      if (Date.now() > deadline) {
-        throw new Error(
-          `${this.basePath}: pagination timed out after 5 minutes (${allItems.length} items loaded from ${page - 1} pages). ` +
-          `Use date filters to narrow the query.`
-        );
+    try {
+      do {
+        if (Date.now() > deadline) {
+          throw new Error(
+            `${this.basePath}: pagination timed out after 5 minutes (${allItems.length} items loaded from ${page - 1} pages). ` +
+            `Use date filters to narrow the query.`
+          );
+        }
+        if (page > maxPages) {
+          throw new Error(
+            `Data exceeds ${maxPages} pages (${allItems.length} items loaded). ` +
+            `Use date filters to narrow the query.`
+          );
+        }
+        const response = await this.list({ ...params, page });
+        if (pinnedTotalPages === undefined) {
+          pinnedTotalPages = response.total_pages;
+        } else if (response.total_pages !== pinnedTotalPages) {
+          throw new PaginationMetadataError(
+            page,
+            `total_pages changed from ${pinnedTotalPages} to ${describeMetadataValue(response.total_pages)}`,
+          );
+        }
+        allItems.push(...response.items);
+        if (allItems.length > maxItems) {
+          throw new Error(
+            `${this.basePath}: item count (${allItems.length}) exceeds limit of ${maxItems}. ` +
+            `Use date filters to narrow the query.`
+          );
+        }
+        totalPages = response.total_pages;
+        if (totalPages > 1 && page === 1) {
+          log("info", `${this.basePath}: fetching ${totalPages} pages...`);
+        }
+        if (totalPages > 1) {
+          await reportProgress(page - 1, totalPages);
+        }
+        page++;
+      } while (page <= totalPages);
+    } catch (error) {
+      if (error instanceof PaginationMetadataError) {
+        this.invalidateCache();
       }
-      if (page > maxPages) {
-        throw new Error(
-          `Data exceeds ${maxPages} pages (${allItems.length} items loaded). ` +
-          `Use date filters to narrow the query.`
-        );
-      }
-      const response = await this.list({ ...params, page });
-      allItems.push(...(response.items ?? []));
-      if (allItems.length > maxItems) {
-        throw new Error(
-          `${this.basePath}: item count (${allItems.length}) exceeds limit of ${maxItems}. ` +
-          `Use date filters to narrow the query.`
-        );
-      }
-      totalPages = response.total_pages;
-      if (totalPages > 1 && page === 1) {
-        log("info", `${this.basePath}: fetching ${totalPages} pages...`);
-      }
-      if (totalPages > 1) {
-        await reportProgress(page - 1, totalPages);
-      }
-      page++;
-    } while (page <= totalPages);
+      throw error;
+    }
 
     return allItems;
   }

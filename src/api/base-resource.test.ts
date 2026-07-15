@@ -3,6 +3,7 @@ import { BaseResource, cache } from "./base-resource.js";
 import type { PaginatedResponse, ApiResponse } from "../types/api.js";
 import { HttpError, type HttpClient } from "../http-client.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
+import { reportProgress } from "../progress.js";
 import { ClientsApi } from "./clients.api.js";
 import { ProductsApi } from "./products.api.js";
 import { JournalsApi } from "./journals.api.js";
@@ -36,9 +37,35 @@ function apiResponse(): ApiResponse {
   return { code: 200, messages: [] };
 }
 
+function pageCacheKey(page: number): string {
+  return `connection:0:/items:list:page=${String(page)}`;
+}
+
+const paginationSentinels = {
+  "connection:0:/items:list:": "default-page",
+  "connection:0:/items:list:page=1": "page-one",
+  "connection:0:/items:list:page=10": "page-ten",
+  "connection:0:/items:listAll": "aggregate",
+  "connection:0:/products:list:": "products",
+  "connection:1:/items:list:page=2": "other-connection",
+} as const;
+
+function seedPaginationSentinels(except?: string): void {
+  for (const [key, value] of Object.entries(paginationSentinels)) {
+    if (key !== except) cache.set(key, value);
+  }
+}
+
+function expectPaginationSentinels(except?: string): void {
+  for (const [key, value] of Object.entries(paginationSentinels)) {
+    if (key !== except) expect(cache.get(key)).toBe(value);
+  }
+}
+
 describe("BaseResource", () => {
   beforeEach(() => {
     cache.invalidate(); // clear all entries between tests
+    vi.mocked(reportProgress).mockReset().mockResolvedValue(undefined);
   });
 
   it("H06-A exposes the client connection fingerprint", () => {
@@ -77,7 +104,7 @@ describe("BaseResource", () => {
       const client = makeClient();
       const resource = new BaseResource<Item>(client, "/items");
       const page1 = paginated([{ id: 1, name: "a" }]);
-      const page2 = paginated([{ id: 2, name: "b" }]);
+      const page2 = paginated([{ id: 2, name: "b" }], 2, 2);
       vi.mocked(client.get).mockResolvedValueOnce(page1).mockResolvedValueOnce(page2);
 
       const r1 = await resource.list({ page: 1 });
@@ -91,6 +118,150 @@ describe("BaseResource", () => {
       const r1Again = await resource.list({ page: 1 });
       expect(r1Again.items[0].id).toBe(1);
       expect(client.get).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("M02 page validation", () => {
+    const responseCases = [
+      {
+        label: "null response",
+        requestedPage: 2,
+        response: null,
+        message: "Pagination page 2: response must be a non-null object; received null",
+      },
+      {
+        label: "primitive response",
+        requestedPage: 2,
+        response: 7,
+        message: "Pagination page 2: response must be a non-null object; received 7",
+      },
+      {
+        label: "array response",
+        requestedPage: 2,
+        response: [],
+        message: "Pagination page 2: response must be a non-null object; received []",
+      },
+      {
+        label: "missing items",
+        requestedPage: 2,
+        response: { current_page: 2, total_pages: 2 },
+        message: "Pagination page 2: items must be an array; received undefined",
+      },
+      {
+        label: "non-array items",
+        requestedPage: 2,
+        response: { current_page: 2, total_pages: 2, items: "not-an-array" },
+        message: "Pagination page 2: items must be an array; received \"not-an-array\"",
+      },
+      {
+        label: "mismatched current page",
+        requestedPage: 2,
+        response: { current_page: 1, total_pages: 2, items: [] },
+        message: "Pagination page 2: current_page must equal requested page 2; received 1",
+      },
+      {
+        label: "noninteger current page",
+        requestedPage: 2,
+        response: { current_page: 2.5, total_pages: 3, items: [] },
+        message: "Pagination page 2: current_page must equal requested page 2; received 2.5",
+      },
+      {
+        label: "zero total pages",
+        requestedPage: 1,
+        response: { current_page: 1, total_pages: 0, items: [] },
+        message: "Pagination page 1: total_pages must be a positive integer at least 1; received 0",
+      },
+      {
+        label: "total pages below requested page",
+        requestedPage: 2,
+        response: { current_page: 2, total_pages: 1, items: [] },
+        message: "Pagination page 2: total_pages must be a positive integer at least 2; received 1",
+      },
+      {
+        label: "fractional total pages",
+        requestedPage: 2,
+        response: { current_page: 2, total_pages: 2.5, items: [] },
+        message: "Pagination page 2: total_pages must be a positive integer at least 2; received 2.5",
+      },
+      {
+        label: "NaN total pages",
+        requestedPage: 2,
+        response: { current_page: 2, total_pages: Number.NaN, items: [] },
+        message: "Pagination page 2: total_pages must be a positive integer at least 2; received NaN",
+      },
+      {
+        label: "infinite total pages",
+        requestedPage: 2,
+        response: { current_page: 2, total_pages: Number.POSITIVE_INFINITY, items: [] },
+        message: "Pagination page 2: total_pages must be a positive integer at least 2; received Infinity",
+      },
+    ] as const;
+
+    it.each(responseCases)(
+      "M02 rejects a fresh $label and removes only its exact cache key",
+      async ({ requestedPage, response, message }) => {
+        const client = makeClient();
+        const resource = new BaseResource<Item>(client, "/items");
+        const exactKey = pageCacheKey(requestedPage);
+        seedPaginationSentinels(exactKey);
+        vi.mocked(client.get).mockResolvedValueOnce(response as PaginatedResponse<Item>);
+
+        const thrown = await resource.list({ page: requestedPage }).catch(error => error);
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown.constructor.name).toBe("PaginationMetadataError");
+        expect(thrown.message).toBe(message);
+        expect(client.get).toHaveBeenCalledTimes(1);
+        expect(cache.get(exactKey)).toBeUndefined();
+        expectPaginationSentinels(exactKey);
+      },
+    );
+
+    it.each(responseCases)(
+      "M02 rejects a cached $label and removes only its exact cache key",
+      async ({ requestedPage, response, message }) => {
+        const client = makeClient();
+        const resource = new BaseResource<Item>(client, "/items");
+        const exactKey = pageCacheKey(requestedPage);
+        seedPaginationSentinels(exactKey);
+        cache.set(exactKey, response);
+
+        const thrown = await resource.list({ page: requestedPage }).catch(error => error);
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown.constructor.name).toBe("PaginationMetadataError");
+        expect(thrown.message).toBe(message);
+        expect(client.get).not.toHaveBeenCalled();
+        expect(cache.get(exactKey)).toBeUndefined();
+        expectPaginationSentinels(exactKey);
+      },
+    );
+
+    it.each([
+      [0, "Pagination page 0: requested page must be a positive integer; received 0"],
+      [-1, "Pagination page -1: requested page must be a positive integer; received -1"],
+      [1.5, "Pagination page 1.5: requested page must be a positive integer; received 1.5"],
+      [Number.NaN, "Pagination page NaN: requested page must be a positive integer; received NaN"],
+      [Number.POSITIVE_INFINITY, "Pagination page Infinity: requested page must be a positive integer; received Infinity"],
+    ] as const)("M02 rejects requested page %s before cache or transport access", async (requestedPage, message) => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      const exactKey = pageCacheKey(requestedPage);
+      seedPaginationSentinels(exactKey);
+      const generation = cache.generation;
+      const cacheGetSpy = vi.spyOn(cache, "get");
+
+      const thrown = await resource.list({ page: requestedPage }).catch(error => error);
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown.constructor.name).toBe("PaginationMetadataError");
+      expect(thrown.message).toBe(message);
+      expect(client.get).not.toHaveBeenCalled();
+      expect(cache.generation).toBe(generation);
+      expect(cacheGetSpy).not.toHaveBeenCalled();
+      cacheGetSpy.mockRestore();
+      expect(cache.get(exactKey)).toBeUndefined();
+      expectPaginationSentinels(exactKey);
     });
   });
 
@@ -307,6 +478,217 @@ describe("BaseResource", () => {
       });
 
       await expect(resource.listAll(undefined, 5)).rejects.toThrow(/5 pages/);
+    });
+  });
+
+  describe("M02 traversal stability", () => {
+    const traversalCases = [
+      {
+        label: "shrinking total_pages",
+        firstTotal: 3,
+        secondPage: 2,
+        secondTotal: 2,
+        message: "Pagination page 2: total_pages changed from 3 to 2",
+        checksStableTotalBeforeItems: true,
+      },
+      {
+        label: "expanding total_pages",
+        firstTotal: 2,
+        secondPage: 2,
+        secondTotal: 3,
+        message: "Pagination page 2: total_pages changed from 2 to 3",
+        checksStableTotalBeforeItems: true,
+      },
+      {
+        label: "repeated current_page metadata",
+        firstTotal: 2,
+        secondPage: 1,
+        secondTotal: 2,
+        message: "Pagination page 2: current_page must equal requested page 2; received 1",
+        checksStableTotalBeforeItems: false,
+      },
+    ] as const;
+
+    const traversalModes = (["fresh", "cached"] as const).flatMap(mode =>
+      traversalCases.map(row => ({ mode, ...row })),
+    );
+
+    it.each(traversalModes)(
+      "M02 rejects $label during a $mode traversal before consuming the bad page and cleans only this resource",
+      async ({ mode, ...row }) => {
+        const client = makeClient();
+        const resource = new BaseResource<Item>(client, "/items");
+        const secondItems = [{ id: 2, name: "must-not-be-consumed" }];
+        const iterator = vi.spyOn(secondItems, Symbol.iterator);
+        const first = paginated([{ id: 1, name: "first" }], 1, row.firstTotal);
+        const second = paginated(secondItems, row.secondPage, row.secondTotal);
+        const third = paginated([{ id: 3, name: "third" }], 3, 3);
+        cache.set("connection:0:/items:listAll", "stale-aggregate");
+        cache.set("connection:0:/items:list:page=99", "stale-page");
+        cache.set("connection:0:/products:list:", "products");
+        cache.set("connection:1:/items:list:page=1", "other-connection");
+
+        if (mode === "cached") {
+          cache.set(pageCacheKey(1), first);
+          cache.set(pageCacheKey(2), second);
+          cache.set(pageCacheKey(3), third);
+        } else {
+          vi.mocked(client.get)
+            .mockResolvedValueOnce(first)
+            .mockResolvedValueOnce(second)
+            .mockResolvedValueOnce(third);
+        }
+        const invalidateSpy = vi.spyOn(cache, "invalidate");
+        invalidateSpy.mockClear();
+
+        const thrown = await resource.listAll().catch(error => error);
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown.constructor.name).toBe("PaginationMetadataError");
+        expect(thrown.message).toBe(row.message);
+        expect(client.get).toHaveBeenCalledTimes(mode === "fresh" ? 2 : 0);
+        if (row.checksStableTotalBeforeItems) expect(iterator).not.toHaveBeenCalled();
+        expect(invalidateSpy).toHaveBeenCalledTimes(1);
+        expect(invalidateSpy).toHaveBeenCalledWith("connection:0:/items");
+        expect(cache.get("connection:0:/items:listAll")).toBeUndefined();
+        expect(cache.get(pageCacheKey(1))).toBeUndefined();
+        expect(cache.get(pageCacheKey(2))).toBeUndefined();
+        expect(cache.get(pageCacheKey(3))).toBeUndefined();
+        expect(cache.get("connection:0:/items:list:page=99")).toBeUndefined();
+        expect(cache.get("connection:0:/products:list:")).toBe("products");
+        expect(cache.get("connection:1:/items:list:page=1")).toBe("other-connection");
+      },
+    );
+
+    it("M02 listAllCached does not write an aggregate after typed traversal failure", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      vi.mocked(client.get)
+        .mockResolvedValueOnce(paginated([{ id: 1, name: "first" }], 1, 2))
+        .mockResolvedValueOnce(paginated([{ id: 2, name: "second" }], 2, 3))
+        .mockResolvedValueOnce(paginated([{ id: 3, name: "third" }], 3, 3));
+      cache.set("connection:0:/products:list:", "products");
+      cache.set("connection:1:/items:list:page=1", "other-connection");
+
+      const thrown = await resource.listAllCached().catch(error => error);
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown.constructor.name).toBe("PaginationMetadataError");
+      expect(thrown.message).toBe("Pagination page 2: total_pages changed from 2 to 3");
+      expect(client.get).toHaveBeenCalledTimes(2);
+      expect(cache.get("connection:0:/items:listAll")).toBeUndefined();
+      expect(cache.get(pageCacheKey(1))).toBeUndefined();
+      expect(cache.get(pageCacheKey(2))).toBeUndefined();
+      expect(cache.get("connection:0:/products:list:")).toBe("products");
+      expect(cache.get("connection:1:/items:list:page=1")).toBe("other-connection");
+    });
+
+    function seedNegativeControlSentinels(): void {
+      cache.set("connection:0:/items:listAll", "aggregate", 600);
+      cache.set("connection:0:/items:list:page=99", "page-99", 600);
+      cache.set("connection:0:/items:42", "item-42", 600);
+      cache.set("connection:0:/products:list:", "products", 600);
+      cache.set("connection:1:/items:list:page=1", "other-connection", 600);
+    }
+
+    function expectNegativeControlSentinels(): void {
+      expect(cache.get("connection:0:/items:listAll")).toBe("aggregate");
+      expect(cache.get("connection:0:/items:list:page=99")).toBe("page-99");
+      expect(cache.get("connection:0:/items:42")).toBe("item-42");
+      expect(cache.get("connection:0:/products:list:")).toBe("products");
+      expect(cache.get("connection:1:/items:list:page=1")).toBe("other-connection");
+    }
+
+    it("M02 preserves raw upstream error identity and resource caches", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      const upstreamError = new Error("upstream unavailable");
+      seedNegativeControlSentinels();
+      vi.mocked(client.get).mockRejectedValueOnce(upstreamError);
+      const generation = cache.generation;
+
+      const thrown = await resource.listAll().catch(error => error);
+
+      expect(thrown).toBe(upstreamError);
+      expect(cache.generation).toBe(generation);
+      expectNegativeControlSentinels();
+    });
+
+    it("M02 preserves reportProgress error identity and resource caches", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      const progressError = new Error("progress channel closed");
+      seedNegativeControlSentinels();
+      vi.mocked(client.get).mockResolvedValueOnce(paginated([{ id: 1, name: "first" }], 1, 2));
+      vi.mocked(reportProgress).mockRejectedValueOnce(progressError);
+      const generation = cache.generation;
+
+      const thrown = await resource.listAll().catch(error => error);
+
+      expect(thrown).toBe(progressError);
+      expect(cache.generation).toBe(generation);
+      expectNegativeControlSentinels();
+      expect(cache.get(pageCacheKey(1))).toEqual(paginated([{ id: 1, name: "first" }], 1, 2));
+    });
+
+    it("M02 preserves caches on deadline timeout", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-07-15T12:00:00Z"));
+        const client = makeClient();
+        const resource = new BaseResource<Item>(client, "/items");
+        seedNegativeControlSentinels();
+        vi.mocked(client.get).mockImplementationOnce(async () => {
+          vi.advanceTimersByTime(300_001);
+          return paginated([{ id: 1, name: "first" }], 1, 2);
+        });
+        const generation = cache.generation;
+
+        const thrown = await resource.listAll().catch(error => error);
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown.message).toContain("pagination timed out after 5 minutes");
+        expect(cache.generation).toBe(generation);
+        expectNegativeControlSentinels();
+        expect(cache.get(pageCacheKey(1))).toBeDefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("M02 preserves caches on max-page breach", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      seedNegativeControlSentinels();
+      vi.mocked(client.get).mockResolvedValueOnce(paginated([{ id: 1, name: "first" }], 1, 2));
+      const generation = cache.generation;
+
+      const thrown = await resource.listAll(undefined, 1).catch(error => error);
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown.message).toContain("Data exceeds 1 pages");
+      expect(cache.generation).toBe(generation);
+      expectNegativeControlSentinels();
+      expect(cache.get(pageCacheKey(1))).toBeDefined();
+    });
+
+    it("M02 preserves caches on max-item breach", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      seedNegativeControlSentinels();
+      vi.mocked(client.get).mockResolvedValueOnce(paginated([
+        { id: 1, name: "first" },
+        { id: 2, name: "second" },
+      ]));
+      const generation = cache.generation;
+
+      const thrown = await resource.listAll(undefined, 200, 1).catch(error => error);
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown.message).toContain("item count (2) exceeds limit of 1");
+      expect(cache.generation).toBe(generation);
+      expectNegativeControlSentinels();
+      expect(cache.get(pageCacheKey(1))).toBeDefined();
     });
   });
 
