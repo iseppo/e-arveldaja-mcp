@@ -2188,202 +2188,135 @@ Expected: empty output. Do not begin M01 until the H14 row is complete and the w
 
 ### Task 7: M01 — Cache invalidation and audit metadata for indeterminate mutations
 
-**Files:**
-- Modify: `src/api/base-resource.ts:120-180`
+**Exact tracked scope (freeze before review):**
+- Modify: `src/api/base-resource.ts`
 - Modify: `src/api/base-resource.test.ts`
 - Create: `src/mutation-audit.ts`
 - Create: `src/mutation-audit.test.ts`
-- Modify: `src/audit-log.ts:30-65`
-- Modify: `src/index.ts:890-940`
+- Modify: `src/audit-log.ts`
+- Modify: `src/audit-log.test.ts`
+- Modify: `src/index.ts`
 
-**Interfaces:**
-- Consumes: `HttpError`, neutral `MutationIndeterminateError` from H03, and the invocation's captured connection snapshot.
-- Produces: `BaseResource.mutate<R>(operation, entityId, businessKey, affectedPatterns, request): Promise<R>`; create/update/delete/upload invalidate on success or ambiguity but not proven rejection.
-- Produces: audit action `MUTATION_INDETERMINATE`; the top-level tool wrapper writes it to the invocation's original connection before serializing the MCP error.
+**Contracts and boundaries:**
+- Add protected `BaseResource.mutate<R>(operation, entityId, businessKey, affectedPatterns, request)` and route inherited `create`, `update`, `delete`, `uploadDocument`, and `deleteDocument` through it.
+- On success, invalidate the supplied connection-scoped prefixes. On raw `HttpError.status === "network"`, invalidate them and throw one neutral `MutationIndeterminateError`. If the request already throws a structured indeterminate outcome, invalidate the deduplicated union of local and declared `affectedCaches`, then rethrow the same object without losing IDs, key, cause, or next action.
+- Numeric `HttpError` responses—including 400, 409, and 503—and unrelated errors are response-backed/definite for this helper: rethrow unchanged and do not evict caches.
+- Prefix `connection:0:/clients` must remove that namespace's object, list, and `listAll` entries while preserving unrelated resource prefixes and every other connection namespace.
+- Map all and only the six current `BaseResource` subclass paths to the existing singular audit vocabulary: `/clients -> client`, `/products -> product`, `/journals -> journal`, `/transactions -> transaction`, `/sale_invoices -> sale_invoice`, and `/purchase_invoices -> purchase_invoice`. Type-check values against exported `AuditEntityType`; an unknown path must not produce plural/untyped audit metadata.
+- Add `MUTATION_INDETERMINATE` to `AUDIT_ACTIONS` and to both `ACTION_LABELS` maps (Estonian and English), plus `export type AuditEntityType = z.infer<typeof AuditEntityType>`.
+- `auditMutationIndeterminate` first validates `error.entity` with `AuditEntityType.safeParse`. Unknown or plural structural entities are never persisted. For valid entities it records tool, action, singular entity/type and ID plus scalar Markdown-renderable details: `category`, `mutation_may_have_occurred`, `operation`, `business_key`, a deterministic comma-separated `affected_caches`, `cause_name`, `cause_message`, optional `cause_status`/`cause_method`/`cause_path`, and `next_action`. Do not pass the caches or cause as nested values because the current audit renderer skips complex objects.
+- Change `logAudit` to return `true` only after the append succeeds and `false` from its existing best-effort catch; existing callers may ignore the backward-compatible return. `auditMutationIndeterminate` returns the same boolean. This is the strict production persistence signal used by tests—do not add a test-only writer or make audit failure throw through normal callers.
+- Extract a small tested final-error seam `serializeToolMutationError`. It receives `toolName`, `error`, `trackMutation`, `snapshotIndex`, and connection names; only a tracked mutating indeterminate outcome with a valid entity and a resolvable non-empty original connection name is audited. Resolve the destination exclusively from `snapshotIndex`, never `connectionState.activeIndex`. An invalid/out-of-range snapshot skips persistence entirely. If the strict writer returns `false` or throws, emit one stable error log without raw cause data and still return `toolError(error)` for the original outcome.
+- Preserve specialized confirm/invalidate/deactivate/reactivate/deliver implementations. In particular, do not disturb H03's transaction-confirm recovery/cleanup state machine or H06's `BookingGuard` verification and structural ambiguity predicate. H06 compatibility is proven against the new structured inherited `JournalsApi.create`.
 
-- [ ] **Step 1: Write the failing regression**
+- [ ] **Step 1: Establish the clean baseline**
 
-```ts
-it("invalidates object and collection caches on an indeterminate update", async () => {
-  const client = makeClient();
-  const resource = new BaseResource<Item>(client, "/clients");
-  vi.mocked(client.get).mockResolvedValueOnce({ id: 5, name: "old" }).mockResolvedValueOnce({ id: 5, name: "fresh" });
-  await resource.get(5);
-  vi.mocked(client.patch).mockRejectedValueOnce(new HttpError("lost", "network", "PATCH", "/clients/5"));
-  await expect(resource.update(5, { name: "new" })).rejects.toMatchObject({ category: "mutation_indeterminate" });
-  expect(await resource.get(5)).toEqual({ id: 5, name: "fresh" });
-});
-
-it("keeps a proven rejection out of the indeterminate path", async () => {
-  const client = makeClient();
-  const resource = new BaseResource<Item>(client, "/clients");
-  const generation = cache.generation;
-  vi.mocked(client.patch).mockRejectedValueOnce(new HttpError("conflict", 409, "PATCH", "/clients/5"));
-  await expect(resource.update(5, { name: "new" })).rejects.toMatchObject({ status: 409 });
-  expect(cache.generation).toBe(generation);
-});
-
-it.each([
-  [ClientsApi, "/clients", "client"],
-  [ProductsApi, "/products", "product"],
-  [JournalsApi, "/journals", "journal"],
-  [TransactionsApi, "/transactions", "transaction"],
-  [SaleInvoicesApi, "/sale_invoices", "sale_invoice"],
-  [PurchaseInvoicesApi, "/purchase_invoices", "purchase_invoice"],
-] as const)("maps %s mutation ambiguity to the singular audit entity", async (Resource, path, entity) => {
-  const client = makeClient();
-  const resource = new Resource(client);
-  vi.mocked(client.patch).mockRejectedValueOnce(new HttpError("lost", "network", "PATCH", `${path}/5`));
-  await expect(resource.update(5, {})).rejects.toMatchObject({ entity, entityId: 5 });
-});
-```
-
-Import the six concrete API classes used by the table. This table is the contract that API resource paths are normalized to the existing singular `AUDIT_ENTITY_TYPES`, rather than leaking plural URL segments into audit records.
-
-```ts
-it("audits the original connection with the complete neutral outcome", () => {
-  const error = new MutationIndeterminateError({
-    operation: "update", entity: "purchase_invoice", entityId: 5, businessKey: "/purchase_invoices:5",
-    affectedCaches: ["/purchase_invoices"], cause: new HttpError("lost", "network", "PATCH", "/purchase_invoices/5"),
-    nextAction: "Freshly read purchase invoice 5.",
-  });
-  auditMutationIndeterminate("update_purchase_invoice", error, "original-company");
-  expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
-    tool: "update_purchase_invoice", action: "MUTATION_INDETERMINATE", entity_type: "purchase_invoice", entity_id: 5,
-    details: expect.objectContaining({ operation: "update", business_key: "/purchase_invoices:5", affected_caches: ["/purchase_invoices"] }),
-  }), { connectionName: "original-company" });
-});
-```
-
-- [ ] **Step 2: Prove red**
-
-Run: `npx vitest run src/api/base-resource.test.ts src/mutation-audit.test.ts -t "indeterminate update|proven rejection|singular audit entity|original connection"`
-
-Expected: FAIL because the failed request leaves the old cached object and exposes no recovery metadata.
-
-- [ ] **Step 3: Centralize mutation outcome handling**
-
-```ts
-private async mutate<R>(
-  operation: MutationOperation,
-  entityId: number | undefined,
-  businessKey: string,
-  affectedPatterns: string[],
-  request: () => Promise<R>,
-): Promise<R> {
-  try {
-    const result = await request();
-    for (const pattern of affectedPatterns) this.invalidateCache(pattern);
-    return result;
-  } catch (error) {
-    if (error instanceof HttpError && error.status === "network") {
-      for (const pattern of affectedPatterns) this.invalidateCache(pattern);
-      throw new MutationIndeterminateError({
-        operation, entity: auditEntityForResourcePath(this.basePath), entityId, businessKey,
-        affectedCaches: [...affectedPatterns], cause: error,
-        nextAction: `Perform a fresh read for ${businessKey} before another mutation.`,
-      });
-    }
-    throw error;
-  }
-}
-
-async update(id: number, data: Partial<T>): Promise<ApiResponse> {
-  return this.mutate("update", id, `${this.basePath}:${id}`, [this.basePath],
-    () => this.client.patch(`${this.basePath}/${id}`, data));
-}
-
-async create(data: Partial<T>): Promise<ApiResponse> {
-  return this.mutate("create", undefined, `${this.basePath}:create`, [this.basePath],
-    () => this.client.post(this.basePath, data));
-}
-
-async delete(id: number): Promise<ApiResponse> {
-  return this.mutate("delete", id, `${this.basePath}:${id}`, [this.basePath],
-    () => this.client.delete(`${this.basePath}/${id}`));
-}
-
-async uploadDocument(id: number, name: string, contents: string): Promise<ApiResponse> {
-  return this.mutate("upload", id, `${this.basePath}:${id}:document_user`, [this.basePath],
-    () => this.client.request(`${this.basePath}/${id}/document_user`, { method: "PUT", body: { name, contents } }));
-}
-
-async deleteDocument(id: number): Promise<ApiResponse> {
-  return this.mutate("delete", id, `${this.basePath}:${id}:document_user`, [this.basePath],
-    () => this.client.delete(`${this.basePath}/${id}/document_user`));
-}
-```
-
-Define the mapping next to `BaseResource` and type-check every output against the audit vocabulary from `audit-log.ts`:
-
-```ts
-import type { AuditEntityType } from "../audit-log.js";
-
-const RESOURCE_AUDIT_ENTITY_BY_PATH = {
-  "/clients": "client",
-  "/products": "product",
-  "/journals": "journal",
-  "/transactions": "transaction",
-  "/sale_invoices": "sale_invoice",
-  "/purchase_invoices": "purchase_invoice",
-} as const satisfies Record<string, AuditEntityType>;
-
-function auditEntityForResourcePath(path: string): AuditEntityType {
-  const entity = (RESOURCE_AUDIT_ENTITY_BY_PATH as Readonly<Record<string, AuditEntityType | undefined>>)[path];
-  if (!entity) throw new Error(`No audit entity mapping for resource path ${path}`);
-  return entity;
-}
-```
-
-In `audit-log.ts`, export the inferred type alongside the Zod schema without changing the runtime export:
-
-```ts
-export type AuditEntityType = z.infer<typeof AuditEntityType>;
-```
-
-Add `"MUTATION_INDETERMINATE"` to `AUDIT_ACTIONS`. Create `src/mutation-audit.ts`:
-
-```ts
-import { logAudit } from "./audit-log.js";
-import type { MutationIndeterminateError } from "./mutation-outcome.js";
-
-export function auditMutationIndeterminate(tool: string, error: MutationIndeterminateError, connectionName?: string): void {
-  logAudit({
-    tool, action: "MUTATION_INDETERMINATE", entity_type: error.entity, entity_id: error.entityId,
-    summary: `${error.operation} ${error.businessKey} has an indeterminate outcome; inspect before retrying.`,
-    details: {
-      operation: error.operation, business_key: error.businessKey,
-      affected_caches: [...error.affectedCaches], cause: error.cause, next_action: error.nextAction,
-      mutation_may_have_occurred: true,
-    },
-  }, connectionName ? { connectionName } : undefined);
-}
-```
-
-In `index.ts`'s `wrapToolHandler` catch, before `ConnectionSwitchInterruptedError` handling and before `toolError(error)`, add:
-
-```ts
-if (isMutationIndeterminate(error) && trackMutation) {
-  const originalConnectionName = allConfigs[snapshot.index]?.name;
-  auditMutationIndeterminate(toolName, error,
-    originalConnectionName ?? undefined);
-}
-```
-
-The lookup must use `snapshot.index`, never `connectionState.activeIndex`. Keep H06's `ambiguousMutation` predicate structural so this BaseResource outcome is recovered exactly like a raw network create.
-
-- [ ] **Step 4: Prove green and review**
-
-Run: `npx vitest run src/api/base-resource.test.ts src/api/transactions.api.test.ts src/mutation-audit.test.ts src/audit-log.test.ts && npm run build && git diff --check`
-
-Expected: ambiguity invalidates and carries every neutral field; 4xx rejection remains unwrapped; H06 recognizes the structured create; original-connection audit contains the operation, IDs, key, caches, cause, and next action. Write `.omc/reviews/M01.diff` and obtain both verdicts.
-
-- [ ] **Step 5: Commit M01**
+Run before source edits:
 
 ```bash
-git add src/api/base-resource.ts src/api/base-resource.test.ts src/mutation-audit.ts src/mutation-audit.test.ts src/audit-log.ts src/index.ts
+git status --short
+npx vitest run src/api/base-resource.test.ts src/api/transactions.api.test.ts src/booking-guard.test.ts src/audit-log.test.ts src/mutation-outcome.test.ts src/tool-error.test.ts
+```
+
+Expected: empty status and all selected tests pass. Record exact counts. Stop if the baseline is not clean.
+
+- [ ] **Step 2: Write RED-A cache/outcome tests**
+
+In `src/api/base-resource.test.ts`, add named M01 tests for:
+
+1. A raw network `update(5)` with `/clients:list:...`, `/clients:listAll`, and `/clients:5` primed; all three are evicted, while `/products` and `connection:1:/clients` remain.
+2. A five-row inherited-method matrix covering create/update/delete/upload/delete-document. Assert exactly one request, correct operation, ID omission/presence, exact business key, `affectedCaches: [basePath]`, singular entity, complete serialized cause, and no unrelated eviction.
+3. Numeric 400, 409, and 503 errors plus an ordinary `Error`; assert identity-preserving rejection, no wrapping, and no cache eviction.
+4. An already-created `MutationIndeterminateError` with declared caches `[/clients, /products, /products]` while the local path is `/clients`; assert the deduplicated union invalidates exactly two prefixes (including the exact cache-generation delta), both prefixes are evicted, and the exact original object/fields survive.
+5. A six-class table importing `ClientsApi`, `ProductsApi`, `JournalsApi`, `TransactionsApi`, `SaleInvoicesApi`, and `PurchaseInvoicesApi`; inherited `update(5)` ambiguity must yield the exact singular entity/path contract.
+6. Existing success-path and namespace-isolation regressions remain green.
+
+Use production paths for ambiguity cases; the generic `/items` fixture has no audit entity mapping.
+
+- [ ] **Step 3: Write RED-B audit/wrapper tests**
+
+Create `src/mutation-audit.test.ts` and add focused tests that:
+
+1. Assert the direct audit entry contains every neutral field in the flattened scalar contract and is routed with `{ connectionName: "original-company" }`.
+2. Call the actual serialization seam with `snapshotIndex: 0` and names `["original-company", "currently-active-company"]`; assert only the original company is audited and the returned MCP payload retains every neutral field.
+3. Assert `trackMutation: false` emits no audit for both read-only and setup-mode call-site cases.
+4. Assert a numeric `HttpError` emits no indeterminate audit.
+5. Make the strict audit dependency return `false`, then throw in a separate row; each asserts one safe error log and the exact original MCP error payload still returns.
+6. Assert an out-of-range snapshot index does not call the writer at all rather than falling back to the active connection.
+7. Throw a structural indeterminate object whose `entity` is plural or unknown; assert `AuditEntityType.safeParse` blocks persistence while the exact original MCP payload is preserved.
+
+In `src/audit-log.test.ts`, assert the new Zod action parses and render it once with `EARVELDAJA_AUDIT_LANG=et` and once with `en`; both must show the chosen localized label, not the raw token. Add a real temporary-log write/read assertion through production `logAudit`/`getAuditLogByConnection` proving every flattened M01 recovery field survives persisted Markdown. Also force the append path to fail and assert `logAudit` returns `false`; a successful write returns `true`. Restore environment and filesystem state.
+
+- [ ] **Step 4: Prove honest RED**
+
+Run:
+
+```bash
+npx vitest run src/api/base-resource.test.ts -t "M01"
+npx vitest run src/mutation-audit.test.ts src/audit-log.test.ts -t "M01|MUTATION_INDETERMINATE"
+```
+
+Expected RED-A: assertion failures show stale caches/raw network errors and absent metadata. Expected RED-B: after minimal compile wiring, assertion failures show missing routing, failure containment, and labels. An import/parse error alone is not sufficient RED evidence.
+
+- [ ] **Step 5: Implement minimal GREEN**
+
+In `src/api/base-resource.ts`:
+
+- Define the six-entry typed path map.
+- In `mutate`, success invalidates `affectedPatterns`; structured ambiguity invalidates the deduplicated local/declared union and rethrows by identity; raw network invalidates local patterns and constructs the neutral error; everything else rethrows unchanged.
+- Use exact inherited-method metadata:
+
+| Method | Operation | Entity ID | Business key |
+|---|---|---:|---|
+| `create` | `create` | omitted | `${basePath}:create` |
+| `update(id)` | `update` | `id` | `${basePath}:${id}` |
+| `delete(id)` | `delete` | `id` | `${basePath}:${id}` |
+| `uploadDocument(id)` | `upload` | `id` | `${basePath}:${id}:document_user` |
+| `deleteDocument(id)` | `delete` | `id` | `${basePath}:${id}:document_user` |
+
+In `src/audit-log.ts`, add the typed action and both labels, make `logAudit` return the strict boolean persistence signal, and keep its best-effort non-throwing contract. In `src/mutation-audit.ts`, implement runtime entity validation, flattened recovery details, the direct boolean writer, and the serialization seam. In `src/index.ts`, keep connection-switch/debug/setup handling intact and replace only the final `toolError(error)` path with the seam, passing `snapshot.index` and the immutable config-name list.
+
+- [ ] **Step 6: Prove focused GREEN and H03/H06 compatibility**
+
+Run in order:
+
+```bash
+npx vitest run src/api/base-resource.test.ts -t "M01"
+npx vitest run src/mutation-audit.test.ts src/audit-log.test.ts -t "M01|MUTATION_INDETERMINATE"
+npx vitest run src/api/base-resource.test.ts src/api/transactions.api.test.ts src/booking-guard.test.ts src/mutation-outcome.test.ts src/tool-error.test.ts src/mutation-audit.test.ts src/audit-log.test.ts
+npx vitest run src/booking-guard.test.ts -t "recovers a found structured ambiguous create|makes a structured ambiguous create"
+npm run build
+git diff --check
+```
+
+Expected: both RED groups pass; H03 neutral fields and cleanup semantics remain intact; H06 recognizes structured create ambiguity, verifies once, and never duplicates; build and diff check pass.
+
+- [ ] **Step 7: Run full verification**
+
+```bash
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+```
+
+Expected: full unit, integration (only documented environment skips), release, and diff gates pass. Record exact counts and skip reasons.
+
+- [ ] **Step 8: Freeze exact scope and run ordered reviews**
+
+Require `git status --short` to contain exactly the seven tracked paths above and `git diff --cached --name-only` to be empty. Copy the real index to a temporary index, add exactly the seven paths there, and write non-empty `.omc/reviews/M01.diff`. Verify the temporary-index name list equals the allowlist, the artifact byte-matches its diff, and the real index stays empty.
+
+Dispatch a fresh SPEC reviewer with the M01 spec row, this task, RED/GREEN evidence, and frozen artifact. Require exactly `SPEC COMPLIANCE: APPROVED`. After that only, dispatch a different fresh QUALITY reviewer and require exactly `CODE QUALITY: APPROVED`. Any code change invalidates both verdicts: rerun all gates, rebuild the artifact, then restart SPEC followed by QUALITY.
+
+- [ ] **Step 9: Commit and close the ledger gate**
+
+```bash
+git add src/api/base-resource.ts src/api/base-resource.test.ts src/mutation-audit.ts src/mutation-audit.test.ts src/audit-log.ts src/audit-log.test.ts src/index.ts
+git diff --cached --name-only
 git commit -m "fix(M01): invalidate caches on ambiguous mutations"
 ```
+
+Expected staged names: exactly the seven-path allowlist. Append one M01 row to `.omc/full-codebase-remediation-ledger.md` with baseline, RED-A, RED-B, focused/build/full/integration/release/diff results, ordered review verdicts, and commit hash. Require final `git status --short` empty. Do not begin M02 until the row is complete and the worktree is clean.
 
 ### Task 8: M02 — Fail closed on malformed pagination
 
