@@ -196,19 +196,38 @@ Append the H01 ledger row only after the local `npx --yes node@18` smoke reports
 - [ ] **Step 1: Write the failing regression**
 
 ```ts
-it("falls back to JSON when TOON silently changes keys or scalar types", () => {
-  const source = { "01": "1", nested: [{ enabled: "false", value: null }] };
+import { decode } from "@toon-format/toon";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@toon-format/toon", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@toon-format/toon")>();
+  return { ...actual, decode: vi.fn(actual.decode) };
+});
+
+const mockedDecode = vi.mocked(decode);
+
+it("falls back to JSON when TOON decodes to a different value without throwing", () => {
+  const source = { count: 3, status: "ok" };
+  mockedDecode.mockReturnValueOnce({ count: "3", status: "ok" });
+
   const encoded = toMcpJson(source);
-  expect(parseMcpResponse(encoded)).toEqual(source);
-  expect(encoded.trimStart().startsWith("{")).toBe(true);
+  expect(encoded).toBe(JSON.stringify(source));
+});
+
+it("keeps TOON when TOON decoding is lossless", () => {
+  const source = { count: 3, status: "ok" };
+  const encoded = toMcpJson(source);
+
+  expect(encoded.trimStart().startsWith("{")).toBe(false);
+  expect(decode(encoded)).toEqual(source);
 });
 ```
 
 - [ ] **Step 2: Prove red**
 
-Run: `npx vitest run src/mcp-json.test.ts -t "silently changes keys"`
+Run: `npx vitest run src/mcp-json.test.ts -t "decodes to a different value"`
 
-Expected: FAIL because `decode(encoded)` succeeds but differs from `source`, so non-JSON TOON is returned.
+Expected: FAIL because the mocked `decode(encoded)` succeeds with a scalar-type mismatch, but the current implementation ignores the decoded value and returns non-JSON TOON. The partial mock delegates to the real codec for all calls except this one deliberate mismatch. The installed `@toon-format/toon@2.3.0` currently round-trips the original sample losslessly, so that sample must not be forced to JSON.
 
 - [ ] **Step 3: Implement exact decoded-value comparison**
 
@@ -225,7 +244,8 @@ export function jsonDeepEqual(left: unknown, right: unknown): boolean {
   const leftKeys = Object.keys(leftRecord);
   const rightKeys = Object.keys(rightRecord);
   return leftKeys.length === rightKeys.length &&
-    leftKeys.every((key, index) => key === rightKeys[index] && jsonDeepEqual(leftRecord[key], rightRecord[key]));
+    leftKeys.every((key) => Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+      jsonDeepEqual(leftRecord[key], rightRecord[key]));
 }
 
 const encoded = encode(stripped);
