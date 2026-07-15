@@ -3170,66 +3170,275 @@ Expected: empty output. Do not begin H17 or any later finding until H16 is commi
 
 ### Task 12: H17 — Preserve distribution currency and EUR values
 
-**Files:**
-- Modify: `src/tools/lightyear-investments.ts:449-475,1350-1450`
+**Exact tracked scope (freeze before review):**
+- Modify: `src/tools/lightyear-investments.ts`
 - Modify: `src/tools/lightyear-investments.test.ts`
 
-**Interfaces:**
-- Consumes: H16 `FxRateOrientation` and conversion pairing.
-- Produces: `LightyearDistribution` with `currency`, `gross_eur`, `fee_eur`, `net_eur`, `tax_eur`, and `fx_provenance`.
+Do not change CSV parsing, shared money utilities, registered tool names/input schemas, workflow Markdown/mirrors, accounting defaults, `BookingGuard`, audit infrastructure, trade journal calculations, capital-gains matching, portfolio calculations, or any H18/M26 behavior. H17 may add one separate read-only trade-reservation pre-pass solely to prevent a distribution from reusing or laundering trade FX evidence; it must not change H16's `TradeExtractionResult`, which trades H16 accepts, their warnings, their consumed set, or their postings.
 
-- [ ] **Step 1: Write the failing regression**
+**Authoritative contracts:**
+- `AccountStatementRow.gross_amount`, `net_amount`, `tax_amount`, and `fee` are denominated in that row's `ccy`. Preserve the normalized uppercase currency and the four original nominal values on every extracted distribution. Never label a foreign nominal value as EUR and never use it in an EUR journal posting, summary total, or audit amount.
+- Export `LightyearDistribution` with explicit nullable EUR/provenance/review fields. A valid EUR row has rounded EUR values equal to its source values, null FX provenance, and null review reason. A valid foreign row has all four EUR values, one proven FX provenance object, and null review reason. Any unresolved/malformed row keeps its nominal evidence but has all four EUR values and provenance null plus one stable `FxReviewReason`.
+- Before FX matching, normalize `ccy` with `trim().toUpperCase()` and require it to be non-empty. Require finite positive `gross_amount`; finite non-negative `net_amount`, `tax_amount`, and `fee`; and `gross_amount === net_amount + tax_amount + fee` within `0.01`. A foreign row additionally requires positive net cash because its authoritative EUR value must come from a cash conversion. Invalid source arithmetic is review-required even for EUR; it is never repaired from a subset of fields.
+- Before either trade or distribution extraction, run a separate complete `collectTradeReservedConversionRefs(rows)` pre-pass over all statement Buy/Sell and Conversion rows. Build the entire reservation relation before returning a set; never derive it from H16's successful `consumedConversionRefs`, mutation timing, or row iteration order. Define `statementDay(value)` as `parseLightyearDate(value).split(/[T ]/)[0]`, accepted only when it is a real calendar date in exact `YYYY-MM-DD` form (UTC year/month/day round-trip); use that same helper on both trade and conversion rows. A Buy/Sell row has usable reservation evidence when `statementDay` succeeds and `abs(gross_amount)` is finite and positive. A non-empty non-EUR currency narrows reservations to conversion rows with that currency; an empty/whitespace trade currency is malformed but conservatively reserves every same-day non-EUR conversion reference whose finite positive absolute gross agrees within `0.01`; an explicit EUR trade reserves none. Quantity, net, fee, reference text, conversion cardinality/sign/rate, and eventual H16 acceptance do not weaken otherwise usable ownership evidence. An invalid/missing day or non-positive/non-finite gross supplies no matchable ownership evidence and reserves nothing. For each usable trade, reserve **all** conversion references having at least one matching conversion row; thus valid, cash-equivalent, malformed-net/fee, ambiguous, and later-rejected trade candidates cannot be claimed by a distribution. `parse_lightyear_statement` and `book_lightyear_distributions` compute and pass this immutable set independently of `extractTrades`; H16's consumed set remains unchanged.
+- Build each foreign distribution's `rawCandidateRefs` from every conversion reference having at least one row in the distribution currency, with the same successful `statementDay`, and absolute conversion **gross** equal to the distribution's positive nominal `net_amount` within `0.01`. Gross is the pre-conversion cash consumed; do not match against distribution gross income or select by input/reference order. `availableCandidateRefs = rawCandidateRefs - tradeReservedConversionRefs`. A sole reserved raw candidate therefore becomes an ownership failure with useful warning context; reserved references do not participate in distribution assignment.
+- Build the complete distribution-to-available-reference candidate graph before consuming anything. A distribution must have exactly one available reference, and that reference must be available to exactly one distribution. Zero available candidates, multiple available candidates, or one available reference claimed by multiple distributions make every affected distribution review-required and consume no conversion row. This prevents greedy CSV-order-dependent assignment. A non-reserved unique candidate may still be used when an unrelated reserved raw candidate also matched; only the available graph controls assignment.
+- A uniquely assigned reference is valid only when it contains exactly two rows total: one EUR row and one row in the distribution currency; both rows are on the distribution date; the EUR net is positive; and the foreign net is negative. Reuse H16's conversion gross/net/sign/finite/fee validation and `resolveFxPair(abs(eurNet), abs(foreignNet), rates)`. Missing/duplicate/third rows, wrong date/currency/flow, missing/invalid/contradictory/ambiguous rates, or amount disagreement stop for review. Canonicalize `fx_provenance.conversion_row_indexes` as `[eurRow.row_index, foreignRow.row_index]`, regardless of CSV row ordering.
+- H17 does not invent an accounting allocation for an FX conversion fee. A non-zero fee on either conversion row uses the existing `conversion_fee_conflict` review reason, leaves both rows unconsumed, and creates no journal. Distribution-row `fee` is distinct and is converted like tax/income. Supporting a separately posted conversion fee would require a new reviewed contract and is outside this finding.
+- On a proven zero-conversion-fee pair, `net_eur` is the rounded absolute EUR conversion net and is authoritative. Convert nominal tax and distribution fee with H16's proven multiply/divide orientation, rejecting non-finite results. Set `gross_eur = roundMoney(net_eur + tax_eur + fee_eur)` so the journal balances, and require it to agree within `0.01` with direct conversion of nominal gross. Any component/reconciliation contradiction stops for review. Add the conversion reference and its two row indexes to distribution provenance/consumed output only after every check succeeds.
+- Use stable mapped reasons only. Add `distribution_currency_missing` and `distribution_amount_conflict` to `FxReviewCode`/`FX_REVIEW_MESSAGES`; reuse H16 rate/pair/conversion codes for shared failures. No mapped message contains raw CSV content. Emit one warning per reviewed distribution in the stable form `<wrapped distribution ref>: distribution review [<code>] <mapped message>`. Append ` Conversion <wrapped conversion ref>.` when the distribution's raw candidate set contains exactly one reference, including a shared-owner or structurally invalid candidate; omit candidate context for zero or multiple references. Wrap both reference contexts with `wrapUntrustedOcr`; do not broaden this task into M26's general imported-field output hardening.
+- Choose one review reason deterministically with this precedence: (1) blank source currency -> `distribution_currency_missing`; (2) invalid nominal distribution finite/sign/reconciliation evidence -> `distribution_amount_conflict`; (3) zero/multiple/shared/reserved candidate ownership, wrong pair cardinality, missing/duplicate EUR or foreign side, third/other-currency row, or pair row on the wrong date -> `invalid_conversion_pair`; (4) zero or non-finite **absolute conversion-net magnitude** on either side -> `invalid_net_amount`; (5) conversion gross/net/sign/fee arithmetic or signed direction failure (anything other than EUR net positive and foreign net negative) -> `conversion_amount_conflict`; (6) any non-zero conversion fee after otherwise valid conversion arithmetic -> `conversion_fee_conflict`; (7) the exact `resolveFxPair` failure (`missing_rate`, `invalid_rate`, `ambiguous_orientation`, `ambiguous_rate`, or `contradictory_rate`); (8) non-finite component conversion or converted gross/component reconciliation failure -> `distribution_amount_conflict`. A valid foreign conversion net is signed negative but has a positive absolute magnitude and must never be classified as `invalid_net_amount` merely because of its sign. Validate/classify the complete candidate evidence before selecting this precedence, so CSV/rate order and exception timing cannot choose the public reason. Source-row defects outrank candidate defects; graph/cardinality defects outrank pair/rate defects; pair amount/flow and fee defects outrank rate defects.
+- In `parse_lightyear_statement`, include successful distribution conversion row indexes in `handledRowIndexes`; failed/ambiguous distribution conversion rows remain unhandled. Keep H16 visibility categories distinct: conversion rows belonging to a valid ordinary trade are handled by that trade, conversion rows belonging to a successfully extracted cash-equivalent trade stay in `ignoredRowIndexes`, and conversion rows only reserved by a rejected/ambiguous trade remain unhandled. Do not assert that every distribution reservation makes its conversion rows unhandled. Add distribution warnings to `warnings` and set `needs_review` when any distribution has a review reason.
+- The parse summary's exact structured distribution object is `{ count, bookable_count, review_count, total_eur }`, where `count = distributions.length`, `bookable_count = distributions.filter(isBookableDistribution).length`, `review_count = count - bookable_count`, and `total_eur = roundMoney(sum(bookable gross_eur))`; unresolved nominal values contribute zero only to this explicitly partial total and are disclosed by `review_count`. Preserve the existing top-level trade/deposit/withdrawal/cash/unhandled keys. With `include_rows=true`, render exactly `| Date | Ref | Ticker | CCY | Gross CCY | Tax CCY | Fee CCY | Net CCY | Gross EUR | Tax EUR | Fee EUR | Net EUR | Status | FX |`. Date is the parsed date; Ref is wrapped; Ticker is the existing ticker or `—`; CCY is normalized; all nominal and present EUR monetary cells use `.toFixed(2)` and absent EUR cells use `—`; Status is `bookable` or `manual_review:<code>`; and FX is `source_eur`, `<rate> <orientation> via <wrapped conversion ref>`, or `—`. The distribution and conversion references in this table are wrapped; existing trade/cash sections remain unchanged.
+- `isBookableDistribution` is true only when `fx_review_reason === null`, all four EUR fields are finite/non-negative with positive `gross_eur`, their sum reconciles, and either `currency === "EUR" && fx_provenance === null` or `currency !== "EUR" && fx_provenance !== null`. Every parser and booking count/filter uses this one predicate; nullable fields are not independently reinterpreted at call sites.
+- In `book_lightyear_distributions`, first partition `bookable` and `reviewed` before account requirements, duplicate lookup, or mutation. If `bookable.length === 0`, return the complete manual-review payload immediately without `getAccounts`, `BookingGuard.load`/journal `listAll`, journal create, or audit, even when the caller supplied optional overrides. If any bookable row exists, preserve caller-input compatibility: validate every caller-provided `reward_account`, `tax_account`, and `fee_account` override even when no bookable row uses that override. Demand/validate a **default** optional account only when a bookable consumer needs it: default reward account only for a bookable Reward, missing tax account errors only for bookable `tax_eur > 0`, and default fee account only for bookable `fee_eur > 0`. Validate broker/income as existing booking requires, then load `BookingGuard` and perform duplicate checks over bookable rows.
+- Reviewed booking rows have exactly `{ reference, ticker, date, currency, gross_amount, tax_amount, fee, net_amount, gross_eur: null, tax_eur: null, fee_eur: null, net_eur: null, fx_provenance: null, status: "manual_review", review_reason: { code, message } }`. A bookable non-duplicate result has the same source/EUR/provenance fields, omits `review_reason`, and has status `would_create`, `created`, or the existing create-race `duplicate`. Top-level formulas are exact: `total_distributions = all.length`, `bookable_distributions = bookable.length`, `review_required = reviewed.length`, `new_entries = bookable non-duplicates after snapshot/in-file dedupe`, and `duplicates_skipped = bookable snapshot/in-file duplicates`; `results` contains every reviewed row plus every bookable non-snapshot/in-file-duplicate row in original source-row order, while `duplicate` create-race outcomes remain present as today. Existing pre-detected duplicates remain summarized by `duplicates_skipped` and absent from `results`. `warnings` is omitted when extraction warnings are empty and otherwise equals the source-order H17 warning list. The all-reviewed early response therefore has mode, the five zero/proven count fields (`total_distributions` remains the source count), manual-review results, warnings, and the existing note, but no duplicate/guard side effects. Reviewed rows never reach `BookingGuard`, create a journal, or emit audit.
+- Every distribution journal remains `cl_currencies_id: "EUR"` and uses only `net_eur`, `tax_eur`, `fee_eur`, and `gross_eur`: debit broker/tax/fee and credit the existing reward-or-income account. Preserve titles, dimensions, project status, duplicate recovery, and audit timing. Dry-run/created results expose source currency and nominal amounts alongside the four EUR values and provenance. The CREATED audit summary uses `gross_eur`; details retain source currency/nominal evidence, EUR values, FX provenance, and exact postings. No dry-run, duplicate, or review result writes an audit event.
+- Successful EUR dividends/interest/rewards remain backward-compatible: same accounts, postings, journal title/key, result status, and duplicate counts, with only additive currency/EUR/provenance fields. A stray conversion beside an EUR distribution is never consumed. H18 gains tolerance and M26 imported-string hardening remain untouched.
 
-```ts
-it("books a USD distribution with authoritative EUR amounts", async () => {
-  const result = await runDistributionFixture({ currency: "USD", gross: 100, net: 85, tax: 15, eurPerForeign: 0.9 });
-  expect(result.postings).toEqual(expect.arrayContaining([
-    expect.objectContaining({ type: "D", amount: 76.5 }),
-    expect.objectContaining({ type: "D", amount: 13.5 }),
-    expect.objectContaining({ type: "C", amount: 90 }),
-  ]));
-  expect(result.journal.cl_currencies_id).toBe("EUR");
-});
-```
-
-- [ ] **Step 2: Prove red**
-
-Run: `npx vitest run src/tools/lightyear-investments.test.ts -t "USD distribution"`
-
-Expected: FAIL because nominal 100/85/15 are treated as EUR and currency is discarded.
-
-- [ ] **Step 3: Convert at extraction and require provenance**
+Use these exact shapes:
 
 ```ts
-interface LightyearDistribution {
-  row_index: number; date: string; reference: string; type: AccountStatementRow["type"];
-  ticker: string; isin: string; currency: string;
-  gross_amount: number; fee: number; net_amount: number; tax_amount: number;
-  gross_eur?: number; fee_eur?: number; net_eur?: number; tax_eur?: number;
-  fx_provenance?: { rate: number; orientation: FxRateOrientation; conversion_reference: string };
+export interface DistributionFxProvenance {
+  rate: number;
+  orientation: FxRateOrientation;
+  conversion_reference: string;
+  conversion_row_indexes: [number, number];
 }
 
-if (dist.currency !== "EUR" && !dist.fx_provenance) {
-  results.push({ ...dist, status: "manual_review", reason: "Missing authoritative EUR conversion" });
-  continue;
+export interface LightyearDistribution {
+  row_index: number;
+  date: string;
+  reference: string;
+  type: AccountStatementRow["type"];
+  ticker: string;
+  isin: string;
+  currency: string;
+  gross_amount: number;
+  fee: number;
+  net_amount: number;
+  tax_amount: number;
+  gross_eur: number | null;
+  fee_eur: number | null;
+  net_eur: number | null;
+  tax_eur: number | null;
+  fx_provenance: DistributionFxProvenance | null;
+  fx_review_reason: FxReviewReason | null;
 }
-const grossEur = dist.currency === "EUR" ? dist.gross_amount : dist.gross_eur!;
-const netEur = dist.currency === "EUR" ? dist.net_amount : dist.net_eur!;
-const taxEur = dist.currency === "EUR" ? dist.tax_amount : dist.tax_eur!;
+
+interface DistributionExtractionResult {
+  distributions: LightyearDistribution[];
+  warnings: string[];
+  consumedConversionRefs: Set<string>;
+}
 ```
 
-- [ ] **Step 4: Prove green and review**
+`distribution_currency_missing` maps to `"The distribution has no explicit source currency."`; `distribution_amount_conflict` maps to `"The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent."` Every failure uses `FX_REVIEW_MESSAGES[code]`, not an ad hoc string.
 
-Run: `npx vitest run src/tools/lightyear-investments.test.ts && npm run build && git diff --check`
+- [ ] **Step 1: Record the clean H17 baseline**
 
-Expected: EUR posting values reconcile and missing conversion creates no journal. Package the listed files and obtain independent `APPROVED`.
-
-- [ ] **Step 5: Commit H17**
+Before editing either implementation path, require that the H16 commit and ledger are complete and the worktree/index are clean. Run:
 
 ```bash
+git status --short
+npx vitest run src/tools/lightyear-investments.test.ts
+npm run build
+git diff --check
+```
+
+Plan-time evidence on 2026-07-16 is **87/87** tests passing in the Lightyear file, with build/diff check passing and empty status. Re-record actual execution-time counts for the ledger. If the baseline differs, diagnose it before adding H17 tests.
+
+- [ ] **Step 2: Add the successful USD/EUR provenance RED tests**
+
+Tag every new test with `H17`. Add a coherent USD dividend fixture with one foreign-to-EUR zero-fee conversion pair on the same date:
+
+```ts
+const rows = [
+  ["01/03/2026 12:00:00", "CN-H17", "", "", "Conversion", "0", "USD", "0", "-85.00", "0.9", "0", "-85.00", "0"],
+  ["01/03/2026 12:00:00", "CN-H17", "", "", "Conversion", "0", "EUR", "0", "76.50", "1.111111111111", "0", "76.50", "0"],
+  ["01/03/2026 10:00:00", "DIV-H17", "USCO", "US0000000001", "Dividend", "0", "USD", "0", "100.00", "0", "0", "85.00", "15.00"],
+];
+```
+
+Through `parse_lightyear_statement`, assert exact summary `{ count: 1, bookable_count: 1, review_count: 0, total_eur: 90 }`; the include-rows table shows normalized `USD`, nominal gross/net/tax/fee `100.00/85.00/15.00/0.00`, EUR gross/net/tax/fee `90.00/76.50/13.50/0.00`, status `bookable`, and FX `0.9 eur_per_foreign via <wrapped CN-H17>`; both conversion rows are handled rather than unhandled; and no warning appears. The parser does not expose structured `fx_provenance` or numeric conversion row indexes, so do not assert those fields on this surface. Repeat with only the reciprocal divide rate present and assert the corresponding table FX cell to prove H16 orientation reuse.
+
+Through `book_lightyear_distributions` in dry-run and execute modes, provide `tax_account` and assert exactly these EUR postings: D broker `76.50`, D tax `13.50`, C income `90.00`; journal currency EUR; source nominal values remain visible separately; result and CREATED-audit provenance have the canonical `[eurRow.row_index, foreignRow.row_index]` tuple; and the audit summary says `90 EUR`, never `100 EUR`. Assert one create and one CREATED audit only on execute.
+
+Add an EUR dividend/reward negative-control matrix with no conversion rows. Assert identical legacy postings/accounts/duplicate behavior, additive EUR fields equal the rounded nominal values, null FX provenance/review reason, and no H17 warning. Also prove a same-date stray conversion is not consumed by an EUR distribution.
+
+- [ ] **Step 3: Add matching, arithmetic, and fail-closed RED matrices**
+
+Add handler-level H17 tests for each finite, parseable failure below. Every distribution-owned candidate failure must assert the exact precedence-selected reason code/message, all four EUR fields/provenance null, `needs_review: true`, stable wrapped warning context, its unconsumed conversion rows in `unhandled`, and zero journal/audit calls under `dry_run: false`. Reservation tests use the separate visibility expectations below instead of falsely requiring every reserved conversion to be unhandled. Keep non-finite CSV tokens as separate parser negative controls: `parseNumber` must reject them before extraction and before any journal/audit call rather than weakening CSV parsing merely to manufacture an H17 review result.
+
+1. blank/whitespace currency; zero/negative gross; negative net/tax/fee; nominal gross versus net+tax+fee disagreement; and foreign net zero; plus separate `NaN`/`Infinity`/overflow-token parser rejections with zero mutation/audit;
+2. no conversion candidate; wrong date; wrong foreign currency; or foreign conversion gross differing from distribution net by more than `0.01`;
+3. two matching references for one distribution, one reference claimed by two otherwise matching distributions, duplicate EUR row, duplicate foreign row, missing side, or any third row under the reference;
+4. same-sign flow, reversed flow (EUR out/foreign in), conversion gross/net/fee inconsistency, missing/both-missing/invalid/contradictory rates, ambiguous orientation, and ambiguous best rate;
+5. a non-zero conversion fee on either side, proving H17 stops rather than hiding the fee in income or booking a nominal amount;
+6. component conversion overflow or converted gross disagreement beyond one cent; and
+7. a conversion matched by the complete reservation pre-pass to a valid ordinary foreign trade, a cash-equivalent foreign trade, a trade with valid day/currency/gross but malformed net/fee, an ambiguous trade with two matching references, and a blank-currency malformed trade that broad-reserves matching non-EUR references. Prove every matching reference is reserved before extraction and cannot be reused by a distribution. Also prove explicit EUR trades reserve none and finite but unusable trade evidence (invalid day or non-positive gross) reserves none; non-finite gross remains a separate parser rejection before the pre-pass.
+
+For those reservation tests, assert the conversion-row visibility contract precisely: a successfully extracted ordinary trade's conversion rows are handled; a successfully extracted cash-equivalent trade's conversion rows are ignored; a malformed or ambiguous rejected trade's reserved-but-unconsumed conversion rows are unhandled. The trade row itself keeps H16's existing handled/review semantics. Permute trade rows before/after distributions and conversions, reverse conversion rows, and reverse ambiguous candidate-reference order; the reservation set, distribution review reasons, and visibility category must not change.
+
+Add deterministic distribution order tests through dry-run booking results and execute audit provenance: reverse conversion-row order, rate order, distribution-row order, and candidate-reference insertion order. Valid unique evidence yields the same rate/orientation, EUR amounts, postings, and canonical tuple **semantics**; each run asserts tuple element 0 equals that run's EUR row index and element 1 its foreign row index. Do not compare raw numeric row indexes across reordered CSV fixtures because row indexes legitimately change. The parser assertions remain limited to its summary/table/handled surfaces. Ambiguous shared evidence reviews all affected distributions and consumes none.
+
+Add a table-driven multi-defect precedence matrix: source currency+amount -> `distribution_currency_missing`; source amount+candidate ambiguity -> `distribution_amount_conflict`; candidate ambiguity+bad pair/rate -> `invalid_conversion_pair`; zero absolute conversion-net magnitude+bad sign/fee/rate -> `invalid_net_amount`; non-finite absolute conversion-net magnitude is defensively the same code but CSV non-finite tokens still reject at parsing; non-zero signed nets with bad direction/arithmetic+fee/rate -> `conversion_amount_conflict`; valid arithmetic with non-zero conversion fee+bad rate -> `conversion_fee_conflict`; and valid pair with the resolver's own rate defects -> its exact H16 code. Include the valid negative foreign net as a control that proceeds past `invalid_net_amount`. Reverse rows/rates in each parseable case and require the same full `{ code, message }`.
+
+Add parse/output tests proving:
+- unresolved foreign gross is excluded from `total_eur` while count/review_count disclose the omission;
+- a mixed valid EUR + unresolved USD statement totals only the EUR/proven foreign value and remains `needs_review`;
+- the structured distribution summary equals the exact four-key/count formula and the include-rows table uses the exact 14 columns/status/FX formats above, labels nominal CCY and EUR separately, and never renders foreign `100.00` under an EUR heading;
+- successfully consumed distribution conversions close `cash_reconciliation`, whereas rejected pairs remain visible as unhandled conversion rows; and
+- warning references containing embedded instruction/newline text occur only inside `UNTRUSTED_OCR` delimiters. Keep ticker/ISIN/title hardening assertions for M26, not H17.
+
+Add booking-output tests for the exact manual-review object and all five top-level formulas in an all-reviewed, mixed, duplicate, dry-run, execute, and create-race-duplicate batch. In the all-reviewed case assert zero `getAccounts`, journal `listAll`, create, and audit calls, including when invalid optional overrides were supplied. In mixed batches, prove a reviewed Reward/tax/fee row alone does not demand or validate a default optional account; a missing/default reward, tax, or fee account is demanded only when a bookable consumer needs it. Separately pass each caller-provided reward/tax/fee override while another row is bookable but does not use it, and assert that the override is still validated (invalid override returns account validation failure; valid override proceeds). Assert result order follows original non-pre-deduped rows and pre-detected duplicates remain absent from results.
+
+- [ ] **Step 4: Prove honest RED against the H16 production baseline**
+
+Run:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts -t "H17"
+```
+
+Expected: old production fails the intended assertions because it discards `ccy`, does not pair/consume distribution conversions, sums nominal foreign gross as EUR, books USD nominal amounts 1:1 into an EUR journal, and has no manual-review/provenance contract. The declared EUR behavior and no-audit dry-run controls may pass and must be reported separately. Zero selected tests, compile-only failures, or tests failing before they reach the vulnerable parser/booking path are not an acceptable RED. Record the exact intended-failure/control counts and inspect every failure before editing production.
+
+- [ ] **Step 5: Implement deterministic extraction and atomic FX provenance**
+
+In `src/tools/lightyear-investments.ts`, extend the H16 reason union/map and add the exact H17 interfaces. Add the separate complete `collectTradeReservedConversionRefs(rows)` pre-pass with the exact usable/malformed evidence rules above; do not derive it from or add it to `TradeExtractionResult`. Replace the array-returning `extractDistributions` with a `DistributionExtractionResult` helper that accepts the immutable reserved set, validates nominal rows, constructs the complete distribution/reference candidate graph, rejects non-bijective matches, applies the exact multi-defect precedence, validates a unique two-row pair, calls H16 validation/resolution, rejects conversion fees, calculates/reconciles the four EUR amounts, and assigns/consumes provenance atomically with `[EUR index, foreign index]` ordering.
+
+Use pure helpers for distribution validation, pair flow, safe foreign conversion, and one stable wrapped warning. Never mutate a caller-owned reserved set: create a local consumed set and add a reference only after full success. Preserve source-row output order for compatibility, while candidate decisions come from the complete graph and remain independent of CSV order.
+
+Update the statement parser to compute/pass reservations before extraction, merge H17 warnings, include proven distribution conversion indexes internally in handled cash, preserve the handled/ignored/unhandled trade conversion categories, emit the exact four-key summary, and render the exact 14-column nominal/EUR/status/FX table without inventing a structured parser provenance/index surface. Update distribution booking to compute the same reservation set, partition bookable/reviewed before any account/guard work, short-circuit an all-reviewed batch without API reads, validate every caller-provided optional override when any bookable row exists while demanding defaults only for bookable consumers, emit the exact result/count formulas, expose canonical provenance in booking results/audit, and build postings/results/audit exclusively from proven EUR fields. Narrow every nullable field before arithmetic; no non-null assertion may be the only bookability guard.
+
+- [ ] **Step 6: Prove focused GREEN and inspect nominal/EUR sinks**
+
+Run in order:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts -t "H17"
+npx vitest run src/tools/lightyear-investments.test.ts
+npm run build
+git diff --check
+rg -n "amount: dist\.(net_amount|tax_amount|fee|gross_amount)|s \+ d\.gross_amount" src/tools/lightyear-investments.ts
+rg -n "extractDistributions\(|reservedConversionRefs|fx_provenance|gross_eur|net_eur|tax_eur|fee_eur" src/tools/lightyear-investments.ts
+```
+
+Expected: all H17 and all legacy Lightyear tests pass, build/diff check pass, the first search has no journal-posting or EUR-summary nominal sink, and the second lists every extraction/parser/booking/audit consumer for manual nullable/provenance inspection. Source nominal values may remain in output and reconciliation code, but never in an EUR-labeled monetary sink. Confirm H16 focused tests still pass unchanged:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts -t "H16"
+```
+
+- [ ] **Step 7: Full repository verification**
+
+Run freshly and retain exact counts/output:
+
+```bash
+npm run validate:release
+npm test
+npm run test:integration
+git diff --check
+```
+
+Require release metadata, full unit, and integration PASS with only documented baseline skips. Diagnose any failure; do not expand beyond the exact two-file H17 scope without stopping for plan review. In particular, do not fix H18 gains tolerance or M26 general imported-string output while touching this file.
+
+- [ ] **Step 8: Freeze the exact two-file artifact without touching the real index**
+
+Prove exact tracked scope:
+
+```bash
+H17_EXPECTED="$(mktemp)"
+H17_ACTUAL="$(mktemp)"
+printf '%s\n' \
+  src/tools/lightyear-investments.test.ts \
+  src/tools/lightyear-investments.ts | sort -u > "$H17_EXPECTED"
+{
+  git diff --name-only HEAD
+  git ls-files --others --exclude-standard
+} | sort -u > "$H17_ACTUAL"
+diff -u "$H17_EXPECTED" "$H17_ACTUAL"
+rm -f "$H17_EXPECTED" "$H17_ACTUAL"
+git diff --cached --quiet
+```
+
+Expected: comparison and real-index check exit 0 silently. Package with a copied temporary index:
+
+```bash
+mkdir -p .omc/reviews
+H17_INDEX="$(mktemp)"
+cp "$(git rev-parse --git-path index)" "$H17_INDEX"
+GIT_INDEX_FILE="$H17_INDEX" git add -- \
+  src/tools/lightyear-investments.ts \
+  src/tools/lightyear-investments.test.ts
+GIT_INDEX_FILE="$H17_INDEX" git diff --cached --binary --output=/tmp/H17.frozen.diff
+GIT_INDEX_FILE="$H17_INDEX" git diff --cached --check
+GIT_INDEX_FILE="$H17_INDEX" git diff --cached --name-only
+rm -f "$H17_INDEX"
+git diff --cached --quiet
+```
+
+Expected: temporary staged names are exactly the two H17 paths, the artifact is non-empty, and the real index remains empty. Use `apply_patch` to create/replace ignored `.omc/reviews/H17.diff` with the exact `/tmp/H17.frozen.diff` bytes, then require:
+
+```bash
+test -s .omc/reviews/H17.diff
+cmp /tmp/H17.frozen.diff .omc/reviews/H17.diff
+```
+
+- [ ] **Step 9: Independent SPEC review**
+
+Give a fresh non-author reviewer the H17 spec row, this complete Task 12, `.omc/reviews/H17.diff`, baseline output, honest RED matrix/counts, and all GREEN/full verification. Require exactly:
+
+```text
+SPEC COMPLIANCE: APPROVED
+```
+
+The SPEC pass must audit exact two-file scope; source currency/nominal preservation; EUR negative controls; nominal and converted arithmetic validation; raw-versus-available complete graph-based date/currency/net-cash matching; the separate complete trade reservation pre-pass and its usable/blank-currency/malformed evidence rules; row-order independence; valid-trade handled, cash-equivalent ignored, and rejected-trade unhandled conversion visibility; canonical `[EUR, foreign]` provenance tuple semantics in booking results/audit without false parser-surface or cross-reorder numeric-index assertions; zero/non-finite absolute net magnitude versus signed-flow reason mapping and the exact case-to-code/multi-defect precedence; two-row cardinality and flow; H16 rate/orientation reuse; conversion-fee stop; component/gross reconciliation; atomic consumption/provenance; missing/malformed/ambiguous fail-closed behavior; no foreign nominal EUR sink; the exact four-key parse summary and 14-column table; exact booking manual-review object, five count formulas, result membership/order, and duplicate semantics; partition before account/guard work; all-reviewed zero-account/guard/list/create/audit calls even with overrides; every caller-provided optional override validated in any batch with a bookable row; default optional accounts demanded only by bookable consumers; exact journal postings; audit currency/provenance; stable wrapped warnings; and no H18/M26 drift.
+
+- [ ] **Step 10: Independent QUALITY review**
+
+Only after SPEC approval, give a different fresh non-author reviewer the same frozen artifact and evidence. Require exactly:
+
+```text
+CODE QUALITY: APPROVED
+```
+
+The QUALITY pass must inspect finite guards before arithmetic; normalized currencies/dates; a side-effect-free complete reservation pre-pass independent of H16 consumption; full raw/available candidate graph and row-order independence; non-mutating reserved sets; candidate cardinality instead of `.find()`; deterministic defect classification before precedence selection; absolute-net magnitude checks separated from signed-flow validation; H16 discriminated-union narrowing; zero-fee policy; cent rounding/reconciliation; canonical provenance tuple ordering only on booking/audit surfaces; atomic nullable EUR/provenance assignment; correct handled/ignored/unhandled conversion indexes; the single bookability predicate; no unsafe non-null arithmetic; partition and all-reviewed early return before account/guard work; caller-provided override validation preserved in mixed/bookable batches while default-account demand is driven only by bookable rows; exact result/count ordering under dedupe/create races; no raw nominal values in EUR postings/summaries/audit amounts; stable mapped messages and wrapped reference context; EUR/duplicate compatibility; focused fixtures that fail old production; and exact scope. Any rejection or source/test edit invalidates both approvals: rerun Steps 6-8, overwrite the artifact, then restart SPEC followed by QUALITY with fresh reviewers.
+
+- [ ] **Step 11: Final primary verification, exact staging, and commit**
+
+After both approvals, rerun:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+cmp /tmp/H17.frozen.diff .omc/reviews/H17.diff
+```
+
+Repeat the Step 8 exact-scope comparison. Only then run:
+
+```bash
+git status --short
 git add src/tools/lightyear-investments.ts src/tools/lightyear-investments.test.ts
+git diff --cached --name-only
 git commit -m "fix(H17): retain distribution currency provenance"
 ```
+
+Expected: staged names are exactly the two reviewed H17 paths. Do not stage ignored review/ledger artifacts and do not push.
+
+- [ ] **Step 12: Ledger and clean sequential handoff**
+
+Use `apply_patch` to append one H17 row to `.omc/full-codebase-remediation-ledger.md` containing the baseline count, intended RED failures and negative controls, focused H16/H17 compatibility, build/full/integration/release/diff evidence, byte-matching artifact evidence, ordered fresh SPEC and QUALITY verdicts, and the commit hash. Then run:
+
+```bash
+git status --short
+```
+
+Expected: empty output. Do not begin H18 or any later finding until H17 is committed, recorded, and clean.
 
 ### Task 13: H18 — Tolerant but bounded gains matching
 
