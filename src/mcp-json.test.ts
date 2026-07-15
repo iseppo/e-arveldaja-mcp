@@ -1,4 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { decode } from "@toon-format/toon";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@toon-format/toon", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@toon-format/toon")>();
+  return { ...actual, decode: vi.fn(actual.decode) };
+});
+
+const mockedDecode = vi.mocked(decode);
+
 import {
   capUntrustedText,
   MAX_UNTRUSTED_TEXT_CHARS,
@@ -131,6 +140,22 @@ describe("toMcpJson", () => {
         ref_number: null,
       },
     });
+  });
+
+  it("falls back to JSON when TOON decodes to a different value without throwing", () => {
+    const source = { count: 3, status: "ok" };
+    mockedDecode.mockReturnValueOnce({ count: "3", status: "ok" });
+
+    const encoded = toMcpJson(source);
+    expect(encoded).toBe(JSON.stringify(source));
+  });
+
+  it("keeps TOON when TOON decoding is lossless", () => {
+    const source = { count: 3, status: "ok" };
+    const encoded = toMcpJson(source);
+
+    expect(encoded.trimStart().startsWith("{")).toBe(false);
+    expect(decode(encoded)).toEqual(source);
   });
 
   it("falls back to JSON when TOON cannot round-trip sandboxed multiline text", () => {
