@@ -4005,52 +4005,139 @@ Expected: clean worktree and the M19 commit at `HEAD`. Do not begin Task 15/M20 
 
 **Interfaces:**
 - Consumes: journal document number, effective date, title.
-- Produces: `isYearEndClosingJournal(journal, year?): boolean` shared by close discovery and P&L filtering.
+- Produces the canonical exported helper `isYearEndClosingJournal(journal: Pick<Journal, "document_number" | "effective_date" | "title">, year?: number): boolean`, shared by close discovery and period P&L filtering.
+- Preserves: deletion and duplicate-list filtering in `findExistingYearEndCloseJournals`; registered/deleted/period filtering in `computeAllBalances`; every balance, statement, warning, proposal, and execution calculation outside the detector substitution.
 
-- [ ] **Step 1: Write the failing regression**
+- [ ] **Step 1: Verify the committed M19 boundary and record the annual baseline**
 
-```ts
-it("excludes a title-only legacy year-end close from P&L", async () => {
-  const report = await buildAnnualReportData(apiWithJournal({
-    effective_date: "2025-12-31", title: "Aasta lõppkanne 2025", document_number: undefined,
-    postings: expenseClosePostings(100),
-  }), 2025);
-  expect(readProfit(report)).toBe(0);
-});
-```
-
-- [ ] **Step 2: Prove red**
-
-Run: `npx vitest run src/tools/annual-report.test.ts -t "title-only legacy"`
-
-Expected: FAIL because P&L filtering only checks `YECL-` document numbers.
-
-- [ ] **Step 3: Reuse one detector**
-
-```ts
-export function isYearEndClosingJournal(journal: Pick<Journal, "document_number" | "effective_date" | "title">, year?: number): boolean {
-  if (journal.document_number?.startsWith("YECL-")) return true;
-  const effectiveYear = year ?? Number(journal.effective_date?.slice(0, 4));
-  if (journal.effective_date !== `${effectiveYear}-12-31`) return false;
-  const title = journal.title?.toLocaleLowerCase("et") ?? "";
-  return title.includes(`aasta lõppkanne ${effectiveYear}`) || title.includes(`year-end close ${effectiveYear}`);
-}
-```
-
-Use this function in `findExistingYearEndCloseJournals` and the `journalFilter` passed to period P&L.
-
-- [ ] **Step 4: Prove green and review**
-
-Run: `npx vitest run src/tools/annual-report.test.ts && npm run build && git diff --check`
-
-Expected: legacy close excluded once; ordinary 31 December journals remain. Package the listed files and obtain independent `APPROVED`.
-
-- [ ] **Step 5: Commit M20**
+Run:
 
 ```bash
+git status --short
+git log -1 --oneline
+npx vitest run src/tools/annual-report.test.ts
+```
+
+Expected: the worktree is clean with committed M19 at `HEAD`, the annual-report file passes its existing **16 tests**, and there is no M20 diff. Record the baseline in the ignored remediation ledger only after M20 is committed. Task 15 owns exactly the two paths listed above; do not touch M21.
+
+- [ ] **Step 2: RED — add the public detector/consumer contract matrix**
+
+Do not add a named import for a helper that does not exist yet, because that would turn every selected case into a module-load failure. Add `import * as annualReport from "./annual-report.js"` (or reuse an existing namespace import) while retaining the working imports/call sites. In the helper-contract test, first assert `expect((annualReport as any).isYearEndClosingJournal).toBeTypeOf("function")`; only after that assertion may the test execute the table vectors through the dynamically obtained function. The pre-fix missing export is therefore one intentional helper-availability RED rather than a fixture/import/setup failure.
+
+Add these ten narrowly named tests. Use balanced revenue/expense close postings whose P&L effect is observable and the captured public `prepare_year_end_close` handler whose `existing_year_end_close_journals` result is observable. Every journal passed to prepare must have an explicit unique ID, `registered: true`, and balanced postings. In tests spanning both consumers, make the prepare assertions before the P&L assertions and use `expect.soft` or one aggregate tuple assertion so one failure cannot prevent the remaining consumer contract from executing:
+
+1. `M20 excludes an Estonian title-only year-end close from P&L`;
+2. `M20 excludes an English title-only year-end close from P&L`;
+3. `M20 prepare detects Estonian and English title-only closes as existing` (both variants are returned by exact unique ID and `execution_status.can_execute` is false; a generated proposal is allowed and must not be asserted absent);
+4. `M20 preserves canonical YECL document compatibility in P&L and prepare` (`YECL-2025` on `2025-12-31`);
+5. `M20 keeps wrong-year document and title journals in P&L and out of prepare duplicates` (`effective_date: "2025-12-31"` with `YECL-2024` and matching 2024 title while preparing/reporting 2025);
+6. `M20 keeps midyear canonical-looking journals in P&L and out of prepare duplicates` (`YECL-2025` on `2025-06-30`);
+7. `M20 keeps malformed and prefix-only YECL documents in P&L and out of prepare duplicates` (`YECL-2025-extra` and `YECL-`);
+8. `M20 keeps an ordinary 31 December journal in P&L and out of prepare duplicates`;
+9. `M20 exports a strict detector for invalid or missing date and year inputs` (first prove helper availability, then table-test missing/invalid dates, non-strict date prefixes, invalid explicit years, and valid inferred/explicit controls);
+10. `M20 recognition has no double effect or journal-order dependence` (include one uniquely identified journal whose exact `YECL-2025` document and matching title overlap both recognition routes; forward and reverse orders must return that ID exactly once from prepare, exclude its postings exactly once from P&L, and yield the same expected values alongside title-only and ordinary journals).
+
+For helper-table assertions, an explicitly supplied `year` is authoritative: if it is not an integer in the inclusive range 1000–9999, return false immediately and never fall back to the journal date. When `year` is omitted, obtain the target year only from a strict `YYYY-` effective-date prefix and reject a missing or invalid date. Every recognized journal must then have the exact effective date `${targetYear}-12-31`. The canonical document identity is only exact `YECL-${targetYear}`. If it is absent, normalize the title with `toLocaleLowerCase("et-EE")` and accept only containment of the exact phrase `aasta lõppkanne ${targetYear}` or `year-end close ${targetYear}`. A wrong-year document/title, malformed or prefix-only `YECL`, invalid/missing date/year, midyear date, and ordinary 31 December journal are false.
+
+Run:
+
+```bash
+npx vitest run src/tools/annual-report.test.ts -t "M20"
+```
+
+Expected before production edits: exactly **3 tests PASS** — `M20 prepare detects Estonian and English title-only closes as existing`, `M20 preserves canonical YECL document compatibility in P&L and prepare`, and `M20 keeps an ordinary 31 December journal in P&L and out of prepare duplicates` — and exactly **7 tests RED** — the Estonian P&L case, English P&L case, wrong-year case, midyear case, malformed/prefix-only case, order/double-effect case, and helper-availability/table case. Record every exact test name and assertion failure. The helper case must fail only at the explicit `toBeTypeOf("function")` assertion; fixture/import/setup failures are not acceptable RED evidence.
+
+- [ ] **Step 3: GREEN — export one strict, year-aware detector**
+
+In `src/tools/annual-report.ts`, export the helper with exactly this public type boundary:
+
+```ts
+export function isYearEndClosingJournal(
+  journal: Pick<Journal, "document_number" | "effective_date" | "title">,
+  year?: number,
+): boolean
+```
+
+Implement the contract without truthy coercions or loose prefix matching:
+
+- when `year` is supplied, return false immediately unless it is an integer from 1000 through 9999; never fall back from an invalid explicit year to the journal date;
+- when `year` is omitted, choose `targetYear` only from a strict `^\d{4}-` effective-date prefix and reject missing or invalid dates;
+- return false unless `effective_date` is exactly `${targetYear}-12-31`;
+- accept the document route only when `document_number` exactly equals `YECL-${targetYear}`;
+- otherwise normalize the title with `toLocaleLowerCase("et-EE")` and accept only containment of the exact year-specific Estonian or English phrase;
+- do not inspect deletion, registration, postings, or report periods inside this identity helper.
+
+Replace the duplicated identity logic inside `findExistingYearEndCloseJournals` with `isYearEndClosingJournal(journal, year)`, retaining its caller-owned deleted filtering. Pass the report year to the P&L consumer as `journalFilter: (journal) => !isYearEndClosingJournal(journal, year)`. Registered/deleted/period filtering stays in `computeAllBalances`; do not alter any other calculation.
+
+- [ ] **Step 4: Prove the focused GREEN contract and compatibility**
+
+Run:
+
+```bash
+npx vitest run src/tools/annual-report.test.ts -t "M20"
+npx vitest run src/tools/annual-report.test.ts
+```
+
+Expected: all **10 M20 tests PASS** and the complete annual-report file passes **26 tests**. Both title languages are excluded from P&L and detected by prepare; the canonical document remains compatible; wrong-year, midyear, malformed/prefix-only, invalid/missing, and ordinary controls remain included in P&L and absent from duplicate discovery; an invalid explicit year returns false without date fallback; and the overlapping document-plus-title journal is listed/excluded once with identical forward/reverse results.
+
+- [ ] **Step 5: Inspect the exact two-file scope and create the frozen artifact**
+
+Run:
+
+```bash
+git diff --name-only
+git diff --check
+git diff -- src/tools/annual-report.ts src/tools/annual-report.test.ts
+mkdir -p .omc/reviews
+git diff -- src/tools/annual-report.ts src/tools/annual-report.test.ts > /tmp/M20.frozen.diff
+cp /tmp/M20.frozen.diff .omc/reviews/M20.diff
+cmp -s /tmp/M20.frozen.diff .omc/reviews/M20.diff
+wc -c .omc/reviews/M20.diff
+sha256sum .omc/reviews/M20.diff
+```
+
+Expected: changed names are exactly `src/tools/annual-report.ts` and `src/tools/annual-report.test.ts`; the patch contains only the exported detector, its two consumers, and the public regression/control tests; diff-check and artifact comparison pass. Record artifact bytes and SHA-256. No M21 path or behavior may appear.
+
+- [ ] **Step 6: Run affected, full, build, integration, and release verification**
+
+Run:
+
+```bash
+npx vitest run src/tools/annual-report.test.ts
+npm test
+npm run build
+npm run test:integration
+npm run validate:release
+git diff --check
+```
+
+Expected: affected and full unit suites pass, build passes, integration passes with only documented skips, release validation passes, and the diff is clean. No balance, warning, proposal, execution, deletion, registration, or period-filter regression is permitted.
+
+- [ ] **Step 7: Obtain ordered independent review of the frozen artifact**
+
+First delegate a fresh spec-compliance reviewer with only the M20 requirements, committed M19 base, and `.omc/reviews/M20.diff`; require `SPEC COMPLIANCE: APPROVED` or actionable findings. It must verify invalid explicit-year fail-closed behavior with no fallback, strict inferred target-year/date derivation, exact document equality, `et-EE` normalization and both exact title phrases, both consumers, explicit unique/registered/balanced prepare fixtures, caller-owned deletion/registration/period filtering, all negative controls, exactly-once overlapping-route behavior, order independence, exact two-file scope, and absence of M21 drift.
+
+Only after spec approval, delegate a different fresh code-quality reviewer and require `CODE QUALITY APPROVED` or findings. It must inspect malformed input handling, locale normalization, accidental loose matching, duplicated logic, public-test strength, calculation drift, and test order dependence. Author and reviewers must be separate contexts. If either review finds a defect, add or correct the failing test first where applicable, reproduce RED, make the smallest fix, rerun Steps 4–6, regenerate the artifact, and restart both reviews in order.
+
+- [ ] **Step 8: Re-verify artifact identity, commit M20, ledger it, and stop cleanly**
+
+Run the Step 6 verification again after final approval, then:
+
+```bash
+git diff -- src/tools/annual-report.ts src/tools/annual-report.test.ts > /tmp/M20.live.diff
+cmp -s /tmp/M20.live.diff .omc/reviews/M20.diff
+git status --short
 git add src/tools/annual-report.ts src/tools/annual-report.test.ts
+git diff --cached --name-only
+git diff --cached --check
+git diff --cached -- src/tools/annual-report.ts src/tools/annual-report.test.ts > /tmp/M20.staged.diff
+cmp -s /tmp/M20.staged.diff .omc/reviews/M20.diff
 git commit -m "fix(M20): unify year-end close detection"
 ```
+
+Expected: live, reviewed, and staged diffs are byte-identical; staged names are exactly the two M20 paths; commit succeeds. Use `apply_patch` to append one ignored-ledger M20 row containing the 16-test baseline, exact 3-PASS/7-RED names and messages (including the bounded helper-availability RED), 10/10 GREEN and 26-test affected result, public P&L/prepare proofs for both title languages and canonical compatibility, invalid-explicit-year no-fallback proof, all negative controls, overlapping-route exactly-once and forward/reverse order proof, full/build/integration/release/diff results, artifact bytes/SHA, ordered independent verdicts, exact two-file/no-M21 scope, and commit hash.
+
+Finally run `git status --short` and `git log -1 --oneline`. Expected: clean worktree and M20 at `HEAD`. Do not begin Task 16/M21 until M20 is committed, recorded, and clean.
 
 ### Task 16: M21 — Prevent deductible VAT defaults for non-VAT companies
 
