@@ -4404,80 +4404,102 @@ The 33,398-byte v4 artifact remains unapproved because normal scoped operational
 ### Task 19: M26 — Separate booked, skipped, and review-required portfolio rows
 
 **Files:**
-- Modify: `src/tools/lightyear-investments.ts:1471-1585`
+- Modify: `src/tools/lightyear-investments.ts:135-156,465-484,2114-2555,2755-2874`
 - Modify: `src/tools/lightyear-investments.test.ts`
 
 **Interfaces:**
-- Consumes: H16/H17 FX warnings and the same `isBookableTrade` criteria used by `book_lightyear_trades`.
-- Produces: portfolio output buckets `booked_basis`, `previewed`, `skipped`, `review_required`; totals use `booked_basis` only.
+- Consumes: `InvestmentTrade.cash_equivalent`, H16 `fx_review_reason`, and one shared intrinsic FX/provenance/fee readiness classifier used by `book_lightyear_trades` and `lightyear_portfolio_summary`.
+- Produces: exclusive public arrays `booked_basis`, `previewed`, `skipped`, and `review_required`; WAC holdings and every legacy total derive only from `booked_basis`.
 
-- [ ] **Step 1: Write the failing regression**
+- [ ] **Step 1: Fix the contract and record the baseline**
+
+The portfolio accepts only `file_path` and performs no journal, gains-file, account, duplicate, or custom skip-policy lookup. Therefore `booked_basis` means a non-cash-equivalent statement trade that passes the shared intrinsic H16 FX/provenance/fee classifier and may participate in this analytical WAC preview; it is not proof that a journal exists or that gains/accounts/duplicates are ready. `previewed` is the position array computed only from that basis with `state: "active" | "closed"`. `skipped` contains default cash-equivalent trades. `review_required` contains non-cash trades rejected by the intrinsic classifier. Cash-equivalent skip takes precedence over review, while extraction warnings already emitted for those rows remain visible.
+
+Preserve `active_holdings`, `closed_positions`, and `totals` as compatibility aliases derived exclusively from `previewed`, with their existing shapes and arithmetic. The note must direct operators to the authoritative `book_lightyear_trades` dry run. Baseline: `src/tools/lightyear-investments.test.ts` 312/312 and repository 2,457/2,457.
+
+- [ ] **Step 2: Add thirteen exact M26 tests without production edits**
+
+Add 13 M26-tagged tests:
+
+1. RED: default BRICEKSP buy 900/sell 150 plus ordinary EUR buy 50 yields two `skipped`, one `booked_basis`, one previewed position, and remaining cost 50 rather than 800.
+2. RED: unmatched foreign buy appears only in `review_required` with exact `invalid_conversion_pair` and creates no quantity, count, position, or cost.
+3. RED: an FX-reviewed sell after a valid buy cannot consume that buy's quantity/WAC basis or add a sell/realized loss.
+4. RED: a successfully converted foreign trade with unresolved/overflowing trade fee is wholly review-required despite positive EUR amount; no nominal or zero-fee substitution enters WAC.
+5. RED: malformed EUR arithmetic becomes `trade_amount_conflict` and contributes nothing.
+6. PASS control: coherent EUR and H16 foreign calculations retain legacy active holdings, converted fee, WAC, totals, and warning absence without asserting new fields.
+7. RED: cash-equivalent plus FX defect appears only in `skipped`; `review_required` is empty and the existing H16 warning remains exactly once.
+8. PASS control: valid full buy/sell retains the legacy closed-position WAC figures and totals.
+9. RED: an initially missing shared classifier table-covers ready EUR, ready foreign, extraction rejection, missing foreign provenance, and null fee, and proves portfolio classification matches booking dry-run status and exact H16 reasons.
+10. PASS control: H18 raw-exact, bounded-tolerant, and ambiguous gains cases retain booking counts/results/warnings; portfolio basis does not replace context-dependent sell decisions.
+11. RED: exact public DTO key allowlists for ready/skipped/review variants exclude every internal row, rate, orientation, conversion, and cash-equivalent field.
+12. RED: instruction/newline references in all three variants are wrapped once by the `UNTRUSTED_OCR` boundary; no full trade is spread into output.
+13. RED: `previewed` includes active/closed state, legacy aliases equal state-filtered rows with `state` omitted, totals derive from those aliases, and the note states intrinsic/default-policy limitations.
+
+Expected before production edits: M26 10 FAIL / 3 PASS; whole Lightyear file 10 FAIL / 315 PASS out of 325. No transform/import-only failure is acceptable.
+
+- [ ] **Step 3: Add one shared, type-safe intrinsic readiness classifier**
+
+Add a discriminated result beside `tradeFeeInEur`:
 
 ```ts
-it("does not count an FX-unmatched skipped instrument in booked portfolio totals", async () => {
-  const payload = await runPortfolioFixture([foreignTradeWithoutConversion("BAD", 100), eurTrade("OK", 50)]);
-  expect(payload.totals.total_remaining_cost_eur).toBe(50);
-  expect(payload.skipped).toEqual(expect.arrayContaining([expect.objectContaining({ ticker: "BAD" })]));
-  expect(payload.booked_basis).toEqual(expect.arrayContaining([expect.objectContaining({ ticker: "OK" })]));
-});
+export type TradeIntrinsicReadiness =
+  | { kind: "ready"; converted_trade_fee_eur: number }
+  | { kind: "review_required"; reason: FxReviewReason };
+
+export function classifyTradeIntrinsicReadiness(
+  trade: Pick<InvestmentTrade, "ccy" | "eur_amount" | "fee_eur" | "fx_rate" | "fx_orientation" | "fx_review_reason">,
+): TradeIntrinsicReadiness;
 ```
 
-- [ ] **Step 2: Prove red**
+Existing extraction reason wins. A non-EUR trade without nonzero EUR amount, rate, or orientation returns `trade_fee_unresolved`; a null `tradeFeeInEur` result does the same; otherwise return the proven rounded converted fee. Cash-equivalent/default or custom ticker policy stays outside this helper.
 
-Run: `npx vitest run src/tools/lightyear-investments.test.ts -t "skipped instrument"`
+Replace only the matching inline predicate in `book_lightyear_trades`. Preserve filtering, accounts, gains, duplicate snapshot, progress, journals, audit, result shapes, warning wording/cardinality, and H18 skips. A review result keeps the current skipped booking response; add an unresolved-fee warning only when extraction did not already emit one. A ready result uses the helper fee without recomputation.
 
-Expected: FAIL because every parsed trade feeds holdings/totals.
+- [ ] **Step 4: Partition before WAC and render deliberate DTOs**
 
-- [ ] **Step 3: Partition with the booking predicate**
+Portfolio precedence is: cash equivalent to `skipped`; otherwise classifier rejection to `review_required`; otherwise an internal `{ trade, convertedTradeFee }` booked-basis pair. Build WAC solely from ready pairs and never use `convertedFee ?? 0`.
+
+Render, without spreading `InvestmentTrade`:
 
 ```ts
-const partition = trades.reduce((result, trade) => {
-  const reason = bookingReviewReason(trade);
-  if (reason) result.review_required.push({ ...trade, reason });
-  else if (trade.skip_reason) result.skipped.push({ ...trade, reason: trade.skip_reason });
-  else result.booked_basis.push(trade);
-  return result;
-}, { booked_basis: [] as InvestmentTrade[], skipped: [] as Array<InvestmentTrade & { reason: string }>, review_required: [] as Array<InvestmentTrade & { reason: string }> });
-
-const holdings = new Map<string, { ticker: string; isin: string; quantity: number; total_cost_eur: number; total_proceeds_eur: number; realized_gain_loss_eur: number; buy_count: number; sell_count: number }>();
-for (const trade of partition.booked_basis) {
-  const holding = holdings.get(trade.ticker) ?? { ticker: trade.ticker, isin: trade.isin, quantity: 0, total_cost_eur: 0, total_proceeds_eur: 0, realized_gain_loss_eur: 0, buy_count: 0, sell_count: 0 };
-  if (trade.type === "Buy") {
-    holding.total_cost_eur += trade.eur_amount + tradeFeeInEur(trade);
-    holding.quantity += trade.quantity;
-    holding.buy_count += 1;
-  } else {
-    const proceeds = trade.eur_amount - tradeFeeInEur(trade);
-    const averageCost = holding.quantity > 0.000001 ? holding.total_cost_eur / holding.quantity : 0;
-    const soldCost = averageCost * trade.quantity;
-    holding.total_proceeds_eur += proceeds;
-    holding.realized_gain_loss_eur += proceeds - soldCost;
-    holding.total_cost_eur -= soldCost;
-    holding.quantity -= trade.quantity;
-    holding.sell_count += 1;
-  }
-  holdings.set(trade.ticker, holding);
-}
+type PortfolioTradeBaseDto = {
+  reference: string; // wrapUntrustedOcr
+  ticker: string;
+  isin: string;
+  type: "Buy" | "Sell";
+  date: string;
+  quantity: number;
+  currency: string;
+  gross_amount: number;
+};
 ```
 
-Return all buckets and calculate every `booked_*` total only from `partition.booked_basis`.
+Ready DTOs add `status: "intrinsically_ready"`, `eur_amount`, and `trade_fee_eur`. Skipped DTOs add `status: "skipped"` and structured `skip_reason: { code: "default_cash_equivalent", message }`. Review DTOs add `status: "review_required"` and the exact structured H16 `review_reason`. Exclude `row_index`, `datetime`, `price_per_share`, all rate/orientation/review/FX/conversion internals, and `cash_equivalent`. Continue internal matching with raw references; wrap only at output.
 
-- [ ] **Step 4: Prove green and independently review**
+`previewed` contains all WAC positions with state. Derive legacy aliases by removing `state`; calculate legacy totals from those aliases. Keep deterministic statement order for trade buckets and deterministic holdings insertion order. Preserve extraction warnings and add only the same unresolved-fee warning booking would add. Update the note with the precise intrinsic-versus-context boundary.
 
-Run: `npx vitest run src/tools/lightyear-investments.test.ts && npm run build && git diff --check`
+- [ ] **Step 5: Protect H16/H17/H18 and prove GREEN**
 
-Expected: skipped/review rows are visible but excluded from booked totals. Write `.omc/reviews/M26.diff` and obtain both verdicts.
+Before implementation, freeze committed `HEAD` slices for `extractTrades` through `rawStatementDatePrefix`, `rawStatementDatePrefix` through `findExistingJournalsByRef`, `withinProceedsTolerance` through `registerLightyearTools`, and distribution booking up to portfolio registration. After implementation require those four slices byte-identical; the intentional booking-loop change lies outside them.
 
-- [ ] **Step 5: Commit M26**
+Run selectors in order: M26, H16, H17, H18, then the full Lightyear file. Expected: M26 13/13, Lightyear 325/325. Run `npm run build`, `npm run validate:release`, `git diff --check`, `npm test`, and `npm run test:integration`; expected full unit 2,470/2,470 and integration 20 pass/3 documented skips. Require exactly the two M26 files and no M23/H08 drift.
+
+- [ ] **Step 6: Freeze and obtain ordered independent review**
+
+Write the exact two-file diff to `.omc/reviews/M26.diff`, record bytes/SHA-256, and prove live identity. First obtain fresh `SPEC COMPLIANCE: APPROVED` for bucket exclusivity/precedence, intrinsic/context boundary, helper parity, partition-before-WAC, fee null safety, DTO allowlist/wrapping, warnings, aliases/note, protected H16/H17/H18 behavior, tests, and scope. Then obtain a different fresh `CODE QUALITY APPROVED` for union narrowing, one classifier source, absence of `?? 0`/raw spreads/duplicate warning logic, deterministic ordering, alias derivation, and test strength. Any edit/finding invalidates the artifact and restarts gates and reviews.
+
+- [ ] **Step 7: Re-verify, commit, ledger, and stop cleanly**
+
+After approvals rerun all gates and protected-slice comparisons, prove live/staged/artifact identity, stage exactly the two files, and commit:
 
 ```bash
 git add src/tools/lightyear-investments.ts src/tools/lightyear-investments.test.ts
+git diff --cached --name-only
+git diff --cached --check
 git commit -m "fix(M26): separate Lightyear portfolio outcomes"
 ```
 
-- [ ] **Step 6: Append ledger, prove clean, then pass Wave 3**
-
-Append M26, require empty `git status --short`, then run `npm run validate:release && git diff --check && npm run build && npm test && npm run test:integration`; require PASS with baseline skips only.
+Append one ignored-ledger M26 row with baseline, exact 10 RED/3 control names, 13/13 and 325/325 GREEN, bucket/DTO/helper/alias evidence, protected-slice hashes and H16/H17/H18 selectors, full gates, artifact identity, ordered verdicts, exact scope, and commit hash. Require empty `git status --short` with M26 at `HEAD`. Do not begin H08 until M26 is committed, recorded, and clean.
 
 ### Task 20: H08 — Bind CAMT statement IBAN to the selected bank dimension
 
