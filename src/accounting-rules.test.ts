@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, utimesSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync, utimesSync } from "fs";
+import { join, relative } from "path";
 import { tmpdir } from "os";
 import { afterEach, describe, expect, it } from "vitest";
+import * as accountingRules from "./accounting-rules.js";
+import type { AccountingAutoBookingRule } from "./accounting-rules.js";
 import {
   chooseDefaultBundleStorage,
   findAutoBookingRule,
@@ -24,6 +26,44 @@ import {
 
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
 const ORIGINAL_RULES_DIR = process.env.EARVELDAJA_RULES_DIR;
+
+function legacyAutoBookingRules(rows: string[]): string {
+  return `# Accounting Rules
+
+## Auto Booking
+| match | category | purchase_article_id |
+| --- | --- | --- |
+${rows.join("\n")}
+`;
+}
+
+function snapshotTree(root: string): Array<[string, "dir" | string]> {
+  if (!existsSync(root)) return [];
+  const entries: Array<[string, "dir" | string]> = [];
+  const visit = (path: string): void => {
+    for (const name of readdirSync(path).sort((a, b) => a < b ? -1 : a > b ? 1 : 0)) {
+      const file = join(path, name);
+      const rel = relative(root, file).replace(/\\/g, "/");
+      if (statSync(file).isDirectory()) {
+        entries.push([rel, "dir"]);
+        visit(file);
+      } else {
+        entries.push([rel, readFileSync(file).toString("base64")]);
+      }
+    }
+  };
+  visit(root);
+  return entries;
+}
+
+function captureErrorMessage(fn: () => unknown): string {
+  try {
+    fn();
+    return "NO_ERROR";
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
 
 afterEach(() => {
   if (ORIGINAL_RULES_FILE === undefined) {
@@ -956,6 +996,221 @@ purchase_article_id: 501
     });
 
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("M22 accounting-rule migration collisions", () => {
+  const collisionMessage =
+    'Normalized rule collision: auto-booking/acme--saas-subscriptions.md <= ["ACME OÜ", "acme ou"]. ' +
+    "Resolve duplicate legacy rows so every normalized auto-booking target is unique before retrying migration.";
+
+  it("M22 reports every normalized target collision deterministically", () => {
+    const helper = (accountingRules as any).findRuleMigrationConflicts;
+    expect(helper).toBeTypeOf("function");
+    const rules: AccountingAutoBookingRule[] = [
+      { match: "beta ou", category: "bank_fees", purchase_article_id: 4 },
+      { match: "ACME OÜ", category: "saas_subscriptions", purchase_article_id: 1 },
+      { match: "wise", category: "bank_fees", purchase_article_id: 5 },
+      { match: "acme ou", category: "saas_subscriptions", purchase_article_id: 2 },
+      { match: "Beta OÜ", category: "bank_fees", purchase_article_id: 3 },
+      { match: "acme ou", category: "saas_subscriptions", purchase_article_id: 6 },
+    ];
+    const before = structuredClone(rules);
+
+    expect(helper(rules)).toEqual([
+      {
+        canonicalKey: "auto-booking/acme--saas-subscriptions.md",
+        sourceMatches: ["ACME OÜ", "acme ou", "acme ou"],
+      },
+      {
+        canonicalKey: "auto-booking/beta--bank-fees.md",
+        sourceMatches: ["Beta OÜ", "beta ou"],
+      },
+    ]);
+    expect(rules).toEqual(before);
+  });
+
+  it("M22 refuses a normalized duplicate before creating a new bundle or lock parent", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m22-new-"));
+    try {
+      const legacyFile = join(root, "accounting-rules.md");
+      const bundleDir = join(root, "missing-parent", "bundle");
+      const legacy = legacyAutoBookingRules([
+        "| ACME OÜ | saas_subscriptions | 1 |",
+        "| acme ou | saas_subscriptions | 2 |",
+      ]);
+      writeFileSync(legacyFile, legacy, "utf8");
+
+      expect(() => migrateLegacyRulesToBundle(legacyFile, bundleDir)).toThrow(collisionMessage);
+      expect(readFileSync(legacyFile, "utf8")).toBe(legacy);
+      expect(existsSync(`${legacyFile}.migrated`)).toBe(false);
+      expect(existsSync(join(root, "missing-parent"))).toBe(false);
+      for (const path of [bundleDir, `${bundleDir}.lock`, `${bundleDir}.migrating`, `${bundleDir}.replacing`]) {
+        expect(existsSync(path), path).toBe(false);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M22 preserves an authoritative bundle byte-for-byte on collision", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m22-authoritative-"));
+    try {
+      const legacyFile = join(root, "accounting-rules.md");
+      const bundleDir = join(root, "bundle");
+      mkdirSync(join(bundleDir, "auto-booking"), { recursive: true });
+      writeFileSync(join(bundleDir, "auto-booking", "stripe--saas-subscriptions.md"), "existing concept\n", "utf8");
+      writeFileSync(join(bundleDir, "index.md"), "existing index\n", "utf8");
+      writeFileSync(join(bundleDir, "log.md"), "existing log\n", "utf8");
+      const legacy = legacyAutoBookingRules([
+        "| ACME OÜ | saas_subscriptions | 1 |",
+        "| acme ou | saas_subscriptions | 2 |",
+      ]);
+      writeFileSync(legacyFile, legacy, "utf8");
+      const before = snapshotTree(bundleDir);
+
+      expect(() => migrateLegacyRulesToBundle(legacyFile, bundleDir)).toThrow(collisionMessage);
+      expect(snapshotTree(bundleDir)).toEqual(before);
+      expect(readFileSync(legacyFile, "utf8")).toBe(legacy);
+      expect(existsSync(`${legacyFile}.migrated`)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M22 preserves reserved and stale migration state on collision", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m22-stale-"));
+    try {
+      const legacyFile = join(root, "accounting-rules.md");
+      const bundleDir = join(root, "bundle");
+      mkdirSync(bundleDir);
+      mkdirSync(`${bundleDir}.migrating`);
+      mkdirSync(`${bundleDir}.replacing`);
+      writeFileSync(join(bundleDir, "index.md"), "reserved index\n", "utf8");
+      writeFileSync(join(bundleDir, "log.md"), "reserved log\n", "utf8");
+      writeFileSync(join(`${bundleDir}.migrating`, "marker.bin"), Buffer.from([0, 1, 2]));
+      writeFileSync(join(`${bundleDir}.replacing`, "marker.bin"), Buffer.from([3, 4, 5]));
+      writeFileSync(legacyFile, legacyAutoBookingRules([
+        "| ACME OÜ | saas_subscriptions | 1 |",
+        "| acme ou | saas_subscriptions | 2 |",
+      ]), "utf8");
+      const before = [bundleDir, `${bundleDir}.migrating`, `${bundleDir}.replacing`].map(snapshotTree);
+
+      expect(() => migrateLegacyRulesToBundle(legacyFile, bundleDir)).toThrow(collisionMessage);
+      expect([bundleDir, `${bundleDir}.migrating`, `${bundleDir}.replacing`].map(snapshotTree)).toEqual(before);
+      expect(existsSync(`${legacyFile}.migrated`)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M22 collision errors are independent of legacy row order", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m22-order-"));
+    try {
+      const rows = [
+        "| Zeta OÜ | bank_fees | 1 |",
+        "| zeta ou | bank_fees | 2 |",
+        "| ACME OÜ | saas_subscriptions | 3 |",
+        "| acme ou | saas_subscriptions | 4 |",
+      ];
+      const rules: AccountingAutoBookingRule[] = [
+        { match: "Zeta OÜ", category: "bank_fees", purchase_article_id: 1 },
+        { match: "zeta ou", category: "bank_fees", purchase_article_id: 2 },
+        { match: "ACME OÜ", category: "saas_subscriptions", purchase_article_id: 3 },
+        { match: "acme ou", category: "saas_subscriptions", purchase_article_id: 4 },
+      ];
+      const helper = (accountingRules as any).findRuleMigrationConflicts;
+      const helperForward = typeof helper === "function" ? helper(rules) : undefined;
+      const helperReverse = typeof helper === "function" ? helper([...rules].reverse()) : undefined;
+      const messages = [rows, [...rows].reverse()].map((orderedRows, index) => {
+        const caseRoot = join(root, String(index));
+        mkdirSync(caseRoot);
+        const legacyFile = join(caseRoot, "accounting-rules.md");
+        writeFileSync(legacyFile, legacyAutoBookingRules(orderedRows), "utf8");
+        return captureErrorMessage(() => migrateLegacyRulesToBundle(legacyFile, join(caseRoot, "bundle")));
+      });
+
+      expect.soft(helper).toBeTypeOf("function");
+      expect.soft(helperForward).toEqual(helperReverse);
+      expect.soft(messages[0]).not.toBe("NO_ERROR");
+      expect.soft(messages[0]).toBe(messages[1]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M22 rejects repeated identical source rows instead of silently updating", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m22-identical-"));
+    try {
+      const legacyFile = join(root, "accounting-rules.md");
+      const bundleDir = join(root, "bundle");
+      const legacy = legacyAutoBookingRules([
+        "| ACME OÜ | saas_subscriptions | 1 |",
+        "| ACME OÜ | saas_subscriptions | 1 |",
+      ]);
+      writeFileSync(legacyFile, legacy, "utf8");
+
+      expect(() => migrateLegacyRulesToBundle(legacyFile, bundleDir)).toThrow(
+        'Normalized rule collision: auto-booking/acme--saas-subscriptions.md <= ["ACME OÜ", "ACME OÜ"]',
+      );
+      expect(readFileSync(legacyFile, "utf8")).toBe(legacy);
+      expect(existsSync(`${legacyFile}.migrated`)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M22 allows the same normalized match in different categories", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m22-categories-"));
+    try {
+      const legacyFile = join(root, "accounting-rules.md");
+      const bundleDir = join(root, "bundle");
+      writeFileSync(legacyFile, legacyAutoBookingRules([
+        "| ACME OÜ | saas_subscriptions | 1 |",
+        "| acme ou | bank_fees | 2 |",
+      ]), "utf8");
+
+      const result = migrateLegacyRulesToBundle(legacyFile, bundleDir);
+
+      expect(result.counterparties).toBe(2);
+      expect(result.files).toEqual([
+        "auto-booking/acme--saas-subscriptions.md",
+        "auto-booking/acme--bank-fees.md",
+      ]);
+      expect(existsSync(join(bundleDir, "auto-booking", "acme--saas-subscriptions.md"))).toBe(true);
+      expect(existsSync(join(bundleDir, "auto-booking", "acme--bank-fees.md"))).toBe(true);
+      expect(existsSync(`${legacyFile}.migrated`)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M22 still migrates distinct normalized targets", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m22-distinct-"));
+    try {
+      const legacyFile = join(root, "accounting-rules.md");
+      const bundleDir = join(root, "bundle");
+      writeFileSync(legacyFile, legacyAutoBookingRules([
+        "| OpenAI | saas_subscriptions | 501 |",
+        "| Wise | bank_fees | 861 |",
+      ]), "utf8");
+      process.env.EARVELDAJA_RULES_DIR = bundleDir;
+      delete process.env.EARVELDAJA_RULES_FILE;
+
+      const result = migrateLegacyRulesToBundle(legacyFile, bundleDir);
+      resetAccountingRulesCache();
+
+      expect(result).toMatchObject({ migrated: true, source: legacyFile, bundle: bundleDir, counterparties: 2 });
+      expect(result.files).toEqual([
+        "auto-booking/openai--saas-subscriptions.md",
+        "auto-booking/wise--bank-fees.md",
+      ]);
+      expect(existsSync(`${legacyFile}.migrated`)).toBe(true);
+      expect(findAutoBookingRule("openai ireland limited", "saas_subscriptions")).toMatchObject({ purchase_article_id: 501 });
+      expect(findAutoBookingRule("wise europe sa", "bank_fees")).toMatchObject({ purchase_article_id: 861 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

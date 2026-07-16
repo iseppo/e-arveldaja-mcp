@@ -1205,6 +1205,50 @@ function autoBookingConceptSlug(match: string, category?: string): string {
   return categorySlug ? `${base}--${categorySlug}` : base;
 }
 
+function autoBookingConceptRelativeTarget(match: string, category?: string): string {
+  return `${AUTO_BOOKING_SUBDIR}/${autoBookingConceptSlug(match, category)}.md`;
+}
+
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+export function findRuleMigrationConflicts(
+  rules: AccountingAutoBookingRule[],
+): Array<{ canonicalKey: string; sourceMatches: string[] }> {
+  const sourcesByTarget = new Map<string, string[]>();
+
+  for (const rule of rules) {
+    const canonicalKey = autoBookingConceptRelativeTarget(rule.match, rule.category);
+    const sourceMatches = sourcesByTarget.get(canonicalKey) ?? [];
+    sourceMatches.push(rule.match);
+    sourcesByTarget.set(canonicalKey, sourceMatches);
+  }
+
+  return [...sourcesByTarget.entries()]
+    .filter(([, sourceMatches]) => sourceMatches.length > 1)
+    .map(([canonicalKey, sourceMatches]) => ({
+      canonicalKey,
+      sourceMatches: [...sourceMatches].sort(compareCodePoints),
+    }))
+    .sort((a, b) => compareCodePoints(a.canonicalKey, b.canonicalKey));
+}
+
+function assertNoRuleMigrationConflicts(rules: AccountingRules): void {
+  const conflicts = findRuleMigrationConflicts(rules.auto_booking?.counterparties ?? []);
+  if (conflicts.length === 0) return;
+
+  const details = conflicts
+    .map(conflict =>
+      `${conflict.canonicalKey} <= [${conflict.sourceMatches.map(source => JSON.stringify(source)).join(", ")}]`
+    )
+    .join("; ");
+  throw new Error(
+    `Normalized rule collision: ${details}. ` +
+    "Resolve duplicate legacy rows so every normalized auto-booking target is unique before retrying migration.",
+  );
+}
+
 function buildAutoBookingConcept(rule: AccountingAutoBookingRule): string {
   const oneLine = (value: string): string => value.replace(/[\r\n]+/g, " ").trim();
   const title = rule.category ? `${rule.match} — ${rule.category}` : rule.match;
@@ -1231,7 +1275,7 @@ function buildAutoBookingConcept(rule: AccountingAutoBookingRule): string {
 }
 
 function writeAutoBookingConcept(dir: string, rule: AccountingAutoBookingRule): { file: string; rel: string; action: "inserted" | "updated" } {
-  const rel = join(AUTO_BOOKING_SUBDIR, `${autoBookingConceptSlug(rule.match, rule.category)}.md`);
+  const rel = autoBookingConceptRelativeTarget(rule.match, rule.category);
   const file = resolve(dir, rel);
   const action: "inserted" | "updated" = existsSync(file) ? "updated" : "inserted";
   mkdirSync(dirname(file), { recursive: true });
@@ -1383,6 +1427,16 @@ type MigrationResult = {
 };
 
 export function migrateLegacyRulesToBundle(legacyFile: string, dir: string): MigrationResult {
+  if (existsSync(legacyFile)) {
+    let preflightRules: AccountingRules | undefined;
+    try {
+      preflightRules = parseMarkdownRules(readFileSync(legacyFile, "utf-8"));
+    } catch {
+      // Preserve the locked path's existing unreadable/invalid-source warning
+      // and refusal semantics rather than duplicating diagnostics here.
+    }
+    if (preflightRules) assertNoRuleMigrationConflicts(preflightRules);
+  }
   return withBundleLock(dir, () => migrateLegacyRulesToBundleLocked(legacyFile, dir));
 }
 
@@ -1410,6 +1464,7 @@ function migrateLegacyRulesToBundleLocked(legacyFile: string, dir: string): Migr
       "Fix or move that file before writing accounting rules, so its contents are not lost.",
     );
   }
+  assertNoRuleMigrationConflicts(rules);
   const counterparties = rules.auto_booking?.counterparties ?? [];
 
   const buildInto = (target: string): string[] => {
