@@ -4501,6 +4501,14 @@ git commit -m "fix(M26): separate Lightyear portfolio outcomes"
 
 Append one ignored-ledger M26 row with baseline, exact 10 RED/3 control names, 13/13 and 325/325 GREEN, bucket/DTO/helper/alias evidence, protected-slice hashes and H16/H17/H18 selectors, full gates, artifact identity, ordered verdicts, exact scope, and commit hash. Require empty `git status --short` with M26 at `HEAD`. Do not begin H08 until M26 is committed, recorded, and clean.
 
+#### M26 first review-correction plan
+
+The first frozen M26 artifact is unapproved because PASS control test 10 was extended after the recorded RED to assert the new `booked_basis` field. Reconstructing committed production with the frozen final test file therefore yields 11 FAIL / 2 PASS rather than the approved 10 FAIL / 3 PASS. Correct the evidence without changing production behavior:
+
+1. Remove only the post-RED `intrinsicPortfolio.booked_basis` and `review_required` assertions from the H18 PASS control. Keep its raw-exact, bounded-tolerant, and ambiguous gains booking assertions unchanged; test 13/note, the shared-classifier tests, protected H18 slice, and existing H18 selector cover the intrinsic-versus-context boundary.
+2. In a detached temporary checkout at the M26 plan HEAD, overlay the corrected final test diff only and prove production is byte-identical to HEAD. Persist and verify exact test-only RED: M26 10 FAIL / 3 PASS and whole Lightyear 10 FAIL / 315 PASS, with the three declared controls passing and no import/transform error.
+3. Rerun M26 13/13, H16/H17/H18 selectors, Lightyear 325/325, all four protected-slice comparisons, build, release, diff, full unit 2,470/2,470, and integration 20 pass/3 documented skips. Regenerate the exact two-file artifact and restart fresh ordered specification and code-quality reviews; any edit or finding restarts the cycle.
+
 ### Task 20: H08 — Bind CAMT statement IBAN to the selected bank dimension
 
 **Files:**
