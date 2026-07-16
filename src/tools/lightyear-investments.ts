@@ -1726,15 +1726,33 @@ function findExistingJournalsByRef(
  * Match sell trades to capital gains entries by date + ticker + quantity + proceeds.
  *
  * Disambiguation rules:
- * - Exactly one exact match (date+ticker+qty+proceeds within 0.02 EUR) → pair.
- * - Multiple exact matches → SKIP the sell with an ambiguity warning. Earlier
- *   versions would `break` on the first exact proceeds match and silently
- *   pick whichever came first in CSV order; two identical-proceeds lots
- *   could collide without detection.
- * - No exact match, exactly one inexact match (date+ticker+qty only, proceeds
- *   differ) → pair with a warning so the user can cross-check cost basis.
- * - Multiple inexact matches → SKIP with ambiguity warning.
+ * - Exactly one eligible match (raw exact or within the bounded proceeds
+ *   tolerance) → pair. Tolerant matches retain the existing review warning.
+ * - Multiple eligible matches → SKIP the sell with an ambiguity warning.
+ * - Shaped matches outside the proceeds tolerance → SKIP with an actionable
+ *   manual-review warning.
  */
+export function withinProceedsTolerance(
+  actual: number,
+  expected: number,
+  absolute = 0.02,
+  relative = 0.001,
+): boolean {
+  if (
+    !Number.isFinite(actual) ||
+    !Number.isFinite(expected) ||
+    !Number.isFinite(absolute) ||
+    !Number.isFinite(relative) ||
+    absolute < 0 ||
+    relative < 0
+  ) {
+    return false;
+  }
+
+  const difference = Math.abs(actual - expected);
+  return difference <= Math.max(absolute, Math.abs(expected) * relative);
+}
+
 function matchSellsToCapitalGains(
   sells: InvestmentTrade[],
   gains: CapitalGainsRow[],
@@ -1745,7 +1763,8 @@ function matchSellsToCapitalGains(
 
   for (const sell of sells) {
     const exactMatches: number[] = [];
-    const inexactMatches: number[] = [];
+    const tolerantMatches: number[] = [];
+    const outsideMatches: number[] = [];
 
     for (let i = 0; i < gains.length; i++) {
       if (consumedGains.has(i)) continue;
@@ -1758,35 +1777,39 @@ function matchSellsToCapitalGains(
 
       if (Math.abs(gain.proceeds_eur - sell.eur_amount) < 0.02) {
         exactMatches.push(i);
+      } else if (withinProceedsTolerance(sell.eur_amount, gain.proceeds_eur)) {
+        tolerantMatches.push(i);
       } else {
-        inexactMatches.push(i);
+        outsideMatches.push(i);
       }
     }
 
-    if (exactMatches.length === 1) {
-      const idx = exactMatches[0]!;
+    const eligibleMatches = [...exactMatches, ...tolerantMatches];
+
+    if (eligibleMatches.length === 1) {
+      const idx = eligibleMatches[0]!;
+      const gain = gains[idx]!;
+      if (tolerantMatches.length === 1) {
+        warnings.push(
+          `Inexact FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
+          `proceeds differ (sell ${sell.eur_amount} EUR vs gains ${gain.proceeds_eur} EUR, likely FX rounding). ` +
+          `Using date+ticker+qty match; verify cost basis.`
+        );
+      }
       result.set(sell.reference, gains[idx]!);
       consumedGains.add(idx);
-    } else if (exactMatches.length > 1) {
+    } else if (eligibleMatches.length > 1) {
       warnings.push(
         `Ambiguous FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
-        `${exactMatches.length} gains rows match date+ticker+qty+proceeds exactly. Skipping — verify cost basis manually and book the journal by hand.`
+        `${eligibleMatches.length} gains rows match date+ticker+qty within proceeds tolerance. ` +
+        `Skipping — verify cost basis manually and book the journal by hand.`
       );
       // Don't book — ambiguous cost basis is worse than missing it.
-    } else if (inexactMatches.length === 1) {
-      const idx = inexactMatches[0]!;
-      const gain = gains[idx]!;
+    } else if (outsideMatches.length > 0) {
       warnings.push(
-        `Inexact FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
-        `proceeds differ (sell ${sell.eur_amount} EUR vs gains ${gain.proceeds_eur} EUR, likely FX rounding). ` +
-        `Using date+ticker+qty match; verify cost basis.`
-      );
-      result.set(sell.reference, gains[idx]!);
-      consumedGains.add(idx);
-    } else if (inexactMatches.length > 1) {
-      warnings.push(
-        `Ambiguous FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
-        `${inexactMatches.length} gains rows match date+ticker+qty but none match proceeds within 0.02 EUR. Skipping — resolve manually.`
+        `FIFO candidates for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}, ` +
+        `sell proceeds ${sell.eur_amount} EUR) are outside proceeds tolerance. ` +
+        `Skipping — manual review is required before booking.`
       );
     }
   }

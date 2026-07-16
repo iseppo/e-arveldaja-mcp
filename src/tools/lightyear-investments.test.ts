@@ -6,7 +6,7 @@ import { resolveFileInput } from "../file-validation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import * as lightyearInvestments from "./lightyear-investments.js";
 
-const { registerLightyearTools, tradeFeeInEur } = lightyearInvestments;
+const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance } = lightyearInvestments;
 
 vi.mock("fs/promises", async importOriginal => ({
   ...(await importOriginal<typeof import("fs/promises")>()),
@@ -3325,4 +3325,221 @@ describe("H16 Lightyear handler provenance", () => {
     expect(payload.warnings[0]).toContain("FX review [trade_fee_unresolved]");
     expect(payload.warnings[0]).toContain(H16_MESSAGES.trade_fee_unresolved);
   });
+});
+
+describe("H18 bounded proceeds tolerance", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/lightyear.csv" });
+    mockedReadFile.mockReset();
+    vi.mocked(logAudit).mockClear();
+  });
+
+  it.each([
+    { actual: 9.98, expected: 10, absolute: 0.02, relative: 0.001, result: true, description: "absolute boundary is inclusive" },
+    { actual: testNextDown(9.98), expected: 10, absolute: 0.02, relative: 0.001, result: false, description: "next float beyond absolute boundary" },
+    { actual: 9990, expected: 10_000, absolute: 0.02, relative: 0.001, result: true, description: "relative boundary is inclusive" },
+    { actual: testNextDown(9990), expected: 10_000, absolute: 0.02, relative: 0.001, result: false, description: "next float beyond relative boundary" },
+    { actual: 100, expected: 100, absolute: 0, relative: 0, result: true, description: "zero tolerances allow equality" },
+    { actual: Number.NaN, expected: 100, absolute: 0.02, relative: 0.001, result: false, description: "NaN actual" },
+    { actual: 100, expected: Number.POSITIVE_INFINITY, absolute: 0.02, relative: 0.001, result: false, description: "infinite expected" },
+    { actual: 100, expected: 100, absolute: Number.NaN, relative: 0.001, result: false, description: "NaN absolute tolerance" },
+    { actual: 100, expected: 100, absolute: 0.02, relative: Number.POSITIVE_INFINITY, result: false, description: "infinite relative tolerance" },
+    { actual: 100, expected: 100, absolute: -0.01, relative: 0.001, result: false, description: "negative absolute tolerance" },
+    { actual: 100, expected: 100, absolute: 0.02, relative: -0.001, result: false, description: "negative relative tolerance" },
+  ])("$description", ({ actual, expected, absolute, relative, result }) => {
+    expect(withinProceedsTolerance(actual, expected, absolute, relative)).toBe(result);
+  });
+
+  it("uses the documented defaults", () => {
+    expect(withinProceedsTolerance(9.98, 10)).toBe(true);
+    expect(withinProceedsTolerance(testNextDown(9.98), 10)).toBe(false);
+    expect(withinProceedsTolerance(9990, 10_000)).toBe(true);
+    expect(withinProceedsTolerance(testNextDown(9990), 10_000)).toBe(false);
+  });
+
+  function h18StatementSell(reference: string, proceeds: string): string[] {
+    return [
+      "10/11/2025 08:51:32", reference, "AAPL", "US0378331005", "Sell", "10",
+      "EUR", "999", proceeds, "", "0", proceeds, "",
+    ];
+  }
+
+  function h18GainsRow(
+    proceeds: string,
+    name: string,
+    isin: string,
+  ): string[] {
+    const numericProceeds = Number(proceeds);
+    const capitalGain = Number.isFinite(numericProceeds) ? String(numericProceeds - 9000) : "0";
+    return [
+      "10/11/2025 08:51:32", "AAPL", name, isin, "United States", "equity", "0", "10",
+      "9000", proceeds, capitalGain,
+    ];
+  }
+
+  async function h18Book(
+    statementRows: string[][],
+    gainsRows: string[][],
+  ): Promise<{ payload: any; run: ReturnType<typeof setupLightyearTool> }> {
+    const statement = buildStatementCsv(statementRows);
+    const gains = buildCapitalGainsCsv(gainsRows);
+    mockedReadFile.mockResolvedValueOnce(statement).mockResolvedValueOnce(gains);
+    vi.mocked(logAudit).mockClear();
+    const run = setupLightyearTool("book_lightyear_trades");
+    const response = await run.handler({
+      file_path: "/tmp/lightyear.csv",
+      capital_gains_file: "/tmp/gains.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      gain_loss_account: 8320,
+      dry_run: false,
+    });
+    const payload = parseMcpResponse(response.content[0]!.text) as any;
+    return { payload, run };
+  }
+
+  it("H18 preserves the raw-exact gains match", async () => {
+    const { payload, run } = await h18Book(
+      [h18StatementSell("OR-H18-RAW", "9990")],
+      [h18GainsRow("9990.004", "Apple raw exact", "US0378331005")],
+    );
+
+    expect(payload.created).toBe(1);
+    expect(payload.skipped).toBe(0);
+    expect(payload.results).toEqual([
+      expect.objectContaining({ reference: "OR-H18-RAW", status: "created", eur_amount: 9990 }),
+    ]);
+    expect(run.api.journals.create).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logAudit)).toHaveBeenCalledTimes(1);
+  });
+
+  it("H18 preserves the unique relative-boundary gains match", async () => {
+    const { payload, run } = await h18Book(
+      [h18StatementSell("OR-H18-RELATIVE", "9990")],
+      [h18GainsRow("10000", "Apple relative boundary", "US0378331006")],
+    );
+
+    expect(payload.created).toBe(1);
+    expect(payload.skipped).toBe(0);
+    expect(payload.results).toEqual([
+      expect.objectContaining({ reference: "OR-H18-RELATIVE", status: "created", eur_amount: 10000 }),
+    ]);
+    expect(run.api.journals.create).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logAudit)).toHaveBeenCalledTimes(1);
+  });
+
+  it("H18 skips a unique just-outside candidate and performs zero mutation or audit", async () => {
+    const { payload, run } = await h18Book(
+      [h18StatementSell("OR-H18-JUST-OUTSIDE", "9989.99")],
+      [h18GainsRow("10000", "Apple just outside", "US0378331007")],
+    );
+
+    expect(payload.created).toBe(0);
+    expect(payload.skipped).toBe(1);
+    expect(payload.results).toEqual([
+      expect.objectContaining({ reference: "OR-H18-JUST-OUTSIDE", status: "skipped" }),
+    ]);
+    const warning = payload.warnings.find((value: string) => /outside proceeds tolerance.*manual review/i.test(value));
+    expect(warning).toContain("2025-11-10");
+    expect(warning).toContain("AAPL");
+    expect(warning).toContain("10");
+    expect(warning).toContain("9989.99");
+    expect(run.api.journals.create).not.toHaveBeenCalled();
+    expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
+  });
+
+  it("H18 skips a material proceeds mismatch and performs zero mutation or audit", async () => {
+    const { payload, run } = await h18Book(
+      [h18StatementSell("OR-H18-MATERIAL", "9990")],
+      [h18GainsRow("16000", "Apple material mismatch", "US0378331008")],
+    );
+
+    expect(payload.created).toBe(0);
+    expect(payload.skipped).toBe(1);
+    expect(payload.results).toEqual([
+      expect.objectContaining({ reference: "OR-H18-MATERIAL", status: "skipped" }),
+    ]);
+    expect(payload.warnings).toContainEqual(expect.stringMatching(/outside proceeds tolerance.*manual review/i));
+    expect(run.api.journals.create).not.toHaveBeenCalled();
+    expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
+  });
+
+  it("H18 treats exact plus tolerant candidates as ambiguous", async () => {
+    const { payload, run } = await h18Book(
+      [h18StatementSell("OR-H18-UNION", "9990")],
+      [
+        h18GainsRow("9990.004", "Apple exact candidate", "US0378331009"),
+        h18GainsRow("10000", "Apple tolerant candidate", "US0378331010"),
+      ],
+    );
+
+    expect(payload.created).toBe(0);
+    expect(payload.skipped).toBe(1);
+    expect(payload.results).toEqual([
+      expect.objectContaining({ reference: "OR-H18-UNION", status: "skipped" }),
+    ]);
+    expect(payload.warnings).toContainEqual(expect.stringMatching(/Ambiguous FIFO match/));
+    expect(run.api.journals.create).not.toHaveBeenCalled();
+    expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
+  });
+
+  it("H18 consumes one eligible gains row once and is deterministic across gains-row reorder", async () => {
+    const statementRows = [
+      h18StatementSell("OR-H18-FIRST", "9990"),
+      h18StatementSell("OR-H18-SECOND", "9990"),
+    ];
+    const eligible = h18GainsRow("10000", "Apple eligible", "US0378331011");
+    const outside = h18GainsRow("16000", "Apple outside", "US0378331012");
+
+    const execute = async (gainsRows: string[][]) => {
+      mockedReadFile.mockReset();
+      vi.mocked(logAudit).mockClear();
+      const { payload, run } = await h18Book(statementRows, gainsRows);
+      expect(payload.created).toBe(1);
+      expect(payload.skipped).toBe(1);
+      expect(run.api.journals.create).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(logAudit)).toHaveBeenCalledTimes(1);
+      return {
+        ...payload,
+        results: payload.results.map((entry: any) => ({
+          ...entry,
+          ...(entry.journal_id !== undefined && { journal_id: "<created>" }),
+        })),
+      };
+    };
+
+    const eligibleFirst = await execute([eligible, outside]);
+    const outsideFirst = await execute([outside, eligible]);
+
+    expect(outsideFirst).toEqual(eligibleFirst);
+    expect(eligibleFirst.results).toEqual([
+      expect.objectContaining({ reference: "OR-H18-FIRST", status: "created", eur_amount: 10000 }),
+      expect.objectContaining({ reference: "OR-H18-SECOND", status: "skipped" }),
+    ]);
+    expect(eligibleFirst.warnings).toContainEqual(expect.stringMatching(/outside proceeds tolerance.*manual review/i));
+  });
+
+  it.each(["NaN", "Infinity", "-Infinity"])(
+    "H18 public parser rejects nonfinite gains proceeds token %s before matching",
+    async token => {
+      const statement = buildStatementCsv([h18StatementSell("OR-H18-NONFINITE", "9990")]);
+      const gains = buildCapitalGainsCsv([
+        h18GainsRow(token, `Apple ${token}`, "US0378331013"),
+      ]);
+      mockedReadFile.mockResolvedValueOnce(statement).mockResolvedValueOnce(gains);
+      vi.mocked(logAudit).mockClear();
+      const run = setupLightyearTool("book_lightyear_trades");
+
+      await expect(run.handler({
+        file_path: "/tmp/lightyear.csv",
+        capital_gains_file: "/tmp/gains.csv",
+        investment_account: 1550,
+        broker_account: 1120,
+        gain_loss_account: 8320,
+        dry_run: false,
+      })).rejects.toThrow(`Unparseable numeric value: "${token}"`);
+      expect(run.api.journals.create).not.toHaveBeenCalled();
+      expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
+    },
+  );
 });
