@@ -160,6 +160,7 @@ describe("workflow response helpers", () => {
   });
 
   it("turns safe materializing dry-run steps into approval actions", () => {
+    const wiseDigest = "a".repeat(64);
     const workflow = buildWorkflowEnvelope({
       summary: "Dry runs are ready for approval.",
       dry_run_steps: [
@@ -172,9 +173,15 @@ describe("workflow response helpers", () => {
         {
           tool: "import_wise_transactions",
           summary: "Wise dry run would create 2 bank transactions and update 1 invoice FX settlement.",
-          suggested_args: { file_path: "/tmp/wise.csv", accounts_dimensions_id: 8, execute: false },
+          suggested_args: {
+            file_path: "/tmp/wise.csv",
+            accounts_dimensions_id: 8,
+            approved_command_digest: wiseDigest,
+            execute: false,
+          },
           preview: {
             created: 2,
+            command_count: 4,
             skipped: 0,
             error_count: 0,
             invoice_currency_fixes: {
@@ -222,12 +229,52 @@ describe("workflow response helpers", () => {
     ]);
     expect(workflow.approval_previews[1]).toMatchObject({
       execute_tool: "import_wise_transactions",
+      execute_args: {
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 8,
+        approved_command_digest: wiseDigest,
+        execute: true,
+      },
       accounting_impact: expect.arrayContaining([
         "2 bank transactions",
         "1 invoice FX update",
       ]),
       duplicate_risk: expect.stringContaining("confirms or links source bank transactions"),
     });
+
+    const invoiceOnly = buildWorkflowEnvelope({
+      summary: "One Wise invoice FX update is ready for approval.",
+      dry_run_steps: [{
+        tool: "import_wise_transactions",
+        suggested_args: {
+          file_path: "/tmp/wise.csv",
+          accounts_dimensions_id: 8,
+          approved_command_digest: wiseDigest,
+          execute: false,
+        },
+        preview: {
+          created: 0,
+          command_count: 1,
+          skipped: 1,
+          error_count: 0,
+          invoice_currency_fixes: {
+            total: 1,
+            candidates: [{ invoice_id: 42, category: "foreign_currency_lock", result: "would_update" }],
+          },
+        },
+      }],
+    });
+    const expectedInvoiceOnlyArgs = {
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 8,
+      approved_command_digest: wiseDigest,
+      execute: true,
+    };
+    expect(invoiceOnly.approval_previews).toHaveLength(1);
+    expect(invoiceOnly.approval_previews[0]?.execute_args).toEqual(expectedInvoiceOnlyArgs);
+    expect(invoiceOnly.available_actions[0]).toMatchObject({ args: expectedInvoiceOnlyArgs });
+    expect(invoiceOnly.recommended_next_action).toMatchObject({ args: expectedInvoiceOnlyArgs });
+    expect(invoiceOnly.approval_previews[0]?.execute_args).not.toHaveProperty("command_count");
   });
 
   it("blocks follow-up tool calls when materializing dry runs still need review", () => {

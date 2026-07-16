@@ -48,6 +48,8 @@ Review:
 - Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
 - Use top-level `skipped_details` only as a grouped convenience summary for `execution.skipped` + `execution.errors`.
 - Check top-level `invoice_currency_fixes` when present; each candidate is a dry-run invoice FX update that execution may apply.
+- Review the complete `execution.commands` command plan, including every planned mutation and the top-level `command_count`.
+- Record the `approved_command_digest` returned for that complete command plan; approval and execution must use that exact digest.
 - Fall back to top-level `total_csv_rows`, `eligible`, `filtered_out`, `created`, `skipped`, and `results` only if `execution` is absent.
 
 Show:
@@ -73,17 +75,21 @@ The approval card must include:
 - selected fee account dimension, if any
 - source bank transactions that execution confirms or links while applying fee and inter-account handling
 - side effects: PROJECT bank rows, fee confirmations, inter-account confirmations/skips, and invoice FX updates
+- the complete `execution.commands` plan and its `approved_command_digest`
 - audit reference when available
 
-State that approval authorizes all listed categories. If the user does not approve every listed mutation category, stop and ask which category should be excluded or reviewed; do not run `execute: true`.
+State that approval authorizes all listed categories. These mutation categories are PROJECT bank-row creation, fee creation and confirmation, inter-account handling, and invoice FX updates. The `approved_command_digest` is required for every one of these categories. If the user does not approve every listed mutation category, stop and ask which category should be excluded or reviewed; do not run `execute: true`.
 
 If the user does not explicitly approve, stop.
 
 ### Step 4: Execute
 
 Call `import_wise_transactions` again:
-- same arguments as the dry run
+- use the reviewed dry-run inputs
+- `approved_command_digest`: the exact digest returned by the reviewed dry run
 - execute: true
+
+If execution reports a missing or mismatched digest, do not retry execution with a guessed or older value. Rerun the dry run, review the new complete `execution.commands` plan, and request approval for its newly returned digest.
 
 Report:
 - `execution.summary.created`

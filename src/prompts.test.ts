@@ -374,6 +374,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("list_account_dimensions");
     expect(text).toContain("execute: false");
     expect(text).toContain("execute: true");
+    expect(text).toContain("approved_command_digest");
+    expect(text).toContain("digest returned by the reviewed dry run");
     expect(text).toContain("execution.summary");
     expect(text).toContain("execution.skipped");
     expect(text).toContain("execution.errors");
