@@ -80,6 +80,7 @@ import {
 } from "./audit-log.js";
 import { buildAuditLogLabels } from "./audit-log-labels.js";
 import { serializeToolMutationError } from "./mutation-audit.js";
+import { initAccountingRulesConnection } from "./accounting-rules.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
@@ -383,6 +384,12 @@ async function main() {
   const setupInfo = getCredentialSetupInfo();
   const connectionNames = Object.freeze(allConfigs.map(config => config.name));
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
+  initAccountingRulesConnection(() => ({
+    name: allConfigs[connectionState.activeIndex]?.name ?? "setup",
+    stableIdentity: allConfigs[connectionState.activeIndex]
+      ? buildConnectionFingerprint(allConfigs[connectionState.activeIndex]!.config)
+      : "setup",
+  }));
   const connectionFingerprints = Object.fromEntries(
     allConfigs.map((config) => [config.name, buildConnectionFingerprint(config.config)]),
   );

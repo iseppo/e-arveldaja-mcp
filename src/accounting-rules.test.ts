@@ -1,7 +1,47 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { join, relative } from "path";
 import { tmpdir } from "os";
-import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "crypto";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const fsInspectionMock = vi.hoisted(() => ({
+  readdirSyncEaccesPath: undefined as string | undefined,
+  readdirSyncEaccesHits: 0,
+  legacyReadEaccesPath: undefined as string | undefined,
+  legacyReadEaccesHits: 0,
+}));
+
+vi.mock("fs", async importOriginal => {
+  const actual = await importOriginal<typeof import("fs")>();
+  return {
+    ...actual,
+    existsSync: ((...args: any[]) => {
+      if (String(args[0]) === fsInspectionMock.legacyReadEaccesPath) {
+        return false;
+      }
+      return (actual.existsSync as (...values: any[]) => any)(...args);
+    }) as typeof actual.existsSync,
+    readdirSync: ((...args: any[]) => {
+      if (String(args[0]) === fsInspectionMock.readdirSyncEaccesPath) {
+        fsInspectionMock.readdirSyncEaccesHits += 1;
+        throw Object.assign(new Error(`EACCES: permission denied, scandir '${String(args[0])}'`), {
+          code: "EACCES",
+        });
+      }
+      return (actual.readdirSync as (...values: any[]) => any)(...args);
+    }) as typeof actual.readdirSync,
+    readFileSync: ((...args: any[]) => {
+      if (String(args[0]) === fsInspectionMock.legacyReadEaccesPath) {
+        fsInspectionMock.legacyReadEaccesHits += 1;
+        throw Object.assign(new Error(`EACCES: permission denied, open '${String(args[0])}'`), {
+          code: "EACCES",
+        });
+      }
+      return (actual.readFileSync as (...values: any[]) => any)(...args);
+    }) as typeof actual.readFileSync,
+  };
+});
+
 import * as accountingRules from "./accounting-rules.js";
 import type { AccountingAutoBookingRule } from "./accounting-rules.js";
 import {
@@ -26,6 +66,7 @@ import {
 
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
 const ORIGINAL_RULES_DIR = process.env.EARVELDAJA_RULES_DIR;
+const ORIGINAL_CONFIG_DIR = process.env.EARVELDAJA_CONFIG_DIR;
 
 function legacyAutoBookingRules(rows: string[]): string {
   return `# Accounting Rules
@@ -66,6 +107,10 @@ function captureErrorMessage(fn: () => unknown): string {
 }
 
 afterEach(() => {
+  fsInspectionMock.readdirSyncEaccesPath = undefined;
+  fsInspectionMock.readdirSyncEaccesHits = 0;
+  fsInspectionMock.legacyReadEaccesPath = undefined;
+  fsInspectionMock.legacyReadEaccesHits = 0;
   if (ORIGINAL_RULES_FILE === undefined) {
     delete process.env.EARVELDAJA_RULES_FILE;
   } else {
@@ -75,6 +120,15 @@ afterEach(() => {
     delete process.env.EARVELDAJA_RULES_DIR;
   } else {
     process.env.EARVELDAJA_RULES_DIR = ORIGINAL_RULES_DIR;
+  }
+  if (ORIGINAL_CONFIG_DIR === undefined) {
+    delete process.env.EARVELDAJA_CONFIG_DIR;
+  } else {
+    process.env.EARVELDAJA_CONFIG_DIR = ORIGINAL_CONFIG_DIR;
+  }
+  const initConnection = (accountingRules as any).initAccountingRulesConnection;
+  if (typeof initConnection === "function") {
+    initConnection(() => ({ name: "default", stableIdentity: "default" }));
   }
   resetAccountingRulesCache();
 });
@@ -1332,10 +1386,445 @@ describe("default bundle storage location (chooseDefaultBundleStorage)", () => {
     // Nothing exists at the project root — a packaged/fresh install.
 
     const storage = chooseDefaultBundleStorage(projectRoot, globalDir);
+    const scope = (accountingRules as any).buildAccountingRulesConnectionScope("default", "default");
 
-    expect(storage.dir).toBe(join(globalDir, "accounting-rules"));
-    expect(storage.legacyFile).toBe(join(globalDir, "accounting-rules.md"));
+    expect(storage.dir).toBe(join(globalDir, "accounting-rules", scope));
+    expect(storage.legacyFile).toBe(join(globalDir, scope, "accounting-rules.md"));
 
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("M23 connection-scoped accounting-rule storage", () => {
+  it("M23 canonical scope is the full identity digest and survives label changes", () => {
+    const buildScope = (accountingRules as any).buildAccountingRulesConnectionScope;
+    const identity = "sha256:stable-non-secret-company-identity";
+    const expected = createHash("sha256").update(identity).digest("hex");
+
+    expect(buildScope("Acme OÜ", identity)).toBe(expected);
+    expect(buildScope("Renamed Company", identity)).toBe(expected);
+    expect(buildScope("Acme OÜ", `${identity}-other`)).not.toBe(expected);
+    expect(expected).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("M23 live getter failures and blank identities fail closed while overrides and setup remain explicit", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-getter-"));
+    try {
+      const initConnection = (accountingRules as any).initAccountingRulesConnection;
+      const getterError = new Error("connection state unavailable");
+      process.env.EARVELDAJA_CONFIG_DIR = join(root, "global");
+      delete process.env.EARVELDAJA_RULES_FILE;
+      delete process.env.EARVELDAJA_RULES_DIR;
+
+      initConnection(() => { throw getterError; });
+      expect.soft(() => getAccountingRulesPath()).toThrow(/accounting rules connection identity.*unavailable/i);
+
+      initConnection(() => ({ name: "Acme", stableIdentity: "   " }));
+      expect.soft(() => getAccountingRulesPath()).toThrow(/stable identity.*blank/i);
+
+      initConnection(() => { throw getterError; });
+      const explicitFile = join(root, "explicit.md");
+      process.env.EARVELDAJA_RULES_FILE = explicitFile;
+      expect(getAccountingRulesPath()).toBe(explicitFile);
+      delete process.env.EARVELDAJA_RULES_FILE;
+      const explicitDir = join(root, "explicit-bundle");
+      process.env.EARVELDAJA_RULES_DIR = explicitDir;
+      expect(getAccountingRulesPath()).toBe(explicitDir);
+
+      delete process.env.EARVELDAJA_RULES_DIR;
+      initConnection(() => ({ name: "setup", stableIdentity: "setup" }));
+      expect(getAccountingRulesPath()).toBe(join(
+        root,
+        "global",
+        "accounting-rules",
+        createHash("sha256").update("setup").digest("hex"),
+      ));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 rejects a blank identity before initialized project or global compatibility returns", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-blank-compat-"));
+    try {
+      const projectRoot = join(root, "project");
+      const projectBundle = join(projectRoot, "accounting-rules");
+      const globalDir = join(root, "global");
+      const globalBundle = join(globalDir, "accounting-rules");
+      mkdirSync(projectBundle, { recursive: true });
+      mkdirSync(globalBundle, { recursive: true });
+      writeFileSync(join(projectBundle, "index.md"), "# Project rules\n", "utf8");
+      writeFileSync(join(globalBundle, "log.md"), "# Global rules\n", "utf8");
+
+      expect.soft(() => chooseDefaultBundleStorage(projectRoot, globalDir, "Acme", "   "))
+        .toThrow(/stable identity.*blank/i);
+      expect.soft(() => chooseDefaultBundleStorage(join(root, "fresh-project"), globalDir, "Acme", ""))
+        .toThrow(/stable identity.*blank/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 pins project and global roots when exact root directory inspection is denied", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-root-eacces-"));
+    try {
+      const projectRoot = join(root, "project");
+      const projectBundle = join(projectRoot, "accounting-rules");
+      const globalDir = join(root, "global");
+      const globalBundle = join(globalDir, "accounting-rules");
+      mkdirSync(projectBundle, { recursive: true });
+      mkdirSync(globalBundle, { recursive: true });
+      fsInspectionMock.readdirSyncEaccesPath = projectBundle;
+
+      expect.soft(chooseDefaultBundleStorage(projectRoot, globalDir, "Acme", "company-a")).toMatchObject({
+        dir: projectBundle,
+        legacyFile: join(projectRoot, "accounting-rules.md"),
+      });
+      expect.soft(fsInspectionMock.readdirSyncEaccesHits).toBe(1);
+
+      fsInspectionMock.readdirSyncEaccesPath = globalBundle;
+      fsInspectionMock.readdirSyncEaccesHits = 0;
+      expect.soft(chooseDefaultBundleStorage(join(root, "fresh-project"), globalDir, "Acme", "company-a")).toMatchObject({
+        dir: globalBundle,
+        legacyFile: join(globalDir, "accounting-rules.md"),
+      });
+      expect.soft(fsInspectionMock.readdirSyncEaccesHits).toBe(1);
+    } finally {
+      fsInspectionMock.readdirSyncEaccesPath = undefined;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 pins project and global roots when an exact legacy path cannot be inspected", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-legacy-eacces-"));
+    try {
+      const projectRoot = join(root, "project");
+      const projectLegacy = join(projectRoot, "accounting-rules.md");
+      const globalDir = join(root, "global");
+      const globalLegacy = join(globalDir, "accounting-rules.md");
+
+      fsInspectionMock.legacyReadEaccesPath = projectLegacy;
+      expect.soft(chooseDefaultBundleStorage(projectRoot, globalDir, "Acme", "company-a")).toMatchObject({
+        dir: join(projectRoot, "accounting-rules"),
+        legacyFile: projectLegacy,
+      });
+      expect.soft(fsInspectionMock.legacyReadEaccesHits).toBe(1);
+
+      fsInspectionMock.legacyReadEaccesPath = globalLegacy;
+      fsInspectionMock.legacyReadEaccesHits = 0;
+      expect.soft(chooseDefaultBundleStorage(join(root, "fresh-project"), globalDir, "Acme", "company-a")).toMatchObject({
+        dir: join(globalDir, "accounting-rules"),
+        legacyFile: globalLegacy,
+      });
+      expect.soft(fsInspectionMock.legacyReadEaccesHits).toBe(1);
+    } finally {
+      fsInspectionMock.legacyReadEaccesPath = undefined;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 ignores only exact well-typed scoped lifecycle artifacts at the global root", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-scoped-artifacts-"));
+    try {
+      const existingScope = createHash("sha256").update("company-a").digest("hex");
+      const nextIdentity = "company-b";
+      const nextScope = createHash("sha256").update(nextIdentity).digest("hex");
+      const globalDir = join(root, "valid", "global");
+      const globalRules = join(globalDir, "accounting-rules");
+      mkdirSync(join(globalRules, existingScope), { recursive: true });
+      writeFileSync(join(globalRules, `${existingScope}.lock`), "lock\n", "utf8");
+      writeFileSync(join(globalRules, `${existingScope}.lock.reclaim`), "reclaim\n", "utf8");
+      mkdirSync(join(globalRules, `${existingScope}.migrating`));
+      mkdirSync(join(globalRules, `${existingScope}.replacing`));
+
+      expect.soft(chooseDefaultBundleStorage(join(root, "valid", "project"), globalDir, "Other", nextIdentity))
+        .toMatchObject({
+          dir: join(globalRules, nextScope),
+          legacyFile: join(globalDir, nextScope, "accounting-rules.md"),
+        });
+
+      const invalidEntries: Array<{ name: string; type: "file" | "dir" }> = [
+        { name: existingScope, type: "file" },
+        { name: `${existingScope}.lock`, type: "dir" },
+        { name: `${existingScope}.lock.reclaim`, type: "dir" },
+        { name: `${existingScope}.migrating`, type: "file" },
+        { name: `${existingScope}.replacing`, type: "file" },
+        { name: existingScope.toUpperCase(), type: "dir" },
+        { name: existingScope.slice(0, -1), type: "dir" },
+        { name: `prefix-${existingScope}.lock`, type: "file" },
+        { name: `${existingScope}.lock.trailing`, type: "file" },
+      ];
+      invalidEntries.forEach(({ name, type }, index) => {
+        const isolatedGlobal = join(root, `invalid-${index}`, "global");
+        const isolatedRules = join(isolatedGlobal, "accounting-rules");
+        mkdirSync(isolatedRules, { recursive: true });
+        const entry = join(isolatedRules, name);
+        if (type === "dir") mkdirSync(entry);
+        else writeFileSync(entry, "unexpected\n", "utf8");
+
+        expect.soft(chooseDefaultBundleStorage(join(root, `invalid-${index}`, "project"), isolatedGlobal, "Other", nextIdentity))
+          .toMatchObject({
+            dir: isolatedRules,
+            legacyFile: join(isolatedGlobal, "accounting-rules.md"),
+          });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 pins the project root when bundle inspection cannot prove absence", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-project-probe-"));
+    try {
+      const projectRoot = join(root, "project");
+      const projectBundle = join(projectRoot, "accounting-rules");
+      const globalDir = join(root, "global");
+      mkdirSync(projectBundle, { recursive: true });
+      writeFileSync(join(projectBundle, "auto-booking"), "not a directory\n", "utf8");
+
+      expect(chooseDefaultBundleStorage(projectRoot, globalDir, "Acme", "company-a")).toMatchObject({
+        dir: projectBundle,
+        legacyFile: join(projectRoot, "accounting-rules.md"),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 pins the global root on inspection failure and documents opaque label-stable scope", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-global-probe-"));
+    try {
+      const projectRoot = join(root, "project");
+      const globalDir = join(root, "global");
+      const globalBundle = join(globalDir, "accounting-rules");
+      mkdirSync(globalBundle, { recursive: true });
+      writeFileSync(join(globalBundle, "auto-booking"), "not a directory\n", "utf8");
+
+      expect.soft(chooseDefaultBundleStorage(projectRoot, globalDir, "Acme", "company-a")).toMatchObject({
+        dir: globalBundle,
+        legacyFile: join(globalDir, "accounting-rules.md"),
+      });
+      const readme = readFileSync(join(process.cwd(), "README.md"), "utf8");
+      expect.soft(readme).toContain("opaque identity scope");
+      expect.soft(readme).toContain("Changing a connection label does not move its accounting-rule store");
+      expect.soft(readme).not.toContain("<connection>--<identity>");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 scopes a fresh global bundle and legacy fallback by connection", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-fresh-"));
+    try {
+      const projectRoot = join(root, "project");
+      const globalDir = join(root, "global");
+      const buildScope = (accountingRules as any).buildAccountingRulesConnectionScope;
+      expect(buildScope).toBeTypeOf("function");
+      const scope = buildScope("Acme OÜ", "sha256:non-secret-company-a");
+
+      expect(chooseDefaultBundleStorage(projectRoot, globalDir, "Acme OÜ", "sha256:non-secret-company-a")).toEqual({
+        mode: "bundle",
+        dir: join(globalDir, "accounting-rules", scope),
+        legacyFile: join(globalDir, scope, "accounting-rules.md"),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 sanitizes connection names without path escape or identity collision", () => {
+    const sanitize = (accountingRules as any).sanitizeAccountingRulesConnectionName;
+    const buildScope = (accountingRules as any).buildAccountingRulesConnectionScope;
+    expect(sanitize).toBeTypeOf("function");
+    expect(buildScope).toBeTypeOf("function");
+
+    expect(sanitize("Åcme ÕÜ")).toBe("acme-ou");
+    expect(sanitize(" ../Acme\\Corp/\u0000 ")).toBe("acme-corp");
+    expect(sanitize("   ")).toBe("default");
+    expect(sanitize("CON")).toBe("connection-con");
+    expect(sanitize("x".repeat(500)).length).toBeLessThanOrEqual(54);
+    expect(sanitize("A/B")).toBe(sanitize("A B"));
+    expect(sanitize(".." as string)).not.toMatch(/^\.{1,2}$/);
+    expect(sanitize("safe")).not.toMatch(/[/\\\u0000-\u001f]/);
+
+    const first = buildScope("A/B", "fingerprint-one");
+    const same = buildScope("A B", "fingerprint-one");
+    const otherIdentity = buildScope("A/B", "fingerprint-two");
+    expect(first).toBe(same);
+    expect(otherIdentity).not.toBe(first);
+    expect(buildScope("Duplicate", "company-a")).not.toBe(buildScope("Duplicate", "company-b"));
+    expect(first.length).toBeLessThanOrEqual(64);
+    expect(buildScope("A/B", "fingerprint-one")).toBe(first);
+  });
+
+  it("M23 ignores the untouched shipped project template when selecting storage", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-template-"));
+    try {
+      const globalDir = join(root, "global");
+      const storage = chooseDefaultBundleStorage(process.cwd(), globalDir, "Acme OÜ", "company-a");
+      const scope = (accountingRules as any).buildAccountingRulesConnectionScope("Acme OÜ", "company-a");
+
+      expect(storage.dir).toBe(join(globalDir, "accounting-rules", scope));
+      expect(storage.legacyFile).toBe(join(globalDir, scope, "accounting-rules.md"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 keeps a modified or data-bearing project legacy in place", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-project-legacy-"));
+    try {
+      const template = readFileSync(join(process.cwd(), "accounting-rules.md"), "utf8");
+      for (const [name, contents] of [
+        ["note", `${template}\nCompany note: keep this treatment.\n`],
+        ["data", legacyAutoBookingRules(["| OpenAI | saas_subscriptions | 501 |"])],
+      ] as const) {
+        const projectRoot = join(root, name);
+        const globalDir = join(root, `global-${name}`);
+        mkdirSync(projectRoot);
+        writeFileSync(join(projectRoot, "accounting-rules.md"), contents, "utf8");
+
+        expect(chooseDefaultBundleStorage(projectRoot, globalDir, "Acme", "company-a")).toMatchObject({
+          dir: join(projectRoot, "accounting-rules"),
+          legacyFile: join(projectRoot, "accounting-rules.md"),
+        });
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 keeps an initialized project bundle in place", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-project-bundle-"));
+    try {
+      const projectRoot = join(root, "project");
+      const globalDir = join(root, "global");
+      mkdirSync(join(projectRoot, "accounting-rules"), { recursive: true });
+      writeFileSync(join(projectRoot, "accounting-rules", "index.md"), "# Existing bundle\n", "utf8");
+
+      expect(chooseDefaultBundleStorage(projectRoot, globalDir, "Acme", "company-a")).toMatchObject({
+        dir: join(projectRoot, "accounting-rules"),
+        legacyFile: join(projectRoot, "accounting-rules.md"),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 keeps an existing root-marked unscoped global bundle in place", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-global-bundle-"));
+    try {
+      const projectRoot = join(root, "project");
+      const globalDir = join(root, "global");
+      mkdirSync(join(globalDir, "accounting-rules"), { recursive: true });
+      writeFileSync(join(globalDir, "accounting-rules", "index.md"), "# Existing global bundle\n", "utf8");
+
+      expect(chooseDefaultBundleStorage(projectRoot, globalDir, "Acme", "company-a")).toMatchObject({
+        dir: join(globalDir, "accounting-rules"),
+        legacyFile: join(globalDir, "accounting-rules.md"),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 keeps an existing non-template unscoped global legacy in place", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-global-legacy-"));
+    try {
+      const projectRoot = join(root, "project");
+      const globalDir = join(root, "global");
+      mkdirSync(globalDir);
+      writeFileSync(join(globalDir, "accounting-rules.md"), "# Accounting Rules\n\nCompany data.\n", "utf8");
+
+      expect(chooseDefaultBundleStorage(projectRoot, globalDir, "Acme", "company-a")).toMatchObject({
+        dir: join(globalDir, "accounting-rules"),
+        legacyFile: join(globalDir, "accounting-rules.md"),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 active connection getter changes the real resolved path without cache bleed", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-switch-"));
+    try {
+      const initConnection = (accountingRules as any).initAccountingRulesConnection;
+      expect(initConnection).toBeTypeOf("function");
+      process.env.EARVELDAJA_CONFIG_DIR = join(root, "global");
+      delete process.env.EARVELDAJA_RULES_FILE;
+      delete process.env.EARVELDAJA_RULES_DIR;
+      let active = { name: "env-file", stableIdentity: "fingerprint-env" };
+      initConnection(() => active);
+
+      const envSave = saveAutoBookingRule({ match: "OpenAI", category: "saas_subscriptions", purchase_article_id: 501 });
+      const envRulesPath = getAccountingRulesPath();
+      active = { name: "renamed-env-file", stableIdentity: "fingerprint-env" };
+      expect(getAccountingRulesPath()).toBe(envRulesPath);
+      expect(findAutoBookingRule("openai ireland", "saas_subscriptions")).toMatchObject({ purchase_article_id: 501 });
+
+      active = { name: "demo", stableIdentity: "fingerprint-demo" };
+      const demoSave = saveAutoBookingRule({ match: "Wise", category: "bank_fees", purchase_article_id: 861 });
+      expect(demoSave.path).not.toBe(envSave.path);
+      expect(demoSave.path).toContain(join(root, "global", "accounting-rules"));
+      expect(findAutoBookingRule("wise europe", "bank_fees")).toMatchObject({ purchase_article_id: 861 });
+      expect(findAutoBookingRule("openai ireland", "saas_subscriptions")).toBeUndefined();
+
+      active = { name: "env-file", stableIdentity: "fingerprint-env" };
+      expect(getAccountingRulesPath()).toBe(envRulesPath);
+      expect(findAutoBookingRule("openai ireland", "saas_subscriptions")).toMatchObject({ purchase_article_id: 501 });
+      expect(findAutoBookingRule("wise europe", "bank_fees")).toBeUndefined();
+
+      active = { name: "Åcme OÜ", stableIdentity: "fingerprint-acme-one" };
+      const firstCollision = saveAutoBookingRule({ match: "Stripe", category: "saas_subscriptions", purchase_article_id: 111 });
+      active = { name: "acme ou", stableIdentity: "fingerprint-acme-two" };
+      const secondCollision = saveAutoBookingRule({ match: "Anthropic", category: "saas_subscriptions", purchase_article_id: 222 });
+      expect(secondCollision.path).not.toBe(firstCollision.path);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 explicit rules environment overrides remain unscoped", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-m23-overrides-"));
+    try {
+      const file = join(root, "explicit.md");
+      process.env.EARVELDAJA_RULES_FILE = file;
+      delete process.env.EARVELDAJA_RULES_DIR;
+      expect(getAccountingRulesPath()).toBe(file);
+
+      delete process.env.EARVELDAJA_RULES_FILE;
+      const dir = join(root, "explicit-bundle");
+      process.env.EARVELDAJA_RULES_DIR = dir;
+      expect(getAccountingRulesPath()).toBe(dir);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("M23 index initializes accounting rules from the live connection state", () => {
+    const source = readFileSync(join(process.cwd(), "src", "index.ts"), "utf8");
+    expect(source).toContain('initAccountingRulesConnection');
+    const call = source.match(/initAccountingRulesConnection\(\(\) => \(\{[\s\S]*?\}\)\);/)?.[0] ?? "";
+    expect(call).toContain('allConfigs[connectionState.activeIndex]?.name ?? "setup"');
+    expect(call).toContain('buildConnectionFingerprint(allConfigs[connectionState.activeIndex]!.config)');
+    expect(call).toContain(': "setup"');
+    expect(call).not.toContain("connectionFingerprints[");
+  });
+
+  it("M23 tracked template exactly matches the source default and contains no company data", () => {
+    const isDefaultTemplate = (accountingRules as any).isDefaultAccountingRulesTemplate;
+    expect(isDefaultTemplate).toBeTypeOf("function");
+    const template = readFileSync(join(process.cwd(), "accounting-rules.md"), "utf8");
+
+    expect(isDefaultTemplate(template)).toBe(true);
+    expect(isDefaultTemplate(template.replace(/\n?$/, "\nCompany note.\n"))).toBe(false);
+    expect(template).not.toMatch(/\|\s*[^-\s][^|]*\|\s*(?:saas_subscriptions|bank_fees)\s*\|/i);
+  });
+
+  it("M23 generated project bundle path is ignored", () => {
+    const gitignore = readFileSync(join(process.cwd(), ".gitignore"), "utf8");
+    expect(gitignore).toContain(
+      "# Generated connection-specific accounting rules (templates remain tracked elsewhere)\naccounting-rules/\n",
+    );
   });
 });

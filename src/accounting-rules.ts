@@ -1,5 +1,5 @@
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "fs";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { z } from "zod";
 import { getProjectRoot } from "./paths.js";
@@ -93,6 +93,7 @@ export interface SaveAutoBookingRuleInput {
 
 let cachedRules: AccountingRules | undefined;
 let cachedRulesKey: string | undefined;
+let accountingRulesConnectionGetter = () => ({ name: "default", stableIdentity: "default" });
 
 const AUTO_BOOKING_RULE_ACTION_FIELDS = [
   "purchase_article_id",
@@ -134,7 +135,48 @@ function resolveStorage(): RulesStorage {
     const dir = resolveAbsolute(configuredDir);
     return { mode: "bundle", dir, legacyFile: resolve(dirname(dir), LEGACY_FILE_NAME) };
   }
-  return chooseDefaultBundleStorage(getProjectRoot(), getGlobalConfigDir());
+  let connection: { name: string; stableIdentity: string };
+  try {
+    connection = accountingRulesConnectionGetter();
+  } catch (error) {
+    throw new Error("Accounting rules connection identity is unavailable.", { cause: error });
+  }
+  return chooseDefaultBundleStorage(
+    getProjectRoot(),
+    getGlobalConfigDir(),
+    connection.name,
+    connection.stableIdentity,
+  );
+}
+
+export function initAccountingRulesConnection(
+  getter: () => { name: string; stableIdentity: string },
+): void {
+  accountingRulesConnectionGetter = getter;
+  resetAccountingRulesCache();
+}
+
+const WINDOWS_RESERVED_COMPONENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+const MAX_CONNECTION_NAME_COMPONENT_LENGTH = 54;
+
+export function sanitizeAccountingRulesConnectionName(name: string): string {
+  let component = name
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "default";
+  if (WINDOWS_RESERVED_COMPONENT.test(component)) {
+    component = `connection-${component}`;
+  }
+  return component.slice(0, MAX_CONNECTION_NAME_COMPONENT_LENGTH).replace(/-+$/g, "") || "default";
+}
+
+export function buildAccountingRulesConnectionScope(_name: string, stableIdentity: string): string {
+  if (!stableIdentity.trim()) {
+    throw new Error("Accounting rules stable identity must not be blank.");
+  }
+  return createHash("sha256").update(stableIdentity).digest("hex");
 }
 
 /**
@@ -158,14 +200,25 @@ function resolveStorage(): RulesStorage {
 export function chooseDefaultBundleStorage(
   projectRoot: string,
   globalConfigDir: string,
+  connectionName = "default",
+  stableIdentity = connectionName,
 ): { mode: "bundle"; dir: string; legacyFile: string } {
+  const scope = buildAccountingRulesConnectionScope(connectionName, stableIdentity);
   const projectDir = resolve(projectRoot, BUNDLE_DIR_NAME);
   const projectLegacy = resolve(projectRoot, LEGACY_FILE_NAME);
-  if (isInitializedBundle(projectDir) || existsSync(projectLegacy)) {
+  if (isRootInitializedBundle(projectDir) || existingLegacyContainsUserData(projectLegacy)) {
     return { mode: "bundle", dir: projectDir, legacyFile: projectLegacy };
   }
-  const dir = resolve(globalConfigDir, BUNDLE_DIR_NAME);
-  return { mode: "bundle", dir, legacyFile: resolve(globalConfigDir, LEGACY_FILE_NAME) };
+  const globalDir = resolve(globalConfigDir, BUNDLE_DIR_NAME);
+  const globalLegacy = resolve(globalConfigDir, LEGACY_FILE_NAME);
+  if (isRootInitializedBundle(globalDir) || existingLegacyContainsUserData(globalLegacy)) {
+    return { mode: "bundle", dir: globalDir, legacyFile: globalLegacy };
+  }
+  return {
+    mode: "bundle",
+    dir: resolve(globalDir, scope),
+    legacyFile: resolve(globalConfigDir, scope, LEGACY_FILE_NAME),
+  };
 }
 
 // ---- Cross-process write lock --------------------------------------------
@@ -368,6 +421,52 @@ function isInitializedBundle(dir: string): boolean {
   }
 }
 
+const SCOPED_RULES_DIRECTORY_NAME = /^[0-9a-f]{64}$/;
+const SCOPED_RULES_LOCK_FILE_NAME = /^[0-9a-f]{64}\.lock(?:\.reclaim)?$/;
+const SCOPED_RULES_STAGING_DIRECTORY_NAME = /^[0-9a-f]{64}\.(?:migrating|replacing)$/;
+
+function isRootInitializedBundle(dir: string): boolean {
+  try {
+    if (!statSync(dir).isDirectory()) return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    return true;
+  }
+  try {
+    const knownSubdirs = new Set(["auto-booking", "owner-expense", "annual-report"]);
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === "index.md" || entry.name === "log.md") {
+        return true;
+      }
+      if (SCOPED_RULES_DIRECTORY_NAME.test(entry.name)) {
+        if (!entry.isDirectory()) return true;
+        continue;
+      }
+      if (SCOPED_RULES_LOCK_FILE_NAME.test(entry.name)) {
+        if (!entry.isFile()) return true;
+        continue;
+      }
+      if (SCOPED_RULES_STAGING_DIRECTORY_NAME.test(entry.name)) {
+        if (!entry.isDirectory()) return true;
+        continue;
+      }
+      if (!knownSubdirs.has(entry.name)) {
+        return true;
+      }
+      if (!entry.isDirectory()) {
+        return true;
+      }
+      if (listBundleMarkdownFiles(resolve(dir, entry.name)).length > 0) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Whether a bundle holds at least one real concept file (not just the reserved
  * `index.md`/`log.md`). This — not mere existence of markdown — is what makes a
@@ -442,6 +541,21 @@ Columns:
 - \`account_id\`
 - \`category\`
 `;
+
+export function isDefaultAccountingRulesTemplate(markdown: string): boolean {
+  const withoutOptionalFinalNewline = (value: string): string =>
+    value.endsWith("\n") ? value.slice(0, -1) : value;
+  return withoutOptionalFinalNewline(markdown) === withoutOptionalFinalNewline(DEFAULT_RULES_TEMPLATE);
+}
+
+function existingLegacyContainsUserData(file: string): boolean {
+  try {
+    return !isDefaultAccountingRulesTemplate(readFileSync(file, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    return true;
+  }
+}
 
 function normalizeHeader(header: string): string {
   return header.trim().toLowerCase().replace(/\s+/g, "_");

@@ -32,6 +32,11 @@ Optional account overrides table:
 - `vat_deduction_mode`
 - `vat_deduction_ratio`
 
+## Annual Report
+
+If your chart of accounts uses a custom current-year profit/loss account, add a plain text line under Annual Report:
+- `Current year profit account: 2970`
+
 ## Liability Classification
 
 Add account-level overrides only when maturity is known outside the ledger.

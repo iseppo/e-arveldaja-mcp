@@ -15,3 +15,6 @@ logs/
 .mcpregistry_*_token
 json
 "$TMPERR"
+
+# Generated connection-specific accounting rules (templates remain tracked elsewhere)
+accounting-rules/
