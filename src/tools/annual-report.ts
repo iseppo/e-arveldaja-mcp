@@ -361,21 +361,34 @@ function buildUnresolvedItems(
   };
 }
 
-function isYearEndClosingJournal(journal: Pick<Journal, "document_number">): boolean {
-  return journal.document_number?.startsWith("YECL-") ?? false;
+export function isYearEndClosingJournal(
+  journal: Pick<Journal, "document_number" | "effective_date" | "title">,
+  year?: number,
+): boolean {
+  let targetYear: number;
+
+  if (year !== undefined) {
+    if (!Number.isInteger(year) || year < 1000 || year > 9999) return false;
+    targetYear = year;
+  } else {
+    const dateMatch = /^(\d{4})-/.exec(journal.effective_date ?? "");
+    if (!dateMatch) return false;
+    targetYear = Number(dateMatch[1]);
+    if (targetYear < 1000 || targetYear > 9999) return false;
+  }
+
+  if (journal.effective_date !== `${targetYear}-12-31`) return false;
+  if (journal.document_number === `YECL-${targetYear}`) return true;
+
+  const title = journal.title?.toLocaleLowerCase("et-EE") ?? "";
+  return title.includes(`aasta lõppkanne ${targetYear}`) ||
+    title.includes(`year-end close ${targetYear}`);
 }
 
 function findExistingYearEndCloseJournals(allJournals: Journal[], year: number): Journal[] {
-  const documentNumber = `YECL-${year}`;
-  const yearEndDate = `${year}-12-31`;
-  const titleNeedles = [`aasta lõppkanne ${year}`, `year-end close ${year}`];
-
-  return allJournals.filter((journal) => {
-    if (journal.is_deleted || journal.effective_date !== yearEndDate) return false;
-    if (journal.document_number === documentNumber) return true;
-    const title = journal.title?.toLowerCase() ?? "";
-    return titleNeedles.some((needle) => title.includes(needle));
-  });
+  return allJournals.filter((journal) =>
+    !journal.is_deleted && isYearEndClosingJournal(journal, year)
+  );
 }
 
 function buildBalanceLine(balance: AccountBalance): StatementLine {
@@ -706,7 +719,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     computeAllBalances(api, undefined, priorTo, preloaded),
     computeAllBalances(api, from, to, {
       ...preloaded,
-      journalFilter: (journal) => !isYearEndClosingJournal(journal),
+      journalFilter: (journal) => !isYearEndClosingJournal(journal, year),
     }),
   ]);
 

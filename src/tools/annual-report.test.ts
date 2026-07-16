@@ -21,6 +21,7 @@ vi.mock("../opening-balance-limitations.js", async (importOriginal) => {
 
 import type { ApiContext } from "./crud-tools.js";
 import { buildAnnualReportData, registerAnnualReportTools } from "./annual-report.js";
+import * as annualReport from "./annual-report.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
@@ -189,6 +190,60 @@ function extractEquity(report: Record<string, unknown>) {
   });
 }
 
+function makeM20BaseJournals(): Journal[] {
+  return [
+    makeJournal("2024-01-01", [
+      makePosting(1000, "D", 100),
+      makePosting(3000, "C", 100),
+    ], { id: 1001, registered: true }),
+    makeJournal("2024-12-31", [
+      makePosting(1000, "D", 50),
+      makePosting(3200, "C", 50),
+    ], { id: 1002, registered: true }),
+    makeJournal("2025-01-01", [
+      makePosting(1000, "D", 20),
+      makePosting(3100, "C", 20),
+    ], { id: 1003, registered: true }),
+    makeJournal("2025-06-01", [
+      makePosting(1000, "D", 60),
+      makePosting(3001, "C", 60),
+    ], { id: 1004, registered: true }),
+    makeJournal("2025-06-15", [
+      makePosting(5000, "D", 10),
+      makePosting(1000, "C", 10),
+    ], { id: 1005, registered: true }),
+  ];
+}
+
+function makeM20ClosingJournal(
+  id: number,
+  overrides: Pick<Journal, "effective_date"> & Partial<Pick<Journal, "document_number" | "title">>,
+): Journal {
+  return makeJournal(overrides.effective_date, [
+    makePosting(3001, "D", 60),
+    makePosting(5000, "C", 10),
+    makePosting(2970, "C", 50),
+  ], {
+    id,
+    registered: true,
+    document_number: overrides.document_number,
+    title: overrides.title,
+  });
+}
+
+async function m20Profit(journals: Journal[]): Promise<number> {
+  const report = await buildAnnualReportData(createApi(journals), 2025);
+  return (report.income_statement_schema_1 as {
+    aruandeaasta_puhaskasum: { amount: number };
+  }).aruandeaasta_puhaskasum.amount;
+}
+
+async function m20Prepare(journals: Journal[]): Promise<Record<string, any>> {
+  const handler = setupTool("prepare_year_end_close", { journals });
+  const result = await handler({ year: 2025 });
+  return parseMcpResponse(result.content[0]!.text);
+}
+
 describe("buildAnnualReportData", () => {
   const ACCOUNT_999_WARNING =
     "Some asset accounts fall outside the current (10–16) / non-current (17–19) balance-sheet ranges, so they count toward total assets but appear in neither asset line: 999. Review their classification.";
@@ -313,6 +368,203 @@ describe("buildAnnualReportData", () => {
       },
     ]);
     expect(equity.total_equity).toBe(220);
+  });
+
+  it("M20 excludes an Estonian title-only year-end close from P&L", async () => {
+    const closingJournal = makeM20ClosingJournal(1101, {
+      effective_date: "2025-12-31",
+      title: "Aasta lõppkanne 2025",
+    });
+
+    expect(await m20Profit([...makeM20BaseJournals(), closingJournal])).toBe(50);
+  });
+
+  it("M20 excludes an English title-only year-end close from P&L", async () => {
+    const closingJournal = makeM20ClosingJournal(1102, {
+      effective_date: "2025-12-31",
+      title: "Year-End Close 2025",
+    });
+
+    expect(await m20Profit([...makeM20BaseJournals(), closingJournal])).toBe(50);
+  });
+
+  it("M20 prepare detects Estonian and English title-only closes as existing", async () => {
+    const journals = [
+      ...makeM20BaseJournals(),
+      makeM20ClosingJournal(1201, {
+        effective_date: "2025-12-31",
+        title: "Aasta lõppkanne 2025",
+      }),
+      makeM20ClosingJournal(1202, {
+        effective_date: "2025-12-31",
+        title: "Year-End Close 2025",
+      }),
+    ];
+
+    const payload = await m20Prepare(journals);
+
+    expect(payload.existing_year_end_close_journals.map((journal: { id: number }) => journal.id)).toEqual([
+      1201,
+      1202,
+    ]);
+    expect(payload.execution_status.can_execute).toBe(false);
+  });
+
+  it("M20 preserves canonical YECL document compatibility in P&L and prepare", async () => {
+    const canonicalClose = makeM20ClosingJournal(1301, {
+      effective_date: "2025-12-31",
+      document_number: "YECL-2025",
+      title: "Aasta lõppkanne 2025",
+    });
+    const journals = [...makeM20BaseJournals(), canonicalClose];
+
+    const payload = await m20Prepare(journals);
+    const profit = await m20Profit(journals);
+
+    expect.soft(payload.existing_year_end_close_journals.map((journal: { id: number }) => journal.id)).toEqual([1301]);
+    expect.soft(payload.execution_status.can_execute).toBe(false);
+    expect.soft(profit).toBe(50);
+  });
+
+  it("M20 keeps wrong-year document and title journals in P&L and out of prepare duplicates", async () => {
+    const wrongYearClose = makeM20ClosingJournal(1401, {
+      effective_date: "2025-12-31",
+      document_number: "YECL-2024",
+      title: "Aasta lõppkanne 2024",
+    });
+    const journals = [...makeM20BaseJournals(), wrongYearClose];
+
+    const payload = await m20Prepare(journals);
+    const profit = await m20Profit(journals);
+
+    expect.soft(payload.existing_year_end_close_journals).toEqual([]);
+    expect.soft(profit).toBe(0);
+  });
+
+  it("M20 keeps midyear canonical-looking journals in P&L and out of prepare duplicates", async () => {
+    const midyearClose = makeM20ClosingJournal(1402, {
+      effective_date: "2025-06-30",
+      document_number: "YECL-2025",
+      title: "Aasta lõppkanne 2025",
+    });
+    const journals = [...makeM20BaseJournals(), midyearClose];
+
+    const payload = await m20Prepare(journals);
+    const profit = await m20Profit(journals);
+
+    expect.soft(payload.existing_year_end_close_journals).toEqual([]);
+    expect.soft(profit).toBe(0);
+  });
+
+  it("M20 keeps malformed and prefix-only YECL documents in P&L and out of prepare duplicates", async () => {
+    const journals = [
+      ...makeM20BaseJournals(),
+      makeM20ClosingJournal(1403, {
+        effective_date: "2025-12-31",
+        document_number: "YECL-2025-extra",
+        title: "Malformed close marker",
+      }),
+      makeM20ClosingJournal(1404, {
+        effective_date: "2025-12-31",
+        document_number: "YECL-",
+        title: "Prefix-only close marker",
+      }),
+    ];
+
+    const payload = await m20Prepare(journals);
+    const profit = await m20Profit(journals);
+
+    expect.soft(payload.existing_year_end_close_journals).toEqual([]);
+    expect.soft(profit).toBe(-50);
+  });
+
+  it("M20 keeps an ordinary 31 December journal in P&L and out of prepare duplicates", async () => {
+    const ordinaryJournal = makeM20ClosingJournal(1405, {
+      effective_date: "2025-12-31",
+      document_number: "ADJ-2025",
+      title: "Ordinary year-end adjustment",
+    });
+    const journals = [...makeM20BaseJournals(), ordinaryJournal];
+
+    const payload = await m20Prepare(journals);
+    const profit = await m20Profit(journals);
+
+    expect.soft(payload.existing_year_end_close_journals).toEqual([]);
+    expect.soft(profit).toBe(0);
+  });
+
+  it("M20 exports a strict detector for invalid or missing date and year inputs", () => {
+    const detector = (annualReport as any).isYearEndClosingJournal;
+    expect(detector).toBeTypeOf("function");
+
+    const canonical = {
+      effective_date: "2025-12-31",
+      document_number: "YECL-2025",
+      title: "Aasta lõppkanne 2025",
+    };
+    const vectors: Array<{
+      name: string;
+      journal: Pick<Journal, "document_number" | "effective_date" | "title">;
+      year?: number;
+      expected: boolean;
+    }> = [
+      { name: "valid inferred document", journal: canonical, expected: true },
+      { name: "valid inferred Estonian title", journal: { ...canonical, document_number: null }, expected: true },
+      { name: "valid inferred English title", journal: { ...canonical, document_number: null, title: "YEAR-END CLOSE 2025" }, expected: true },
+      { name: "valid explicit year", journal: canonical, year: 2025, expected: true },
+      { name: "missing date", journal: { ...canonical, effective_date: undefined as unknown as string }, expected: false },
+      { name: "empty date", journal: { ...canonical, effective_date: "" }, expected: false },
+      { name: "invalid date", journal: { ...canonical, effective_date: "not-a-date" }, expected: false },
+      { name: "non-strict date prefix", journal: { ...canonical, effective_date: "x2025-12-31" }, expected: false },
+      { name: "slash date", journal: { ...canonical, effective_date: "2025/12/31" }, expected: false },
+      { name: "timestamp suffix", journal: { ...canonical, effective_date: "2025-12-31T00:00:00Z" }, expected: false },
+      { name: "non-integer explicit year", journal: canonical, year: 2025.5, expected: false },
+      { name: "too-small explicit year", journal: canonical, year: 999, expected: false },
+      { name: "too-large explicit year", journal: canonical, year: 10000, expected: false },
+      { name: "NaN explicit year", journal: canonical, year: Number.NaN, expected: false },
+      { name: "infinite explicit year", journal: canonical, year: Number.POSITIVE_INFINITY, expected: false },
+      { name: "wrong valid explicit year", journal: canonical, year: 2024, expected: false },
+      { name: "midyear date", journal: { ...canonical, effective_date: "2025-06-30" }, expected: false },
+      { name: "malformed document", journal: { ...canonical, document_number: "YECL-2025-extra", title: "ordinary" }, expected: false },
+      { name: "prefix-only document", journal: { ...canonical, document_number: "YECL-", title: "ordinary" }, expected: false },
+      { name: "ordinary journal", journal: { ...canonical, document_number: "ADJ-2025", title: "ordinary" }, expected: false },
+    ];
+
+    for (const vector of vectors) {
+      expect.soft(detector(vector.journal, vector.year), vector.name).toBe(vector.expected);
+    }
+  });
+
+  it("M20 recognition has no double effect or journal-order dependence", async () => {
+    const overlapClose = makeM20ClosingJournal(1501, {
+      effective_date: "2025-12-31",
+      document_number: "YECL-2025",
+      title: "Aasta lõppkanne 2025",
+    });
+    const titleOnlyClose = makeM20ClosingJournal(1502, {
+      effective_date: "2025-12-31",
+      title: "Year-End Close 2025",
+    });
+    const ordinaryJournal = makeM20ClosingJournal(1503, {
+      effective_date: "2025-12-31",
+      document_number: "ADJ-2025",
+      title: "Ordinary year-end adjustment",
+    });
+    const forward = [...makeM20BaseJournals(), overlapClose, titleOnlyClose, ordinaryJournal];
+    const reverse = [...makeM20BaseJournals(), ordinaryJournal, titleOnlyClose, overlapClose];
+
+    const forwardPrepare = await m20Prepare(forward);
+    const reversePrepare = await m20Prepare(reverse);
+    const forwardProfit = await m20Profit(forward);
+    const reverseProfit = await m20Profit(reverse);
+    const forwardIds = forwardPrepare.existing_year_end_close_journals.map((journal: { id: number }) => journal.id);
+    const reverseIds = reversePrepare.existing_year_end_close_journals.map((journal: { id: number }) => journal.id);
+
+    expect.soft(forwardIds).toEqual([1501, 1502]);
+    expect.soft(reverseIds).toEqual([1502, 1501]);
+    expect.soft(forwardIds.filter((id: number) => id === 1501)).toHaveLength(1);
+    expect.soft(reverseIds.filter((id: number) => id === 1501)).toHaveLength(1);
+    expect.soft([forwardProfit, reverseProfit]).toEqual([0, 0]);
   });
 
   it("maps 8xxx FX gain/loss into 'Finantstulud ja -kulud' as a net (income − expense), not into unmapped", async () => {
