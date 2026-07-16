@@ -4277,41 +4277,61 @@ Append one ignored-ledger M22 row with baseline, exact RED/GREEN names/counts, f
 **Files:**
 - Modify: `src/accounting-rules.ts:130-170`
 - Modify: `src/accounting-rules.test.ts`
+- Modify: `src/index.ts:60-100,380-400`
 - Modify: `.gitignore:1-20`
+- Modify: `accounting-rules.md`
+- Modify: `README.md:92-108`
 
 **Interfaces:**
-- Consumes: global config directory and active connection namespace.
-- Produces: `chooseDefaultBundleStorage(projectRoot, globalConfigDir, connectionName="default")` resolving to `<globalConfigDir>/accounting-rules/<safe-connection>` for new installs.
+- Consumes: global config directory, active connection namespace, explicit rules overrides, and existing project/global rule stores.
+- Produces: `sanitizeAccountingRulesConnectionName(name)`, `buildAccountingRulesConnectionScope(name, stableIdentity)`, `isDefaultAccountingRulesTemplate(markdown)`, `initAccountingRulesConnection(getter)`, and `chooseDefaultBundleStorage(projectRoot, globalConfigDir, connectionName="default", stableIdentity=connectionName)`; a genuinely fresh default resolves to `<globalConfigDir>/accounting-rules/<safe-name>--<identity-hash>` while existing data-bearing stores remain in place.
 
-- [ ] **Step 1: Write the failing regression**
+- [ ] **Step 1: Record the current baseline and storage precedence**
 
-```ts
-it("places new company rules in an ignored connection-scoped location", () => {
-  expect(chooseDefaultBundleStorage("/repo", "/config", "Acme OÜ")).toMatchObject({
-    dir: resolve("/config", "accounting-rules", "acme-ou"),
-  });
-  expect(readFileSync(".gitignore", "utf8")).toContain("accounting-rules/");
-});
-```
+Run `npx vitest run src/accounting-rules.test.ts`. The pre-M23 baseline is 46/46 and the repository total is 2,437. Confirm precedence: explicit `EARVELDAJA_RULES_FILE`/`EARVELDAJA_RULES_DIR`; initialized project bundle or project legacy; current unscoped global bundle/legacy; only then a fresh default. Confirm the tracked root `accounting-rules.md` currently makes every checkout look like a project legacy store even though it contains only shipped instructions.
 
-- [ ] **Step 2: Prove red**
+- [ ] **Step 2: Add twelve exact M23 tests without production edits**
 
-Run: `npx vitest run src/accounting-rules.test.ts -t "connection-scoped location"`
+Use a namespace import for initially missing exports and restore all environment variables/getters in `afterEach`. Add M23-tagged tests:
 
-Expected: FAIL because the function has no connection argument and the repo path lacks an ignore policy.
+1. `M23 scopes a fresh global bundle and legacy fallback by connection` supplies `Acme OÜ` plus a stable non-secret fingerprint and expects `<global>/accounting-rules/acme-ou--<short-hash>` and `<global>/acme-ou--<short-hash>/accounting-rules.md`.
+2. `M23 sanitizes connection names without path escape or identity collision` covers NFKD diacritics, traversal/separators/control characters, blank fallback `default`, Windows reserved basenames, deterministic bounded output, two raw names that sanitize alike, and duplicate names with different fingerprints; distinct identities must produce distinct scopes.
+3. `M23 ignores the untouched shipped project template when selecting storage` uses the real tracked template and expects the connection-scoped global path.
+4. `M23 keeps a modified or data-bearing project legacy in place` is a passing compatibility control, including a free-form note appended to the shipped template.
+5. `M23 keeps an initialized project bundle in place` is a passing control.
+6. `M23 keeps an existing root-marked unscoped global bundle in place` is only the passing upgrade control for a true root-marked old bundle. The separate assertion that scoped children do not pin their parent stays in RED test 8.
+7. `M23 keeps an existing non-template unscoped global legacy in place` is a passing upgrade control.
+8. `M23 active connection getter changes the real resolved path without cache bleed` initializes a mutable `{ name, stableIdentity }` getter, saves into `env-file`, switches to `demo` after the shared parent exists, and proves the recursive child is not mistaken for an unscoped bundle; paths and saved/read rules remain distinct, and switching back restores only the first rules. Repeat with colliding labels and different fingerprints.
+9. `M23 explicit rules environment overrides remain unscoped` is a passing control for both file and dir modes.
+10. `M23 index initializes accounting rules from the live connection state` reads `src/index.ts` and requires one imported initializer with a full live getter object: `name` from the active config (or `"setup"`) and `stableIdentity: buildConnectionFingerprint(allConfigs[connectionState.activeIndex]!.config)` (or `"setup"`). It rejects using the name-indexed fingerprint map for this identity.
+11. `M23 tracked template exactly matches the source default and contains no company data` requires `isDefaultAccountingRulesTemplate(readFileSync(accounting-rules.md)) === true` and proves one appended free-form note makes it false.
+12. `M23 generated project bundle path is ignored` checks the exact `.gitignore` rule; the shell gate later proves Git behavior.
 
-- [ ] **Step 3: Scope and ignore generated bundles**
+Expected before production edits: tests 1, 2, 3, 8, 10, 11, and 12 FAIL; tests 4–7 and 9 PASS. Run `npx vitest run src/accounting-rules.test.ts -t "M23"` and record exact 7 RED / 5 control names and messages before any production edit.
 
-```ts
-export function chooseDefaultBundleStorage(projectRoot: string, globalConfigDir: string, connectionName = "default") {
-  const projectDir = resolve(projectRoot, BUNDLE_DIR_NAME);
-  const projectLegacy = resolve(projectRoot, LEGACY_FILE_NAME);
-  if (isInitializedBundle(projectDir) || existsSync(projectLegacy)) return { mode: "bundle" as const, dir: projectDir, legacyFile: projectLegacy };
-  const scope = connectionName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "default";
-  const dir = resolve(globalConfigDir, BUNDLE_DIR_NAME, scope);
-  return { mode: "bundle" as const, dir, legacyFile: resolve(globalConfigDir, scope, LEGACY_FILE_NAME) };
-}
-```
+- [ ] **Step 3: Implement safe scope and template/data precedence**
+
+Implement `sanitizeAccountingRulesConnectionName` with NFKD diacritic removal, lowercase ASCII alphanumerics plus collapsed hyphens, trimmed separators, a safe `default` fallback, Windows-reserved-name defense, and a bounded component. It must return one path segment and never `.` or `..`. Implement `buildAccountingRulesConnectionScope(name, stableIdentity)` by appending a mandatory deterministic short hash of the non-secret stable identity. Bound the combined component without dropping the identity hash, so duplicate names and names that sanitize alike cannot share rules when their fingerprints differ.
+
+Export `isDefaultAccountingRulesTemplate(markdown)` and make the tracked `accounting-rules.md` byte-equivalent (allowing only final-newline normalization) to `DEFAULT_RULES_TEMPLATE`. Any difference—including a free-form note or whitespace edit—is user content and must pin the project legacy path; unreadable existing legacy also pins safely rather than being stranded.
+
+Add a root-aware initialized-bundle predicate for precedence decisions. It may recognize root `index.md`/`log.md` or the known root concept layout, but must not recursively treat `<global>/accounting-rules/<scope>/...` as proof that `<global>/accounting-rules` itself is an old unscoped bundle. Keep ordinary bundle loading recursive after a storage root has been selected.
+
+Update `chooseDefaultBundleStorage` in this order:
+
+1. initialized project bundle;
+2. existing project legacy that is not the untouched shipped template (or cannot be read);
+3. initialized current unscoped global bundle `<global>/accounting-rules`;
+4. existing non-template/unreadable unscoped global legacy `<global>/accounting-rules.md`;
+5. fresh connection-scoped bundle `<global>/accounting-rules/<safe-name>--<identity-hash>` with scoped legacy fallback `<global>/<safe-name>--<identity-hash>/accounting-rules.md`.
+
+Do not move existing stores in M23. Explicit environment overrides retain their current highest precedence and exact paths.
+
+- [ ] **Step 4: Wire the live connection name without cross-company cache reuse**
+
+Add `initAccountingRulesConnection(getter: () => { name: string; stableIdentity: string })` with a safe default; initialization resets the accounting-rule cache. `resolveStorage` passes the getter's current pair to `chooseDefaultBundleStorage`. In `index.ts`, initialize it after `connectionState` and configs exist: `name` is the live connection name and `stableIdentity` is `buildConnectionFingerprint(activeConfig.config)` (or `"setup"` without a config). Do not key through the existing name-indexed fingerprint object because duplicate names can exist, and do not snapshot either value. Existing cache keys contain the selected path signature; tests must prove switching, colliding labels, and switching back never serve another connection's rules.
+
+- [ ] **Step 5: Align ignore and operator documentation**
 
 Add exactly this ignore entry:
 
@@ -4320,18 +4340,28 @@ Add exactly this ignore entry:
 accounting-rules/
 ```
 
-- [ ] **Step 4: Prove green and review**
+Keep `accounting-rules.md` tracked as a generic, company-data-free template. Update README storage documentation to state: untouched shipped template does not pin the repo; new defaults are connection-scoped under the global config directory; existing project and unscoped global stores remain in place; explicit overrides are unchanged.
 
-Run: `npx vitest run src/accounting-rules.test.ts && git check-ignore accounting-rules/example/concept.md && npm run build && git diff --check`
+- [ ] **Step 6: Prove GREEN and repository gates**
 
-Expected: tests/build PASS and `git check-ignore` prints the generated path. Package the listed files and obtain independent `APPROVED`.
+Run the exact M23 selector, then `npx vitest run src/accounting-rules.test.ts`. Expected: 12/12 and 58/58. Run `git check-ignore -v accounting-rules/example/concept.md`, which must identify the new rule. Then run `npm run build`, `npm run validate:release`, `git diff --check`, `npm test`, and `npm run test:integration`. Expected full unit total: 2,449 if exactly twelve tests were added; integration 20 pass/3 documented skips. Require exactly the six M23 files and no M26 drift.
 
-- [ ] **Step 5: Commit M23**
+- [ ] **Step 7: Freeze and obtain ordered independent review**
+
+Write the exact six-file diff to `.omc/reviews/M23.diff`, record bytes/SHA-256, and prove live identity. First obtain `SPEC COMPLIANCE: APPROVED` from a fresh reviewer checking live getter/fingerprint wiring, root-aware precedence, template detection, collision-resistant safe scope, cache isolation, backward compatibility, ignore behavior, docs, and exact scope. Only then obtain `CODE QUALITY APPROVED` from a different fresh reviewer checking path portability/collisions, fingerprint secrecy/stability, recursive-parent misclassification, unsafe reads, initialization/cycles, cache behavior, test isolation, and documentation accuracy. Any finding restarts tests/gates, artifact generation, and both reviews.
+
+- [ ] **Step 8: Re-verify, commit, ledger, and stop cleanly**
+
+After approvals, rerun Step 6, prove live/staged/artifact byte identity, stage exactly the six paths, and commit:
 
 ```bash
-git add src/accounting-rules.ts src/accounting-rules.test.ts .gitignore
+git add src/accounting-rules.ts src/accounting-rules.test.ts src/index.ts .gitignore accounting-rules.md README.md
+git diff --cached --name-only
+git diff --cached --check
 git commit -m "fix(M23): isolate generated accounting rules"
 ```
+
+Append one ignored-ledger M23 row with baseline, exact RED/GREEN, precedence/switch/ignore/template proofs, full gates, artifact identity, ordered verdicts, exact scope, and commit hash. Require an empty `git status --short` and M23 at `HEAD`. Do not begin M26 until M23 is committed, recorded, and clean.
 
 ### Task 19: M26 — Separate booked, skipped, and review-required portfolio rows
 
