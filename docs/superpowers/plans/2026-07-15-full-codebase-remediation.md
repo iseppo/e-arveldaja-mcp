@@ -4626,6 +4626,14 @@ The 15,430-byte artifact passed specification review but failed code-quality rev
 2. Remove the selected-match early return. First collect every bank-account row whose normalized `iban_code` or `account_no` matches the normalized statement identity. Treat only positive safe-integer numeric `accounts_dimensions_id` values as valid owners. A selected match is accepted only when every matching row has the selected valid dimension; repeated selected rows are allowed. A matching valid other dimension makes ownership ambiguous and rejects while naming only safely rendered numeric dimension IDs. A matching row with a missing or malformed runtime dimension also rejects as invalid/ambiguous configuration without interpolating the malformed value. Preserve the earlier no-selected-row and blank-selected-identity errors, selected identity diagnostics, exact-once statement/account wrapping, normalization, and call order.
 3. Expected GREEN: H08 11/11, combined CAMT 40/40, full unit 2,485/2,485, integration 20 pass/3 skips, build/release/diff checks PASS, exact three-file scope. Regenerate the artifact and restart fresh ordered spec and quality reviews plus independent verification; any edit or finding restarts all gates and reviews.
 
+#### H08 second review-correction plan
+
+The 19,133-byte artifact passed specification review but failed code-quality review because Unicode case expansion can collide distinct account identities (`ß`.toUpperCase() becomes `SS`). Invalidate the artifact and verdicts:
+
+1. Add one H08 test before production edits: statement identity `ß` versus configured selected identity `SS` must reject with `validation_failed`, a fixed safe message, and the shared zero downstream transaction/client/progress/create/audit proof. The raw non-ASCII value may appear only inside one untrusted wrapper. Expected RED: H08 1 FAIL / 11 PASS and combined CAMT 1 FAIL / 40 PASS out of 41.
+2. Replace Unicode uppercasing with ASCII-only normalization: accept only a nonempty value consisting of ASCII letters/digits after removing formatting whitespace, uppercase only `[a-z]`, and return no normalized identity for every other value. Non-ASCII configured identifiers are unusable; a non-ASCII statement identity fails closed. Every comparison must require both normalized operands to exist so absent/invalid values can never match each other. Preserve lowercase ASCII/whitespace compatibility, wrapping, ownership ambiguity logic, call order, and side-effect guarantees.
+3. Require H08 12/12, combined CAMT 41/41, full unit 2,486/2,486, integration 20 pass/3 skips, build/release/diff checks and exact scope. Regenerate the artifact and restart all reviews and verification.
+
 ### Task 21: H09 — Scope CAMT reference duplicates by bank dimension
 
 **Files:**
