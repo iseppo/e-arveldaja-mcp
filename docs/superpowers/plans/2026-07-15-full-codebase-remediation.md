@@ -4144,63 +4144,69 @@ Finally run `git status --short` and `git log -1 --oneline`. Expected: clean wor
 **Files:**
 - Modify: `src/tools/purchase-vat-defaults.ts:75-150`
 - Modify: `src/tools/purchase-vat-defaults.test.ts`
+- Modify: `src/tools/crud/purchase-invoices.ts:1-130`
 - Modify: `src/tools/crud-tools.test.ts`
 
 **Interfaces:**
 - Consumes: live `isVatRegistered` and purchase article defaults.
-- Produces: `validateNonVatItem(item): string[]`; non-VAT defaults never contain `vat_accounts_id` or deductible VAT article/rate.
+- Produces: `validateNonVatItem(item): string[]`; non-VAT defaults never contain `vat_accounts_id`, `vat_accounts_dimensions_id`, or deductible VAT article/rate.
+- Contract boundary: inherited/defaulted values are canonicalized by `applyPurchaseVatDefaults`; explicit contradictory direct-CRUD input is rejected for manual review before any reference-data lookup, create call, or audit write.
 
-- [ ] **Step 1: Write failing regressions**
+- [ ] **Step 1: Record the affected baseline**
 
-```ts
-it("strips deductible VAT defaults for a non-VAT company", () => {
-  const result = applyPurchaseVatDefaults([{ id: 1, vat_accounts_id: 1510, cl_vat_articles_id: 1 } as any],
-    { cl_purchase_articles_id: 1, vat_rate_dropdown: "22" } as any, false);
-  expect(result.vat_accounts_id).toBeUndefined();
-  expect(result.cl_vat_articles_id).toBe(11);
-  expect(result.vat_rate_dropdown).toBe("-");
-});
-```
+Run `npx vitest run src/tools/purchase-vat-defaults.test.ts src/tools/crud-tools.test.ts` before edits. The pre-M21 baseline is 2 files and 171 tests: 14 purchase-VAT-default tests plus 157 CRUD tests. Record any drift before continuing.
 
-- [ ] **Step 2: Prove red**
+- [ ] **Step 2: Add exact failing regressions without production edits**
 
-Run: `npx vitest run src/tools/purchase-vat-defaults.test.ts src/tools/crud-tools.test.ts -t "non-VAT company"`
+In `purchase-vat-defaults.test.ts`, add M21-tagged tests that prove a non-VAT item is canonicalized to no `vat_accounts_id`, no `vat_accounts_dimensions_id`, `cl_vat_articles_id: 11`, and `vat_rate_dropdown: "-"` when deductible values originate from each of these paths: the selected purchase article, a rate-matched article, a keyword-matched article, and the incoming item itself. Include an order-independent article-list control, an already-canonical non-VAT control, and a VAT-registered compatibility control that still inherits account 1510/article 1/rate behavior unchanged. Replace the obsolete test that expects the expense account to become a VAT account.
 
-Expected: FAIL because selected/rate article defaults can carry deductible VAT fields.
+Add table-driven `validateNonVatItem` tests. For a non-VAT company, `undefined` and `null` mean absence for `vat_accounts_id`, `vat_accounts_dimensions_id`, and `cl_vat_articles_id`; article 11 is allowed; an absent rate or any whitespace/comma-normalized dash is allowed. Any non-null VAT account or VAT-account dimension, any article other than 11, and every normalized non-dash rate including `"0"`, `0`, `"24"`, and malformed non-empty text is a conflict. Assert deterministic field-specific messages and no mutation of the caller-owned item.
 
-- [ ] **Step 3: Fail conflicting explicit input and sanitize defaults**
+In `crud-tools.test.ts`, add M21-tagged public `create_purchase_invoice` tests using live `getVatInfo()` results:
 
-```ts
-export function validateNonVatItem(item: PurchaseInvoiceItem): string[] {
-  const conflicts: string[] = [];
-  if (item.vat_accounts_id !== undefined) conflicts.push("vat_accounts_id is not allowed for a non-VAT company");
-  if (item.cl_vat_articles_id !== undefined && item.cl_vat_articles_id !== 11) conflicts.push("deductible cl_vat_articles_id is not allowed for a non-VAT company");
-  if (normalizeVatRate(item.vat_rate_dropdown) !== undefined && normalizeVatRate(item.vat_rate_dropdown) !== "-") conflicts.push("vat_rate_dropdown must be '-' for a non-VAT company");
-  return conflicts;
-}
+1. A non-VAT company with one explicit conflict returns `isError: true` and a classified payload with `category: "manual_review_required"`, indexed `details`, and a `next_action` telling the caller to remove deductible VAT fields or use article 11/rate `"-"`.
+2. Multiple conflicting rows produce one deterministic aggregate response containing every indexed conflict; the handler performs zero `getPurchaseArticles`, `getAccounts`, `getAccountDimensions`, `createAndSetTotals`, and audit calls.
+3. A non-VAT request whose explicit fields are absent/null or article 11/rate `"-"` passes validation and the created payload is canonical: no VAT account/dimension and article 11/rate `"-"` on every row.
+4. The same deductible input under a VAT-registered live status remains accepted and retains registered-company defaults.
 
-if (!isVatRegistered) {
-  delete merged.vat_accounts_id;
-  merged.cl_vat_articles_id = NON_VAT_REGISTERED_FALLBACK.cl_vat_articles_id;
-  merged.vat_rate_dropdown = "-";
-  return merged;
-}
-```
+The handler harness must stub `getPurchaseArticles` for successful cases and `createAndSetTotals`; tests must assert the live VAT status is read exactly once. Keep receipt-inbox and PDF workflows out of this direct-CRUD validation scope; their inherited values remain protected by the pure canonicalizer.
 
-The CRUD handler calls `validateNonVatItem` on explicit input before defaults and returns `manual_review_required` if conflicts exist.
+- [ ] **Step 3: Prove the intended RED set**
 
-- [ ] **Step 4: Prove green and review**
+Run the M21-tagged tests only, then the two complete affected files. Record exact test names and counts. Expected before production edits: helper canonicalization and validator/export tests fail, CRUD classified rejection/zero-side-effect tests fail, and the declared already-canonical plus VAT-registered controls pass. No unrelated test may fail.
 
-Run: `npx vitest run src/tools/purchase-vat-defaults.test.ts src/tools/crud-tools.test.ts && npm run build && git diff --check`
+- [ ] **Step 4: Implement the pure validation and canonicalization boundary**
 
-Expected: defaults sanitize; explicit contradiction stops before create. Package the listed files and obtain independent `APPROVED`.
+Export `validateNonVatItem(item: PurchaseInvoiceItem): string[]` from `purchase-vat-defaults.ts`. Normalize the rate once. Treat `null` like absence for nullable account/article/dimension fields; report a conflict only for a non-null VAT account/dimension, a non-null article other than 11, or a defined normalized rate other than `"-"`. Do not mutate the input.
 
-- [ ] **Step 5: Commit M21**
+In `applyPurchaseVatDefaults`, retain the existing VAT-registered branch unchanged. For `isVatRegistered === false`, return a cloned canonical row after deleting both VAT account fields and forcing article 11 plus rate `"-"`; do not consult selected, rate-matched, or keyword-matched deductible defaults for the returned non-VAT VAT fields. Preserve unrelated defaults and caller-owned input immutability.
+
+- [ ] **Step 5: Enforce explicit-input review atomically in CRUD**
+
+In `create_purchase_invoice`, preserve this order: fetch live VAT status, parse all raw items, and—only when live status is non-VAT—validate every raw item and aggregate indexed conflicts. If any conflict exists, immediately return `toolError({ error: "Non-VAT purchase invoice contains deductible VAT fields", category: "manual_review_required", details, next_action: ... })`. Only a conflict-free request may fetch purchase articles/accounts/dimensions, apply defaults, create, or audit. This ordering makes a multi-item request all-or-nothing and distinguishes explicit contradictions from inherited defaults.
+
+- [ ] **Step 6: Prove green at finding, affected, and repository level**
+
+Run the exact M21 selector, both complete affected files, `npm run build`, `npm run validate:release`, `git diff --check`, `npm test`, and `npm run test:integration`, in that order. Expected: all M21 and affected tests pass; the unit total is the pre-M21 2,418 plus the exact number of added tests; integration remains 20 passing with the three documented skips; build/release/diff checks pass. Inspect `git diff --name-only` and require exactly the four M21 paths with no M22 or receipt/PDF drift.
+
+- [ ] **Step 7: Freeze and obtain ordered independent review**
+
+Write the exact four-file diff to `.omc/reviews/M21.diff`; record byte size and SHA-256. First give a fresh spec-compliance reviewer only the M21 requirements, committed M20 base, and frozen artifact. Require `SPEC COMPLIANCE: APPROVED` or actionable findings. The reviewer must check live-status use, explicit-vs-inherited boundary, nullable semantics, rate normalization including zero/malformed values, orphan VAT dimension removal, selected/rate/keyword defaults, multi-item atomicity, zero side effects, registered compatibility, input immutability, and exact scope.
+
+Only after spec approval, give the unchanged artifact to a different fresh code-quality reviewer and require `CODE QUALITY APPROVED` or findings. Any finding restarts with a failing test where applicable, the smallest fix, all Step 6 gates, artifact regeneration, and both ordered reviews.
+
+- [ ] **Step 8: Re-verify artifact identity, commit, ledger, and stop cleanly**
+
+After final approvals, rerun Step 6, compare the live diff byte-for-byte with `.omc/reviews/M21.diff`, stage exactly the four paths, run staged name/check/diff identity checks, and commit:
 
 ```bash
-git add src/tools/purchase-vat-defaults.ts src/tools/purchase-vat-defaults.test.ts src/tools/crud-tools.test.ts
+git add src/tools/purchase-vat-defaults.ts src/tools/purchase-vat-defaults.test.ts src/tools/crud/purchase-invoices.ts src/tools/crud-tools.test.ts
+git diff --cached --name-only
+git diff --cached --check
 git commit -m "fix(M21): block deductible VAT for non-VAT companies"
 ```
+
+Append one ignored-ledger M21 row with baseline, exact RED/GREEN counts, pure-helper and CRUD proofs, full/build/integration/release/diff results, frozen artifact bytes/SHA, ordered review verdicts, exact four-file scope, and commit hash. Finally require an empty `git status --short` and M21 at `HEAD`. Do not begin M22 until M21 is committed, recorded, and clean.
 
 ### Task 17: M22 — Detect accounting-rule migration collisions
 
