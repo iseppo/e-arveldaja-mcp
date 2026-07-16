@@ -3,7 +3,7 @@ import { z } from "zod";
 import { readFile } from "fs/promises";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
-import type { AccountDimension } from "../types/api.js";
+import type { AccountDimension, BankAccount } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
 import { resolveFileInput } from "../file-validation.js";
 import { batch } from "../annotations.js";
@@ -42,6 +42,162 @@ interface WiseRow {
   reference: string;
   category: string;
   note: string;
+}
+
+type WiseTransferOwnershipBasis = "verified_endpoints" | "operator_approved";
+
+interface WiseTransferReview {
+  wise_id: string;
+  code: "wise_transfer_dimensions_unverified" | "wise_transfer_ownership_unverified";
+  reason: string;
+  source_verified: boolean;
+  target_verified: boolean;
+  approval_required: boolean;
+}
+
+interface WiseTransferDecision {
+  targetDimensionId?: number;
+  sourceVerified: boolean;
+  targetVerified: boolean;
+  ownershipBasis?: WiseTransferOwnershipBasis;
+  review?: WiseTransferReview;
+}
+
+const WISE_TRANSFER_DIMENSIONS_REASON =
+  "Wise and target dimensions must resolve to two distinct configured bank accounts before reconciliation.";
+const WISE_TRANSFER_OWNERSHIP_REASON =
+  "Wise transfer ownership is unverified; both endpoints must match configured own-account identities or this exact Wise ID must be explicitly approved.";
+
+function isWiseTransferCandidate(row: WiseRow): boolean {
+  return row.id.startsWith("TRANSFER-") || row.id.startsWith("BANK_DETAILS_PAYMENT_RETURN-");
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function bankIdentitiesByDimension(bankAccounts: BankAccount[]): {
+  dimensions: Set<number>;
+  identityDimensions: Map<string, Set<number>>;
+} {
+  const dimensions = new Set<number>();
+  const identityDimensions = new Map<string, Set<number>>();
+
+  for (const account of bankAccounts) {
+    const dimensionId = account.accounts_dimensions_id;
+    if (!isPositiveSafeInteger(dimensionId)) continue;
+    dimensions.add(dimensionId);
+    for (const value of [account.beneficiary_name, account.account_name_est, account.account_name_eng]) {
+      const identity = normalizeWiseCompanyName(value);
+      if (!identity) continue;
+      const owners = identityDimensions.get(identity) ?? new Set<number>();
+      owners.add(dimensionId);
+      identityDimensions.set(identity, owners);
+    }
+  }
+
+  return { dimensions, identityDimensions };
+}
+
+function uniqueActivePostingDimensions(accountDimensions: AccountDimension[]): Map<number, AccountDimension> {
+  const candidates = new Map<number, AccountDimension[]>();
+  for (const dimension of accountDimensions) {
+    if (dimension.is_deleted || !isPositiveSafeInteger(dimension.id)) {
+      continue;
+    }
+    const matches = candidates.get(dimension.id) ?? [];
+    matches.push(dimension);
+    candidates.set(dimension.id, matches);
+  }
+
+  const unique = new Map<number, AccountDimension>();
+  for (const [id, matches] of candidates) {
+    if (matches.length === 1 && isPositiveSafeInteger(matches[0]!.accounts_id)) {
+      unique.set(id, matches[0]!);
+    }
+  }
+  return unique;
+}
+
+function endpointMatchesOwnDimension(
+  value: string,
+  dimensionId: number | undefined,
+  ownCompanyIdentity: string,
+  identityDimensions: Map<string, Set<number>>,
+): boolean {
+  const identity = normalizeWiseCompanyName(value);
+  if (!identity) return false;
+  if (ownCompanyIdentity && identity === ownCompanyIdentity) return true;
+  if (dimensionId === undefined) return false;
+  const owners = identityDimensions.get(identity);
+  return owners?.size === 1 && owners.has(dimensionId);
+}
+
+function classifyWiseOwnTransfer(
+  row: WiseRow,
+  accountsDimensionsId: number | undefined,
+  targetDimensionId: number | undefined,
+  configuredDimensions: Set<number>,
+  identityDimensions: Map<string, Set<number>>,
+  ownCompanyIdentity: string,
+  approved: boolean,
+): WiseTransferDecision {
+  const direction = normalizeWiseDirection(row.direction);
+  const sourceDimensionId = direction === "IN" ? targetDimensionId : accountsDimensionsId;
+  const destinationDimensionId = direction === "IN" ? accountsDimensionsId : targetDimensionId;
+  const sourceVerified = endpointMatchesOwnDimension(
+    row.sourceName,
+    sourceDimensionId,
+    ownCompanyIdentity,
+    identityDimensions,
+  );
+  const targetVerified = endpointMatchesOwnDimension(
+    row.targetName,
+    destinationDimensionId,
+    ownCompanyIdentity,
+    identityDimensions,
+  );
+  const structurallyValid = accountsDimensionsId !== undefined &&
+    configuredDimensions.has(accountsDimensionsId) &&
+    targetDimensionId !== undefined &&
+    targetDimensionId !== accountsDimensionsId &&
+    configuredDimensions.has(targetDimensionId);
+
+  if (!structurallyValid) {
+    return {
+      targetDimensionId,
+      sourceVerified,
+      targetVerified,
+      review: {
+        wise_id: row.id,
+        code: "wise_transfer_dimensions_unverified",
+        reason: WISE_TRANSFER_DIMENSIONS_REASON,
+        source_verified: sourceVerified,
+        target_verified: targetVerified,
+        approval_required: false,
+      },
+    };
+  }
+
+  if (sourceVerified && targetVerified) {
+    return { targetDimensionId, sourceVerified, targetVerified, ownershipBasis: "verified_endpoints" };
+  }
+  if (approved) {
+    return { targetDimensionId, sourceVerified, targetVerified, ownershipBasis: "operator_approved" };
+  }
+  return {
+    targetDimensionId,
+    sourceVerified,
+    targetVerified,
+    review: {
+      wise_id: row.id,
+      code: "wise_transfer_ownership_unverified",
+      reason: WISE_TRANSFER_OWNERSHIP_REASON,
+      source_verified: sourceVerified,
+      target_verified: targetVerified,
+      approval_required: true,
+    },
+  };
 }
 
 function parseWiseNumber(value: string | undefined | null, fieldName: string, defaultValue: number): number {
@@ -187,8 +343,8 @@ function normalizeWiseText(value?: string | null): string {
   return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-function normalizeWiseCompanyName(value?: string | null): string {
-  return normalizeCompanyName(value);
+function normalizeWiseCompanyName(value?: unknown): string {
+  return typeof value === "string" ? normalizeCompanyName(value) : "";
 }
 
 function normalizeWiseCurrency(value?: string | null, fallback = "EUR"): string {
@@ -365,8 +521,11 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID for the Wise account in e-arveldaja"),
       fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account."),
       fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),
-      inter_account_dimension_id: z.number().optional().describe(
+      inter_account_dimension_id: coerceId.optional().describe(
         "Other bank account dimension ID for inter-account transfers. Auto-detected if only one other bank account exists; required with 3+ bank accounts."
+      ),
+      confirm_own_transfer_ids: z.array(z.string().min(1)).optional().describe(
+        "Exact Wise IDs explicitly approved as own transfers. TRANSFER-* and BANK_DETAILS_PAYMENT_RETURN-* prefixes are hints only."
       ),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
@@ -380,6 +539,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       fee_account_dimensions_id,
       fee_account_relation_id,
       inter_account_dimension_id,
+      confirm_own_transfer_ids,
       execute,
       date_from,
       date_to,
@@ -423,10 +583,71 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         if (date_to && date > date_to) return false;
         return true;
       });
+
+      const hintedRows = eligible.filter(isWiseTransferCandidate);
+      const approvedTransferIds = confirm_own_transfer_ids ?? [];
+      if (new Set(approvedTransferIds).size !== approvedTransferIds.length) {
+        throw new Error("confirm_own_transfer_ids must contain unique exact Wise transfer IDs.");
+      }
+      const eligibleHintIds = new Set(hintedRows.map(row => row.id));
+      if (approvedTransferIds.some(id => !eligibleHintIds.has(id))) {
+        throw new Error(
+          "confirm_own_transfer_ids must reference eligible TRANSFER-* or BANK_DETAILS_PAYMENT_RETURN-* rows in this CSV exactly."
+        );
+      }
+
+      let bankAccountsSnapshot: BankAccount[] = [];
+      let invoiceInfoSnapshot: Awaited<ReturnType<typeof api.readonly.getInvoiceInfo>> | undefined;
+      let accountDimensionsSnapshot: AccountDimension[] | undefined;
+      let postingDimensionsSnapshot = new Map<number, AccountDimension>();
+      let autoDetectedInterAccountDimId: number | undefined;
+      const transferDecisions = new Map<WiseRow, WiseTransferDecision>();
+      if (hintedRows.length > 0) {
+        [bankAccountsSnapshot, invoiceInfoSnapshot, accountDimensionsSnapshot] = await Promise.all([
+          api.readonly.getBankAccounts(),
+          api.readonly.getInvoiceInfo(),
+          api.readonly.getAccountDimensions(),
+        ]);
+        const { dimensions: bankDimensions, identityDimensions } = bankIdentitiesByDimension(bankAccountsSnapshot);
+        postingDimensionsSnapshot = uniqueActivePostingDimensions(accountDimensionsSnapshot);
+        const configuredDimensions = new Set(
+          [...bankDimensions].filter(id => postingDimensionsSnapshot.has(id)),
+        );
+        const wiseDimensionId = isPositiveSafeInteger(accounts_dimensions_id)
+          ? accounts_dimensions_id
+          : undefined;
+        // Resolve endpoint direction from safe configured bank records first;
+        // posting validity is a separate structural gate below so endpoint
+        // booleans stay truthful when an otherwise-known bank dimension has a
+        // missing, deleted, or ambiguous posting dimension.
+        const otherDimensions = [...bankDimensions].filter(id => id !== wiseDimensionId);
+        autoDetectedInterAccountDimId = otherDimensions.length === 1 ? otherDimensions[0] : undefined;
+        const targetDimensionId = inter_account_dimension_id === undefined
+          ? autoDetectedInterAccountDimId
+          : isPositiveSafeInteger(inter_account_dimension_id)
+            ? inter_account_dimension_id
+            : undefined;
+        const ownCompanyIdentity = normalizeWiseCompanyName(invoiceInfoSnapshot.invoice_company_name);
+        const approvedSet = new Set(approvedTransferIds);
+
+        for (const row of hintedRows) {
+          const decision = classifyWiseOwnTransfer(
+            row,
+            wiseDimensionId,
+            targetDimensionId,
+            configuredDimensions,
+            identityDimensions,
+            ownCompanyIdentity,
+            approvedSet.has(row.id),
+          );
+          transferDecisions.set(row, decision);
+        }
+      }
+
       const hasFeeRows = eligible.some(row => bookedFeeAmountForWiseRow(row) > 0);
       const accountDimensions = hasFeeRows
-        ? await api.readonly.getAccountDimensions()
-        : [];
+        ? accountDimensionsSnapshot ?? await api.readonly.getAccountDimensions()
+        : accountDimensionsSnapshot ?? [];
       const feeAccountDimensionsId = hasFeeRows
         ? resolveWiseFeeAccountDimensionId(accountDimensions, fee_account_dimensions_id, fee_account_relation_id)
         : undefined;
@@ -476,6 +697,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         description: string;
         status: string;
         api_id?: number;
+        source_row?: WiseRow;
       }> = [];
       const skipped: Array<{ wise_id: string; reason: string }> = [];
 
@@ -537,6 +759,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
               amount,
               description: desc,
               status: "would_create",
+              source_row: row,
             });
             seenWiseIds.add(wiseIdTag);
             for (const signature of mainSignatureCandidates) {
@@ -569,6 +792,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 description: desc,
                 status: "created",
                 api_id: result.created_object_id,
+                source_row: row,
               });
               seenWiseIds.add(wiseIdTag);
               for (const signature of mainSignatureCandidates) {
@@ -692,165 +916,140 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         }
       }
 
+      const ownershipReviews = created.flatMap(entry => {
+        if (!entry.source_row) return [];
+        const review = transferDecisions.get(entry.source_row)?.review;
+        return review ? [review] : [];
+      });
+
       // --- Post-import: auto-reconcile inter-account transfers ---
       const interAccountResults: Array<{
         api_id: number;
         wise_id: string;
         amount: number;
         status: string;
+        ownership_basis: WiseTransferOwnershipBasis;
         journal_id?: number;
         orphan_project_transaction_id?: number;
         orphan_action_hint?: string;
       }> = [];
 
-      // Identify created transfer transactions (not fees, not card payments)
-      const transferEntries = created.filter(c =>
-        c.api_id &&
-        c.status === "created" &&
-        /^WISE:(TRANSFER|BANK_DETAILS_PAYMENT_RETURN)-/.test(c.description)
-      );
-
-      let autoDetectedInterAccountDimId: number | undefined;
-      if (transferEntries.length > 0 && !inter_account_dimension_id) {
-        // Pre-compute auto-detection for dry-run visibility
-        const bankAccounts = await api.readonly.getBankAccounts();
-        const otherBankDims = bankAccounts
-          .filter(ba => ba.accounts_dimensions_id && ba.accounts_dimensions_id !== accounts_dimensions_id)
-          .map(ba => ba.accounts_dimensions_id!);
-        if (otherBankDims.length === 1) {
-          autoDetectedInterAccountDimId = otherBankDims[0]!;
-        }
-      }
+      // A prefix only marks a candidate. Only a row-keyed preflight decision
+      // with verified dimensions and ownership may enter reconciliation.
+      const transferEntries = created.filter(entry => {
+        if (!entry.api_id || entry.status !== "created" || !entry.source_row) return false;
+        return transferDecisions.get(entry.source_row)?.ownershipBasis !== undefined;
+      });
 
       if (transferEntries.length > 0 && !dryRun) {
-        // Resolve the target bank account dimension for inter-account transfers
-        const allAccountDimensions = accountDimensions.length > 0
-          ? accountDimensions
-          : await api.readonly.getAccountDimensions();
+        const firstDecision = transferDecisions.get(transferEntries[0]!.source_row!);
+        const targetDimensionId = firstDecision?.targetDimensionId;
+        const targetDim = targetDimensionId === undefined
+          ? undefined
+          : postingDimensionsSnapshot.get(targetDimensionId);
 
-        const bankAccounts = await api.readonly.getBankAccounts();
-        const bankDimensionIds = new Set(
-          bankAccounts
-            .filter(ba => ba.accounts_dimensions_id)
-            .map(ba => ba.accounts_dimensions_id!)
-        );
+        // The bank snapshot proved this dimension is configured; the account
+        // dimension supplies the posting account needed by confirm.
+        if (targetDimensionId !== undefined && targetDim) {
+          const ownDimensionIds = new Set([accounts_dimensions_id, targetDimensionId]);
+          const guard = await BookingGuard.load(api, { ownDimensionIds });
 
-        let targetDimensionId = inter_account_dimension_id;
-        if (!targetDimensionId) {
-          // Auto-detect: find other bank account dimensions (not the Wise account)
-          const otherBankDims = [...bankDimensionIds].filter(d => d !== accounts_dimensions_id);
-          if (otherBankDims.length === 1) {
-            targetDimensionId = otherBankDims[0]!;
+          let companyClientId: number | undefined;
+          const companyName = invoiceInfoSnapshot?.invoice_company_name;
+          if (companyName) {
+            const clients = await api.clients.findByName(companyName);
+            companyClientId = resolveOwnCompanyClientId(companyName, clients);
           }
-          // If 0 or 2+ other bank accounts, skip auto-reconciliation
-        }
 
-        if (targetDimensionId) {
-          const targetDim = allAccountDimensions.find(d => d.id === targetDimensionId && !d.is_deleted);
+          for (const entry of transferEntries) {
+            const decision = transferDecisions.get(entry.source_row!);
+            const ownershipBasis = decision?.ownershipBasis;
+            if (!ownershipBasis) continue;
+            const roundedAmount = roundMoney(entry.amount);
+            // Check both directions for an existing journal. The Wise ID acts
+            // as a per-transfer reference — the guard only suppresses the
+            // confirmation when an existing journal's document_number carries
+            // the same reference (or no reference at all, preserving
+            // pre-disambiguation behaviour).
+            const existingJournal = guard.findInterAccount({
+              sourceDim: accounts_dimensions_id,
+              targetDim: targetDimensionId,
+              amount: roundedAmount,
+              date: entry.date,
+              reference: entry.wise_id,
+            });
 
-          if (targetDim) {
-            // Load one BookingGuard snapshot to detect existing inter-account
-            // journals (Lane B) and to record newly-confirmed legs in-run.
-            const ownDimensionIds = new Set([accounts_dimensions_id, targetDimensionId]);
-            const guard = await BookingGuard.load(api, { ownDimensionIds });
-
-            // Resolve company client for setting clients_id
-            let companyClientId: number | undefined;
-            const invoiceInfo = await api.readonly.getInvoiceInfo();
-            const companyName = invoiceInfo.invoice_company_name;
-            if (companyName) {
-              const clients = await api.clients.findByName(companyName);
-              companyClientId = resolveOwnCompanyClientId(companyName, clients);
-            }
-
-            for (const entry of transferEntries) {
-              const roundedAmount = roundMoney(entry.amount);
-              // Check both directions for an existing journal. The Wise ID acts
-              // as a per-transfer reference — the guard only suppresses the
-              // confirmation when an existing journal's document_number carries
-              // the same reference (or no reference at all, preserving
-              // pre-disambiguation behaviour).
-              const existingJournal = guard.findInterAccount({
-                sourceDim: accounts_dimensions_id,
-                targetDim: targetDimensionId,
-                amount: roundedAmount,
-                date: entry.date,
-                reference: entry.wise_id,
+            if (existingJournal) {
+              interAccountResults.push({
+                api_id: entry.api_id!,
+                wise_id: entry.wise_id,
+                amount: entry.amount,
+                status: "already_journalized",
+                ownership_basis: ownershipBasis,
+                journal_id: existingJournal,
               });
-
-              if (existingJournal) {
+            } else {
+              // Confirm against the target bank account
+              try {
+                if (companyClientId) {
+                  await api.transactions.update(entry.api_id!, { clients_id: companyClientId });
+                }
+                const confirmResult = await api.transactions.confirm(entry.api_id!, [{
+                  related_table: "accounts",
+                  related_id: targetDim.accounts_id,
+                  related_sub_id: targetDim.id!,
+                  amount: entry.amount,
+                }]);
+                // Record the new journal into the in-run index so the opposite
+                // leg of this same transfer, if also queued in this batch, is
+                // detected as already journalized instead of double-confirmed.
+                guard.recordInterAccount({
+                  sourceDim: accounts_dimensions_id,
+                  targetDim: targetDimensionId,
+                  amount: roundedAmount,
+                  date: entry.date,
+                  reference: entry.wise_id,
+                }, confirmResult?.created_object_id);
+                logAudit({
+                  tool: "import_wise_transactions", action: "CONFIRMED", entity_type: "transaction",
+                  entity_id: entry.api_id!,
+                  summary: `Confirmed Wise inter-account transfer ${entry.amount} EUR`,
+                  details: {
+                    amount: entry.amount,
+                    wise_id: entry.wise_id,
+                    target_dimension_id: targetDim.id,
+                    ownership_basis: ownershipBasis,
+                  },
+                });
                 interAccountResults.push({
                   api_id: entry.api_id!,
                   wise_id: entry.wise_id,
                   amount: entry.amount,
-                  status: "already_journalized",
-                  journal_id: existingJournal,
+                  status: "confirmed_inter_account",
+                  ownership_basis: ownershipBasis,
                 });
-              } else {
-                // Confirm against the target bank account
-                try {
-                  if (companyClientId) {
-                    await api.transactions.update(entry.api_id!, { clients_id: companyClientId });
-                  }
-                  const confirmResult = await api.transactions.confirm(entry.api_id!, [{
-                    related_table: "accounts",
-                    related_id: targetDim.accounts_id,
-                    related_sub_id: targetDim.id!,
-                    amount: entry.amount,
-                  }]);
-                  // Record the new journal into the in-run index so the opposite
-                  // leg of this same transfer, if also queued in this batch, is
-                  // detected as already journalized instead of double-confirmed.
-                  guard.recordInterAccount({
-                    sourceDim: accounts_dimensions_id,
-                    targetDim: targetDimensionId,
-                    amount: roundedAmount,
-                    date: entry.date,
-                    reference: entry.wise_id,
-                  }, confirmResult?.created_object_id);
-                  logAudit({
-                    tool: "import_wise_transactions", action: "CONFIRMED", entity_type: "transaction",
-                    entity_id: entry.api_id!,
-                    summary: `Confirmed Wise inter-account transfer ${entry.amount} EUR`,
-                    details: { amount: entry.amount, wise_id: entry.wise_id, target_dimension_id: targetDim.id },
-                  });
-                  interAccountResults.push({
-                    api_id: entry.api_id!,
-                    wise_id: entry.wise_id,
-                    amount: entry.amount,
-                    status: "confirmed_inter_account",
-                  });
-                  // Update the created entry status
-                  entry.status = "created_and_confirmed_inter_account";
-                } catch (err: unknown) {
-                  // Orphan-PROJECT warning: the transaction was created in the
-                  // API (api_id assigned) but confirmation failed. A retry
-                  // would hit the wise-ID dedup and skip, leaving the row
-                  // permanently in PROJECT status. Surface api_id explicitly
-                  // as `orphan_project_transaction_id` so the user can
-                  // invalidate/retry manually.
-                  const errorMessage = err instanceof Error ? err.message : String(err);
-                  interAccountResults.push({
-                    api_id: entry.api_id!,
-                    wise_id: entry.wise_id,
-                    amount: entry.amount,
-                    status: "confirm_failed: " + errorMessage,
-                    orphan_project_transaction_id: entry.api_id!,
-                    orphan_action_hint: `Transaction ${entry.api_id} was created but left in PROJECT status. Rerunning the import will skip it via wise_id dedup. To retry confirmation: invalidate_transaction(${entry.api_id}), then delete_transaction(${entry.api_id}) and rerun — or confirm_transaction(${entry.api_id}) manually against the target bank account.`,
-                  });
-                }
+                // Update the created entry status
+                entry.status = "created_and_confirmed_inter_account";
+              } catch (err: unknown) {
+                // Orphan-PROJECT warning: the transaction was created in the
+                // API (api_id assigned) but confirmation failed. A retry
+                // would hit the wise-ID dedup and skip, leaving the row
+                // permanently in PROJECT status. Surface api_id explicitly
+                // as `orphan_project_transaction_id` so the user can
+                // invalidate/retry manually.
+                const errorMessage = err instanceof Error ? err.message : String(err);
+                interAccountResults.push({
+                  api_id: entry.api_id!,
+                  wise_id: entry.wise_id,
+                  amount: entry.amount,
+                  status: "confirm_failed: " + errorMessage,
+                  ownership_basis: ownershipBasis,
+                  orphan_project_transaction_id: entry.api_id!,
+                  orphan_action_hint: `Transaction ${entry.api_id} was created but left in PROJECT status. Rerunning the import will skip it via wise_id dedup. To retry confirmation: invalidate_transaction(${entry.api_id}), then delete_transaction(${entry.api_id}) and rerun — or confirm_transaction(${entry.api_id}) manually against the target bank account.`,
+                });
               }
             }
           }
-        }
-      } else if (transferEntries.length > 0 && dryRun) {
-        for (const entry of transferEntries) {
-          interAccountResults.push({
-            api_id: 0,
-            wise_id: entry.wise_id,
-            amount: entry.amount,
-            status: "would_check_inter_account",
-          });
         }
       }
 
@@ -1035,6 +1234,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         skipped: executionSkipped.length,
         error_count: executionErrors.length,
         inter_account_total: interAccountResults.length,
+        needs_review: ownershipReviews.length,
       };
       const invoiceCurrencyFixes = invoiceFixCandidates.length > 0
         ? {
@@ -1077,6 +1277,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
         ...((inter_account_dimension_id ?? autoDetectedInterAccountDimId) !== undefined
           ? { inter_account_dimension_id: inter_account_dimension_id ?? autoDetectedInterAccountDimId }
           : {}),
+        ...(confirm_own_transfer_ids !== undefined ? { confirm_own_transfer_ids } : {}),
         ...(date_from ? { date_from } : {}),
         ...(date_to ? { date_to } : {}),
         ...(skip_jar_transfers !== undefined ? { skip_jar_transfers } : {}),
@@ -1099,6 +1300,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             }]
           : [],
       });
+      const outputResults = created.map(({ description: _description, source_row: _sourceRow, ...rest }) => rest);
 
       return {
         content: [{
@@ -1116,7 +1318,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
             } : {}),
             created: summary.created,
             skipped: skipped.length,
-            ...(autoDetectedInterAccountDimId && transferEntries.length > 0 && dryRun ? {
+            ...(autoDetectedInterAccountDimId && hintedRows.length > 0 && dryRun ? {
               inter_account_auto_detected_dimension_id: autoDetectedInterAccountDimId,
             } : {}),
             ...(interAccountResults.length > 0 ? {
@@ -1127,15 +1329,17 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
                 details: interAccountResults,
               },
             } : {}),
+            ...(ownershipReviews.length > 0 ? { ownership_reviews: ownershipReviews } : {}),
             ...(invoiceCurrencyFixes ? { invoice_currency_fixes: invoiceCurrencyFixes } : {}),
-            results: created.map(({ description: _desc, ...rest }) => rest),
+            results: outputResults,
             skipped_details: sanitizedSkippedDetails,
             execution: buildBatchExecutionContract({
               mode,
               summary,
-              results: created.map(({ description: _desc, ...rest }) => rest),
+              results: outputResults,
               skipped: sanitizedExecutionSkipped,
               errors: sanitizedExecutionErrors,
+              needs_review: ownershipReviews,
             }),
           }),
         }],
