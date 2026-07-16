@@ -4509,6 +4509,15 @@ The first frozen M26 artifact is unapproved because PASS control test 10 was ext
 2. In a detached temporary checkout at the M26 plan HEAD, overlay the corrected final test diff only and prove production is byte-identical to HEAD. Persist and verify exact test-only RED: M26 10 FAIL / 3 PASS and whole Lightyear 10 FAIL / 315 PASS, with the three declared controls passing and no import/transform error.
 3. Rerun M26 13/13, H16/H17/H18 selectors, Lightyear 325/325, all four protected-slice comparisons, build, release, diff, full unit 2,470/2,470, and integration 20 pass/3 documented skips. Regenerate the exact two-file artifact and restart fresh ordered specification and code-quality reviews; any edit or finding restarts the cycle.
 
+#### M26 second review-correction plan
+
+The replacement artifact passed specification review but failed code-quality review because CSV-controlled ticker and ISIN values remained raw in new trade DTOs and preview/legacy positions. RFC-4180 quoted fields can contain embedded newlines and instruction text. Correct the output boundary without changing raw classification or arithmetic:
+
+1. Strengthen and rename the existing M26 reference-wrapping test rather than adding a test. Cover unsafe newline/instruction ticker and ISIN values across `booked_basis`, `skipped`, `review_required`, `previewed`, `active_holdings`, and `closed_positions`. Keep `BRICEKSP` raw for skipped routing and put that payload in its ISIN. Create a closed buy/sell position sharing unsafe raw identifiers. Prove one start/end wrapper pair per unsafe public value and that aliases reuse the exact already-rendered preview strings/nonces. Add safe compatibility controls for `BRK.B`, `BTC-USD`, valid uppercase `US0378331005`, and empty ISIN.
+2. Add private strict render helpers: a safe ticker is 1–32 ASCII characters matching `[A-Za-z0-9][A-Za-z0-9._+:/-]{0,31}`; a safe ISIN is empty or exactly uppercase `[A-Z]{2}[A-Z0-9]{9}[0-9]`. Do not trim, case-fold, checksum, normalize, or rewrite safe identifiers. Wrap every other non-empty value with `wrapUntrustedOcr` exactly once.
+3. Render ticker/ISIN only in `portfolioTradeBaseDto` and when raw holdings become public positions. Keep raw cash-equivalent routing, Map keys, WAC, matching, totals, warnings, and ordering unchanged. Derive `previewed` from rendered positions and legacy aliases from `previewed` without re-rendering, so nonce values are shared rather than nested or regenerated.
+4. Expected test-only RED: M26 1 FAIL / 12 PASS and Lightyear 1 FAIL / 324 PASS; test count remains 13/325. Then prove focused GREEN, M26 13/13, H16/H17/H18, Lightyear 325/325, protected slices, build, release, diff, full unit 2,470/2,470, and integration 20 pass/3 skips. Regenerate the exact two-file artifact and restart fresh ordered spec and quality reviews; any edit/finding restarts the cycle.
+
 ### Task 20: H08 — Bind CAMT statement IBAN to the selected bank dimension
 
 **Files:**
