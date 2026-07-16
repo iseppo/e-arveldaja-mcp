@@ -3778,49 +3778,224 @@ Expected: clean worktree and the H18 commit at `HEAD`. Do not begin Task 14/M19 
 
 **Interfaces:**
 - Consumes: `withOpeningBalanceApiLimitation()` from `src/opening-balance-limitations.ts`.
-- Produces: `opening_balance_status: "complete" | "api_incomplete"`; visible warnings on client debt and annual report.
+- Produces on both root outputs: `opening_balance_status: "api_incomplete" | "complete"`, `balance_scope: "journal_api_visible_entries_only" | "complete_balance"`, and a `warnings` array containing the opening-balance API limitation when it applies.
+- Preserves: the existing `compute_account_balance` warning and calculation contract; client-debt totals and cache metadata; annual-report warnings and their existing order.
 
-- [ ] **Step 1: Write failing regressions**
+- [ ] **Step 1: Establish the clean M19 baseline and exact four-file boundary**
+
+Run:
+
+```bash
+git status --short
+git log -1 --oneline
+npx vitest run src/tools/account-balance.test.ts src/tools/annual-report.test.ts
+git diff --name-only
+```
+
+Expected: the worktree is clean with the committed H18 finding at `HEAD`; the two focused files pass their existing **27 tests**; and there is no diff. Record the baseline count in the remediation ledger evidence, but do not edit the ignored ledger until M19 is committed. Task 14 owns exactly the four paths listed above; do not start or stage Task 15/M20 work.
+
+- [ ] **Step 2: Add two passing legacy controls and three isolated RED public-contract tests**
+
+In `src/tools/account-balance.test.ts`, capture the real registered `compute_client_debt` handler and invoke it with `clients_id: 42`, `account_ids: "2110"`, and `fresh: true` rather than constructing an internal result object. Use one client C, one account `2110`, and registered journals containing a C 100 posting and a D 30 posting for client 42. Split the proof into two cases:
+
+1. Legacy control, expected PASS before production edits: assert the exact existing payload shape `accounts: [{ account_id: 2110, account_name: <fixture name>, balance_type: "C", balance: 70, debit_total: 30, credit_total: 100, entry_count: 2 }]` and `summary: { total_debt_to_client: 70, total_receivable_from_client: 0, net_position: -70 }`; also assert the exact existing cache metadata object, `clearRuntimeCaches` once, and `listAllWithPostings` once.
+2. Disclosure regression, expected RED before production edits: the same real handler result contains:
 
 ```ts
-it.each(["compute_client_debt", "buildAnnualReportData"])("warns that %s may omit opening balances", async (surface) => {
-  const payload = await invokeReportingSurface(surface);
-  expect(payload.opening_balance_status).toBe("api_incomplete");
-  expect(payload.warnings.join(" ")).toMatch(/opening balance|algbilans/i);
+opening_balance_status: "api_incomplete"
+balance_scope: "journal_api_visible_entries_only"
+```
+
+and `warnings` equals the opening-balance limitation result. Keep calculation/cache assertions in the separate legacy control so this RED fails only for the absent disclosure fields.
+
+In `src/tools/annual-report.test.ts`, exercise `buildAnnualReportData` directly with the existing unclassified asset account `999` fixture. Reuse its real warning rather than injecting a warnings input or inventing an `existingWarnings` placeholder. The exact warning is:
+
+```text
+Some asset accounts fall outside the current (10–16) / non-current (17–19) balance-sheet ranges, so they count toward total assets but appear in neither asset line: 999. Review their classification.
+```
+
+Split the annual proof into three cases:
+
+1. Legacy control, expected PASS before production edits: the account-999 fixture produces exactly the existing warning above, in its existing position and exactly once.
+2. Disclosure regression, expected RED before production edits: the same report has the exact root `api_incomplete` status and `journal_api_visible_entries_only` scope, with final warnings exactly `[account999Warning, OPENING_BALANCE_API_LIMITATION_WARNING]`; assert each warning occurs once. This case must fail only because the root disclosure/limitation is absent.
+3. Controlled complete-branch regression, expected RED before production edits: use a hoisted `vi.fn` module mock for the opening-balance helper. The mock must default to the real helper's append-and-dedupe semantics and be reset to that default in `afterEach`. In this one test only, make a no-argument call return `[]` while a call with nonempty warnings returns those warnings unchanged. The account-999 warning must persist, and the result must expose `opening_balance_status: "complete"`, `balance_scope: "complete_balance"`, and no limitation warning.
+
+Because `annual-report.ts` statically imports the helper, declare a state holder with `vi.hoisted(...)` containing both the helper mock and a slot for the real helper implementation. Install an asynchronous partial module mock so the real constant and every unrelated export remain intact:
+
+```ts
+const openingBalanceHelperState = vi.hoisted(() => ({
+  helper: vi.fn(),
+  realHelper: undefined as undefined | typeof import("../opening-balance-limitations.js").withOpeningBalanceApiLimitation,
+}));
+
+vi.mock("../opening-balance-limitations.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../opening-balance-limitations.js")>();
+  openingBalanceHelperState.realHelper = actual.withOpeningBalanceApiLimitation;
+  openingBalanceHelperState.helper.mockImplementation(openingBalanceHelperState.realHelper);
+  return {
+    ...actual,
+    withOpeningBalanceApiLimitation: openingBalanceHelperState.helper,
+  };
+});
+
+afterEach(() => {
+  openingBalanceHelperState.helper.mockReset();
+  openingBalanceHelperState.helper.mockImplementation(openingBalanceHelperState.realHelper!);
 });
 ```
 
-- [ ] **Step 2: Prove red**
+The factory must save the real helper in the hoisted state and install it immediately as the mock's default implementation. `afterEach` must reset the mock and reinstall `openingBalanceHelperState.realHelper!`; no code outside the factory may reference the factory-scoped `actual`. Delegation to the real helper preserves `OPENING_BALANCE_API_LIMITATION_WARNING` and production dedupe semantics. Changing a spy after importing the module without this hoisted partial module mock will not control the static binding.
 
-Run: `npx vitest run src/tools/account-balance.test.ts src/tools/annual-report.test.ts -t "omit opening balances"`
+Retain existing `compute_account_balance` coverage and confirm its current calculation/warning contract remains unchanged in the affected/full suite; M19 adds no new account-balance-handler behavior. Do not mock the result fields being introduced and do not use loose warning regexes.
 
-Expected: FAIL because these outputs omit the known limitation.
+- [ ] **Step 3: Prove the intended RED and the legacy controls**
 
-- [ ] **Step 3: Add explicit status and warnings**
+Give the five new cases exact names and select only them:
+
+```bash
+npx vitest run src/tools/account-balance.test.ts src/tools/annual-report.test.ts -t "preserves client debt totals and cache metadata|adds client debt opening-balance disclosure|preserves the account 999 annual warning|adds annual opening-balance disclosure after the account 999 warning|reports a complete annual opening-balance scope when the helper has no limitation"
+```
+
+Expected before production edits: exactly **2 legacy controls PASS** (client totals/cache and the real annual account-999 warning) and exactly **3 regressions RED** (client disclosure, annual disclosure, and the mocked complete branch). The complete-branch test is RED because the report lacks metadata even though the controlled helper behavior is available. Record the exact 2-pass/3-fail result and failure messages before editing production code.
+
+- [ ] **Step 4: Compute limitation state independently from existing warnings**
+
+In each production surface, obtain the limitation state from a fresh no-argument call:
 
 ```ts
 const openingBalanceWarnings = withOpeningBalanceApiLimitation();
-const openingBalanceMetadata = {
-  opening_balance_status: openingBalanceWarnings.length > 0 ? "api_incomplete" : "complete",
-  warnings: openingBalanceWarnings,
-  balance_scope: openingBalanceWarnings.length > 0 ? "period_movement_plus_API_visible_opening_entries" : "complete_balance",
-};
+const openingBalanceApiIncomplete = openingBalanceWarnings.length > 0;
 ```
 
-Spread the same metadata into client-debt root output and annual-report root output; append to existing annual-report warnings instead of replacing them.
+Derive only the two metadata fields from that fresh limitation result:
 
-- [ ] **Step 4: Prove green and review**
+```ts
+const opening_balance_status = openingBalanceApiIncomplete
+  ? "api_incomplete"
+  : "complete";
+const balance_scope = openingBalanceApiIncomplete
+  ? "journal_api_visible_entries_only"
+  : "complete_balance";
+```
 
-Run: `npx vitest run src/tools/account-balance.test.ts src/tools/annual-report.test.ts && npm run build && git diff --check`
+Do not infer `opening_balance_status` or `balance_scope` from an annual report's existing warning array: unrelated pre-existing warnings must never turn a complete opening-balance state into `api_incomplete`.
 
-Expected: both surfaces visibly distinguish period movement from complete balance. Package the listed files and obtain independent `APPROVED`.
+- [ ] **Step 5: Add the smallest client-debt disclosure without calculation drift**
 
-- [ ] **Step 5: Commit M19**
+In the real `compute_client_debt` return path, add the two root metadata fields and set root `warnings` to the fresh limitation warnings. Do not modify API requests, row filtering, debtor/creditor aggregation, rounding, response totals, cache reads/writes, cache-hit metadata, or the existing `compute_account_balance` handler and output. The only client-debt behavior change is the explicit limitation disclosure at the root.
+
+- [ ] **Step 6: Merge the annual limitation warning without loss, reorder, or duplication**
+
+In `buildAnnualReportData`, derive status/scope from the fresh no-argument limitation result, but construct final warnings from the function's real local `warnings` array with:
+
+```ts
+const finalWarnings = withOpeningBalanceApiLimitation(warnings);
+```
+
+Return `finalWarnings` plus the two root metadata fields. This helper call must preserve every existing annual warning in its original order and avoid adding a duplicate limitation warning. The real account-999 warning must therefore precede `OPENING_BALANCE_API_LIMITATION_WARNING`. Existing annual warnings are inputs to the final warning merge only; they do not determine status or scope. Do not alter annual calculations, section structure, or other report metadata.
+
+- [ ] **Step 7: Prove focused GREEN and exact compatibility controls**
+
+Run:
+
+```bash
+npx vitest run src/tools/account-balance.test.ts src/tools/annual-report.test.ts -t "preserves client debt totals and cache metadata|adds client debt opening-balance disclosure|preserves the account 999 annual warning|adds annual opening-balance disclosure after the account 999 warning|reports a complete annual opening-balance scope when the helper has no limitation"
+npx vitest run src/tools/account-balance.test.ts src/tools/annual-report.test.ts
+```
+
+Expected: all **5 selected cases PASS**. Both real entry points expose exact status/scope/warning values; annual warnings equal `[account999Warning, OPENING_BALANCE_API_LIMITATION_WARNING]`, each exactly once; the controlled no-limitation branch preserves only `account999Warning` and reports `complete`/`complete_balance`; client payload remains exactly `accounts: [{ account_id: 2110, account_name: <fixture name>, balance_type: "C", balance: 70, debit_total: 30, credit_total: 100, entry_count: 2 }]` with `summary: { total_debt_to_client: 70, total_receivable_from_client: 0, net_position: -70 }`, exact cache metadata, and unchanged call counts; and the full affected files pass. Existing `compute_account_balance` calculation/current warning coverage must remain green.
+
+- [ ] **Step 8: Inspect the exact M19 diff and exclude M20 drift**
+
+Run:
+
+```bash
+git diff -- src/tools/account-balance.ts src/tools/account-balance.test.ts src/tools/annual-report.ts src/tools/annual-report.test.ts
+git diff --name-only
+git diff --check
+```
+
+Expected: changed names are exactly the four M19 paths, diff-check is clean, and the diff contains only tests plus root disclosure/merge logic. In particular, there must be no year-end-close detector or other Task 15/M20 change.
+
+- [ ] **Step 9: Run affected, full, build, integration, and release validation**
+
+Run:
+
+```bash
+npx vitest run src/tools/account-balance.test.ts src/tools/annual-report.test.ts
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+git status --short
+```
+
+Expected: affected and full unit suites pass; build passes; integration passes apart from already documented environmental skips; release validation passes; diff-check is empty; and status lists only the exact four M19 paths. If any command fails, correct the cause and rerun the entire step before review.
+
+- [ ] **Step 10: Freeze the exact four-file review artifact**
+
+After GREEN and before review, create the ignored immutable artifact and record its byte count and SHA-256:
+
+```bash
+mkdir -p .omc/reviews
+git diff -- src/tools/account-balance.ts src/tools/account-balance.test.ts src/tools/annual-report.ts src/tools/annual-report.test.ts > /tmp/M19.frozen.diff
+cp /tmp/M19.frozen.diff .omc/reviews/M19.diff
+cmp /tmp/M19.frozen.diff .omc/reviews/M19.diff
+wc -c .omc/reviews/M19.diff
+sha256sum .omc/reviews/M19.diff
+git diff --name-only
+```
+
+Expected: `cmp` is silent, the artifact is non-empty, and the live changed-name list is exactly the four M19 paths. Any subsequent edit to those files invalidates the artifact and both approvals; regenerate it and restart review from Step 11.
+
+- [ ] **Step 11: Obtain ordered independent spec and quality approvals**
+
+First delegate a fresh spec-compliance reviewer with only the M19 requirements, the committed H18 base, and `.omc/reviews/M19.diff`. Require an explicit `SPEC COMPLIANCE: APPROVED` or actionable findings. The spec review must verify both root output contracts, fresh no-argument limitation-state derivation, the exact conservative scope literals, annual warning order/deduplication, real captured `compute_client_debt` coverage, direct `buildAnnualReportData` coverage, unchanged `compute_account_balance`, unchanged client totals/cache metadata, exact four-file scope, and absence of M20 drift.
+
+Only after spec approval, delegate a different fresh code-quality reviewer and require `CODE QUALITY APPROVED` or findings. It must inspect type precision, duplicated metadata construction, warning identity/deduplication behavior, accidental dependence on unrelated annual warnings, strength of public-handler assertions, and compatibility controls. Author and reviewers must be separate contexts. If either review finds a defect, add or correct the failing test first where applicable, reproduce RED, make the smallest fix, rerun Steps 7–9, regenerate the artifact, and restart both reviews in order.
+
+- [ ] **Step 12: Reverify the approved bytes and commit M19**
+
+After both approvals, rerun:
+
+```bash
+npx vitest run src/tools/account-balance.test.ts src/tools/annual-report.test.ts
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+git diff -- src/tools/account-balance.ts src/tools/account-balance.test.ts src/tools/annual-report.ts src/tools/annual-report.test.ts > /tmp/M19.live.diff
+cmp /tmp/M19.live.diff .omc/reviews/M19.diff
+git diff --name-only
+```
+
+Expected: every validation passes, artifact comparison is silent, and changed names are exactly the reviewed four paths. Then run:
 
 ```bash
 git add src/tools/account-balance.ts src/tools/account-balance.test.ts src/tools/annual-report.ts src/tools/annual-report.test.ts
+git diff --cached --name-only
+git diff --cached --check
+git diff --cached > /tmp/M19.staged.diff
+cmp /tmp/M19.staged.diff .omc/reviews/M19.diff
 git commit -m "fix(M19): warn on incomplete opening balances"
 ```
+
+Expected: staged names are exactly the four reviewed paths, staged diff-check passes, staged bytes match the frozen artifact, and the commit succeeds. Do not stage ignored artifacts and do not push.
+
+- [ ] **Step 13: Record evidence and enforce the sequential handoff**
+
+Use `apply_patch` to append one M19 row to `.omc/full-codebase-remediation-ledger.md` containing: the 27-test baseline; the exact 2-PASS/3-RED selected-case result and 5/5 GREEN result; proof from the real captured `compute_client_debt` handler and direct `buildAnnualReportData`; exact status/scope literals; exact account-999 warning order and exactly-once limitation proof; mocked complete-branch proof with the account-999 warning retained and no limitation; unchanged `compute_account_balance` warning/calculation; unchanged exact client `accounts` entry `{ account_id: 2110, account_name: <fixture name>, balance_type: "C", balance: 70, debit_total: 30, credit_total: 100, entry_count: 2 }`, exact summary `{ total_debt_to_client: 70, total_receivable_from_client: 0, net_position: -70 }`, exact cache metadata, and API/cache call counts; full/build/integration/release/diff results; artifact byte count/SHA; ordered independent spec and quality verdicts; exact four-file scope/no-M20-drift check; and the commit hash.
+
+Run:
+
+```bash
+git status --short
+git log -1 --oneline
+```
+
+Expected: clean worktree and the M19 commit at `HEAD`. Do not begin Task 15/M20 until M19 is committed, recorded, and clean.
 
 ### Task 15: M20 — Canonical year-end-close detector
 
