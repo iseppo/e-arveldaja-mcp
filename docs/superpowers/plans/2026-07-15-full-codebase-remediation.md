@@ -4383,6 +4383,15 @@ The replacement artifact also remains unapproved: fresh specification review pro
 3. Prove 18/18 M23, 64/64 accounting-rules, and 2,455 full unit tests, plus ignore/template/index wiring, build, release, diff, and integration 20 pass/3 documented skips. The exact final tracked scope remains the original six M23 files, with this correction editing only `src/accounting-rules.ts` and its test.
 4. Invalidate the 27,296-byte replacement artifact and all verdicts. Regenerate the exact six-file artifact and restart ordered fresh specification review followed by fresh code-quality review; any further edit or finding restarts all gates and both reviews.
 
+#### M23 third review-correction plan
+
+The 31,181-byte v3 artifact remains unapproved because `existingLegacyContainsUserData` still calls `existsSync` before reading; an access error can therefore look like absence and strand an unreadable project/global legacy file. Correct it test-first:
+
+1. Extend the existing hoisted partial `fs` mock with one exact legacy-fault path: `existsSync` returns `false` for that path (modeling its suppressed access error), while `readFileSync` throws `EACCES` and records a hit; delegate normally for every other path and reset all fault state in `afterEach`. Add one M23 test that exercises both project and global legacy precedence, proves the direct read is not attempted before the fix but is attempted afterward, and requires each existing-but-unreadable legacy location to remain pinned. Expected pre-fix result: 19 M23 tests with 1 FAIL / 18 PASS; whole file 1 FAIL / 64 PASS out of 65.
+2. Remove the `existsSync` precheck from `existingLegacyContainsUserData`. Read directly; only `ENOENT` means absent, while `EACCES` and every other read/inspection error conservatively mean user data exists and pin that legacy location.
+3. Prove 19/19 M23, 65/65 accounting-rules, and 2,456 full unit tests, plus ignore/template/index wiring, build, release, diff, and integration 20 pass/3 documented skips. This correction edits only `src/accounting-rules.ts` and its test; the final tracked M23 scope remains the same six files.
+4. Invalidate the v3 artifact and verdicts, regenerate the exact six-file artifact, and restart ordered fresh specification then code-quality review. Any further edit or finding restarts the complete verification and review cycle.
+
 ### Task 19: M26 — Separate booked, skipped, and review-required portfolio rows
 
 **Files:**
