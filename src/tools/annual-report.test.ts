@@ -3,11 +3,28 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Account, Journal } from "../types/api.js";
+
+const openingBalanceHelperState = vi.hoisted(() => ({
+  helper: vi.fn(),
+  realHelper: undefined as undefined | typeof import("../opening-balance-limitations.js").withOpeningBalanceApiLimitation,
+}));
+
+vi.mock("../opening-balance-limitations.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../opening-balance-limitations.js")>();
+  openingBalanceHelperState.realHelper = actual.withOpeningBalanceApiLimitation;
+  openingBalanceHelperState.helper.mockImplementation(openingBalanceHelperState.realHelper);
+  return {
+    ...actual,
+    withOpeningBalanceApiLimitation: openingBalanceHelperState.helper,
+  };
+});
+
 import type { ApiContext } from "./crud-tools.js";
 import { buildAnnualReportData, registerAnnualReportTools } from "./annual-report.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
+import { OPENING_BALANCE_API_LIMITATION_WARNING } from "../opening-balance-limitations.js";
 
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
 
@@ -18,6 +35,8 @@ afterEach(() => {
     process.env.EARVELDAJA_RULES_FILE = ORIGINAL_RULES_FILE;
   }
   resetAccountingRulesCache();
+  openingBalanceHelperState.helper.mockReset();
+  openingBalanceHelperState.helper.mockImplementation(openingBalanceHelperState.realHelper!);
 });
 
 function makeAccount(overrides: Partial<Account> & Pick<Account,
@@ -171,6 +190,8 @@ function extractEquity(report: Record<string, unknown>) {
 }
 
 describe("buildAnnualReportData", () => {
+  const ACCOUNT_999_WARNING =
+    "Some asset accounts fall outside the current (10–16) / non-current (17–19) balance-sheet ranges, so they count toward total assets but appear in neither asset line: 999. Review their classification.";
   const baseJournals: Journal[] = [
     makeJournal("2024-01-01", [
       makePosting(1000, "D", 100),
@@ -193,6 +214,63 @@ describe("buildAnnualReportData", () => {
       makePosting(1000, "C", 10),
     ]),
   ];
+
+  function buildAccount999Report() {
+    return buildAnnualReportData(createApi([
+      ...baseJournals,
+      makeJournal("2025-12-31", [
+        makePosting(999, "D", 25),
+        makePosting(1000, "C", 25),
+      ]),
+    ], {
+      extraAccounts: [
+        makeAccount({
+          id: 999,
+          balance_type: "D",
+          account_type_est: "Varad",
+          account_type_eng: "Assets",
+          name_est: "Määramata vara",
+          name_eng: "Unclassified asset",
+        }),
+      ],
+    }), 2025);
+  }
+
+  it("preserves the account 999 annual warning", async () => {
+    const report = await buildAccount999Report();
+
+    expect((report.warnings as string[])[0]).toBe(ACCOUNT_999_WARNING);
+    expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
+  });
+
+  it("adds annual opening-balance disclosure after the account 999 warning", async () => {
+    const report = await buildAccount999Report();
+
+    expect(report.opening_balance_status).toBe("api_incomplete");
+    expect(report.balance_scope).toBe("journal_api_visible_entries_only");
+    expect(report.warnings).toEqual([
+      ACCOUNT_999_WARNING,
+      OPENING_BALANCE_API_LIMITATION_WARNING,
+    ]);
+    expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
+    expect((report.warnings as string[]).filter(
+      (warning) => warning === OPENING_BALANCE_API_LIMITATION_WARNING,
+    )).toHaveLength(1);
+  });
+
+  it("reports a complete annual opening-balance scope when the helper has no limitation", async () => {
+    openingBalanceHelperState.helper.mockImplementation((warnings: string[] = []) =>
+      warnings.length === 0 ? [] : warnings,
+    );
+
+    const report = await buildAccount999Report();
+
+    expect(report.opening_balance_status).toBe("complete");
+    expect(report.balance_scope).toBe("complete_balance");
+    expect(report.warnings).toEqual([ACCOUNT_999_WARNING]);
+    expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
+    expect(report.warnings).not.toContain(OPENING_BALANCE_API_LIMITATION_WARNING);
+  });
 
   it("includes all equity accounts dynamically before closing while keeping current-year profit separate", async () => {
     const report = await buildAnnualReportData(createApi(baseJournals), 2025);

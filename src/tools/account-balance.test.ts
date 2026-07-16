@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import type { Journal } from "../types/api.js";
 import { clearRuntimeCaches } from "../cache-control.js";
+import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
 
 // ---------------------------------------------------------------------------
 // The module registers MCP tools but also exports computeAccountBalance via
@@ -304,5 +305,89 @@ describe("compute_account_balance tool", () => {
     const data = parse((result.content[0] as { text: string }).text);
     expect(data.debit_total).toBe(300);
     expect(data.entry_count).toBe(1);
+  });
+});
+
+describe("compute_client_debt tool", () => {
+  const CLIENT_ID = 42;
+  const ACCOUNT_ID = 2110;
+  const CLIENT_DEBT_ACCOUNT = {
+    id: ACCOUNT_ID,
+    name_est: "Võlg kliendile",
+    name_eng: "Debt to client",
+    balance_type: "C",
+  };
+
+  function setupClientDebtFixture() {
+    const api = makeApi([
+      journal({
+        id: 1,
+        clients_id: CLIENT_ID,
+        postings: [posting(ACCOUNT_ID, "C", 100)],
+      }),
+      journal({
+        id: 2,
+        clients_id: CLIENT_ID,
+        postings: [posting(ACCOUNT_ID, "D", 30)],
+      }),
+    ], CLIENT_DEBT_ACCOUNT);
+    const server = {} as Parameters<typeof registerAccountBalanceTools>[0];
+    registerAccountBalanceTools(
+      server,
+      api as unknown as Parameters<typeof registerAccountBalanceTools>[1],
+    );
+
+    return {
+      handler: capturedHandlers["compute_client_debt"]!,
+      listAllWithPostings: api.journals.listAllWithPostings,
+    };
+  }
+
+  async function invokeClientDebtHandler() {
+    const fixture = setupClientDebtFixture();
+    const result = await fixture.handler({
+      clients_id: CLIENT_ID,
+      account_ids: String(ACCOUNT_ID),
+      fresh: true,
+    });
+
+    return {
+      data: parseMcpResponse(result.content[0]!.text) as Record<string, unknown>,
+      listAllWithPostings: fixture.listAllWithPostings,
+    };
+  }
+
+  it("preserves client debt totals and cache metadata", async () => {
+    const { data, listAllWithPostings } = await invokeClientDebtHandler();
+
+    expect(data.accounts).toEqual([{
+      account_id: 2110,
+      account_name: "Võlg kliendile",
+      balance_type: "C",
+      balance: 70,
+      debit_total: 30,
+      credit_total: 100,
+      entry_count: 2,
+    }]);
+    expect(data.summary).toEqual({
+      total_debt_to_client: 70,
+      total_receivable_from_client: 0,
+      net_position: -70,
+    });
+    expect(data.cache).toEqual({
+      fresh: true,
+      cleared: true,
+      scope: "all",
+    });
+    expect(clearRuntimeCachesMock).toHaveBeenCalledOnce();
+    expect(listAllWithPostings).toHaveBeenCalledOnce();
+  });
+
+  it("adds client debt opening-balance disclosure", async () => {
+    const { data } = await invokeClientDebtHandler();
+
+    expect(data.opening_balance_status).toBe("api_incomplete");
+    expect(data.balance_scope).toBe("journal_api_visible_entries_only");
+    expect(data.warnings).toEqual(withOpeningBalanceApiLimitation());
   });
 });

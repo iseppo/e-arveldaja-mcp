@@ -13,6 +13,7 @@ import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { CURRENT_YEAR_PROFIT_ACCOUNT } from "../accounting-defaults.js";
 import { getCashFlowCategoryRule, getCurrentYearProfitAccountRule, getLiabilityClassificationRule } from "../accounting-rules.js";
+import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
 
 type PostingType = "D" | "C";
 type CashFlowClass = "operating" | "investing" | "financing" | "unclassified";
@@ -1004,10 +1005,19 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   );
   const closingEquity = totalEquity;
   const averageEquity = roundMoney((openingEquity + closingEquity) / 2);
+  const openingBalanceWarnings = withOpeningBalanceApiLimitation();
+  const openingBalanceApiIncomplete = openingBalanceWarnings.length > 0;
+  const finalWarnings = withOpeningBalanceApiLimitation(warnings);
 
   return {
     year,
     fiscal_period: { from, to },
+    opening_balance_status: openingBalanceApiIncomplete
+      ? "api_incomplete"
+      : "complete",
+    balance_scope: openingBalanceApiIncomplete
+      ? "journal_api_visible_entries_only"
+      : "complete_balance",
     framework: {
       accounting_standard: "Estonian GAAP (RTJ)",
       entity_size: "micro_or_small",
@@ -1161,7 +1171,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         note: "Journal count may overlap with invoice-generated journals and should be used as a disclosure review aid, not as a final transaction amount.",
       },
     },
-    warnings,
+    warnings: finalWarnings,
   };
 }
 

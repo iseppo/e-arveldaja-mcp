@@ -196,6 +196,9 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         .filter(r => r.balance_type === "D") // asset accounts
         .reduce((sum, r) => sum + r.balance, 0);
 
+      const openingBalanceWarnings = withOpeningBalanceApiLimitation();
+      const openingBalanceApiIncomplete = openingBalanceWarnings.length > 0;
+
       return {
         content: [{
           type: "text",
@@ -207,6 +210,13 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
               total_receivable_from_client: roundMoney(totalReceivable),
               net_position: roundMoney(totalReceivable - totalDebt),
             },
+            opening_balance_status: openingBalanceApiIncomplete
+              ? "api_incomplete"
+              : "complete",
+            balance_scope: openingBalanceApiIncomplete
+              ? "journal_api_visible_entries_only"
+              : "complete_balance",
+            warnings: openingBalanceWarnings,
             ...cacheClearMetadata(cacheClear),
           }),
         }],
