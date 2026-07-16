@@ -4211,59 +4211,66 @@ Append one ignored-ledger M21 row with baseline, exact RED/GREEN counts, pure-he
 ### Task 17: M22 — Detect accounting-rule migration collisions
 
 **Files:**
-- Modify: `src/accounting-rules.ts:1389-1445`
+- Modify: `src/accounting-rules.ts:1185-1240,1389-1447`
 - Modify: `src/accounting-rules.test.ts`
 
 **Interfaces:**
-- Consumes: `normalizeAutoBookingRuleMatch(match)` and `autoBookingConceptSlug`.
+- Consumes: `normalizeAutoBookingRuleMatch(match)` and the exact `autoBookingConceptSlug(match, category)` target identity.
 - Produces: `findRuleMigrationConflicts(rules): Array<{ canonicalKey: string; sourceMatches: string[] }>`; migration aborts before staging writes.
 
-- [ ] **Step 1: Write the failing regression**
+- [ ] **Step 1: Record the affected baseline and target identity**
 
-```ts
-it("refuses normalized duplicate rules without overwriting either source", () => {
-  writeFileSync(legacy, rulesMarkdown([rule("ACME OÜ", 5000), rule("acme ou", 6000)]));
-  expect(() => migrateLegacyRulesToBundle(legacy, bundle)).toThrow(/normalized rule collision.*ACME OÜ.*acme ou/i);
-  expect(readFileSync(legacy, "utf8")).toContain("ACME OÜ");
-  expect(existsSync(bundle)).toBe(false);
-});
-```
+Run `npx vitest run src/accounting-rules.test.ts`. The pre-M22 baseline is 1 file and 38 tests. Confirm that `writeAutoBookingConcept` writes `auto-booking/${autoBookingConceptSlug(match, category)}.md` and that migration currently loops and writes before any collision preflight.
 
-- [ ] **Step 2: Prove red**
+- [ ] **Step 2: Add eight exact M22 regressions without production edits**
 
-Run: `npx vitest run src/accounting-rules.test.ts -t "normalized duplicate"`
+Use a namespace import only for the initially missing helper so the whole suite still loads. Add M22-tagged tests with `try/finally` cleanup and byte/tree snapshots where applicable:
 
-Expected: FAIL because the later normalized slug overwrites the earlier concept.
+1. `M22 reports every normalized target collision deterministically` proves the exported helper exists, groups rules by the exact relative concept target, sorts groups by `canonicalKey`, sorts `sourceMatches` with a locale-independent comparator, retains repeated identical sources, and returns no group for a singleton.
+2. `M22 refuses a normalized duplicate before creating a new bundle or lock parent` places the destination below a nonexistent parent, migrates `ACME OÜ` and `acme ou` in the same category, expects a deterministic error naming the canonical target and both sources, and requires the legacy bytes unchanged, no `.migrated`, and no parent, `${dir}.lock`, bundle, `.migrating`, or `.replacing` path.
+3. `M22 preserves an authoritative bundle byte-for-byte on collision` snapshots every relative file and byte before the call and proves an unrelated existing concept, index, and log are unchanged.
+4. `M22 preserves reserved and stale migration state on collision` starts with a reserved-only bundle plus marker files in existing `.migrating` and `.replacing` directories and proves all three trees are byte-identical after refusal.
+5. `M22 collision errors are independent of legacy row order` runs the same two collision groups in forward and reverse order in separate roots and requires identical helper results and thrown messages.
+6. `M22 rejects repeated identical source rows instead of silently updating` proves two byte-identical match/category rows still form a two-source conflict and preserve the legacy source.
+7. `M22 allows the same normalized match in different categories` is a passing control that creates two distinct concept targets and archives the source.
+8. `M22 still migrates distinct normalized targets` is a passing compatibility control that preserves the existing migration summary, files, archive, and rule lookup behavior.
 
-- [ ] **Step 3: Preflight all canonical keys**
+The first six tests are intended REDs and the last two are declared controls. Run `npx vitest run src/accounting-rules.test.ts -t "M22"` and record exact names/messages/counts. Expected before production edits: 6 FAIL / 2 PASS, with failures caused by last-write-wins or the missing helper—not fixture or cleanup errors.
 
-```ts
-export function findRuleMigrationConflicts(rules: AccountingAutoBookingRule[]) {
-  const groups = new Map<string, string[]>();
-  for (const rule of rules) {
-    const key = `${normalizeAutoBookingRuleMatch(rule.match)}\0${(rule.category ?? "").trim().toLowerCase()}`;
-    groups.set(key, [...(groups.get(key) ?? []), rule.match]);
-  }
-  return [...groups].filter(([, matches]) => matches.length > 1)
-    .map(([canonicalKey, sourceMatches]) => ({ canonicalKey, sourceMatches }));
-}
+- [ ] **Step 3: Implement one exact, deterministic preflight**
 
-const conflicts = findRuleMigrationConflicts(counterparties);
-if (conflicts.length) throw new Error(`Normalized rule collision: ${conflicts.map(c => c.sourceMatches.join(" <> ")).join("; ")}`);
-```
+Export `findRuleMigrationConflicts(rules: AccountingAutoBookingRule[]): Array<{ canonicalKey: string; sourceMatches: string[] }>` next to the concept-target helpers. Define `canonicalKey` from the exact relative filesystem destination (`auto-booking/${autoBookingConceptSlug(rule.match, rule.category)}.md`), not a parallel approximation. Group all sources, retain duplicates, filter groups of size greater than one, sort source strings with an explicit code-point comparator, then sort results by canonical key with the same comparator. Do not mutate or reorder the input.
 
-- [ ] **Step 4: Prove green and review**
+Add a read-only legacy-source collision preflight that reads/parses an existing readable source and throws one deterministic `Normalized rule collision` error listing canonical keys and all source matches plus resolution guidance. Run it in `migrateLegacyRulesToBundle` **before** calling `withBundleLock`; this is required because `withBundleLock` creates `dirname(dir)` and writes/removes `${dir}.lock`. If the source is absent or cannot be read/parsed, leave the existing locked-path absence/error semantics unchanged rather than hiding or duplicating its diagnostic.
 
-Run: `npx vitest run src/accounting-rules.test.ts && npm run build && git diff --check`
+Repeat the same collision check immediately after the authoritative parse inside `migrateLegacyRulesToBundleLocked`. The second check closes the source-change TOCTOU window between read-only preflight and lock acquisition. Both checks must precede their next possible mutation; the locked check must occur before `buildInto`, `scaffoldBundle`, stale staging/replacing cleanup, concept/index/log writes, rename, archive, or cache-visible mutation. Do not change ordinary save/upsert behavior or destination-vs-source merge semantics; M22 covers collisions within the legacy source being migrated.
 
-Expected: collision aborts before writes/archive; distinct rules migrate. Package the listed files and obtain independent `APPROVED`.
+- [ ] **Step 4: Prove finding and affected GREEN**
 
-- [ ] **Step 5: Commit M22**
+Run the exact M22 selector and then `npx vitest run src/accounting-rules.test.ts`. Expected: 8/8 M22 and 46/46 affected tests pass; collision paths have zero filesystem mutation and ordinary distinct migrations retain prior behavior.
+
+- [ ] **Step 5: Run repository gates and freeze the exact artifact**
+
+Run `npm run build`, `npm run validate:release`, `git diff --check`, `npm test`, and `npm run test:integration`. Expected: full unit total is 2,437 if exactly eight tests were added; integration is 20 pass/3 documented skips; all other gates pass. Require `git diff --name-only` to list exactly `src/accounting-rules.ts` and `src/accounting-rules.test.ts`, with no M23 drift. Write that two-file diff to `.omc/reviews/M22.diff`, record bytes/SHA-256, and prove live/artifact identity.
+
+- [ ] **Step 6: Obtain ordered independent review**
+
+First give a fresh spec reviewer only the M22 requirements, committed M21 base, and frozen artifact. Require `SPEC COMPLIANCE: APPROVED` or actionable findings. It must verify exact target identity, all duplicate retention, deterministic ordering/message, read-only preflight before lock-parent/lock creation, repeated under-lock preflight for TOCTOU safety, new/authoritative/reserved/stale-state preservation, source/archive behavior, controls, and exact scope.
+
+Only after spec approval, give the unchanged artifact to a different fresh quality reviewer and require `CODE QUALITY APPROVED` or findings. Any finding restarts with a failing test where applicable, the smallest fix, all Step 4–5 gates, artifact regeneration, and both ordered reviews.
+
+- [ ] **Step 7: Re-verify, commit, ledger, and stop cleanly**
+
+After final approval, rerun Steps 4–5, prove live and staged diffs byte-identical to `.omc/reviews/M22.diff`, stage exactly the two paths, and commit:
 
 ```bash
 git add src/accounting-rules.ts src/accounting-rules.test.ts
+git diff --cached --name-only
+git diff --cached --check
 git commit -m "fix(M22): detect rule migration collisions"
 ```
+
+Append one ignored-ledger M22 row with baseline, exact RED/GREEN names/counts, filesystem-preservation and compatibility proofs, full/build/integration/release/diff results, artifact bytes/SHA, ordered verdicts, exact scope, and commit hash. Require an empty `git status --short` and M22 at `HEAD`. Do not begin M23 until M22 is committed, recorded, and clean.
 
 ### Task 18: M23 — Ignore connection-scoped generated rules
 
