@@ -4392,6 +4392,15 @@ The 31,181-byte v3 artifact remains unapproved because `existingLegacyContainsUs
 3. Prove 19/19 M23, 65/65 accounting-rules, and 2,456 full unit tests, plus ignore/template/index wiring, build, release, diff, and integration 20 pass/3 documented skips. This correction edits only `src/accounting-rules.ts` and its test; the final tracked M23 scope remains the same six files.
 4. Invalidate the v3 artifact and verdicts, regenerate the exact six-file artifact, and restart ordered fresh specification then code-quality review. Any further edit or finding restarts the complete verification and review cycle.
 
+#### M23 fourth review-correction plan
+
+The 33,398-byte v4 artifact remains unapproved because normal scoped operational siblings (`<digest>.lock`, `.lock.reclaim`, `.migrating`, and `.replacing`) are classified as unexpected root entries and can pin the shared unscoped parent during concurrent work or crash recovery. Correct this test-first:
+
+1. Add one M23 test which creates a valid 64-hex scoped directory plus its `.lock` and `.lock.reclaim` files and `.migrating` and `.replacing` directories, then proves a different identity still resolves to its own digest scope rather than the unscoped parent. In isolated roots within the same test, prove wrong entry types, uppercase or near-match digests, prefixes, and trailing suffixes still pin conservatively. Expected pre-fix result: 20 M23 tests with 1 FAIL / 19 PASS; whole file 1 FAIL / 65 PASS out of 66.
+2. Classify root entries with exact case-sensitive anchored patterns: bare `[0-9a-f]{64}` is allowed only as a directory; `[0-9a-f]{64}.lock` and `.lock.reclaim` only as files; `[0-9a-f]{64}.migrating` and `.replacing` only as directories. Do not accept prefixes, suffixes, case-folding, or wrong types. Preserve conservative pinning for every other entry and all inspection errors.
+3. Prove 20/20 M23, 66/66 accounting-rules, and 2,457 full unit tests, plus ignore/template/index wiring, build, release, diff, and integration 20 pass/3 documented skips. This correction edits only `src/accounting-rules.ts` and its test; final tracked M23 scope remains the same six files.
+4. Invalidate v4 and all verdicts, regenerate the exact six-file artifact, and restart ordered fresh specification then code-quality review. Any further edit or finding restarts the complete verification and review cycle.
+
 ### Task 19: M26 — Separate booked, skipped, and review-required portfolio rows
 
 **Files:**
