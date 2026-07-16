@@ -269,6 +269,15 @@ const multiStatementXml = `<?xml version="1.0" encoding="UTF-8"?>
 </Document>`;
 
 describe("parseCamt053Xml", () => {
+  it("H08 preserves whitespace and lowercase in the statement IBAN for later binding normalization", () => {
+    const parsed = parseCamt053Xml(sampleXml.replace(
+      "EE637700771011212909",
+      "ee63 7700 7710 1121 2909",
+    ));
+
+    expect(parsed.statement_metadata.iban).toBe("ee63 7700 7710 1121 2909");
+  });
+
   it("parses statement metadata and entry direction mapping data", () => {
     const result = parseCamt053Xml(sampleXml);
 

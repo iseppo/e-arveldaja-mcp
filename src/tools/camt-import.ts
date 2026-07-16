@@ -25,6 +25,7 @@ const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const XML_DTD_PATTERN = /<!(?:DOCTYPE|ENTITY)/i;
 const CAMT_DESCRIPTION_METADATA_PREFIX = "[e-arveldaja-mcp:camt";
 const TRANSACTION_DESCRIPTION_MAX_LENGTH = 150;
+const CANONICAL_ACCOUNT_IDENTITY_REGEX = /^[A-Z0-9]{1,34}$/;
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
@@ -1000,6 +1001,101 @@ async function ensureAccountDimensionExists(api: ApiContext, accountsDimensionsI
   }
 }
 
+function normalizeAccountIdentity(value: string | undefined | null): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const compact = value.replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9]+$/.test(compact)) return undefined;
+  return compact.replace(/[a-z]/g, character =>
+    String.fromCharCode(character.charCodeAt(0) - 32));
+}
+
+function renderAccountIdentity(value: string): string {
+  return CANONICAL_ACCOUNT_IDENTITY_REGEX.test(value)
+    ? value
+    : wrapUntrustedOcr(value) ?? value;
+}
+
+function accountBindingValidationError(message: string): Error {
+  return Object.assign(new Error(message), { category: "validation_failed" as const });
+}
+
+export async function assertStatementAccountMatchesDimension(
+  api: ApiContext,
+  statementIban: string,
+  dimensionId: number,
+): Promise<void> {
+  const bankAccounts = await api.readonly.getBankAccounts();
+  const selectedRows = bankAccounts.filter(account => account.accounts_dimensions_id === dimensionId);
+  if (selectedRows.length === 0) {
+    throw accountBindingValidationError(`No bank account record is bound to selected dimension ${dimensionId}`);
+  }
+
+  const selectedIdentityByNormalized = new Map<string, string>();
+  for (const account of selectedRows) {
+    for (const identity of [account.iban_code, account.account_no]) {
+      const normalized = normalizeAccountIdentity(identity);
+      if (normalized !== undefined && !selectedIdentityByNormalized.has(normalized)) {
+        selectedIdentityByNormalized.set(normalized, identity!);
+      }
+    }
+  }
+  if (selectedIdentityByNormalized.size === 0) {
+    throw accountBindingValidationError(
+      `Bank account records bound to selected dimension ${dimensionId} have no usable IBAN or account number`,
+    );
+  }
+
+  const normalizedStatementIdentity = normalizeAccountIdentity(statementIban);
+  if (normalizedStatementIdentity === undefined) {
+    throw accountBindingValidationError(
+      `Statement account ${renderAccountIdentity(statementIban)} is not a valid ASCII account identity`,
+    );
+  }
+  const statementMatchesSelected = selectedIdentityByNormalized.has(normalizedStatementIdentity);
+  const matchingDimensions = new Set<number>();
+  for (const account of bankAccounts) {
+    const matches = [account.iban_code, account.account_no]
+      .some(identity => {
+        const normalizedIdentity = normalizeAccountIdentity(identity);
+        return normalizedIdentity !== undefined && normalizedIdentity === normalizedStatementIdentity;
+      });
+    if (!matches) continue;
+
+    const ownerDimensionId: unknown = account.accounts_dimensions_id;
+    if (typeof ownerDimensionId !== "number" ||
+        !Number.isSafeInteger(ownerDimensionId) ||
+        ownerDimensionId <= 0) {
+      throw accountBindingValidationError(
+        "A matching bank-account record has an invalid dimension identifier",
+      );
+    }
+    matchingDimensions.add(ownerDimensionId);
+  }
+
+  const owningDimensions = [...matchingDimensions]
+    .filter(ownerDimensionId => ownerDimensionId !== dimensionId)
+    .sort((left, right) => left - right);
+
+  if (statementMatchesSelected) {
+    if (owningDimensions.length === 0) return;
+    throw accountBindingValidationError(
+      `Statement account ${renderAccountIdentity(statementIban)} matches selected bank dimension ${dimensionId} ` +
+      `but is also bound to other bank dimension(s): ${owningDimensions.join(", ")}.`,
+    );
+  }
+
+  const selectedIdentities = [...selectedIdentityByNormalized.values()]
+    .map(renderAccountIdentity)
+    .join(", ");
+  const ownerNote = owningDimensions.length > 0
+    ? ` The statement account is bound to other bank dimension(s): ${owningDimensions.join(", ")}.`
+    : "";
+  throw accountBindingValidationError(
+    `Statement account ${renderAccountIdentity(statementIban)} does not match selected bank dimension ${dimensionId} ` +
+    `(configured identities: ${selectedIdentities}).${ownerNote}`,
+  );
+}
+
 async function resolveClientForEntry(
   api: ApiContext,
   entry: ParsedCamtEntry,
@@ -1159,9 +1255,11 @@ export function registerCamtImportTools(
         throw new Error(`date_from ${date_from} must be on or before date_to ${date_to}`);
       }
 
+      const loaded = await loadParsedCamt053(file_path);
       await ensureAccountDimensionExists(api, accounts_dimensions_id);
+      await assertStatementAccountMatchesDimension(api, loaded.statement_metadata.iban, accounts_dimensions_id);
 
-      const parsed = await enrichWithDuplicates(await loadParsedCamt053(file_path), api);
+      const parsed = await enrichWithDuplicates(loaded, api);
       const existingTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
       const filteredEntries = parsed.entries.filter(entry => {
         if (date_from && entry.date < date_from) return false;
