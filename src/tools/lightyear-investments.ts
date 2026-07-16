@@ -72,7 +72,8 @@ export type FxReviewCode =
   | "trade_amount_conflict"
   | "trade_fee_unresolved"
   | "distribution_currency_missing"
-  | "distribution_amount_conflict";
+  | "distribution_amount_conflict"
+  | "portfolio_arithmetic_overflow";
 
 export interface FxReviewReason {
   code: FxReviewCode;
@@ -97,6 +98,7 @@ export const FX_REVIEW_MESSAGES: Record<FxReviewCode, string> = {
   trade_fee_unresolved: "The foreign-currency trade fee has no proven EUR conversion.",
   distribution_currency_missing: "The distribution has no explicit source currency.",
   distribution_amount_conflict: "The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent.",
+  portfolio_arithmetic_overflow: "The portfolio arithmetic exceeds the supported exact bounds.",
 };
 
 export interface DistributionFxProvenance {
@@ -317,7 +319,7 @@ function agreesToCent(left: number, right: number): boolean {
   return Math.abs(roundMoney(left) - roundMoney(right)) <= LEGACY_CENT_MATCH_TOLERANCE;
 }
 
-function moneyToSafeCents(value: number): number | null {
+function moneyToPostingSafeCents(value: number): number | null {
   if (!Number.isFinite(value)) return null;
   const rounded = roundMoney(value);
   const scaled = rounded * 100;
@@ -325,8 +327,12 @@ function moneyToSafeCents(value: number): number | null {
   const cents = Math.round(scaled);
   if (!Number.isSafeInteger(cents)) return null;
   const normalizedCents = Object.is(cents, -0) ? 0 : cents;
-  if (Math.abs(normalizedCents) > MAX_UNAMBIGUOUS_MONEY_CENTS) return null;
   return roundMoney(normalizedCents / 100) === rounded ? normalizedCents : null;
+}
+
+function moneyToSafeCents(value: number): number | null {
+  const cents = moneyToPostingSafeCents(value);
+  return cents !== null && Math.abs(cents) <= MAX_UNAMBIGUOUS_MONEY_CENTS ? cents : null;
 }
 
 function hasExactRoundedMoneyBalance(gross: number, net: number, tax: number, fee: number): boolean {
@@ -481,6 +487,175 @@ export function tradeFeeInEur(trade: {
   ) return null;
   const convertedFee = convertForeignToEur(trade.fee_eur, rate, orientation);
   return Number.isFinite(convertedFee) ? roundMoney(convertedFee) : null;
+}
+
+export type TradeIntrinsicReadiness =
+  | { kind: "ready"; converted_trade_fee_eur: number }
+  | { kind: "review_required"; reason: FxReviewReason };
+
+function quantityToSafeMicrounits(value: number): number | null {
+  if (!Number.isFinite(value)) return null;
+  const units = Math.round(value * 1_000_000);
+  return Number.isSafeInteger(units) ? units : null;
+}
+
+export function classifyTradeIntrinsicReadiness(
+  trade: Pick<InvestmentTrade, "type" | "quantity" | "ccy" | "eur_amount" | "fee_eur" | "fx_rate" | "fx_orientation" | "fx_review_reason" | "fx_fee_eur">,
+): TradeIntrinsicReadiness {
+  if (trade.fx_review_reason !== null) {
+    return { kind: "review_required", reason: trade.fx_review_reason };
+  }
+  if (
+    normalizedCurrency(trade.ccy) !== "EUR" &&
+    (trade.eur_amount === 0 || trade.fx_rate === null || trade.fx_orientation === null)
+  ) {
+    return { kind: "review_required", reason: fxReason("trade_fee_unresolved") };
+  }
+  const convertedTradeFee = tradeFeeInEur(trade);
+  if (convertedTradeFee === null) {
+    return { kind: "review_required", reason: fxReason("trade_fee_unresolved") };
+  }
+  const quantityUnits = quantityToSafeMicrounits(trade.quantity);
+  const eurAmountCents = moneyToPostingSafeCents(trade.eur_amount);
+  const tradeFeeCents = moneyToPostingSafeCents(convertedTradeFee);
+  const fxFeeCents = moneyToPostingSafeCents(trade.fx_fee_eur);
+  const checkedCentArithmetic = (...values: number[]): number | null => {
+    let total = 0;
+    for (const value of values) {
+      total += value;
+      if (!Number.isSafeInteger(total)) return null;
+    }
+    return total;
+  };
+  const hasSafeQuantity = Number.isFinite(trade.quantity) && trade.quantity > 0 &&
+    quantityUnits !== null;
+  const hasSafeMoney = eurAmountCents !== null && eurAmountCents > 0 &&
+    tradeFeeCents !== null && tradeFeeCents >= 0 &&
+    fxFeeCents !== null && fxFeeCents >= 0;
+  const hasSafePostingArithmetic = hasSafeMoney && (
+    trade.type === "Buy"
+      ? checkedCentArithmetic(eurAmountCents!, tradeFeeCents!) !== null &&
+        checkedCentArithmetic(fxFeeCents!, tradeFeeCents!) !== null &&
+        checkedCentArithmetic(eurAmountCents!, fxFeeCents!, tradeFeeCents!) !== null
+      : checkedCentArithmetic(eurAmountCents!, -tradeFeeCents!) !== null &&
+        checkedCentArithmetic(tradeFeeCents!, fxFeeCents!) !== null
+  );
+  if (!hasSafeQuantity || !hasSafePostingArithmetic) {
+    return { kind: "review_required", reason: fxReason("trade_amount_conflict") };
+  }
+  return { kind: "ready", converted_trade_fee_eur: convertedTradeFee };
+}
+
+type PortfolioTradeBaseDto = {
+  reference: string;
+  ticker: string;
+  isin: string;
+  type: "Buy" | "Sell";
+  date: string;
+  quantity: number;
+  currency: string;
+  gross_amount: number;
+};
+
+type BookedBasisTradeDto = PortfolioTradeBaseDto & {
+  status: "intrinsically_ready";
+  eur_amount: number;
+  trade_fee_eur: number;
+};
+
+type SkippedTradeDto = PortfolioTradeBaseDto & {
+  status: "skipped";
+  skip_reason: {
+    code: "default_cash_equivalent";
+    message: string;
+  };
+};
+
+type ReviewRequiredTradeDto = PortfolioTradeBaseDto & {
+  status: "review_required";
+  review_reason: FxReviewReason;
+};
+
+const SAFE_PORTFOLIO_TICKER_RE = /^[A-Za-z0-9][A-Za-z0-9._+:/-]{0,31}$/;
+const SAFE_PORTFOLIO_ISIN_RE = /^[A-Z]{2}[A-Z0-9]{9}[0-9]$/;
+const SAFE_PORTFOLIO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const SAFE_PORTFOLIO_CURRENCY_RE = /^[A-Z]{3}$/;
+
+function renderPortfolioTicker(value: string): string {
+  return SAFE_PORTFOLIO_TICKER_RE.test(value)
+    ? value
+    : (wrapUntrustedOcr(value) ?? "");
+}
+
+function renderPortfolioIsin(value: string): string {
+  return value === "" || SAFE_PORTFOLIO_ISIN_RE.test(value)
+    ? value
+    : (wrapUntrustedOcr(value) ?? "");
+}
+
+function renderPortfolioDate(value: string): string {
+  const match = SAFE_PORTFOLIO_DATE_RE.exec(value);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (month >= 1 && month <= 12 && day >= 1 && day <= monthDays[month - 1]!) return value;
+  }
+  return value === "" ? value : (wrapUntrustedOcr(value) ?? "");
+}
+
+function renderPortfolioCurrency(value: string): string {
+  return value === "" || SAFE_PORTFOLIO_CURRENCY_RE.test(value)
+    ? value
+    : (wrapUntrustedOcr(value) ?? "");
+}
+
+function renderPortfolioQuantity(value: number): number {
+  const units = quantityToSafeMicrounits(value);
+  return units === null ? value : units / 1_000_000;
+}
+
+function portfolioTradeBaseDto(trade: InvestmentTrade): PortfolioTradeBaseDto {
+  return {
+    reference: wrapUntrustedOcr(trade.reference) ?? "",
+    ticker: renderPortfolioTicker(trade.ticker),
+    isin: renderPortfolioIsin(trade.isin),
+    type: trade.type,
+    date: renderPortfolioDate(trade.date),
+    quantity: renderPortfolioQuantity(trade.quantity),
+    currency: renderPortfolioCurrency(trade.ccy),
+    gross_amount: trade.gross_amount_ccy,
+  };
+}
+
+function bookedBasisTradeDto(trade: InvestmentTrade, convertedTradeFee: number): BookedBasisTradeDto {
+  return {
+    ...portfolioTradeBaseDto(trade),
+    status: "intrinsically_ready",
+    eur_amount: trade.eur_amount,
+    trade_fee_eur: convertedTradeFee,
+  };
+}
+
+function skippedTradeDto(trade: InvestmentTrade): SkippedTradeDto {
+  return {
+    ...portfolioTradeBaseDto(trade),
+    status: "skipped",
+    skip_reason: {
+      code: "default_cash_equivalent",
+      message: "Default cash-equivalent instruments are excluded from the analytical WAC basis.",
+    },
+  };
+}
+
+function reviewRequiredTradeDto(trade: InvestmentTrade, reason: FxReviewReason): ReviewRequiredTradeDto {
+  return {
+    ...portfolioTradeBaseDto(trade),
+    status: "review_required",
+    review_reason: reason,
+  };
 }
 
 function getStatementRowCashDelta(row: AccountStatementRow): { currency: string; amount: number } | null {
@@ -2211,20 +2386,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       for (let tradeIdx = 0; tradeIdx < newTrades.length; tradeIdx++) {
         const trade = newTrades[tradeIdx]!;
         await reportProgress(tradeIdx, totalNewTrades);
-        const convertedTradeFee = tradeFeeInEur(trade);
-        const provenanceFailure = trade.fx_review_reason ?? (
-          normalizedCurrency(trade.ccy) !== "EUR" &&
-          (trade.eur_amount === 0 || trade.fx_rate === null || trade.fx_orientation === null)
-            ? fxReason("trade_fee_unresolved")
-            : convertedTradeFee === null
-              ? fxReason("trade_fee_unresolved")
-              : null
-        );
-        if (provenanceFailure || convertedTradeFee === null) {
+        const readiness = classifyTradeIntrinsicReadiness(trade);
+        if (readiness.kind === "review_required") {
           if (trade.fx_review_reason === null) {
             warnings.push(fxReviewWarning(
               trade.reference,
-              provenanceFailure ?? fxReason("trade_fee_unresolved"),
+              readiness.reason,
               trade.conversion_ref ?? undefined,
             ));
           }
@@ -2235,14 +2402,14 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             date: trade.date,
             eur_amount: 0,
             status: "skipped",
-            skip_reason: (provenanceFailure ?? fxReason("trade_fee_unresolved")).message,
+            skip_reason: readiness.reason.message,
           });
           continue;
         }
 
         // eur_amount is the EUR conversion net (after FX fee deduction).
         // fx_fee_eur is the FX conversion fee. trade.fee_eur is the trade platform fee.
-        const tradeFeeEur = roundMoney(convertedTradeFee);
+        const tradeFeeEur = readiness.converted_trade_fee_eur;
         const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
 
         if (trade.type === "Buy") {
@@ -2765,6 +2932,30 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
       const portfolioWarnings: string[] = [...fxWarnings];
 
+      const skippedTrades: InvestmentTrade[] = [];
+      const reviewedTrades: Array<{ trade: InvestmentTrade; reason: FxReviewReason; ordinal: number }> = [];
+      const candidateTrades: Array<{ trade: InvestmentTrade; convertedTradeFee: number }> = [];
+      for (let ordinal = 0; ordinal < trades.length; ordinal++) {
+        const trade = trades[ordinal]!;
+        if (trade.cash_equivalent) {
+          skippedTrades.push(trade);
+          continue;
+        }
+        const readiness = classifyTradeIntrinsicReadiness(trade);
+        if (readiness.kind === "review_required") {
+          reviewedTrades.push({ trade, reason: readiness.reason, ordinal });
+          if (trade.fx_review_reason === null) {
+            portfolioWarnings.push(fxReviewWarning(
+              trade.reference,
+              readiness.reason,
+              trade.conversion_ref ?? undefined,
+            ));
+          }
+          continue;
+        }
+        candidateTrades.push({ trade, convertedTradeFee: readiness.converted_trade_fee_eur });
+      }
+
       // Compute holdings using weighted average cost (WAC)
       const holdings = new Map<string, {
         ticker: string;
@@ -2776,9 +2967,24 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         buy_count: number;
         sell_count: number;
       }>();
+      const acceptedReadyTrades: typeof candidateTrades = [];
+      const tradeOrdinals = new Map(trades.map((trade, ordinal) => [trade, ordinal]));
+      const holdingRemainingCostCents = new Map<string, number>();
+      const holdingRealizedCents = new Map<string, number>();
+      let portfolioRemainingCostCents = 0;
+      let portfolioRealizedCents = 0;
+      const replaceBoundedCents = (total: number, previous: number, next: number): number | null => {
+        const withoutPrevious = total - previous;
+        if (!Number.isSafeInteger(withoutPrevious)) return null;
+        const replaced = withoutPrevious + next;
+        return Number.isSafeInteger(replaced) && Math.abs(replaced) <= MAX_UNAMBIGUOUS_MONEY_CENTS
+          ? replaced
+          : null;
+      };
 
-      for (const trade of trades) {
-        const h = holdings.get(trade.ticker) ?? {
+      for (const { trade, convertedTradeFee } of candidateTrades) {
+        const previous = holdings.get(trade.ticker);
+        const proposed = previous ? { ...previous } : {
           ticker: trade.ticker,
           isin: trade.isin,
           quantity: 0,
@@ -2788,85 +2994,126 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           buy_count: 0,
           sell_count: 0,
         };
+        let soldCost: number | null = null;
+        let averageCost: number | null = null;
 
         if (trade.type === "Buy") {
           // Investment cost = eur_amount (conversion net) + trade fee.
           // FX fee is expensed, not part of cost basis (matches Lightyear CG report).
-          const convertedTradeFee = tradeFeeInEur(trade);
-          if (convertedTradeFee === null && trade.fx_review_reason === null) {
-            portfolioWarnings.push(fxReviewWarning(
-              trade.reference,
-              fxReason("trade_fee_unresolved"),
-              trade.conversion_ref ?? undefined,
-            ));
-          }
-          h.total_cost_eur += trade.eur_amount + (convertedTradeFee ?? 0);
-          h.quantity += trade.quantity;
-          h.buy_count++;
+          proposed.total_cost_eur += trade.eur_amount + convertedTradeFee;
+          proposed.quantity += trade.quantity;
+          proposed.buy_count++;
         } else {
           // Sell: remove proportional cost basis using weighted average cost
-          const convertedTradeFee = tradeFeeInEur(trade);
-          if (convertedTradeFee === null && trade.fx_review_reason === null) {
-            portfolioWarnings.push(fxReviewWarning(
-              trade.reference,
-              fxReason("trade_fee_unresolved"),
-              trade.conversion_ref ?? undefined,
-            ));
-          }
-          const proceeds = trade.eur_amount - (convertedTradeFee ?? 0);
-          h.total_proceeds_eur += proceeds;
-          h.sell_count++;
+          const proceeds = trade.eur_amount - convertedTradeFee;
+          proposed.total_proceeds_eur += proceeds;
+          proposed.sell_count++;
 
-          if (h.quantity > 0.000001) {
-            const avgCost = h.total_cost_eur / h.quantity;
-            const soldCost = avgCost * trade.quantity;
-            h.realized_gain_loss_eur += proceeds - soldCost;
-            h.total_cost_eur -= soldCost;
+          if (proposed.quantity > 0.000001) {
+            averageCost = proposed.total_cost_eur / proposed.quantity;
+            soldCost = averageCost * trade.quantity;
+            proposed.realized_gain_loss_eur += proceeds - soldCost;
+            proposed.total_cost_eur -= soldCost;
           }
-          h.quantity -= trade.quantity;
+          proposed.quantity -= trade.quantity;
         }
 
-        holdings.set(trade.ticker, h);
+        if (averageCost === null && proposed.quantity > 0.000001) {
+          averageCost = proposed.total_cost_eur / proposed.quantity;
+        }
+        const quantityUnits = quantityToSafeMicrounits(proposed.quantity);
+        const remainingCostCents = moneyToSafeCents(proposed.total_cost_eur);
+        const proceedsCents = moneyToSafeCents(proposed.total_proceeds_eur);
+        const realizedCents = moneyToSafeCents(proposed.realized_gain_loss_eur);
+        const soldCostCents = soldCost === null ? 0 : moneyToSafeCents(soldCost);
+        const averageCostCents = averageCost === null ? 0 : moneyToSafeCents(averageCost);
+        const previousRemainingCents = holdingRemainingCostCents.get(trade.ticker) ?? 0;
+        const previousRealizedCents = holdingRealizedCents.get(trade.ticker) ?? 0;
+        const previousActiveRemainingCents = previous && Math.abs(previous.quantity) >= 0.000001
+          ? previousRemainingCents
+          : 0;
+        const proposedActiveRemainingCents = quantityUnits !== null && Math.abs(proposed.quantity) >= 0.000001
+          ? remainingCostCents
+          : 0;
+        const nextPortfolioRemainingCents = remainingCostCents === null || proposedActiveRemainingCents === null
+          ? null
+          : replaceBoundedCents(portfolioRemainingCostCents, previousActiveRemainingCents, proposedActiveRemainingCents);
+        const nextPortfolioRealizedCents = realizedCents === null
+          ? null
+          : replaceBoundedCents(portfolioRealizedCents, previousRealizedCents, realizedCents);
+
+        if (
+          quantityUnits === null || remainingCostCents === null || proceedsCents === null ||
+          realizedCents === null || soldCostCents === null || averageCostCents === null ||
+          nextPortfolioRemainingCents === null || nextPortfolioRealizedCents === null
+        ) {
+          const reason = fxReason("portfolio_arithmetic_overflow");
+          reviewedTrades.push({ trade, reason, ordinal: tradeOrdinals.get(trade)! });
+          portfolioWarnings.push(fxReviewWarning(trade.reference, reason));
+          continue;
+        }
+
+        holdings.set(trade.ticker, proposed);
+        holdingRemainingCostCents.set(trade.ticker, remainingCostCents);
+        holdingRealizedCents.set(trade.ticker, realizedCents);
+        portfolioRemainingCostCents = nextPortfolioRemainingCents;
+        portfolioRealizedCents = nextPortfolioRealizedCents;
+        acceptedReadyTrades.push({ trade, convertedTradeFee });
       }
 
-      const portfolio = Array.from(holdings.values()).map(h => {
-        const qtyHeld = Math.round(h.quantity * 1000000) / 1000000;
+      const positions = Array.from(holdings.values()).map(h => {
+        const qtyHeld = quantityToSafeMicrounits(h.quantity)! / 1_000_000;
+        const remainingCostCents = holdingRemainingCostCents.get(h.ticker)!;
+        const realizedCents = holdingRealizedCents.get(h.ticker)!;
         return {
-          ticker: h.ticker,
-          isin: h.isin,
+          ticker: renderPortfolioTicker(h.ticker),
+          isin: renderPortfolioIsin(h.isin),
           quantity_held: qtyHeld,
-          remaining_cost_eur: roundMoney(h.total_cost_eur),
+          remaining_cost_eur: remainingCostCents / 100,
           avg_cost_per_unit: qtyHeld > 0.000001
-            ? roundMoney(h.total_cost_eur / h.quantity)
+            ? moneyToSafeCents(h.total_cost_eur / h.quantity)! / 100
             : null,
-          total_proceeds_eur: roundMoney(h.total_proceeds_eur),
-          realized_gain_loss_eur: roundMoney(h.realized_gain_loss_eur),
+          total_proceeds_eur: moneyToSafeCents(h.total_proceeds_eur)! / 100,
+          realized_gain_loss_eur: realizedCents / 100,
           buys: h.buy_count,
           sells: h.sell_count,
           fully_sold: Math.abs(h.quantity) < 0.000001,
         };
       });
 
-      const active = portfolio.filter(p => !p.fully_sold);
-      const closed = portfolio.filter(p => p.fully_sold);
+      const previewed = positions.map(position => ({
+        ...position,
+        state: position.fully_sold ? "closed" as const : "active" as const,
+      }));
+      const legacyPositions = previewed.map(({ state: _state, ...position }) => position);
+      const active = legacyPositions.filter((_position, index) => previewed[index]!.state === "active");
+      const closed = legacyPositions.filter((_position, index) => previewed[index]!.state === "closed");
+      reviewedTrades.sort((left, right) => left.ordinal - right.ordinal);
 
       return {
         content: [{
           type: "text",
           text: toMcpJson({
+            booked_basis: acceptedReadyTrades.map(({ trade, convertedTradeFee }) =>
+              bookedBasisTradeDto(trade, convertedTradeFee)),
+            previewed,
+            skipped: skippedTrades.map(skippedTradeDto),
+            review_required: reviewedTrades.map(({ trade, reason }) =>
+              reviewRequiredTradeDto(trade, reason)),
             active_holdings: active,
             closed_positions: closed,
             totals: {
               active_positions: active.length,
-              total_remaining_cost_eur: roundMoney(active.reduce((s, p) => s + p.remaining_cost_eur, 0)),
-              total_realized_gain_loss_eur: roundMoney(portfolio.reduce((s, p) => s + p.realized_gain_loss_eur, 0)),
+              total_remaining_cost_eur: portfolioRemainingCostCents / 100,
+              total_realized_gain_loss_eur: portfolioRealizedCents / 100,
               closed_positions: closed.length,
             },
             ...(portfolioWarnings.length > 0 && { warnings: portfolioWarnings }),
-            note: "Cost basis computed using weighted average cost (WAC) method — for analytical purposes only. " +
-              "book_lightyear_trades uses FIFO cost basis from the capital gains file, so this summary " +
-              "may not match the investment account balance after booking sells. " +
-              "For tax reporting, use parse_lightyear_capital_gains which uses FIFO.",
+            note: "This analytical WAC preview uses the intrinsic readiness classifier and default cash-equivalent policy. " +
+              "It does not prove journals, gains, accounts, or duplicates are ready. " +
+              "Run book_lightyear_trades as a dry run for authoritative booking readiness. " +
+              "Cost basis is computed using weighted average cost; book_lightyear_trades and " +
+              "parse_lightyear_capital_gains use FIFO for sell and tax reporting.",
           }),
         }],
       };
