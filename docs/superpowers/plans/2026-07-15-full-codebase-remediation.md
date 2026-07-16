@@ -3454,53 +3454,319 @@ Expected: empty output. Do not begin H18 or any later finding until H17 is commi
 ### Task 13: H18 — Tolerant but bounded gains matching
 
 **Files:**
-- Modify: `src/tools/lightyear-investments.ts:542-600`
-- Modify: `src/tools/lightyear-investments.test.ts`
+- Modify: `src/tools/lightyear-investments.ts` — export the finite tolerance predicate and use it only in sell-to-capital-gains candidate classification.
+- Test: `src/tools/lightyear-investments.test.ts` — helper-contract, matcher determinism, and public `book_lightyear_trades` side-effect regressions.
+
+**Exact scope and non-goals:**
+- The reviewed H18 patch must contain exactly the two paths above. Do not create files or change schemas, API clients, audit helpers, documentation, package metadata, or release configuration.
+- Preserve H16 trade extraction and H17 distribution parsing, reservation, provenance, review routing, booking, and messages byte-for-byte. H18 must not change date/ticker/quantity candidate formation, trade/distribution ownership, CSV parsing, account selection, journal construction, or existing cent-exact proceeds semantics.
+- Do not expose configurable tolerances through the MCP tool schema. The only new interface is the exported TypeScript helper with defaults shown below.
+- Do not use row order as a tie-breaker, do not consume an outside-tolerance row, and do not silently turn a non-finite value into a match.
 
 **Interfaces:**
-- Consumes: sell/gains EUR proceeds.
-- Produces: `withinProceedsTolerance(actual, expected, absolute=0.02, relative=0.001): boolean`.
+- Consumes: the existing date/ticker/quantity candidate set and each sell/gains pair's EUR proceeds.
+- Produces: `withinProceedsTolerance(actual, expected, absolute = 0.02, relative = 0.001): boolean`.
+- Predicate contract: return `false` unless `actual`, `expected`, `absolute`, and `relative` are finite and both tolerances are nonnegative. Otherwise return the inclusive result `Math.abs(actual - expected) <= Math.max(absolute, Math.abs(expected) * relative)`.
+- Candidate categories: retain the current raw exact rule `Math.abs(sellProceeds - gainProceeds) < 0.02` unchanged; `tolerant` means beyond that exact rule but within the new predicate; `outside` means beyond the predicate or invalid/non-finite. The eligible union is `exact + tolerant`.
+- Consumption contract: after excluding gains rows already consumed by earlier sells, consume only when the eligible union contains exactly one row. Zero eligible rows remain unmatched; more than one is ambiguous and consumes none. Outside rows never enter the result map.
+- Diagnostics contract: when a sell has shaped candidates but no eligible row because their proceeds are outside the bound, emit one actionable manual-review warning for that sell even if the outside candidate is unique. Include enough stable sell context (at least date/ticker/quantity and sell proceeds) to identify the row; do not emit one warning per candidate.
+- Determinism contract: preserve input sell order, stable candidate classification, and one-to-one gains-row consumption. Reordering gains rows may change neither which unambiguous pair is selected nor which sells remain unmatched.
 
-- [ ] **Step 1: Write the failing regression**
+- [ ] **Step 1: Freeze scope, baselines, and H16/H17 behavior before RED**
+
+Run:
+
+```bash
+git status --short
+git diff --check
+npx vitest run src/tools/lightyear-investments.test.ts
+npm run build
+```
+
+Expected: clean worktree, empty diff-check output, the focused Lightyear suite passes, and the build passes. Record the exact focused test count in `.omc/full-codebase-remediation-ledger.md` notes without editing that ignored ledger yet.
+
+Freeze executable slices of the protected H16/H17 source regions from committed H17:
+
+```bash
+git show HEAD:src/tools/lightyear-investments.ts > /tmp/H18.before.ts
+awk '/^function extractTrades\(/{on=1} /^function rawStatementDatePrefix\(/{on=0} on' /tmp/H18.before.ts > /tmp/H18.before.h16-extractTrades.ts
+awk '/^function rawStatementDatePrefix\(/{on=1} /^function findExistingJournalsByRef\(/{on=0} on' /tmp/H18.before.ts > /tmp/H18.before.h17-extraction-reservation.ts
+awk '/registerTool\(server, "book_lightyear_distributions"/{on=1} /registerTool\(server, "lightyear_portfolio_summary"/{on=0} on' /tmp/H18.before.ts > /tmp/H18.before.h17-booking.ts
+sha256sum /tmp/H18.before.h16-extractTrades.ts /tmp/H18.before.h17-extraction-reservation.ts /tmp/H18.before.h17-booking.ts
+git rev-parse HEAD
+```
+
+Expected: all three slices are non-empty. Record the current H17 commit hash and the three hashes. These exact `awk` marker slices intentionally exclude the H18 gains matcher/helper. Step 9 regenerates the same slices from the working file and requires byte equality.
+
+- [ ] **Step 2: Add helper-contract RED tests, including inclusive boundaries and invalid inputs**
+
+Add a dedicated `describe("H18 bounded proceeds tolerance", ...)` block and import `withinProceedsTolerance` from the production module. The table must express the exact contract rather than duplicating production logic:
+
+Use the test file's existing `testNextDown` helper so the outside cases are the nearest representable values beyond the mathematical boundary:
 
 ```ts
-it("rejects the only date/ticker/quantity candidate when proceeds are materially different", () => {
-  const warnings: string[] = [];
-  const matches = matchSellsToCapitalGains([sell({ eur_amount: 100 })], [gain({ proceeds_eur: 160 })], warnings);
-  expect(matches.size).toBe(0);
-  expect(warnings.join(" ")).toContain("outside proceeds tolerance");
+it.each([
+  { actual: 9.98, expected: 10, absolute: 0.02, relative: 0.001, result: true, description: "absolute boundary is inclusive" },
+  { actual: testNextDown(9.98), expected: 10, absolute: 0.02, relative: 0.001, result: false, description: "next float beyond absolute boundary" },
+  { actual: 9990, expected: 10_000, absolute: 0.02, relative: 0.001, result: true, description: "relative boundary is inclusive" },
+  { actual: testNextDown(9990), expected: 10_000, absolute: 0.02, relative: 0.001, result: false, description: "next float beyond relative boundary" },
+  { actual: 100, expected: 100, absolute: 0, relative: 0, result: true, description: "zero tolerances allow equality" },
+  { actual: Number.NaN, expected: 100, absolute: 0.02, relative: 0.001, result: false, description: "NaN actual" },
+  { actual: 100, expected: Number.POSITIVE_INFINITY, absolute: 0.02, relative: 0.001, result: false, description: "infinite expected" },
+  { actual: 100, expected: 100, absolute: Number.NaN, relative: 0.001, result: false, description: "NaN absolute tolerance" },
+  { actual: 100, expected: 100, absolute: 0.02, relative: Number.POSITIVE_INFINITY, result: false, description: "infinite relative tolerance" },
+  { actual: 100, expected: 100, absolute: -0.01, relative: 0.001, result: false, description: "negative absolute tolerance" },
+  { actual: 100, expected: 100, absolute: 0.02, relative: -0.001, result: false, description: "negative relative tolerance" },
+])("$description", ({ actual, expected, absolute, relative, result }) => {
+  expect(withinProceedsTolerance(actual, expected, absolute, relative)).toBe(result);
+});
+
+it("uses the documented defaults", () => {
+  expect(withinProceedsTolerance(9.98, 10)).toBe(true);
+  expect(withinProceedsTolerance(testNextDown(9.98), 10)).toBe(false);
+  expect(withinProceedsTolerance(9990, 10_000)).toBe(true);
+  expect(withinProceedsTolerance(testNextDown(9990), 10_000)).toBe(false);
 });
 ```
 
-- [ ] **Step 2: Prove red**
+- [ ] **Step 3: Prove the helper tests are RED for the intended reason**
 
-Run: `npx vitest run src/tools/lightyear-investments.test.ts -t "materially different"`
+Run:
 
-Expected: FAIL because a unique inexact candidate is accepted without a bound.
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts -t "H18 bounded proceeds tolerance"
+git diff --name-only
+git diff -- src/tools/lightyear-investments.ts
+```
 
-- [ ] **Step 3: Apply absolute/relative tolerance**
+Expected: the new tests fail because `withinProceedsTolerance` is not exported/implemented. The changed-name list contains only `src/tools/lightyear-investments.test.ts`, and the production-file diff is empty. Fix any test syntax or fixture error until failures are contract failures, not harness failures.
+
+- [ ] **Step 4: Add public-tool tests with the real read/handler/API/audit harness**
+
+Every public case must build `statement` with `buildStatementCsv(...)`, build `gains` with `buildCapitalGainsCsv(...)`, load them in that order, call the registered handler, and parse its real payload:
 
 ```ts
-export function withinProceedsTolerance(actual: number, expected: number, absolute = 0.02, relative = 0.001): boolean {
+mockedReadFile.mockResolvedValueOnce(statement).mockResolvedValueOnce(gains);
+vi.mocked(logAudit).mockClear();
+const run = setupLightyearTool("book_lightyear_trades");
+const response = await run.handler({
+  file_path: "/tmp/lightyear.csv",
+  capital_gains_file: "/tmp/gains.csv",
+  investment_account: 1550,
+  broker_account: 1120,
+  gain_loss_account: 8320,
+  dry_run: false,
+});
+const payload = parseMcpResponse(response.content[0]!.text) as any;
+```
+
+Use a EUR sell statement row with a unique reference, fixed `10/11/2025 08:51:32` date, `AAPL`, quantity `10`, zero fee, and `gross_amount`/`net_amount` equal to the sell proceeds. Use capital-gains rows with the same date/ticker/quantity and unique identifying name/ISIN fields. Assert only real fields and spies: `payload.created`, `payload.skipped`, `payload.results`, `payload.warnings`, `run.api.journals.create`, and `vi.mocked(logAudit)`.
+
+Add these controls and RED regressions:
+
+- Preserved raw-exact control: sell `9990`, one gains row `9990.004`; expect `created === 1`, `skipped === 0`, one journal create, and one audit.
+- Public tolerant control: sell `9990`, one gains row `10000`; expect the same successful result. This is deliberately a passing pre-fix control because the old unique-inexact fallback already accepts it; it proves H18 preserves that useful match while adding a bound.
+- Unique outside RED: sell `9989.99`, one gains row `10000` (one cent beyond the inclusive relative boundary); expect `created === 0`, `skipped === 1`, a skipped `payload.results` entry, one warning matching `/outside proceeds tolerance.*manual review/i` and containing `2025-11-10`, `AAPL`, quantity `10`, and proceeds `9989.99`, with zero journal creates and zero audits. Add the material mismatch `9990` versus `16000` with the same zero-side-effect oracle.
+- Exact+tolerant-union ambiguity RED: one sell at `9990`; two same-shape gains rows at `9990.004` (preserved raw exact because difference is below `0.02`) and `10000` (tolerant at the inclusive relative boundary). Expect `created === 0`, `skipped === 1`, an ambiguity warning/result, zero creates, and zero audits. The old exact-first behavior should wrongly create, which makes this a load-bearing RED.
+
+For one-to-one consumption and reorder determinism, use two same-shape sells with different statement references and two gains rows: one eligible (`10000`) and one outside (`16000`). Execute once in `[eligible, outside]` gains order and once in `[outside, eligible]` order after resetting mocks. In both runs the first sell consumes the eligible row, the second sell is skipped for manual review, `payload.created === 1`, `payload.skipped === 1`, and there is exactly one create and one audit. Normalize `payload.results` and `payload.warnings` only by unstable created object ID, then require the two runs to be equal.
+
+Finally add public parser rejection controls for gains proceeds tokens `NaN`, `Infinity`, and `-Infinity`. For each, load the real statement and gains files, call the public handler, assert its existing explicit parse/rejection result, and assert zero `run.api.journals.create` and zero `vi.mocked(logAudit)` calls. Do not require a sell-level outside-tolerance warning: these tokens must be rejected before matcher classification. Direct helper tests are the proof that non-finite numeric arguments return `false`.
+
+- [ ] **Step 5: Prove the public-tool matrix is RED and controls remain GREEN**
+
+Run each load-bearing case independently, then the whole H18 block:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts -t "H18 preserves the raw-exact gains match"
+npx vitest run src/tools/lightyear-investments.test.ts -t "H18 preserves the unique relative-boundary gains match"
+npx vitest run src/tools/lightyear-investments.test.ts -t "H18 skips a unique just-outside candidate and performs zero mutation or audit"
+npx vitest run src/tools/lightyear-investments.test.ts -t "H18 treats exact plus tolerant candidates as ambiguous"
+npx vitest run src/tools/lightyear-investments.test.ts -t "H18"
+```
+
+Expected before production changes: helper tests fail because the export is missing; raw-exact and public `9990`/`10000` tolerant controls pass under existing behavior; unique outside fails because the old unbounded fallback consumes it; exact+tolerant ambiguity fails because the old exact-first branch creates a journal. Parser non-finite controls pass if existing rejection is already correct. Record those exact RED failures and passing controls before touching production code; do not claim the tolerant public control as RED.
+
+- [ ] **Step 6: Implement the minimal finite-only exported predicate**
+
+Add this helper beside the existing proceeds comparison logic without changing unrelated parsing or booking code:
+
+```ts
+export function withinProceedsTolerance(
+  actual: number,
+  expected: number,
+  absolute = 0.02,
+  relative = 0.001,
+): boolean {
+  if (
+    !Number.isFinite(actual) ||
+    !Number.isFinite(expected) ||
+    !Number.isFinite(absolute) ||
+    !Number.isFinite(relative) ||
+    absolute < 0 ||
+    relative < 0
+  ) {
+    return false;
+  }
+
   const difference = Math.abs(actual - expected);
   return difference <= Math.max(absolute, Math.abs(expected) * relative);
 }
 ```
 
-Classify date+ticker+quantity candidates into exact/tolerant/outside. Only one exact or tolerant candidate may be consumed; every outside candidate adds a manual-review warning and never enters the result map.
+Do not round either operand before this predicate. The current raw exact check `Math.abs(actual - expected) < 0.02` remains a distinct classification rule.
 
-- [ ] **Step 4: Prove green and review**
+- [ ] **Step 7: Implement exact+tolerant union matching without changing candidate formation**
 
-Run: `npx vitest run src/tools/lightyear-investments.test.ts && npm run build && git diff --check`
+Inside the existing per-sell matcher, keep its date/ticker/quantity candidate lookup and consumed-row exclusion unchanged. Replace only the unbounded unique-inexact fallback with explicit categories equivalent to:
 
-Expected: cent rounding passes, large discrepancy remains unmatched. Package the listed files and obtain independent `APPROVED`.
+```ts
+const availableCandidates = shapedCandidates.filter((candidate) => !consumedGainRows.has(candidate.rowIndex));
+const exactCandidates = availableCandidates.filter(
+  (candidate) => Math.abs(sell.proceedsEur - candidate.proceedsEur) < 0.02,
+);
+const tolerantCandidates = availableCandidates.filter(
+  (candidate) =>
+    Math.abs(sell.proceedsEur - candidate.proceedsEur) >= 0.02 &&
+    withinProceedsTolerance(sell.proceedsEur, candidate.proceedsEur),
+);
+const eligibleCandidates = [...exactCandidates, ...tolerantCandidates];
 
-- [ ] **Step 5: Commit H18**
+if (eligibleCandidates.length === 1) {
+  const [candidate] = eligibleCandidates;
+  matches.set(sell.rowIndex, candidate);
+  consumedGainRows.add(candidate.rowIndex);
+} else if (eligibleCandidates.length > 1) {
+  warnings.push(actionableAmbiguityWarning(sell, eligibleCandidates));
+} else if (availableCandidates.length > 0) {
+  warnings.push(actionableOutsideToleranceWarning(sell));
+}
+```
+
+Use the actual existing symbol/property names rather than introducing parallel model types or placeholder helpers. The important invariants are: exact and tolerant rows are combined before counting; outside rows are excluded from that count and never consumed; the candidate row is marked consumed atomically with adding the match; warning order follows sell order; one outside-tolerance warning is emitted per unmatched sell, with stable identifying context.
+
+- [ ] **Step 8: Prove GREEN for the helper and focused public behavior**
+
+Run:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts -t "H18 bounded proceeds tolerance"
+npx vitest run src/tools/lightyear-investments.test.ts -t "H18"
+npx vitest run src/tools/lightyear-investments.test.ts
+npm run build
+git diff --check
+```
+
+Expected: every helper row and public H18 case passes; the full Lightyear file passes; TypeScript builds; diff-check is empty. Confirm unique outside cases report zero create/audit calls, raw exact and `9990`/`10000` tolerant controls create once, and exact+tolerant ambiguity creates neither candidate.
+
+- [ ] **Step 9: Prove H16/H17 compatibility and exact two-file scope**
+
+Run the focused H16 and H17 named groups already present in the test file, followed by the complete Lightyear suite. Regenerate and compare the exact protected marker slices from Step 1:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts -t "H16"
+npx vitest run src/tools/lightyear-investments.test.ts -t "H17"
+npx vitest run src/tools/lightyear-investments.test.ts
+awk '/^function extractTrades\(/{on=1} /^function rawStatementDatePrefix\(/{on=0} on' src/tools/lightyear-investments.ts > /tmp/H18.current.h16-extractTrades.ts
+awk '/^function rawStatementDatePrefix\(/{on=1} /^function findExistingJournalsByRef\(/{on=0} on' src/tools/lightyear-investments.ts > /tmp/H18.current.h17-extraction-reservation.ts
+awk '/registerTool\(server, "book_lightyear_distributions"/{on=1} /registerTool\(server, "lightyear_portfolio_summary"/{on=0} on' src/tools/lightyear-investments.ts > /tmp/H18.current.h17-booking.ts
+cmp /tmp/H18.before.h16-extractTrades.ts /tmp/H18.current.h16-extractTrades.ts
+cmp /tmp/H18.before.h17-extraction-reservation.ts /tmp/H18.current.h17-extraction-reservation.ts
+cmp /tmp/H18.before.h17-booking.ts /tmp/H18.current.h17-booking.ts
+sha256sum /tmp/H18.current.h16-extractTrades.ts /tmp/H18.current.h17-extraction-reservation.ts /tmp/H18.current.h17-booking.ts
+git diff --name-only
+git diff --check
+```
+
+Expected: all H16/H17 tests pass; the H16 `extractTrades` and H17 distribution/reservation/booking regions are byte-identical; changed names are exactly:
+
+```text
+src/tools/lightyear-investments.test.ts
+src/tools/lightyear-investments.ts
+```
+
+Inspect the full two-file diff for accidental parser, distribution, journal, schema, or message changes. Remove any change outside the H18 helper, gains candidate classification/warning, and H18 tests.
+
+- [ ] **Step 10: Run full validation before review**
+
+Run:
+
+```bash
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+git status --short
+```
+
+Expected: build, full unit suite, integration suite (apart from already documented environmental skips), and release validation pass; diff-check is empty; status lists only the exact two H18 paths. If any command fails, fix the cause and rerun the entire Step 8–10 sequence before requesting review.
+
+- [ ] **Step 11: Freeze the exact two-file artifact**
+
+After GREEN and before review, create the ignored immutable review artifact and record its byte count and SHA-256:
+
+```bash
+mkdir -p .omc/reviews
+git diff -- src/tools/lightyear-investments.ts src/tools/lightyear-investments.test.ts > /tmp/H18.frozen.diff
+cp /tmp/H18.frozen.diff .omc/reviews/H18.diff
+cmp /tmp/H18.frozen.diff .omc/reviews/H18.diff
+wc -c .omc/reviews/H18.diff
+sha256sum .omc/reviews/H18.diff
+git diff --name-only
+```
+
+Expected: `cmp` is silent, the artifact is non-empty, and the live changed-name list is exactly the two H18 paths. Do not edit either source/test file after freezing without regenerating the artifact and restarting both reviews.
+
+- [ ] **Step 12: Obtain ordered independent spec and quality approvals**
+
+First delegate a fresh spec-compliance reviewer with only the H18 requirements, the committed H17 base, and `.omc/reviews/H18.diff`. Require an explicit `SPEC COMPLIANCE: APPROVED` or actionable findings. The reviewer must verify finite/nonnegative validation, inclusive max-bound math, exact+tolerant union cardinality, outside no-consumption/manual-review behavior, deterministic one-to-one consumption, public zero-side-effect regressions, frozen H16/H17 behavior, and exact two-file scope.
+
+Only after spec approval, delegate a different fresh code-quality reviewer. Require an explicit `CODE QUALITY APPROVED` or findings, with attention to floating-point boundary tests, stable warning cardinality/content, accidental quadratic scans, row-identity consumption, parser-to-public-handler coverage, and test controls that would fail under the old unbounded fallback.
+
+If either reviewer finds an issue: amend tests first when the contract proof is missing, reproduce RED, implement the smallest correction, rerun Steps 8–10, regenerate `.omc/reviews/H18.diff`, and restart review from spec approval. Author and reviewer contexts must remain separate.
+
+- [ ] **Step 13: Reverify the approved bytes and commit H18**
+
+After both approvals, rerun:
+
+```bash
+npx vitest run src/tools/lightyear-investments.test.ts
+npm run build
+npm test
+npm run test:integration
+npm run validate:release
+git diff --check
+git diff -- src/tools/lightyear-investments.ts src/tools/lightyear-investments.test.ts > /tmp/H18.live.diff
+cmp /tmp/H18.live.diff .omc/reviews/H18.diff
+git diff --name-only
+```
+
+Repeat all three `awk` extraction, `cmp`, and `sha256sum` commands from Step 9. Expected: all validation passes; artifact and protected-region comparisons are silent; changed names are exactly the two reviewed H18 paths. Then run:
 
 ```bash
 git add src/tools/lightyear-investments.ts src/tools/lightyear-investments.test.ts
+git diff --cached --name-only
+git diff --cached --check
+git diff --cached > /tmp/H18.staged.diff
+cmp /tmp/H18.staged.diff .omc/reviews/H18.diff
 git commit -m "fix(H18): bound Lightyear proceeds matching"
 ```
+
+Expected: staged names are exactly the two reviewed paths, staged diff-check passes, staged bytes match the frozen artifact, and the commit succeeds. Do not stage ignored artifacts and do not push.
+
+- [ ] **Step 14: Record evidence and enforce the sequential handoff**
+
+Use `apply_patch` to append one H18 row to `.omc/full-codebase-remediation-ledger.md` with: baseline test count; helper-missing, unique-outside-consumed, and exact+tolerant-union RED failures; passing raw-exact, public `9990`/`10000` tolerant, and parser rejection controls; helper absolute/relative boundary plus non-finite evidence; public just-outside/material mismatch, ambiguity, consumed-row, and reorder evidence; zero create/audit proof for review-only and parser-rejected cases; exact H16/H17 protected-slice hashes/comparisons; focused/full/build/integration/release/diff results; artifact byte count/SHA; ordered spec and quality verdicts; and commit hash.
+
+Run:
+
+```bash
+git status --short
+git log -1 --oneline
+```
+
+Expected: clean worktree and the H18 commit at `HEAD`. Do not begin Task 14/M19 until H18 is committed, recorded, and clean.
 
 ### Task 14: M19 — Surface opening-balance incompleteness
 
