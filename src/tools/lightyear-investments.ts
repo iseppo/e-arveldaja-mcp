@@ -70,7 +70,9 @@ export type FxReviewCode =
   | "conversion_amount_conflict"
   | "conversion_fee_conflict"
   | "trade_amount_conflict"
-  | "trade_fee_unresolved";
+  | "trade_fee_unresolved"
+  | "distribution_currency_missing"
+  | "distribution_amount_conflict";
 
 export interface FxReviewReason {
   code: FxReviewCode;
@@ -93,7 +95,42 @@ export const FX_REVIEW_MESSAGES: Record<FxReviewCode, string> = {
   conversion_fee_conflict: "The conversion fee cannot be attributed and converted to EUR unambiguously.",
   trade_amount_conflict: "The trade gross, net, or fee arithmetic is inconsistent.",
   trade_fee_unresolved: "The foreign-currency trade fee has no proven EUR conversion.",
+  distribution_currency_missing: "The distribution has no explicit source currency.",
+  distribution_amount_conflict: "The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent.",
 };
+
+export interface DistributionFxProvenance {
+  rate: number;
+  orientation: FxRateOrientation;
+  conversion_reference: string;
+  conversion_row_indexes: [number, number];
+}
+
+export interface LightyearDistribution {
+  row_index: number;
+  date: string;
+  reference: string;
+  type: AccountStatementRow["type"];
+  ticker: string;
+  isin: string;
+  currency: string;
+  gross_amount: number;
+  fee: number;
+  net_amount: number;
+  tax_amount: number;
+  gross_eur: number | null;
+  fee_eur: number | null;
+  net_eur: number | null;
+  tax_eur: number | null;
+  fx_provenance: DistributionFxProvenance | null;
+  fx_review_reason: FxReviewReason | null;
+}
+
+interface DistributionExtractionResult {
+  distributions: LightyearDistribution[];
+  warnings: string[];
+  consumedConversionRefs: Set<string>;
+}
 
 interface InvestmentTrade {
   row_index: number;
@@ -239,6 +276,13 @@ function isCashEquivalentTicker(ticker: string): boolean {
 
 const MIN_FX_RATE = 1e-4;
 
+// Account-statement decimals are parsed through Number, so accepting values all
+// the way to Number.MAX_SAFE_INTEGER cents would pretend adjacent source cents
+// remain distinguishable where the binary ULP is already larger than a cent.
+// At this deliberately conservative ceiling (10 trillion EUR), the ULP stays
+// below half a cent and decimal -> Number -> integer-cent recovery is unambiguous.
+const MAX_UNAMBIGUOUS_MONEY_CENTS = 1_000_000_000_000_000;
+
 function fxReason(code: FxReviewCode): FxReviewReason {
   return { code, message: FX_REVIEW_MESSAGES[code] };
 }
@@ -255,9 +299,46 @@ function isFiniteNonNegative(value: number): boolean {
   return Number.isFinite(value) && value >= 0;
 }
 
+const LEGACY_CENT_MATCH_TOLERANCE = 0.0100000001;
+
+function boundedIeeeNoise(...values: number[]): number {
+  return Math.min(
+    1e-9,
+    Number.EPSILON * Math.max(1, ...values.map(value => Math.abs(value))) * 4,
+  );
+}
+
+function strictCandidateResidualTolerance(left: number, right: number): number {
+  return 0.01 + boundedIeeeNoise(left, right);
+}
+
 function agreesToCent(left: number, right: number): boolean {
   if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
-  return Math.abs(roundMoney(left) - roundMoney(right)) <= 0.0100000001;
+  return Math.abs(roundMoney(left) - roundMoney(right)) <= LEGACY_CENT_MATCH_TOLERANCE;
+}
+
+function moneyToSafeCents(value: number): number | null {
+  if (!Number.isFinite(value)) return null;
+  const rounded = roundMoney(value);
+  const scaled = rounded * 100;
+  if (!Number.isFinite(scaled)) return null;
+  const cents = Math.round(scaled);
+  if (!Number.isSafeInteger(cents)) return null;
+  const normalizedCents = Object.is(cents, -0) ? 0 : cents;
+  if (Math.abs(normalizedCents) > MAX_UNAMBIGUOUS_MONEY_CENTS) return null;
+  return roundMoney(normalizedCents / 100) === rounded ? normalizedCents : null;
+}
+
+function hasExactRoundedMoneyBalance(gross: number, net: number, tax: number, fee: number): boolean {
+  const grossCents = moneyToSafeCents(gross);
+  const netCents = moneyToSafeCents(net);
+  const taxCents = moneyToSafeCents(tax);
+  const feeCents = moneyToSafeCents(fee);
+  if (grossCents === null || netCents === null || taxCents === null || feeCents === null) return false;
+  const netAndTaxCents = netCents + taxCents;
+  if (!Number.isSafeInteger(netAndTaxCents)) return false;
+  const componentCents = netAndTaxCents + feeCents;
+  return Number.isSafeInteger(componentCents) && grossCents === componentCents;
 }
 
 function convertForeignToEur(
@@ -415,9 +496,30 @@ function getStatementRowCashDelta(row: AccountStatementRow): { currency: string;
   }
 }
 
-function addCashDelta(target: Map<string, number>, currency: string, amount: number): void {
-  if (!currency || Math.abs(amount) < 0.000001) return;
-  target.set(currency, roundMoney((target.get(currency) ?? 0) + amount));
+interface CashAccumulator {
+  values: Map<string, number>;
+  overflowCurrencies: Set<string>;
+}
+
+function cashAccumulator(): CashAccumulator {
+  return { values: new Map(), overflowCurrencies: new Set() };
+}
+
+function addCashDelta(target: CashAccumulator, currency: string, amount: number): void {
+  if (!currency || target.overflowCurrencies.has(currency)) return;
+  if (!Number.isFinite(amount)) {
+    target.values.delete(currency);
+    target.overflowCurrencies.add(currency);
+    return;
+  }
+  if (Math.abs(amount) < 0.000001) return;
+  const next = (target.values.get(currency) ?? 0) + amount;
+  if (!Number.isFinite(next)) {
+    target.values.delete(currency);
+    target.overflowCurrencies.add(currency);
+    return;
+  }
+  target.values.set(currency, roundMoney(next));
 }
 
 function cashMapToObject(map: Map<string, number>): Record<string, number> {
@@ -435,9 +537,9 @@ function reconcileHandledStatementCash(
   handledRowIndexes: Set<number>,
   ignoredRowIndexes: Set<number> = new Set(),
 ) {
-  const totalByCurrency = new Map<string, number>();
-  const handledByCurrency = new Map<string, number>();
-  const gapByCurrency = new Map<string, number>();
+  const totalByCurrency = cashAccumulator();
+  const handledByCurrency = cashAccumulator();
+  const gapByCurrency = cashAccumulator();
 
   for (const row of rows) {
     if (ignoredRowIndexes.has(row.row_index)) continue;
@@ -450,23 +552,45 @@ function reconcileHandledStatementCash(
   }
 
   const currencies = new Set([
-    ...totalByCurrency.keys(),
-    ...handledByCurrency.keys(),
+    ...totalByCurrency.values.keys(),
+    ...handledByCurrency.values.keys(),
+    ...totalByCurrency.overflowCurrencies,
+    ...handledByCurrency.overflowCurrencies,
   ]);
   for (const currency of currencies) {
+    if (totalByCurrency.overflowCurrencies.has(currency) || handledByCurrency.overflowCurrencies.has(currency)) {
+      gapByCurrency.overflowCurrencies.add(currency);
+      continue;
+    }
     addCashDelta(
       gapByCurrency,
       currency,
-      (totalByCurrency.get(currency) ?? 0) - (handledByCurrency.get(currency) ?? 0),
+      (totalByCurrency.values.get(currency) ?? 0) - (handledByCurrency.values.get(currency) ?? 0),
     );
   }
 
+  const overflowByCurrency = Object.fromEntries(
+    [...currencies]
+      .sort((left, right) => left.localeCompare(right))
+      .map(currency => {
+        const states = [
+          ...(totalByCurrency.overflowCurrencies.has(currency) ? ["total"] : []),
+          ...(handledByCurrency.overflowCurrencies.has(currency) ? ["handled"] : []),
+          ...(gapByCurrency.overflowCurrencies.has(currency) ? ["gap"] : []),
+        ];
+        return [currency, states] as const;
+      })
+      .filter(([, states]) => states.length > 0)
+  );
+  const hasOverflow = Object.keys(overflowByCurrency).length > 0;
+
   return {
-    total_by_currency: cashMapToObject(totalByCurrency),
-    handled_by_currency: cashMapToObject(handledByCurrency),
-    gap_by_currency: cashMapToObject(gapByCurrency),
+    total_by_currency: cashMapToObject(totalByCurrency.values),
+    handled_by_currency: cashMapToObject(handledByCurrency.values),
+    gap_by_currency: cashMapToObject(gapByCurrency.values),
     ignored_rows: ignoredRowIndexes.size,
-    is_balanced: [...gapByCurrency.values()].every((amount) => Math.abs(amount) < 0.01),
+    ...(hasOverflow && { overflow_by_currency: overflowByCurrency }),
+    is_balanced: !hasOverflow && [...gapByCurrency.values.values()].every((amount) => Math.abs(amount) < 0.01),
   };
 }
 
@@ -713,35 +837,837 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
   return { trades, warnings: fxWarnings, consumedConversionRefs: consumedConversions };
 }
 
-/**
- * Extract distribution (dividend/interest) entries.
- */
-function extractDistributions(rows: AccountStatementRow[]): Array<{
-  row_index: number;
-  date: string;
+export { extractTrades as extractTradesForTesting };
+
+function rawStatementDatePrefix(value: string): string {
+  return value.split(/[\sT]/)[0]!;
+}
+
+function statementDay(value: string): string | null {
+  const day = parseLightyearDate(value).split(/[T ]/)[0]!;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const date = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, date));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === date
+    ? day
+    : null;
+}
+
+function conversionRowsByReference(rows: AccountStatementRow[]): Map<string, AccountStatementRow[]> {
+  const result = new Map<string, AccountStatementRow[]>();
+  for (const row of rows) {
+    if (row.type !== "Conversion") continue;
+    const group = result.get(row.reference) ?? [];
+    group.push(row);
+    result.set(row.reference, group);
+  }
+  return result;
+}
+
+interface CappedReferenceMatch {
+  count: 0 | 1 | 2;
+  uniqueReference: string | null;
+}
+
+interface TradeReservationEntry {
+  amount: number;
   reference: string;
-  type: AccountStatementRow["type"];
-  ticker: string;
-  isin: string;
-  gross_amount: number;
-  fee: number;
-  net_amount: number;
-  tax_amount: number;
-}> {
-  return rows
-    .filter(r => r.type === "Distribution" || r.type === "Dividend" || r.type === "Interest" || r.type === "Reward")
-    .map(r => ({
-      row_index: r.row_index,
-      date: parseLightyearDate(r.date),
-      reference: r.reference,
-      type: r.type,
-      ticker: r.ticker,
-      isin: r.isin,
-      gross_amount: r.gross_amount,
-      fee: r.fee,
-      net_amount: r.net_amount,
-      tax_amount: r.tax_amount,
-    }));
+  row: AccountStatementRow;
+}
+
+interface TradeReservationGroup {
+  entries: TradeReservationEntry[];
+  nextActive: number[];
+}
+
+interface MutableTradeReservationIndex {
+  groups: Map<string, TradeReservationGroup>;
+  positionsByReference: Map<string, Array<{ group: TradeReservationGroup; index: number }>>;
+}
+
+interface ConversionCandidateIndex {
+  buckets: Map<string, Set<string>>;
+  wildcardCurrencyBuckets: Map<string, Set<string>>;
+  bucketKeysByReference: Map<string, Array<{ wildcard: boolean; key: string }>>;
+  evidenceByReference: Map<string, AccountStatementRow[]>;
+}
+
+function hasExactCandidateResidual(left: number, right: number): boolean {
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  const residual = Math.abs(Math.abs(left) - Math.abs(right));
+  return Number.isFinite(residual) && residual <= strictCandidateResidualTolerance(left, right);
+}
+
+function candidateAmountBucket(amount: number): { kind: "cents"; value: number } | { kind: "exact"; value: string } | null {
+  if (!isFiniteNonNegative(amount)) return null;
+  const rounded = roundMoney(amount);
+  const scaled = rounded * 100;
+  if (Number.isFinite(scaled)) {
+    const cents = Math.round(scaled);
+    if (Number.isSafeInteger(cents) && roundMoney(cents / 100) === rounded) {
+      return { kind: "cents", value: cents };
+    }
+  }
+  return { kind: "exact", value: rounded.toString() };
+}
+
+function candidateBucketKey(day: string, currency: string, bucket: { kind: "cents"; value: number } | { kind: "exact"; value: string }): string {
+  return `${day}\u0000${currency}\u0000${bucket.kind}:${bucket.value}`;
+}
+
+function candidateProbeKeys(day: string, currency: string, amount: number): string[] {
+  const bucket = candidateAmountBucket(amount);
+  if (bucket === null) return [];
+  if (bucket.kind === "exact") return [candidateBucketKey(day, currency, bucket)];
+  // Each raw amount can round by up to half a cent, while the authoritative
+  // raw residual allows one cent plus bounded IEEE noise. Therefore two
+  // rounded-cent buckets in either direction are the complete candidate
+  // window; a third bucket is necessarily outside the final raw predicate.
+  return [-2, -1, 0, 1, 2]
+    .map(offset => bucket.value + offset)
+    .filter(Number.isSafeInteger)
+    .map(value => candidateBucketKey(day, currency, { kind: "cents", value }));
+}
+
+function emptyTradeReservationIndex(): MutableTradeReservationIndex {
+  return { groups: new Map(), positionsByReference: new Map() };
+}
+
+function addTradeReservationEntry(
+  index: MutableTradeReservationIndex,
+  key: string,
+  amount: number,
+  row: AccountStatementRow,
+): void {
+  const group = index.groups.get(key) ?? { entries: [], nextActive: [] };
+  group.entries.push({ amount, reference: row.reference, row });
+  index.groups.set(key, group);
+}
+
+function finalizeTradeReservationIndex(index: MutableTradeReservationIndex): void {
+  for (const group of index.groups.values()) {
+    group.entries.sort((left, right) => left.amount - right.amount);
+    group.nextActive = Array.from({ length: group.entries.length + 1 }, (_value, position) => position);
+    for (let position = 0; position < group.entries.length; position++) {
+      const reference = group.entries[position]!.reference;
+      const positions = index.positionsByReference.get(reference) ?? [];
+      positions.push({ group, index: position });
+      index.positionsByReference.set(reference, positions);
+    }
+  }
+}
+
+function findNextActive(group: TradeReservationGroup, position: number): number {
+  let root = position;
+  while (group.nextActive[root] !== root) root = group.nextActive[root]!;
+  let cursor = position;
+  while (group.nextActive[cursor] !== cursor) {
+    const next = group.nextActive[cursor]!;
+    group.nextActive[cursor] = root;
+    cursor = next;
+  }
+  return root;
+}
+
+function deactivateTradeReservationReference(index: MutableTradeReservationIndex, reference: string): void {
+  for (const position of index.positionsByReference.get(reference) ?? []) {
+    position.group.nextActive[position.index] = findNextActive(position.group, position.index + 1);
+  }
+  index.positionsByReference.delete(reference);
+}
+
+function lowerBoundTradeReservation(entries: readonly TradeReservationEntry[], target: number): number {
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (entries[middle]!.amount < target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function upperBoundTradeReservation(entries: readonly TradeReservationEntry[], target: number): number {
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (entries[middle]!.amount <= target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+const NEXT_FLOAT_BUFFER = new ArrayBuffer(8);
+const NEXT_FLOAT_VIEW = new DataView(NEXT_FLOAT_BUFFER);
+
+function nextUp(value: number): number {
+  if (Number.isNaN(value) || value === Number.POSITIVE_INFINITY) return value;
+  if (value === Number.NEGATIVE_INFINITY) return -Number.MAX_VALUE;
+  if (value === 0) return Number.MIN_VALUE;
+  NEXT_FLOAT_VIEW.setFloat64(0, value, false);
+  const bits = NEXT_FLOAT_VIEW.getBigUint64(0, false);
+  NEXT_FLOAT_VIEW.setBigUint64(0, bits + (value > 0 ? 1n : -1n), false);
+  return NEXT_FLOAT_VIEW.getFloat64(0, false);
+}
+
+function nextDown(value: number): number {
+  return -nextUp(-value);
+}
+
+interface TradeReservationBounds {
+  lower: number;
+  upper: number;
+}
+
+export interface TradeReservationDiagnostics {
+  strict_candidate_visits?: number;
+  legacy_candidate_visits?: number;
+  strict_queries?: number;
+  legacy_queries?: number;
+  strict_cache_hits?: number;
+  legacy_cache_hits?: number;
+}
+
+function incrementTradeReservationDiagnostic(
+  diagnostics: TradeReservationDiagnostics | undefined,
+  key: keyof TradeReservationDiagnostics,
+): void {
+  if (diagnostics) diagnostics[key] = (diagnostics[key] ?? 0) + 1;
+}
+
+function finiteNumberIdentity(value: number): string {
+  NEXT_FLOAT_VIEW.setFloat64(0, value, false);
+  return NEXT_FLOAT_VIEW.getBigUint64(0, false).toString(16).padStart(16, "0");
+}
+
+function strictTradeProbeIdentity(day: string, currency: string, wildcardCurrency: boolean, gross: number): string {
+  return JSON.stringify([
+    "strict",
+    "raw-residual",
+    day,
+    wildcardCurrency ? "wildcard" : "exact",
+    wildcardCurrency ? "*" : currency,
+    finiteNumberIdentity(gross),
+  ]);
+}
+
+function legacyTradeProbeIdentity(datePrefix: string, currency: string, gross: number): string {
+  return JSON.stringify([
+    "legacy",
+    "rounded-cent",
+    datePrefix,
+    "exact",
+    currency,
+    finiteNumberIdentity(gross),
+  ]);
+}
+
+function strictReservationBoundGuard(target: number, tolerance: number, bound: number): number {
+  const scale = Math.max(1, Math.abs(target), Math.abs(tolerance), Math.abs(bound));
+  const scaledMagnitude = (
+    Math.abs(target) / scale +
+    Math.abs(tolerance) / scale +
+    Math.abs(bound) / scale
+  );
+  return Number.MIN_VALUE + Number.EPSILON * scale * scaledMagnitude * 8;
+}
+
+function strictTradeReservationBounds(target: number): TradeReservationBounds {
+  const lowerTolerance = strictCandidateResidualTolerance(target, target);
+  const rawLower = target - lowerTolerance;
+  const lowerGuard = strictReservationBoundGuard(target, lowerTolerance, rawLower);
+
+  let rawUpper = target + 0.01;
+  for (let iteration = 0; iteration < 8; iteration++) {
+    const expanded = target + strictCandidateResidualTolerance(target, rawUpper);
+    if (expanded <= rawUpper) break;
+    rawUpper = expanded;
+  }
+  const upperTolerance = strictCandidateResidualTolerance(target, rawUpper);
+  const upperGuard = strictReservationBoundGuard(target, upperTolerance, rawUpper);
+
+  return {
+    lower: nextDown(rawLower - lowerGuard),
+    upper: nextUp(rawUpper + upperGuard),
+  };
+}
+
+function queryTradeReservationIndex(
+  index: MutableTradeReservationIndex,
+  key: string,
+  target: number,
+  tolerance: number,
+  matches: (row: AccountStatementRow) => boolean,
+  reserve: (reference: string) => void,
+  bounds?: TradeReservationBounds,
+  onCandidateVisit?: () => void,
+): void {
+  const group = index.groups.get(key);
+  if (!group) return;
+  const lower = lowerBoundTradeReservation(group.entries, bounds?.lower ?? target - tolerance);
+  const upper = upperBoundTradeReservation(group.entries, bounds?.upper ?? target + tolerance);
+  for (
+    let position = findNextActive(group, lower);
+    position < upper;
+    position = findNextActive(group, position + 1)
+  ) {
+    const entry = group.entries[position]!;
+    onCandidateVisit?.();
+    if (matches(entry.row)) reserve(entry.reference);
+  }
+}
+
+function strictTradeReservationKey(day: string, currency: string, wildcard: boolean): string {
+  return `${wildcard ? "*" : "="}\u0000${day}\u0000${currency}`;
+}
+
+function legacyTradeReservationKey(datePrefix: string, currency: string): string {
+  return `${datePrefix}\u0000${currency}`;
+}
+
+function buildTradeReservationIndexes(rows: AccountStatementRow[]): {
+  strictH17: MutableTradeReservationIndex;
+  legacyH16: MutableTradeReservationIndex;
+} {
+  const strictH17 = emptyTradeReservationIndex();
+  const legacyH16 = emptyTradeReservationIndex();
+  for (const row of rows) {
+    if (row.type !== "Conversion") continue;
+    const currency = normalizedCurrency(row.ccy);
+    const amount = Math.abs(row.gross_amount);
+
+    const day = statementDay(row.date);
+    if (day !== null && currency !== "" && currency !== "EUR" && isFinitePositive(amount)) {
+      addTradeReservationEntry(strictH17, strictTradeReservationKey(day, currency, false), amount, row);
+      addTradeReservationEntry(strictH17, strictTradeReservationKey(day, "*", true), amount, row);
+    }
+
+    if (currency !== "EUR" && Number.isFinite(amount)) {
+      addTradeReservationEntry(legacyH16, legacyTradeReservationKey(rawStatementDatePrefix(row.date), currency), roundMoney(amount), row);
+    }
+  }
+  finalizeTradeReservationIndex(strictH17);
+  finalizeTradeReservationIndex(legacyH16);
+  return { strictH17, legacyH16 };
+}
+
+function reserveAndPruneTradeReference(
+  reference: string,
+  reserved: Set<string>,
+  strict: MutableTradeReservationIndex,
+  legacy: MutableTradeReservationIndex,
+): void {
+  if (reserved.has(reference)) return;
+  reserved.add(reference);
+  deactivateTradeReservationReference(strict, reference);
+  deactivateTradeReservationReference(legacy, reference);
+}
+
+function addReferenceToBucket(
+  index: ConversionCandidateIndex,
+  reference: string,
+  wildcard: boolean,
+  key: string,
+): void {
+  const buckets = wildcard ? index.wildcardCurrencyBuckets : index.buckets;
+  const references = buckets.get(key) ?? new Set<string>();
+  if (references.has(reference)) return;
+  references.add(reference);
+  buckets.set(key, references);
+  const keys = index.bucketKeysByReference.get(reference) ?? [];
+  keys.push({ wildcard, key });
+  index.bucketKeysByReference.set(reference, keys);
+}
+
+function buildConversionCandidateIndex(
+  rows: AccountStatementRow[],
+  excludedReferences: ReadonlySet<string> = new Set(),
+): ConversionCandidateIndex {
+  const index: ConversionCandidateIndex = {
+    buckets: new Map(),
+    wildcardCurrencyBuckets: new Map(),
+    bucketKeysByReference: new Map(),
+    evidenceByReference: new Map(),
+  };
+  for (const row of rows) {
+    if (row.type !== "Conversion" || excludedReferences.has(row.reference)) continue;
+    const day = statementDay(row.date);
+    const currency = normalizedCurrency(row.ccy);
+    const amount = Math.abs(row.gross_amount);
+    const bucket = candidateAmountBucket(amount);
+    if (day === null || currency === "" || currency === "EUR" || bucket === null) continue;
+    const evidence = index.evidenceByReference.get(row.reference) ?? [];
+    evidence.push(row);
+    index.evidenceByReference.set(row.reference, evidence);
+    addReferenceToBucket(index, row.reference, false, candidateBucketKey(day, currency, bucket));
+    addReferenceToBucket(index, row.reference, true, candidateBucketKey(day, "*", bucket));
+  }
+  return index;
+}
+
+function referenceHasExactCandidateEvidence(
+  index: ConversionCandidateIndex,
+  reference: string,
+  day: string,
+  currency: string,
+  amount: number,
+  wildcardCurrency: boolean,
+): boolean {
+  return (index.evidenceByReference.get(reference) ?? []).some(row => {
+    const rowCurrency = normalizedCurrency(row.ccy);
+    return statementDay(row.date) === day &&
+      rowCurrency !== "" &&
+      rowCurrency !== "EUR" &&
+      (wildcardCurrency || rowCurrency === currency) &&
+      hasExactCandidateResidual(row.gross_amount, amount);
+  });
+}
+
+function probeCappedReferences(
+  index: ConversionCandidateIndex,
+  day: string,
+  currency: string,
+  amount: number,
+  wildcardCurrency = false,
+): CappedReferenceMatch {
+  const buckets = wildcardCurrency ? index.wildcardCurrencyBuckets : index.buckets;
+  const bucketCurrency = wildcardCurrency ? "*" : currency;
+  let first: string | null = null;
+  for (const key of candidateProbeKeys(day, bucketCurrency, amount)) {
+    for (const reference of buckets.get(key) ?? []) {
+      if (!referenceHasExactCandidateEvidence(index, reference, day, currency, amount, wildcardCurrency)) continue;
+      if (reference === first) continue;
+      if (first === null) {
+        first = reference;
+        continue;
+      }
+      return { count: 2, uniqueReference: null };
+    }
+  }
+  return first === null
+    ? { count: 0, uniqueReference: null }
+    : { count: 1, uniqueReference: first };
+}
+
+function removeConversionReference(index: ConversionCandidateIndex, reference: string): void {
+  for (const { wildcard, key } of index.bucketKeysByReference.get(reference) ?? []) {
+    const buckets = wildcard ? index.wildcardCurrencyBuckets : index.buckets;
+    const references = buckets.get(key);
+    references?.delete(reference);
+    if (references?.size === 0) buckets.delete(key);
+  }
+  index.bucketKeysByReference.delete(reference);
+  index.evidenceByReference.delete(reference);
+}
+
+type DistributionCandidateIndex = Map<string, Set<LightyearDistribution>>;
+
+function buildDistributionCandidateIndex(
+  distributions: readonly LightyearDistribution[],
+  sourceRowsByIndex: ReadonlyMap<number, AccountStatementRow>,
+): DistributionCandidateIndex {
+  const index: DistributionCandidateIndex = new Map();
+  for (const distribution of distributions) {
+    const source = sourceRowsByIndex.get(distribution.row_index);
+    if (!source || distribution.currency === "" || distribution.currency === "EUR" || !isFinitePositive(distribution.net_amount)) continue;
+    const day = statementDay(source.date);
+    const bucket = candidateAmountBucket(distribution.net_amount);
+    if (day === null || bucket === null) continue;
+    const key = candidateBucketKey(day, distribution.currency, bucket);
+    const owners = index.get(key) ?? new Set<LightyearDistribution>();
+    owners.add(distribution);
+    index.set(key, owners);
+  }
+  return index;
+}
+
+function countCappedDistributionOwners(
+  candidateRows: readonly AccountStatementRow[],
+  distributionIndex: DistributionCandidateIndex,
+  sourceRowsByIndex: ReadonlyMap<number, AccountStatementRow>,
+): 0 | 1 | 2 {
+  let first: LightyearDistribution | null = null;
+  for (const row of candidateRows) {
+    const day = statementDay(row.date);
+    const currency = normalizedCurrency(row.ccy);
+    const amount = Math.abs(row.gross_amount);
+    if (day === null || currency === "" || currency === "EUR" || !isFinitePositive(amount)) continue;
+    for (const key of candidateProbeKeys(day, currency, amount)) {
+      for (const distribution of distributionIndex.get(key) ?? []) {
+        const source = sourceRowsByIndex.get(distribution.row_index);
+        if (
+          !source ||
+          statementDay(source.date) !== day ||
+          distribution.currency !== currency ||
+          !hasExactCandidateResidual(distribution.net_amount, amount)
+        ) continue;
+        if (distribution === first) continue;
+        if (first === null) {
+          first = distribution;
+          continue;
+        }
+        return 2;
+      }
+    }
+  }
+  return first === null ? 0 : 1;
+}
+
+export function collectTradeReservedConversionRefs(
+  rows: AccountStatementRow[],
+  diagnostics?: TradeReservationDiagnostics,
+): ReadonlySet<string> {
+  const indexes = buildTradeReservationIndexes(rows);
+  const reserved = new Set<string>();
+  const processedStrictProbes = new Set<string>();
+  const processedLegacyProbes = new Set<string>();
+  for (const trade of rows) {
+    if (trade.type !== "Buy" && trade.type !== "Sell") continue;
+    const day = statementDay(trade.date);
+    const gross = Math.abs(trade.gross_amount);
+    const currency = normalizedCurrency(trade.ccy);
+
+    if (day !== null && isFinitePositive(gross) && currency !== "EUR") {
+      const wildcardCurrency = currency === "";
+      const probeIdentity = strictTradeProbeIdentity(day, currency, wildcardCurrency, gross);
+      if (processedStrictProbes.has(probeIdentity)) {
+        incrementTradeReservationDiagnostic(diagnostics, "strict_cache_hits");
+      } else {
+        incrementTradeReservationDiagnostic(diagnostics, "strict_queries");
+        queryTradeReservationIndex(
+          indexes.strictH17,
+          strictTradeReservationKey(day, wildcardCurrency ? "*" : currency, wildcardCurrency),
+          gross,
+          strictCandidateResidualTolerance(gross, gross),
+          row => {
+            const rowCurrency = normalizedCurrency(row.ccy);
+            return statementDay(row.date) === day &&
+              rowCurrency !== "" &&
+              rowCurrency !== "EUR" &&
+              (wildcardCurrency || rowCurrency === currency) &&
+              hasExactCandidateResidual(row.gross_amount, gross);
+          },
+          reference => reserveAndPruneTradeReference(reference, reserved, indexes.strictH17, indexes.legacyH16),
+          strictTradeReservationBounds(gross),
+          () => incrementTradeReservationDiagnostic(diagnostics, "strict_candidate_visits"),
+        );
+        processedStrictProbes.add(probeIdentity);
+      }
+    }
+
+    if (validateTradeAmounts(trade) === null && currency !== "EUR") {
+      const datePrefix = rawStatementDatePrefix(trade.date);
+      const roundedGross = roundMoney(gross);
+      const probeIdentity = legacyTradeProbeIdentity(datePrefix, currency, gross);
+      if (processedLegacyProbes.has(probeIdentity)) {
+        incrementTradeReservationDiagnostic(diagnostics, "legacy_cache_hits");
+      } else {
+        incrementTradeReservationDiagnostic(diagnostics, "legacy_queries");
+        queryTradeReservationIndex(
+          indexes.legacyH16,
+          legacyTradeReservationKey(datePrefix, currency),
+          roundedGross,
+          LEGACY_CENT_MATCH_TOLERANCE,
+          row => rawStatementDatePrefix(row.date) === datePrefix &&
+            normalizedCurrency(row.ccy) === currency &&
+            agreesToCent(Math.abs(row.gross_amount), gross),
+          reference => reserveAndPruneTradeReference(reference, reserved, indexes.strictH17, indexes.legacyH16),
+          undefined,
+          () => incrementTradeReservationDiagnostic(diagnostics, "legacy_candidate_visits"),
+        );
+        processedLegacyProbes.add(probeIdentity);
+      }
+    }
+  }
+  return reserved;
+}
+
+function distributionWarning(
+  reference: string,
+  reason: FxReviewReason,
+  candidateReference?: string,
+): string {
+  const candidate = candidateReference === undefined
+    ? ""
+    : ` Conversion ${wrapUntrustedOcr(candidateReference) ?? ""}.`;
+  return `${wrapUntrustedOcr(reference) ?? ""}: distribution review [${reason.code}] ${reason.message}${candidate}`;
+}
+
+function hasRawDistributionArithmetic(row: AccountStatementRow): boolean {
+  const componentTotal = row.net_amount + row.tax_amount + row.fee;
+  if (!Number.isFinite(componentTotal)) return false;
+  const residual = Math.abs(row.gross_amount - componentTotal);
+  return Number.isFinite(residual) &&
+    residual <= 0.01 + boundedIeeeNoise(
+      row.gross_amount,
+      componentTotal,
+      row.net_amount,
+      row.tax_amount,
+      row.fee,
+    );
+}
+
+function nominalDistributionFailure(row: AccountStatementRow, currency: string): FxReviewReason | null {
+  if (currency === "") return fxReason("distribution_currency_missing");
+  if (
+    !isFinitePositive(row.gross_amount) ||
+    !isFiniteNonNegative(row.net_amount) ||
+    !isFiniteNonNegative(row.tax_amount) ||
+    !isFiniteNonNegative(row.fee) ||
+    !hasRawDistributionArithmetic(row) ||
+    !agreesToCent(row.gross_amount, row.net_amount + row.tax_amount + row.fee) ||
+    (currency !== "EUR" && !isFinitePositive(row.net_amount))
+  ) return fxReason("distribution_amount_conflict");
+  return null;
+}
+
+function isBookableDistribution(distribution: LightyearDistribution): boolean {
+  const { gross_eur, net_eur, tax_eur, fee_eur } = distribution;
+  if (
+    distribution.fx_review_reason !== null ||
+    gross_eur === null || net_eur === null || tax_eur === null || fee_eur === null ||
+    !isFinitePositive(gross_eur) ||
+    !isFiniteNonNegative(net_eur) ||
+    !isFiniteNonNegative(tax_eur) ||
+    !isFiniteNonNegative(fee_eur) ||
+    !hasExactRoundedMoneyBalance(gross_eur, net_eur, tax_eur, fee_eur)
+  ) return false;
+  return distribution.currency === "EUR"
+    ? distribution.fx_provenance === null
+    : distribution.fx_provenance !== null;
+}
+
+function sumBookableDistributionGrossEur(distributions: readonly LightyearDistribution[]): number {
+  let totalCents = 0;
+  for (const distribution of distributions) {
+    if (!isBookableDistribution(distribution) || distribution.gross_eur === null) continue;
+    const grossCents = moneyToSafeCents(distribution.gross_eur);
+    if (grossCents === null) return 0;
+    const nextTotal = totalCents + grossCents;
+    if (!Number.isSafeInteger(nextTotal) || nextTotal > MAX_UNAMBIGUOUS_MONEY_CENTS) return 0;
+    totalCents = nextTotal;
+  }
+  return roundMoney(totalCents / 100);
+}
+
+function extractDistributions(
+  rows: AccountStatementRow[],
+  tradeReservedConversionRefs: ReadonlySet<string>,
+): DistributionExtractionResult {
+  const sourceRows = rows.filter(r => r.type === "Distribution" || r.type === "Dividend" || r.type === "Interest" || r.type === "Reward");
+  const sourceRowsByIndex = new Map(sourceRows.map(row => [row.row_index, row]));
+  const conversions = conversionRowsByReference(rows);
+  const distributions: LightyearDistribution[] = sourceRows.map(row => ({
+    row_index: row.row_index,
+    date: parseLightyearDate(row.date),
+    reference: row.reference,
+    type: row.type,
+    ticker: row.ticker,
+    isin: row.isin,
+    currency: normalizedCurrency(row.ccy),
+    gross_amount: row.gross_amount,
+    fee: row.fee,
+    net_amount: row.net_amount,
+    tax_amount: row.tax_amount,
+    gross_eur: null,
+    fee_eur: null,
+    net_eur: null,
+    tax_eur: null,
+    fx_provenance: null,
+    fx_review_reason: null,
+  }));
+
+  const rawCandidateIndex = buildConversionCandidateIndex(rows);
+  const availableCandidateIndex = buildConversionCandidateIndex(rows, tradeReservedConversionRefs);
+  const rawCandidates = new Map<LightyearDistribution, CappedReferenceMatch>();
+  const availableCandidates = new Map<LightyearDistribution, CappedReferenceMatch>();
+  for (const distribution of distributions) {
+    const source = sourceRowsByIndex.get(distribution.row_index)!;
+    const nominalFailure = nominalDistributionFailure(source, distribution.currency);
+    const day = statementDay(source.date);
+    const canProbe = day !== null && distribution.currency !== "" && distribution.currency !== "EUR" && isFinitePositive(distribution.net_amount);
+    const raw = canProbe
+      ? probeCappedReferences(rawCandidateIndex, day, distribution.currency, distribution.net_amount)
+      : { count: 0 as const, uniqueReference: null };
+    const available = canProbe
+      ? probeCappedReferences(availableCandidateIndex, day, distribution.currency, distribution.net_amount)
+      : { count: 0 as const, uniqueReference: null };
+    rawCandidates.set(distribution, raw);
+    availableCandidates.set(distribution, available);
+    if (nominalFailure) {
+      distribution.fx_review_reason = nominalFailure;
+      continue;
+    }
+    if (distribution.currency === "EUR") {
+      try {
+        const grossEur = roundMoney(distribution.gross_amount);
+        const netEur = roundMoney(distribution.net_amount);
+        const taxEur = roundMoney(distribution.tax_amount);
+        const feeEur = roundMoney(distribution.fee);
+        if (
+          !isFinitePositive(grossEur) ||
+          !isFiniteNonNegative(netEur) ||
+          !isFiniteNonNegative(taxEur) ||
+          !isFiniteNonNegative(feeEur) ||
+          !hasExactRoundedMoneyBalance(grossEur, netEur, taxEur, feeEur)
+        ) {
+          distribution.fx_review_reason = fxReason("distribution_amount_conflict");
+          continue;
+        }
+        distribution.gross_eur = grossEur;
+        distribution.net_eur = netEur;
+        distribution.tax_eur = taxEur;
+        distribution.fee_eur = feeEur;
+      } catch {
+        distribution.fx_review_reason = fxReason("distribution_amount_conflict");
+        distribution.gross_eur = distribution.net_eur = distribution.tax_eur = distribution.fee_eur = null;
+      }
+      continue;
+    }
+  }
+
+  const distributionCandidateIndex = buildDistributionCandidateIndex(distributions, sourceRowsByIndex);
+  const ownerCounts = new Map<string, 0 | 1 | 2>();
+
+  const consumedConversionRefs = new Set<string>();
+  for (const distribution of distributions) {
+    if (distribution.fx_review_reason || distribution.currency === "EUR") continue;
+    const available = availableCandidates.get(distribution) ?? { count: 0, uniqueReference: null };
+    if (available.count !== 1 || available.uniqueReference === null) {
+      distribution.fx_review_reason = fxReason("invalid_conversion_pair");
+      continue;
+    }
+    const reference = available.uniqueReference;
+    const candidateRows = conversions.get(reference) ?? [];
+    let ownerCount = ownerCounts.get(reference);
+    if (ownerCount === undefined) {
+      ownerCount = countCappedDistributionOwners(candidateRows, distributionCandidateIndex, sourceRowsByIndex);
+      ownerCounts.set(reference, ownerCount);
+    }
+    if (ownerCount !== 1) {
+      distribution.fx_review_reason = fxReason("invalid_conversion_pair");
+      continue;
+    }
+    const eurRows = candidateRows.filter(row => normalizedCurrency(row.ccy) === "EUR");
+    const foreignRows = candidateRows.filter(row => normalizedCurrency(row.ccy) === distribution.currency);
+    const day = statementDay(sourceRowsByIndex.get(distribution.row_index)!.date);
+    if (
+      candidateRows.length !== 2 || eurRows.length !== 1 || foreignRows.length !== 1 ||
+      day === null ||
+      candidateRows.some(row => statementDay(row.date) !== day)
+    ) {
+      distribution.fx_review_reason = fxReason("invalid_conversion_pair");
+      continue;
+    }
+    const eur = eurRows[0]!;
+    const foreign = foreignRows[0]!;
+    if (!isFinitePositive(Math.abs(eur.net_amount)) || !isFinitePositive(Math.abs(foreign.net_amount))) {
+      distribution.fx_review_reason = fxReason("invalid_net_amount");
+      continue;
+    }
+    const amountFailure = validateConversionAmounts(eur, foreign);
+    if (amountFailure && amountFailure.code !== "conversion_fee_conflict") {
+      distribution.fx_review_reason = amountFailure;
+      continue;
+    }
+    if (eur.net_amount <= 0 || foreign.net_amount >= 0) {
+      distribution.fx_review_reason = fxReason("conversion_amount_conflict");
+      continue;
+    }
+    if (eur.fee !== 0 || foreign.fee !== 0) {
+      distribution.fx_review_reason = fxReason("conversion_fee_conflict");
+      continue;
+    }
+    const resolution = resolveFxPair(Math.abs(eur.net_amount), Math.abs(foreign.net_amount), [eur.fx_rate, foreign.fx_rate]);
+    if (!resolution.ok) {
+      distribution.fx_review_reason = resolution.reason;
+      continue;
+    }
+    try {
+      const netEur = roundMoney(Math.abs(eur.net_amount));
+      const taxEur = roundMoney(convertForeignToEur(distribution.tax_amount, resolution.rate, resolution.orientation));
+      const feeEur = roundMoney(convertForeignToEur(distribution.fee, resolution.rate, resolution.orientation));
+      const grossEur = roundMoney(netEur + taxEur + feeEur);
+      const directGross = convertForeignToEur(distribution.gross_amount, resolution.rate, resolution.orientation);
+      const roundedDirectGross = roundMoney(directGross);
+      if (
+        !isFinitePositive(grossEur) ||
+        !isFiniteNonNegative(netEur) ||
+        !isFiniteNonNegative(taxEur) ||
+        !isFiniteNonNegative(feeEur) ||
+        !isFiniteNonNegative(roundedDirectGross) ||
+        moneyToSafeCents(roundedDirectGross) === null ||
+        !hasExactRoundedMoneyBalance(grossEur, netEur, taxEur, feeEur) ||
+        !agreesToCent(grossEur, roundedDirectGross)
+      ) {
+        distribution.fx_review_reason = fxReason("distribution_amount_conflict");
+        continue;
+      }
+      distribution.net_eur = netEur;
+      distribution.tax_eur = taxEur;
+      distribution.fee_eur = feeEur;
+      distribution.gross_eur = grossEur;
+      distribution.fx_provenance = {
+        rate: resolution.rate,
+        orientation: resolution.orientation,
+        conversion_reference: reference,
+        conversion_row_indexes: [eur.row_index, foreign.row_index],
+      };
+      consumedConversionRefs.add(reference);
+    } catch {
+      distribution.fx_review_reason = fxReason("distribution_amount_conflict");
+      distribution.gross_eur = distribution.net_eur = distribution.tax_eur = distribution.fee_eur = null;
+      distribution.fx_provenance = null;
+    }
+  }
+
+  const aggregateContributors = distributions.filter(isBookableDistribution);
+  const aggregateGrossCents = aggregateContributors.map(distribution =>
+    distribution.gross_eur === null ? null : moneyToSafeCents(distribution.gross_eur)
+  );
+  let aggregateTotalCents = 0;
+  let aggregateIsSafe = true;
+  for (const grossCents of aggregateGrossCents) {
+    if (
+      grossCents === null ||
+      grossCents < 0 ||
+      aggregateTotalCents > MAX_UNAMBIGUOUS_MONEY_CENTS - grossCents
+    ) {
+      aggregateIsSafe = false;
+      break;
+    }
+    aggregateTotalCents += grossCents;
+  }
+
+  if (!aggregateIsSafe) {
+    for (const distribution of aggregateContributors) {
+      if (distribution.fx_provenance !== null) {
+        consumedConversionRefs.delete(distribution.fx_provenance.conversion_reference);
+      }
+      distribution.gross_eur = null;
+      distribution.net_eur = null;
+      distribution.tax_eur = null;
+      distribution.fee_eur = null;
+      distribution.fx_provenance = null;
+      distribution.fx_review_reason = fxReason("distribution_amount_conflict");
+    }
+  }
+
+  const warnings = distributions
+    .filter(distribution => distribution.fx_review_reason !== null)
+    .map(distribution => {
+      const raw = rawCandidates.get(distribution) ?? { count: 0, uniqueReference: null };
+      return distributionWarning(
+        distribution.reference,
+        distribution.fx_review_reason!,
+        raw.count === 1 ? raw.uniqueReference ?? undefined : undefined,
+      );
+    });
+  return { distributions, warnings, consumedConversionRefs };
 }
 
 interface LightyearRefLookup {
@@ -892,11 +1818,13 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           return true;
         });
       }
+      const tradeReservedConversionRefs = collectTradeReservedConversionRefs(rows);
       const {
         trades,
         warnings: fxWarnings,
       } = extractTrades(rows);
-      const distributions = extractDistributions(rows);
+      const distributionExtraction = extractDistributions(rows, tradeReservedConversionRefs);
+      const distributions = distributionExtraction.distributions;
       const bookableTrades = trades.filter(t => !t.cash_equivalent);
       const cashEquivalentTrades = trades.filter(t => t.cash_equivalent);
 
@@ -909,6 +1837,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         ...bookableTrades.map(t => t.row_index),
         ...bookableTrades.flatMap(t => t.conversion_row_indexes),
         ...distributions.map(d => d.row_index),
+        ...rows.filter(row => row.type === "Conversion" && distributionExtraction.consumedConversionRefs.has(row.reference)).map(row => row.row_index),
         ...deposits.map(r => r.row_index),
         ...withdrawals.map(r => r.row_index),
       ]);
@@ -999,14 +1928,23 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         };
       }
 
-      const warnings: string[] = [...fxWarnings, ...unresolvedTradeFeeWarnings];
+      const warnings: string[] = [...fxWarnings, ...unresolvedTradeFeeWarnings, ...distributionExtraction.warnings];
       if (unmatchedFx.length > 0) {
         warnings.push(
           `${unmatchedFx.length} foreign currency trade(s) could not be matched to FX conversion entries: ` +
           unmatchedFx.map(t => `${wrapUntrustedOcr(t.reference) ?? ""} (${t.ticker} ${t.ccy})`).join(", ")
         );
       }
-      if (!cashReconciliation.is_balanced) {
+      const cashOverflowEntries = Object.entries(cashReconciliation.overflow_by_currency ?? {});
+      if (cashOverflowEntries.length > 0) {
+        warnings.push(
+          `Statement cash reconciliation overflowed while accumulating: ` +
+          cashOverflowEntries
+            .map(([currency, states]) => `${currency} (${states.join(", ")})`)
+            .join("; ") +
+          `. Reconciliation is not balanced; review the statement manually.`
+        );
+      } else if (!cashReconciliation.is_balanced) {
         warnings.push(
           `Statement cash reconciliation is not balanced. Unhandled cash impact remains in: ` +
           Object.entries(cashReconciliation.gap_by_currency)
@@ -1029,7 +1967,9 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         }),
         distributions: {
           count: distributions.length,
-          total_eur: roundMoney(distributions.reduce((s, d) => s + d.gross_amount, 0)),
+          bookable_count: distributions.filter(isBookableDistribution).length,
+          review_count: distributions.filter(distribution => !isBookableDistribution(distribution)).length,
+          total_eur: sumBookableDistributionGrossEur(distributions),
         },
         deposits: {
           count: deposits.length,
@@ -1050,7 +1990,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           !cashReconciliation.is_balanced ||
           unhandledSuggestions.length > 0 ||
           trades.some(trade => trade.fx_review_reason !== null) ||
-          unresolvedTradeFeeWarnings.length > 0
+          unresolvedTradeFeeWarnings.length > 0 ||
+          distributions.some(distribution => distribution.fx_review_reason !== null)
         ) && {
           needs_review: true,
         }),
@@ -1074,11 +2015,18 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         ? `## Trades (${bookableTrades.length})\n\n| Date | Ref | Ticker | Type | Qty | CCY | EUR | Fee |\n|------|-----|--------|------|-----|-----|-----|-----|\n${bookableTrades.map(t => `| ${t.date} | ${wrapUntrustedOcr(t.reference) ?? ""} | ${t.ticker} | ${t.type} | ${t.quantity} | ${t.ccy} | ${t.eur_amount.toFixed(2)} | ${t.fee_eur.toFixed(2)} |`).join("\n")}`
         : "";
 
-      const distRows = distributions.map(d =>
-        `| ${d.date} | ${wrapUntrustedOcr(d.reference) ?? ""} | ${d.ticker || "—"} | ${d.gross_amount.toFixed(2)} | ${d.tax_amount.toFixed(2)} | ${d.net_amount.toFixed(2)} |`
-      );
+      const eurCell = (value: number | null): string => value === null ? "—" : value.toFixed(2);
+      const distRows = distributions.map(d => {
+        const status = isBookableDistribution(d) ? "bookable" : `manual_review:${d.fx_review_reason!.code}`;
+        const fx = d.currency === "EUR"
+          ? "source_eur"
+          : d.fx_provenance
+            ? `${d.fx_provenance.rate} ${d.fx_provenance.orientation} via ${wrapUntrustedOcr(d.fx_provenance.conversion_reference) ?? ""}`
+            : "—";
+        return `| ${d.date} | ${wrapUntrustedOcr(d.reference) ?? ""} | ${d.ticker || "—"} | ${d.currency} | ${d.gross_amount.toFixed(2)} | ${d.tax_amount.toFixed(2)} | ${d.fee.toFixed(2)} | ${d.net_amount.toFixed(2)} | ${eurCell(d.gross_eur)} | ${eurCell(d.tax_eur)} | ${eurCell(d.fee_eur)} | ${eurCell(d.net_eur)} | ${status} | ${fx} |`;
+      });
       const distTable = distributions.length > 0
-        ? `## Distributions (${distributions.length})\n\n| Date | Ref | Ticker | Gross | Tax | Net |\n|------|-----|--------|-------|-----|-----|\n${distRows.join("\n")}`
+        ? `## Distributions (${distributions.length})\n\n| Date | Ref | Ticker | CCY | Gross CCY | Tax CCY | Fee CCY | Net CCY | Gross EUR | Tax EUR | Fee EUR | Net EUR | Status | FX |\n|------|-----|--------|-----|-----------|---------|---------|---------|-----------|---------|---------|---------|--------|----|\n${distRows.join("\n")}`
         : "";
 
       const parts = [
@@ -1599,21 +2547,59 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     { ...batch, openWorldHint: true, title: "Book Lightyear Distributions" },
     async ({ file_path, broker_account, broker_dimension_id, income_account, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
-      const fee_account = fee_account_param ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
-      // Platform rewards are non-investment OTHER operating income (Muud äritulud),
-      // NOT a financial-loss expense. The previous 8600 default was the FX-loss
-      // account — crediting income there booked it to an expense line, wrong sign.
       const reward_account = reward_account_param ?? DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT;
+      const fee_account = fee_account_param ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
 
       const csv = await readCsvFile(file_path);
       const rows = parseAccountStatement(csv);
-      const distributions = extractDistributions(rows);
+      const extraction = extractDistributions(rows, collectTradeReservedConversionRefs(rows));
+      const distributions = extraction.distributions;
+      const bookable = distributions.filter(isBookableDistribution);
+      const reviewed = distributions.filter(distribution => !isBookableDistribution(distribution));
+      const sourceFields = (distribution: LightyearDistribution) => ({
+        reference: distribution.reference,
+        ticker: distribution.ticker,
+        date: distribution.date,
+        currency: distribution.currency,
+        gross_amount: distribution.gross_amount,
+        tax_amount: distribution.tax_amount,
+        fee: distribution.fee,
+        net_amount: distribution.net_amount,
+        gross_eur: distribution.gross_eur,
+        tax_eur: distribution.tax_eur,
+        fee_eur: distribution.fee_eur,
+        net_eur: distribution.net_eur,
+        fx_provenance: distribution.fx_provenance,
+      });
+      const manualResult = (distribution: LightyearDistribution) => ({
+        ...sourceFields(distribution),
+        status: "manual_review",
+        review_reason: distribution.fx_review_reason,
+      });
+      const baseResponse = {
+        mode: isDryRun ? "DRY_RUN" : "EXECUTED",
+        total_distributions: distributions.length,
+        bookable_distributions: bookable.length,
+        review_required: reviewed.length,
+        ...(extraction.warnings.length > 0 && { warnings: extraction.warnings }),
+        note: isDryRun
+          ? "Set dry_run=false to create journal entries."
+          : "Journal entries created. Review and register when ready.",
+      };
+      if (bookable.length === 0) {
+        return {
+          content: [{ type: "text", text: toMcpJson({
+            ...baseResponse,
+            new_entries: 0,
+            duplicates_skipped: 0,
+            results: reviewed.map(manualResult),
+          }) }],
+        };
+      }
 
-      // Validate accounts exist and are active. reward_account is only validated
-      // when a reward will actually be booked (or the caller pinned it): its
-      // default moved from 8600 to 3800, so a dividend/interest-only import must
-      // not start failing just because the chart lacks the reward income account.
-      const hasReward = distributions.some(dist => dist.type === "Reward");
+      const hasReward = bookable.some(distribution => distribution.type === "Reward");
+      const needsTax = bookable.some(distribution => (distribution.tax_eur ?? 0) > 0);
+      const needsFee = bookable.some(distribution => (distribution.fee_eur ?? 0) > 0);
       const accounts = await api.readonly.getAccounts();
       const errors = validateAccounts(accounts, [
         { id: broker_account, label: "Broker account" },
@@ -1621,8 +2607,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         ...((hasReward || reward_account_param !== undefined)
           ? [{ id: reward_account, label: "Reward account" }]
           : []),
-        ...(tax_account ? [{ id: tax_account, label: "Tax account" }] : []),
-        { id: fee_account, label: "Fee account" },
+        ...(tax_account !== undefined ? [{ id: tax_account, label: "Tax account" }] : []),
+        ...((needsFee || fee_account_param !== undefined) ? [{ id: fee_account, label: "Fee account" }] : []),
       ]);
 
       if (errors.length > 0) {
@@ -1632,7 +2618,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         });
       }
 
-      if (!tax_account && distributions.some(dist => dist.tax_amount > 0)) {
+      if (!tax_account && needsTax) {
         return toolError({
           error: "tax_account is required when distributions include withheld tax",
           hint: "Provide tax_account so tax_amount can be booked separately for Lightyear distributions.",
@@ -1641,16 +2627,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
       // Check duplicates — one snapshot for the run (see book_lightyear_trades).
       const guard = await BookingGuard.load(api);
-      const allRefs = distributions.map(d => ({ reference: d.reference, date: d.date }));
+      const allRefs = bookable.map(d => ({ reference: d.reference, date: d.date }));
       const existingRefs = findExistingJournalsByRef(guard.journals, allRefs);
 
       // Dedupe against existing journals AND within this CSV (see book_lightyear_trades):
       // the first occurrence of a reference books, later same-ref rows are duplicates,
       // so dry-run counts match what execution creates.
       const seenRefs = new Set<string>();
-      const newDist: typeof distributions = [];
-      const duplicates: typeof distributions = [];
-      for (const d of distributions) {
+      const newDist: LightyearDistribution[] = [];
+      const duplicates: LightyearDistribution[] = [];
+      for (const d of bookable) {
         if (existingRefs.has(d.reference) || seenRefs.has(d.reference)) {
           duplicates.push(d);
         } else {
@@ -1659,40 +2645,32 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         }
       }
 
-      const results: Array<{
-        reference: string;
-        ticker: string;
-        date: string;
-        gross_amount: number;
-        tax_amount: number;
-        fee: number;
-        net_amount: number;
-        status: string;
-        journal_id?: number;
-      }> = [];
-
-      for (const dist of newDist) {
+      const newSet = new Set(newDist.map(distribution => distribution.row_index));
+      const results: Array<Record<string, unknown>> = [];
+      for (const dist of distributions) {
+        if (!isBookableDistribution(dist)) {
+          results.push(manualResult(dist));
+          continue;
+        }
+        if (!newSet.has(dist.row_index)) continue;
+        const netEur = dist.net_eur;
+        const taxEur = dist.tax_eur;
+        const feeEur = dist.fee_eur;
+        const grossEur = dist.gross_eur;
+        if (netEur === null || taxEur === null || feeEur === null || grossEur === null) continue;
         const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
 
-        // Dr broker_account: net received amount
-        if (dist.net_amount > 0) {
-          postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "D", amount: dist.net_amount });
+        if (netEur > 0) {
+          postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "D", amount: netEur });
         }
-
-        // Dr tax_account: withheld tax (tax_amount from CSV, NOT fee)
-        if (dist.tax_amount > 0 && tax_account) {
-          postings.push({ accounts_id: tax_account, type: "D", amount: dist.tax_amount });
+        if (taxEur > 0 && tax_account) {
+          postings.push({ accounts_id: tax_account, type: "D", amount: taxEur });
         }
-
-        // Dr fee_account: platform fee (fee from CSV)
-        if (dist.fee > 0) {
-          postings.push({ accounts_id: fee_account, type: "D", amount: dist.fee });
+        if (feeEur > 0) {
+          postings.push({ accounts_id: fee_account, type: "D", amount: feeEur });
         }
-
-        // Cr income_account: gross amount (net + tax + fee)
-        const creditAmount = roundMoney(dist.net_amount + dist.tax_amount + dist.fee);
         const isReward = dist.type === "Reward";
-        postings.push({ accounts_id: isReward ? reward_account : income_account, type: "C", amount: creditAmount });
+        postings.push({ accounts_id: isReward ? reward_account : income_account, type: "C", amount: grossEur });
 
         const title = dist.ticker
           ? `Lightyear tulu: ${dist.ticker} (${dist.isin})`
@@ -1700,13 +2678,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
         if (isDryRun) {
           results.push({
-            reference: dist.reference,
-            ticker: dist.ticker,
-            date: dist.date,
-            gross_amount: dist.gross_amount,
-            tax_amount: dist.tax_amount,
-            fee: dist.fee,
-            net_amount: dist.net_amount,
+            ...sourceFields(dist),
             status: "would_create",
           });
         } else {
@@ -1718,13 +2690,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           if (outcome.status === "duplicate") {
             // Existing journal for this key — skip the CREATED audit and report a duplicate.
             results.push({
-              reference: dist.reference,
-              ticker: dist.ticker,
-              date: dist.date,
-              gross_amount: dist.gross_amount,
-              tax_amount: dist.tax_amount,
-              fee: dist.fee,
-              net_amount: dist.net_amount,
+              ...sourceFields(dist),
               status: "duplicate",
               journal_id: outcome.journal_id,
             });
@@ -1732,22 +2698,16 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             logAudit({
               tool: "book_lightyear_distributions", action: "CREATED", entity_type: "journal",
               entity_id: outcome.journal_id,
-              summary: `Lightyear distribution: ${dist.ticker || "interest"} gross ${dist.gross_amount} EUR`,
+              summary: `Lightyear distribution: ${dist.ticker || "interest"} gross ${grossEur} EUR`,
               details: {
-                effective_date: dist.date, ticker: dist.ticker,
-                total_gross: dist.gross_amount, tax_amount: dist.tax_amount, fee: dist.fee, net_amount: dist.net_amount,
-                postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+                effective_date: dist.date,
+                ...sourceFields(dist),
+                postings: postings.map(posting => ({ ...posting })),
               },
             });
 
             results.push({
-              reference: dist.reference,
-              ticker: dist.ticker,
-              date: dist.date,
-              gross_amount: dist.gross_amount,
-              tax_amount: dist.tax_amount,
-              fee: dist.fee,
-              net_amount: dist.net_amount,
+              ...sourceFields(dist),
               status: "created",
               journal_id: outcome.journal_id,
             });
@@ -1759,14 +2719,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         content: [{
           type: "text",
           text: toMcpJson({
-            mode: isDryRun ? "DRY_RUN" : "EXECUTED",
-            total_distributions: distributions.length,
+            ...baseResponse,
             new_entries: newDist.length,
             duplicates_skipped: duplicates.length,
             results,
-            note: isDryRun
-              ? "Set dry_run=false to create journal entries."
-              : "Journal entries created. Review and register when ready.",
           }),
         }],
       };
