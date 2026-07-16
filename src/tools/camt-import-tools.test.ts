@@ -89,6 +89,57 @@ function withUnstructuredDescription(xml: string, description: string): string {
   return xml.replace("<Ustrd>Test payment</Ustrd>", `<Ustrd>${description}</Ustrd>`);
 }
 
+function splitReferenceXml(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-split</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">300.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-03</Dt></BookgDt>
+        <AcctSvcrRef>REF-SPLIT-1</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs>
+              <EndToEndId>E2E-1</EndToEndId>
+            </Refs>
+            <AmtDtls>
+              <TxAmt><Amt Ccy="EUR">100.00</Amt></TxAmt>
+            </AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor A OÜ</Nm></Cdtr>
+            </RltdPties>
+            <RmtInf>
+              <Ustrd>Split payment A</Ustrd>
+            </RmtInf>
+          </TxDtls>
+          <TxDtls>
+            <Refs>
+              <EndToEndId>E2E-2</EndToEndId>
+            </Refs>
+            <AmtDtls>
+              <TxAmt><Amt Ccy="EUR">200.00</Amt></TxAmt>
+            </AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor B OÜ</Nm></Cdtr>
+            </RltdPties>
+            <RmtInf>
+              <Ustrd>Split payment B</Ustrd>
+            </RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+}
+
 function setupCamtTool(options: {
   existingTransactions?: unknown[];
   findByCodeResult?: unknown;
@@ -436,6 +487,537 @@ describe("camt import tool", () => {
       expect(message.match(/<<UNTRUSTED_OCR_START:[0-9a-f]+>>/g)).toHaveLength(1);
       expect(message.match(/<<UNTRUSTED_OCR_END:[0-9a-f]+>>/g)).toHaveLength(1);
       expectNoH08ImportSideEffects(api);
+    });
+  });
+
+  describe("H09 bank-dimension-scoped duplicate detection", () => {
+    it("H09 keeps a direct same reference on another bank dimension eligible and creates it on the selected dimension", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(singleEntryXml);
+
+      const { api, handler } = setupCamtTool({
+        existingTransactions: [{
+          id: 900,
+          status: "PROJECT",
+          is_deleted: false,
+          accounts_dimensions_id: 8,
+          bank_ref_number: "REF-VOID-1",
+        }],
+      });
+
+      const result = await handler({
+        file_path: "/tmp/camt.xml",
+        accounts_dimensions_id: 7,
+        execute: true,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(payload).toMatchObject({
+        mode: "EXECUTED",
+        total_statement_entries: 1,
+        eligible_entries: 1,
+        created_count: 1,
+        skipped_count: 0,
+        summary: {
+          total_statement_entries: 1,
+          eligible_entries: 1,
+          created_count: 1,
+          skipped_count: 0,
+        },
+        sample: [expect.objectContaining({
+          status: "created",
+          bank_reference: "REF-VOID-1",
+        })],
+        execution: expect.objectContaining({
+          mode: "EXECUTED",
+          summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
+          results: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+          skipped: [],
+        }),
+      });
+    });
+
+    it("H09 still skips the same direct reference on the selected bank dimension", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(singleEntryXml);
+
+      const { api, handler } = setupCamtTool({
+        existingTransactions: [{
+          id: 901,
+          status: "PROJECT",
+          is_deleted: false,
+          accounts_dimensions_id: 7,
+          bank_ref_number: "REF-VOID-1",
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+        }],
+      });
+
+      const result = await handler({
+        file_path: "/tmp/camt.xml",
+        accounts_dimensions_id: 7,
+        execute: true,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(api.transactions.create).not.toHaveBeenCalled();
+      expect(payload).toMatchObject({
+        mode: "EXECUTED",
+        total_statement_entries: 1,
+        eligible_entries: 1,
+        created_count: 0,
+        skipped_count: 1,
+        summary: {
+          total_statement_entries: 1,
+          eligible_entries: 1,
+          created_count: 0,
+          skipped_count: 1,
+        },
+        sample: [],
+        execution: expect.objectContaining({
+          mode: "EXECUTED",
+          summary: expect.objectContaining({ created_count: 0, skipped_count: 1 }),
+          results: [],
+          skipped: [expect.objectContaining({
+            bank_reference: "REF-VOID-1",
+            duplicate_transaction_ids: [901],
+          })],
+        }),
+      });
+    });
+
+    it("H09 rejects missing and malformed stored dimension values before duplicate-key extraction", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(singleEntryXml);
+
+      for (const accountsDimensionsId of [undefined, null, "7", 0, -7, 7.5, Number.NaN]) {
+        const { api, handler } = setupCamtTool({
+          existingTransactions: [{
+            id: 902,
+            status: "PROJECT",
+            is_deleted: false,
+            accounts_dimensions_id: accountsDimensionsId,
+            bank_ref_number: "REF-VOID-1",
+          }],
+        });
+
+        const result = await handler({
+          file_path: "/tmp/camt.xml",
+          accounts_dimensions_id: 7,
+          execute: true,
+        });
+        const payload = parseMcpResponse(result.content[0]!.text);
+
+        expect(api.transactions.create).toHaveBeenCalledTimes(1);
+        expect(payload).toMatchObject({
+          mode: "EXECUTED",
+          total_statement_entries: 1,
+          eligible_entries: 1,
+          created_count: 1,
+          skipped_count: 0,
+          summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
+          sample: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+          execution: expect.objectContaining({
+            mode: "EXECUTED",
+            summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
+            results: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+            skipped: [],
+          }),
+        });
+        expect(payload.execution.skipped).toEqual([]);
+        expect(payload.execution.needs_review).toEqual([]);
+      }
+    });
+
+    it("H09 preserves case-sensitive direct bank-reference matching within the selected dimension", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(singleEntryXml);
+
+      const { api, handler } = setupCamtTool({
+        existingTransactions: [{
+          id: 903,
+          status: "PROJECT",
+          is_deleted: false,
+          accounts_dimensions_id: 7,
+          bank_ref_number: "ref-void-1",
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+        }],
+      });
+
+      const result = await handler({
+        file_path: "/tmp/camt.xml",
+        accounts_dimensions_id: 7,
+        execute: true,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(payload).toMatchObject({
+        mode: "EXECUTED",
+        created_count: 1,
+        skipped_count: 0,
+        summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
+        sample: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+        execution: expect.objectContaining({
+          mode: "EXECUTED",
+          summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
+          results: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+          skipped: [],
+        }),
+      });
+      expect(JSON.stringify(payload)).not.toContain("903");
+    });
+
+    it("H09 still trusts signed short and long CAMT reference markers on the selected dimension", async () => {
+      const longBankReference = "REF-" + "1234567890".repeat(20);
+      const variants = [
+        {
+          id: 904,
+          xml: singleEntryXml,
+          description: "Test payment\n[e-arveldaja-mcp:camt br=REF-VOID-1 sig=829b819216e09dd3]",
+        },
+        {
+          id: 905,
+          xml: singleEntryXml.replace(/REF-VOID-1/g, longBankReference),
+          description: "Test payment\n[e-arveldaja-mcp:camt brh=sha256:6dad99eb61334998e434cf2e593253b6c357e519d7d352e14e4beaf7c19a6f89 sig=699a9250bc1ba018]",
+        },
+      ];
+
+      for (const variant of variants) {
+        mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+        mockedReadFile.mockResolvedValue(variant.xml);
+        const { api, handler } = setupCamtTool({
+          existingTransactions: [{
+            id: variant.id,
+            status: "PROJECT",
+            is_deleted: false,
+            accounts_dimensions_id: 7,
+            bank_ref_number: null,
+            date: "2026-02-01",
+            type: "C",
+            amount: 10,
+            cl_currencies_id: "EUR",
+            ref_number: null,
+            bank_account_name: "Vendor OÜ",
+            description: variant.description,
+          }],
+        });
+
+        const result = await handler({
+          file_path: "/tmp/camt.xml",
+          accounts_dimensions_id: 7,
+          execute: true,
+        });
+        const payload = parseMcpResponse(result.content[0]!.text);
+
+        expect(api.transactions.create).not.toHaveBeenCalled();
+        expect(payload).toMatchObject({
+          mode: "EXECUTED",
+          total_statement_entries: 1,
+          eligible_entries: 1,
+          created_count: 0,
+          skipped_count: 1,
+          summary: expect.objectContaining({ created_count: 0, skipped_count: 1 }),
+          sample: [],
+          execution: expect.objectContaining({
+            mode: "EXECUTED",
+            summary: expect.objectContaining({ created_count: 0, skipped_count: 1 }),
+            results: [],
+            skipped: [expect.objectContaining({ duplicate_transaction_ids: [variant.id] })],
+          }),
+        });
+      }
+    });
+
+    it("H09 keeps signed short and long CAMT reference markers on another bank dimension eligible", async () => {
+      const longBankReference = "REF-" + "1234567890".repeat(20);
+      const variants = [
+        {
+          id: 906,
+          xml: singleEntryXml,
+          reference: "REF-VOID-1",
+          description: "Test payment\n[e-arveldaja-mcp:camt br=REF-VOID-1 sig=829b819216e09dd3]",
+        },
+        {
+          id: 907,
+          xml: singleEntryXml.replace(/REF-VOID-1/g, longBankReference),
+          reference: longBankReference,
+          description: "Test payment\n[e-arveldaja-mcp:camt brh=sha256:6dad99eb61334998e434cf2e593253b6c357e519d7d352e14e4beaf7c19a6f89 sig=699a9250bc1ba018]",
+        },
+      ];
+
+      for (const variant of variants) {
+        mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+        mockedReadFile.mockResolvedValue(variant.xml);
+        const { api, handler } = setupCamtTool({
+          existingTransactions: [{
+            id: variant.id,
+            status: "PROJECT",
+            is_deleted: false,
+            accounts_dimensions_id: 8,
+            bank_ref_number: null,
+            date: "2026-02-01",
+            type: "C",
+            amount: 10,
+            cl_currencies_id: "EUR",
+            ref_number: null,
+            bank_account_name: "Vendor OÜ",
+            description: variant.description,
+          }],
+        });
+
+        const result = await handler({
+          file_path: "/tmp/camt.xml",
+          accounts_dimensions_id: 7,
+          execute: true,
+        });
+        const payload = parseMcpResponse(result.content[0]!.text);
+
+        expect(api.transactions.create).toHaveBeenCalledTimes(1);
+        expect(payload).toMatchObject({
+          mode: "EXECUTED",
+          total_statement_entries: 1,
+          eligible_entries: 1,
+          created_count: 1,
+          skipped_count: 0,
+          summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
+          sample: [expect.objectContaining({ status: "created", bank_reference: variant.reference })],
+          execution: expect.objectContaining({
+            mode: "EXECUTED",
+            summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
+            results: [expect.objectContaining({ status: "created", bank_reference: variant.reference })],
+            skipped: [],
+          }),
+        });
+      }
+    });
+
+    it("H09 parses granular CAMT without ledger or bank-configuration reads for absent and ambiguous bank-account fixtures", async () => {
+      const bankAccountFixtures = [
+        [],
+        [
+          fixtureBankAccount({ accounts_dimensions_id: 7 }),
+          fixtureBankAccount({ accounts_dimensions_id: 8 }),
+        ],
+      ];
+
+      for (const bankAccounts of bankAccountFixtures) {
+        mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+        mockedReadFile.mockResolvedValue(singleEntryXml);
+        const { api, handler } = setupCamtTool({
+          toolName: "parse_camt053",
+          bankAccounts,
+          existingTransactions: [{
+            id: 908,
+            status: "PROJECT",
+            is_deleted: false,
+            accounts_dimensions_id: 8,
+            bank_ref_number: "REF-VOID-1",
+          }],
+        });
+
+        const result = await handler({ file_path: "/tmp/camt.xml" });
+        const payload = parseMcpResponse(result.content[0]!.text);
+
+        expect(payload).toMatchObject({
+          summary: expect.objectContaining({ entry_count: 1, duplicate_count: 0 }),
+          entries: [expect.objectContaining({
+            bank_reference: "REF-VOID-1",
+            description: expect.stringMatching(wrapped("Test payment")),
+          })],
+        });
+        expect(payload.entries[0]).not.toHaveProperty("duplicate");
+        expect(payload.entries[0]).not.toHaveProperty("duplicate_transaction_ids");
+        expect(api.transactions.listAll).not.toHaveBeenCalled();
+        expect(api.readonly.getAccountDimensions).not.toHaveBeenCalled();
+        expect(api.readonly.getBankAccounts).not.toHaveBeenCalled();
+      }
+    });
+
+    it("H09 process parse preserves its wrapper while making no ledger or bank-configuration reads", async () => {
+      const bankAccountFixtures = [
+        [],
+        [
+          fixtureBankAccount({ accounts_dimensions_id: 7 }),
+          fixtureBankAccount({ accounts_dimensions_id: 8 }),
+        ],
+      ];
+
+      for (const bankAccounts of bankAccountFixtures) {
+        mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+        mockedReadFile.mockResolvedValue(singleEntryXml);
+        const { api, handler } = setupCamtTool({
+          toolName: "process_camt053",
+          bankAccounts,
+          existingTransactions: [{
+            id: 909,
+            status: "PROJECT",
+            is_deleted: false,
+            accounts_dimensions_id: 8,
+            bank_ref_number: "REF-VOID-1",
+          }],
+        });
+
+        const result = await handler({ mode: "parse", file_path: "/tmp/camt.xml" });
+        const payload = parseMcpResponse(result.content[0]!.text);
+
+        expect(payload).toMatchObject({
+          recommended_entry_point: "process_camt053",
+          mode: "parse",
+          delegated_tool: "parse_camt053",
+          delegated_args: { file_path: "/tmp/camt.xml" },
+          result: {
+            summary: expect.objectContaining({ entry_count: 1, duplicate_count: 0 }),
+            entries: [expect.objectContaining({
+              bank_reference: "REF-VOID-1",
+              description: expect.stringMatching(wrapped("Test payment")),
+            })],
+          },
+        });
+        expect(payload.result.entries[0]).not.toHaveProperty("duplicate");
+        expect(payload.result.entries[0]).not.toHaveProperty("duplicate_transaction_ids");
+        expect(api.transactions.listAll).not.toHaveBeenCalled();
+        expect(api.readonly.getAccountDimensions).not.toHaveBeenCalled();
+        expect(api.readonly.getBankAccounts).not.toHaveBeenCalled();
+      }
+    });
+
+    it("H09 process dry_run keeps a same-reference row from another dimension eligible with approval intact", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(singleEntryXml);
+
+      const { api, handler } = setupCamtTool({
+        toolName: "process_camt053",
+        existingTransactions: [{
+          id: 910,
+          status: "PROJECT",
+          is_deleted: false,
+          accounts_dimensions_id: 8,
+          bank_ref_number: "REF-VOID-1",
+        }],
+      });
+
+      const result = await handler({
+        mode: "dry_run",
+        file_path: "/tmp/camt.xml",
+        accounts_dimensions_id: 7,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(api.transactions.create).not.toHaveBeenCalled();
+      expect(payload).toMatchObject({
+        recommended_entry_point: "process_camt053",
+        mode: "dry_run",
+        delegated_tool: "import_camt053",
+        delegated_args: {
+          file_path: "/tmp/camt.xml",
+          accounts_dimensions_id: 7,
+          execute: false,
+        },
+        result: {
+          mode: "DRY_RUN",
+          total_statement_entries: 1,
+          eligible_entries: 1,
+          created_count: 1,
+          skipped_count: 0,
+          summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
+          sample: [expect.objectContaining({ status: "would_create", bank_reference: "REF-VOID-1" })],
+          execution: expect.objectContaining({
+            mode: "DRY_RUN",
+            summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
+            results: [expect.objectContaining({ status: "would_create", bank_reference: "REF-VOID-1" })],
+            skipped: [],
+          }),
+          workflow: expect.objectContaining({
+            recommended_next_action: expect.objectContaining({
+              kind: "approve_tool_call",
+              tool: "process_camt053",
+              args: expect.objectContaining({ mode: "execute", accounts_dimensions_id: 7 }),
+            }),
+          }),
+        },
+      });
+    });
+
+    it("H09 keeps both repeated-reference rows eligible when the exact Vendor A row exists only on another dimension", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(splitReferenceXml());
+
+      const { api, handler } = setupCamtTool({
+        existingTransactions: [{
+          id: 905,
+          status: "PROJECT",
+          is_deleted: false,
+          accounts_dimensions_id: 8,
+          bank_ref_number: "REF-SPLIT-1",
+          date: "2026-02-03",
+          type: "C",
+          amount: 100,
+          cl_currencies_id: "EUR",
+          ref_number: "E2E-1",
+          bank_account_name: "Vendor A OÜ",
+          description: "Split payment A",
+        }],
+      });
+
+      const result = await handler({
+        file_path: "/tmp/camt.xml",
+        accounts_dimensions_id: 7,
+      });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(api.transactions.create).not.toHaveBeenCalled();
+      expect(payload).toMatchObject({
+        mode: "DRY_RUN",
+        total_statement_entries: 2,
+        eligible_entries: 2,
+        created_count: 2,
+        skipped_count: 0,
+        summary: expect.objectContaining({
+          total_statement_entries: 2,
+          eligible_entries: 2,
+          created_count: 2,
+          skipped_count: 0,
+        }),
+        sample: [
+          expect.objectContaining({
+            status: "would_create",
+            amount: 100,
+            counterparty: expect.stringMatching(wrapped("Vendor A OÜ")),
+            bank_reference: "REF-SPLIT-1",
+          }),
+          expect.objectContaining({
+            status: "would_create",
+            amount: 200,
+            counterparty: expect.stringMatching(wrapped("Vendor B OÜ")),
+            bank_reference: "REF-SPLIT-1",
+          }),
+        ],
+        execution: expect.objectContaining({
+          mode: "DRY_RUN",
+          summary: expect.objectContaining({ created_count: 2, skipped_count: 0 }),
+          results: [
+            expect.objectContaining({ amount: 100, status: "would_create" }),
+            expect.objectContaining({ amount: 200, status: "would_create" }),
+          ],
+          skipped: [],
+        }),
+      });
+      const leakedDuplicateIds = payload.execution.skipped.flatMap(
+        (item: { duplicate_transaction_ids?: number[] }) => item.duplicate_transaction_ids ?? [],
+      );
+      const leakedPossibleDuplicateIds = payload.execution.needs_review.flatMap(
+        (item: { existing_transactions?: Array<{ id?: number }> }) =>
+          item.existing_transactions?.map(transaction => transaction.id) ?? [],
+      );
+      expect(leakedDuplicateIds).not.toContain(905);
+      expect(leakedPossibleDuplicateIds).not.toContain(905);
     });
   });
 
@@ -1368,7 +1950,7 @@ describe("camt import tool", () => {
     ]));
   });
 
-  it("only skips the already imported split row when a prior import used the same shared bank reference", async () => {
+  it("H09 only skips the already imported repeated-reference row on the selected bank dimension", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
@@ -1425,6 +2007,7 @@ describe("camt import tool", () => {
           id: 501,
           status: "PROJECT",
           is_deleted: false,
+          accounts_dimensions_id: 7,
           bank_ref_number: "REF-SPLIT-1",
           date: "2026-02-03",
           type: "C",

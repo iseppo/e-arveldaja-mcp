@@ -213,6 +213,21 @@ function bankReferenceLookupKey(value: string | undefined): string | undefined {
   return normalized ? bankReferenceHash(normalized) : undefined;
 }
 
+function dimensionScopedBankReferenceLookupKey(
+  unscopedReferenceKey: string | undefined,
+  dimensionId: unknown,
+): string | undefined {
+  if (
+    !unscopedReferenceKey ||
+    typeof dimensionId !== "number" ||
+    !Number.isSafeInteger(dimensionId) ||
+    dimensionId <= 0
+  ) {
+    return undefined;
+  }
+  return `${dimensionId}\0${unscopedReferenceKey}`;
+}
+
 function decodeCamtMetadataValue(value: string): string | undefined {
   try {
     const decoded = decodeURIComponent(value);
@@ -546,21 +561,32 @@ function pickCounterparty(txDetails: unknown, direction: "CRDT" | "DBIT"): { par
   };
 }
 
-function buildDuplicateLookup(transactions: Transaction[]): DuplicateLookup {
+function buildDuplicateLookup(transactions: Transaction[], selectedDimensionId: number): DuplicateLookup {
   const byBankRef = new Map<string, number[]>();
   const byEntryKey = new Map<string, number[]>();
 
   for (const transaction of transactions) {
     if (!transaction.id) continue;
+    if (
+      typeof transaction.accounts_dimensions_id !== "number" ||
+      !Number.isSafeInteger(transaction.accounts_dimensions_id) ||
+      transaction.accounts_dimensions_id <= 0 ||
+      transaction.accounts_dimensions_id !== selectedDimensionId
+    ) {
+      continue;
+    }
 
-    const entryKey = buildExistingTransactionDuplicateKey(transaction);
+    const entryKey = buildExistingTransactionDuplicateKey(transaction, selectedDimensionId);
     if (entryKey) {
       const exactExisting = byEntryKey.get(entryKey) ?? [];
       exactExisting.push(transaction.id);
       byEntryKey.set(entryKey, exactExisting);
     }
 
-    const directBankRefKey = directBankReferenceLookupKey(transaction);
+    const directBankRefKey = dimensionScopedBankReferenceLookupKey(
+      directBankReferenceLookupKey(transaction),
+      selectedDimensionId,
+    );
     if (!directBankRefKey) continue;
 
     const existing = byBankRef.get(directBankRefKey) ?? [];
@@ -605,14 +631,16 @@ function buildExistingTransactionDuplicateKey(
     "bank_account_name" |
     "description"
   >,
+  selectedDimensionId: number,
   bankReferenceKey = storedBankReferenceLookupKey(transaction),
 ): string | undefined {
-  if (!bankReferenceKey || !transaction.date || !transaction.type || !Number.isFinite(transaction.amount)) {
+  const scopedBankReferenceKey = dimensionScopedBankReferenceLookupKey(bankReferenceKey, selectedDimensionId);
+  if (!scopedBankReferenceKey || !transaction.date || !transaction.type || !Number.isFinite(transaction.amount)) {
     return undefined;
   }
 
   return [
-    bankReferenceKey,
+    scopedBankReferenceKey,
     transaction.date,
     transaction.type,
     transaction.cl_currencies_id ?? "",
@@ -624,9 +652,12 @@ function buildExistingTransactionDuplicateKey(
   ].join("|");
 }
 
-function buildExistingDuplicateKeyForEntry(entry: ParsedCamtEntry): string | undefined {
+function buildExistingDuplicateKeyForEntry(entry: ParsedCamtEntry, selectedDimensionId: number): string | undefined {
   const bankReference = normalizeOptionalReference(entry.bank_reference);
-  const bankReferenceKey = bankReferenceLookupKey(bankReference);
+  const bankReferenceKey = dimensionScopedBankReferenceLookupKey(
+    bankReferenceLookupKey(bankReference),
+    selectedDimensionId,
+  );
   if (!bankReference || !bankReferenceKey) return undefined;
 
   return [
@@ -646,8 +677,9 @@ function findDuplicateTransactionIds(
   entry: ParsedCamtEntry,
   lookup: DuplicateLookup,
   repeatedBankReferences: ReadonlySet<string>,
+  selectedDimensionId: number,
 ): number[] {
-  const exactKey = buildExistingDuplicateKeyForEntry(entry);
+  const exactKey = buildExistingDuplicateKeyForEntry(entry, selectedDimensionId);
   if (exactKey) {
     const exactMatches = lookup.byEntryKey.get(exactKey) ?? [];
     if (exactMatches.length > 0) {
@@ -656,7 +688,10 @@ function findDuplicateTransactionIds(
   }
 
   const bankReference = normalizeOptionalReference(entry.bank_reference);
-  const bankReferenceKey = bankReferenceLookupKey(bankReference);
+  const bankReferenceKey = dimensionScopedBankReferenceLookupKey(
+    bankReferenceLookupKey(bankReference),
+    selectedDimensionId,
+  );
   if (!bankReference || !bankReferenceKey || repeatedBankReferences.has(bankReference)) return [];
 
   const matches = new Set<number>();
@@ -972,12 +1007,21 @@ async function loadParsedCamt053(filePath: string): Promise<CamtParseResult> {
   }
 }
 
-async function enrichWithDuplicates(parsed: CamtParseResult, api: ApiContext): Promise<CamtParseResult> {
+async function enrichWithDuplicates(
+  parsed: CamtParseResult,
+  api: ApiContext,
+  selectedDimensionId: number,
+): Promise<CamtParseResult> {
   const existingTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
-  const duplicateLookup = buildDuplicateLookup(existingTransactions);
+  const duplicateLookup = buildDuplicateLookup(existingTransactions, selectedDimensionId);
   const repeatedBankReferences = findRepeatedBankReferences(parsed.entries);
   const entries = parsed.entries.map(entry => {
-    const duplicateIds = findDuplicateTransactionIds(entry, duplicateLookup, repeatedBankReferences);
+    const duplicateIds = findDuplicateTransactionIds(
+      entry,
+      duplicateLookup,
+      repeatedBankReferences,
+      selectedDimensionId,
+    );
     return {
       ...entry,
       duplicate: duplicateIds.length > 0,
@@ -1204,13 +1248,13 @@ export function registerCamtImportTools(
 
   registerCapturedTool(
     "parse_camt053",
-    "Parse a CAMT.053 bank statement XML file and preview statement metadata, entries, summary, and duplicate matches against existing transactions.",
+    "Parse a CAMT.053 bank statement XML file and preview statement metadata, entries, and summary without querying existing transactions.",
     {
       file_path: z.string().describe("Absolute path to the CAMT.053 XML file."),
     },
     { ...readOnly, openWorldHint: true, title: "Parse CAMT.053" },
     async ({ file_path }) => {
-      const parsed = await enrichWithDuplicates(await loadParsedCamt053(file_path), api);
+      const parsed = await loadParsedCamt053(file_path);
       return {
         content: [{
           type: "text",
@@ -1259,7 +1303,7 @@ export function registerCamtImportTools(
       await ensureAccountDimensionExists(api, accounts_dimensions_id);
       await assertStatementAccountMatchesDimension(api, loaded.statement_metadata.iban, accounts_dimensions_id);
 
-      const parsed = await enrichWithDuplicates(loaded, api);
+      const parsed = await enrichWithDuplicates(loaded, api, accounts_dimensions_id);
       const existingTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
       const filteredEntries = parsed.entries.filter(entry => {
         if (date_from && entry.date < date_from) return false;
