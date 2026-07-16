@@ -98,6 +98,215 @@ function toolMetadataText(options: { description?: string; inputSchema?: Record<
   return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
+function purchaseInvoiceCreateParams(items: Array<Record<string, unknown>>) {
+  return {
+    clients_id: 17,
+    client_name: "Test Supplier",
+    number: "PI-M21",
+    create_date: "2026-07-16",
+    journal_date: "2026-07-16",
+    term_days: 14,
+    vat_price: 0,
+    gross_price: 100,
+    items,
+  };
+}
+
+describe("M21 create_purchase_invoice non-VAT boundary", () => {
+  beforeEach(() => vi.mocked(logAudit).mockClear());
+
+  it("M21 rejects one explicit non-VAT deductible field with classified indexed guidance", async () => {
+    const getVatInfo = vi.fn().mockResolvedValue({ vat_number: null });
+    const getPurchaseArticles = vi.fn().mockResolvedValue([]);
+    const createAndSetTotals = vi.fn().mockResolvedValue({ id: 70 });
+    const { api, handler } = getCrudToolHarness("create_purchase_invoice", {
+      readonly: {
+        getVatInfo,
+        getPurchaseArticles,
+        getAccounts: vi.fn().mockResolvedValue([{
+          id: 1510,
+          name_est: "Sisendkäibemaks",
+          allows_dimensions: false,
+          is_valid: true,
+        }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: { createAndSetTotals },
+    });
+
+    const result = await handler(purchaseInvoiceCreateParams([{
+      cl_purchase_articles_id: 45,
+      custom_title: "Internet",
+      total_net_price: 100,
+      vat_accounts_id: 1510,
+    }])) as { isError?: boolean; content: Array<{ text: string }> };
+
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toEqual({
+      error: "Non-VAT purchase invoice contains deductible VAT fields",
+      category: "manual_review_required",
+      details: ["items[0].vat_accounts_id must be absent"],
+      next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+    });
+    expect(getVatInfo).toHaveBeenCalledTimes(1);
+    expect(getPurchaseArticles).not.toHaveBeenCalled();
+    expect(createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.readonly.getAccounts).not.toHaveBeenCalled();
+    expect(api.readonly.getAccountDimensions).not.toHaveBeenCalled();
+    expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it("M21 aggregates every indexed non-VAT conflict before all reference, create, and audit side effects", async () => {
+    const getVatInfo = vi.fn().mockResolvedValue({ vat_number: "" });
+    const getPurchaseArticles = vi.fn().mockResolvedValue([]);
+    const getAccounts = vi.fn().mockResolvedValue([]);
+    const getAccountDimensions = vi.fn().mockResolvedValue([]);
+    const createAndSetTotals = vi.fn();
+    const { handler } = getCrudToolHarness("create_purchase_invoice", {
+      readonly: { getVatInfo, getPurchaseArticles, getAccounts, getAccountDimensions },
+      purchaseInvoices: { createAndSetTotals },
+    });
+
+    const result = await handler(purchaseInvoiceCreateParams([
+      {
+        cl_purchase_articles_id: 45,
+        custom_title: "Internet",
+        vat_accounts_id: 1510,
+        vat_accounts_dimensions_id: 15101,
+        cl_vat_articles_id: 1,
+        vat_rate_dropdown: "24",
+      },
+      {
+        cl_purchase_articles_id: 46,
+        custom_title: "Fuel",
+        cl_vat_articles_id: 2,
+        vat_rate_dropdown: 0,
+      },
+    ])) as { isError?: boolean; content: Array<{ text: string }> };
+
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      category: "manual_review_required",
+      details: [
+        "items[0].vat_accounts_id must be absent",
+        "items[0].vat_accounts_dimensions_id must be absent",
+        "items[0].cl_vat_articles_id must be absent or 11",
+        "items[0].vat_rate_dropdown must be absent or \"-\"",
+        "items[1].cl_vat_articles_id must be absent or 11",
+        "items[1].vat_rate_dropdown must be absent or \"-\"",
+      ],
+    });
+    expect(getVatInfo).toHaveBeenCalledTimes(1);
+    expect(getPurchaseArticles).not.toHaveBeenCalled();
+    expect(getAccounts).not.toHaveBeenCalled();
+    expect(getAccountDimensions).not.toHaveBeenCalled();
+    expect(createAndSetTotals).not.toHaveBeenCalled();
+    expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it("M21 creates canonical non-VAT rows for absent null and article 11 dash inputs", async () => {
+    const getVatInfo = vi.fn().mockResolvedValue({ vat_number: null });
+    const getPurchaseArticles = vi.fn().mockResolvedValue([{
+      id: 45,
+      name_est: "Sisendkäibemaks",
+      name_eng: "Input VAT",
+      vat_accounts_id: 1510,
+      cl_vat_articles_id: 1,
+      vat_rate_dropdown: "24",
+    }]);
+    const createAndSetTotals = vi.fn().mockResolvedValue({ id: 71 });
+    const { api, handler } = getCrudToolHarness("create_purchase_invoice", {
+      readonly: {
+        getVatInfo,
+        getPurchaseArticles,
+        getAccounts: vi.fn().mockResolvedValue([{
+          id: 1510,
+          name_est: "Sisendkäibemaks",
+          allows_dimensions: false,
+          is_valid: true,
+        }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: { createAndSetTotals },
+    });
+
+    const result = await handler(purchaseInvoiceCreateParams([
+      { cl_purchase_articles_id: 45, custom_title: "Absent VAT fields", total_net_price: 30 },
+      {
+        cl_purchase_articles_id: 45,
+        custom_title: "Null VAT fields",
+        total_net_price: 30,
+        vat_accounts_id: null,
+        vat_accounts_dimensions_id: null,
+        cl_vat_articles_id: null,
+        vat_rate_dropdown: null,
+      },
+      {
+        cl_purchase_articles_id: 45,
+        custom_title: "Canonical VAT fields",
+        total_net_price: 40,
+        cl_vat_articles_id: 11,
+        vat_rate_dropdown: " - ",
+      },
+    ])) as { isError?: boolean; content: Array<{ text: string }> };
+
+    expect(result.isError).not.toBe(true);
+    expect(getVatInfo).toHaveBeenCalledTimes(1);
+    expect(getPurchaseArticles).toHaveBeenCalledTimes(1);
+    expect(createAndSetTotals).toHaveBeenCalledTimes(1);
+    const created = createAndSetTotals.mock.calls[0]![0] as { items: Array<Record<string, unknown>> };
+    expect(created.items).toHaveLength(3);
+    for (const item of created.items) {
+      expect(item).not.toHaveProperty("vat_accounts_id");
+      expect(item).not.toHaveProperty("vat_accounts_dimensions_id");
+      expect(item.cl_vat_articles_id).toBe(11);
+      expect(item.vat_rate_dropdown).toBe("-");
+    }
+    expect(createAndSetTotals).toHaveBeenCalledWith(expect.any(Object), 0, 100, false);
+    expect(api.readonly.getAccounts).toHaveBeenCalledTimes(1);
+    expect(api.readonly.getAccountDimensions).toHaveBeenCalledTimes(1);
+    expect(logAudit).toHaveBeenCalledTimes(1);
+  });
+
+  it("M21 accepts the same deductible input for a live VAT-registered company", async () => {
+    const getVatInfo = vi.fn().mockResolvedValue({ vat_number: "EE123456789" });
+    const getPurchaseArticles = vi.fn().mockResolvedValue([]);
+    const createAndSetTotals = vi.fn().mockResolvedValue({ id: 72 });
+    const { handler } = getCrudToolHarness("create_purchase_invoice", {
+      readonly: {
+        getVatInfo,
+        getPurchaseArticles,
+        getAccounts: vi.fn().mockResolvedValue([{
+          id: 1510,
+          name_est: "Sisendkäibemaks",
+          allows_dimensions: false,
+          is_valid: true,
+        }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: { createAndSetTotals },
+    });
+    const deductibleItem = {
+      cl_purchase_articles_id: 45,
+      custom_title: "Internet",
+      total_net_price: 100,
+      vat_accounts_id: 1510,
+      cl_vat_articles_id: 1,
+      vat_rate_dropdown: "24",
+    };
+
+    const result = await handler(purchaseInvoiceCreateParams([deductibleItem])) as { isError?: boolean };
+
+    expect(result.isError).not.toBe(true);
+    expect(getVatInfo).toHaveBeenCalledTimes(1);
+    expect(createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect((createAndSetTotals.mock.calls[0]![0] as { items: unknown[] }).items).toEqual([
+      expect.objectContaining(deductibleItem),
+    ]);
+    expect(createAndSetTotals).toHaveBeenCalledWith(expect.any(Object), 0, 100, true);
+  });
+});
+
 describe("safeJsonParse", () => {
   it("parses valid JSON", () => {
     expect(safeJsonParse('{"a":1}', "test")).toEqual({ a: 1 });

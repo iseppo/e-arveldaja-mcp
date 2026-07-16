@@ -8,7 +8,11 @@ import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
 import { applyListView, viewParam } from "../../list-views.js";
-import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "../purchase-vat-defaults.js";
+import {
+  applyPurchaseVatDefaults,
+  getPurchaseArticlesWithVat,
+  validateNonVatItem,
+} from "../purchase-vat-defaults.js";
 import { validateItemDimensions } from "../../account-validation.js";
 import type { CreatePurchaseInvoiceData } from "../../types/api.js";
 import {
@@ -100,8 +104,22 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       bank_account_no: z.string().optional().describe("Supplier bank account"),
     }, { ...create, title: "Create Purchase Invoice" }, async (params) => {
       const isVatReg = await isCompanyVatRegistered(api);
-      const purchaseArticles = await getPurchaseArticlesWithVat(api);
       const rawItems = parsePurchaseInvoiceItems(params.items);
+      if (!isVatReg) {
+        const details = rawItems.flatMap((item, index) =>
+          validateNonVatItem(item).map(error => `items[${index}].${error}`)
+        );
+        if (details.length > 0) {
+          return toolError({
+            error: "Non-VAT purchase invoice contains deductible VAT fields",
+            category: "manual_review_required",
+            details,
+            next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+          });
+        }
+      }
+
+      const purchaseArticles = await getPurchaseArticlesWithVat(api);
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
 
       // Validate dimension requirements before hitting the API

@@ -8,10 +8,6 @@ const VAT_REGISTERED_FALLBACK = {
   cl_vat_articles_id: 1,
 } as const;
 
-const NON_VAT_REGISTERED_FALLBACK = {
-  cl_vat_articles_id: 11,
-} as const;
-
 const warnedFallbackKeys = new Set<string>();
 let connectionScope = "";
 
@@ -68,6 +64,26 @@ export function normalizeVatRate(value: unknown): string | undefined {
   return String(parsed);
 }
 
+export function validateNonVatItem(item: PurchaseInvoiceItem): string[] {
+  const errors: string[] = [];
+  const vatRateDropdown = normalizeVatRate(item.vat_rate_dropdown);
+
+  if (item.vat_accounts_id !== undefined && item.vat_accounts_id !== null) {
+    errors.push("vat_accounts_id must be absent");
+  }
+  if (item.vat_accounts_dimensions_id !== undefined && item.vat_accounts_dimensions_id !== null) {
+    errors.push("vat_accounts_dimensions_id must be absent");
+  }
+  if (item.cl_vat_articles_id !== undefined && item.cl_vat_articles_id !== null && item.cl_vat_articles_id !== 11) {
+    errors.push("cl_vat_articles_id must be absent or 11");
+  }
+  if (vatRateDropdown !== undefined && vatRateDropdown !== "-") {
+    errors.push('vat_rate_dropdown must be absent or "-"');
+  }
+
+  return errors;
+}
+
 function extractVatDefaults(article?: PurchaseArticleWithVat): PurchaseVatDefaults {
   return {
     vat_accounts_id: toNumber(article?.vat_accounts_id),
@@ -89,7 +105,6 @@ function findArticleDefaults(
   articles: PurchaseArticleWithVat[],
   item: PurchaseInvoiceItem,
   vatRateDropdown: string | undefined,
-  isVatRegistered: boolean,
 ): PurchaseVatDefaults {
   const selectedArticle = item.cl_purchase_articles_id !== undefined
     ? articles.find(article => article.id === item.cl_purchase_articles_id)
@@ -112,13 +127,9 @@ function findArticleDefaults(
 
   const keywordMatch = withVatDefaults.find(article => {
     const text = getArticleSearchText(article);
-    return isVatRegistered
-      ? (text.includes("vat") || text.includes("käibemaks")) &&
-          !text.includes("non-deduct") &&
-          !text.includes("mahaarv")
-      : text.includes("non-deduct") ||
-          text.includes("mahaarv") ||
-          text.includes("mitte");
+    return (text.includes("vat") || text.includes("käibemaks")) &&
+      !text.includes("non-deduct") &&
+      !text.includes("mahaarv");
   });
   if (keywordMatch) return extractVatDefaults(keywordMatch);
 
@@ -140,35 +151,25 @@ export function applyPurchaseVatDefaults(
     ...item,
   } as PurchaseInvoiceItem;
 
-  const vatRateDropdown = normalizeVatRate(merged.vat_rate_dropdown);
-  const defaults = findArticleDefaults(purchaseArticles, merged, vatRateDropdown, isVatRegistered);
-
-  if (isVatRegistered) {
-    merged.vat_accounts_id ??= defaults.vat_accounts_id ?? VAT_REGISTERED_FALLBACK.vat_accounts_id;
-    merged.cl_vat_articles_id ??= defaults.cl_vat_articles_id ?? VAT_REGISTERED_FALLBACK.cl_vat_articles_id;
-
-    if (defaults.vat_accounts_id === undefined || defaults.cl_vat_articles_id === undefined) {
-      warnFallbackOnce(
-        "vat-registered",
-        `Could not resolve purchase VAT defaults from purchase_articles; falling back to vat_accounts_id=${VAT_REGISTERED_FALLBACK.vat_accounts_id} and cl_vat_articles_id=${VAT_REGISTERED_FALLBACK.cl_vat_articles_id}.`
-      );
-    }
+  if (!isVatRegistered) {
+    delete merged.vat_accounts_id;
+    delete merged.vat_accounts_dimensions_id;
+    merged.cl_vat_articles_id = 11;
+    merged.vat_rate_dropdown = "-";
     return merged;
   }
 
-  merged.vat_rate_dropdown ??= "-";
+  const vatRateDropdown = normalizeVatRate(merged.vat_rate_dropdown);
+  const defaults = findArticleDefaults(purchaseArticles, merged, vatRateDropdown);
 
-  if (merged.vat_rate_dropdown !== "-") {
-    merged.vat_accounts_id ??= defaults.vat_accounts_id ?? merged.purchase_accounts_id;
-    merged.cl_vat_articles_id ??= defaults.cl_vat_articles_id ?? NON_VAT_REGISTERED_FALLBACK.cl_vat_articles_id;
+  merged.vat_accounts_id ??= defaults.vat_accounts_id ?? VAT_REGISTERED_FALLBACK.vat_accounts_id;
+  merged.cl_vat_articles_id ??= defaults.cl_vat_articles_id ?? VAT_REGISTERED_FALLBACK.cl_vat_articles_id;
 
-    if (defaults.cl_vat_articles_id === undefined) {
-      warnFallbackOnce(
-        "non-vat-registered",
-        "Could not resolve non-deductible VAT defaults from purchase_articles; falling back to cl_vat_articles_id=11."
-      );
-    }
+  if (defaults.vat_accounts_id === undefined || defaults.cl_vat_articles_id === undefined) {
+    warnFallbackOnce(
+      "vat-registered",
+      `Could not resolve purchase VAT defaults from purchase_articles; falling back to vat_accounts_id=${VAT_REGISTERED_FALLBACK.vat_accounts_id} and cl_vat_articles_id=${VAT_REGISTERED_FALLBACK.cl_vat_articles_id}.`
+    );
   }
-
   return merged;
 }
