@@ -4374,6 +4374,15 @@ The first frozen implementation artifact passed specification review but did not
 5. Update README wording from a label-derived scope to an opaque identity scope and state that label changes do not move the store. Keep the original six-file M23 boundary: only `src/accounting-rules.ts`, `src/accounting-rules.test.ts`, and `README.md` need corrective edits; `.gitignore`, `accounting-rules.md`, and `src/index.ts` remain unchanged but stay in the final artifact.
 6. Prove 16/16 M23 and 62/62 accounting-rules tests, then repeat ignore, build, release, diff, full unit (2,453 expected), and integration (20 pass/3 documented skips) gates. Regenerate the exact six-file artifact and restart ordered fresh specification and code-quality reviews because the first artifact and verdicts are invalidated.
 
+#### M23 second review-correction plan
+
+The replacement artifact also remains unapproved: fresh specification review proved that `existsSync` can suppress a marker-probe `EACCES` after the root `statSync` succeeds, and that blank stable identities are rejected only on the fresh-scope branch after project/global compatibility returns. Correct both sequentially:
+
+1. Add two tests before production edits. Use a hoisted partial Vitest mock of `fs` which delegates every operation except a test-controlled exact-path `readdirSync` fault; avoid non-portable permission fixtures and `spyOn` against the non-configurable Node ESM namespace. One test injects `EACCES` while enumerating otherwise empty project and global bundle roots, proves the root enumeration was attempted, and requires each root to remain pinned. The other test supplies a blank identity to initialized project and initialized global stores and requires rejection before either compatibility return. Expected pre-fix result: 18 M23 tests with 2 FAIL / 16 PASS; whole file 2 FAIL / 62 PASS out of 64.
+2. Compute and validate the canonical scope at the entry to `chooseDefaultBundleStorage`, before any project/global probing or return, and reuse it only if the fresh branch is selected. In `isRootInitializedBundle`, after a successful directory `statSync`, force `readdirSync(dir, { withFileTypes: true })` and use the returned root entries to discover reserved markers and known concept subdirectories. Any root/subdirectory inspection error or unexpected existing entry type pins conservatively; only initial `ENOENT` or a successfully enumerated empty/uninitialized root is absent.
+3. Prove 18/18 M23, 64/64 accounting-rules, and 2,455 full unit tests, plus ignore/template/index wiring, build, release, diff, and integration 20 pass/3 documented skips. The exact final tracked scope remains the original six M23 files, with this correction editing only `src/accounting-rules.ts` and its test.
+4. Invalidate the 27,296-byte replacement artifact and all verdicts. Regenerate the exact six-file artifact and restart ordered fresh specification review followed by fresh code-quality review; any further edit or finding restarts all gates and both reviews.
+
 ### Task 19: M26 — Separate booked, skipped, and review-required portfolio rows
 
 **Files:**
