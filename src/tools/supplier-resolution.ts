@@ -21,7 +21,7 @@ export type SupplierIdentityFields = Pick<ExtractedReceiptFields, "supplier_name
 export interface SupplierResolution {
   found: boolean;
   created: boolean;
-  match_type?: "registry_code" | "vat_no" | "name_normalized" | "name_fuzzy" | "created" | "client_id";
+  match_type?: "registry_code" | "vat_no" | "name_normalized" | "name_fuzzy" | "created" | "client_id" | "strong_identifier_conflict";
   client?: Client;
   preview_client?: Partial<Client>;
   registry_data?: Record<string, string> | null;
@@ -32,6 +32,16 @@ export interface SupplierResolution {
    * "needs manual supplier resolution" hint.
    */
   self_match_blocked?: boolean;
+  /**
+   * Set (with match_type "strong_identifier_conflict") when a name match was
+   * vetoed because the invoice carried a strong identifier — registry code or
+   * VAT number — that CONTRADICTS the name-matched client's own strong
+   * identifier (H13). Booking against a name twin of a different legal entity
+   * is a silent miscoding; the caller must route to manual review instead.
+   */
+  requires_manual_review?: boolean;
+  /** Human-readable explanation for requires_manual_review. */
+  reason?: string;
 }
 
 export interface SupplierResolutionOptions {
@@ -126,6 +136,42 @@ export async function resolveSupplierInternal(
   };
   let selfMatchBlocked = false;
 
+  // H13: a strong identifier (registry code / VAT) that CONTRADICTS a
+  // name-matched client's own strong identifier vetoes the name match. Two
+  // deliberate scoping rules keep this from refusing legitimate suppliers:
+  //  - Own-company IDs are excluded. A supplier_reg_code/vat that equals the
+  //    active company's identity is a header mis-scan of the buyer (issues
+  //    #14/#22), not a supplier signal, so it must not veto a real name match.
+  //  - Only a genuine contradiction counts. If the candidate client has no
+  //    strong identifier of that kind on file, absence is not conflict — the
+  //    name match resolves and the invoice's identifier can enrich the record.
+  const suppliedRegCode = fields.supplier_reg_code?.trim() || undefined;
+  const suppliedVat = normalizeVatForCompare(fields.supplier_vat_no);
+  const foreignRegCode = suppliedRegCode && suppliedRegCode !== ownCode ? suppliedRegCode : undefined;
+  const foreignVat = suppliedVat && suppliedVat !== ownVat ? suppliedVat : undefined;
+  const strongIdentifierConflict = (candidate: Client): string | undefined => {
+    if (foreignRegCode) {
+      const candidateCode = candidate.code?.trim();
+      if (candidateCode && candidateCode !== foreignRegCode) {
+        return `Invoice registry code ${foreignRegCode} conflicts with matched client's registry code ${candidateCode} — resolve the supplier manually.`;
+      }
+    }
+    if (foreignVat) {
+      const candidateVat = normalizeVatForCompare(candidate.invoice_vat_no);
+      if (candidateVat && candidateVat !== foreignVat) {
+        return `Invoice VAT number conflicts with matched client's VAT number — resolve the supplier manually.`;
+      }
+    }
+    return undefined;
+  };
+  const conflictResult = (reason: string): SupplierResolution => ({
+    found: false,
+    created: false,
+    match_type: "strong_identifier_conflict",
+    requires_manual_review: true,
+    reason,
+  });
+
   // self_match_blocked is meant to flag results where the returned client is
   // suspect (none was found, or only the previewed-new path is left). When
   // we successfully resolve to a different real supplier via a later step
@@ -194,11 +240,14 @@ export async function resolveSupplierInternal(
         client => normalizeCompanyName(client.name) === normalizedSupplierName,
       );
       if (normalizedExactMatches.length === 1) {
+        const candidate = normalizedExactMatches[0]!;
+        const conflict = strongIdentifierConflict(candidate);
+        if (conflict) return conflictResult(conflict);
         return {
           found: true,
           created: false,
           match_type: "name_normalized",
-          client: normalizedExactMatches[0]!,
+          client: candidate,
         };
       }
       // length === 0 → no match, length > 1 → ambiguous, both fall
@@ -221,6 +270,8 @@ export async function resolveSupplierInternal(
           fields.supplier_name.toLowerCase().includes(bestMatch.toLowerCase())
         )
       ) {
+        const conflict = strongIdentifierConflict(matchedClient);
+        if (conflict) return conflictResult(conflict);
         return { found: true, created: false, match_type: "name_fuzzy", client: matchedClient };
       }
     }

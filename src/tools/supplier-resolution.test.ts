@@ -405,3 +405,115 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
     expect(api.clients.create).not.toHaveBeenCalled();
   });
 });
+
+describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
+  it("does not name-match a client whose registry code conflicts", async () => {
+    // Invoice carries reg code 87654321, but the only same-name client on
+    // file has a DIFFERENT registry code (12345678). Booking against that
+    // client would attach the invoice to the wrong legal entity. The strong
+    // identifier must veto the name match and demand manual review.
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", code: "12345678" })],
+      { supplier_name: "Acme OÜ", supplier_reg_code: "87654321" },
+      false,
+    );
+
+    expect(result).toMatchObject({
+      found: false,
+      match_type: "strong_identifier_conflict",
+      requires_manual_review: true,
+    });
+    expect(result.client).toBeUndefined();
+    expect(typeof result.reason).toBe("string");
+  });
+
+  it("vetoes a fuzzy name match when the registry code conflicts", async () => {
+    // Names differ enough that the normalized-exact tier misses (different
+    // normalized keys) but the fuzzy tier's 0.7-similarity + substring
+    // inclusion still fires. The conflicting reg code must veto it at the
+    // fuzzy return site, not just the normalized one.
+    const client = makeClient({ id: 1, name: "Globex Trading House", code: "12345678" });
+    // Sanity: without a conflicting identifier this pair resolves via fuzzy.
+    const control = await resolveSupplierInternal(
+      stubApi,
+      [client],
+      { supplier_name: "Globex Trading Hous" },
+      false,
+    );
+    expect(control.match_type).toBe("name_fuzzy");
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [client],
+      { supplier_name: "Globex Trading Hous", supplier_reg_code: "87654321" },
+      false,
+    );
+
+    expect(result.found).toBe(false);
+    expect(result.match_type).toBe("strong_identifier_conflict");
+    expect(result.requires_manual_review).toBe(true);
+  });
+
+  it("vetoes a name match when the VAT number conflicts", async () => {
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", invoice_vat_no: "EE111111111" })],
+      { supplier_name: "Acme OÜ", supplier_vat_no: "EE999999999" },
+      false,
+    );
+
+    expect(result.found).toBe(false);
+    expect(result.match_type).toBe("strong_identifier_conflict");
+    expect(result.requires_manual_review).toBe(true);
+  });
+
+  it("still resolves by registry code when the strong identifier MATCHES a client (no conflict)", async () => {
+    // Control: a matching reg code is a positive strong match and must
+    // short-circuit to registry_code — the conflict gate must not fire.
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", code: "87654321" })],
+      { supplier_name: "Acme OÜ", supplier_reg_code: "87654321" },
+      false,
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.match_type).toBe("registry_code");
+    expect(result.client?.id).toBe(1);
+  });
+
+  it("still name-matches when the client carries no conflicting identifier (absence is not conflict)", async () => {
+    // The client has NO registry code on file, so the invoice's reg code
+    // does not contradict anything — the name match should resolve and the
+    // reg code can enrich the record later. Absence must not be treated as
+    // a conflict (that would refuse legitimate suppliers).
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", code: null })],
+      { supplier_name: "Acme OÜ", supplier_reg_code: "87654321" },
+      false,
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.match_type).toBe("name_normalized");
+    expect(result.client?.id).toBe(1);
+  });
+
+  it("does not treat the buyer's own reg code (mis-scanned as supplier) as a conflict", async () => {
+    // supplier_reg_code equals the active company's own code — a header
+    // mis-scan, not a supplier signal. It must not veto a legitimate name
+    // match against a real supplier whose own code differs.
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", code: "12345678" })],
+      { supplier_name: "Acme OÜ", supplier_reg_code: "17133416" },
+      false,
+      { ownCompanyRegistryCode: "17133416" },
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.match_type).toBe("name_normalized");
+    expect(result.client?.id).toBe(1);
+  });
+});
