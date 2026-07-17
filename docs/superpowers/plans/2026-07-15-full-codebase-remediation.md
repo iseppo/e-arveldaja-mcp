@@ -5494,6 +5494,220 @@ Run: `npm run validate:release && git diff --check && npm run build && npm test 
 
 Expected: all commands PASS with only baseline integration skips and clean status remains empty.
 
+#### M05 hardened execution plan v4 — strict CAMT and Wise validation
+
+Revision history — each round was corrected against a **fresh** independent plan reviewer who had not seen the prior rounds:
+
+- **v1** REJECTED: 1 BLOCKER (prose-supersedes-code over Task 25's live sketches) + 3 MAJOR (`process_camt053` drops `isError`; `wise:row:<physical-line>` unimplementable; the security contract had no test).
+- **v2** REJECTED: the four v1 findings verified RESOLVED, but two new MAJORs surfaced — the CAMT half of the output-boundary contract was still prose-only (case #4 now carries it), and no semantically genuine RED existed for the date defect (case #2 now REDs through the existing `parseCamt053Xml` binding). Eight MINORs fixed, including a factually wrong `splitBookedAmounts` rationale in v2's own text.
+- **v3** REJECTED: twelve of fourteen prior findings verified closed with substance, and both technical claims the v2 round demanded be independently verified (`splitBookedAmounts` dead code, `normalizeDate` permissiveness) confirmed correct. Two MAJORs stood, both the same failure shape narrowed rather than eliminated: the void declaration covered only Task 25's Step 3, leaving Step 1's `it.each`, identity-leaking sketches live in the step an executor reaches first (now Steps 1–5 are void); and case #2's mandated `.replace(">2026-02-01<", …)` hit the OPBD **balance** date rather than the entry booking date it claimed, putting a false rationale inside the item titled "Record the RED reason honestly" (now both date sinks are routed and attributed separately). Five citation-drift slips corrected against the live tree; two residual false-positive paths closed in the security-core controls.
+- **v4** is this section. It received **PLAN: APPROVED** from a fourth fresh reviewer, who independently re-derived all ~50 line citations and both control-case REDs and found no BLOCKER or MAJOR. Five MINORs from that approving review were then applied in place, none of them consequential to implementation: the `-t` filter citation (5244, not 5246); the void range (5161–5485, since 5487–5489 is Step 6); the `it.each` working (five blocks, 3+6+4+2+1 = 16 — the total was right, the shown arithmetic was not); the digit-leading rule extended from the malicious `<Amt>` to every filler lexeme (`parseFloat("Infinity")` is non-finite and throws at `:476`, changing the RED reason); and a **false claim in v4's own text** — that Task 25's `{2,127}` quantifier would have rejected fixture IDs `jar-1`/`void-1`. It would not: `^[A-Za-z0-9]` consumes the first byte, leaving 4 characters inside `[2,127]`. That claim was inherited from an earlier review report and restated without independent verification — the exact failure this protocol exists to catch. The rule it justified (1–128) was correct and unchanged.
+
+Each round's corrections were verified against the live tree by direct evaluation, not inspection, before being written — a standard v4 itself violated once, in the item quoted above.
+
+**Task 25's Step 1 through Step 5 code blocks (lines 5161–5485) are VOID IN THEIR ENTIRETY. Do not copy them.** Only this v4 section's eleven cases, its `-t` filter, and its item 9 staging list are implementable. The void covers, specifically:
+
+- **Step 1's test sketches (5161–5241)** use `it.each`, which vitest counts as one test per row: its five blocks (four `it.each` at 5168/5175/5186/5199 plus one plain `it()` at 5226) yield 3 + 6 + 4 + 2 + 1 = 16 tests, not 11, breaking every count in this section. They also embed the statement ID in the identity (line 5171: `source_row_id: "camt:sample-statement:ntry:1"`) — one of the very security leaks this section voids Step 3 for — and call `parseCamtDate(value, "camt:s:ntry:1", "booking_date")`, a signature that exists only inside the void Step 3 block.
+- **Step 2's `-t` filter (5244)** matches only the void Step 1 test titles.
+- **Step 5's staging list (5480–5485)** `git add`s four files, omitting `src/tools/camt-import-tools.test.ts`, which cases #4–#6 modify and which item 9 requires.
+
+Task 25's Step 6 (5487–5489) and Step 7 (5491–5495) are **not** void — they agree with items 9 and 10 — and its header (5149–5159) survives, superseded on file locators by item 1's scope list.
+- **Step 3's code sketches (5250–5472)**, reviewed against the live tree and found to contain two security leaks, two invariant regressions, one arity error, and one self-contradiction:
+
+- `wise:row:${i + 1}:${rawId}` and `camt:${statementId}:ntry:N` embed attacker-controlled bytes in `source_row_id`, violating item 2 below. `statementId` is `textAt(statement, ["Id"])` (`camt-import.ts:983`) and is deliberately `wrapUntrustedOcr`-wrapped at output today (`camt-import.ts:1267`) precisely because it is untrusted.
+- `toolError({ category, source, rejected_fields })` passes **no `error` key**. In `src/tool-error.ts:30-35` an object with neither a string `error` nor a string `message` falls through to `return { error: serializeUnknownError(error) }`, which is `JSON.stringify(error).substring(0, 500)` (`:10-11`). The whole payload — including unwrapped, untruncated raw attacker values — collapses into one `error` string, and the sketches' own `toMatchObject` assertions would fail.
+- The `import_camt053` block drops `assertStatementAccountMatchesDimension` (live at `camt-import.ts:1304`), regressing H08's statement-binding gate.
+- `buildWiseRow` never sets `rowIndex`, but `WiseRow.rowIndex` is required (`wise-import.ts:35`) and feeds every M04 command key and digest (`:691,1083,1198,1374,1704`). This is a `tsc` failure and an M04 digest break.
+- `enrichWithDuplicates(preflight.value, api)` is wrong-arity: the live signature is `enrichWithDuplicates(parsed, api, selectedDimensionId)` (`camt-import.ts:1010-1014`, called with three arguments at `:1306`).
+- Adding `enrichWithDuplicates` to `parse_camt053` contradicts both item 6 below and Task 25's own assertion `expect(api.transactions.listAll).not.toHaveBeenCalled()`. `parse_camt053` performs no enrichment today (`:1257`).
+
+This v4 section is the sole implementable specification for M05. Where it and Task 25 differ, this section governs; where Task 25 supplies code, that code is void.
+
+1. **Commit the approved plan as the clean M05 implementation base.** M05 starts from clean code baseline `8b9bb61`. Fresh baseline: CAMT parser **6/6**, CAMT tools **46/46**, Wise **58/58**, combined **110/110**, full unit **2,530/2,530 across 76 files**, and integration **20 PASS/3 documented skips**. After plan review, commit only this plan document with `git commit -m "docs(M05): harden bank import validation plan"`, record the hash as `M05_IMPLEMENTATION_BASE`, and require a clean worktree. Exact implementation scope is `src/tools/camt-import.ts`, `src/tools/camt-import.test.ts`, `src/tools/camt-import-tools.test.ts`, `src/tools/wise-import.ts`, and `src/tools/wise-import.test.ts`.
+
+2. **Write exactly eleven selected M05 cases before production edits.** Require focused RED **9 FAIL/2 PASS** and combined three-file RED **9 FAIL/112 PASS out of 121**. Each table row is exactly one `it()` that accumulates all its inputs. Do **not** use `it.each`: vitest counts one test per row and every count in this section would break. All three files currently contain zero `it.each`.
+
+   | # | File | Case | Initial result |
+   |---|---|---|---|
+   | 1 | `camt-import.test.ts` | Accumulate malformed balance, entry, and original monetary lexemes (`10oops`, `Infinity`, `1,2,3`, `1e2`) with positional row IDs, asserting each `source_row_id` matches `/^camt:(statement:1|balance:\d+|ntry:\d+(:tx:\d+)?)$/` on a fixture whose `<Id>` is a distinctive sentinel absent from every emitted identity | FAIL |
+   | 2 | `camt-import.test.ts` | Reject impossible/partially consumed dates, invalid clocks/offsets/currency syntax, and invalid `CdtDbtInd`. **Must include a genuine RED through the existing `parseCamt053Xml` binding, pinning the balance date and the entry booking date separately** (see item 11 for the exact routing — a bare `.replace(">2026-02-01<", …)` hits only the OPBD balance date and never reaches the entry) | FAIL |
+   | 3 | `camt-import.test.ts` | Preserve valid decimals/date-times, lexical calendar dates, and H08 whitespace/lowercase account-identity bytes. **Uses only bindings that exist at `M05_IMPLEMENTATION_BASE`** (i.e. `parseCamt053Xml`, never `preflightCamt053Xml`) — otherwise this declared control REDs on an undefined binding and item 2's counts become 10 FAIL/1 PASS | PASS |
+   | 4 | `camt-import-tools.test.ts` | Granular parse returns safe structured failure with zero ledger/configuration reads. **Also pins the CAMT output boundary** (the counterpart of case #11): a fixture carrying a 300-character malicious `<Amt>` lexeme plus >100 independently invalid monetary/date fields yields each non-empty `value` nonce-wrapped and ≤256 characters of raw content, `rejected_fields.length === 100`, `rejected_fields_truncated === true`, a true `rejected_field_count`, and `mutation_occurred === false` | FAIL |
+   | 5 | `camt-import-tools.test.ts` | Granular dry-run/execute import rejects before dimension, binding, duplicate, client, progress, audit, or mutation work | FAIL |
+   | 6 | `camt-import-tools.test.ts` | Merged parse/dry-run/execute returns the same nested failure with zero accounting reads **and `result.isError === true` on the merged tool** | FAIL |
+   | 7 | `wise-import.test.ts` | Accumulate missing/duplicate consumed headers while allowing unrelated extra headers | FAIL |
+   | 8 | `wise-import.test.ts` | Reject every nonblank row whose field count differs from the actual header count | FAIL |
+   | 9 | `wise-import.test.ts` | Accumulate invalid ID/status/direction/timestamps/amounts/currencies/fees/rate before cache/API/progress/audit work | FAIL |
+   | 10 | `wise-import.test.ts` | Preserve canonical/filtered rows, M04 digest/command plan, early digest rejection, and one cache clear after valid preflight | PASS |
+   | 11 | `wise-import.test.ts` | **Output-boundary contract:** a CSV whose rows carry a 300-character malicious ID and >100 independently invalid fields yields identities matching `/^wise:(header|row:\d+)$/` only; the raw ID appears in no `source_row_id`, `field`, `reason`, or `error`; each exposed `value` is `wrapUntrustedOcr`-wrapped and ≤256 characters of raw content; `rejected_fields.length === 100` with `rejected_fields_truncated === true` and `rejected_field_count` equal to the true total; and `mutation_occurred === false` with no replacement digest | FAIL |
+
+   Use only positional, non-attacker-controlled identities: `camt:statement:1`, `camt:balance:<index>`, `camt:ntry:<index>`, `camt:ntry:<entry>:tx:<detail>`, `wise:header`, and `wise:row:<data-record-ordinal>`. Never embed statement IDs, Wise IDs, counterparty text, or malformed values in `source_row_id` or fixed reasons.
+
+   `<data-record-ordinal>` is defined as the 1-based index into the blank-filtered **data** records, header excluded — equivalently `rowIndex + 1`. (`records[0]` is the header, so `records[1]` is data-record ordinal 1 with `rowIndex` 0.) It is deliberately **not** a physical line number: `parseCSV` (`src/csv.ts:29-39`) supports quoted fields containing embedded newlines, so one record may span many physical lines (Wise's `Reference` and `Note` are exactly such free-text fields), and blank records are filtered out before indexing. Emitting a `wise:row:<n>` that claimed to be a line number would misdirect the operator. Extending `parseCSV` to track per-record start lines is out of M05's five-file scope and is declined.
+
+   A headers-only CSV (zero data records) is a **fatal structural error and throws**, matching item 4's CAMT treatment and today's `wise-import.ts:224`. It is not a rejected field: no data row exists to address, and `wise:file` is deliberately absent from the identity set above.
+
+   Cases #4 and #11 exist because the identity/wrapping/truncation/cap rules are the security core of M05 and would otherwise be asserted only in prose. Both sources need their own case: the sketch below defines the shared shape per-module with no cross-module helper, so `preflightFailure` is written twice and one test pins only one copy. The CAMT `value` carries the raw `<Amt>` lexeme — attacker-controlled bytes from a statement any counterparty can send, which today's `parseAmountNode` already echoes (`camt-import.ts:476`) and which M05 exists to contain. Case #1's benign lexemes (`10oops`, `Infinity`, `1,2,3`, `1e2` — all ≤6 characters) would let an unwrapped or untruncated CAMT copy pass all 121 tests, which is why case #4 carries the 300-character CAMT counterpart.
+
+   **The 300-character malicious value must be the FIRST issue in document order** in both fixtures. Both cap emission at 100 issues in document order; if the malicious value lands at index ≥100 it is never emitted, and "each exposed `value` is ≤256 characters" is satisfied vacuously by the short benign lexemes — a false positive of exactly the kind this section warns about. Author each fixture so the oversized value is issue #1 and the >100 filler issues follow it. In case #4, additionally pin the leading byte of **every** monetary lexeme in the fixture — the malicious `<Amt>` and all the filler amounts alike. A lexeme that `parseFloat` maps to a non-finite value makes today's code **throw** at `camt-import.ts:476` rather than silently accept, so the handler throws instead of returning a payload and the RED reason changes. This bites the fillers as easily as the payload: `Number.parseFloat("Infinity")` is `Infinity`, which is `!Number.isFinite` and therefore throws — so case #1's `Infinity` lexeme must not be reused as case #4 filler. Start every monetary lexeme with a digit (e.g. `10oops`, `1,2,3`, `1e2`, and a 300-character digit-leading payload) so the RED reproduces the silent-acceptance defect the finding is actually about, and record that reason in the ledger.
+
+   Note that `wrapUntrustedOcr` (`src/mcp-json.ts:11-19`) mints a fresh nonce per call: assert wrapping by extracting the nonce from the emitted marker and checking the delimiters pair, never by comparing against a fixed string or asserting over whole-JSON equality. A prior M04 review rejected exactly that false positive. Note also that `wrapUntrustedOcr("")` returns `""` **unwrapped** (`src/mcp-json.ts:13`), and `reject()` normalizes a missing field to `value: ""` — so cases #4 and #11 assert wrapping over non-empty values only. This carve-out is safe: an empty string carries no payload.
+
+3. **Apply exact source validation semantics.** Define `ImportRejectedField { source_row_id: string; field: string; value: string; reason: string }` and source-local disjoint preflight result unions. Money must be a fully consumed finite decimal with optional sign and no exponent/comma/trailing bytes. CAMT balance amounts may be zero; booked and original entry amounts must be positive because direction is separate. Wise source/target/fee amounts must be non-negative; retain both-sides-zero filtering; exchange rate must be positive. Currency is exactly three ASCII letters stored uppercase; source/target are required, while blank fee currency retains its corresponding-side fallback.
+
+   The blank-fee-currency fallback is a **faithful hoist of existing behavior, not a change**, and was traced before being specified. Today the fee currency is stored raw (`wise-import.ts:254,256`, where the `?? "EUR"` fires only on a *missing* field, not a blank one) and the fallback is applied at use time: `bookedFeeCurrencyForWiseRow(row, transactionCurrency)` (`:387-390`) calls `normalizeWiseCurrency(value, fallback)` (`:361-364`, `normalized || fallback`, which catches `""`), and its `fallbackCurrency` argument is `transactionCurrency = bookedCurrencyForWiseRow(row)` (`:1029`, `:1165`) — the own-account side's currency, i.e. `targetCurrency` on the target side and `sourceCurrency` on the source side. Resolving the same fallback eagerly in preflight therefore yields an identical value. The `?? "EUR"` at `:254,256` becomes unreachable once headers are required exactly once, since `idx()` can no longer return `-1` for a consumed header.
+
+   These rules validate the **parsed `<Amt>` / `AmtDtls` lexemes only**. Derived per-detail split amounts produced by `splitBookedAmounts` (`camt-import.ts:501-516`) are explicitly out of scope and remain unvalidated, because a derived split can legitimately round to zero: `totalAmount = 0.01` across weights `10`/`20` yields `roundMoney` values `0.00` and `0.01`, so a positivity rule on derived values would reject valid statements. (The `totalWeight <= 0` branch at `:510` is unreachable dead code — when `canSplitProportionally` every weight is `> 0`, otherwise every weight is `1` and the function has already returned early at `:502` for `length <= 1`, so the sum is always `≥ 2`. Do not cite it as a rationale.)
+
+   CAMT dates accept complete `YYYY-MM-DD` or complete ISO date-time, real Gregorian dates, clocks within 23:59:59, optional 1–9 digit fractions, and `Z`/offsets through +/-14:00. Validate statement period values, balance dates, and entry booking dates, preserve successful period strings, and retain the date's lexical calendar prefix without UTC shifting. Wise created/finished timestamps require complete real regular-export syntax, accepting space or `T` and valid optional timezone syntax; preserve the trimmed text and derive the booking date only after validation.
+
+   Wise ID is required, 1–128 characters, starts ASCII alphanumeric, then uses only ASCII alphanumeric plus `.`, `_`, `:`, or `-` — i.e. `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`. Task 25's void `{2,127}` quantifier imposed a 3-character minimum that nothing in the Wise format justifies; the bound is 1–128. (Verified by direct evaluation: `{2,127}` would *not* have rejected the existing fixture IDs `jar-1` or `void-1` — `^[A-Za-z0-9]` consumes `j`, leaving `ar-1` at 4 characters, inside `[2,127]`. All 33 fixture IDs match both regexes. The 3-character floor is arbitrary, not fixture-breaking.)
+
+   Status must match `[A-Z][A-Z0-9_]{0,63}` **after trimming only, without uppercasing**, and eligibility stays the raw comparison `status === "COMPLETED"` (`wise-import.ts:875`). Uppercasing before the eligibility check would make a `completed` row — silently filtered today — newly **eligible for mutation**, which is a new mutation path rather than a tightening and would violate the global constraint "preserve safe existing behavior unless the review proved it unsafe". Real Wise exports are uppercase and no fixture covers the lowercase case, so this is a deliberate decision to leave the filter byte-exact. Other well-formed states remain filtered.
+
+   Direction must be exactly `IN`, `OUT`, or `NEUTRAL` **after** the existing `trim().toUpperCase()` normalization in `normalizeWiseDirection` (`wise-import.ts:306-312`) — not raw-byte-exact, which would turn a lowercase `in` that works today into a whole-file rejection. `NEUTRAL` remains filtered. CAMT direction is exactly `CRDT` or `DBIT` and invalid values become row-addressed issues. CAMT statement ID/bank references/remittance IDs remain optional; account IBAN remains required/nonempty, while H08 retains canonical identity and ownership responsibility.
+
+   Wise headers are BOM/outer-whitespace normalized then case-sensitive. (`parseCSV` already strips the BOM at `src/csv.ts:5-7`, so the header-local `replace(/^﻿/, "")` mirrors today's redundant `wise-import.ts:226` and is retained only for defence in depth — it is not a new requirement.) Every consumed header must occur exactly once. `Batch` and `Created by` remain accepted unused columns but are not required; unrelated extra headers are allowed. Every nonblank row must contain exactly the actual header count. Preserve valid-row `rowIndex = data-row index from zero` because M04 command keys/digests depend on it; because M05 rejects the whole file when any row is invalid, every surviving record maps 1:1 and `rowIndex` stays byte-identical, keeping `sha256(\`${row.rowIndex}\0${action}\0${row.id}\`)` (`wise-import.ts:691`) and the `row:<n>:…` command keys (`:1083`, `:1198`, `:1374` are `main`/`fee`/`inter_account`; `:1704` is `row:${row.rowIndex}:invoice:${fix.invoice_id}`) stable. Note today's `if (fields.length < headers.length - 2) continue;` (`:244`) already lets `rowIndex` gap, since skipping a row does not disturb `i`; under M05 any such file is rejected wholesale, so every *accepted* file keeps a 1:1 record-to-row mapping.
+
+4. **Accumulate issues without returning partial rows.** CAMT preflight scans balances, every entry, and every transaction detail in document order. Invalid core fields exclude that row from a successful value but do not stop later/detail validation. DTD/entity rejection, malformed XML, and exactly-one-statement remain fatal structural errors. `parseCamt053Xml` retains its successful return type and delegates to the same implementation, throwing one fixed validation exception on failed preflight; tool handlers use structured `preflightCamt053Xml`. Do not add `source_row_id` to successful CAMT entries. Wise validates every independent field before deciding whether to build a row and returns no partial parsed rows when any issue exists.
+
+   **Wise header issues short-circuit the row loop.** Accumulate every header issue first; if any exists, return the failure before iterating rows. A missing header makes `idx(name)` return `-1` and `fields[-1]` `undefined`, which would manufacture a spurious issue on every row and bury the real cause under hundreds of derived ones — and, with the 100-issue cap, could evict the header issue itself from the output entirely.
+
+5. **Return bounded, sandboxed failure output.** Both tools use `toolError` with fixed `error`, `category: "import_preflight_failed"`, source, full `rejected_field_count`, deterministic `rejected_fields_truncated`, at most the first 100 issues, and `mutation_occurred: false`. Validate the whole file even after 100 issues. Truncate each exposed raw value to 256 characters and pass it through `wrapUntrustedOcr`; keep field names, row IDs, and reasons fixed. Never expose raw values in error/reason/identity, and never expose an approval or replacement digest on failure.
+
+   The fixed `error` string is **mandatory, not cosmetic**. `toolError` must be called as `toolError({ error: "Import preflight failed", category: "import_preflight_failed", source, rejected_field_count, rejected_fields_truncated, rejected_fields, mutation_occurred: false })`. Omitting `error` routes the payload through `toErrorPayload`'s final fallback (`src/tool-error.ts:35`) into `serializeUnknownError`, which `JSON.stringify`s the whole object and truncates it to 500 characters (`:10-11`) — collapsing every structured field into one string and defeating both the wrapping and the 256-character truncation. `toErrorPayload` returns a `record` with a string `error` verbatim (`:32`), which is the required path.
+
+   Scope note: this clause governs the **preflight failure payload**. It does not claim the module as a whole never echoes raw bytes — structural `xmlParser.parse` failures (item 4) can still surface attacker XML fragments in an exception message. That is pre-existing, outside M05's design row (`design.md:197` scopes M05 to amounts, dates, and identifiers), and is not a regression introduced here; it is recorded for a future finding rather than fixed in M05.
+
+6. **Preserve parser/import and M04 boundaries.** `parse_camt053` performs resolve/read/preflight only, with zero dimension/bank/transaction/client/progress/audit/mutation calls and no duplicate enrichment. `import_camt053` preflights first; only success continues, in this exact live order: `ensureAccountDimensionExists` → `assertStatementAccountMatchesDimension` (H08 binding, `camt-import.ts:1304`) → `enrichWithDuplicates(parsed, api, accounts_dimensions_id)` (H09 scoped duplicates, three arguments, `:1306`) → clients → progress → mutations. Merged `process_camt053` embeds the same structured failure without accounting reads.
+
+   **`process_camt053` must propagate `isError`.** This is a behavioral regression M05 introduces if left unspecified. Today a malformed CAMT file throws out of `loadParsedCamt053` (`camt-import.ts:1004`) and propagates through the merged tool as a genuine MCP error. After M05 the granular handlers return `toolError(...)` (`isError: true`, `src/tool-error.ts:45-48`), but `invokeCapturedTool` (`:1236-1247`) reads only `result.content[0]?.text` and never inspects `isError`, and the merged handler (`:1660-1674`) builds a fresh `CallToolResult` without the flag. Because `parse_camt053`/`import_camt053` are granular-gated and hidden by default (`:1222,1232`; see `EARVELDAJA_EXPOSE_GRANULAR_TOOLS` in CLAUDE.md), production clients see only `process_camt053` — so every M05 rejection would arrive as `isError: false`, reading to a consuming agent as a completed import. No mutation occurs and `mutation_occurred: false` still holds, so this is a truthfulness defect rather than a corruption one, but it must not ship. Extend `invokeCapturedTool` to return the delegated `isError` alongside the parsed payload, and have the merged handler set `isError: true` when the delegated result is an error. Case #6 asserts `result.isError === true` on the merged tool, not merely the nested payload shape.
+
+   Wise keeps malformed/missing execute-digest rejection before file resolution; then resolves/reads raw bytes and computes SHA-256, runs preflight, and on failure returns before `clearRuntimeCaches`, every API read, progress, audit, or mutation. Success continues to the existing single planning cache clear. Preserve all M04 raw-file/caller-argument/connection/live-state/command bindings, execution, partial failures, and safe projection. A valid digest plus malformed CSV returns preflight failure without replacement digest; changed but well-formed CSV still reaches the fixed M04 digest mismatch.
+
+   **Corrected reference sketch.** This replaces Task 25's void Step 3 code. It is illustrative of structure and of the six corrections above, not a literal patch; item 3's semantics govern where they are more specific.
+
+   ```ts
+   // --- shared shape (defined per-module; no new cross-module helper) ---
+   export interface ImportRejectedField { source_row_id: string; field: string; value: string; reason: string }
+   class ImportFieldError extends Error { constructor(readonly issue: ImportRejectedField) { super(issue.reason) } }
+   function reject(source_row_id: string, field: string, value: unknown, reason: string): never {
+     throw new ImportFieldError({ source_row_id, field, value: String(value ?? ""), reason });
+   }
+   // Accumulate: run one field parse, push its issue, keep going. Never abort the file on the first issue.
+   function capture<T>(sink: ImportRejectedField[], parse: () => T): T | undefined {
+     try { return parse() } catch (error) {
+       if (error instanceof ImportFieldError) { sink.push(error.issue); return undefined }
+       throw error;
+     }
+   }
+
+   // --- bounded, sandboxed failure payload (item 5) — note the REQUIRED fixed `error` ---
+   const MAX_EXPOSED_ISSUES = 100, MAX_EXPOSED_VALUE_CHARS = 256;
+   function preflightFailure(source: "camt" | "wise", rejected: ImportRejectedField[]): CallToolResult {
+     return toolError({
+       error: "Import preflight failed",              // REQUIRED: without it tool-error.ts:35 stringifies the payload
+       category: "import_preflight_failed",
+       source,
+       rejected_field_count: rejected.length,         // true total, counted over the WHOLE file
+       rejected_fields_truncated: rejected.length > MAX_EXPOSED_ISSUES,
+       rejected_fields: rejected.slice(0, MAX_EXPOSED_ISSUES).map(issue => ({
+         ...issue,                                    // source_row_id / field / reason are fixed, never raw
+         value: wrapUntrustedOcr(issue.value.slice(0, MAX_EXPOSED_VALUE_CHARS)),
+       })),
+       mutation_occurred: false,                      // never a replacement/approval digest on failure
+     });
+   }
+
+   // --- Wise: positional identity, accumulation, rowIndex preserved ---
+   for (let i = 1; i < records.length; i++) {
+     const rowId = `wise:row:${i}`;                   // ordinal into the blank-filtered array === rowIndex + 1.
+     //                                                  NEVER `wise:row:${i}:${rawId}` — that leaks attacker bytes.
+     const fields = records[i]!;
+     if (fields.length !== headers.length) {
+       rejected.push({ source_row_id: rowId, field: "row", value: String(fields.length),
+                       reason: `Expected ${headers.length} columns` });
+       continue;
+     }
+     const before = rejected.length;
+     const id = capture(rejected, () => parseWiseId(fields[idx("ID")], rowId));
+     // ... every other independent field via capture(), so one row yields ALL its issues ...
+     if (rejected.length !== before) continue;        // no partial rows
+     rows.push(buildWiseRow(fields, idx, rowId, { id: id!, /* ... */ }, i - 1));
+   }
+   // buildWiseRow MUST set `rowIndex` (required by WiseRow, wise-import.ts:35; feeds every M04 digest/command key):
+   //   return { rowIndex, id: required.id, /* ... */ };
+
+   // --- CAMT: accumulate across balances, every entry, every detail, in document order ---
+   // `buildStatement` is a NEW extraction (no such symbol today): the existing body of parseCamt053Xml, threaded
+   // with an issue sink. When rejected.length > 0 it still returns a constructible `value` that is then discarded
+   // — invalid core fields exclude their row from the successful value without aborting later/detail validation.
+   export function preflightCamt053Xml(xml: string): CamtPreflightResult {
+     const rejected: ImportRejectedField[] = [];
+     const value = buildStatement(xml, rejected);     // structural XML/DTD/entity/one-statement errors still THROW
+     return rejected.length ? { ok: false, source: "camt", rejected_fields: rejected }
+                            : { ok: true, source: "camt", value };
+   }
+   // parseCamt053Xml keeps its signature/return type and delegates to buildStatement, throwing one FIXED
+   // (non-echoing) exception on failed preflight — which also closes today's raw-text echo at :476
+   // (`Invalid amount value "${amountText}" in CAMT file`). Existing throw-expecting tests stay green:
+   // camt-import.test.ts:349 (multi-statement), :355 (DOCTYPE), :360 (ENTITY) are all structural.
+   // Converting today's `Unsupported CdtDbtInd` (:928), `entry is missing amount` (:938), and
+   // `entry is missing booking date` (:933) throws into row-addressed issues breaks no test — no test
+   // asserts those messages. This also closes today's raw header echo at wise-import.ts:235
+   // (`Missing expected header "${expected}". Found: ${headers.slice(0, 10).join(", ")}`), whose path
+   // preflightWiseCsv replaces outright.
+   //
+   // loadParsedCamt053 (:1000-1008) loses both handler callers to loadCamt053Preflight and MUST BE DELETED,
+   // not left dead. tsconfig has no noUnusedLocals so tsc would not catch it, but validate:release may.
+   // After deletion parseCamt053Xml's remaining consumers are its tests and the exported public surface.
+
+   // --- handler wiring: exact live order, three-arg enrichment, H08 binding retained ---
+   const preflight = await loadCamt053Preflight(file_path);
+   if (!preflight.ok) return preflightFailure(preflight.source, preflight.rejected_fields);
+   await ensureAccountDimensionExists(api, accounts_dimensions_id);
+   await assertStatementAccountMatchesDimension(api, preflight.value.statement_metadata.iban, accounts_dimensions_id);
+   const parsed = await enrichWithDuplicates(preflight.value, api, accounts_dimensions_id);
+   // parse_camt053 stops after the preflight line — no ensure/assert/enrich, no API reads at all.
+
+   // --- merged wrapper: carry isError (item 6) ---
+   async function invokeCapturedTool(name, args): Promise<{ payload: Record<string, unknown>; isError: boolean }> {
+     const result = await handler(args);
+     // ... existing text extraction / parseMcpResponse ...
+     return { payload, isError: result.isError === true };
+   }
+   ```
+
+7. **Prove GREEN and compatibility.** Require M05 **11/11**, CAMT parser **9/9** (6 + cases 1–3), CAMT tools **49/49** (46 + cases 4–6), Wise **63/63** (58 + cases 7–11), combined **121/121**, M04 compatibility **13/13**, full unit **2,541/2,541 across 76 files**, build/release/diff checks PASS, integration **20 PASS/3 documented skips**, and exact five-file implementation scope. The `invokeCapturedTool`/merged-handler `isError` change of item 6 lives in `src/tools/camt-import.ts` and stays inside that scope.
+
+8. **Freeze and review one immutable artifact.** Freeze `.omc/reviews/M05.diff` from `M05_IMPLEMENTATION_BASE`, record bytes/SHA-256, prove frozen/live identity, and obtain ordered fresh specification, quality/security, and verifier approvals. Any edit invalidates the artifact and all verdicts.
+
+9. **Commit all five scoped files.** Stage all five listed files, prove staged/artifact identity, and commit with `fix(M05): validate bank import rows strictly`. Append the ignored ledger row with baseline, RED/control and GREEN counts, zero-read/mutation evidence, M04 compatibility, artifact identity, verdicts, and commit hash.
+
+10. **Pass Wave 4 before H11.** From clean committed status run `npm run validate:release`, `git diff --check`, `npm run build`, `npm test`, and `npm run test:integration`. Require **2,541/2,541**, integration **20 PASS/3 skips**, and clean status before starting H11.
+
+11. **Record the RED reason honestly, per case.** Do not repeat Task 25's blanket rationale (line 5246, *"Expected: FAIL because `parseFloat("10oops")` returns 10"*) — it is factually wrong for the parser-level cases. Against today's code `preflightCamt053Xml` is an undefined binding, so any assertion routed through it fails with a `TypeError`, not on the reviewed defect. (This does not kill the file: vite's missing-export check is gated behind `if (!("externalize" in fetchResult))`, so source-module bindings resolve to `undefined` and only the individual case fails — which is what keeps item 2's 9 FAIL/2 PASS arithmetic true.)
+
+    A `TypeError` on a missing symbol proves nothing about the defect under review, so **both** defect classes in the design row must RED through a binding that exists at `M05_IMPLEMENTATION_BASE`:
+
+    - **Amounts** — cases #4–#6 drive the real handlers and produce a semantically genuine RED on the `parseFloat` defect (`Number.parseFloat("10oops") === 10`, `camt-import.ts:474`).
+    - **Dates** — case #2 must RED through the existing `parseCamt053Xml` export. The defect is real and reachable today: `normalizeDate` (`camt-import.ts:190-193`) is `value.split("T")[0] ?? value`, so `normalizeDate("2026-02-30")` returns `"2026-02-30"` and `normalizeDate("2026-02-01junk")` returns `"2026-02-01junk"`, unvalidated. Verified by direct evaluation, not inspection.
+
+      **Route the two date sinks separately.** `sampleXml` contains three `>2026-02-01<` occurrences and `String.prototype.replace` with a string pattern replaces only the **first**, which is the OPBD **balance** date (fixture line 34), consumed by `normalizeDate` at `camt-import.ts:916`. The **entry booking date** (fixture line 53), consumed at `camt-import.ts:931` and throwing `"CAMT.053 entry is missing booking date"` at `:933`, is never reached by that replacement. (`<FrDtTm>2026-02-01T00:00:00+02:00</FrDtTm>` at fixture line 10 does not match the pattern at all.) Item 3 mandates validating balance dates **and** entry booking dates; a single first-match replacement would let an implementer validate only `:916`, leave the `:931` defect intact, and still see case #2 GREEN with all 121 tests passing. Pin both:
+
+      ```ts
+      // balance date sink (camt-import.ts:916)
+      expect(() => parseCamt053Xml(sampleXml.replace(">2026-02-01<", ">2026-02-30<"))).toThrow();
+      // entry booking date sink (camt-import.ts:931) — target the BookgDt node explicitly
+      expect(() => parseCamt053Xml(
+        sampleXml.replace("<BookgDt>\n          <Dt>2026-02-01</Dt>", "<BookgDt>\n          <Dt>2026-02-30</Dt>"),
+      )).toThrow();
+      ```
+
+      Do not substitute `replaceAll` for the pair: it routes to both sinks but leaves the ledger unable to attribute the failure to either, which is the attribution this item exists to require.
+
+    Without the case #2 additions the date half of `design.md:197` ("real dates") would be proven by code inspection alone, which the global constraints forbid. The ledger row must state the actual failure reason per case — and, for case #2, per date sink — rather than a single blanket claim.
+
 ### Task 26: H11 — Preserve explicit zero VAT
 
 **Files:**
