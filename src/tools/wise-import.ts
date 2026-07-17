@@ -210,69 +210,370 @@ function classifyWiseOwnTransfer(
   };
 }
 
-function parseWiseNumber(value: string | undefined | null, fieldName: string, defaultValue: number): number {
-  if (value === undefined || value === null || value.trim() === "") return defaultValue;
-  const parsed = parseFloat(value);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`Invalid numeric value in Wise CSV column "${fieldName}": "${value}"`);
-  }
-  return parsed;
+// --- M05: strict Wise row validation -----------------------------------------
+//
+// A Wise export is external input. Every rejected field is addressed by a
+// POSITIONAL identity so no file-supplied byte (the Wise ID, counterparty text,
+// the malformed value itself) reaches an identity or a reason. Raw values are
+// exposed only through the bounded, sandboxed projection in
+// wisePreflightFailure().
+
+export interface ImportRejectedField {
+  source_row_id: string;
+  field: string;
+  value: string;
+  reason: string;
 }
 
-function parseWiseCSV(csv: string): WiseRow[] {
-  const records = parseCSV(csv, ",", 10 * 1024 * 1024).filter(record => record.some(field => field.trim() !== ""));
-  if (records.length < 2) throw new Error("CSV has no data rows");
+type WisePreflightResult =
+  | { ok: true; source: "wise"; rows: WiseRow[] }
+  | { ok: false; source: "wise"; rejected_fields: ImportRejectedField[] };
 
+class ImportFieldError extends Error {
+  constructor(readonly issue: ImportRejectedField) {
+    super(issue.reason);
+    this.name = "ImportFieldError";
+  }
+}
+
+function reject(source_row_id: string, field: string, value: unknown, reason: string): never {
+  throw new ImportFieldError({ source_row_id, field, value: String(value ?? ""), reason });
+}
+
+/** Run one field parse, recording its issue and continuing. */
+function capture<T>(sink: ImportRejectedField[], parse: () => T): T | undefined {
+  try {
+    return parse();
+  } catch (error) {
+    if (error instanceof ImportFieldError) {
+      sink.push(error.issue);
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+const MAX_EXPOSED_ISSUES = 100;
+const MAX_EXPOSED_VALUE_CHARS = 256;
+
+/**
+ * Bounded, sandboxed failure payload. The fixed `error` string is load-bearing:
+ * without it toolError() falls through to serializeUnknownError(), which
+ * JSON.stringifies the whole payload into one 500-char string and defeats both
+ * the sandbox wrapping and the truncation below.
+ */
+function wisePreflightFailure(rejected: ImportRejectedField[]) {
+  return toolError({
+    error: "Import preflight failed",
+    category: "import_preflight_failed",
+    source: "wise",
+    rejected_field_count: rejected.length,
+    rejected_fields_truncated: rejected.length > MAX_EXPOSED_ISSUES,
+    rejected_fields: rejected.slice(0, MAX_EXPOSED_ISSUES).map(issue => ({
+      source_row_id: issue.source_row_id,
+      field: issue.field,
+      value: wrapUntrustedOcr(issue.value.slice(0, MAX_EXPOSED_VALUE_CHARS)),
+      reason: issue.reason,
+    })),
+    mutation_occurred: false,
+  });
+}
+
+// Every column consumed into a WiseRow. `Batch` and `Created by` are accepted
+// export columns that nothing reads, so they are not required; unrelated extra
+// columns are allowed through untouched.
+const WISE_ROW_HEADERS = [
+  "ID", "Status", "Direction", "Created on", "Finished on",
+  "Source fee amount", "Source fee currency", "Target fee amount", "Target fee currency",
+  "Source name", "Source amount (after fees)", "Source currency",
+  "Target name", "Target amount (after fees)", "Target currency",
+  "Exchange rate", "Reference", "Category", "Note",
+] as const;
+type WiseRowHeader = typeof WISE_ROW_HEADERS[number];
+type WiseHeaderIndex = (name: WiseRowHeader) => number;
+
+const WISE_MONEY_REGEX = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+const WISE_CURRENCY_REGEX = /^[A-Z]{3}$/;
+const WISE_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const WISE_STATUS_REGEX = /^[A-Z][A-Z0-9_]{0,63}$/;
+const WISE_TIMESTAMP_REGEX =
+  /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+function assertRealWiseDate(date: string, row: string, field: string, original: unknown): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) return reject(row, field, original, "Expected YYYY-MM-DD");
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  const roundTrips = utc.getUTCFullYear() === year
+    && utc.getUTCMonth() === month - 1
+    && utc.getUTCDate() === day;
+  return roundTrips ? date : reject(row, field, original, "Impossible calendar date");
+}
+
+function parseWiseMoney(value: unknown, row: string, field: string, defaultValue?: number): number {
+  const text = String(value ?? "").trim();
+  if (text === "" && defaultValue !== undefined) return defaultValue;
+  if (!WISE_MONEY_REGEX.test(text)) {
+    return reject(row, field, value, "Wise number must be a fully consumed finite decimal");
+  }
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : reject(row, field, value, "Wise number must be finite");
+}
+
+function parseWiseNonNegativeMoney(value: unknown, row: string, field: string, defaultValue?: number): number {
+  const amount = parseWiseMoney(value, row, field, defaultValue);
+  return amount >= 0 ? amount : reject(row, field, value, "Wise amount must not be negative");
+}
+
+/**
+ * `allowBlank` marks a timestamp Wise legitimately leaves empty. Only
+ * "Finished on" qualifies: Wise blanks it for every transfer that never
+ * completed, and callers already fall back to the creation date
+ * (`wiseDate(row.finishedOn || row.createdOn)`), so a blank still books a real
+ * date. Rejecting it would fail the whole file — preflight runs before the
+ * status filter — turning one cancelled transfer into a blocked import.
+ * "Created on" is the terminal operand of that `||`, so validating it strictly
+ * is what guarantees the chain always yields a real date; a blank there is
+ * rejected because nothing further can substitute for it. That is a
+ * strengthening over the base, which booked `date: ""` when both timestamps
+ * were blank; here the chain can no longer produce one.
+ */
+function parseWiseTimestamp(value: unknown, row: string, field: string, allowBlank = false): string {
+  const text = String(value ?? "").trim();
+  if (text === "" && allowBlank) return text;
+  const match = WISE_TIMESTAMP_REGEX.exec(text);
+  if (!match) return reject(row, field, value, "Invalid Wise timestamp");
+  assertRealWiseDate(match[1]!, row, field, value);
+  if (match[2] !== undefined && (Number(match[2]) > 23 || Number(match[3]) > 59 || Number(match[4]) > 59)) {
+    return reject(row, field, value, "Impossible Wise clock time");
+  }
+  // Preserve the trimmed text; the booking date is derived only after this.
+  return text;
+}
+
+function parseWiseCurrency(value: unknown, row: string, field: string): string {
+  const text = String(value ?? "").trim().toUpperCase();
+  return WISE_CURRENCY_REGEX.test(text)
+    ? text
+    : reject(row, field, value, "Expected a three-letter ISO currency code");
+}
+
+/**
+ * A blank fee currency falls back to its own side's currency, matching what
+ * bookedFeeCurrencyForWiseRow() resolves at use time \u2014 the source side against
+ * sourceCurrency, the target side against targetCurrency \u2014 so the booked value
+ * is unchanged. The use-time resolver still runs and still applies the same
+ * fallback; resolving here only means the stored row already carries a real
+ * currency rather than a blank. Both agree in every case, so this is
+ * behavior-preserving, not a second, competing rule.
+ */
+function parseWiseOptionalCurrency(value: unknown, fallback: string, row: string, field: string): string {
+  return String(value ?? "").trim() === "" ? fallback : parseWiseCurrency(value, row, field);
+}
+
+/**
+ * Only the BLANK fallback needs the row's own side currency; whether a
+ * non-blank value is well-formed is independent of every other field. Asserting
+ * it in the field loop is what keeps a bad ID from hiding a bad fee currency —
+ * buildWiseRow runs only for an otherwise-clean row, so a check that lived
+ * solely there would go unreported on exactly the rows that need it most.
+ */
+function assertWiseOptionalCurrency(value: unknown, row: string, field: string): void {
+  if (String(value ?? "").trim() === "") return;
+  parseWiseCurrency(value, row, field);
+}
+
+/**
+ * Validates the trimmed form; the caller stores the RAW field. The stored id
+ * feeds three identity sinks — the `WISE:{id}` transaction description
+ * (:1334), the journal `document_number`, which carries the raw unprefixed id
+ * (:1711), and the M04 command digest (sha256(rowIndex\0action\0id)) — so
+ * normalizing it here would silently shift the identity of every row against
+ * ledgers imported before M05.
+ */
+function assertWiseId(value: unknown, row: string): void {
+  const text = String(value ?? "").trim();
+  if (!WISE_ID_REGEX.test(text)) {
+    reject(row, "ID", value, "Wise ID must be 1-128 characters of ASCII alphanumerics, '.', '_', ':' or '-'");
+  }
+}
+
+/**
+ * Validates the trimmed form but returns nothing: the caller stores the RAW
+ * field. Eligibility stays the raw `r.status !== "COMPLETED"` comparison in
+ * the eligible-rows filter, so normalizing the stored value \u2014 by uppercasing OR by trimming \u2014
+ * would make a `completed` / `" COMPLETED "` row that is silently filtered
+ * today newly eligible for mutation. That is a new mutation path, not a
+ * tightening, and the global constraints forbid it. Validate the trimmed form;
+ * store the bytes as sent.
+ */
+function assertWiseStatus(value: unknown, row: string): void {
+  const text = String(value ?? "").trim();
+  if (!WISE_STATUS_REGEX.test(text)) {
+    reject(row, "Status", value, "Wise status must be uppercase alphanumerics or underscore");
+  }
+}
+
+/**
+ * Validates AFTER the existing normalizeWiseDirection() casing rules, so a
+ * lowercase direction that works today keeps working. The caller stores the RAW
+ * field; every consumer normalizes at use time.
+ */
+function assertWiseDirection(value: unknown, row: string): void {
+  if (normalizeWiseDirection(String(value ?? "")) === undefined) {
+    reject(row, "Direction", value, "Wise direction must be IN, OUT or NEUTRAL");
+  }
+}
+
+function validateWiseHeaders(
+  records: string[][],
+  rejected: ImportRejectedField[],
+): { headers: string[]; idx: WiseHeaderIndex } {
   const headers = records[0]!.map(header => header.replace(/^\uFEFF/, "").trim());
-  // Validate required headers exist
-  const requiredHeaders = [
-    "ID", "Status", "Direction",
-    "Source amount (after fees)", "Target amount (after fees)",
-    "Exchange rate",
-  ];
-  for (const expected of requiredHeaders) {
-    if (!headers.includes(expected)) {
-      throw new Error(`Missing expected header "${expected}". Found: ${headers.slice(0, 10).join(", ")}`);
+  for (const expected of WISE_ROW_HEADERS) {
+    const count = headers.filter(header => header === expected).length;
+    if (count !== 1) {
+      rejected.push({
+        source_row_id: "wise:header",
+        field: expected,
+        value: String(count),
+        reason: count === 0 ? "Missing expected header" : "Header occurs more than once",
+      });
     }
   }
+  return { headers, idx: name => headers.indexOf(name) };
+}
 
-  const idx = (name: string) => headers.indexOf(name);
+function parseWiseExchangeRate(value: unknown, row: string): number {
+  const rate = parseWiseMoney(value, row, "Exchange rate", 1);
+  return rate > 0 ? rate : reject(row, "Exchange rate", value, "Wise exchange rate must be positive");
+}
+
+/**
+ * Fields whose VALUE is derived by validation. `id`, `status`, and `direction`
+ * are deliberately absent: they are validated but stored raw, because their
+ * stored bytes decide filtering eligibility and M04 identity.
+ */
+interface ValidatedWiseFields {
+  createdOn: string; finishedOn: string;
+  sourceAmount: number; targetAmount: number;
+  sourceCurrency: string; targetCurrency: string;
+  sourceFeeAmount: number; targetFeeAmount: number;
+  exchangeRate: number;
+}
+
+function buildWiseRow(
+  fields: string[],
+  idx: WiseHeaderIndex,
+  row: string,
+  rowIndex: number,
+  valid: ValidatedWiseFields,
+): WiseRow {
+  return {
+    // Preserved verbatim: every M04 command key and approval digest is derived
+    // from rowIndex.
+    rowIndex,
+    // id / status / direction are validated but stored EXACTLY as sent.
+    // Normalizing them here would change behavior rather than tighten it:
+    // a trimmed status flips a padded " COMPLETED " row from filtered to
+    // booked, and a trimmed id shifts the WISE:{id} description, the raw-id
+    // journal document_number, and the M04 command digest alike.
+    id: fields[idx("ID")] ?? "",
+    status: fields[idx("Status")] ?? "",
+    direction: fields[idx("Direction")] ?? "",
+    createdOn: valid.createdOn,
+    finishedOn: valid.finishedOn,
+    sourceFeeAmount: valid.sourceFeeAmount,
+    // Only the fee CURRENCIES depend on other validated fields (their own
+    // side's currency), so they resolve here rather than in the field loop.
+    sourceFeeCurrency: parseWiseOptionalCurrency(fields[idx("Source fee currency")], valid.sourceCurrency, row, "Source fee currency"),
+    targetFeeAmount: valid.targetFeeAmount,
+    targetFeeCurrency: parseWiseOptionalCurrency(fields[idx("Target fee currency")], valid.targetCurrency, row, "Target fee currency"),
+    sourceName: fields[idx("Source name")] ?? "",
+    sourceAmount: valid.sourceAmount,
+    sourceCurrency: valid.sourceCurrency,
+    targetName: fields[idx("Target name")] ?? "",
+    targetAmount: valid.targetAmount,
+    targetCurrency: valid.targetCurrency,
+    exchangeRate: valid.exchangeRate,
+    reference: fields[idx("Reference")] ?? "",
+    category: fields[idx("Category")] ?? "",
+    note: fields[idx("Note")] ?? "",
+  };
+}
+
+function preflightWiseCsv(csv: string): WisePreflightResult {
+  const records = parseCSV(csv, ",", 10 * 1024 * 1024).filter(record => record.some(field => field.trim() !== ""));
+  // A headers-only file is a structural error: there is no data row to address.
+  if (records.length < 2) throw new Error("CSV has no data rows");
+
+  const rejected: ImportRejectedField[] = [];
+  const { headers, idx } = validateWiseHeaders(records, rejected);
+  // Header issues short-circuit: with a missing header idx() returns -1 and
+  // every row would manufacture a derived issue, burying the real cause and
+  // potentially evicting it under the exposure cap.
+  if (rejected.length > 0) return { ok: false, source: "wise", rejected_fields: rejected };
 
   const rows: WiseRow[] = [];
   for (let i = 1; i < records.length; i++) {
     const fields = records[i]!;
-    if (fields.length < headers.length - 2) continue; // allow slightly short rows
+    // Positional identity: the ordinal of this data record, == rowIndex + 1.
+    // Never the Wise ID \u2014 that is attacker-controlled.
+    const rowId = `wise:row:${i}`;
 
-    rows.push({
-      rowIndex: i - 1,
-      id: fields[idx("ID")] ?? "",
-      status: fields[idx("Status")] ?? "",
-      direction: fields[idx("Direction")] ?? "",
-      createdOn: fields[idx("Created on")] ?? "",
-      finishedOn: fields[idx("Finished on")] ?? "",
-      sourceFeeAmount: parseWiseNumber(fields[idx("Source fee amount")], "Source fee amount", 0),
-      sourceFeeCurrency: fields[idx("Source fee currency")] ?? "EUR",
-      targetFeeAmount: parseWiseNumber(fields[idx("Target fee amount")], "Target fee amount", 0),
-      targetFeeCurrency: fields[idx("Target fee currency")] ?? "EUR",
-      sourceName: fields[idx("Source name")] ?? "",
-      sourceAmount: parseWiseNumber(fields[idx("Source amount (after fees)")], "Source amount (after fees)", 0),
-      sourceCurrency: fields[idx("Source currency")] ?? "EUR",
-      targetName: fields[idx("Target name")] ?? "",
-      targetAmount: parseWiseNumber(fields[idx("Target amount (after fees)")], "Target amount (after fees)", 0),
-      targetCurrency: fields[idx("Target currency")] ?? "EUR",
-      exchangeRate: parseWiseNumber(fields[idx("Exchange rate")], "Exchange rate", 1),
-      reference: fields[idx("Reference")] ?? "",
-      category: fields[idx("Category")] ?? "",
-      note: fields[idx("Note")] ?? "",
-    });
+    if (fields.length !== headers.length) {
+      rejected.push({
+        source_row_id: rowId,
+        field: "row",
+        value: String(fields.length),
+        reason: `Expected ${headers.length} columns`,
+      });
+      continue;
+    }
+
+    // EVERY independently checkable field is validated before the row is
+    // abandoned, so one pass reports all of a row's defects rather than only
+    // the first. Anything that depends on nothing else belongs here rather
+    // than in buildWiseRow, which runs only for an otherwise-clean row: a bad
+    // ID must not hide a bad rate.
+    const before = rejected.length;
+    // Validated in place; their raw bytes are what buildWiseRow stores.
+    capture(rejected, () => assertWiseId(fields[idx("ID")], rowId));
+    capture(rejected, () => assertWiseStatus(fields[idx("Status")], rowId));
+    capture(rejected, () => assertWiseDirection(fields[idx("Direction")], rowId));
+    // Only the blank fallback is side-dependent, so validate the non-blank
+    // form here and leave buildWiseRow to resolve it.
+    capture(rejected, () => assertWiseOptionalCurrency(fields[idx("Source fee currency")], rowId, "Source fee currency"));
+    capture(rejected, () => assertWiseOptionalCurrency(fields[idx("Target fee currency")], rowId, "Target fee currency"));
+    const valid = {
+      createdOn: capture(rejected, () => parseWiseTimestamp(fields[idx("Created on")], rowId, "Created on")),
+      finishedOn: capture(rejected, () => parseWiseTimestamp(fields[idx("Finished on")], rowId, "Finished on", true)),
+      sourceFeeAmount: capture(rejected, () => parseWiseNonNegativeMoney(fields[idx("Source fee amount")], rowId, "Source fee amount", 0)),
+      targetFeeAmount: capture(rejected, () => parseWiseNonNegativeMoney(fields[idx("Target fee amount")], rowId, "Target fee amount", 0)),
+      sourceAmount: capture(rejected, () => parseWiseNonNegativeMoney(fields[idx("Source amount (after fees)")], rowId, "Source amount (after fees)", 0)),
+      targetAmount: capture(rejected, () => parseWiseNonNegativeMoney(fields[idx("Target amount (after fees)")], rowId, "Target amount (after fees)", 0)),
+      sourceCurrency: capture(rejected, () => parseWiseCurrency(fields[idx("Source currency")], rowId, "Source currency")),
+      targetCurrency: capture(rejected, () => parseWiseCurrency(fields[idx("Target currency")], rowId, "Target currency")),
+      exchangeRate: capture(rejected, () => parseWiseExchangeRate(fields[idx("Exchange rate")], rowId)),
+    };
+
+    if (rejected.length !== before) continue;
+
+    capture(rejected, () => rows.push(buildWiseRow(fields, idx, rowId, i - 1, valid as ValidatedWiseFields)));
   }
 
-  return rows;
+  // No partial rows: any issue rejects the whole file.
+  return rejected.length > 0
+    ? { ok: false, source: "wise", rejected_fields: rejected }
+    : { ok: true, source: "wise", rows };
 }
 
 function wiseDate(dateStr: string): string {
-  // "2026-01-19 17:59:56" → "2026-01-19"
-  return dateStr.split(" ")[0] ?? dateStr;
+  // "2026-01-19 17:59:56" or "2026-01-19T17:59:56" → "2026-01-19".
+  // Both separators are accepted by WISE_TIMESTAMP_REGEX, so splitting on space
+  // alone would hand the whole "…T…" string back as a booking date and skew the
+  // date_from/date_to string comparisons.
+  return dateStr.split(/[ T]/)[0] ?? dateStr;
 }
 
 function assertIsoDate(value: string | undefined, fieldName: "date_from" | "date_to"): void {
@@ -858,7 +1159,12 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       }
       const csv = csvBytes.toString("utf8");
       const rawCsvSha256 = sha256(csvBytes);
-      const rows = parseWiseCSV(csv);
+      // Preflight before the cache clear, every API read, progress report,
+      // audit entry, and mutation. A valid digest over a malformed CSV fails
+      // here and never hands back a replacement digest.
+      const preflight = preflightWiseCsv(csv);
+      if (!preflight.ok) return wisePreflightFailure(preflight.rejected_fields);
+      const rows = preflight.rows;
       const executeRequested = execute === true;
       // Planning is always side-effect free. Approved execution consumes the
       // compiled command payloads after the digest gate below.

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { toolError } from "../tool-error.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Client, Transaction } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
@@ -31,12 +32,150 @@ const xmlParser = new XMLParser({
   attributeNamePrefix: "@_",
   processEntities: false,
   trimValues: true,
+  // Keep every tag value as raw text. The parser's built-in number coercion
+  // rewrites the lexeme before it can be validated — it turns "1e2" into 100
+  // and "0x10" into 16, so a statement could launder a hex or exponent literal
+  // into a booked amount that strict validation never sees. It also silently
+  // drops leading zeros from identifiers. M05 validates the bytes as sent.
+  parseTagValue: false,
   // Strip XML namespace prefixes so a namespace-qualified statement
   // (<ns:Document>…) parses under the same unprefixed keys (Document, Stmt, …)
   // this code navigates by. Without it, valid prefixed CAMT files fail with
   // "Expected exactly one <Stmt>, found 0".
   removeNSPrefix: true,
 });
+
+// --- M05: strict import validation -------------------------------------------
+//
+// External statements are attacker-controlled. Every rejected field is
+// addressed by a POSITIONAL identity so no file-supplied byte (statement ID,
+// counterparty text, the malformed value itself) can reach an identity or a
+// reason. Raw values are exposed only through the bounded, sandboxed projection
+// in importPreflightFailure().
+
+export interface ImportRejectedField {
+  source_row_id: string;
+  field: string;
+  value: string;
+  reason: string;
+}
+
+export type CamtPreflightResult =
+  | { ok: true; source: "camt"; value: CamtParseResult }
+  | { ok: false; source: "camt"; rejected_fields: ImportRejectedField[] };
+
+class ImportFieldError extends Error {
+  constructor(readonly issue: ImportRejectedField) {
+    super(issue.reason);
+    this.name = "ImportFieldError";
+  }
+}
+
+function reject(source_row_id: string, field: string, value: unknown, reason: string): never {
+  throw new ImportFieldError({ source_row_id, field, value: String(value ?? ""), reason });
+}
+
+/**
+ * Run one field parse, recording its issue and continuing. Accumulating rather
+ * than throwing on the first bad field is what lets one pass report defects
+ * from every entry in a file instead of stopping at the first. Coverage is per
+ * capture() call, not exhaustive within one: a node parsed by a single call
+ * (parseAmountNode validates amount before currency) reports only the first
+ * defect it hits, and the rest of that node's fields go unexamined until the
+ * reported one is fixed.
+ */
+function capture<T>(sink: ImportRejectedField[], parse: () => T): T | undefined {
+  try {
+    return parse();
+  } catch (error) {
+    if (error instanceof ImportFieldError) {
+      sink.push(error.issue);
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+const MAX_EXPOSED_ISSUES = 100;
+const MAX_EXPOSED_VALUE_CHARS = 256;
+
+/**
+ * Bounded, sandboxed failure payload. The fixed `error` string is load-bearing:
+ * without it toolError() falls through to serializeUnknownError(), which
+ * JSON.stringifies the whole payload into one 500-char string and defeats both
+ * the sandbox wrapping and the truncation below.
+ */
+function importPreflightFailure(source: "camt" | "wise", rejected: ImportRejectedField[]) {
+  return toolError({
+    error: "Import preflight failed",
+    category: "import_preflight_failed",
+    source,
+    rejected_field_count: rejected.length,
+    rejected_fields_truncated: rejected.length > MAX_EXPOSED_ISSUES,
+    rejected_fields: rejected.slice(0, MAX_EXPOSED_ISSUES).map(issue => ({
+      source_row_id: issue.source_row_id,
+      field: issue.field,
+      value: wrapUntrustedOcr(issue.value.slice(0, MAX_EXPOSED_VALUE_CHARS)),
+      reason: issue.reason,
+    })),
+    mutation_occurred: false,
+  });
+}
+
+const CAMT_MONEY_REGEX = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+const CURRENCY_REGEX = /^[A-Z]{3}$/;
+const CAMT_DATE_TIME_REGEX =
+  /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|([+-])(\d{2}):(\d{2}))?)?$/;
+
+function parseCamtMoney(value: unknown, row: string, field: string): number {
+  const text = String(value ?? "").trim();
+  if (!CAMT_MONEY_REGEX.test(text)) {
+    return reject(row, field, value, "CAMT amount must be a fully consumed finite decimal");
+  }
+  const amount = Number(text);
+  return Number.isFinite(amount) ? amount : reject(row, field, value, "CAMT amount must be finite");
+}
+
+/** Reject dates the calendar does not have (2026-02-30, 2026-13-01). */
+function assertRealDate(date: string, row: string, field: string, original: unknown): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) return reject(row, field, original, "Expected YYYY-MM-DD");
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  const roundTrips = utc.getUTCFullYear() === year
+    && utc.getUTCMonth() === month - 1
+    && utc.getUTCDate() === day;
+  return roundTrips ? date : reject(row, field, original, "Impossible calendar date");
+}
+
+function parseCamtDate(value: unknown, row: string, field: string): string {
+  const text = String(value ?? "").trim();
+  const match = CAMT_DATE_TIME_REGEX.exec(text);
+  if (!match) return reject(row, field, value, "Expected a complete CAMT YYYY-MM-DD or ISO date-time");
+
+  // Retain the LEXICAL calendar prefix — converting through Date would shift the
+  // day for offsets far from UTC.
+  const date = assertRealDate(match[1]!, row, field, value);
+
+  if (match[2] !== undefined && (Number(match[2]) > 23 || Number(match[3]) > 59 || Number(match[4]) > 59)) {
+    return reject(row, field, value, "Impossible CAMT clock time");
+  }
+  if (match[6] !== undefined) {
+    const offsetHours = Number(match[6]);
+    const offsetMinutes = Number(match[7]);
+    if (offsetHours > 14 || offsetMinutes > 59 || (offsetHours === 14 && offsetMinutes !== 0)) {
+      return reject(row, field, value, "Invalid CAMT timezone offset");
+    }
+  }
+  return date;
+}
+
+function parseCurrency(value: unknown, row: string, field: string): string {
+  const text = String(value ?? "").trim().toUpperCase();
+  return CURRENCY_REGEX.test(text)
+    ? text
+    : reject(row, field, value, "Expected a three-letter ISO currency code");
+}
 
 type XmlRecord = Record<string, unknown>;
 
@@ -185,11 +324,6 @@ function textArrayAt(node: unknown, path: string[]): string[] {
   return asArray(valueAt(node, path))
     .map(item => textOf(item))
     .filter((item): item is string => !!item);
-}
-
-function normalizeDate(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  return value.split("T")[0] ?? value;
 }
 
 function normalizeOptionalReference(value: string | undefined): string | undefined {
@@ -467,28 +601,41 @@ function storedBankAccountNo(transaction: Pick<Transaction,
 }
 
 
-function parseAmountNode(node: unknown, fallbackCurrency?: string): { amount: number; currency: string } | undefined {
+function parseAmountNode(
+  node: unknown,
+  fallbackCurrency: string | undefined,
+  sourceRowId: string,
+  field = "amount",
+): { amount: number; currency: string; text: string } | undefined {
   const amountText = textOf(node);
   if (!amountText) return undefined;
 
-  const amount = Number.parseFloat(amountText);
-  if (!Number.isFinite(amount)) {
-    throw new Error(`Invalid amount value "${amountText}" in CAMT file`);
-  }
-
-  const record = asRecord(node);
-  const currency = textOf(record?.["@_Ccy"]) ?? fallbackCurrency ?? "EUR";
-  return { amount, currency };
+  const currencyText = textOf(asRecord(node)?.["@_Ccy"]);
+  return {
+    amount: parseCamtMoney(amountText, sourceRowId, field),
+    currency: currencyText === undefined
+      ? (fallbackCurrency ?? "EUR")
+      : parseCurrency(currencyText, sourceRowId, `${field}_currency`),
+    // The raw lexeme, so a later rule (positivity) can echo the bytes the file
+    // actually carried rather than a reparsed number: `value` is the operator's
+    // handle on the source document, and it is what the output boundary wraps.
+    text: amountText,
+  };
 }
 
 function parseOriginalAmountNode(
   txDetails: unknown,
-  fallbackCurrency?: string,
+  fallbackCurrency: string | undefined,
+  sourceRowId: string,
 ): { amount: number; currency: string } | undefined {
-  return (
-    parseAmountNode(valueAt(txDetails, ["AmtDtls", "TxAmt", "Amt"]), fallbackCurrency) ??
-    parseAmountNode(valueAt(txDetails, ["AmtDtls", "InstdAmt", "Amt"]), fallbackCurrency)
-  );
+  const amount =
+    parseAmountNode(valueAt(txDetails, ["AmtDtls", "TxAmt", "Amt"]), fallbackCurrency, sourceRowId, "original_amount") ??
+    parseAmountNode(valueAt(txDetails, ["AmtDtls", "InstdAmt", "Amt"]), fallbackCurrency, sourceRowId, "original_amount");
+  // Direction is carried separately, so an original amount is positive.
+  if (amount && !(amount.amount > 0)) {
+    return reject(sourceRowId, "original_amount", amount.text, "CAMT original amount must be positive");
+  }
+  return amount;
 }
 
 function collectTransactionDetails(entryNode: unknown): Array<unknown | undefined> {
@@ -752,9 +899,17 @@ function findPossibleDuplicateMatches(
   const entryDescription = normalizeBatchDuplicateKeyPart(entry.description);
   const entryReference = normalizeBatchDuplicateKeyPart(entry.reference_number);
   const entryIban = normalizePossibleDuplicateIban(entry.counterparty_iban);
-
+  // Every candidate is considered. This function is only ever reached for an
+  // entry that is NOT an exact duplicate — the caller skips those before
+  // calling — so no candidate here can be double-reported, and a candidate's
+  // bank reference is not grounds to drop it. Excluding candidates that merely
+  // HAVE a reference used to hide two silent-rebooking paths: a reference
+  // whose stored bytes were coerced by the base parser ("007" written as "7"),
+  // and a reference repeated across an entry's legs, which makes
+  // findDuplicateTransactionIds refuse the byBankRef fallback and leaves this
+  // review the only remaining net. Output is still bounded downstream by the
+  // requirement of at least one concrete match_reason.
   return candidates
-    .filter((transaction) => !directBankReferenceLookupKey(transaction))
     .map((transaction) => {
       const existingBankAccountNo = normalizeOptionalReference(transaction.bank_account_no ?? undefined);
       const matchReasons: string[] = [];
@@ -882,7 +1037,7 @@ function summarizeEntries(entries: ParsedCamtEntry[]): CamtParseResult["summary"
   return summary;
 }
 
-export function parseCamt053Xml(xml: string): CamtParseResult {
+function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParseResult {
   if (XML_DTD_PATTERN.test(xml)) {
     throw new Error("CAMT.053 files must not contain DOCTYPE or ENTITY declarations");
   }
@@ -902,18 +1057,51 @@ export function parseCamt053Xml(xml: string): CamtParseResult {
     throw new Error("CAMT.053 file is missing statement account IBAN");
   }
 
-  const accountCurrency = textAt(statement, ["Acct", "Ccy"]) ?? "EUR";
+  // Held to the same three-letter rule as every <Amt Ccy=""> attribute: this
+  // value is the fallback currency for any amount that carries no attribute of
+  // its own, so it reaches cl_currencies_id on the mutation payload, and it is
+  // emitted in statement_metadata, which wraps only statement_id and bank_name.
+  const rawAccountCurrency = textAt(statement, ["Acct", "Ccy"]);
+  const accountCurrency = rawAccountCurrency === undefined
+    ? "EUR"
+    : capture(rejected, () => parseCurrency(rawAccountCurrency, "camt:statement:1", "account_currency")) ?? "EUR";
 
-  const balances = asArray(valueAt(statement, ["Bal"])).map(balanceNode => {
+  // Statement period strings are validated but preserved verbatim on success.
+  const periodFrom = textAt(statement, ["FrToDt", "FrDtTm"]) ?? textAt(statement, ["FrToDt", "FrDt"]);
+  const periodTo = textAt(statement, ["FrToDt", "ToDtTm"]) ?? textAt(statement, ["FrToDt", "ToDt"]);
+  if (periodFrom !== undefined) capture(rejected, () => parseCamtDate(periodFrom, "camt:statement:1", "period_from"));
+  if (periodTo !== undefined) capture(rejected, () => parseCamtDate(periodTo, "camt:statement:1", "period_to"));
+
+  const balances = asArray(valueAt(statement, ["Bal"])).map((balanceNode, balanceIndex) => {
+    const rowId = `camt:balance:${balanceIndex + 1}`;
     const balanceCode = textAt(balanceNode, ["Tp", "CdOrPrtry", "Cd"]);
-    const amount = parseAmountNode(valueAt(balanceNode, ["Amt"]), accountCurrency);
+    // A balance amount may legitimately be zero; its sign is carried separately
+    // by CdtDbtInd, so only the lexeme itself is validated here.
+    const amount = capture(rejected, () => parseAmountNode(valueAt(balanceNode, ["Amt"]), accountCurrency, rowId));
+    const rawDate = textAt(balanceNode, ["Dt", "Dt"]) ?? textAt(balanceNode, ["Dt", "DtTm"]);
+    const date = rawDate === undefined
+      ? undefined
+      : capture(rejected, () => parseCamtDate(rawDate, rowId, "balance_date"));
+    // Validated under the same row identity as the balance amount and date.
+    // The direction decides the balance's sign, so an unvalidated value here
+    // misstates the statement rather than merely echoing bad bytes. (This is a
+    // local justification, not a completeness claim: statement_metadata still
+    // emits bank_bic raw, an optional identifier nothing reads. The iban is
+    // not in that set — it is required, and H08 validates it at the
+    // statement-binding gate via assertStatementAccountMatchesDimension.)
+    const rawDirection = textAt(balanceNode, ["CdtDbtInd"]);
+    const direction = rawDirection === undefined
+      ? undefined
+      : capture(rejected, () => rawDirection === "CRDT" || rawDirection === "DBIT"
+        ? rawDirection
+        : reject(rowId, "balance_direction", rawDirection, "CAMT direction must be CRDT or DBIT"));
     return {
       code: balanceCode,
       balance: amount && {
         amount: amount.amount,
         currency: amount.currency,
-        direction: textAt(balanceNode, ["CdtDbtInd"]),
-        date: normalizeDate(textAt(balanceNode, ["Dt", "Dt"]) ?? textAt(balanceNode, ["Dt", "DtTm"])),
+        direction,
+        date,
       },
     };
   });
@@ -922,24 +1110,37 @@ export function parseCamt053Xml(xml: string): CamtParseResult {
   const closingBalance = balances.find(balance => balance.code === "CLBD")?.balance;
 
   const entries: ParsedCamtEntry[] = [];
-  for (const entryNode of asArray(valueAt(statement, ["Ntry"]))) {
-    const direction = textAt(entryNode, ["CdtDbtInd"]);
-    if (direction !== "CRDT" && direction !== "DBIT") {
-      throw new Error(`Unsupported CdtDbtInd "${direction ?? "missing"}" in CAMT.053 file`);
-    }
+  for (const [entryIndex, entryNode] of asArray(valueAt(statement, ["Ntry"])).entries()) {
+    // Positional identity only. The statement <Id> is attacker-controlled and
+    // must never appear in a row identity.
+    const entryRowId = `camt:ntry:${entryIndex + 1}`;
 
-    const entryDate = normalizeDate(textAt(entryNode, ["BookgDt", "Dt"]) ?? textAt(entryNode, ["BookgDt", "DtTm"]));
-    if (!entryDate) {
-      throw new Error("CAMT.053 entry is missing booking date");
-    }
+    const rawDirection = textAt(entryNode, ["CdtDbtInd"]);
+    const direction = rawDirection === "CRDT" || rawDirection === "DBIT"
+      ? rawDirection
+      : capture(rejected, () => reject(entryRowId, "direction", rawDirection, "CAMT direction must be CRDT or DBIT"));
 
-    const entryAmount = parseAmountNode(valueAt(entryNode, ["Amt"]), accountCurrency);
-    if (!entryAmount) {
-      throw new Error("CAMT.053 entry is missing amount");
-    }
+    const rawDate = textAt(entryNode, ["BookgDt", "Dt"]) ?? textAt(entryNode, ["BookgDt", "DtTm"]);
+    const entryDate = rawDate === undefined
+      ? capture(rejected, () => reject(entryRowId, "booking_date", rawDate, "CAMT entry is missing a booking date"))
+      : capture(rejected, () => parseCamtDate(rawDate, entryRowId, "booking_date"));
+
+    const entryAmount = capture(rejected, () => {
+      const amount = parseAmountNode(valueAt(entryNode, ["Amt"]), accountCurrency, entryRowId);
+      if (!amount) return reject(entryRowId, "amount", undefined, "CAMT entry is missing an amount");
+      // Direction is carried separately, so a booked entry amount is positive.
+      if (!(amount.amount > 0)) return reject(entryRowId, "amount", amount.text, "CAMT entry amount must be positive");
+      return amount;
+    });
 
     const detailNodes = collectTransactionDetails(entryNode);
-    const originalAmounts = detailNodes.map((txDetails) => parseOriginalAmountNode(txDetails, accountCurrency));
+    const originalAmounts = detailNodes.map((txDetails, detailIndex) => capture(rejected, () =>
+      parseOriginalAmountNode(txDetails, accountCurrency, `${entryRowId}:tx:${detailIndex + 1}`)));
+
+    // An invalid core field excludes this row from the successful value but
+    // never stops validation of later entries or details.
+    if (!direction || !entryDate || !entryAmount) continue;
+
     const bookedAmounts = splitBookedAmounts(
       entryAmount.amount,
       originalAmounts.map((amount) => amount?.amount),
@@ -985,10 +1186,7 @@ export function parseCamt053Xml(xml: string): CamtParseResult {
       currency: accountCurrency,
       bank_bic: textAt(statement, ["Acct", "Svcr", "FinInstnId", "BIC"]),
       bank_name: textAt(statement, ["Acct", "Svcr", "FinInstnId", "Nm"]),
-      period: {
-        from: textAt(statement, ["FrToDt", "FrDtTm"]) ?? textAt(statement, ["FrToDt", "FrDt"]),
-        to: textAt(statement, ["FrToDt", "ToDtTm"]) ?? textAt(statement, ["FrToDt", "ToDt"]),
-      },
+      period: { from: periodFrom, to: periodTo },
       opening_balance: openingBalance,
       closing_balance: closingBalance,
     },
@@ -997,11 +1195,39 @@ export function parseCamt053Xml(xml: string): CamtParseResult {
   };
 }
 
-async function loadParsedCamt053(filePath: string): Promise<CamtParseResult> {
+/**
+ * Structured preflight used by the tool handlers: validates the whole file and
+ * accumulates every invalid field. Structural failures (DTD/entity, malformed
+ * XML, not exactly one statement) remain thrown.
+ */
+export function preflightCamt053Xml(xml: string): CamtPreflightResult {
+  const rejected: ImportRejectedField[] = [];
+  const value = buildStatement(xml, rejected);
+  return rejected.length > 0
+    ? { ok: false, source: "camt", rejected_fields: rejected }
+    : { ok: true, source: "camt", value };
+}
+
+/**
+ * Value-returning parser kept for callers that want an exception on any invalid
+ * row. The thrown message is fixed and never echoes file content.
+ */
+export function parseCamt053Xml(xml: string): CamtParseResult {
+  const rejected: ImportRejectedField[] = [];
+  const value = buildStatement(xml, rejected);
+  if (rejected.length > 0) {
+    throw new Error(
+      `CAMT.053 file contains ${rejected.length} invalid field(s). ` +
+      "Use the import tool to see which rows and fields were rejected.",
+    );
+  }
+  return value;
+}
+
+async function loadCamt053Preflight(filePath: string): Promise<CamtPreflightResult> {
   const { path, cleanup } = await resolveFileInput(filePath, [".xml"], CAMT_MAX_FILE_SIZE);
   try {
-    const xml = await readFile(path, "utf-8");
-    return parseCamt053Xml(xml);
+    return preflightCamt053Xml(await readFile(path, "utf-8"));
   } finally {
     if (cleanup) await cleanup();
   }
@@ -1205,6 +1431,9 @@ const isoDateString = (description: string) =>
 
 interface CamtToolResponse {
   content: Array<{ type: "text"; text: string }>;
+  // Modelled explicitly so a delegated failure cannot be silently downgraded to
+  // a success by the merged wrapper.
+  isError?: boolean;
 }
 type CamtToolHandler = (args: Record<string, unknown>) => Promise<CamtToolResponse>;
 
@@ -1233,7 +1462,10 @@ export function registerCamtImportTools(
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
 
-  async function invokeCapturedTool(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async function invokeCapturedTool(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ payload: Record<string, unknown>; isError: boolean }> {
     const handler = handlers.get(name);
     if (!handler) throw new Error(`Internal error: handler "${name}" is not registered`);
     const result = await handler(args);
@@ -1241,9 +1473,14 @@ export function registerCamtImportTools(
     if (!text) throw new Error(`CAMT wrapper received no text payload from ${name}`);
 
     const parsed = parseMcpResponse(text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : { value: parsed };
+    return {
+      payload: typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : { value: parsed },
+      // The merged tool is the only CAMT entry point exposed by default, so a
+      // delegated failure must not read as a completed import here.
+      isError: result.isError === true,
+    };
   }
 
   registerCapturedTool(
@@ -1254,7 +1491,11 @@ export function registerCamtImportTools(
     },
     { ...readOnly, openWorldHint: true, title: "Parse CAMT.053" },
     async ({ file_path }) => {
-      const parsed = await loadParsedCamt053(file_path);
+      // Resolve, read, preflight — and nothing else. No ledger or configuration
+      // read happens until the file is known to be well-formed.
+      const preflight = await loadCamt053Preflight(file_path);
+      if (!preflight.ok) return importPreflightFailure(preflight.source, preflight.rejected_fields);
+      const parsed = preflight.value;
       return {
         content: [{
           type: "text",
@@ -1299,7 +1540,12 @@ export function registerCamtImportTools(
         throw new Error(`date_from ${date_from} must be on or before date_to ${date_to}`);
       }
 
-      const loaded = await loadParsedCamt053(file_path);
+      // Preflight first: a malformed file is rejected before dimension
+      // existence (M05), H08 statement binding, or H09 duplicate enrichment.
+      const preflight = await loadCamt053Preflight(file_path);
+      if (!preflight.ok) return importPreflightFailure(preflight.source, preflight.rejected_fields);
+      const loaded = preflight.value;
+
       await ensureAccountDimensionExists(api, accounts_dimensions_id);
       await assertStatementAccountMatchesDimension(api, loaded.statement_metadata.iban, accounts_dimensions_id);
 
@@ -1657,9 +1903,10 @@ export function registerCamtImportTools(
         };
       }
 
-      const delegatedResult = await invokeCapturedTool(delegatedTool, delegatedArgs);
-      const result = remapHiddenGranularWorkflowResult(delegatedResult);
+      const delegated = await invokeCapturedTool(delegatedTool, delegatedArgs);
+      const result = remapHiddenGranularWorkflowResult(delegated.payload);
       return {
+        ...(delegated.isError ? { isError: true } : {}),
         content: [{
           type: "text",
           text: toMcpJson({

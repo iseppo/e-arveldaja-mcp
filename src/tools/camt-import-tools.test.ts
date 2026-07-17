@@ -671,7 +671,28 @@ describe("camt import tool", () => {
           skipped: [],
         }),
       });
-      expect(JSON.stringify(payload)).not.toContain("903");
+      // Asserted against the id-bearing fields, NOT a substring of the whole
+      // stringified payload. The response carries seven sandbox markers but
+      // only FOUR independent random nonces — wrapUntrustedOcr mints one per
+      // call, and the extra markers are the same wrapped strings serialized
+      // twice because workflow.needs_review aliases execution.needs_review.
+      // Those four 32-hex nonces are the ONLY random content — masking them
+      // collapses every payload to one shape, and the signature is a fixed
+      // literal — so they give 120 places a stray "903" can appear. Hence
+      // `JSON.stringify(payload)).not.toContain("903")` failed on 158 of 6,000
+      // real payloads (2.6%; a 4-nonce model predicts 2.89%, a 7-nonce one
+      // 5.00%, which the data refutes at z = -8.4). That flake also FAKES
+      // mutation kills: a surviving mutant can look "killed".
+      // These are the id-bearing sources; workflow.needs_review aliases the
+      // same array this checks, so covering execution.needs_review covers it.
+      const referencedTransactionIds: number[] = [
+        ...(payload.execution.skipped ?? [])
+          .flatMap((s: any) => s.duplicate_transaction_ids ?? []),
+        ...(payload.execution.needs_review ?? [])
+          .flatMap((d: any) => (d.existing_transactions ?? []).map((m: any) => m.id)),
+        ...(payload.possible_duplicate_summary?.sample_existing_transaction_ids ?? []),
+      ];
+      expect(referencedTransactionIds).not.toContain(903);
     });
 
     it("H09 still trusts signed short and long CAMT reference markers on the selected dimension", async () => {
@@ -1200,6 +1221,204 @@ describe("camt import tool", () => {
         note: "Review mutating side effects in the human-readable audit log named after the company when available; a connection suffix is added only when needed to disambiguate.",
       }),
     });
+  });
+
+  // parseTagValue: false is required (it stops <Amt>0x10</Amt> silently booking
+  // 16), but it also stops coercing IDENTIFIERS: a reference the base parser
+  // stored as "7" now parses as "007". A statement booked before that change
+  // therefore no longer matches on the exact bank-reference key. Nothing else
+  // catches it: findPossibleDuplicateMatches excluded every candidate that
+  // merely HAS a bank reference — which is exactly this row — so the re-import
+  // reported a clean would_create and silently booked a second transaction.
+  it("surfaces a possible duplicate when an existing row's bank reference was stored by the coercing parser", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-legacy-ref</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">10.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <AcctSvcrRef>007</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>007</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties>
+              <Cdtr><Nm>Vendor OÜ</Nm></Cdtr>
+            </RltdPties>
+            <RmtInf><Ustrd>Legacy ref payment</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 91,
+          status: "CONFIRMED",
+          accounts_dimensions_id: 7,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          // What the base parser wrote: "007" coerced to the number 7.
+          bank_ref_number: "7",
+          bank_account_no: null,
+          bank_account_name: "Vendor OÜ",
+          ref_number: null,
+          description: "Legacy ref payment",
+        },
+      ],
+    });
+
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    })).content[0]!.text);
+
+    expect(payload.summary.possible_duplicate_count,
+      "a re-import must not silently book a second transaction").toBe(1);
+    expect(payload.execution.needs_review).toEqual([
+      expect.objectContaining({
+        existing_transactions: [expect.objectContaining({ id: 91 })],
+      }),
+    ]);
+  });
+
+  // The bank reference repeats across an entry's TxDtls legs, so
+  // findDuplicateTransactionIds refuses the byBankRef fallback and the entry is
+  // not an exact duplicate. Possible-duplicate review is then the only net
+  // left — and it is precisely the case a filter keyed on "the candidate has a
+  // bank reference" throws away.
+  it("surfaces a possible duplicate for a repeated-reference split entry whose exact key misses", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-split-ref</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">20.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <AcctSvcrRef>SPLIT-1</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Vendor A</Nm></Cdtr></RltdPties>
+          </TxDtls>
+          <TxDtls>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Vendor B</Nm></Cdtr></RltdPties>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 92,
+          status: "CONFIRMED",
+          accounts_dimensions_id: 7,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          bank_ref_number: "SPLIT-1",
+          bank_account_no: null,
+          bank_account_name: "Vendor A",
+          ref_number: null,
+          // Edited after import, so the exact duplicate key no longer matches.
+          description: "Leg one - reconciled by accountant",
+        },
+      ],
+    });
+
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    })).content[0]!.text);
+
+    expect(payload.summary.possible_duplicate_count,
+      "a same-reference candidate must still reach review when the exact key misses").toBe(1);
+    expect(payload.execution.needs_review).toEqual([
+      expect.objectContaining({
+        existing_transactions: [expect.objectContaining({ id: 92 })],
+      }),
+    ]);
+  });
+
+  // Guards the ref-less/ref-less shape, for which possible-duplicate review is
+  // the ONLY defense: an entry with no bank reference has no exact key at all.
+  // Any future narrowing of the candidate set must not silently drop it.
+  it("surfaces a possible duplicate when neither the entry nor the candidate carries a bank reference", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-no-ref</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">10.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <NtryDtls>
+          <TxDtls>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Vendor OÜ</Nm></Cdtr></RltdPties>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [
+        {
+          id: 93,
+          status: "CONFIRMED",
+          accounts_dimensions_id: 7,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          bank_ref_number: null,
+          bank_account_no: null,
+          bank_account_name: "Vendor OÜ",
+          ref_number: null,
+          description: "Manually entered earlier",
+        },
+      ],
+    });
+
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    })).content[0]!.text);
+
+    expect(payload.summary.possible_duplicate_count).toBe(1);
   });
 
   it("stores CAMT bank metadata in the writable description as an API bug workaround", async () => {
@@ -2106,5 +2325,161 @@ describe("camt import tool", () => {
         reason: "Duplicate CAMT entry inside current import batch",
       }),
     ]);
+  });
+
+  // --- M05: strict CAMT row validation at the tool boundary ------------------
+  describe("M05 strict validation", () => {
+    // Positional identities only — never the attacker-controlled statement <Id>.
+    const M05_CAMT_ROW_ID_RE = /^camt:(statement:1|balance:\d+|ntry:\d+(:tx:\d+)?)$/;
+    const UNWRAP_RE = /^<<UNTRUSTED_OCR_START:([0-9a-f]+)>>\n([\s\S]*)\n<<UNTRUSTED_OCR_END:\1>>$/;
+
+    // Every monetary lexeme is DIGIT-LEADING on purpose. At the base revision a
+    // non-digit-leading lexeme made parseFloat return NaN and THROW, so the
+    // handler would have rejected by throwing rather than by silently
+    // accepting — reproducing the wrong defect. `Infinity` is excluded for the
+    // same reason (parseFloat("Infinity") is non-finite, which also threw).
+    const MALICIOUS_AMT = `9${"9".repeat(298)}x`; // 300 chars, digit-leading, unparseable tail
+
+    // The malicious value is the FIRST issue in document order, so the <=256
+    // truncation assertion cannot pass vacuously once the 100-issue cap bites.
+    function m05OversizedCamtXml(): string {
+      const fillers = Array.from({ length: 120 }, (_, index) => `      <Ntry>
+        <Amt Ccy="EUR">1oops${index}</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+      </Ntry>`).join("\n");
+      return `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-1</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">${MALICIOUS_AMT}</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+      </Ntry>
+${fillers}
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+    }
+
+    // Case 4 (FAIL): parse_camt053 rejects the file with a safe, bounded,
+    // sandboxed payload and performs zero ledger/configuration reads.
+    it("M05 parse_camt053 returns a bounded sandboxed failure with zero accounting reads", async () => {
+      // Module-level mocks are shared across this file and the config sets no
+      // clearMocks, so the zero-call assertions below need a clean slate.
+      vi.clearAllMocks();
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(m05OversizedCamtXml());
+      const { api, handler } = setupCamtTool({ toolName: "parse_camt053" });
+
+      const result = await handler({ file_path: "/tmp/camt.xml" });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      expect(result.isError).toBe(true);
+      expect(payload).toMatchObject({
+        error: "Import preflight failed",
+        category: "import_preflight_failed",
+        source: "camt",
+        mutation_occurred: false,
+      });
+
+      // Bounded: the whole file is validated, but at most 100 issues are exposed.
+      expect(payload.rejected_fields).toHaveLength(100);
+      expect(payload.rejected_fields_truncated).toBe(true);
+      expect(payload.rejected_field_count).toBe(121);
+
+      // The oversized attacker lexeme is issue #1, sandboxed and truncated.
+      const first = payload.rejected_fields[0];
+      expect(first.source_row_id).toBe("camt:ntry:1");
+      expect(first.field).toBe("amount");
+      const unwrapped = UNWRAP_RE.exec(first.value);
+      expect(unwrapped, "exposed value must be nonce-wrapped").not.toBeNull();
+      expect(unwrapped![2]).toHaveLength(256);
+      expect(unwrapped![2]).toBe(MALICIOUS_AMT.slice(0, 256));
+
+      for (const issue of payload.rejected_fields) {
+        expect(issue.source_row_id).toMatch(M05_CAMT_ROW_ID_RE);
+        // Non-empty values are nonce-wrapped; identity/field/reason stay fixed.
+        if (issue.value !== "") expect(issue.value).toMatch(UNWRAP_RE);
+        expect(issue.reason).not.toContain(MALICIOUS_AMT.slice(0, 32));
+      }
+      expect(payload.error).not.toContain(MALICIOUS_AMT.slice(0, 32));
+
+      // Zero ledger / configuration reads: parse resolves, reads, preflights.
+      expect(api.readonly.getAccountDimensions).not.toHaveBeenCalled();
+      expectNoH08ImportSideEffects(api);
+    });
+
+    // Case 5 (FAIL): import_camt053 rejects before dimension existence, H08
+    // binding, H09 duplicates, clients, progress, audit, or any mutation.
+    it("M05 import_camt053 rejects before dimension, binding, duplicate, client, progress, audit, or mutation work", async () => {
+      for (const execute of [false, true]) {
+        vi.clearAllMocks();
+        mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+        mockedReadFile.mockResolvedValue(singleEntryXml.replaceAll(">10.00<", ">10oops<"));
+        const { api, handler } = setupCamtTool({ toolName: "import_camt053" });
+
+        const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute });
+        const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+        expect(result.isError, `execute=${execute}`).toBe(true);
+        expect(payload).toMatchObject({
+          error: "Import preflight failed",
+          category: "import_preflight_failed",
+          source: "camt",
+          mutation_occurred: false,
+          // Two issues, far below the 100 cap: nothing is withheld. Only the
+          // >100 case asserts the true direction, so without this the flag
+          // could be hard-coded true and every test would still pass.
+          rejected_fields_truncated: false,
+          rejected_field_count: 2,
+        });
+        expect(payload.rejected_fields).toEqual([
+          expect.objectContaining({ source_row_id: "camt:ntry:1", field: "amount" }),
+          expect.objectContaining({ source_row_id: "camt:ntry:1:tx:1", field: "original_amount" }),
+        ]);
+
+        // Preflight runs first: nothing downstream is touched.
+        expect(api.readonly.getAccountDimensions).not.toHaveBeenCalled();
+        expect(api.readonly.getBankAccounts).not.toHaveBeenCalled();
+        expectNoH08ImportSideEffects(api);
+      }
+    });
+
+    // Case 6 (FAIL): the merged tool — the only one exposed by default — embeds
+    // the same failure AND reports isError, which invokeCapturedTool drops today.
+    it("M05 process_camt053 embeds the same failure and propagates isError with zero accounting reads", async () => {
+      for (const mode of ["parse", "dry_run", "execute"] as const) {
+        vi.clearAllMocks();
+        mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+        mockedReadFile.mockResolvedValue(singleEntryXml.replaceAll(">10.00<", ">10oops<"));
+        const { api, handler } = setupCamtTool({ toolName: "process_camt053" });
+
+        const result = await handler({
+          file_path: "/tmp/camt.xml",
+          mode,
+          ...(mode === "parse" ? {} : { accounts_dimensions_id: 7 }),
+        });
+        const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+        // A rejected import must not read as a completed one.
+        expect(result.isError, `mode=${mode}`).toBe(true);
+        expect(payload.result).toMatchObject({
+          error: "Import preflight failed",
+          category: "import_preflight_failed",
+          source: "camt",
+          mutation_occurred: false,
+        });
+
+        expect(api.readonly.getAccountDimensions).not.toHaveBeenCalled();
+        expectNoH08ImportSideEffects(api);
+      }
+    });
   });
 });

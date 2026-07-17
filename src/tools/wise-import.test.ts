@@ -4291,4 +4291,639 @@ describe("wise import tool", () => {
       expect(purchaseInvoiceUpdate).not.toHaveBeenCalled();
     });
   });
+
+  // --- M05: strict Wise row validation --------------------------------------
+  describe("M05 strict validation", () => {
+    // Positional identities only — never the attacker-controlled Wise ID.
+    const M05_WISE_ROW_ID_RE = /^wise:(header|row:\d+)$/;
+    const UNWRAP_RE = /^<<UNTRUSTED_OCR_START:([0-9a-f]+)>>\n([\s\S]*)\n<<UNTRUSTED_OCR_END:\1>>$/;
+
+    const VALID_ROW = [
+      "tx-1", "COMPLETED", "OUT", "2026-06-01 10:00:00", "2026-06-01 10:00:00",
+      "0", "EUR", "0", "EUR", "Seppo OÜ", "100", "EUR", "Vendor OÜ", "100", "EUR",
+      "1", "REF-1", "", "", "General", "",
+    ];
+
+    function withHeader(header: string, rows: string[][]): string {
+      return `${header}\n${rows.map(values => values.join(",")).join("\n")}\n`;
+    }
+
+    function expectNoWiseReadsOrMutations(api: any): void {
+      expect(api.clients.listAll).not.toHaveBeenCalled();
+      expect(api.readonly.getAccountDimensions).not.toHaveBeenCalled();
+      expect(api.transactions.listAll).not.toHaveBeenCalled();
+      expect(api.transactions.create).not.toHaveBeenCalled();
+      expect(mockedClearRuntimeCaches).not.toHaveBeenCalled();
+      expect(mockedReportProgress).not.toHaveBeenCalled();
+      expectNoWiseMutations(api);
+    }
+
+    function expectPreflightFailure(payload: any): void {
+      expect(payload).toMatchObject({
+        error: "Import preflight failed",
+        category: "import_preflight_failed",
+        source: "wise",
+        mutation_occurred: false,
+      });
+      // A failed preflight never hands back an approval to replay.
+      expect(payload.approved_command_digest).toBeUndefined();
+    }
+
+    // Case 7 (FAIL): header issues accumulate, extra headers are tolerated.
+    it("M05 accumulates missing and duplicate consumed headers while allowing unrelated extra headers", async () => {
+      // "Status" missing, "ID" duplicated, two unrelated extras present.
+      const brokenHeader = [
+        "ID", "ID", "Direction", "Created on", "Finished on",
+        "Source fee amount", "Source fee currency", "Target fee amount", "Target fee currency",
+        "Source name", "Source amount (after fees)", "Source currency",
+        "Target name", "Target amount (after fees)", "Target currency",
+        "Exchange rate", "Reference", "Batch", "Created by", "Category", "Note",
+        "Unrelated Extra", "Another Extra",
+      ].join(",");
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(
+        withHeader(brokenHeader, [[...VALID_ROW, "x", "y"]]), "utf8",
+      ));
+      const { handler, api } = setupWiseTool([]);
+
+      const payload = parseWiseResponse(await handler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+      }));
+
+      expectPreflightFailure(payload);
+      // Both header defects are reported, not just the first.
+      expect(payload.rejected_fields).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source_row_id: "wise:header", field: "Status" }),
+        expect.objectContaining({ source_row_id: "wise:header", field: "ID" }),
+      ]));
+      // Extra headers are not themselves defects.
+      expect(payload.rejected_fields.map((f: any) => f.field))
+        .not.toEqual(expect.arrayContaining(["Unrelated Extra", "Another Extra"]));
+      // Header issues short-circuit the row loop: a missing header makes
+      // idx() return -1 and fields[-1] undefined, which would manufacture a
+      // spurious issue on EVERY row and — under the 100-issue cap — could
+      // evict the real header cause from the payload entirely. The assertions
+      // above use subset matching and would survive that, so pin it exactly:
+      // nothing but header issues may be reported.
+      for (const issue of payload.rejected_fields) {
+        expect(issue.source_row_id).toBe("wise:header");
+      }
+      expectNoWiseReadsOrMutations(api);
+
+      // A well-formed header with only extras added is accepted (no header issue).
+      vi.clearAllMocks();
+      const extrasHeader = `${CSV_HEADER},Unrelated Extra`;
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(
+        withHeader(extrasHeader, [[...VALID_ROW, "x"]]), "utf8",
+      ));
+      const second = setupWiseTool([]);
+      const okPayload = parseWiseResponse(await second.handler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+      }));
+      expect(okPayload.category).not.toBe("import_preflight_failed");
+
+      // Outer whitespace is NORMALIZED away, so a padded header is accepted:
+      // parseCSV does not trim, and without the header .trim() a real export
+      // with padded columns would be rejected wholesale.
+      vi.clearAllMocks();
+      const paddedHeader = CSV_HEADER.split(",").map(h => ` ${h} `).join(",");
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(
+        withHeader(paddedHeader, [VALID_ROW]), "utf8",
+      ));
+      const padded = parseWiseResponse(await setupWiseTool([]).handler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+      }));
+      expect(padded.category, "a padded header must normalize, not reject").not.toBe("import_preflight_failed");
+
+      // ...but comparison stays CASE-SENSITIVE once normalized: a lowercase
+      // "id" is a genuinely different column, not a spelling of "ID".
+      vi.clearAllMocks();
+      const wrongCaseHeader = CSV_HEADER.replace(/^ID,/, "id,");
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(
+        withHeader(wrongCaseHeader, [VALID_ROW]), "utf8",
+      ));
+      const wrongCase = parseWiseResponse(await setupWiseTool([]).handler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+      }));
+      expectPreflightFailure(wrongCase);
+      expect(wrongCase.rejected_fields).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source_row_id: "wise:header", field: "ID" }),
+      ]));
+    });
+
+    // Case 8 (FAIL): every nonblank row must match the actual header count.
+    it("M05 rejects every nonblank row whose field count differs from the header count", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(withHeader(CSV_HEADER, [
+        VALID_ROW.slice(0, 19),          // short — today silently accepted
+        VALID_ROW,                       // valid
+        [...VALID_ROW, "extra"],         // long
+      ]), "utf8"));
+      const { handler, api } = setupWiseTool([]);
+
+      const payload = parseWiseResponse(await handler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+      }));
+
+      expectPreflightFailure(payload);
+      // Exposed values are sandbox-wrapped, so compare the plain text inside.
+      expect(payload.rejected_fields).toEqual([
+        expect.objectContaining({
+          source_row_id: "wise:row:1", field: "row", value: expect.stringMatching(wrapped("19")),
+        }),
+        expect.objectContaining({
+          source_row_id: "wise:row:3", field: "row", value: expect.stringMatching(wrapped("22")),
+        }),
+      ]);
+      expectNoWiseReadsOrMutations(api);
+
+      // A headers-only file is a STRUCTURAL error, not a rejected field: there
+      // is no row to address an issue to, so it throws rather than returning a
+      // rejected-field payload. Relaxing the guard to `< 1` would report a
+      // successful import of zero rows instead of failing.
+      vi.clearAllMocks();
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(`${CSV_HEADER}\n`, "utf8"));
+      const headersOnly = setupWiseTool([]);
+      await expect(
+        headersOnly.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true }),
+        "a headers-only CSV must fail, not import zero rows",
+      ).rejects.toThrow("CSV has no data rows");
+      expectNoWiseReadsOrMutations(headersOnly.api);
+    });
+
+    // Case 9 (FAIL): every invalid field on a row accumulates, before any
+    // cache clear, API read, progress report, audit entry, or mutation.
+    it("M05 accumulates every invalid Wise field before cache, API, progress, or audit work", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      // The Wise money/ID/timestamp grammars carry the SAME rules as their
+      // CAMT counterparts, so this fixture carries the same lexeme classes
+      // case #1 mandates. `10oops` alone proves almost nothing: every loose
+      // regex rejects it. The exponent and comma forms are what distinguish a
+      // fully-consumed decimal rule from a permissive one — `Number("1e2")` is
+      // 100, so an unpinned exponent silently books 100.
+      const oversizedId = `A${"B".repeat(199)}`; // 200 chars: over the 128 bound.
+      mockedReadFile.mockResolvedValue(Buffer.from(withHeader(CSV_HEADER, [
+        [
+          "",                    // ID: required
+          "completed!",          // Status: lowercase and a non-[A-Z0-9_] byte
+          "SIDEWAYS",            // Direction: not IN/OUT/NEUTRAL
+          "2026-02-30 10:00:00", // Created on: impossible date
+          "2026-06-01 25:00:00", // Finished on: impossible clock
+          '"1,2,3"',             // Source fee amount: comma, not a decimal
+                                 // (CSV-quoted, or it would split the row and
+                                 // trip the field-count rule instead)
+          "EURO",                // Source fee currency: non-blank, not 3 letters
+          "-1",                  // Target fee amount: negative
+          "EUROS",               // Target fee currency: non-blank, not 3 letters
+          "Seppo OÜ",
+          "10oops",              // Source amount: not fully consumed
+          "EURO",                // Source currency: not 3 letters
+          "Vendor OÜ",
+          "1e2",                 // Target amount: exponent — would book 100
+          "EURO",                // Target currency: separate binding from Source
+          "0",                   // Exchange rate: must be positive
+          "REF-1", "", "", "General", "",
+        ],
+        [
+          oversizedId,           // ID: exceeds the 128-character bound
+          "COMPLETED", "OUT", "2026-06-01 10:00:00",
+          "2026-06-01 10:00:00XYZ", // Finished on: trailing bytes after the clock
+          "0", "EUR", "0", "EUR", "Seppo OÜ",
+          // Regex-legal digits, but Number() overflows to Infinity. Only the
+          // finiteness check rejects it: Infinity passes the non-negative
+          // test, so without that check it reaches the ledger.
+          "9".repeat(400), "EUR", "V", "100", "EUR",
+          "1", "REF-2", "", "", "General", "",
+        ],
+        [
+          "-abc",                // ID: must start alphanumeric
+          `C${"O".repeat(70)}`,  // Status: well-formed bytes, over the 64 bound
+          "OUT",
+          "2026-06-01 10:00:00.1234", // Created on: fraction beyond 3 digits
+          "2026-06-01 10:00:00",
+          "0", "EUR", "0", "EUR", "Seppo OÜ", "100", "EUR", "V", "100", "EUR",
+          "1", "REF-3", "", "", "General", "",
+        ],
+        [
+          // Each of these violates its rule and NOTHING ELSE, which is what
+          // isolates the rule itself. The rows above reject on length or on a
+          // stray byte, so both charset and casing could be dropped from the
+          // grammars entirely and every assertion here would still hold.
+          "AB$CD",               // ID: alnum-leading and short, but `$` is
+                                 // outside the [A-Za-z0-9._:-] charset. The id
+                                 // reaches the transaction description and the
+                                 // journal document_number, so the charset is
+                                 // what keeps those two sinks predictable.
+          "completed",           // Status: clean lowercase, no stray byte and
+                                 // within the 64 bound — only the uppercase-only
+                                 // rule rejects it.
+          "OUT",
+          "2026-06-01 10:00:00",
+          "2026-06-01 10:00:00",
+          "0", "EUR", "0", "EUR", "Seppo OÜ", "100", "EUR", "V", "100", "EUR",
+          "1", "REF-4", "", "", "General", "",
+        ],
+      ]), "utf8"));
+      const { handler, api } = setupWiseTool([]);
+
+      const payload = parseWiseResponse(await handler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+      }));
+
+      expectPreflightFailure(payload);
+      // Well under the 100 cap: nothing is withheld, so the flag must read
+      // false and the count must equal what was exposed. Only the >100 case
+      // asserts the true direction; without this the flag could be hard-coded.
+      expect(payload.rejected_fields_truncated).toBe(false);
+      expect(payload.rejected_field_count).toBe(payload.rejected_fields.length);
+      // A NON-BLANK fee currency is validated like any other currency; only a
+      // blank one falls back to its side. Both fee columns are listed because
+      // they are separate bindings — asserting one leaves the other unpinned.
+      expect(payload.rejected_fields.map((f: any) => f.field)).toEqual(expect.arrayContaining([
+        "ID", "Status", "Direction", "Created on", "Finished on",
+        "Source fee amount", "Source fee currency", "Target fee amount", "Target fee currency",
+        "Source amount (after fees)", "Source currency", "Target amount (after fees)",
+        "Target currency", "Exchange rate",
+      ]));
+      // Row 4 isolates the charset and casing rules. Pinned by row AND reason:
+      // rows 1-3 emit their own "ID"/"Status" issues, so a field-name-only
+      // assertion would be satisfied by those and would survive widening the
+      // ID charset to any byte or letting the status grammar accept lowercase.
+      expect(payload.rejected_fields).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          source_row_id: "wise:row:4", field: "ID",
+          reason: "Wise ID must be 1-128 characters of ASCII alphanumerics, '.', '_', ':' or '-'",
+        }),
+        expect.objectContaining({
+          source_row_id: "wise:row:4", field: "Status",
+          reason: "Wise status must be uppercase alphanumerics or underscore",
+        }),
+      ]));
+      // Row 1's impossible date and clock must be pinned by row AND reason:
+      // rows 2 and 3 below also emit "Created on" / "Finished on" issues, so a
+      // field-name-only assertion is satisfied by those and would survive
+      // deleting the calendar and clock checks entirely.
+      expect(payload.rejected_fields).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          source_row_id: "wise:row:1", field: "Created on", reason: "Impossible calendar date",
+        }),
+        expect.objectContaining({
+          source_row_id: "wise:row:1", field: "Finished on", reason: "Impossible Wise clock time",
+        }),
+        // Regex-legal but non-finite: rejected by the finiteness check, not the
+        // grammar and not the non-negative rule (Infinity > 0).
+        expect.objectContaining({
+          source_row_id: "wise:row:2", field: "Source amount (after fees)",
+          reason: "Wise number must be finite",
+        }),
+      ]));
+      // The comma lexeme must be rejected BY THE GRAMMAR, not incidentally by
+      // the finiteness check downstream: Number("1,2,3") is NaN, so a regex
+      // that admitted commas would still reject — with a different reason.
+      // Pinning the reason is what makes the "no comma" clause load-bearing.
+      expect(payload.rejected_fields).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          source_row_id: "wise:row:1",
+          field: "Source fee amount",
+          reason: "Wise number must be a fully consumed finite decimal",
+        }),
+      ]));
+      // The ID bound and its leading-alphanumeric anchor are separate clauses
+      // from the character class, and each needs its own row: one row carries
+      // only one ID.
+      expect(payload.rejected_fields).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source_row_id: "wise:row:2", field: "ID" }),
+        expect.objectContaining({ source_row_id: "wise:row:2", field: "Finished on" }),
+        expect.objectContaining({ source_row_id: "wise:row:3", field: "ID" }),
+        expect.objectContaining({ source_row_id: "wise:row:3", field: "Created on" }),
+        // The status LENGTH bound is a separate clause from its character
+        // class: row 1's "completed!" is caught by the class alone.
+        expect.objectContaining({ source_row_id: "wise:row:3", field: "Status" }),
+      ]));
+      for (const issue of payload.rejected_fields) {
+        expect(issue.source_row_id).toMatch(/^wise:row:[1234]$/);
+      }
+      expectNoWiseReadsOrMutations(api);
+    });
+
+    // Case 10 (PASS — declared control): the existing valid path is untouched.
+    // Uses only the live handler, so it passes before and after implementation.
+    it("M05 control: canonical rows, filtering, digest gating, and one cache clear stay compatible", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(withHeader(CSV_HEADER, [
+        VALID_ROW,
+        // Filtered, not rejected: non-COMPLETED status and NEUTRAL direction.
+        ["tx-2", "CANCELLED", "OUT", "2026-06-01 10:00:00", "2026-06-01 10:00:00",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "50", "EUR", "V", "50", "EUR", "1", "R2", "", "", "General", ""],
+        ["tx-3", "COMPLETED", "NEUTRAL", "2026-06-01 10:00:00", "2026-06-01 10:00:00",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "50", "EUR", "V", "50", "EUR", "1", "R3", "", "", "General", ""],
+        // A padded status is well-formed once trimmed, so it must NOT be
+        // rejected — but eligibility compares the RAW field, so it stays
+        // filtered exactly as it is today. Normalizing the stored status would
+        // turn this silently-filtered row into a booked one: a new mutation
+        // path, not a tightening.
+        ["tx-4", " COMPLETED ", "OUT", "2026-06-01 10:00:00", "2026-06-01 10:00:00",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "50", "EUR", "V", "50", "EUR", "1", "R4", "", "", "General", ""],
+        // A `T`-form timestamp books the same date a space-form one does:
+        // wiseDate splits on [ T], widened from the base's space-only split,
+        // and no other fixture uses the T form.
+        ["tx-7", "COMPLETED", "OUT", "2026-05-06T08:00:00", "2026-05-06T09:30:00",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "60", "EUR", "V", "60", "EUR", "1", "R7", "", "", "General", ""],
+        // Fractional seconds and a timezone offset are valid optional syntax
+        // (item 3), so they must be ACCEPTED — the counterpart to case #9's
+        // rejections. Without this row both clauses could be deleted outright
+        // and every test would still pass.
+        ["tx-8", "COMPLETED", "OUT", "2026-05-08 08:00:00.123+02:00", "2026-05-08 09:30:00.123+02:00",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "40", "EUR", "V", "40", "EUR", "1", "R8", "", "", "General", ""],
+        // "stored uppercase" (item 3) is a normalization, not just a filter: a
+        // lowercase code is ACCEPTED and booked uppercase. Every other fixture
+        // supplies uppercase, so nothing else proves the toUpperCase() step
+        // rather than the regex that follows it.
+        ["tx-9", "COMPLETED", "OUT", "2026-05-09 08:00:00", "2026-05-09 09:30:00",
+         "0", "eur", "0", "eur", "Seppo OÜ", "30", "eur", "V", "30", "eur", "1", "R9", "", "", "General", ""],
+        // Direction is validated AFTER normalizeWiseDirection's trim/uppercase,
+        // never raw-byte-exact: a lowercase direction books today, so rejecting
+        // it would fail the WHOLE file (preflight precedes the status filter).
+        // tx-4 pins the same tolerance for Status; without this row Direction's
+        // validator could be made raw-byte-exact and every test would pass.
+        ["tx-10", "COMPLETED", "out", "2026-05-10 08:00:00", "2026-05-10 09:30:00",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "20", "EUR", "V", "20", "EUR", "1", "R10", "", "", "General", ""],
+        // parseCSV does not trim fields (tx-4's " COMPLETED " survives padded),
+        // so the timestamp validator must PRESERVE ITS TRIMMED TEXT: booking
+        // reads the returned value, and wiseDate splits on /[ T]/, so a leading
+        // space would yield date "" — a transaction booked with no date, with
+        // validation passing because it validates the trimmed form.
+        ["tx-11", "COMPLETED", "OUT", " 2026-05-11 08:00:00", " 2026-05-11 09:30:00",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "10", "EUR", "V", "10", "EUR", "1", "R11", "", "", "General", ""],
+        // Blank fee and rate cells are regular-export syntax that the base
+        // already defaulted (parseWiseNumber, f20ccae:213-214). Dropping the
+        // blank->default branch would reject EVERY real export carrying one,
+        // and no other fixture leaves these columns empty.
+        ["tx-12", "COMPLETED", "OUT", "2026-05-12 08:00:00", "2026-05-12 09:30:00",
+         "", "EUR", "", "EUR", "Seppo OÜ", "15", "EUR", "V", "15", "EUR", "", "R12", "", "", "General", ""],
+        // A ONE-character ID is legal: the grammar is a leading alphanumeric
+        // plus {0,127} more. Only the 128 upper bound is pinned elsewhere, so
+        // without this row the quantifier could become {2,127} and every
+        // single-character ID would fail its whole file. The void first draft
+        // of this task carried exactly that wrong bound.
+        ["X", "COMPLETED", "OUT", "2026-05-13 08:00:00", "2026-05-13 09:30:00",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "25", "EUR", "V", "25", "EUR", "1", "R13", "", "", "General", ""],
+      ]), "utf8"));
+      const { rawHandler, api } = setupWiseTool([]);
+
+      // A malformed execute digest is rejected before the file is even resolved.
+      const badDigest = parseWiseResponse(await rawHandler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+        approved_command_digest: "not-a-digest",
+      }));
+      expect(badDigest.category).toBe("digest_mismatch");
+      expect(badDigest.mutation_occurred).toBe(false);
+
+      // A valid dry run plans the command and exposes an approval digest.
+      clearWiseCallHistory(api);
+      const preview = parseWiseResponse(await rawHandler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+      }));
+      expect(preview.category).not.toBe("import_preflight_failed");
+      expect(preview.approved_command_digest).toMatch(/^[0-9a-f]{64}$/);
+      // Planning clears the runtime cache exactly once.
+      expect(mockedClearRuntimeCaches).toHaveBeenCalledTimes(1);
+      expectNoWiseMutations(api);
+
+      // Only the canonical row is planned. tx-2 (CANCELLED), tx-3 (NEUTRAL),
+      // and tx-4 (" COMPLETED " — padded) are all filtered, never booked.
+      const plannedIds = JSON.stringify(preview);
+      expect(plannedIds).toContain("tx-1");
+      for (const filtered of ["tx-2", "tx-3", "tx-4"]) {
+        expect(plannedIds, `${filtered} must stay filtered`).not.toContain(filtered);
+      }
+
+      // tx-7's T-form timestamp books the finish DATE, not the whole string.
+      expect(plannedIds).toContain("tx-7");
+      expect(plannedIds).toContain("2026-05-06");
+      expect(plannedIds).not.toContain("2026-05-06T09:30:00");
+      // tx-8's fractional seconds and offset are accepted, and the booking
+      // date is the lexical prefix — no UTC shift from the +02:00.
+      expect(plannedIds).toContain("tx-8");
+      expect(plannedIds).toContain("2026-05-08");
+      expect(plannedIds).not.toContain("2026-05-08 09:30:00.123+02:00");
+      // tx-9's lowercase currencies are booked uppercase, never raw. Matched
+      // on the positional row_key, not wise_id: the projected wise_id is
+      // sandbox-wrapped, so it never compares equal to the raw id.
+      const lowercase = preview.execution.commands.find((c: any) => c.row_key === "row:6:main");
+      expect(lowercase, "tx-9 must be planned").toBeDefined();
+      expect(lowercase.booked_currency).toBe("EUR");
+      expect(lowercase.source_currency).toBe("EUR");
+      expect(lowercase.target_currency).toBe("EUR");
+
+      // tx-10's lowercase direction books exactly as the canonical OUT row
+      // does. Compared against tx-1's own planned type rather than a literal,
+      // so this asserts equivalence to today's behavior, not a guess at it.
+      const canonical = preview.execution.commands.find((c: any) => c.row_key === "row:0:main");
+      const lowerDirection = preview.execution.commands.find((c: any) => c.row_key === "row:7:main");
+      expect(lowerDirection, "tx-10 must be planned").toBeDefined();
+      expect(lowerDirection.transaction_type).toBe(canonical.transaction_type);
+
+      // tx-11's padded timestamps book the trimmed lexical date, not "".
+      const padded = preview.execution.commands.find((c: any) => c.row_key === "row:8:main");
+      expect(padded, "tx-11 must be planned").toBeDefined();
+      expect(padded.date).toBe("2026-05-11");
+
+      // tx-12's blank fee/rate cells default rather than reject, and a zero
+      // fee plans no fee leg at all.
+      const blankFees = preview.execution.commands.find((c: any) => c.row_key === "row:9:main");
+      expect(blankFees, "tx-12 must be planned").toBeDefined();
+      expect(blankFees.exchange_rate).toBe(1);
+      expect(preview.execution.commands.find((c: any) => c.row_key === "row:9:fee")).toBeUndefined();
+
+      // The one-character ID is accepted and booked, not rejected.
+      const shortId = preview.execution.commands.find((c: any) => c.row_key === "row:10:main");
+      expect(shortId, "a 1-character ID must be planned, not rejected").toBeDefined();
+    });
+
+    // Case 12 (FAIL): a blank "Finished on" is regular-export syntax, not a
+    // malformed value. Wise leaves the column empty for every transfer that
+    // never completed, which is why `wiseDate(r.finishedOn || r.createdOn)`
+    // has a createdOn fallback at four sites (:1188, :1192, :1325, :1896) and
+    // why the base stored the field raw (`fields[idx("Finished on")] ?? ""`).
+    // Rejecting it fails the WHOLE file — preflight runs before the status
+    // filter — so one cancelled transfer would block an otherwise valid
+    // import. That is a new failure path, not a tightening: the fallback
+    // yields a real date, so there is no silent corruption to prevent.
+    // "Created on" is deliberately NOT blank-tolerant: it is the terminal
+    // operand of that `||`, so validating it strictly is what guarantees the
+    // chain always yields a real date — an invariant the base lacked, since
+    // base booked `date: ""` when both timestamps were blank.
+    it("M05 accepts a blank Wise finish timestamp and still rejects a blank creation timestamp", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(withHeader(CSV_HEADER, [
+        VALID_ROW,
+        // A cancelled transfer as Wise actually exports it: no finish time.
+        // Filtered by status, but it must not reject the file around it.
+        ["tx-2", "CANCELLED", "OUT", "2026-06-01 10:00:00", "",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "50", "EUR", "V", "50", "EUR", "1", "R2", "", "", "General", ""],
+        // COMPLETED with no finish time: books at the creation date via the
+        // existing fallback rather than rejecting.
+        ["tx-5", "COMPLETED", "OUT", "2026-05-04 09:00:00", "",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "70", "EUR", "V", "70", "EUR", "1", "R5", "", "", "General", ""],
+      ]), "utf8"));
+      const { rawHandler, api } = setupWiseTool([]);
+
+      const preview = parseWiseResponse(await rawHandler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+      }));
+
+      // The blank finish time rejects nothing.
+      expect(preview.category).not.toBe("import_preflight_failed");
+      const planned = JSON.stringify(preview);
+      expect(planned).toContain("tx-1");
+      expect(planned, "tx-2 must stay filtered, not reject the file").not.toContain("tx-2");
+      // tx-5 books at its creation date, proving the createdOn fallback lives.
+      expect(planned).toContain("tx-5");
+      expect(planned).toContain("2026-05-04");
+      expectNoWiseMutations(api);
+
+      // A blank creation timestamp stays a rejection: it is the last operand
+      // the fallback chain can reach, so nothing can substitute for it.
+      clearWiseCallHistory(api);
+      mockedReadFile.mockResolvedValue(Buffer.from(withHeader(CSV_HEADER, [
+        ["tx-6", "COMPLETED", "OUT", "", "2026-06-01 10:00:00",
+         "0", "EUR", "0", "EUR", "Seppo OÜ", "80", "EUR", "V", "80", "EUR", "1", "R6", "", "", "General", ""],
+      ]), "utf8"));
+      const blankCreated = parseWiseResponse(await rawHandler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+      }));
+      expect(blankCreated.category).toBe("import_preflight_failed");
+      expect(blankCreated.rejected_fields).toEqual([
+        expect.objectContaining({ source_row_id: "wise:row:1", field: "Created on" }),
+      ]);
+      expect(blankCreated.mutation_occurred).toBe(false);
+    });
+
+    // Case 13 (PASS — declared control): item 3 specifies the blank-fee-currency
+    // fallback as a "faithful hoist of existing behavior", resolved eagerly in
+    // preflight instead of at use time. Nothing else proves that equivalence:
+    // no other fixture carries a blank fee currency, so making the fallback
+    // strict — or resolving it to a fixed "EUR" instead of the row's own side —
+    // leaves the whole suite green. Asserted on cl_currencies_id at the API
+    // boundary because preflightWiseCsv is not exported, and on the fee create
+    // specifically: the fallback IS the side's currency, so that currency also
+    // appears elsewhere on the row and any whole-payload substring check would
+    // pass vacuously.
+    it("M05 control: a blank fee currency still books against its own side's currency", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(withHeader(CSV_HEADER, [
+        // Incoming row: the own-account side is the target, so the target fee
+        // is the booked one and USD (the target currency) is its fallback.
+        ["fee-blank-1", "COMPLETED", "IN", "2026-01-16 09:00:00", "2026-01-16 09:00:00",
+         "0", "", "2", "", "Customer Inc", "100", "SEK", "Seppo AI OÜ", "92", "USD",
+         "0.92", "PAY-FX", "", "", "General", ""],
+      ]), "utf8"));
+      const create = vi.fn()
+        .mockResolvedValueOnce({ created_object_id: 9020 })
+        .mockResolvedValueOnce({ created_object_id: 9021 });
+      const { api, handler } = setupWiseTool([], create);
+
+      await handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: true,
+      });
+
+      expect(api.transactions.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        description: "WISE:FEE:fee-blank-1 Wise teenustasu",
+        amount: 2,
+        cl_currencies_id: "USD",
+      }));
+
+      // Mirror image. An OUTGOING row's own side is the SOURCE, so the source
+      // fee is the booked one and SEK (the source currency) is its fallback.
+      // The IN row above only ever reaches the target-side fallback, so without
+      // this row the source-side one could be replaced by a fixed "EUR" and a
+      // real fee would book in the wrong currency with the suite fully green.
+      vi.clearAllMocks();
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(withHeader(CSV_HEADER, [
+        ["fee-blank-2", "COMPLETED", "OUT", "2026-01-16 09:00:00", "2026-01-16 09:00:00",
+         "2", "", "0", "", "Seppo AI OÜ", "100", "SEK", "Vendor Inc", "92", "USD",
+         "0.92", "PAY-FX", "", "", "General", ""],
+      ]), "utf8"));
+      const createOut = vi.fn()
+        .mockResolvedValueOnce({ created_object_id: 9030 })
+        .mockResolvedValueOnce({ created_object_id: 9031 });
+      const outbound = setupWiseTool([], createOut);
+
+      await outbound.handler({
+        file_path: "/tmp/wise.csv",
+        accounts_dimensions_id: 5,
+        fee_account_dimensions_id: 9,
+        execute: true,
+      });
+
+      expect(outbound.api.transactions.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        description: "WISE:FEE:fee-blank-2 Wise teenustasu",
+        amount: 2,
+        cl_currencies_id: "SEK",
+      }));
+    });
+
+    // Case 11 (FAIL): the output boundary — identity, sandboxing, truncation,
+    // and the issue cap. This is the security core of M05 on the Wise side.
+    it("M05 bounds and sandboxes the Wise failure payload without leaking attacker bytes", async () => {
+      // 300 chars. Must be the FIRST issue in document order, or the <=256
+      // truncation assertion could pass vacuously once the 100-cap bites.
+      const maliciousId = `A${"B".repeat(299)}`;
+      const rows = [
+        // Row 1: oversized ID (>128 chars) — issue #1.
+        [maliciousId, ...VALID_ROW.slice(1)],
+        // Rows 2+: >100 further independently invalid fields.
+        ...Array.from({ length: 60 }, (_, index) => ([
+          `id-${index}`, "COMPLETED", "OUT", "2026-06-01 10:00:00", "2026-06-01 10:00:00",
+          "0", "EUR", "0", "EUR", "Seppo OÜ",
+          `${index}oops`,  // invalid amount
+          "EURO",          // invalid currency
+          "Vendor OÜ", "100", "EUR", "1", "R", "", "", "General", "",
+        ])),
+      ];
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+      mockedReadFile.mockResolvedValue(Buffer.from(withHeader(CSV_HEADER, rows), "utf8"));
+      const { handler, api } = setupWiseTool([]);
+
+      const payload = parseWiseResponse(await handler({
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+      }));
+
+      expectPreflightFailure(payload);
+
+      // Bounded: whole file validated, at most 100 issues exposed.
+      expect(payload.rejected_fields).toHaveLength(100);
+      expect(payload.rejected_fields_truncated).toBe(true);
+      expect(payload.rejected_field_count).toBe(121); // 1 ID + 60 rows x 2 fields
+
+      // Issue #1 is the oversized ID: sandboxed and truncated to 256 chars.
+      const first = payload.rejected_fields[0];
+      expect(first.source_row_id).toBe("wise:row:1");
+      expect(first.field).toBe("ID");
+      const unwrapped = UNWRAP_RE.exec(first.value);
+      expect(unwrapped, "exposed value must be nonce-wrapped").not.toBeNull();
+      expect(unwrapped![2]).toHaveLength(256);
+      expect(unwrapped![2]).toBe(maliciousId.slice(0, 256));
+
+      // The raw ID never reaches an identity, field name, reason, or the error.
+      for (const issue of payload.rejected_fields) {
+        expect(issue.source_row_id).toMatch(M05_WISE_ROW_ID_RE);
+        expect(issue.source_row_id).not.toContain("BBBB");
+        expect(issue.field).not.toContain("BBBB");
+        expect(issue.reason).not.toContain("BBBB");
+        if (issue.value !== "") expect(issue.value).toMatch(UNWRAP_RE);
+      }
+      expect(payload.error).not.toContain("BBBB");
+      expectNoWiseReadsOrMutations(api);
+    });
+  });
 });
