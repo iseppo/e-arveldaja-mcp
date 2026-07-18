@@ -1219,6 +1219,14 @@ ${entryXml}
       transactions: {
         listAll: vi.fn().mockResolvedValue([]),
         get: vi.fn().mockImplementation(async (id: number) => {
+          const identity = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_name: "Curated supplier",
+          };
           if (id === 77) {
             return {
               id: 77,
@@ -1226,13 +1234,14 @@ ${entryXml}
               is_deleted: false,
               bank_ref_number: null,
               ref_number: "",
-              bank_account_name: "Curated supplier",
+              ...identity,
             };
           }
           return {
             id,
             status: "PROJECT",
             is_deleted: false,
+            ...identity,
           };
         }),
         update: vi.fn().mockResolvedValue({}),
@@ -1335,6 +1344,241 @@ ${entryXml}
 
     expect(api.transactions.update).not.toHaveBeenCalled();
     expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["bank dimension", { accounts_dimensions_id: 20 }],
+    ["date", { date: "2026-07-02" }],
+    ["amount", { amount: 99 }],
+    ["currency", { cl_currencies_id: "USD" }],
+    ["direction", { type: "D" }],
+  ])("cleanup_camt_possible_duplicate refuses cleanup when %s differs (H19)", async (_label, patch) => {
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          if (id === 77) {
+            return {
+              id: 77,
+              status: "CONFIRMED",
+              is_deleted: false,
+              accounts_dimensions_id: 5,
+              date: "2026-07-01",
+              type: "C",
+              amount: 42.5,
+              cl_currencies_id: "EUR",
+              bank_account_name: "Acme OÜ",
+              bank_ref_number: null,
+            };
+          }
+          return {
+            id,
+            status: "PROJECT",
+            is_deleted: false,
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_name: "Acme OÜ",
+            bank_ref_number: "CAMT-REF-1",
+            ...patch,
+          };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await expect(handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+      patch_missing_fields: { bank_ref_number: "CAMT-REF-1" },
+    })).rejects.toThrow(/identity mismatch/i);
+
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
+
+  it("cleanup_camt_possible_duplicate refuses cleanup when the coarse key matches but no counterparty corroborates (H19 collision)", async () => {
+    // Two separate EUR 42.50 debit-card purchases on the same day: identical
+    // dimension/date/direction/currency/amount, different merchants. The coarse
+    // key collides, so status + key alone would delete the wrong PROJECT row.
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          const key = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+          };
+          if (id === 77) {
+            return { id: 77, status: "CONFIRMED", is_deleted: false, bank_account_name: "Alpha Kohvik OÜ", ref_number: "RF-ALPHA", ...key };
+          }
+          return { id, status: "PROJECT", is_deleted: false, bank_account_name: "Beeta Pood OÜ", ref_number: "RF-BEETA", ...key };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await expect(handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+    })).rejects.toThrow(/identity mismatch.*corroborating/i);
+
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
+
+  it("cleanup_camt_possible_duplicate fails closed when a required identity field is missing (H19)", async () => {
+    // The candidate PROJECT row has no date — identity cannot be proven, so the
+    // destructive delete must be refused rather than treating absent==absent.
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          if (id === 77) {
+            return {
+              id: 77,
+              status: "CONFIRMED",
+              is_deleted: false,
+              accounts_dimensions_id: 5,
+              date: "2026-07-01",
+              type: "C",
+              amount: 42.5,
+              cl_currencies_id: "EUR",
+              bank_account_name: "Acme OÜ",
+            };
+          }
+          return {
+            id,
+            status: "PROJECT",
+            is_deleted: false,
+            accounts_dimensions_id: 5,
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_name: "Acme OÜ",
+            // date deliberately omitted
+          };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await expect(handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+    })).rejects.toThrow(/identity mismatch.*date missing/i);
+
+    expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
+
+  it("cleanup_camt_possible_duplicate does not treat a matching free-text description alone as corroboration (H19)", async () => {
+    // Description is metadata-wrapped/length-capped once persisted and is the
+    // lowest-entropy signal, so it is excluded from the gate's corroborators. A
+    // shared description with NO matching reference/IBAN/counterparty must block.
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          const key = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            description: "Card purchase",
+          };
+          if (id === 77) {
+            return { id: 77, status: "CONFIRMED", is_deleted: false, bank_account_name: "Alpha Kohvik OÜ", ...key };
+          }
+          return { id, status: "PROJECT", is_deleted: false, bank_account_name: "Beeta Pood OÜ", ...key };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await expect(handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+    })).rejects.toThrow(/identity mismatch.*corroborating/i);
+
+    expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
+
+  it("cleanup_camt_possible_duplicate blocks when both rows carry a differing bank reference (H19)", async () => {
+    // Same coarse key AND a matching counterparty, but each row already has its
+    // own DISTINCT bank reference — dispositive proof of two different entries.
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          const key = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_name: "Acme OÜ",
+          };
+          if (id === 77) {
+            return { id: 77, status: "CONFIRMED", is_deleted: false, bank_ref_number: "REF-AAA", ...key };
+          }
+          return { id, status: "PROJECT", is_deleted: false, bank_ref_number: "REF-BBB", ...key };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await expect(handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+    })).rejects.toThrow(/identity mismatch.*bank reference differs/i);
+
+    expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
+
+  it("cleanup_camt_possible_duplicate proceeds when the kept row lacks a bank reference but the identity matches (H19)", async () => {
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          const identity = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_name: "Acme OÜ",
+          };
+          if (id === 77) {
+            return { id: 77, status: "CONFIRMED", is_deleted: false, bank_ref_number: null, ref_number: "", ...identity };
+          }
+          return { id, status: "PROJECT", is_deleted: false, bank_ref_number: "CAMT-REF-1", ...identity };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    const result = await handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+      patch_missing_fields: { bank_ref_number: "CAMT-REF-1" },
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(api.transactions.update).toHaveBeenCalledWith(77, { bank_ref_number: "CAMT-REF-1" });
+    expect(api.transactions.delete).toHaveBeenCalledWith(9001);
+    expect(payload).toMatchObject({ cleaned: true, deleted: true });
   });
 
   it("save_auto_booking_rule upserts a local rule into the configured markdown file", async () => {
@@ -2134,10 +2378,18 @@ ${entryXml}
       transactions: {
         listAll: vi.fn().mockResolvedValue([]),
         get: vi.fn().mockImplementation(async (id: number) => {
+          const identity = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_name: "Acme OÜ",
+          };
           if (id === 77) {
-            return { id: 77, status: "CONFIRMED", is_deleted: false, bank_ref_number: null };
+            return { id: 77, status: "CONFIRMED", is_deleted: false, bank_ref_number: null, ...identity };
           }
-          return { id, status: "PROJECT", is_deleted: false };
+          return { id, status: "PROJECT", is_deleted: false, ...identity };
         }),
         update: vi.fn().mockResolvedValue({}),
         delete: vi.fn().mockRejectedValue(new Error("Network timeout deleting 9001")),

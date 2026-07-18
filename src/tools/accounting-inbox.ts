@@ -9,10 +9,11 @@ import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "
 import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
 import { logAudit } from "../audit-log.js";
+import { roundMoney } from "../money.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import { jsonObjectInput, parseJsonObject, type ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
-import { registerCamtImportTools } from "./camt-import.js";
+import { camtDuplicateStructuredCorroborators, registerCamtImportTools, storedBankReferenceLookupKey } from "./camt-import.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { registerBankReconciliationTools } from "./bank-reconciliation.js";
@@ -824,6 +825,103 @@ const CAMT_DUPLICATE_PATCH_FIELDS = [
   "description",
 ] as const;
 
+/**
+ * Prove that the PROJECT transaction `cleanup_camt_possible_duplicate` is about
+ * to DELETE is genuinely the same bank entry as the CONFIRMED transaction it
+ * keeps. The tool previously gated deletion on status alone (CONFIRMED kept /
+ * PROJECT deleted), so a wrong `delete_transaction_id` — an LLM slip, or an id
+ * smuggled in through prompt-injected CAMT text — would have irreversibly
+ * deleted an unrelated PROJECT transaction.
+ *
+ * Identity has two layers, both mirroring the system's OWN possible-duplicate
+ * proposal logic in camt-import.ts so the destructive gate can never accept a
+ * pair the proposer would not have surfaced:
+ *
+ *  1. The coarse candidate key (`buildPossibleDuplicateCandidateKey`, scoped to
+ *     `accounts_dimensions_id`): bank dimension + date + direction (`type`,
+ *     which encodes CRDT→"D"/DBIT→"C" over a positive-magnitude `amount`, so it
+ *     is the signed-amount discriminator) + currency + rounded amount. Each of
+ *     these must be PRESENT on both rows and equal — a missing field can never
+ *     prove identity, so it fails CLOSED (no `?? EUR`/`?? null` collapsing two
+ *     different rows to one identity).
+ *  2. Structured corroboration (`camtDuplicateStructuredCorroborators`): at least
+ *     one of reference number / counterparty IBAN / counterparty name must match.
+ *     Without this, two same-day same-amount card purchases from different
+ *     merchants share the coarse key and the wrong one could be deleted. The
+ *     proposer's free-text `description` corroborator is deliberately excluded
+ *     (metadata-wrapped/length-capped once persisted, and the lowest-entropy
+ *     signal), so the gate is strictly more conservative than the proposer.
+ *  3. Bank-reference divergence: when BOTH rows resolve a bank reference —
+ *     `storedBankReferenceLookupKey`, i.e. the direct `bank_ref_number` OR a
+ *     trust-validated reference recovered from CAMT description metadata — and
+ *     the two keys differ, that is dispositive proof of two different entries →
+ *     mismatch. The reference is not a required corroborator (the kept row
+ *     routinely lacks one — that is what the cleanup enriches), so this only ever
+ *     tightens the gate; reusing the codebase's own key derivation keeps it from
+ *     drifting from how references are compared everywhere else.
+ *
+ * RESIDUAL (inherent, human-gated): two genuinely distinct same-merchant,
+ * same-day, same-amount purchases where the kept row resolves NO bank reference
+ * (no direct field and no recoverable CAMT metadata) are indistinguishable from a
+ * true duplicate by any field available here — the only discriminator is the
+ * reference the kept row lacks. `cleanup_camt_possible_duplicate` is therefore
+ * surfaced as an approval-required action, never auto-executed.
+ */
+export function compareCamtDuplicateIdentity(
+  kept: Transaction,
+  candidate: Transaction,
+):
+  | { matches: true; identity: string; corroboration: string[] }
+  | { matches: false; reasons: string[] } {
+  const reasons: string[] = [];
+
+  const keptDimension = Number.isFinite(kept.accounts_dimensions_id) ? kept.accounts_dimensions_id : undefined;
+  const candidateDimension = Number.isFinite(candidate.accounts_dimensions_id) ? candidate.accounts_dimensions_id : undefined;
+  if (keptDimension === undefined || candidateDimension === undefined || keptDimension !== candidateDimension) {
+    reasons.push("bank dimension missing or differs");
+  }
+
+  const keptDate = typeof kept.date === "string" ? kept.date.trim() : "";
+  const candidateDate = typeof candidate.date === "string" ? candidate.date.trim() : "";
+  if (!keptDate || !candidateDate || keptDate !== candidateDate) {
+    reasons.push("date missing or differs");
+  }
+
+  const keptType = typeof kept.type === "string" ? kept.type.trim() : "";
+  const candidateType = typeof candidate.type === "string" ? candidate.type.trim() : "";
+  if (!keptType || !candidateType || keptType !== candidateType) {
+    reasons.push("direction (type) missing or differs");
+  }
+
+  const keptCurrency = typeof kept.cl_currencies_id === "string" ? kept.cl_currencies_id.trim() : "";
+  const candidateCurrency = typeof candidate.cl_currencies_id === "string" ? candidate.cl_currencies_id.trim() : "";
+  if (!keptCurrency || !candidateCurrency || keptCurrency !== candidateCurrency) {
+    reasons.push("currency missing or differs");
+  }
+
+  const keptAmount = Number.isFinite(kept.amount) ? roundMoney(kept.amount) : undefined;
+  const candidateAmount = Number.isFinite(candidate.amount) ? roundMoney(candidate.amount) : undefined;
+  if (keptAmount === undefined || candidateAmount === undefined || keptAmount !== candidateAmount) {
+    reasons.push("amount missing or differs");
+  }
+
+  const keptRefKey = storedBankReferenceLookupKey(kept);
+  const candidateRefKey = storedBankReferenceLookupKey(candidate);
+  if (keptRefKey && candidateRefKey && keptRefKey !== candidateRefKey) {
+    reasons.push("bank reference differs");
+  }
+
+  const corroboration = camtDuplicateStructuredCorroborators(kept, candidate);
+  if (corroboration.length === 0) {
+    reasons.push("no corroborating counterparty match (reference, IBAN, or counterparty)");
+  }
+
+  if (reasons.length > 0) return { matches: false, reasons };
+
+  const identity = [keptDimension, keptDate, keptType, keptCurrency, keptAmount!.toFixed(2)].join("|");
+  return { matches: true, identity, corroboration };
+}
+
 function hasConcreteRuleOverrideField(ruleOverride: Record<string, unknown> | undefined): boolean {
   if (!ruleOverride) return false;
   return hasAnyAutoBookingRuleActionField({
@@ -1419,6 +1517,17 @@ export function registerAccountingInboxTools(
         );
       }
 
+      const identityCheck = compareCamtDuplicateIdentity(keptTransaction, duplicateTransaction);
+      if (!identityCheck.matches) {
+        throw new Error(
+          `Refusing to clean up transactions ${keep_transaction_id} and ${delete_transaction_id}: ` +
+          `CAMT duplicate identity mismatch (${identityCheck.reasons.join("; ")}). ` +
+          `Only a PROJECT transaction that matches the kept one on bank dimension, date, direction, ` +
+          `currency, and amount — with at least one corroborating counterparty field — may be deleted ` +
+          `as its duplicate.`,
+        );
+      }
+
       const appliedPatch: Partial<Transaction> = {};
       const requestedPatch = patch_missing_fields ?? {};
       for (const field of CAMT_DUPLICATE_PATCH_FIELDS) {
@@ -1485,7 +1594,11 @@ export function registerAccountingInboxTools(
         entity_type: "transaction",
         entity_id: delete_transaction_id,
         summary: `Deleted duplicate CAMT transaction ${delete_transaction_id} after preserving transaction ${keep_transaction_id}`,
-        details: { kept_transaction_id: keep_transaction_id },
+        details: {
+          kept_transaction_id: keep_transaction_id,
+          identity: identityCheck.identity,
+          corroboration: identityCheck.corroboration,
+        },
       });
 
       return {

@@ -561,7 +561,7 @@ function directBankReferenceLookupKey(transaction: Pick<Transaction, "bank_ref_n
   return bankReferenceLookupKey(transaction.bank_ref_number ?? undefined);
 }
 
-function storedBankReferenceLookupKey(transaction: Pick<Transaction,
+export function storedBankReferenceLookupKey(transaction: Pick<Transaction,
   "bank_ref_number" |
   "date" |
   "type" |
@@ -874,6 +874,48 @@ function buildPossibleDuplicateCandidateKey(
     currency,
     roundMoney(amount).toFixed(2),
   ].join("|");
+}
+
+/**
+ * Structured counterparty evidence that two stored transactions are the SAME
+ * bank entry — beyond the coarse candidate key (date/type/currency/amount/
+ * dimension), which alone collides for e.g. two same-day, same-amount card
+ * purchases from different merchants. Returns the matching corroborators among
+ * reference number, counterparty IBAN, and counterparty name, reusing the exact
+ * normalizers `findPossibleDuplicateMatches` uses for those three fields.
+ *
+ * This is the DESTRUCTIVE-gate subset of the proposer's `match_reasons` rule: it
+ * deliberately EXCLUDES the proposer's `description` corroborator. The stored
+ * description is metadata-wrapped and length-capped by
+ * `buildCamtDescriptionWithMetadata`, so a persisted description is not a
+ * faithful equivalent of the full `entry.description` the proposer compares —
+ * and free-text description is the lowest-entropy, most attacker-influenced
+ * signal. Requiring one of the three structured identifiers makes the cleanup
+ * gate strictly MORE conservative than the proposer (it can only ever accept a
+ * subset of what the proposer surfaces). The bank reference is intentionally not
+ * a corroborator here, exactly as in the proposal logic, because the kept row
+ * routinely lacks it (that is what the cleanup enriches); the gate uses the bank
+ * reference only as a divergence check when BOTH rows carry one.
+ */
+export function camtDuplicateStructuredCorroborators(
+  a: Pick<Transaction, "ref_number" | "bank_account_no" | "bank_account_name">,
+  b: Pick<Transaction, "ref_number" | "bank_account_no" | "bank_account_name">,
+): string[] {
+  const reasons: string[] = [];
+
+  const aRef = normalizeBatchDuplicateKeyPart(a.ref_number ?? undefined);
+  const bRef = normalizeBatchDuplicateKeyPart(b.ref_number ?? undefined);
+  if (aRef && aRef === bRef) reasons.push("reference_number");
+
+  const aIban = normalizePossibleDuplicateIban(normalizeOptionalReference(a.bank_account_no ?? undefined));
+  const bIban = normalizePossibleDuplicateIban(normalizeOptionalReference(b.bank_account_no ?? undefined));
+  if (aIban && aIban === bIban) reasons.push("counterparty_iban");
+
+  const aName = normalizedCounterpartyName(a.bank_account_name ?? undefined);
+  const bName = normalizedCounterpartyName(b.bank_account_name ?? undefined);
+  if (aName && aName === bName) reasons.push("counterparty_name");
+
+  return reasons;
 }
 
 function findPossibleDuplicateMatches(
