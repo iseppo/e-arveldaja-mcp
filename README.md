@@ -293,17 +293,6 @@ This now runs self-contained MCP surface checks by default against a locally spa
 EARVELDAJA_INTEGRATION_TEST=true npm run test:integration
 ```
 
-### Auditing legacy default accounts
-
-If you booked dividends, Lightyear activity, or FX-rounding differences with a version before the chart-of-accounts correction, this read-only script scans the current year's ledger for entries still sitting on an old default account and reports them for review (it never mutates anything):
-
-```bash
-npm run audit:legacy-accounts                 # every configured company, current year
-npm run audit:legacy-accounts -- --connection 0 --since 2026-01-01 --json
-```
-
-Run it from the directory where your credentials live. It flags both direct postings to the old account numbers and `LY:`/`FX:`/dividend journals that used a wrong or dual-purpose account; some old numbers are also legitimate real accounts (e.g. 2540 pension payments), so treat the output as a review list, not an automatic error report.
-
 ### Releasing to the MCP Registry
 
 Claude Cowork discovers public MCP servers through the [MCP Registry](https://registry.modelcontextprotocol.io). Pushing to GitHub is not enough: publish the same version to npm first, then publish this repo's `server.json` metadata to the registry.
