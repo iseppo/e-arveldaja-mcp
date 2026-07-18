@@ -181,6 +181,25 @@ describe("extractIban", () => {
   it("returns undefined for empty text", () => {
     expect(extractIban("")).toBeUndefined();
   });
+
+  it("continues from an invalid first IBAN to a later valid IBAN", () => {
+    // The first candidate has invalid check digits; extraction must not stop
+    // at it and return undefined — it must keep scanning to the valid one.
+    expect(extractIban("IBAN EE001234567890123456 then EE471000001020145685")).toBe("EE471000001020145685");
+  });
+
+  it("extracts an IBAN with no space between a punctuation label and the value", () => {
+    // Real invoices print "IBAN:EE..." with no separating space, and enclose the
+    // value in brackets or trail it with ";BIC:...". The extractor must still
+    // find the IBAN in each — a whitespace-only split would miss all three.
+    expect(extractIban("IBAN:EE382200221020145685")).toBe("EE382200221020145685");
+    expect(extractIban("IBAN:(EE382200221020145685)")).toBe("EE382200221020145685");
+    expect(extractIban("EE382200221020145685;BIC:HABAEE2X")).toBe("EE382200221020145685");
+  });
+
+  it("extracts a lowercase/mixed-case IBAN (OCR normalisation)", () => {
+    expect(extractIban("iban: ee38 2200 2210 2014 5685")).toBe("EE382200221020145685");
+  });
 });
 
 describe("extractReferenceNumber", () => {

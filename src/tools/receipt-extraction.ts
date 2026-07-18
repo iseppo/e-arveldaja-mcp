@@ -32,8 +32,7 @@ export const DATE_VALUE_SOURCE =
   TEXTUAL_MONTH_SOURCE +
   String.raw`\s+\d{1,2},?\s+\d{4})`;
 
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const RECEIPT_TOTAL_LABEL_RE = /(tasuda|maksta|kokku|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due)/i;
+const RECEIPT_TOTAL_LABEL_RE =/(tasuda|maksta|kokku|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due)/i;
 const RECEIPT_VAT_LABEL_RE = /(käibemaks|km\b|vat\b|tax\b)/i;
 const RECEIPT_NET_LABEL_RE = /(neto|subtotal|vahesumma|summa km-ta|summa eurodes\s*\(km-ta\)|summa\s*\(km-ta\)|käibemaksuta|without vat|total net)/i;
 const RECEIPT_REFERENCE_LINE_RE =
@@ -896,8 +895,13 @@ export function normalizeDate(raw: string): string | undefined {
     .trim()
     .replace(/^(?:esmaspäev|teisipäev|kolmapäev|neljapäev|reede|laupäev|pühapäev|monday|tuesday|wednesday|thursday|friday|saturday|sunday),\s*/i, "");
 
-  if (ISO_DATE_RE.test(trimmed)) {
-    return trimmed;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (iso) {
+    // Shape alone is not enough: run the same calendar round-trip toIsoDate
+    // uses so an impossible day (e.g. 2026-02-30) is rejected instead of
+    // passing straight through to a booking field. Return the ORIGINAL string
+    // when valid so a well-formed ISO date is preserved byte-for-byte.
+    return toIsoDate(Number(iso[1]), Number(iso[2]), Number(iso[3])) !== undefined ? trimmed : undefined;
   }
 
   const dotted = trimmed.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})$/);

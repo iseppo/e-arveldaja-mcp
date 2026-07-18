@@ -3,6 +3,7 @@ import type { Account } from "../types/api.js";
 import type { LayoutTextItem } from "../document-identifiers.js";
 import {
   normalizeDate,
+  extractDates,
   extractAmounts,
   buildKeywordSuggestion,
   computeMinOcrConfidence,
@@ -33,6 +34,16 @@ import type { ExtractedAmountsWithMetadata } from "./receipt-extraction.js";
 describe("normalizeDate", () => {
   it("passes through ISO dates unchanged", () => {
     expect(normalizeDate("2024-03-15")).toBe("2024-03-15");
+  });
+
+  it("rejects impossible ISO dates (calendar round-trip)", () => {
+    // ISO-format but not a real calendar day — must not pass through.
+    expect(normalizeDate("2026-02-30")).toBeUndefined();
+    expect(normalizeDate("2026-13-01")).toBeUndefined();
+  });
+
+  it("extractDates ignores an impossible ISO invoice date", () => {
+    expect(extractDates("Invoice date: 2026-02-30")).toEqual({});
   });
 
   it("parses DD.MM.YYYY", () => {
