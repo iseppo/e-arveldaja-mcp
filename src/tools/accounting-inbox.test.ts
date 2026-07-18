@@ -3,7 +3,7 @@ import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import { parseDocument } from "../document-parser.js";
-import { registerAccountingInboxTools } from "./accounting-inbox.js";
+import { buildRecommendedSteps, registerAccountingInboxTools } from "./accounting-inbox.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import * as auditLogModule from "../audit-log.js";
 import {
@@ -42,6 +42,57 @@ const workspacesToClean: string[] = [];
 afterEach(async () => {
   await Promise.all(workspacesToClean.splice(0).map(path => rm(path, { recursive: true, force: true })));
   mockedParseDocument.mockReset();
+});
+
+describe("buildRecommendedSteps receipt folders (M13)", () => {
+  const folder = (path: string, count: number) => ({
+    path,
+    receipt_file_count: count,
+    sample_files: [],
+  });
+  const bare = (receiptFolders: any[], defaultsOverrides: any = {}) =>
+    buildRecommendedSteps({
+      camtFiles: [],
+      wiseFiles: [],
+      receiptFolders,
+      defaults: {
+        suggested_receipt_dimension_id: undefined,
+        local_bank_candidates: [],
+        candidates: [],
+        ...defaultsOverrides,
+      },
+    } as any);
+
+  it("creates deterministic processing steps for every receipt folder", () => {
+    const prepared = bare([folder("b", 2), folder("a", 1)]);
+    expect(
+      prepared.steps
+        .filter((step) => step.tool === "process_receipt_batch")
+        .map((step) => step.suggested_args.folder_path),
+    ).toEqual(["a", "b"]);
+  });
+
+  it("gives each receipt folder an independent step with folder index and file count", () => {
+    const prepared = bare([folder("b", 2), folder("a", 1)]);
+    const receiptSteps = prepared.steps.filter((step) => step.tool === "process_receipt_batch");
+    expect(receiptSteps).toHaveLength(2);
+    // path-sorted: "a" (1 file) is folder 1/2, "b" (2 files) is folder 2/2
+    expect(receiptSteps[0]!.reason).toContain("1/2");
+    expect(receiptSteps[0]!.reason).toContain("1 eligible receipt file");
+    expect(receiptSteps[1]!.reason).toContain("2/2");
+    expect(receiptSteps[1]!.reason).toContain("2 eligible receipt file");
+  });
+
+  it("marks every folder's step recommended and dimension-carrying when a receipt dimension is known", () => {
+    const prepared = bare([folder("b", 2), folder("a", 1)], { suggested_receipt_dimension_id: 101, local_bank_candidates: [] });
+    const receiptSteps = prepared.steps.filter((step) => step.tool === "process_receipt_batch");
+    expect(receiptSteps).toHaveLength(2);
+    for (const step of receiptSteps) {
+      expect(step.recommended).toBe(true);
+      expect(step.missing_inputs).toEqual([]);
+      expect(step.suggested_args).toMatchObject({ accounts_dimensions_id: 101, execution_mode: "dry_run" });
+    }
+  });
 });
 
 describe("accounting_inbox (scan mode)", () => {

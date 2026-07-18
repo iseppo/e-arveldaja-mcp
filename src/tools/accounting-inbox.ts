@@ -468,7 +468,7 @@ function buildMissingDimensionQuestion(
   };
 }
 
-function buildRecommendedSteps(params: {
+export function buildRecommendedSteps(params: {
   camtFiles: InboxFileCandidate[];
   wiseFiles: InboxFileCandidate[];
   receiptFolders: ReceiptFolderCandidate[];
@@ -552,28 +552,33 @@ function buildRecommendedSteps(params: {
     ));
   }
 
-  const primaryReceiptFolder = receiptFolders[0];
-  if (primaryReceiptFolder) {
+  // Emit one dry-run step per discovered receipt folder, not just the first, so
+  // no folder's receipts are silently skipped. Sort by path for a deterministic,
+  // reproducible step order (detectReceiptFolders orders by file count, which is
+  // fine for picking a "primary" but non-deterministic to depend on for output).
+  const sortedReceiptFolders = [...receiptFolders].sort((a, b) => a.path.localeCompare(b.path));
+  for (const [folderIndex, folder] of sortedReceiptFolders.entries()) {
     const dimensionId = defaults.suggested_receipt_dimension_id;
     const missingInputs = dimensionId === undefined ? ["accounts_dimensions_id"] : [];
+    const folderScope = `Folder ${folderIndex + 1}/${sortedReceiptFolders.length} (${folder.path}): ${folder.receipt_file_count} eligible receipt file(s).`;
     steps.push({
       step: stepNumber++,
       tool: "process_receipt_batch",
-      purpose: "Dry-run receipt processing for the most likely receipt folder.",
+      purpose: `Dry-run receipt processing for folder ${folder.path}.`,
       recommended: dimensionId !== undefined,
       suggested_args: {
-        folder_path: primaryReceiptFolder.path,
+        folder_path: folder.path,
         ...(dimensionId !== undefined ? { accounts_dimensions_id: dimensionId } : {}),
         execution_mode: "dry_run",
       },
       missing_inputs: missingInputs,
       reason: dimensionId !== undefined
-        ? `Recommended receipt matching bank dimension: ${dimensionId}. Start with the folder that has the most receipt files.`
-        : "A bank account dimension is still needed to match receipts against outgoing bank transactions.",
+        ? `${folderScope} Recommended receipt matching bank dimension: ${dimensionId}.`
+        : `${folderScope} A bank account dimension is still needed to match receipts against outgoing bank transactions.`,
     });
   }
 
-  if (primaryReceiptFolder && defaults.suggested_receipt_dimension_id === undefined) {
+  if (receiptFolders.length > 0 && defaults.suggested_receipt_dimension_id === undefined) {
     questions.push(buildMissingDimensionQuestion(
       "receipt_accounts_dimensions_id",
       "Which bank account dimension should receipts be matched against by default?",
