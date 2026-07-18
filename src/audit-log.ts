@@ -21,6 +21,7 @@ import {
   normalizeAuditLabel,
   sanitizeAuditLogName,
 } from "./audit-log-labels.js";
+import { withOwnedFileLockSync, type LockOptions } from "./file-lock.js";
 
 // ---------------------------------------------------------------------------
 // Shared audit filter vocabularies (single source of truth)
@@ -83,7 +84,33 @@ export interface AuditLogLabelAssignment {
 
 const LOGS_DIR = join(process.cwd(), "logs");
 const LABELS_FILE = join(LOGS_DIR, ".audit-labels.json");
+const AUDIT_LOG_LOCK = join(LOGS_DIR, ".audit-log.lock");
 const ENTRY_SEPARATOR = "\n---\n\n";
+
+// Serialize every audit-file mutation (append AND relabel/merge) on one
+// cross-process lock so a merge's read-modify-write can never lose an append
+// that races it. Synchronous by contract — logAudit and the label API are sync.
+//
+// The lock options default to withOwnedFileLockSync's own defaults (30s / 25ms).
+// A test seam can shorten the wait so a contention test does not stall; it never
+// changes production behavior unless explicitly set.
+let auditLogLockOptions: LockOptions = {};
+export function setAuditLogLockOptionsForTesting(options?: LockOptions): void {
+  auditLogLockOptions = options ?? {};
+}
+function withAuditLogLock<T>(fn: () => T): T {
+  return withOwnedFileLockSync(AUDIT_LOG_LOCK, fn, auditLogLockOptions);
+}
+
+// Test seam: lets a test model an append landing on the source file while a
+// relabel merge is in progress, so the lock/reread behavior is deterministically
+// verifiable. Never set in production.
+let auditMergeTestHook: ((sourcePath: string, targetPath: string) => void) | undefined;
+export function setAuditMergeTestHookForTesting(
+  hook?: (sourcePath: string, targetPath: string) => void,
+): void {
+  auditMergeTestHook = hook;
+}
 const META_RE = /^<!-- audit:(\{.*\}) -->$/m;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const AUDIT_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
@@ -237,14 +264,21 @@ function renderMergedSections(sections: string[]): string {
   return sections.join(ENTRY_SEPARATOR) + (sections.length > 0 ? ENTRY_SEPARATOR : "");
 }
 
+// Precondition: the caller (setAuditLogLabels) holds the audit lock for the
+// whole relabel. This REREADS both files (so an append captured before the
+// relabel's lock is preserved) and replaces the target atomically via
+// temp-file + rename.
 function mergeAuditLogFiles(sourcePath: string, targetPath: string): void {
-  const sourceContent = readFileSync(sourcePath, "utf-8");
+  // Test seam: model a concurrent append arriving on the source mid-merge.
+  auditMergeTestHook?.(sourcePath, targetPath);
+
+  const sourceContent = existsSync(sourcePath) ? readFileSync(sourcePath, "utf-8") : "";
   if (!sourceContent.trim()) {
-    unlinkSync(sourcePath);
+    if (existsSync(sourcePath)) unlinkSync(sourcePath);
     return;
   }
 
-  const targetContent = readFileSync(targetPath, "utf-8");
+  const targetContent = existsSync(targetPath) ? readFileSync(targetPath, "utf-8") : "";
   const mergedSections = [...splitAuditSections(targetContent), ...splitAuditSections(sourceContent)]
     .map((section, index) => ({
       section,
@@ -264,10 +298,14 @@ function mergeAuditLogFiles(sourcePath: string, targetPath: string): void {
     })
     .map((entry) => entry.section);
 
-  writeFileSync(targetPath, renderMergedSections(mergedSections), {
+  // Atomically replace the target: write a private temp file, then rename over
+  // the target so a reader never sees a half-written merge.
+  const temporary = `${targetPath}.tmp-${process.pid}`;
+  writeFileSync(temporary, renderMergedSections(mergedSections), {
     encoding: "utf-8",
     mode: PRIVATE_FILE_MODE,
   });
+  renameSync(temporary, targetPath);
   enforcePrivateFileMode(targetPath);
   unlinkSync(sourcePath);
 }
@@ -323,41 +361,48 @@ export function setAuditLogLabels(assignments: AuditLogLabelAssignment[]): void 
     touchedPaths.add(getLogFilePathForLabel(assignment.label));
   }
 
-  const originalFiles = new Map<string, string | null>();
-  for (const path of touchedPaths) {
-    originalFiles.set(path, existsSync(path) ? readFileSync(path, "utf-8") : null);
-  }
-
-  try {
-    for (const assignment of tempAssignments) {
-      setAuditLogLabelInternal(assignment.connectionName, assignment.tempLabel);
+  // Perform the ENTIRE relabel — snapshot, both migration phases, and the label
+  // persist — under one audit lock. logAudit's append takes the same lock and
+  // re-reads the persisted labels inside it, so a concurrent append can never
+  // land on (or recreate) a file mid-migration: it is either fully applied
+  // before the relabel or serialized after it, resolving to the final label.
+  withAuditLogLock(() => {
+    const originalFiles = new Map<string, string | null>();
+    for (const path of touchedPaths) {
+      originalFiles.set(path, existsSync(path) ? readFileSync(path, "utf-8") : null);
     }
 
-    for (const assignment of tempAssignments) {
-      setAuditLogLabelInternal(assignment.connectionName, assignment.label);
-    }
-
-    persistAuditLabelMap();
-  } catch (error) {
-    auditLabelByConnection.clear();
-    for (const [connectionName, label] of originalLabels.entries()) {
-      auditLabelByConnection.set(connectionName, label);
-    }
-
-    for (const [path, content] of originalFiles.entries()) {
-      try {
-        if (content === null) {
-          if (existsSync(path)) unlinkSync(path);
-        } else {
-          writePrivateTextFile(path, content);
-        }
-      } catch {
-        // best-effort rollback
+    try {
+      for (const assignment of tempAssignments) {
+        setAuditLogLabelInternal(assignment.connectionName, assignment.tempLabel);
       }
-    }
 
-    throw error;
-  }
+      for (const assignment of tempAssignments) {
+        setAuditLogLabelInternal(assignment.connectionName, assignment.label);
+      }
+
+      persistAuditLabelMap();
+    } catch (error) {
+      auditLabelByConnection.clear();
+      for (const [connectionName, label] of originalLabels.entries()) {
+        auditLabelByConnection.set(connectionName, label);
+      }
+
+      for (const [path, content] of originalFiles.entries()) {
+        try {
+          if (content === null) {
+            if (existsSync(path)) unlinkSync(path);
+          } else {
+            writePrivateTextFile(path, content);
+          }
+        } catch {
+          // best-effort rollback
+        }
+      }
+
+      throw error;
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -710,9 +755,6 @@ export function logAudit(
 ): boolean {
   const full: AuditEntry = { ...entry, timestamp: new Date().toISOString() };
   try {
-    const filePath = opts?.connectionName
-      ? getLogFilePathForConnection(opts.connectionName)
-      : getLogFilePath();
     if (!existsSync(LOGS_DIR)) {
       mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
     }
@@ -730,7 +772,18 @@ export function logAudit(
         `for tool="${entry.tool}" action="${entry.action}"\n`,
       );
     }
-    appendPrivateTextFile(filePath, md);
+    // Resolve the destination AND append under the shared audit lock, re-reading
+    // the persisted labels inside it. This serializes the append against a
+    // relabel (which holds the same lock for its whole transaction) and makes the
+    // append target the CURRENT label — so it can never land on, or recreate, a
+    // file the relabel just migrated away.
+    withAuditLogLock(() => {
+      loadAuditLabelMap();
+      const filePath = opts?.connectionName
+        ? getLogFilePathForConnection(opts.connectionName)
+        : getLogFilePath();
+      appendPrivateTextFile(filePath, md);
+    });
     return true;
   } catch {
     // Audit logging is best-effort — do not crash the server

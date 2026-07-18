@@ -1,4 +1,5 @@
 import { link, mkdir, open, rm, writeFile } from "node:fs/promises";
+import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -153,6 +154,98 @@ async function waitForPredecessor(
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Synchronous owned file lock (same cross-process protocol as the async lock)
+// ---------------------------------------------------------------------------
+//
+// Some call sites (audit logging) are synchronous by contract and must not
+// consume a Promise as a lock. This mirrors acquireOwnedFileLock's policy
+// exactly — hard-link publish, strict owner parsing, ESRCH-only reclaim of a
+// definitely-dead owner via a guarded reclaim path, invalid/live owners stay
+// busy — but blocks the thread synchronously. Within a single process the JS
+// event loop already serializes sync sections; the file lock adds cross-process
+// mutual exclusion.
+
+// Backing cell for Atomics.wait. Its value is never changed (no notifier
+// exists), so Atomics.wait always blocks for the full requested timeout and
+// then returns "timed-out" — a CPU-friendly synchronous sleep. Node permits
+// Atomics.wait on the main thread.
+const syncWaitCell = new Int32Array(new SharedArrayBuffer(4));
+
+function readTextSync(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function publishOwnedPathSync(path: string, text: string): boolean {
+  const candidate = `${path}.${process.pid}.${randomUUID()}.candidate`;
+  writeFileSync(candidate, text, { flag: "wx", mode: 0o600 });
+  try {
+    linkSync(candidate, path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  } finally {
+    rmSync(candidate, { force: true });
+  }
+}
+
+function releaseIfOwnedSync(path: string, ownerText: string): void {
+  if (readTextSync(path) === ownerText) rmSync(path, { force: true });
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(syncWaitCell, 0, 0, ms);
+}
+
+export function withOwnedFileLockSync<T>(
+  lockPath: string,
+  fn: () => T,
+  options: LockOptions = {},
+): T {
+  const { timeoutMs, pollMs } = validateOptions(options);
+  const deadline = Date.now() + timeoutMs;
+  mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const token: OwnerToken = { pid: process.pid, nonce: randomUUID(), createdAt: new Date().toISOString() };
+  const ownerText = JSON.stringify(token);
+
+  while (true) {
+    if (publishOwnedPathSync(lockPath, ownerText)) {
+      try {
+        return fn();
+      } finally {
+        releaseIfOwnedSync(lockPath, ownerText);
+      }
+    }
+
+    const observedText = readTextSync(lockPath);
+    const observed = observedText === undefined ? { kind: "invalid" } as const : parseOwner(observedText);
+    if (observedText !== undefined && observed.kind === "valid" && ownerDefinitelyDead(observed)) {
+      const reclaimPath = `${lockPath}.reclaim`;
+      if (publishOwnedPathSync(reclaimPath, ownerText)) {
+        try {
+          const current = readTextSync(lockPath);
+          if (current !== undefined && current === observedText && ownerDefinitelyDead(parseOwner(current))) {
+            rmSync(lockPath, { force: true });
+            continue;
+          }
+        } finally {
+          releaseIfOwnedSync(reclaimPath, ownerText);
+        }
+      }
+    }
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new LockBusyError(lockPath, timeoutMs);
+    sleepSync(Math.min(pollMs, remaining));
   }
 }
 

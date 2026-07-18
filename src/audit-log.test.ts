@@ -1,6 +1,8 @@
 import { chmod, mkdtemp, readdir, rm, stat } from "fs/promises";
+import { appendFileSync, existsSync, readFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
+import { LockBusyError, withOwnedFileLockSync } from "./file-lock.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 async function loadAuditLogModule(
@@ -958,5 +960,165 @@ describe("audit summary rendering (M16)", () => {
 
     const text = auditLog.getAuditLog();
     expect(text.match(/Canonical summary/g)).toHaveLength(1);
+  });
+});
+
+describe("audit relabel/append concurrency (M17)", () => {
+  let tempDir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  it("preserves an append that lands on the source file while labels are merged", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m17-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    // Seed a target file so the relabel MERGES (rather than renames)...
+    auditLog.initAuditLog(() => "target");
+    auditLog.logAudit({
+      tool: "confirm_purchase_invoice",
+      action: "CONFIRMED",
+      entity_type: "purchase_invoice",
+      entity_id: 17,
+      summary: "target-existing",
+      details: {},
+    });
+
+    // ...and a source file with a pre-existing entry.
+    auditLog.initAuditLog(() => "source");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 16,
+      summary: "before",
+      details: {},
+    });
+
+    // Model a concurrent append landing on the exact file being merged, mid-merge.
+    auditLog.setAuditMergeTestHookForTesting((sourcePath: string) => {
+      appendFileSync(sourcePath, "### 2026-03-26 10:00:00 — kanne\n\nconcurrent\n---\n\n");
+    });
+
+    auditLog.setAuditLogLabel("source", "target");
+    auditLog.setAuditMergeTestHookForTesting(undefined);
+
+    const merged = readFileSync(join(tempDir, "logs", "target.audit.md"), "utf8");
+    // Both the pre-existing source entry and the concurrent append survive once.
+    expect(merged.match(/before/g)).toHaveLength(1);
+    expect(merged.match(/concurrent/g)).toHaveLength(1);
+  });
+
+  it("holds the audit lock for the whole merge, excluding any concurrent locked writer", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m17-lock-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "target");
+    auditLog.logAudit({
+      tool: "confirm_purchase_invoice",
+      action: "CONFIRMED",
+      entity_type: "purchase_invoice",
+      entity_id: 17,
+      summary: "target-existing",
+      details: {},
+    });
+    auditLog.initAuditLog(() => "source");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 16,
+      summary: "before",
+      details: {},
+    });
+
+    // While the merge runs (holds the audit lock), a competing acquisition of the
+    // SAME lock — which is exactly what logAudit's append does — must be excluded.
+    let observedBusy = false;
+    auditLog.setAuditMergeTestHookForTesting((_sourcePath: string, targetPath: string) => {
+      const auditLock = join(dirname(targetPath), ".audit-log.lock");
+      try {
+        withOwnedFileLockSync(auditLock, () => undefined, { timeoutMs: 20, pollMs: 2 });
+      } catch (error) {
+        observedBusy = error instanceof LockBusyError;
+      }
+    });
+
+    auditLog.setAuditLogLabel("source", "target");
+    auditLog.setAuditMergeTestHookForTesting(undefined);
+
+    expect(observedBusy).toBe(true);
+  });
+
+  it("excludes logAudit's own append while the audit lock is held (append is a locked writer)", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m17-append-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "env");
+
+    // Shorten the append's lock wait so this contention resolves in ~20ms instead
+    // of stalling on the 30s production default.
+    auditLog.setAuditLogLockOptionsForTesting({ timeoutMs: 20, pollMs: 2 });
+
+    const auditLock = join(tempDir, "logs", ".audit-log.lock");
+    let wrote: boolean | undefined;
+    // Hold the audit lock, then call logAudit from within: its append must fail
+    // to acquire the SAME lock (best-effort → returns false) and write nothing.
+    // If logAudit did NOT take the lock, it would write straight through.
+    withOwnedFileLockSync(auditLock, () => {
+      wrote = auditLog.logAudit({
+        tool: "confirm_purchase_invoice",
+        action: "CONFIRMED",
+        entity_type: "purchase_invoice",
+        entity_id: 42,
+        summary: "blocked-append",
+        details: {},
+      });
+    }, { timeoutMs: 1000, pollMs: 2 });
+
+    auditLog.setAuditLogLockOptionsForTesting(undefined);
+    expect(wrote).toBe(false);
+    expect(existsSync(join(tempDir, "logs", "env.audit.md"))).toBe(false);
+  });
+
+  it("routes a stale-view append to the relabeled file instead of orphaning it", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m17-stale-"));
+    // Two module instances share one logs dir — a cross-process simulation.
+    const procA = await loadAuditLogModule(tempDir);
+    const procB = await loadAuditLogModule(tempDir);
+    procA.initAuditLog(() => "env");
+    procB.initAuditLog(() => "env");
+
+    // A seeds an entry, then relabels env -> Acme (persisting the label to disk).
+    procA.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 1,
+      summary: "seed",
+      details: {},
+    });
+    procA.setAuditLogLabel("env", "Acme");
+
+    // B never saw A's relabel (its in-memory label is still "env"). Its append
+    // must resolve to the CURRENT label (Acme) — not recreate the migrated file.
+    procB.logAudit({
+      tool: "confirm_purchase_invoice",
+      action: "CONFIRMED",
+      entity_type: "purchase_invoice",
+      entity_id: 2,
+      summary: "stale-view-append",
+      details: {},
+    });
+
+    const acme = readFileSync(join(tempDir, "logs", "Acme.audit.md"), "utf8");
+    expect(acme).toContain("#2");
+    expect(acme).toContain("stale-view-append");
+    // The migrated source file is not resurrected as an orphan.
+    expect(existsSync(join(tempDir, "logs", "env.audit.md"))).toBe(false);
   });
 });

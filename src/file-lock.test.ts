@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +9,7 @@ import {
   ownerDefinitelyDead,
   parseOwner,
   withOwnedFileLock,
+  withOwnedFileLockSync,
   type OwnerToken,
 } from "./file-lock.js";
 
@@ -188,5 +190,40 @@ describe("H06-B owned file lock", () => {
     release();
     await first;
     await expect(later).resolves.toBe("later");
+  });
+});
+
+describe("M17 synchronous owned file lock", () => {
+  it("keeps a malformed owner busy without replacing it", async () => {
+    const path = await lockPath();
+    await writeFile(path, "not-json", { mode: 0o600 });
+    expect(() => withOwnedFileLockSync(path, () => "ran", { timeoutMs: 20, pollMs: 2 }))
+      .toThrow(LockBusyError);
+    expect(await readFile(path, "utf8")).toBe("not-json");
+  });
+
+  it("reclaims a definitely-dead owner and runs the callback", async () => {
+    const path = await lockPath();
+    await writeFile(path, JSON.stringify(deadOwner()), { mode: 0o600 });
+    const result = withOwnedFileLockSync(path, () => "ran", { timeoutMs: 200, pollMs: 5 });
+    expect(result).toBe("ran");
+  });
+
+  it("keeps a live owner busy without replacing it", async () => {
+    const path = await lockPath();
+    const live = JSON.stringify({ ...deadOwner(), pid: process.pid });
+    await writeFile(path, live, { mode: 0o600 });
+    expect(() => withOwnedFileLockSync(path, () => "ran", { timeoutMs: 10, pollMs: 2 }))
+      .toThrow(LockBusyError);
+    expect(await readFile(path, "utf8")).toBe(live);
+  });
+
+  it("releases its own token after the callback throws", async () => {
+    const path = await lockPath();
+    expect(() => withOwnedFileLockSync(path, () => { throw new Error("boom"); }))
+      .toThrow("boom");
+    // Lock released → a fresh acquisition succeeds and the file holds our token.
+    const observed = withOwnedFileLockSync(path, () => readFileSync(path, "utf8"), { timeoutMs: 200, pollMs: 5 });
+    expect(parseOwner(observed)).toMatchObject({ kind: "valid" });
   });
 });
