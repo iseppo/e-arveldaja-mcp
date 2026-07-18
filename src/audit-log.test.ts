@@ -862,3 +862,101 @@ describe("audit log labels", () => {
     })).toBe(false);
   });
 });
+
+describe("audit summary rendering (M16)", () => {
+  let tempDir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  it("renders a non-empty summary exactly once", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-summary-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    auditLog.logAudit({
+      tool: "update_journal",
+      action: "UPDATED",
+      entity_type: "journal",
+      entity_id: 1,
+      summary: "Adjusted Acme",
+      details: {},
+    });
+
+    const text = auditLog.getAuditLog();
+    expect(text.match(/Adjusted Acme/g)).toHaveLength(1);
+    expect(text).toMatch(/Summary|Kokkuvõte/);
+  });
+
+  it("does not render a row for an empty or whitespace-only summary", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-summary-empty-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    auditLog.logAudit({
+      tool: "update_journal",
+      action: "UPDATED",
+      entity_type: "journal",
+      entity_id: 2,
+      summary: "   ",
+      details: {},
+    });
+
+    const text = auditLog.getAuditLog();
+    expect(text).not.toMatch(/Summary|Kokkuvõte/);
+  });
+
+  it("escapes markdown and every line break (LF, CRLF, lone CR) in the summary and renders it once", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-summary-escape-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    auditLog.logAudit({
+      tool: "update_journal",
+      action: "UPDATED",
+      entity_type: "journal",
+      entity_id: 3,
+      // LF-injected table row, escaped emphasis, and a LONE CR trying to forge
+      // a new heading line.
+      summary: "Adjusted *Acme*\n| injected | row |\r### forged heading",
+      details: {},
+    });
+
+    const text = auditLog.getAuditLog();
+    // Rendered exactly once.
+    expect(text.match(/Adjusted/g)).toHaveLength(1);
+    // Markdown emphasis and table pipes are escaped.
+    expect(text).toContain("\\*Acme\\*");
+    expect(text).not.toContain("*Acme*");
+    expect(text).not.toContain("| injected |");
+    // Every line break is normalized to a space: no carriage return survives,
+    // so the "### forged heading" cannot start its own Markdown line.
+    expect(text).not.toContain("\r");
+    expect(text).not.toMatch(/^### forged heading/m);
+    expect(text).toMatch(/Summary|Kokkuvõte/);
+  });
+
+  it("renders the summary once even when details also carries a summary key", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-summary-collision-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    auditLog.logAudit({
+      tool: "update_journal",
+      action: "UPDATED",
+      entity_type: "journal",
+      entity_id: 4,
+      summary: "Canonical summary",
+      // A stray details.summary must not double-render the summary row.
+      details: { summary: "Canonical summary" },
+    });
+
+    const text = auditLog.getAuditLog();
+    expect(text.match(/Canonical summary/g)).toHaveLength(1);
+  });
+});

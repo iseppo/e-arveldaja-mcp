@@ -471,7 +471,11 @@ function formatDetailValue(key: string, value: unknown, opts?: { code?: boolean 
   if (typeof value === "boolean") {
     return value ? "true" : "false";
   }
-  return escapeMarkdown(String(value).replace(/\r?\n/g, " "));
+  // Normalize every line break — CRLF, a lone CR, and a lone LF — to a space.
+  // A bare `\r` is still a Markdown line break, so missing it would let an
+  // (OCR-derived / attacker-influenced) value break the table or inject a
+  // forged heading/row after the value is escaped.
+  return escapeMarkdown(String(value).replace(/\r\n?|\n/g, " "));
 }
 
 function renderFieldTable(rows: Array<{ label: string; value: string }>): string {
@@ -519,6 +523,15 @@ function renderDetails(entry: Omit<AuditEntry, "timestamp"> & { timestamp: strin
   };
 
   addRow("tool", entry.tool, { code: true });
+
+  // entry.summary is a top-level AuditEntry field (not part of entry.details),
+  // so nothing else in renderDetails emits it — render it exactly once here.
+  // Skip empty/whitespace summaries to avoid a blank row. formatDetailValue
+  // escapes markdown and normalizes newlines, and addRow marks "summary"
+  // rendered so a stray details.summary can never double-render it below.
+  if (typeof entry.summary === "string" && entry.summary.trim().length > 0) {
+    addRow("summary", entry.summary);
+  }
 
   // Supplier / client info
   if (d.client_name || d.supplier_name) {
