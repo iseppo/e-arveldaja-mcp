@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseMcpResponse } from "./mcp-json.js";
 import { toolError } from "./tool-error.js";
 import { HttpError } from "./http-client.js";
+import { MutationIndeterminateError } from "./mutation-outcome.js";
 
 describe("toolError", () => {
   it("returns MCP isError results for strings", () => {
@@ -115,5 +116,40 @@ describe("toolError", () => {
       "<<UNTRUSTED_OCR_START:deadbeef>>\ngross_sum mismatch\n<<UNTRUSTED_OCR_END:deadbeef>>",
     );
     expect(payload.status).toBe(400);
+  });
+
+  it("H03 toolError serializes every neutral mutation field", () => {
+    const error = new MutationIndeterminateError({
+      operation: "confirm",
+      entity: "transaction",
+      entityId: 7,
+      businessKey: "transaction:7",
+      affectedCaches: ["/transactions", "/journals"],
+      cause: new HttpError("lost", "network", "PATCH", "/transactions/7/register"),
+      nextAction: "Freshly read transaction 7 before any retry.",
+    });
+
+    const result = toolError(error);
+
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse((result.content[0] as { type: string; text: string }).text)).toEqual({
+      error: "confirm transaction:7 is indeterminate. Freshly read transaction 7 before any retry.",
+      name: "MutationIndeterminateError",
+      category: "mutation_indeterminate",
+      mutationMayHaveOccurred: true,
+      operation: "confirm",
+      entity: "transaction",
+      entityId: 7,
+      businessKey: "transaction:7",
+      affectedCaches: ["/transactions", "/journals"],
+      cause: {
+        name: "HttpError",
+        message: "lost",
+        status: "network",
+        method: "PATCH",
+        path: "/transactions/7/register",
+      },
+      nextAction: "Freshly read transaction 7 before any retry.",
+    });
   });
 });

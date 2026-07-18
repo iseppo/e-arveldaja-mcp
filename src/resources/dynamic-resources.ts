@@ -2,6 +2,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import type { ApiContext } from "../tools/crud-tools.js";
 import { registerResource } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
+import { renderExternalEntity } from "../external-text-renderer.js";
 
 function parseResourceId(id: string): number {
   const parsed = Number(id);
@@ -23,7 +24,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "text/plain",
-          text: toMcpJson(client),
+          text: toMcpJson(renderExternalEntity("client", client)),
         }],
       };
     }
@@ -39,7 +40,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "text/plain",
-          text: toMcpJson(product),
+          text: toMcpJson(renderExternalEntity("product", product)),
         }],
       };
     }
@@ -55,7 +56,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "text/plain",
-          text: toMcpJson(journal),
+          text: toMcpJson(renderExternalEntity("journal", journal)),
         }],
       };
     }
@@ -71,7 +72,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "text/plain",
-          text: toMcpJson(invoice),
+          text: toMcpJson(renderExternalEntity("sale_invoice", invoice)),
         }],
       };
     }
@@ -87,7 +88,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "text/plain",
-          text: toMcpJson(invoice),
+          text: toMcpJson(renderExternalEntity("purchase_invoice", invoice)),
         }],
       };
     }
@@ -103,7 +104,7 @@ export function registerDynamicResources(server: McpServer, api: ApiContext): vo
         contents: [{
           uri: uri.href,
           mimeType: "text/plain",
-          text: toMcpJson(transaction),
+          text: toMcpJson(renderExternalEntity("transaction", transaction)),
         }],
       };
     }

@@ -1,8 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { readFile } from "fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import { registerTool } from "../mcp-compat.js";
+import { sha256Hex } from "./receipt-inbox-files.js";
 import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
+import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
@@ -35,20 +39,52 @@ function sanitizeInvoiceDocumentFileName(resolvedPath: string): string {
   return (resolvedPath.split(/[\\/]/).pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255);
 }
 
-export async function prepareInvoiceDocumentUpload(filePath: string): Promise<{
-  resolvedPath: string;
+/**
+ * Snapshot the source document's bytes ONCE and bind the caller to their
+ * SHA-256 digest. `extract_pdf_invoice` returns `source_sha256`;
+ * `create_purchase_invoice_from_pdf` passes it back as `expectedSha256`, so a
+ * file swapped between extraction and creation is rejected (`digest_mismatch`)
+ * BEFORE any API mutation. Both the parser and the uploader read the immutable
+ * snapshot, never the live path. `cleanup()` is always defined and removes the
+ * temp snapshot plus any resolver-owned temp file.
+ */
+export async function prepareInvoiceDocumentUpload(filePath: string, expectedSha256?: string): Promise<{
+  snapshotPath: string;
   fileName: string;
+  bytes: Buffer;
   contentsBase64: string;
-  cleanup?: () => Promise<void>;
+  source_sha256: string;
+  cleanup: () => Promise<void>;
 }> {
-  const { path, cleanup } = await resolveInvoiceDocumentInput(filePath);
-  const buffer = await readFile(path);
-  return {
-    resolvedPath: path,
-    fileName: sanitizeInvoiceDocumentFileName(path),
-    contentsBase64: buffer.toString("base64"),
-    cleanup,
+  const resolved = await resolveInvoiceDocumentInput(filePath);
+  let dir: string | undefined;
+  // Best-effort: cleanup must never throw (it runs in the caller's `finally`
+  // AFTER a possibly-successful create/upload — a failed temp removal must not
+  // mask a completed accounting mutation). It also runs on every early-failure
+  // path below, so the resolver's own temp file never leaks.
+  const cleanup = async () => {
+    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+    if (resolved.cleanup) await resolved.cleanup().catch(() => {});
   };
+  try {
+    const bytes = await readFile(resolved.path);
+    const source_sha256 = sha256Hex(bytes);
+    const fileName = sanitizeInvoiceDocumentFileName(resolved.path);
+    dir = await mkdtemp(join(tmpdir(), "e-arveldaja-invoice-"));
+    const snapshotPath = join(dir, fileName);
+    await writeFile(snapshotPath, bytes, { mode: 0o600 });
+    if (expectedSha256 !== undefined && source_sha256 !== expectedSha256) {
+      throw Object.assign(new Error("Document digest mismatch"), {
+        category: "digest_mismatch",
+        expected_sha256: expectedSha256,
+        actual_sha256: source_sha256,
+      });
+    }
+    return { snapshotPath, fileName, bytes, contentsBase64: bytes.toString("base64"), source_sha256, cleanup };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
 }
 
 function parseVatRate(rateValue?: string): number | undefined {
@@ -125,9 +161,12 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     },
     { ...readOnly, openWorldHint: true, title: "Extract Supplier Invoice PDF" },
     async ({ file_path }) => {
-      const { path: resolved, cleanup } = await resolveInvoiceDocumentInput(file_path);
+      // Snapshot the bytes once and parse the immutable snapshot; the returned
+      // source_sha256 binds a later create_purchase_invoice_from_pdf to these
+      // exact bytes (H15 TOCTOU close).
+      const snapshot = await prepareInvoiceDocumentUpload(file_path);
       try {
-        const parsedDocument = await parseDocument(resolved);
+        const parsedDocument = await parseDocument(snapshot.snapshotPath);
         const allTextItems = textItemsWithPageNums(parsedDocument.result?.pages);
         const minOcrConfidence = computeMinOcrConfidence(allTextItems);
         // Resolve the active company's own identifiers so extraction excludes
@@ -145,7 +184,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         } catch {
           // Offline / unconfigured connection — extract without self-exclusions.
         }
-        const extracted = extractReceiptFieldsFromText(parsedDocument.text, sanitizeInvoiceDocumentFileName(resolved), {
+        const extracted = extractReceiptFieldsFromText(parsedDocument.text, snapshot.fileName, {
           textItems: allTextItems,
           ownCompanyVat,
           ownCompanyRegistryCode,
@@ -226,6 +265,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
                 ...(warnings.length > 0 ? { warnings } : {}),
               },
               llm_fallback: llmFallback,
+              source_sha256: snapshot.source_sha256,
               page_count: parsedDocument.pageCount,
               ...(parsedDocument.ocrPartialFailure ? { partial_ocr_failure: true } : {}),
               ...(minOcrConfidence !== undefined ? { min_ocr_confidence: minOcrConfidence } : {}),
@@ -233,7 +273,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           }],
         };
       } finally {
-        if (cleanup) await cleanup();
+        await snapshot.cleanup();
       }
     }
   );
@@ -687,15 +727,34 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       base_vat_price: z.number().optional().describe("EUR equivalent of vat_price; auto-derived from currency_rate when omitted."),
       base_gross_price: z.number().optional().describe("Actual settled EUR gross total; auto-derived from currency_rate when omitted."),
       file_path: z.string().describe("Absolute path to the source invoice document (PDF/JPG/PNG); uploaded during creation."),
+      source_sha256: z.string().regex(/^[0-9a-f]{64}$/).describe("SHA-256 of the document returned by extract_pdf_invoice; binds this booking to the exact reviewed bytes."),
     },
     { ...create, openWorldHint: true, title: "Create Purchase Invoice from PDF" },
-    async (params) => {
-      const supplier = await api.clients.get(params.supplier_client_id);
-      const documentUpload = await prepareInvoiceDocumentUpload(params.file_path);
+    async (rawParams) => {
+      // Strip any sandbox markers round-tripped from a wrapped extract response
+      // off the persisted business fields (invoice_number, notes, ref_number,
+      // bank_account_no, item titles) before they reach the invoice or audit log.
+      // file_path and source_sha256 are IDENTITY/lookup values, not persisted
+      // business text — they must be used verbatim (a marker-shaped path component
+      // must not be silently rewritten), so read them from rawParams.
+      const params = desandboxAllStrings(rawParams);
+      // H15: refuse to book unless the caller echoes the extract_pdf_invoice
+      // digest, then snapshot-and-verify the bytes BEFORE any API mutation.
+      if (!/^[0-9a-f]{64}$/.test(rawParams.source_sha256 ?? "")) {
+        return toolError({ category: "source_sha256_required", error: "source_sha256 from extract_pdf_invoice is required" });
+      }
+      const documentUpload = await prepareInvoiceDocumentUpload(rawParams.file_path, rawParams.source_sha256);
       try {
+      const supplier = await api.clients.get(params.supplier_client_id);
+      // supplier.name is a trusted API read, but a client created before this
+      // remediation could carry a marker; strip once and use for BOTH the invoice
+      // and the audit log (no-op when already clean).
+      const supplierName = desandboxText(supplier.name);
       const isVatReg = await isCompanyVatRegistered(api);
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
-      const rawItems = parsePurchaseInvoiceItems(params.items);
+      // Parse items from the RAW payload, THEN deep-clean the parsed objects (a
+      // JSON-string items field would otherwise keep wrapper framing in a title).
+      const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(rawParams.items));
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
 
       // Validate dimension requirements before hitting the API
@@ -717,7 +776,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
 
       const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.supplier_client_id,
-        client_name: supplier.name,
+        client_name: supplierName,
         number: params.invoice_number,
         create_date: params.invoice_date,
         journal_date: params.journal_date,
@@ -783,7 +842,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         entity_id: result.id,
         summary: `Created purchase invoice "${params.invoice_number}" from PDF`,
         details: {
-          supplier_name: supplier.name, invoice_number: params.invoice_number,
+          supplier_name: supplierName, invoice_number: params.invoice_number,
           invoice_date: params.invoice_date, total_vat: params.vat_price, total_gross: params.gross_price,
           items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
           file_name: documentUpload.fileName,
@@ -807,7 +866,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         }],
       };
       } finally {
-        if (documentUpload.cleanup) await documentUpload.cleanup();
+        await documentUpload.cleanup();
       }
     }
   );

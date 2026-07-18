@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
+import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive, send } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -38,13 +39,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       ...(date_from !== undefined && { start_date: date_from }),
       ...(date_to !== undefined && { end_date: date_to }),
     });
-    const compact = { ...result, items: applyListView("sale_invoice", result.items, view) };
+    const compact = { ...result, items: renderExternalEntity("sale_invoice", applyListView("sale_invoice", result.items, view)) };
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_sale_invoice", "Get a sales invoice by ID (includes items, deliveries)", idParam.shape, { ...readOnly, title: "Get Sale Invoice" }, async ({ id }) => {
     const result = await api.saleInvoices.get(id);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(renderExternalEntity("sale_invoice", result)) }] };
   });
 
   registerTool(server, "create_sale_invoice", "Create a sales invoice", {
@@ -64,8 +65,16 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       "Note: SaleInvoicesItems schema has no vat_accounts_dimensions_id field — only the purchase side does."
     ),
     notes: z.string().optional().describe("Internal notes"),
-  }, { ...create, title: "Create Sale Invoice" }, async (params) => {
-    const items = parseSaleInvoiceItems(params.items);
+  }, { ...create, title: "Create Sale Invoice" }, async (rawParams) => {
+    // Strip any sandbox markers round-tripped from a wrapped read off EVERY field
+    // (header fields, notes, and item titles), so no marker is persisted to the
+    // invoice or the audit log regardless of which field it lands in.
+    const params = desandboxAllStrings(rawParams);
+    // Parse items from the RAW payload, THEN deep-clean the parsed objects: if
+    // items arrives as a JSON string, stripping it before parse would leave the
+    // wrapper's framing newlines inside a nested title ("\nWidget\n"). Parsing
+    // first makes each title a whole value that desandboxAllStrings can unwrap.
+    const items = desandboxAllStrings(parseSaleInvoiceItems(rawParams.items));
     const [accounts, accountDimensions] = await Promise.all([
       api.readonly.getAccounts(),
       api.readonly.getAccountDimensions(),
@@ -103,10 +112,19 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     id: coerceId.describe("Invoice ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
-    const parsed = parseJsonObject(data, "data");
+    const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const current = await api.saleInvoices.get(id);
-    const updateErrors = validateUpdateFields(parsed, "sale_invoice", { isConfirmed: current.status === "CONFIRMED" });
+    const isConfirmed = current.status === "CONFIRMED";
+    const updateErrors = validateUpdateFields(parsed, "sale_invoice", { isConfirmed });
     if (updateErrors.length > 0) {
+      if (isConfirmed && Object.keys(parsed).length > 0) {
+        return toolError({
+          category: "confirmed_record_immutable",
+          error: "Confirmed sale_invoice update contains ledger-bearing fields",
+          details: updateErrors,
+          next_action: "invalidate_sale_invoice, fetch the draft, update it, then explicitly re-confirm",
+        });
+      }
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
     const result = await api.saleInvoices.update(id, parsed);

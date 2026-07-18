@@ -3,6 +3,7 @@ import type { Account } from "../types/api.js";
 import type { LayoutTextItem } from "../document-identifiers.js";
 import {
   normalizeDate,
+  extractDates,
   extractAmounts,
   buildKeywordSuggestion,
   computeMinOcrConfidence,
@@ -33,6 +34,16 @@ import type { ExtractedAmountsWithMetadata } from "./receipt-extraction.js";
 describe("normalizeDate", () => {
   it("passes through ISO dates unchanged", () => {
     expect(normalizeDate("2024-03-15")).toBe("2024-03-15");
+  });
+
+  it("rejects impossible ISO dates (calendar round-trip)", () => {
+    // ISO-format but not a real calendar day — must not pass through.
+    expect(normalizeDate("2026-02-30")).toBeUndefined();
+    expect(normalizeDate("2026-13-01")).toBeUndefined();
+  });
+
+  it("extractDates ignores an impossible ISO invoice date", () => {
+    expect(extractDates("Invoice date: 2026-02-30")).toEqual({});
   });
 
   it("parses DD.MM.YYYY", () => {
@@ -573,6 +584,125 @@ describe("extractAmounts", () => {
     expect(result.total_gross).toBeUndefined();
     expect(result.total_net).toBeUndefined();
     expect(result.total_vat).toBeUndefined();
+  });
+
+  // H11. An explicit "VAT 0.00" is a STATEMENT that tax is zero, not a missing
+  // value, and the two are not interchangeable downstream: 0 with vat_explicit
+  // says the supplier charged none — a zero-rated, exempt, or reverse-charge
+  // receipt — whereas undefined makes VAT a missing field, which drops it from
+  // the audit line and sends the receipt to needs_review rather than booking.
+  // (It does NOT cause a 24% rate to be derived out of the gross: that path
+  // needs net and gross bound with VAT absent, which cannot occur, since VAT is
+  // then derived as gross - net.) The zero was being dropped by
+  // extractAmountsFromLine's blanket `value !== 0` filter before the line could
+  // ever be classified as the VAT line.
+  it("H11 keeps an explicit zero VAT authoritative when no net line is present", () => {
+    // The reduced case: gross + an explicit zero VAT and nothing else. Today
+    // this yields {total_gross: 100, vat_explicit: false} — the statement is
+    // silently discarded and total_vat is undefined.
+    const result = extractAmounts("Total 100.00 EUR\nVAT 0.00 EUR");
+    expect(result).toMatchObject({
+      total_net: 100, total_vat: 0, total_gross: 100, vat_explicit: true,
+    });
+  });
+
+  it("H11 keeps an explicit zero VAT authoritative when the label is Estonian", () => {
+    // The same statement in the language this server is actually used in.
+    // "KM" is the Estonian VAT label; without this row the fix could be wired
+    // to an English-only label path and every Estonian receipt would regress.
+    const result = extractAmounts("Summa 100.00 EUR\nKM 0.00 EUR");
+    expect(result).toMatchObject({
+      total_net: 100, total_vat: 0, total_gross: 100, vat_explicit: true,
+    });
+  });
+
+  // Declared CONTROL, not a RED: the task's own mandated repro already passes,
+  // because gross(100) - net(100) derives VAT 0 through the fallback and the
+  // explicit "Subtotal" line sets vat_explicit. It is kept as a control so the
+  // fix cannot regress the path that made the plan's example work by accident.
+  it("H11 control: explicit zero VAT with a subtotal line stays correct", () => {
+    const result = extractAmounts("Subtotal 100.00 EUR\nVAT 0.00 EUR\nTotal 100.00 EUR");
+    expect(result).toMatchObject({
+      total_net: 100, total_vat: 0, total_gross: 100, vat_explicit: true,
+    });
+  });
+
+  // Declared CONTROL: zero must stay filtered for UNLABELLED amounts, or page
+  // numbers and empty cells become totals. This is the constraint that makes
+  // the fix label-scoped rather than a blanket removal of the zero filter.
+  // NOTE: this calls extractAmountsFromLine directly, so it pins the FUNCTION
+  // DEFAULT only. The call-site wiring is pinned by the regression below.
+  it("H11 control: an unlabelled zero is still not an amount", () => {
+    expect(extractAmountsFromLine("Page 0 of 3")).not.toContain(0);
+    expect(extractAmountsFromLine("Reference 0")).not.toContain(0);
+  });
+
+  // H11 regression. An "incl. VAT" line describes a COMPONENT that contains
+  // tax; it does not state the document's VAT. Retaining its zero let the
+  // assignment loop's first-wins guard (`totalVat === undefined &&`) lock
+  // total_vat to 0 before the real "VAT 24.00" line was read — destroying a
+  // deductible 24.00, corrupting net 100 -> 124, and flagging it authoritative.
+  // Free shipping on an invoice is routine, so this is a live-money path.
+  //
+  // This is also the ONLY test that pins the call-site's zero scoping: the
+  // control above exercises extractAmountsFromLine's default, so with this
+  // absent the call site could pass `includeZero: true` (or the wider
+  // hasVatAmountLabel) and the whole suite would still pass.
+  it("H11 does not let an 'incl. VAT' component zero override the real VAT line", () => {
+    const result = extractAmounts(
+      "Subtotal 100.00 EUR\nShipping incl. VAT 0.00 EUR\nVAT 24.00 EUR\nTotal 124.00 EUR",
+    );
+    expect(result).toMatchObject({
+      total_net: 100, total_vat: 24, total_gross: 124, vat_explicit: true,
+    });
+  });
+
+  // H11 regression, second mechanism. Here the zero IS on a real VAT-subject
+  // line, so the label scoping above cannot help: a multi-rate table states
+  // both a zero-rated and a standard-rated figure. The operative VAT is the
+  // non-zero one, and there is no "%" token for the rate filter to catch, so
+  // strict first-wins would lock 0 and silently destroy the 24.00 deduction.
+  // A zero is authoritative only as the document's ONLY VAT statement.
+  it("H11 lets a later non-zero VAT supersede a zero-rated line in a multi-rate table", () => {
+    const result = extractAmounts("VAT zero rated 0.00\nVAT standard 24.00\nTotal 124.00");
+    expect(result).toMatchObject({
+      total_net: 100, total_vat: 24, total_gross: 124, vat_explicit: true,
+    });
+  });
+
+  // The converse: the upgrade must NOT let a stray zero-VAT line demote a real
+  // one, and the ONLY-statement zero must still survive. Ordering is the whole
+  // point, so both directions are pinned.
+  it("H11 keeps a non-zero VAT when a zero-rated line follows it", () => {
+    const result = extractAmounts("VAT standard 24.00\nVAT zero rated 0.00\nTotal 124.00");
+    expect(result).toMatchObject({ total_vat: 24, vat_explicit: true });
+  });
+
+  // Pins the zero retention to the line's OWN subject. Here a component says it
+  // includes VAT and the document states NO VAT of its own, so there is nothing
+  // to be authoritative about: claiming total_vat 0 / vat_explicit true would
+  // invent a fact the receipt never stated (and rewrite net out of the gross).
+  // Widening the call site to hasVatAmountLabel — whose "incl. VAT" branch
+  // matches this line, and which reads the NEXT line too — makes exactly that
+  // claim, and no other test distinguishes the two predicates.
+  it("H11 does not invent a VAT figure from an 'incl. VAT' component alone", () => {
+    const result = extractAmounts("Shipping incl. VAT 0.00 EUR\nTotal 124.00 EUR");
+    expect(result.total_vat).toBeUndefined();
+    expect(result.vat_explicit).toBe(false);
+    expect(result.total_gross).toBe(124);
+  });
+
+  // The zero must NOT win when the document contradicts it. Subtotal 100 + VAT
+  // 0 != Total 124, and on OCR text that is most often "24.00" misread with its
+  // digits lost. Trusting the zero would rewrite the explicit net (100 -> 124),
+  // discarding a stated amount to keep a contradicted one; deriving keeps both.
+  // This is the pre-H11 result, and 32 shapes regressed on it before the
+  // reconciliation was added — none of the other tests cover it.
+  it("H11 does not let a contradicted zero VAT override an explicit net", () => {
+    const result = extractAmounts("Subtotal 100.00 EUR\nVAT 0.00 EUR\nTotal 124.00 EUR");
+    expect(result).toMatchObject({
+      total_net: 100, total_vat: 24, total_gross: 124,
+    });
   });
 
   it("extracts gross from a 'Kokku' label line", () => {

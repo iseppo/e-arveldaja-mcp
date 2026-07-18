@@ -1,6 +1,7 @@
 import type { Config } from "./config.js";
 import { createAuthHeaders } from "./auth.js";
 import { wrapUntrustedOcr } from "./mcp-json.js";
+import { buildConnectionFingerprint } from "./connection-fingerprint.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -64,6 +65,7 @@ const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 1_000;
 
 export class HttpClient {
+  public readonly connectionFingerprint: string;
   private lastRequest = Promise.resolve();
   private nextAllowedAt = 0;
   private readonly minIntervalMs = 100; // Max ~10 req/sec
@@ -72,7 +74,9 @@ export class HttpClient {
     private config: Config,
     public readonly cacheNamespace = "connection:0",
     private readonly requestGuard?: () => void,
-  ) {}
+  ) {
+    this.connectionFingerprint = buildConnectionFingerprint(config);
+  }
 
   private assertRequestAllowed(): void {
     this.requestGuard?.();

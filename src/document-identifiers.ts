@@ -226,10 +226,15 @@ export function extractVatNumber(text: string, options?: ExtractVatNumberOptions
 }
 
 export function extractIban(text: string): string | undefined {
-  const match = text.match(/\b([A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){11,30})\b/i);
-  const normalized = match?.[1]?.replace(/\s+/g, "").toUpperCase();
-  if (!normalized) return undefined;
-  return isValidIban(normalized) ? normalized : undefined;
+  // Scan every IBAN-shaped candidate and return the first that passes the
+  // mod-97 checksum — a document can carry a malformed/partial IBAN before the
+  // real one, so we continue past invalid candidates instead of stopping at
+  // the first shape match.
+  for (const match of text.matchAll(/\b([A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){11,30})\b/gi)) {
+    const candidate = match[1]!.replace(/\s+/g, "").toUpperCase();
+    if (isValidIban(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 export function extractReferenceNumber(text: string): string | undefined {

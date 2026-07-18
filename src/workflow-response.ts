@@ -521,10 +521,11 @@ const DRY_RUN_TOOL_REGISTRY: DryRunToolSpec[] = [
     executeArgs: withExecuteTrue,
     extractCounts: preview => ({
       created: numberAt(preview, "created") ?? 0,
+      commandCount: numberAt(preview, "command_count") ?? numberAt(preview, "created") ?? 0,
       errorCount: numberAt(preview, "error_count") ?? 0,
       skipped: numberAt(preview, "skipped") ?? 0,
     }),
-    canApprove: counts => counts.created > 0 && counts.errorCount <= 0,
+    canApprove: counts => counts.commandCount > 0 && counts.errorCount <= 0,
     buildImpact: (counts, preview) => [
       impactLine(counts.created, "bank transaction"),
       impactLine(counts.skipped, "skipped row"),

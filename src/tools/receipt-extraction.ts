@@ -32,8 +32,7 @@ export const DATE_VALUE_SOURCE =
   TEXTUAL_MONTH_SOURCE +
   String.raw`\s+\d{1,2},?\s+\d{4})`;
 
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const RECEIPT_TOTAL_LABEL_RE = /(tasuda|maksta|kokku|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due)/i;
+const RECEIPT_TOTAL_LABEL_RE =/(tasuda|maksta|kokku|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due)/i;
 const RECEIPT_VAT_LABEL_RE = /(käibemaks|km\b|vat\b|tax\b)/i;
 const RECEIPT_NET_LABEL_RE = /(neto|subtotal|vahesumma|summa km-ta|summa eurodes\s*\(km-ta\)|summa\s*\(km-ta\)|käibemaksuta|without vat|total net)/i;
 const RECEIPT_REFERENCE_LINE_RE =
@@ -553,7 +552,22 @@ function parseAmount(raw: string, context?: string, documentContext?: string): n
 }
 
 // Exported for unit tests.
-export function extractAmountsFromLine(line: string, documentContext?: string): number[] {
+/**
+ * `includeZero` retains an explicit 0 as a real amount. It is opt-in, and the
+ * only caller that sets it is the VAT-total path in classifyLine (guarded by
+ * isExplicitVatTotalLine): an unlabelled zero is almost always a page number or
+ * an empty cell, and admitting those as candidates would let them become
+ * totals. Where the line's subject IS the VAT, the label makes the zero
+ * meaningful — "VAT 0.00" states that tax is zero, which is not the same fact
+ * as no VAT figure at all. Dropping it left total_vat undefined, which reports
+ * VAT as a missing field and pushes zero-rated, exempt, and reverse-charge
+ * receipts into needs_review instead of booking them.
+ */
+export function extractAmountsFromLine(
+  line: string,
+  documentContext?: string,
+  options: { includeZero?: boolean } = {},
+): number[] {
   // Only honor a leading minus at start-of-line or after whitespace, and only
   // start a number when it is not immediately preceded by another digit. This
   // stops date/range fragments like "2024-01-15" (→ -1, -15) or "10-20" (→ -20)
@@ -578,7 +592,8 @@ export function extractAmountsFromLine(line: string, documentContext?: string): 
       const parenWrapped = line[start - 1] === "(" && line[start + raw.length] === ")";
       return parenWrapped && parsed > 0 ? -parsed : parsed;
     })
-    .filter((value): value is number => value !== undefined && value !== 0);
+    .filter((value): value is number =>
+      value !== undefined && (options.includeZero === true || value !== 0));
 
   return [...new Set(amounts)];
 }
@@ -669,8 +684,27 @@ function scoreExplicitGrossCandidate(line: string, hasCurrencyKeyword: boolean, 
 
 function isVatAmountLine(line: string): boolean {
   const trimmed = line.trim();
-  return /^(?:käibemaks\b|vat\b|tax\b|km\b)/i.test(trimmed) ||
+  return isExplicitVatTotalLine(trimmed) ||
     /\b(?:sisaldab|including|incl\.?)\b.*(?:käibemaks|vat|tax|km\b)/i.test(trimmed);
+}
+
+/**
+ * The strictly narrower half of isVatAmountLine: the line's own SUBJECT is the
+ * VAT ("VAT 0.00", "KM 0.00"), so its amount IS the document's VAT figure and an
+ * explicit zero there is an authoritative statement (H11).
+ *
+ * Deliberately excludes isVatAmountLine's second branch. A "Shipping incl. VAT
+ * 0.00" line merely says a component includes tax; its zero is not the
+ * document's VAT total, and retaining it would let the first-wins guard in the
+ * assignment loop lock total_vat to 0 before the real "VAT 24.00" line is ever
+ * read — silently destroying a deductible 24.00 and reporting it as explicit.
+ *
+ * Also takes the line's OWN text, never the inspection window: the window
+ * appends the NEXT line, and a neighbour's label must not make this line's zero
+ * meaningful.
+ */
+function isExplicitVatTotalLine(line: string): boolean {
+  return /^(?:käibemaks\b|vat\b|tax\b|km\b)/i.test(line.trim());
 }
 
 function buildAmountInspectionLine(lines: string[], index: number): string {
@@ -861,8 +895,13 @@ export function normalizeDate(raw: string): string | undefined {
     .trim()
     .replace(/^(?:esmaspäev|teisipäev|kolmapäev|neljapäev|reede|laupäev|pühapäev|monday|tuesday|wednesday|thursday|friday|saturday|sunday),\s*/i, "");
 
-  if (ISO_DATE_RE.test(trimmed)) {
-    return trimmed;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (iso) {
+    // Shape alone is not enough: run the same calendar round-trip toIsoDate
+    // uses so an impossible day (e.g. 2026-02-30) is rejected instead of
+    // passing straight through to a booking field. Return the ORIGINAL string
+    // when valid so a well-formed ISO date is preserved byte-for-byte.
+    return toIsoDate(Number(iso[1]), Number(iso[2]), Number(iso[3])) !== undefined ? trimmed : undefined;
   }
 
   const dotted = trimmed.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})$/);
@@ -927,7 +966,6 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   // Pass the whole document as locale context so a bare "1,234" is disambiguated
   // by dot-/comma-decimal siblings on OTHER lines, not just this one (#2).
   const documentContext = lines.join("\n");
-  const amounts = extractAmountsFromLine(line, documentContext);
   const inspectionLine = buildAmountInspectionLine(lines, index);
   const inspectionLower = inspectionLine.toLowerCase();
   const lineLower = line.toLowerCase();
@@ -937,6 +975,16 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower);
   const hasNetLikeLabel = RECEIPT_NET_LABEL_RE.test(lineLower);
   const hasVatAmountLabel = isVatAmountLine(inspectionLine);
+  // Resolved BEFORE the amounts so a VAT-total line can retain an explicit zero
+  // (H11). Scoped to isExplicitVatTotalLine — NOT hasVatAmountLabel, which is
+  // both wider (its "incl. VAT" branch matches component lines) and computed
+  // over the inspection window (this line plus the NEXT one). Either would
+  // retain a zero on a line that does not state the document's VAT.
+  // Everything read here comes from `line`, never from the amounts, so
+  // resolving it first changes ordering only, not any value.
+  const amounts = extractAmountsFromLine(line, documentContext, {
+    includeZero: isExplicitVatTotalLine(line),
+  });
   const deDatedAmounts = amounts.filter(amount => !isLikelyYearAmount(amount, line));
   const filteredAmounts = (deDatedAmounts.length > 0 ? deDatedAmounts : amounts).filter(amount =>
     !(Number.isInteger(amount) && amount >= 1000 && !hasCurrencyKeyword && !hasTotalLikeLabel),
@@ -1548,8 +1596,16 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
       }
     }
 
+    // A zero VAT statement is authoritative only when it is the document's ONLY
+    // VAT statement. A multi-rate table ("VAT zero rated 0.00" above "VAT
+    // standard 24.00") states both, and the operative figure is the non-zero
+    // one — strict first-wins would lock 0 and destroy the deduction. Upgrading
+    // 0 -> non-zero is inert for pre-H11 behavior: totalVat is only ever
+    // assigned from pickedVat here, and a zero pickedVat was unreachable while
+    // extractAmountsFromLine filtered every zero, so this state is new to H11.
+    const vatIsUpgradableZero = totalVat === 0 && classified.pickedVat !== 0;
     if (
-      totalVat === undefined &&
+      (totalVat === undefined || vatIsUpgradableZero) &&
       classified.pickedVat !== undefined &&
       !classified.blockedAsReference &&
       classified.hasVatAmountLabel &&
@@ -1620,6 +1676,37 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
         lineIndex: fallbackCandidate.lineIndex,
         source: "fallback",
         rationale: "fallback_largest",
+      };
+    }
+  }
+
+  // An explicit zero VAT is authoritative only where the document does not
+  // contradict it (H11). When an explicit net AND an explicit gross are both
+  // present and differ, "VAT 0.00" cannot be reconciled with them — on OCR text
+  // that is most often a misread of the real VAT ("24.00" losing its digits).
+  // Trusting the zero would rewrite the explicit net out of the gross below
+  // (Subtotal 100 / VAT 0.00 / Total 124 -> net 124), overriding one stated
+  // amount to preserve a contradicted one. Deriving instead keeps BOTH stated
+  // amounts and reproduces the pre-H11 result exactly. A zero that IS
+  // consistent (gross - net == 0) survives untouched, which is the finding.
+  // `totalNet !== undefined` already implies the net came from an explicit
+  // line: the only write to it above is in the classification loop, which sets
+  // netFromExplicitLine in the same breath, and every other write happens below
+  // this point. Testing netFromExplicitLine as well would be an unfalsifiable
+  // condition, so it is left out.
+  if (
+    totalVat === 0 && vatFromExplicitLine &&
+    totalGross !== undefined && totalNet !== undefined
+  ) {
+    const reconciledVat = roundMoney(totalGross - totalNet);
+    if (Math.abs(reconciledVat) > 0.02) {
+      totalVat = reconciledVat;
+      vatMetadata = {
+        field: "total_vat",
+        value: totalVat,
+        lineIndex: netMetadata?.lineIndex ?? grossMetadata?.lineIndex,
+        source: "fallback",
+        rationale: "derived_from_gross_net",
       };
     }
   }

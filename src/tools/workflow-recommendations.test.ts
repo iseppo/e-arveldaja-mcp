@@ -152,6 +152,22 @@ describe("recommend_workflow", () => {
     expect(payload.workflow.recommended_next_action.label).not.toMatch(/^Run /);
   });
 
+  it("uses file_path for the Lightyear statement next action (M25)", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+
+    const result = await handler({ goal: "book Lightyear CSV dividends and trades" });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+
+    expect(payload.recommended_workflow).toMatchObject({ id: "lightyear-booking" });
+    // parse_lightyear_statement's own parameter is file_path — the recommendation
+    // must not drift to statement_path.
+    expect(payload.next_actions[0]).toMatchObject({
+      tool: "parse_lightyear_statement",
+      args: { file_path: expect.any(String) },
+    });
+    expect(payload.next_actions[0].args).not.toHaveProperty("statement_path");
+  });
+
   it("recommends accounting_inbox as the merged entry point for workspace triage", async () => {
     const { handler } = getRecommendWorkflowHarness();
 

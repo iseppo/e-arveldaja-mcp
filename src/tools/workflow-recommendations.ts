@@ -348,7 +348,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     },
     next_actions: [{
       tool: "parse_lightyear_statement",
-      args: { statement_path: "<absolute Lightyear AccountStatement CSV path>" },
+      args: { file_path: "<absolute Lightyear AccountStatement CSV path>" },
       why: "Parse the statement first so trades, distributions, FX warnings, and skipped entries are visible before booking.",
     }],
     keywords: ["lightyear", "investment", "investments", "trades", "dividend", "dividends", "distribution", "capital gains", "broker", "portfolio", "csv"],

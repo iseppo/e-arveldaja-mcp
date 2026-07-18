@@ -1,5 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { decode } from "@toon-format/toon";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@toon-format/toon", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@toon-format/toon")>();
+  return { ...actual, decode: vi.fn(actual.decode) };
+});
+
+const mockedDecode = vi.mocked(decode);
+
 import {
+  canonicalBusinessText,
   capUntrustedText,
   MAX_UNTRUSTED_TEXT_CHARS,
   parseMcpResponse,
@@ -115,6 +125,55 @@ describe("unwrapUntrustedOcr", () => {
   });
 });
 
+describe("canonicalBusinessText", () => {
+  it("strips a single sandbox wrapper and trims/collapses whitespace", () => {
+    expect(canonicalBusinessText(wrapUntrustedOcr("  Acme   OÜ ")!)).toBe("Acme OÜ");
+  });
+
+  it("returns a plain string trimmed and whitespace-collapsed", () => {
+    expect(canonicalBusinessText("  Acme    OÜ  ")).toBe("Acme OÜ");
+  });
+
+  it("strips nested wrappers (a wrapped value re-wrapped on round-trip)", () => {
+    const doubleWrapped = wrapUntrustedOcr(wrapUntrustedOcr("Acme OÜ")!)!;
+    const canonical = canonicalBusinessText(doubleWrapped);
+    expect(canonical).toBe("Acme OÜ");
+    expect(canonical).not.toContain(UNTRUSTED_OCR_START_PREFIX);
+    expect(canonical).not.toContain(UNTRUSTED_OCR_END_PREFIX);
+  });
+
+  it("strips an attacker-embedded well-formed inner wrapper", () => {
+    // Original counterparty text is itself a valid-looking wrapper; wrapping it
+    // for the response and canonicalizing on the way back must leave no marker.
+    const embedded = wrapUntrustedOcr("Acme OÜ")!; // a well-formed wrapper as content
+    const canonical = canonicalBusinessText(wrapUntrustedOcr(embedded)!);
+    expect(canonical).toBe("Acme OÜ");
+    expect(canonical).not.toContain(UNTRUSTED_OCR_START_PREFIX);
+  });
+
+  it("removes residual mid-string / partial sandbox delimiters", () => {
+    // A wrapper embedded within other text (not spanning the whole value) is not
+    // a whole-value wrapper, so loop-unwrapping leaves it — the residual scrub
+    // must still strip every delimiter token so nothing persisted carries one.
+    const start = `${UNTRUSTED_OCR_START_PREFIX}abc123>>`;
+    const end = `${UNTRUSTED_OCR_END_PREFIX}abc123>>`;
+    const canonical = canonicalBusinessText(`Foo ${start}bar${end} Baz`);
+    expect(canonical).not.toContain("UNTRUSTED_OCR");
+    expect(canonical).toBe("Foo bar Baz");
+  });
+
+  it("strips a dangling start delimiter with no matching end", () => {
+    expect(canonicalBusinessText(`Acme ${UNTRUSTED_OCR_START_PREFIX}deadbeef>> OÜ`))
+      .toBe("Acme OÜ");
+  });
+
+  it("canonicalizes non-strings to an empty string", () => {
+    expect(canonicalBusinessText(undefined)).toBe("");
+    expect(canonicalBusinessText(null)).toBe("");
+    expect(canonicalBusinessText(42)).toBe("");
+  });
+});
+
 describe("toMcpJson", () => {
   it("preserves explicit null values because API nulls are meaningful", () => {
     const encoded = toMcpJson({
@@ -131,6 +190,22 @@ describe("toMcpJson", () => {
         ref_number: null,
       },
     });
+  });
+
+  it("falls back to JSON when TOON decodes to a different value without throwing", () => {
+    const source = { count: 3, status: "ok" };
+    mockedDecode.mockReturnValueOnce({ count: "3", status: "ok" });
+
+    const encoded = toMcpJson(source);
+    expect(encoded).toBe(JSON.stringify(source));
+  });
+
+  it("keeps TOON when TOON decoding is lossless", () => {
+    const source = { count: 3, status: "ok" };
+    const encoded = toMcpJson(source);
+
+    expect(encoded.trimStart().startsWith("{")).toBe(false);
+    expect(decode(encoded)).toEqual(source);
   });
 
   it("falls back to JSON when TOON cannot round-trip sandboxed multiline text", () => {

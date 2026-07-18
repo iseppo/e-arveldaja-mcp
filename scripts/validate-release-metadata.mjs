@@ -100,7 +100,7 @@ async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
-async function main() {
+export async function main() {
   const root = process.cwd();
   const errors = validateReleaseMetadata(
     await readJson(resolve(root, "package.json")),

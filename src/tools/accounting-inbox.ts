@@ -1,18 +1,20 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { open, readdir, realpath, stat } from "fs/promises";
+import { open, opendir, realpath, stat } from "fs/promises";
 import { basename, extname, resolve } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson, unwrapUntrustedOcr } from "../mcp-json.js";
+import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
+import { desandboxText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
 import { logAudit } from "../audit-log.js";
+import { roundMoney } from "../money.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import { jsonObjectInput, parseJsonObject, type ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
-import { registerCamtImportTools } from "./camt-import.js";
+import { camtDuplicateStructuredCorroborators, registerCamtImportTools, storedBankReferenceLookupKey } from "./camt-import.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { registerBankReconciliationTools } from "./bank-reconciliation.js";
@@ -31,10 +33,21 @@ import {
 
 const MIN_AUTO_BOOKING_RULE_MATCH_LENGTH = 3;
 
+// The review types the resolver knows how to plan an action for. Surfaced as a
+// fixed list on the unsupported-review-type contract so a caller that emitted a
+// foreign review_type learns which types are actionable — without ever echoing
+// the (untrusted) foreign value or the caller-supplied id back into the
+// unwrapped resolution.
+const SUPPORTED_REVIEW_TYPES = [
+  "receipt_review",
+  "classification_group",
+  "camt_possible_duplicate",
+] as const;
+
 const RECEIPT_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
 const DEFAULT_SCAN_DEPTH = 2;
 const MAX_SCAN_DEPTH = 4;
-const MAX_SCANNED_FILES = 1500;
+export const MAX_SCANNED_FILES = 1500;
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
   "node_modules",
@@ -106,7 +119,10 @@ interface PreparedInboxData {
     max_depth: number;
     scanned_directories: number;
     scanned_candidate_files: number;
+    inspected_entries: number;
+    entry_limit: number;
     truncated: boolean;
+    continuation_guidance?: string;
   };
   camtFiles: InboxFileCandidate[];
   wiseFiles: InboxFileCandidate[];
@@ -119,7 +135,7 @@ interface PreparedInboxData {
 
 interface ReviewResolutionResult {
   review_type: "receipt_review" | "classification_group" | "camt_possible_duplicate" | "unknown";
-  status: "ready_for_action" | "needs_answers";
+  status: "ready_for_action" | "needs_answers" | "unsupported_review_type";
   recommendation: string;
   compliance_basis: string[];
   unresolved_questions: string[];
@@ -127,6 +143,8 @@ interface ReviewResolutionResult {
   suggested_workflow?: string;
   suggested_tools?: string[];
   next_step_summary: string;
+  error?: string;
+  supported_review_types?: string[];
 }
 
 interface ReviewActionPreparationResult {
@@ -195,27 +213,51 @@ async function readFileSnippet(filePath: string, maxBytes = 4096): Promise<strin
   }
 }
 
-async function scanWorkspaceFiles(
+export interface WorkspaceScanResult {
+  files: ScannedFileInfo[];
+  scanned_directories: number;
+  inspected_entries: number;
+  entry_limit: number;
+  truncated: boolean;
+  continuation_guidance?: string;
+}
+
+export async function scanWorkspaceFiles(
   root: string,
   maxDepth: number,
-): Promise<{ files: ScannedFileInfo[]; scanned_directories: number; truncated: boolean }> {
+): Promise<WorkspaceScanResult> {
   const files: ScannedFileInfo[] = [];
   let scannedDirectories = 0;
+  let inspectedEntries = 0;
   let truncated = false;
 
   async function walk(current: string, depth: number): Promise<void> {
-    if (files.length >= MAX_SCANNED_FILES || truncated) {
+    if (truncated || inspectedEntries >= MAX_SCANNED_FILES) {
       truncated = true;
       return;
     }
     scannedDirectories += 1;
 
-    const entries = await readdir(current, { withFileTypes: true });
-    for (const entry of entries) {
-      if (files.length >= MAX_SCANNED_FILES) {
+    // Stream the directory with opendir (lazy, buffered reads) instead of
+    // readdir, which would materialize — and, with an added sort, O(n log n)
+    // process — the ENTIRE directory before the budget could stop it. Streaming
+    // lets a pathologically large directory be abandoned after ~the budget is
+    // reached without reading the rest, which is the point of the cap. Entries
+    // therefore arrive in filesystem order (no total sort is possible while
+    // streaming), so which entries are inspected before truncation is not
+    // ordered — acceptable: the finding is about bounding traversal, not
+    // selecting a deterministic prefix. The async iterator closes the dir handle
+    // on normal completion and on the early `return` below.
+    const dir = await opendir(current);
+    for await (const entry of dir) {
+      // Count EVERY traversed entry against the budget — not only matching
+      // candidate files. Otherwise a workspace full of non-matching files never
+      // consumes the cap and traversal cost is unbounded.
+      if (inspectedEntries >= MAX_SCANNED_FILES) {
         truncated = true;
         return;
       }
+      inspectedEntries += 1;
 
       const entryPath = resolve(current, entry.name);
       if (entry.isDirectory()) {
@@ -242,7 +284,16 @@ async function scanWorkspaceFiles(
   }
 
   await walk(root, 0);
-  return { files, scanned_directories: scannedDirectories, truncated };
+  return {
+    files,
+    scanned_directories: scannedDirectories,
+    inspected_entries: inspectedEntries,
+    entry_limit: MAX_SCANNED_FILES,
+    truncated,
+    ...(truncated
+      ? { continuation_guidance: "Re-run accounting_inbox with a narrower workspace_path." }
+      : {}),
+  };
 }
 
 function looksLikeCamtFileName(name: string): boolean {
@@ -467,7 +518,7 @@ function buildMissingDimensionQuestion(
   };
 }
 
-function buildRecommendedSteps(params: {
+export function buildRecommendedSteps(params: {
   camtFiles: InboxFileCandidate[];
   wiseFiles: InboxFileCandidate[];
   receiptFolders: ReceiptFolderCandidate[];
@@ -551,28 +602,33 @@ function buildRecommendedSteps(params: {
     ));
   }
 
-  const primaryReceiptFolder = receiptFolders[0];
-  if (primaryReceiptFolder) {
+  // Emit one dry-run step per discovered receipt folder, not just the first, so
+  // no folder's receipts are silently skipped. Sort by path for a deterministic,
+  // reproducible step order (detectReceiptFolders orders by file count, which is
+  // fine for picking a "primary" but non-deterministic to depend on for output).
+  const sortedReceiptFolders = [...receiptFolders].sort((a, b) => a.path.localeCompare(b.path));
+  for (const [folderIndex, folder] of sortedReceiptFolders.entries()) {
     const dimensionId = defaults.suggested_receipt_dimension_id;
     const missingInputs = dimensionId === undefined ? ["accounts_dimensions_id"] : [];
+    const folderScope = `Folder ${folderIndex + 1}/${sortedReceiptFolders.length} (${folder.path}): ${folder.receipt_file_count} eligible receipt file(s).`;
     steps.push({
       step: stepNumber++,
       tool: "process_receipt_batch",
-      purpose: "Dry-run receipt processing for the most likely receipt folder.",
+      purpose: `Dry-run receipt processing for folder ${folder.path}.`,
       recommended: dimensionId !== undefined,
       suggested_args: {
-        folder_path: primaryReceiptFolder.path,
+        folder_path: folder.path,
         ...(dimensionId !== undefined ? { accounts_dimensions_id: dimensionId } : {}),
         execution_mode: "dry_run",
       },
       missing_inputs: missingInputs,
       reason: dimensionId !== undefined
-        ? `Recommended receipt matching bank dimension: ${dimensionId}. Start with the folder that has the most receipt files.`
-        : "A bank account dimension is still needed to match receipts against outgoing bank transactions.",
+        ? `${folderScope} Recommended receipt matching bank dimension: ${dimensionId}.`
+        : `${folderScope} A bank account dimension is still needed to match receipts against outgoing bank transactions.`,
     });
   }
 
-  if (primaryReceiptFolder && defaults.suggested_receipt_dimension_id === undefined) {
+  if (receiptFolders.length > 0 && defaults.suggested_receipt_dimension_id === undefined) {
     questions.push(buildMissingDimensionQuestion(
       "receipt_accounts_dimensions_id",
       "Which bank account dimension should receipts be matched against by default?",
@@ -731,7 +787,8 @@ async function prepareAccountingInbox(
 ): Promise<PreparedInboxData> {
   const root = await validateWorkspacePath(params.workspace_path);
   const depth = params.max_depth ?? DEFAULT_SCAN_DEPTH;
-  const { files, scanned_directories, truncated } = await scanWorkspaceFiles(root, depth);
+  const { files, scanned_directories, inspected_entries, entry_limit, truncated, continuation_guidance } =
+    await scanWorkspaceFiles(root, depth);
   let bankAccounts: BankAccount[] = [];
   let accountDimensions: AccountDimension[] = [];
   let liveApiDefaultsAvailable = true;
@@ -768,7 +825,10 @@ async function prepareAccountingInbox(
       max_depth: depth,
       scanned_directories,
       scanned_candidate_files: files.length,
+      inspected_entries,
+      entry_limit,
       truncated,
+      ...(continuation_guidance !== undefined ? { continuation_guidance } : {}),
     },
     camtFiles,
     wiseFiles,
@@ -824,6 +884,103 @@ const CAMT_DUPLICATE_PATCH_FIELDS = [
   "description",
 ] as const;
 
+/**
+ * Prove that the PROJECT transaction `cleanup_camt_possible_duplicate` is about
+ * to DELETE is genuinely the same bank entry as the CONFIRMED transaction it
+ * keeps. The tool previously gated deletion on status alone (CONFIRMED kept /
+ * PROJECT deleted), so a wrong `delete_transaction_id` — an LLM slip, or an id
+ * smuggled in through prompt-injected CAMT text — would have irreversibly
+ * deleted an unrelated PROJECT transaction.
+ *
+ * Identity has two layers, both mirroring the system's OWN possible-duplicate
+ * proposal logic in camt-import.ts so the destructive gate can never accept a
+ * pair the proposer would not have surfaced:
+ *
+ *  1. The coarse candidate key (`buildPossibleDuplicateCandidateKey`, scoped to
+ *     `accounts_dimensions_id`): bank dimension + date + direction (`type`,
+ *     which encodes CRDT→"D"/DBIT→"C" over a positive-magnitude `amount`, so it
+ *     is the signed-amount discriminator) + currency + rounded amount. Each of
+ *     these must be PRESENT on both rows and equal — a missing field can never
+ *     prove identity, so it fails CLOSED (no `?? EUR`/`?? null` collapsing two
+ *     different rows to one identity).
+ *  2. Structured corroboration (`camtDuplicateStructuredCorroborators`): at least
+ *     one of reference number / counterparty IBAN / counterparty name must match.
+ *     Without this, two same-day same-amount card purchases from different
+ *     merchants share the coarse key and the wrong one could be deleted. The
+ *     proposer's free-text `description` corroborator is deliberately excluded
+ *     (metadata-wrapped/length-capped once persisted, and the lowest-entropy
+ *     signal), so the gate is strictly more conservative than the proposer.
+ *  3. Bank-reference divergence: when BOTH rows resolve a bank reference —
+ *     `storedBankReferenceLookupKey`, i.e. the direct `bank_ref_number` OR a
+ *     trust-validated reference recovered from CAMT description metadata — and
+ *     the two keys differ, that is dispositive proof of two different entries →
+ *     mismatch. The reference is not a required corroborator (the kept row
+ *     routinely lacks one — that is what the cleanup enriches), so this only ever
+ *     tightens the gate; reusing the codebase's own key derivation keeps it from
+ *     drifting from how references are compared everywhere else.
+ *
+ * RESIDUAL (inherent, human-gated): two genuinely distinct same-merchant,
+ * same-day, same-amount purchases where the kept row resolves NO bank reference
+ * (no direct field and no recoverable CAMT metadata) are indistinguishable from a
+ * true duplicate by any field available here — the only discriminator is the
+ * reference the kept row lacks. `cleanup_camt_possible_duplicate` is therefore
+ * surfaced as an approval-required action, never auto-executed.
+ */
+export function compareCamtDuplicateIdentity(
+  kept: Transaction,
+  candidate: Transaction,
+):
+  | { matches: true; identity: string; corroboration: string[] }
+  | { matches: false; reasons: string[] } {
+  const reasons: string[] = [];
+
+  const keptDimension = Number.isFinite(kept.accounts_dimensions_id) ? kept.accounts_dimensions_id : undefined;
+  const candidateDimension = Number.isFinite(candidate.accounts_dimensions_id) ? candidate.accounts_dimensions_id : undefined;
+  if (keptDimension === undefined || candidateDimension === undefined || keptDimension !== candidateDimension) {
+    reasons.push("bank dimension missing or differs");
+  }
+
+  const keptDate = typeof kept.date === "string" ? kept.date.trim() : "";
+  const candidateDate = typeof candidate.date === "string" ? candidate.date.trim() : "";
+  if (!keptDate || !candidateDate || keptDate !== candidateDate) {
+    reasons.push("date missing or differs");
+  }
+
+  const keptType = typeof kept.type === "string" ? kept.type.trim() : "";
+  const candidateType = typeof candidate.type === "string" ? candidate.type.trim() : "";
+  if (!keptType || !candidateType || keptType !== candidateType) {
+    reasons.push("direction (type) missing or differs");
+  }
+
+  const keptCurrency = typeof kept.cl_currencies_id === "string" ? kept.cl_currencies_id.trim() : "";
+  const candidateCurrency = typeof candidate.cl_currencies_id === "string" ? candidate.cl_currencies_id.trim() : "";
+  if (!keptCurrency || !candidateCurrency || keptCurrency !== candidateCurrency) {
+    reasons.push("currency missing or differs");
+  }
+
+  const keptAmount = Number.isFinite(kept.amount) ? roundMoney(kept.amount) : undefined;
+  const candidateAmount = Number.isFinite(candidate.amount) ? roundMoney(candidate.amount) : undefined;
+  if (keptAmount === undefined || candidateAmount === undefined || keptAmount !== candidateAmount) {
+    reasons.push("amount missing or differs");
+  }
+
+  const keptRefKey = storedBankReferenceLookupKey(kept);
+  const candidateRefKey = storedBankReferenceLookupKey(candidate);
+  if (keptRefKey && candidateRefKey && keptRefKey !== candidateRefKey) {
+    reasons.push("bank reference differs");
+  }
+
+  const corroboration = camtDuplicateStructuredCorroborators(kept, candidate);
+  if (corroboration.length === 0) {
+    reasons.push("no corroborating counterparty match (reference, IBAN, or counterparty)");
+  }
+
+  if (reasons.length > 0) return { matches: false, reasons };
+
+  const identity = [keptDimension, keptDate, keptType, keptCurrency, keptAmount!.toFixed(2)].join("|");
+  return { matches: true, identity, corroboration };
+}
+
 function hasConcreteRuleOverrideField(ruleOverride: Record<string, unknown> | undefined): boolean {
   if (!ruleOverride) return false;
   return hasAnyAutoBookingRuleActionField({
@@ -847,9 +1004,11 @@ function extractTransactionPatchFields(record: Record<string, unknown> | undefin
     if (value === undefined || value === null) continue;
     const coerced = typeof value === "string"
       // The value round-tripped through the LLM as a sandbox-wrapped review
-      // field; strip the display-only delimiters before it is written to the
-      // ledger, otherwise the literal <<UNTRUSTED_OCR_START:…>> markers persist.
-      ? unwrapUntrustedOcr(value)
+      // field; strip EVERY wrapper layer and any residual delimiter before it is
+      // written to the ledger, otherwise a nested/forged <<UNTRUSTED_OCR_*>>
+      // marker persists. desandboxText preserves internal whitespace (CAMT
+      // descriptions/refs are stored verbatim apart from the markers).
+      ? desandboxText(value)
       : (typeof value === "number" && Number.isFinite(value))
         ? String(value)
         : typeof value === "bigint"
@@ -914,7 +1073,7 @@ function mergeRuleOverrides(
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
-function resolveReviewItemPlan(
+export function resolveReviewItemPlan(
   reviewItem: Record<string, unknown>,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): ReviewResolutionResult {
@@ -1003,15 +1162,47 @@ function resolveReviewItemPlan(
     };
   }
 
+  // A recognized review_type only reaches this fallback when its required
+  // payload (`item` for receipt_review/camt_possible_duplicate, `group` for
+  // classification_group) is missing. That is a supplied-data problem, not an
+  // unsupported type — telling the caller to change the type would be wrong.
+  // `reviewType` here is exactly one of the SUPPORTED_REVIEW_TYPES literals (the
+  // `.includes` guard validated it), so naming it is safe; the caller-supplied
+  // `id` is never echoed into this unwrapped response.
+  if (reviewType !== undefined && (SUPPORTED_REVIEW_TYPES as readonly string[]).includes(reviewType)) {
+    const requiredPayloadKey = reviewType === "classification_group" ? "group" : "item";
+    return {
+      review_type: reviewType as ReviewResolutionResult["review_type"],
+      status: "needs_answers",
+      error: `This ${reviewType} review item is missing its required "${requiredPayloadKey}" payload.`,
+      supported_review_types: [...SUPPORTED_REVIEW_TYPES],
+      recommendation: `Re-emit this review item from its source tool with the "${requiredPayloadKey}" payload populated.`,
+      compliance_basis: [],
+      unresolved_questions: [
+        `Re-emit this review item with its "${requiredPayloadKey}" payload so the ${reviewType} review can be actioned.`,
+      ],
+      suggested_workflow: undefined,
+      suggested_tools: [],
+      next_step_summary: "Supply the missing review payload before preparing any action.",
+    };
+  }
+
+  // Genuinely foreign / unrecognized review_type. Emit a fixed, actionable
+  // contract with NO caller-supplied value interpolated — the foreign type and
+  // the id are untrusted text and this response is emitted unwrapped.
   return {
     review_type: "unknown",
-    status: "needs_answers",
-    recommendation: "This review item is not yet recognized by the resolver. Inspect the source payload directly before continuing.",
+    status: "unsupported_review_type",
+    error: "This review item has an unsupported review_type.",
+    supported_review_types: [...SUPPORTED_REVIEW_TYPES],
+    recommendation: "Re-emit the item from its source tool with a supported review_type before preparing any action.",
     compliance_basis: [],
-    unresolved_questions: [],
+    unresolved_questions: [
+      `Re-emit this review item with a supported type — one of ${SUPPORTED_REVIEW_TYPES.join(", ")}.`,
+    ],
     suggested_workflow: undefined,
     suggested_tools: [],
-    next_step_summary: "Use the original tool output as the source of truth for this item.",
+    next_step_summary: "Correct the review type before preparing any action.",
   };
 }
 
@@ -1070,12 +1261,26 @@ function prepareReviewAction(
 
   if (options.saveAsRule) {
     const mergedRuleOverride = mergeRuleOverrides(reviewItem, options.ruleOverride);
+    // Canonicalize a marker-/whitespace-only wrapped vat_rate_dropdown to nothing
+    // (mergedRuleOverride is a fresh object, safe to mutate): otherwise it would
+    // pass the readiness guard below as the sole "concrete" field yet canonicalize
+    // to "" at persist, reporting a ready/saved rule with no effective action.
+    if (mergedRuleOverride && typeof mergedRuleOverride.vat_rate_dropdown === "string") {
+      const cleanedVat = canonicalBusinessText(mergedRuleOverride.vat_rate_dropdown);
+      if (cleanedVat) mergedRuleOverride.vat_rate_dropdown = cleanedVat;
+      else delete mergedRuleOverride.vat_rate_dropdown;
+    }
     // Prefer the resolved/normalized counterparty label over the raw OCR
     // `extracted.supplier_name` so a prompt-injected supplier name can't land
     // in `accounting-rules.md` as a rule match key unless the user types it in.
-    const match = stringAt(mergedRuleOverride ?? {}, "match") ??
+    // Canonicalize: the display_counterparty can be a sandbox-wrapped value
+    // round-tripped from a wrapped classify/review response, so strip markers
+    // before it becomes the proposed rule KEY (saveAutoBookingRule canonicalizes
+    // again at persist, but the proposed/echoed key must also be marker-free).
+    const rawMatch = stringAt(mergedRuleOverride ?? {}, "match") ??
       stringAt(item ?? {}, "display_counterparty") ??
       stringAt(group ?? {}, "display_counterparty");
+    const match = rawMatch !== undefined ? canonicalBusinessText(rawMatch) || undefined : undefined;
     const category = stringAt(mergedRuleOverride ?? {}, "category") ??
       stringAt(group ?? {}, "category");
     if (match) {
@@ -1102,7 +1307,12 @@ function prepareReviewAction(
       ]) {
         const value = (mergedRuleOverride ?? {})[key];
         if (value !== undefined) {
-          ruleArgs[PUBLIC_RULE_ARG_NAME[key] ?? key] = value;
+          // Canonicalize the echoed free-text so proposed_action.args carries no
+          // sandbox marker (persistence is protected again in saveAutoBookingRule).
+          const cleaned = (key === "reason" || key === "vat_rate_dropdown") && typeof value === "string"
+            ? canonicalBusinessText(value)
+            : value;
+          ruleArgs[PUBLIC_RULE_ARG_NAME[key] ?? key] = cleaned;
         }
       }
       const hasConcreteRuleField = hasConcreteRuleOverrideField(mergedRuleOverride);
@@ -1419,6 +1629,17 @@ export function registerAccountingInboxTools(
         );
       }
 
+      const identityCheck = compareCamtDuplicateIdentity(keptTransaction, duplicateTransaction);
+      if (!identityCheck.matches) {
+        throw new Error(
+          `Refusing to clean up transactions ${keep_transaction_id} and ${delete_transaction_id}: ` +
+          `CAMT duplicate identity mismatch (${identityCheck.reasons.join("; ")}). ` +
+          `Only a PROJECT transaction that matches the kept one on bank dimension, date, direction, ` +
+          `currency, and amount — with at least one corroborating counterparty field — may be deleted ` +
+          `as its duplicate.`,
+        );
+      }
+
       const appliedPatch: Partial<Transaction> = {};
       const requestedPatch = patch_missing_fields ?? {};
       for (const field of CAMT_DUPLICATE_PATCH_FIELDS) {
@@ -1485,7 +1706,11 @@ export function registerAccountingInboxTools(
         entity_type: "transaction",
         entity_id: delete_transaction_id,
         summary: `Deleted duplicate CAMT transaction ${delete_transaction_id} after preserving transaction ${keep_transaction_id}`,
-        details: { kept_transaction_id: keep_transaction_id },
+        details: {
+          kept_transaction_id: keep_transaction_id,
+          identity: identityCheck.identity,
+          corroboration: identityCheck.corroboration,
+        },
       });
 
       return {
@@ -1529,12 +1754,26 @@ export function registerAccountingInboxTools(
       // its downstream consumers keep the legacy singular field names.
       const purchase_account_id = purchase_accounts_id;
       const liability_account_id = liability_accounts_id;
+      // Canonicalize the free text up front so the length guard and error message
+      // operate on marker-free text (a marker-only match then fails the friendly
+      // "too short" check, not an opaque schema error). saveAutoBookingRule
+      // canonicalizes again at the persist boundary — this is defense in depth.
+      const cleanMatch = canonicalBusinessText(match);
+      const cleanReason = reason !== undefined ? canonicalBusinessText(reason) : undefined;
+      // Canonicalize vat_rate_dropdown BEFORE the concrete-field guard: a
+      // marker-/whitespace-only wrapped value would otherwise pass the guard as
+      // the sole "concrete" field, then canonicalize to "" at persist and save a
+      // rule with no effective booking action. Empty after canonicalization →
+      // undefined, so it no longer counts as a concrete field.
+      const cleanVatRateDropdown = vat_rate_dropdown !== undefined
+        ? (canonicalBusinessText(vat_rate_dropdown) || undefined)
+        : undefined;
       if (!hasConcreteRuleOverrideField({
         purchase_article_id,
         purchase_account_id,
         purchase_account_dimensions_id,
         liability_account_id,
-        vat_rate_dropdown,
+        vat_rate_dropdown: cleanVatRateDropdown,
         reversed_vat_id,
       })) {
         throw new Error("save_auto_booking_rule requires at least one concrete booking field besides match/category/reason");
@@ -1543,22 +1782,22 @@ export function registerAccountingInboxTools(
       // Guard against 1–2 char stems (e.g. "AS", "OÜ") that would substring-match
       // every Estonian company. findAutoBookingRule uses String.includes, so a
       // short normalized stem silently hijacks unrelated counterparties.
-      if (normalizeAutoBookingRuleMatch(match).length < MIN_AUTO_BOOKING_RULE_MATCH_LENGTH) {
+      if (normalizeAutoBookingRuleMatch(cleanMatch).length < MIN_AUTO_BOOKING_RULE_MATCH_LENGTH) {
         throw new Error(
-          `save_auto_booking_rule match "${match}" is too short after normalization (need at least ${MIN_AUTO_BOOKING_RULE_MATCH_LENGTH} characters) — use a more specific counterparty stem to avoid accidental matches.`,
+          `save_auto_booking_rule match "${cleanMatch}" is too short after normalization (need at least ${MIN_AUTO_BOOKING_RULE_MATCH_LENGTH} characters) — use a more specific counterparty stem to avoid accidental matches.`,
         );
       }
 
       const result = saveAutoBookingRule({
-        match,
+        match: cleanMatch,
         category,
         purchase_article_id,
         purchase_account_id,
         purchase_account_dimensions_id,
         liability_account_id,
-        vat_rate_dropdown,
+        vat_rate_dropdown: cleanVatRateDropdown,
         reversed_vat_id,
-        reason,
+        reason: cleanReason,
       });
 
       return {

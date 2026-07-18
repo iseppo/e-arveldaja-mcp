@@ -152,6 +152,9 @@ export function registerPrompts(
     "Scan a workspace for likely accounting inputs, propose the next safe dry-run steps, and ask only the smallest necessary follow-up questions.",
     {
       workspace_path: z.string().optional().describe("Optional folder to scan for CAMT statements, Wise CSV files, and receipt folders"),
+      bank_account_dimension_id: z.number().optional().describe("Optional default bank-account dimension ID reused for CAMT and receipt suggestions"),
+      receipt_matching_dimension_id: z.number().optional().describe("Optional bank-account dimension ID used specifically for receipt matching"),
+      wise_account_dimension_id: z.number().optional().describe("Optional bank-account dimension ID used specifically for Wise suggestions"),
     },
   );
 
@@ -232,6 +235,7 @@ export function registerPrompts(
       file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export"),
       accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID for the Wise account; if omitted, list account dimensions and ask the user to confirm the Wise bank account"),
       fee_account_dimensions_id: z.number().optional().describe("Optional Wise fee expense account dimension ID"),
+      inter_account_dimension_id: z.number().optional().describe("Optional other own bank account dimension for Wise inter-account transfers; required when there are 3+ bank accounts and auto-detection cannot pick one"),
       date_from: z.string().optional().describe("Optional transaction-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional transaction-date upper bound (YYYY-MM-DD)"),
       skip_jar_transfers: z.boolean().optional().describe("Skip Jar transfers (default true)"),
@@ -264,6 +268,7 @@ export function registerPrompts(
     {
       mode: z.enum(["auto", "review", "transaction"]).optional().describe('Reconciliation mode: "auto" (default), "review", or "transaction"'),
       transaction_id: z.number().int().positive().optional().describe('Specific bank transaction ID when mode is "transaction"'),
+      target_accounts_dimensions_id: z.number().optional().describe("Optional target own-bank account dimension for one-sided inter-account reconciliation; provide when there are 3+ bank accounts and the IBAN is missing"),
     },
     {
       note: "Bank reconciliation requires live transactions, invoices, and journals from e-arveldaja, so it cannot run in setup mode.",
@@ -313,14 +318,15 @@ export function registerPrompts(
       "lightyear-booking",
       "Book Lightyear investment trades and distributions into e-arveldaja journals. Parses CSV exports, pairs FX conversions, matches capital gains, and creates journal entries.",
       {
-        statement_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
+        file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
         capital_gains_path: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sells)"),
         investment_account: z.number().describe("Investment asset account number (e.g. 1550)"),
         broker_account: z.number().describe("Broker cash account number (e.g. 1120)"),
-        income_account: z.number().optional().describe("Distribution income account (e.g. 8320 or 8400)"),
-        gain_loss_account: z.number().optional().describe("Realized gain/loss account for sell trades"),
-        loss_account: z.number().optional().describe("Optional separate realized loss account"),
-        fee_account: z.number().optional().describe("Optional fee expense account"),
+        income_account: z.number().optional().describe("Distribution income account (dividends from shares → 8330; fund distributions → 8320; interest → 8400)"),
+        gain_loss_account: z.number().optional().describe("Realized gain account for sell gains (default: auto-detect 'Tulu aktsiatelt ja osadelt', standard 8330)"),
+        loss_account: z.number().optional().describe("Realized loss account for sell losses (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335)"),
+        trade_fee_account: z.number().optional().describe("Expensed TRADE fee account for book_lightyear_trades (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335). Do not reuse this for distributions."),
+        distribution_fee_account: z.number().optional().describe("Platform fee account for book_lightyear_distributions (default: auto-detect 'Muud finantskulud', standard 8610). Distinct from trade_fee_account."),
         tax_account: z.number().optional().describe("Withheld tax account for distributions"),
         investment_dimension_id: z.number().optional().describe("Optional dimension ID for the investment account"),
         broker_dimension_id: z.number().optional().describe("Optional dimension ID for the broker account"),

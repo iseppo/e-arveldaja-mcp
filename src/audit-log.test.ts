@@ -1,6 +1,8 @@
 import { chmod, mkdtemp, readdir, rm, stat } from "fs/promises";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
+import { LockBusyError, withOwnedFileLockSync } from "./file-lock.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 async function loadAuditLogModule(
@@ -763,5 +765,586 @@ describe("audit log labels", () => {
     // The current-active log should NOT — otherwise the entry would be
     // misfiled on the wrong company.
     expect(auditLog.getAuditLog()).not.toContain("CONNECTION_SWITCH_INTERRUPTED");
+  });
+
+  it.each([
+    ["et", "mutatsiooni tulemus määramatu"],
+    ["en", "mutation outcome indeterminate"],
+  ] as const)("M01 renders the localized MUTATION_INDETERMINATE action in %s", async (lang, label) => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-m01-label-"));
+    const previousLang = process.env.EARVELDAJA_AUDIT_LANG;
+    process.env.EARVELDAJA_AUDIT_LANG = lang;
+    try {
+      const auditLog = await loadAuditLogModule(tempDir);
+      auditLog.initAuditLog(() => "original-company");
+
+      expect(auditLog.AuditAction.parse("MUTATION_INDETERMINATE"))
+        .toBe("MUTATION_INDETERMINATE");
+      expect(auditLog.logAudit({
+        tool: "update_client",
+        action: "MUTATION_INDETERMINATE",
+        entity_type: "client",
+        entity_id: 5,
+        summary: "Mutation outcome is indeterminate.",
+        details: { category: "mutation_indeterminate" },
+      }, { connectionName: "original-company" })).toBe(true);
+
+      const humanReadable = auditLog.getAuditLogByConnection("original-company")
+        .split("<!-- audit:")[0]!;
+      expect(humanReadable).toContain(label);
+      expect(humanReadable).not.toContain("MUTATION_INDETERMINATE");
+    } finally {
+      if (previousLang === undefined) delete process.env.EARVELDAJA_AUDIT_LANG;
+      else process.env.EARVELDAJA_AUDIT_LANG = previousLang;
+    }
+  });
+
+  it("M01 persists every flattened mutation recovery field through the real Markdown log", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-m01-fields-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "currently-active-company");
+
+    const persisted = auditLog.logAudit({
+      tool: "update_client",
+      action: "MUTATION_INDETERMINATE",
+      entity_type: "client",
+      entity_id: 5,
+      summary: "Mutation outcome is indeterminate; inspect remote state before retrying.",
+      details: {
+        category: "mutation_indeterminate",
+        mutation_may_have_occurred: true,
+        operation: "update",
+        business_key: "/clients:5",
+        affected_caches: "/clients,/products",
+        cause_name: "HttpError",
+        cause_message: "connection reset after request body",
+        cause_status: "network",
+        cause_method: "PATCH",
+        cause_path: "/clients/5",
+        next_action: "Re-read client 5 before deciding whether to retry.",
+      },
+    }, { connectionName: "original-company" });
+
+    expect(persisted).toBe(true);
+    const markdown = auditLog.getAuditLogByConnection("original-company");
+    for (const value of [
+      "mutation\\_indeterminate",
+      "true",
+      "update",
+      "/clients:5",
+      "/clients,/products",
+      "HttpError",
+      "connection reset after request body",
+      "network",
+      "PATCH",
+      "/clients/5",
+      "Re-read client 5 before deciding whether to retry.",
+    ]) {
+      expect(markdown).toContain(value);
+    }
+    expect(auditLog.getAuditLogByConnection("currently-active-company")).toBe("");
+  });
+
+  it("M01 returns false without throwing when the production append fails", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-m01-failure-"));
+    const auditLog = await loadAuditLogModule(tempDir, {
+      appendFileSync: vi.fn(() => {
+        throw new Error("simulated append failure");
+      }) as unknown as typeof import("fs").appendFileSync,
+    });
+    auditLog.initAuditLog(() => "original-company");
+
+    expect(auditLog.logAudit({
+      tool: "update_client",
+      action: "MUTATION_INDETERMINATE",
+      entity_type: "client",
+      entity_id: 5,
+      summary: "Mutation outcome is indeterminate.",
+      details: { category: "mutation_indeterminate" },
+    })).toBe(false);
+  });
+});
+
+describe("audit summary rendering (M16)", () => {
+  let tempDir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  it("renders a non-empty summary exactly once", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-summary-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    auditLog.logAudit({
+      tool: "update_journal",
+      action: "UPDATED",
+      entity_type: "journal",
+      entity_id: 1,
+      summary: "Adjusted Acme",
+      details: {},
+    });
+
+    const text = auditLog.getAuditLog();
+    expect(text.match(/Adjusted Acme/g)).toHaveLength(1);
+    expect(text).toMatch(/Summary|Kokkuvõte/);
+  });
+
+  it("does not render a row for an empty or whitespace-only summary", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-summary-empty-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    auditLog.logAudit({
+      tool: "update_journal",
+      action: "UPDATED",
+      entity_type: "journal",
+      entity_id: 2,
+      summary: "   ",
+      details: {},
+    });
+
+    const text = auditLog.getAuditLog();
+    expect(text).not.toMatch(/Summary|Kokkuvõte/);
+  });
+
+  it("escapes markdown and every line break (LF, CRLF, lone CR) in the summary and renders it once", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-summary-escape-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    auditLog.logAudit({
+      tool: "update_journal",
+      action: "UPDATED",
+      entity_type: "journal",
+      entity_id: 3,
+      // LF-injected table row, escaped emphasis, and a LONE CR trying to forge
+      // a new heading line.
+      summary: "Adjusted *Acme*\n| injected | row |\r### forged heading",
+      details: {},
+    });
+
+    const text = auditLog.getAuditLog();
+    // Rendered exactly once.
+    expect(text.match(/Adjusted/g)).toHaveLength(1);
+    // Markdown emphasis and table pipes are escaped.
+    expect(text).toContain("\\*Acme\\*");
+    expect(text).not.toContain("*Acme*");
+    expect(text).not.toContain("| injected |");
+    // Every line break is normalized to a space: no carriage return survives,
+    // so the "### forged heading" cannot start its own Markdown line.
+    expect(text).not.toContain("\r");
+    expect(text).not.toMatch(/^### forged heading/m);
+    expect(text).toMatch(/Summary|Kokkuvõte/);
+  });
+
+  it("renders the summary once even when details also carries a summary key", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-summary-collision-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    auditLog.logAudit({
+      tool: "update_journal",
+      action: "UPDATED",
+      entity_type: "journal",
+      entity_id: 4,
+      summary: "Canonical summary",
+      // A stray details.summary must not double-render the summary row.
+      details: { summary: "Canonical summary" },
+    });
+
+    const text = auditLog.getAuditLog();
+    expect(text.match(/Canonical summary/g)).toHaveLength(1);
+  });
+});
+
+describe("audit relabel/append concurrency (M17)", () => {
+  let tempDir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  it("preserves an append that lands on the source file while labels are merged", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m17-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    // Seed a target file so the relabel MERGES (rather than renames)...
+    auditLog.initAuditLog(() => "target");
+    auditLog.logAudit({
+      tool: "confirm_purchase_invoice",
+      action: "CONFIRMED",
+      entity_type: "purchase_invoice",
+      entity_id: 17,
+      summary: "target-existing",
+      details: {},
+    });
+
+    // ...and a source file with a pre-existing entry.
+    auditLog.initAuditLog(() => "source");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 16,
+      summary: "before",
+      details: {},
+    });
+
+    // Model a concurrent append landing on the exact file being merged, mid-merge.
+    auditLog.setAuditMergeTestHookForTesting((sourcePath: string) => {
+      appendFileSync(sourcePath, "### 2026-03-26 10:00:00 — kanne\n\nconcurrent\n---\n\n");
+    });
+
+    auditLog.setAuditLogLabel("source", "target");
+    auditLog.setAuditMergeTestHookForTesting(undefined);
+
+    const merged = readFileSync(join(tempDir, "logs", "target.audit.md"), "utf8");
+    // Both the pre-existing source entry and the concurrent append survive once.
+    expect(merged.match(/before/g)).toHaveLength(1);
+    expect(merged.match(/concurrent/g)).toHaveLength(1);
+  });
+
+  it("holds the audit lock for the whole merge, excluding any concurrent locked writer", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m17-lock-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "target");
+    auditLog.logAudit({
+      tool: "confirm_purchase_invoice",
+      action: "CONFIRMED",
+      entity_type: "purchase_invoice",
+      entity_id: 17,
+      summary: "target-existing",
+      details: {},
+    });
+    auditLog.initAuditLog(() => "source");
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 16,
+      summary: "before",
+      details: {},
+    });
+
+    // While the merge runs (holds the audit lock), a competing acquisition of the
+    // SAME lock — which is exactly what logAudit's append does — must be excluded.
+    let observedBusy = false;
+    auditLog.setAuditMergeTestHookForTesting((_sourcePath: string, targetPath: string) => {
+      const auditLock = join(dirname(targetPath), ".audit-log.lock");
+      try {
+        withOwnedFileLockSync(auditLock, () => undefined, { timeoutMs: 20, pollMs: 2 });
+      } catch (error) {
+        observedBusy = error instanceof LockBusyError;
+      }
+    });
+
+    auditLog.setAuditLogLabel("source", "target");
+    auditLog.setAuditMergeTestHookForTesting(undefined);
+
+    expect(observedBusy).toBe(true);
+  });
+
+  it("excludes logAudit's own append while the audit lock is held (append is a locked writer)", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m17-append-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "env");
+
+    // Shorten the append's lock wait so this contention resolves in ~20ms instead
+    // of stalling on the 30s production default.
+    auditLog.setAuditLogLockOptionsForTesting({ timeoutMs: 20, pollMs: 2 });
+
+    const auditLock = join(tempDir, "logs", ".audit-log.lock");
+    let wrote: boolean | undefined;
+    // Hold the audit lock, then call logAudit from within: its append must fail
+    // to acquire the SAME lock (best-effort → returns false) and write nothing.
+    // If logAudit did NOT take the lock, it would write straight through.
+    withOwnedFileLockSync(auditLock, () => {
+      wrote = auditLog.logAudit({
+        tool: "confirm_purchase_invoice",
+        action: "CONFIRMED",
+        entity_type: "purchase_invoice",
+        entity_id: 42,
+        summary: "blocked-append",
+        details: {},
+      });
+    }, { timeoutMs: 1000, pollMs: 2 });
+
+    auditLog.setAuditLogLockOptionsForTesting(undefined);
+    expect(wrote).toBe(false);
+    expect(existsSync(join(tempDir, "logs", "env.audit.md"))).toBe(false);
+  });
+
+  it("routes a stale-view append to the relabeled file instead of orphaning it", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m17-stale-"));
+    // Two module instances share one logs dir — a cross-process simulation.
+    const procA = await loadAuditLogModule(tempDir);
+    const procB = await loadAuditLogModule(tempDir);
+    procA.initAuditLog(() => "env");
+    procB.initAuditLog(() => "env");
+
+    // A seeds an entry, then relabels env -> Acme (persisting the label to disk).
+    procA.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 1,
+      summary: "seed",
+      details: {},
+    });
+    procA.setAuditLogLabel("env", "Acme");
+
+    // B never saw A's relabel (its in-memory label is still "env"). Its append
+    // must resolve to the CURRENT label (Acme) — not recreate the migrated file.
+    procB.logAudit({
+      tool: "confirm_purchase_invoice",
+      action: "CONFIRMED",
+      entity_type: "purchase_invoice",
+      entity_id: 2,
+      summary: "stale-view-append",
+      details: {},
+    });
+
+    const acme = readFileSync(join(tempDir, "logs", "Acme.audit.md"), "utf8");
+    expect(acme).toContain("#2");
+    expect(acme).toContain("stale-view-append");
+    // The migrated source file is not resurrected as an orphan.
+    expect(existsSync(join(tempDir, "logs", "env.audit.md"))).toBe(false);
+  });
+});
+
+describe("audit default read limit (M18)", () => {
+  let tempDir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  // Zero-padded so no marker is a substring of another (e.g. "0000" only
+  // matches entry 0, never "0104"), and section count is unambiguous.
+  function marker(i: number): string {
+    return `audit-entry-${String(i).padStart(4, "0")}`;
+  }
+  function seed(auditLog: typeof import("./audit-log.js"), count: number): void {
+    auditLog.initAuditLog(() => "acme");
+    for (let i = 0; i < count; i += 1) {
+      auditLog.logAudit({
+        tool: "create_purchase_invoice",
+        action: "CREATED",
+        entity_type: "purchase_invoice",
+        entity_id: i,
+        summary: marker(i),
+        details: {},
+      });
+    }
+  }
+  function count(content: string): number {
+    return content.split("\n---\n\n").filter(Boolean).length;
+  }
+
+  it("returns only the newest 100 entries when no filter is provided", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    seed(auditLog, 105);
+
+    const content = auditLog.getAuditLog();
+    expect(count(content)).toBe(100);
+    // Oldest five (ids 0-4) dropped; newest present.
+    expect(content).not.toContain(marker(0));
+    expect(content).not.toContain(marker(4));
+    expect(content).toContain(marker(5));
+    expect(content).toContain(marker(104));
+  });
+
+  it("applies the same newest-100 cap when the filter object is empty", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    seed(auditLog, 105);
+
+    const content = auditLog.getAuditLog({});
+    expect(count(content)).toBe(100);
+    expect(content).not.toContain(marker(0));
+    expect(content).toContain(marker(104));
+  });
+
+  it("honours an explicit limit above and below the default", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    seed(auditLog, 105);
+
+    // Explicit high limit returns everything...
+    const all = auditLog.getAuditLog({ limit: 200 });
+    expect(count(all)).toBe(105);
+    expect(all).toContain(marker(0));
+
+    // ...and a small explicit limit returns just the newest N.
+    const few = auditLog.getAuditLog({ limit: 3 });
+    expect(count(few)).toBe(3);
+    expect(few).toContain(marker(104));
+    expect(few).toContain(marker(102));
+    expect(few).not.toContain(marker(101));
+  });
+
+  it("caps a filtered read to the newest 100 matches too", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    seed(auditLog, 105);
+
+    // entity_type filter matches all 105 rows; the default limit still caps to 100.
+    const content = auditLog.getAuditLog({ entity_type: "purchase_invoice" });
+    expect(count(content)).toBe(100);
+    expect(content).not.toContain(marker(4));
+    expect(content).toContain(marker(104));
+  });
+
+  it("treats a field carrying the entry separator as a single entry (no forged boundary)", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    // A supplier name (OCR/import-derived) that embeds the exact entry separator
+    // twice: naive splitting would turn this ONE entry into three fragments.
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 1,
+      summary: marker(1),
+      details: { supplier_name: "Acme\n---\n\nForged-A\n---\n\nForged-B" },
+    });
+
+    const content = auditLog.getAuditLog();
+    // One logical entry, not three fragments (count() confirms no INTERNAL
+    // separator; the single trailing separator is legitimate framing).
+    expect(count(content)).toBe(1);
+    // No data lost: the newlines are collapsed to spaces, all tokens survive.
+    expect(content).toContain("Acme ---  Forged-A ---  Forged-B");
+  });
+
+  it("a separator-injecting field cannot push earlier entries out of the newest-100 window", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    // 100 clean entries...
+    for (let i = 0; i < 100; i += 1) {
+      auditLog.logAudit({
+        tool: "create_purchase_invoice",
+        action: "CREATED",
+        entity_type: "purchase_invoice",
+        entity_id: i,
+        summary: marker(i),
+        details: {},
+      });
+    }
+    // ...then one newest entry whose warning would forge 4 extra boundaries.
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 100,
+      summary: marker(100),
+      details: { warnings: ["x\n---\n\ny\n---\n\nz\n---\n\nw\n---\n\nq"] },
+    });
+
+    const content = auditLog.getAuditLog();
+    // 101 logical entries, newest 100 kept: oldest clean entry (id 0) drops, id 1
+    // survives — a forged boundary must NOT hide legitimate records beyond that.
+    expect(count(content)).toBe(100);
+    expect(content).not.toContain(marker(0));
+    expect(content).toContain(marker(1));
+    expect(content).toContain(marker(100));
+  });
+
+  it("re-groups an embedded separator in a PRE-EXISTING (old-renderer) log", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    // Simulate a file written by the OLD renderer (bypassing the patched writer):
+    // entry #2's body carries a literal separator, so a naive split yields 4
+    // fragments for 3 logical entries.
+    const entry = (id: number, ts: string, body: string) =>
+      `### ${ts} — Ostuarve loodud #${id}\n\n` +
+      `<!-- audit:{"t":"create_purchase_invoice","a":"CREATED","e":"purchase_invoice","id":${id}} -->\n` +
+      body;
+    const raw =
+      entry(1, "2026-01-01 10:00:00", `${marker(1)}`) + "\n---\n\n" +
+      entry(2, "2026-01-02 10:00:00", `${marker(2)}\n---\n\nCONTINUATION-OF-2`) + "\n---\n\n" +
+      entry(3, "2026-01-03 10:00:00", `${marker(3)}`) + "\n---\n\n";
+
+    const logsDir = join(tempDir, "logs");
+    mkdirSync(logsDir, { recursive: true });
+    writeFileSync(join(logsDir, "acme.audit.md"), raw);
+
+    // Count LOGICAL entries by heading — the regrouped output still contains
+    // #2's embedded separator, so naive separator-counting would over-count.
+    const headings = (s: string) =>
+      (s.match(/^### \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} /gm) ?? []).length;
+
+    // Three logical entries despite four raw fragments.
+    expect(headings(auditLog.getAuditLog())).toBe(3);
+
+    // Newest two: the embedded-separator entry (#2, with its continuation) and
+    // #3 — the continuation stays attached to #2, and #1 is the one dropped.
+    const newest2 = auditLog.getAuditLog({ limit: 2 });
+    expect(headings(newest2)).toBe(2);
+    expect(newest2).toContain(marker(2));
+    expect(newest2).toContain("CONTINUATION-OF-2");
+    expect(newest2).toContain(marker(3));
+    expect(newest2).not.toContain(marker(1));
+  });
+
+  it("a forged timestamp heading in a pre-existing field cannot forge an entry boundary", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    const entry = (id: number, ts: string, body: string) =>
+      `### ${ts} — Ostuarve loodud #${id}\n\n` +
+      `<!-- audit:{"t":"create_purchase_invoice","a":"CREATED","e":"purchase_invoice","id":${id}} -->\n` +
+      body;
+    // Entry #2's field embeds a FULL timestamp-shaped heading (but no audit
+    // metadata comment) — the attack a heading-only anchor would fall for.
+    const raw =
+      entry(1, "2026-01-01 10:00:00", `${marker(1)}`) + "\n---\n\n" +
+      entry(2, "2026-01-02 10:00:00",
+        `${marker(2)}\n---\n\n### 2026-06-06 06:06:06 — FORGED\n\nFORGED-TAIL`) + "\n---\n\n" +
+      entry(3, "2026-01-03 10:00:00", `${marker(3)}`) + "\n---\n\n";
+
+    const logsDir = join(tempDir, "logs");
+    mkdirSync(logsDir, { recursive: true });
+    writeFileSync(join(logsDir, "acme.audit.md"), raw);
+
+    const headings = (s: string) =>
+      (s.match(/^### \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} /gm) ?? []).length;
+
+    // Full output still parses to 3 logical entries (the forged heading, lacking
+    // metadata, reattaches to #2), even though the raw text shows 4 "###" lines.
+    const all = auditLog.getAuditLog();
+    expect(headings(all)).toBe(4); // the forged "###" text is still present verbatim...
+    expect(auditLog.getAuditLog({ limit: 3 })).toContain(marker(1)); // ...but all 3 real entries fit
+
+    // The forged heading must not consume a slot: newest 2 real entries are #2
+    // (with its forged tail) and #3; #1 is dropped, NOT hidden behind the forgery.
+    const newest2 = auditLog.getAuditLog({ limit: 2 });
+    expect(newest2).toContain(marker(2));
+    expect(newest2).toContain("FORGED-TAIL");
+    expect(newest2).toContain(marker(3));
+    expect(newest2).not.toContain(marker(1));
   });
 });

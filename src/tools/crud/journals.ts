@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
+import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -62,7 +63,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
           total_items: (result as { total_items?: number }).total_items
             ?? result.items.length,
           per_page: (result as { per_page?: number }).per_page ?? perPage,
-          items: applyListView("journal", stripped, params.view),
+          items: renderExternalEntity("journal", applyListView("journal", stripped, params.view)),
           filtered_client_side: false,
           out_of_range: false,
           warnings: withOpeningBalanceApiLimitation(),
@@ -103,7 +104,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       const start = (requestedPage - 1) * perPage;
       const stripped = filtered.slice(start, start + perPage)
         .map(({ postings: _postings, ...rest }) => rest);
-      const items = applyListView("journal", stripped, params.view);
+      const items = renderExternalEntity("journal", applyListView("journal", stripped, params.view));
       return {
         content: [{
           type: "text",
@@ -123,7 +124,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "get_journal", "Get a journal entry by ID (includes postings)", idParam.shape, { ...readOnly, title: "Get Journal" }, async ({ id }) => {
     const result = await api.journals.get(id);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(renderExternalEntity("journal", result)) }] };
   });
 
   registerTool(server, "create_journal", "Create a journal entry with postings", {
@@ -138,7 +139,8 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       "base_amount = EUR equivalent for non-EUR entries. " +
       "projects_* fields link the posting to project tracking dimensions."
     ),
-  }, { ...create, title: "Create Journal" }, async (params) => {
+  }, { ...create, title: "Create Journal" }, async (rawParams) => {
+    const params = desandboxAllStrings(rawParams);
     const postings = parsePostings(params.postings);
     const [accounts, accountDimensions] = await Promise.all([
       api.readonly.getAccounts(),
@@ -185,10 +187,19 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     id: coerceId.describe("Journal ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
-    const parsed = parseJsonObject(data, "data");
+    const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const current = await api.journals.get(id);
-    const updateErrors = validateUpdateFields(parsed, "journal", { isConfirmed: current.registered === true });
+    const isConfirmed = current.registered === true;
+    const updateErrors = validateUpdateFields(parsed, "journal", { isConfirmed });
     if (updateErrors.length > 0) {
+      if (isConfirmed && Object.keys(parsed).length > 0) {
+        return toolError({
+          category: "confirmed_record_immutable",
+          error: "Confirmed journal update contains ledger-bearing fields",
+          details: updateErrors,
+          next_action: "invalidate_journal, fetch the draft, update it, then explicitly re-confirm",
+        });
+      }
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
     const result = await api.journals.update(id, parsed);

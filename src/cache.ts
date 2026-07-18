@@ -62,4 +62,9 @@ export class Cache {
       this.store.delete(key);
     }
   }
+
+  invalidateExact(key: string): void {
+    this._generation++;
+    this.store.delete(key);
+  }
 }

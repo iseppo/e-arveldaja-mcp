@@ -13,8 +13,10 @@ import {
 } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
+import { prepareReceiptBatchSnapshot } from "./receipt-inbox-files.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
+import { HttpError } from "../http-client.js";
 
 // Behavior tests exercise the granular constituent tools directly, so register
 // with the full surface exposed (default hides them behind the merged tools).
@@ -62,6 +64,16 @@ afterEach(() => {
   }
   resetAccountingRulesCache();
 });
+
+// H15: create/create_and_confirm require the exact dry-run manifest. These
+// tests fully mock the filesystem, so derive the manifest from the same mocks
+// (readFile/readdir/stat are persistent mockResolvedValue, so a pre-call
+// snapshot reproduces exactly what the handler will compute).
+async function approvedManifest(folder = "/tmp/receipts") {
+  const snap = await prepareReceiptBatchSnapshot(folder);
+  await snap.cleanup();
+  return snap.manifest;
+}
 
 describe("process_receipt_batch rollback handling", () => {
   it("prefers accounting-rules.md over generic fallback suggestions in dry run", async () => {
@@ -229,6 +241,73 @@ describe("process_receipt_batch rollback handling", () => {
     });
 
     rmSync(rulesDir, { recursive: true, force: true });
+  });
+
+  it("does not apply the receipt file-date window to bank transactions (M08)", async () => {
+    // Regression guard: a June-dated bank row must remain eligible for matching
+    // even when the receipt FILE window (date_from/date_to) is July-only. If the
+    // handler ever mapped date_from/date_to onto the bank filter again, the June
+    // transaction would be dropped and no bank_match candidate would surface.
+    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(readdir).mockResolvedValue([{ name: "receipt.pdf", isFile: () => true }] as any);
+    vi.mocked(stat).mockImplementation(async (path) => {
+      if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
+      return { isDirectory: () => false, size: 512, mtime: new Date("2026-07-15T10:00:00.000Z") } as any;
+    });
+    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
+    vi.mocked(resolveFilePath).mockImplementation((path) => path);
+    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
+    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    vi.mocked(parseDocument).mockResolvedValue({ text: "ignored", pageCount: 1 } as any);
+    vi.mocked(classifyReceiptDocument).mockReturnValue("purchase_invoice");
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Supplier OÜ", invoice_number: "INV-1", invoice_date: "2026-07-15",
+      total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", description: "Service",
+      ref_number: "REF-JUNE", raw_text: "ignored",
+    } as any);
+    vi.mocked(hasAutoBookableReceiptFields).mockReturnValue(true);
+    vi.mocked(suggestBookingInternal).mockResolvedValue({
+      item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230 },
+      source: "fallback", suggested_purchase_article: { id: 501, name: "Software" },
+    } as any);
+    vi.mocked(resolveSupplierInternal).mockResolvedValue({
+      found: true, created: false, match_type: "exact_name",
+      client: { id: 7, name: "Supplier OU", is_supplier: true, is_client: false, cl_code_country: "EST", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false },
+    } as any);
+
+    const server = { registerTool: vi.fn() } as any;
+    const api = {
+      clients: { listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+      },
+      // June-dated PROJECT/type-C row: exact_amount(50)+client_id(15)+reference(20)=85 ≥ 70.
+      // Its date is OUTSIDE the July file window on purpose.
+      transactions: { listAll: vi.fn().mockResolvedValue([
+        { id: 1, accounts_dimensions_id: 100, status: "PROJECT", type: "C", date: "2026-06-30", amount: 124, clients_id: 7, ref_number: "REF-JUNE" },
+      ]) },
+    } as any;
+
+    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
+    if (!registration) throw new Error("Tool was not registered");
+    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+
+    const result = await handler({
+      folder_path: "/tmp/receipts",
+      accounts_dimensions_id: 100,
+      execute: false,
+      // ONLY the receipt file window is bounded (July); NO accounting bounds.
+      date_from: "2026-07-01",
+      date_to: "2026-07-31",
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    // The June bank row survived the July file window and matched.
+    expect(payload.results[0]!.bank_match?.candidate?.transaction_id).toBe(1);
   });
 
   it("merges VAT-only local rules into an existing fallback booking suggestion", async () => {
@@ -860,6 +939,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
+      approved_manifest: await approvedManifest(),
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1040,6 +1120,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
+      approved_manifest: await approvedManifest(),
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1061,7 +1142,7 @@ describe("process_receipt_batch rollback handling", () => {
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
   });
 
-  it("execution_mode=create_and_confirm returns CONFIRMED invoice status after successful confirmation", async () => {
+  it("H05 execution_mode=create_and_confirm uses the default-preserving confirmation call", async () => {
     vi.mocked(realpath).mockImplementation(async (path) => String(path));
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
@@ -1201,6 +1282,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execution_mode: "create_and_confirm",
+      approved_manifest: await approvedManifest(),
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1215,9 +1297,7 @@ describe("process_receipt_batch rollback handling", () => {
       confirmed: true,
       uploaded_document: true,
     }));
-    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(9001, true, {
-      preserveExistingTotals: true,
-    });
+    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(9001, true);
   });
 
   it("preserves supplier-history VAT metadata when OCR misses invoice VAT totals", async () => {
@@ -1360,6 +1440,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
+      approved_manifest: await approvedManifest(),
     });
 
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
@@ -1500,6 +1581,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
+      approved_manifest: await approvedManifest(),
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1601,5 +1683,105 @@ describe("process_receipt_batch rollback handling", () => {
     expect(payload.results[0]!.llm_fallback.confidence_signals).toEqual(
       expect.arrayContaining(["low_ocr_confidence", "partial_ocr_failure"]),
     );
+  });
+});
+
+describe("process_receipt_batch own-company identity protection (M09)", () => {
+  // Build a fully-mocked, otherwise-bookable batch; `getInvoiceInfo` is supplied
+  // per test so we can exercise available / transient-failure / absent-endpoint.
+  function setup(getInvoiceInfo: unknown) {
+    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(readdir).mockResolvedValue([{ name: "receipt.pdf", isFile: () => true }] as any);
+    vi.mocked(stat).mockImplementation(async (path) => {
+      if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
+      return { isDirectory: () => false, size: 512, mtime: new Date("2026-07-15T10:00:00.000Z") } as any;
+    });
+    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
+    vi.mocked(resolveFilePath).mockImplementation((path) => path);
+    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
+    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    vi.mocked(parseDocument).mockResolvedValue({ text: "ignored", pageCount: 1 } as any);
+    vi.mocked(classifyReceiptDocument).mockReturnValue("purchase_invoice");
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Supplier OÜ", invoice_number: "INV-1", invoice_date: "2026-07-15",
+      total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", description: "Service", raw_text: "ignored",
+    } as any);
+    vi.mocked(hasAutoBookableReceiptFields).mockReturnValue(true);
+    vi.mocked(suggestBookingInternal).mockResolvedValue({
+      item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230 },
+      source: "fallback", suggested_purchase_article: { id: 501, name: "Software" },
+    } as any);
+    vi.mocked(resolveSupplierInternal).mockResolvedValue({
+      found: true, created: false, match_type: "exact_name",
+      client: { id: 7, name: "Supplier OU", is_supplier: true, is_client: false, cl_code_country: "EST", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false },
+    } as any);
+
+    const create = vi.fn().mockResolvedValue({ id: 900, number: "INV-1", status: "PROJECT" });
+    const server = { registerTool: vi.fn() } as any;
+    const readonly: Record<string, unknown> = {
+      getAccounts: vi.fn().mockResolvedValue([]),
+      getPurchaseArticles: vi.fn().mockResolvedValue([]),
+      getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+    };
+    if (getInvoiceInfo !== undefined) readonly.getInvoiceInfo = getInvoiceInfo;
+    const api = {
+      clients: { listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]), create, createAndSetTotals: create, uploadDocument: vi.fn(), invalidate: vi.fn() },
+      readonly,
+      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+    } as any;
+
+    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
+    if (!registration) throw new Error("Tool was not registered");
+    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    return { handler, api, create };
+  }
+
+  it("fails closed (dry_run) when invoice_info transiently fails", async () => {
+    const { handler } = setup(vi.fn().mockRejectedValue(new HttpError("temporary", 503, "GET", "/invoice_info")));
+    const result = await handler({ folder_path: "/tmp/receipts", accounts_dimensions_id: 10 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+    expect(payload).toMatchObject({ category: "manual_review_required", protection_state: "retryable_error" });
+  });
+
+  it("blocks create before any mutation when invoice_info transiently fails", async () => {
+    const { handler, create } = setup(vi.fn().mockRejectedValue(new HttpError("temporary", 503, "GET", "/invoice_info")));
+    const result = await handler({ folder_path: "/tmp/receipts", accounts_dimensions_id: 10, execution_mode: "create" });
+    const payload = parseMcpResponse(result.content[0]!.text);
+    expect(payload).toMatchObject({ category: "manual_review_required", protection_state: "retryable_error" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("blocks a manifest-valid create purely on the transient identity failure", async () => {
+    // Stronger than the no-manifest case: obtain a valid approved_manifest from a
+    // successful dry_run, then fail invoice_info on the create call. The request
+    // is fully mutation-eligible (H15 satisfied), so only the M09 identity guard
+    // can be blocking it.
+    const getInvoiceInfo = vi.fn().mockResolvedValue({ invoice_company_name: "My Company OÜ" });
+    const { handler, create } = setup(getInvoiceInfo);
+    const dry = parseMcpResponse((await handler({ folder_path: "/tmp/receipts", accounts_dimensions_id: 10 })).content[0]!.text);
+    expect(dry.approved_manifest).toBeDefined();
+
+    getInvoiceInfo.mockRejectedValueOnce(new HttpError("temporary", 503, "GET", "/invoice_info"));
+    const result = parseMcpResponse((await handler({
+      folder_path: "/tmp/receipts",
+      accounts_dimensions_id: 10,
+      execution_mode: "create",
+      approved_manifest: dry.approved_manifest,
+    })).content[0]!.text);
+    expect(result).toMatchObject({ category: "manual_review_required", protection_state: "retryable_error" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("stays best-effort (continues) when the invoice_info endpoint is absent", async () => {
+    // A permanently-absent endpoint is a known static config — VAT-based
+    // self-match still protects booking, so the batch must NOT fail closed.
+    const { handler } = setup(undefined);
+    const result = await handler({ folder_path: "/tmp/receipts", accounts_dimensions_id: 10 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+    expect(payload.protection_state).toBeUndefined();
+    expect(payload.mode).toBe("DRY_RUN");
+    expect(payload.results).toHaveLength(1);
   });
 });

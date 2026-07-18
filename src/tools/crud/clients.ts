@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
+import { desandboxAllStrings, desandboxText, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -27,13 +28,13 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     { ...pageParam.shape, ...viewParam },
     { ...readOnly, title: "List Clients" }, async (params) => {
     const result = await api.clients.list(params);
-    const compact = { ...result, items: applyListView("client", result.items, params.view) };
+    const compact = { ...result, items: renderExternalEntity("client", applyListView("client", result.items, params.view)) };
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_client", "Get a single client by ID", idParam.shape, { ...readOnly, title: "Get Client" }, async ({ id }) => {
     const result = await api.clients.get(id);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(renderExternalEntity("client", result)) }] };
   });
 
   registerTool(server, "create_client", "Create a new client (buyer/supplier)", {
@@ -49,7 +50,11 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     bank_account_no: z.string().optional().describe("Bank account (IBAN)"),
     invoice_vat_no: z.string().optional().describe("VAT number"),
     notes: z.string().optional().describe("Notes"),
-  }, { ...create, title: "Create Client" }, async (params) => {
+  }, { ...create, title: "Create Client" }, async (rawParams) => {
+    // Strip any sandbox markers that round-tripped in from a wrapped read off
+    // EVERY field (not only the scoped ones), so no marker is ever persisted to
+    // the accounting record or the audit log regardless of which field it lands in.
+    const params = desandboxAllStrings(rawParams);
     const result = await api.clients.create({
       ...params,
       cl_code_country: params.cl_code_country ?? "EST",
@@ -81,7 +86,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     id: coerceId.describe("Client ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Client" }, async ({ id, data }) => {
-    const parsed = parseJsonObject(data, "data");
+    const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const updateErrors = validateUpdateFields(parsed, "client");
     if (updateErrors.length > 0) {
       return toolError({ error: "Invalid update fields", details: updateErrors });
@@ -153,14 +158,16 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "search_client", "Search clients by name (fuzzy match)", {
     name: z.string().describe("Name to search for"),
-  }, { ...readOnly, title: "Search Clients" }, async ({ name }) => {
+  }, { ...readOnly, title: "Search Clients" }, async ({ name: rawName }) => {
+    // Strip markers so a name round-tripped from a wrapped read matches cleanly.
+    const name = desandboxText(rawName);
     const results = await api.clients.findByName(name);
     return toolResponse({
       action: "searched",
       entity: "client",
       message: `Found ${results.length} client(s) matching "${name}".`,
       extra: { count: results.length },
-      raw: results,
+      raw: renderExternalEntity("client", results),
     });
   });
 
@@ -175,7 +182,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
         id: result.id,
         found: true,
         message: `Found client for registry code ${code}.`,
-        raw: result,
+        raw: renderExternalEntity("client", result),
       })
       : toolResponse({
         ok: false,

@@ -165,4 +165,31 @@ describe("Cache", () => {
       expect(cache.generation).toBe(3);
     });
   });
+
+  describe("M02 exact invalidation", () => {
+    const keys = [
+      "connection:0:/items:list:",
+      "connection:0:/items:list:page=1",
+      "connection:0:/items:list:page=10",
+      "connection:0:/items:listAll",
+    ] as const;
+
+    it.each([...keys, "connection:0:/items:list:page=404"])(
+      "removes only the exact key %s, advances generation once, and blocks stale writes",
+      key => {
+        const cache = new Cache(300);
+        for (const candidate of keys) cache.set(candidate, candidate);
+        const generation = cache.generation;
+
+        cache.invalidateExact(key);
+        cache.setIfSameGeneration(key, "stale", generation);
+
+        expect(cache.generation).toBe(generation + 1);
+        expect(cache.get(key)).toBeUndefined();
+        for (const sibling of keys) {
+          if (sibling !== key) expect(cache.get(sibling)).toBe(sibling);
+        }
+      },
+    );
+  });
 });

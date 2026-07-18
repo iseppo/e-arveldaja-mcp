@@ -2,8 +2,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { canonicalBusinessText, parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { toolError } from "../tool-error.js";
 import { HttpError } from "../http-client.js";
+import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { roundMoney } from "../money.js";
@@ -68,20 +70,21 @@ import { buildWorkflowEnvelope, remapHiddenGranularWorkflowResult } from "../wor
 import { DEFAULT_LIABILITY_ACCOUNT, EMTA_PREPAYMENT_ACCOUNT } from "../accounting-defaults.js";
 import {
   RECEIPT_BATCH_EXECUTION_MODES,
+  type ReceiptApprovedManifestEntry,
   type ReceiptBatchExecutionMode,
   type ReceiptBatchFileResult,
   type ReceiptFileInfo,
+  type ReceiptFileSnapshot,
   type ReceiptInboxToolHandler,
   type ReceiptInboxToolResult,
   type ReceiptProcessingContext,
 } from "./receipt-inbox-types.js";
-import { readValidatedReceiptFile, revalidateReceiptFilePath, scanReceiptFolderInternal } from "./receipt-inbox-files.js";
+import { prepareReceiptBatchSnapshot, scanReceiptFolderInternal } from "./receipt-inbox-files.js";
 import { findDuplicateInvoice } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import {
   buildDryRunCreatedInvoicePreview,
   createAndMaybeMatchPurchaseInvoice,
-  invalidateAndReport,
 } from "./receipt-inbox-booking.js";
 import {
   buildReceiptBatchExecution,
@@ -91,6 +94,14 @@ import {
 } from "./receipt-inbox-summary.js";
 
 const POSSIBLE_MATCH_THRESHOLD = 70;
+
+// H15: the exact SHA-256 manifest a dry-run returned. Binding create/confirm to
+// it lets prepareReceiptBatchSnapshot reject a folder that changed since the
+// operator approved the preview, before any API mutation.
+const manifestSchema = z.array(z.object({
+  relative_path: z.string().min(1).refine(value => !value.includes("/") && !value.includes("\\")),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+}));
 
 export { buildDryRunCreatedInvoicePreview };
 
@@ -156,6 +167,44 @@ interface ClassifiedTransactionGroupResult {
     accounts_dimensions_id: number;
     clients_id?: number | null;
   }>;
+}
+
+type PartialClassificationStatus = "PROJECT" | "CONFIRMED" | "VOID" | "UNKNOWN";
+
+interface PartialClassificationMutation {
+  category: "mutation_indeterminate" | "mutation_failed";
+  mutation_may_have_occurred: true;
+  failed_stage:
+    | "transaction_reread"
+    | "invoice_invalidation"
+    | "invoice_confirmation"
+    | "transaction_confirmation";
+  created_invoice_id: number;
+  created_invoice_status: PartialClassificationStatus;
+  attempted_transaction_id: number;
+  transaction_status: PartialClassificationStatus;
+  next_action: string;
+}
+
+function invoiceClassificationStatus(status: unknown): PartialClassificationStatus {
+  return status === "PROJECT" || status === "CONFIRMED" ? status : "UNKNOWN";
+}
+
+function transactionClassificationStatus(
+  transaction: Pick<Transaction, "status" | "is_deleted">,
+): PartialClassificationStatus {
+  if (transaction.is_deleted === true) return "UNKNOWN";
+  return transaction.status === "PROJECT" ||
+    transaction.status === "CONFIRMED" ||
+    transaction.status === "VOID"
+    ? transaction.status
+    : "UNKNOWN";
+}
+
+function isAmbiguousPostCreateFailure(error: unknown): boolean {
+  return isMutationIndeterminate(error) || (
+    error instanceof HttpError && error.status === "network"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -779,19 +828,20 @@ async function resolveClassificationSuggestion(
 }
 
 async function extractReceiptFields(
-  file: ReceiptFileInfo,
+  snapshot: ReceiptFileSnapshot,
   ownCompanyVat?: string,
   ownCompanyRegistryCode?: string,
 ): Promise<ExtractedReceiptFields> {
-  const validatedPath = await revalidateReceiptFilePath(file);
-  const parsedDocument = await parseDocument(validatedPath);
+  // Parse the immutable snapshot bytes (snapshot_path), never the live folder
+  // file, so the parser and the later uploader observe byte-identical content.
+  const parsedDocument = await parseDocument(snapshot.snapshot_path);
   const allTextItems = parsedDocument.result?.pages?.flatMap(page =>
     (page.textItems ?? []).map(item => ({
       ...item,
       pageNum: page.pageNum,
     }))
   );
-  return extractReceiptFieldsFromText(parsedDocument.text, file.name, {
+  return extractReceiptFieldsFromText(parsedDocument.text, snapshot.file.name, {
     ownCompanyVat,
     ownCompanyRegistryCode,
     textItems: allTextItems,
@@ -895,18 +945,28 @@ export function deriveOwnCompanyRegistryCode(
 }
 
 /**
- * Resolve `invoice_info` defensively. The endpoint is a recent addition;
- * test stubs and older API client mocks may not implement it. Returning an
- * empty object on any failure keeps the receipt-batch flow working — we
- * just lose the name-based fallback path for ownCompanyRegistryCode (#22).
+ * Load the active company's own identity (`invoice_company_name`), which feeds
+ * the name-based self-match guard for `ownCompanyRegistryCode` (#22). Two
+ * failure modes are deliberately treated DIFFERENTLY (M09):
+ *
+ *  - **Endpoint absent** (`getInvoiceInfo` is not a function): a known static
+ *    configuration — older API clients / test stubs never had it, and VAT-based
+ *    self-match still protects booking. Stay best-effort: `available` with no
+ *    name, preserving the pre-M09 behaviour.
+ *  - **Endpoint present but the call throws** (e.g. a transient 5xx): we cannot
+ *    tell whether identity would have blocked a self-match, so we FAIL CLOSED
+ *    (`retryable_error`) rather than silently book with weakened protection.
  */
-async function safeGetInvoiceInfo(api: ApiContext): Promise<{ invoice_company_name?: string | null }> {
+export async function loadOwnCompanyIdentity(
+  api: ApiContext,
+): Promise<{ status: "available"; invoiceCompanyName?: string } | { status: "retryable_error"; reason: string }> {
+  const fn = api.readonly.getInvoiceInfo;
+  if (typeof fn !== "function") return { status: "available" };
   try {
-    const fn = api.readonly.getInvoiceInfo;
-    if (typeof fn !== "function") return {};
-    return await fn.call(api.readonly);
-  } catch {
-    return {};
+    const info = await fn.call(api.readonly);
+    return { status: "available", invoiceCompanyName: info.invoice_company_name?.trim() || undefined };
+  } catch (error) {
+    return { status: "retryable_error", reason: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -991,19 +1051,64 @@ export function applyReverseChargeAutoDetection(
 export function buildReferencedInvoiceForPaymentReceipt(
   invoiceNumber: string | undefined,
   purchaseInvoices: PurchaseInvoice[],
-): { invoice_number: string; matched: boolean; matched_invoice_id?: number } | undefined {
+  supplier: { client_id?: number; name?: string },
+): { invoice_number: string; matched: boolean; matched_invoice_id?: number; ambiguity_reason?: string } | undefined {
   const trimmed = invoiceNumber?.trim();
   if (!trimmed || trimmed.toUpperCase().startsWith("AUTO-")) return undefined;
   const normalized = trimmed.toLowerCase();
-  const found = purchaseInvoices.find(invoice =>
+  const numberMatches = purchaseInvoices.filter(invoice =>
     invoice.status !== "DELETED" &&
     invoice.status !== "INVALIDATED" &&
     invoice.number.trim().toLowerCase() === normalized,
   );
-  if (found?.id !== undefined) {
-    return { invoice_number: trimmed, matched: true, matched_invoice_id: found.id };
+
+  // An invoice number is not unique across suppliers, so a bare number match
+  // must never auto-link — it could book the receipt against a different legal
+  // entity's identically-numbered invoice (#23). Confirm the supplier: prefer
+  // a resolved client_id; otherwise require the receipt's supplier name to
+  // normalise-equal the invoice's client_name. Absent any supplier identity we
+  // cannot confirm the link, so nothing matches and the caller routes to review.
+  const supplierNameKey = supplier.name ? normalizeCompanyName(supplier.name) : "";
+  const supplierMatches = numberMatches.filter(invoice => {
+    if (supplier.client_id !== undefined) return invoice.clients_id === supplier.client_id;
+    if (!supplierNameKey) return false;
+    return normalizeCompanyName(invoice.client_name) === supplierNameKey;
+  });
+
+  if (supplierMatches.length === 1 && supplierMatches[0]!.id !== undefined) {
+    return { invoice_number: trimmed, matched: true, matched_invoice_id: supplierMatches[0]!.id };
   }
-  return { invoice_number: trimmed, matched: false };
+  return {
+    invoice_number: trimmed,
+    matched: false,
+    ...(numberMatches.length > 1 ? { ambiguity_reason: "supplier_identity_required" } : {}),
+  };
+}
+
+/**
+ * Select the bank transactions eligible for receipt auto-matching in a batch.
+ *
+ * Accounting-date bounds are SEPARATE from the receipt file-modified-date window
+ * (`date_from`/`date_to`): a receipt saved in July can settle a bank transaction
+ * dated in June, so the file-scan window must never narrow the bank rows (M08).
+ * This helper accepts ONLY accounting-date bounds — it has no access to the
+ * file-date params, so the two windows cannot be conflated by construction.
+ */
+export function selectBatchBankTransactions(
+  allTransactions: Transaction[],
+  accountsDimensionsId: number,
+  bounds: { transaction_date_from?: string; transaction_date_to?: string },
+): Transaction[] {
+  return allTransactions.filter(transaction =>
+    transaction.accounts_dimensions_id === accountsDimensionsId &&
+    isProjectTransaction(transaction) &&
+    // All API-created and CAMT-imported bank transactions are type "C" regardless of
+    // debit/credit direction (see CLAUDE.md). This filter is a defensive guard — any
+    // legacy type="D" rows are intentionally excluded from auto-match.
+    transaction.type === "C" &&
+    (!bounds.transaction_date_from || transaction.date >= bounds.transaction_date_from) &&
+    (!bounds.transaction_date_to || transaction.date <= bounds.transaction_date_to),
+  );
 }
 
 interface ProcessSingleReceiptOptions {
@@ -1020,13 +1125,14 @@ interface ProcessSingleReceiptOptions {
 async function processSingleReceipt(
   api: ApiContext,
   context: ReceiptProcessingContext,
-  file: ReceiptFileInfo,
+  snapshot: ReceiptFileSnapshot,
   options: ProcessSingleReceiptOptions,
 ): Promise<ReceiptBatchFileResult> {
+  const file = snapshot.file;
   const notes: string[] = [];
 
   try {
-    const extracted = await extractReceiptFields(file, options.ownCompanyVat, options.ownCompanyRegistryCode);
+    const extracted = await extractReceiptFields(snapshot, options.ownCompanyVat, options.ownCompanyRegistryCode);
     const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
     const selfVatDetected = detectSelfVatOnly(extracted, options.ownCompanyVat);
     const signals: ExtractionConfidenceSignals = {};
@@ -1072,7 +1178,9 @@ async function processSingleReceipt(
     if (classification !== "purchase_invoice") {
       const referencedInvoice =
         classification === "payment_receipt"
-          ? buildReferencedInvoiceForPaymentReceipt(extracted.invoice_number, context.purchaseInvoices)
+          ? buildReferencedInvoiceForPaymentReceipt(extracted.invoice_number, context.purchaseInvoices, {
+              ...(extracted.supplier_name ? { name: extracted.supplier_name } : {}),
+            })
           : undefined;
       notes.push(
         classification === "owner_paid_expense_reimbursement"
@@ -1273,7 +1381,7 @@ async function processSingleReceipt(
     const created = await createAndMaybeMatchPurchaseInvoice(
       api,
       context,
-      file,
+      snapshot,
       extracted,
       materializedSupplierResolution,
       bookingSuggestion,
@@ -1494,22 +1602,51 @@ export function registerReceiptInboxTools(
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID used when matching bank transactions"),
       execution_mode: z.enum(RECEIPT_BATCH_EXECUTION_MODES).optional().describe("Execution phase: dry_run (default), create (create/upload PROJECT invoices only), or create_and_confirm (create, upload, confirm, and exact-match bank transactions after explicit approval)"),
       execute: z.boolean().optional().describe("Deprecated boolean alias for execution_mode."),
-      date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
-      date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
+      date_from: z.string().optional().describe("Optional receipt file modified-date lower bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
+      date_to: z.string().optional().describe("Optional receipt file modified-date upper bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
+      transaction_date_from: z.string().optional().describe("Optional bank accounting-date lower bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_from."),
+      transaction_date_to: z.string().optional().describe("Optional bank accounting-date upper bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_to."),
+      approved_manifest: manifestSchema.optional().describe("Exact manifest returned by dry_run; required for create/create_and_confirm."),
     },
     { ...batch, openWorldHint: true, title: "Process Receipt Batch" },
-    async ({ folder_path, accounts_dimensions_id, execution_mode, execute, date_from, date_to }) => {
+    async ({ folder_path, accounts_dimensions_id, execution_mode, execute, date_from, date_to, transaction_date_from, transaction_date_to, approved_manifest }) => {
       const { mode: executionMode, legacyExecuteCreate } = resolveReceiptBatchExecutionMode(
         execute,
         execution_mode as ReceiptBatchExecutionMode | undefined,
       );
       const dryRun = executionMode === "dry_run";
-      const scan = await scanReceiptFolderInternal(folder_path, undefined, date_from, date_to);
+      // M09: the active company's identity feeds the #22 self-match guard. If a
+      // PRESENT invoice_info endpoint fails transiently we cannot tell whether
+      // identity would have blocked a self-match, so fail closed BEFORE any
+      // snapshot/mutation instead of booking with weakened protection. (A
+      // permanently-absent endpoint stays best-effort — see loadOwnCompanyIdentity.)
+      const ownCompanyIdentity = await loadOwnCompanyIdentity(api);
+      if (ownCompanyIdentity.status === "retryable_error") {
+        return toolError({
+          error: "Could not load own-company identity; refusing to auto-process receipts",
+          category: "manual_review_required",
+          protection_state: "retryable_error",
+          reason: ownCompanyIdentity.reason,
+          next_action: "Retry once the invoice_info endpoint is reachable again.",
+        });
+      }
+      // H15: creating/confirming without the dry-run manifest is refused so the
+      // approved-bytes binding below cannot be bypassed.
+      if (!dryRun && approved_manifest === undefined) {
+        return toolError({ category: "approved_manifest_required", error: "approved_manifest is required for receipt mutation" });
+      }
+      // Snapshot every receipt's bytes ONCE and (for create/confirm) verify the
+      // folder still matches the approved manifest before any API mutation.
+      const snapshot = await prepareReceiptBatchSnapshot(
+        folder_path,
+        undefined,
+        date_from,
+        date_to,
+        dryRun ? undefined : (approved_manifest as ReceiptApprovedManifestEntry[]),
+      );
+      try {
+      const scan = snapshot.scan;
       const vatInfo = await api.readonly.getVatInfo();
-      // getInvoiceInfo is best-effort: a missing endpoint or test stub means
-      // we lose the name-based fallback for ownCompanyRegistryCode (#22),
-      // but VAT-based self-match still works.
-      const invoiceInfo = await safeGetInvoiceInfo(api);
       const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
       const context: ReceiptProcessingContext = {
         clients: await api.clients.listAll(),
@@ -1521,26 +1658,20 @@ export function registerReceiptInboxTools(
       const ownCompanyRegistryCode = deriveOwnCompanyRegistryCode(
         context.clients,
         ownCompanyVat,
-        invoiceInfo.invoice_company_name?.trim() || undefined,
+        ownCompanyIdentity.invoiceCompanyName,
       );
       const allTransactions = await api.transactions.listAll();
-      const bankTransactions = allTransactions.filter(transaction =>
-        transaction.accounts_dimensions_id === accounts_dimensions_id &&
-        isProjectTransaction(transaction) &&
-        // All API-created and CAMT-imported bank transactions are type "C" regardless of
-        // debit/credit direction (see CLAUDE.md). This filter is a defensive guard — any
-        // legacy type="D" rows are intentionally excluded from auto-match.
-        transaction.type === "C" &&
-        (!date_from || transaction.date >= date_from) &&
-        (!date_to || transaction.date <= date_to),
-      );
+      const bankTransactions = selectBatchBankTransactions(allTransactions, accounts_dimensions_id, {
+        ...(transaction_date_from ? { transaction_date_from } : {}),
+        ...(transaction_date_to ? { transaction_date_to } : {}),
+      });
       const consumedTransactionIds = new Set<number>();
       const results: ReceiptBatchFileResult[] = [];
 
-      for (let index = 0; index < scan.files.length; index++) {
-        const file = scan.files[index]!;
-        await reportProgress(index, scan.files.length);
-        results.push(await processSingleReceipt(api, context, file, {
+      for (let index = 0; index < snapshot.files.length; index++) {
+        const fileSnapshot = snapshot.files[index]!;
+        await reportProgress(index, snapshot.files.length);
+        results.push(await processSingleReceipt(api, context, fileSnapshot, {
           ownCompanyVat,
           ownCompanyRegistryCode,
           bankTransactions,
@@ -1567,7 +1698,10 @@ export function registerReceiptInboxTools(
         accounts_dimensions_id,
         ...(date_from ? { date_from } : {}),
         ...(date_to ? { date_to } : {}),
+        ...(transaction_date_from ? { transaction_date_from } : {}),
+        ...(transaction_date_to ? { transaction_date_to } : {}),
         execution_mode: "create",
+        approved_manifest: snapshot.manifest,
       };
       const workflowSummary = buildReceiptBatchWorkflowSummary(summary);
       const workflow = buildReceiptBatchWorkflow({
@@ -1587,14 +1721,11 @@ export function registerReceiptInboxTools(
             accounts_dimensions_id,
             summary,
             workflow,
-            // TOCTOU warning: create/create_and_confirm rescans the folder at
-            // execution time (there is no manifest/hash carried over from the
-            // dry-run preview), so any file replaced or added since the preview
-            // is processed as-is. Surface this so the operator re-reviews when
-            // the folder may have changed between preview and execution.
-            ...(dryRun ? {} : {
-              warning: "Folder was RE-SCANNED at execution time; files changed or added since the dry-run preview were processed as-is. Re-review the results below if the folder may have changed since the preview.",
-            }),
+            // H15: bytes were snapshotted once and (for create/confirm) checked
+            // against the approved manifest, so there is no execution-time
+            // re-scan drift. Echo the manifest the operator approved / must
+            // approve so the create call can bind to these exact bytes.
+            approved_manifest: snapshot.manifest,
             skipped: scan.skipped,
             results: sanitizedResults,
             execution: buildReceiptBatchExecution({
@@ -1605,6 +1736,9 @@ export function registerReceiptInboxTools(
           }),
         }],
       };
+      } finally {
+        await snapshot.cleanup();
+      }
     },
   );
 
@@ -1615,12 +1749,15 @@ export function registerReceiptInboxTools(
       mode: z.enum(["scan", "dry_run", "create", "create_and_confirm"]).optional().describe("Workflow phase to run. Defaults to scan."),
       folder_path: z.string().describe("Folder path with receipts"),
       accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID used when matching bank transactions. Required except in scan mode."),
-      date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
-      date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
+      date_from: z.string().optional().describe("Optional receipt file modified-date lower bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
+      date_to: z.string().optional().describe("Optional receipt file modified-date upper bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
+      transaction_date_from: z.string().optional().describe("Optional bank accounting-date lower bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_from."),
+      transaction_date_to: z.string().optional().describe("Optional bank accounting-date upper bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_to."),
       file_types: z.array(z.enum(["pdf", "jpg", "png"])).optional().describe("Optional file type filter for scan mode"),
+      approved_manifest: manifestSchema.optional().describe("Exact manifest returned by dry_run; required for create/create_and_confirm."),
     },
     { ...batch, openWorldHint: true, title: "Receipt Batch" },
-    async ({ mode, folder_path, accounts_dimensions_id, date_from, date_to, file_types }) => {
+    async ({ mode, folder_path, accounts_dimensions_id, date_from, date_to, transaction_date_from, transaction_date_to, file_types, approved_manifest }) => {
       const selectedMode = mode ?? "scan";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
@@ -1639,6 +1776,11 @@ export function registerReceiptInboxTools(
         if (accounts_dimensions_id === undefined) {
           throw new Error("accounts_dimensions_id is required when mode is dry_run, create, or create_and_confirm");
         }
+        // H15: create/create_and_confirm must carry the exact manifest a dry_run
+        // returned so the snapshot layer can reject a folder that changed.
+        if (selectedMode !== "dry_run" && approved_manifest === undefined) {
+          return toolError({ category: "approved_manifest_required", error: "approved_manifest is required for receipt mutation" });
+        }
         delegatedTool = "process_receipt_batch";
         delegatedArgs = {
           folder_path,
@@ -1646,6 +1788,9 @@ export function registerReceiptInboxTools(
           execution_mode: selectedMode,
           ...(date_from !== undefined ? { date_from } : {}),
           ...(date_to !== undefined ? { date_to } : {}),
+          ...(transaction_date_from !== undefined ? { transaction_date_from } : {}),
+          ...(transaction_date_to !== undefined ? { transaction_date_to } : {}),
+          ...(approved_manifest !== undefined ? { approved_manifest } : {}),
         };
         result = await invokeCapturedTool(delegatedTool, delegatedArgs);
       }
@@ -1803,6 +1948,7 @@ export function registerReceiptInboxTools(
         transactions: number[];
         created_invoice_ids?: number[];
         linked_transaction_ids?: number[];
+        partial_mutations?: PartialClassificationMutation[];
       }> = [];
 
       for (let index = 0; index < groups.length; index++) {
@@ -1810,6 +1956,11 @@ export function registerReceiptInboxTools(
         await reportProgress(index, groups.length);
         const notes: string[] = [];
         const transactionIds = group.transactions.map(transaction => transaction.id).filter((id): id is number => id !== undefined);
+        const createdInvoiceIds: number[] = [];
+        const linkedTransactionIds: number[] = [];
+        const partialMutations: PartialClassificationMutation[] = [];
+        let wouldCreateCount = 0;
+        let attemptedCreateCount = 0;
 
         try {
           const freshTransactions: Transaction[] = [];
@@ -1883,11 +2034,6 @@ export function registerReceiptInboxTools(
             continue;
           }
 
-          const createdInvoiceIds: number[] = [];
-          const linkedTransactionIds: number[] = [];
-          let wouldCreateCount = 0;
-          let attemptedCreateCount = 0;
-
           for (const transaction of freshTransactions) {
             const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun, group.category);
             const supplier = supplierResolution.client;
@@ -1896,9 +2042,15 @@ export function registerReceiptInboxTools(
             const grossAmount = roundMoney(Math.abs(transaction.amount));
             const transactionCurrency = (transaction.cl_currencies_id ?? "EUR").toUpperCase();
             const transactionCurrencyRate = transaction.currency_rate;
+            // M10: the caller echoes classify output back in classifications_json,
+            // where counterparty fields were sandbox-wrapped for display. Strip
+            // the markers to the canonical business value BEFORE it drives rule
+            // matching (findAutoBookingRule), booking suggestions, or is written
+            // into the audit summary below — nothing persisted/matched may carry
+            // a sandbox marker. The response still re-wraps counterparty text.
             const transactionGroup: TransactionGroup = {
-              normalized_counterparty: group.normalized_counterparty,
-              display_counterparty: group.display_counterparty,
+              normalized_counterparty: canonicalBusinessText(group.normalized_counterparty),
+              display_counterparty: canonicalBusinessText(group.display_counterparty),
               transactions: [transaction],
             };
             const resolved = await resolveClassificationSuggestion(api, {
@@ -1987,69 +2139,146 @@ export function registerReceiptInboxTools(
               grossAmount,
               isVatRegistered,
             );
+            const invoiceId = invoice.id;
+            if (!invoiceId) {
+              throw new Error("createAndSetTotals resolved without a purchase invoice ID");
+            }
             attemptedCreateCount += 1;
+            createdInvoiceIds.push(invoiceId);
+            let observedInvoiceStatus = invoiceClassificationStatus(invoice.status);
             logAudit({
               tool: "apply_transaction_classifications", action: "CREATED", entity_type: "purchase_invoice",
-              entity_id: invoice.id,
-              summary: `Auto-booked purchase invoice from transaction ${transaction.id} (${group.display_counterparty})`,
+              entity_id: invoiceId,
+              summary: `Auto-booked purchase invoice from transaction ${transaction.id} (${transactionGroup.display_counterparty})`,
               details: { supplier_name: supplier.name, invoice_number: `AUTO-TX-${transaction.id}`, date: transaction.date, total_gross: grossAmount },
             });
 
-            if (invoice.id) {
-              const invalidateAutoCreatedInvoice = async (reason: string) => {
-                await invalidateAndReport(api, invoice, notes, {
-                  reason,
-                  onInvalidated: invoiceId => `Invalidated auto-created purchase invoice ${invoiceId} because ${reason}.`,
-                  onInvalidationFailed: (invoiceId, invalidateMessage) =>
-                    `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${wrapUntrustedOcr(invalidateMessage) ?? invalidateMessage}.`,
-                });
-              };
+            type InvoiceInvalidationOutcome =
+              | { ok: true }
+              | { ok: false; error: unknown };
 
-              const freshTransaction = await api.transactions.get(transaction.id!);
-              if (!isProjectTransaction(freshTransaction)) {
-                await invalidateAutoCreatedInvoice(`transaction ${transaction.id} is no longer bookable (status ${freshTransaction.status ?? "UNKNOWN"})`);
-                continue;
-              }
-
+            const invalidateAutoCreatedInvoice = async (
+              reason: string,
+            ): Promise<InvoiceInvalidationOutcome> => {
               try {
-                await api.purchaseInvoices.confirmWithTotals(invoice.id, isVatRegistered, {
-                  preserveExistingTotals: true,
-                });
-                logAudit({
-                  tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "purchase_invoice",
-                  entity_id: invoice.id,
-                  summary: `Auto-confirmed purchase invoice ${invoice.id} for transaction ${transaction.id}`,
-                  details: { invoice_id: invoice.id, transaction_id: transaction.id },
-                });
-                await api.transactions.confirm(transaction.id!, [{
-                  related_table: "purchase_invoices",
-                  related_id: invoice.id,
-                  amount: transaction.amount,
-                }]);
-                logAudit({
-                  tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
-                  entity_id: transaction.id!,
-                  summary: `Auto-confirmed transaction ${transaction.id} against invoice ${invoice.id}`,
-                  details: { amount: transaction.amount, invoice_id: invoice.id },
-                });
+                await api.purchaseInvoices.invalidate(invoiceId);
+                notes.push(`Invalidated auto-created purchase invoice ${invoiceId} because ${reason}.`);
+                return { ok: true };
               } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
-                await invalidateAutoCreatedInvoice(`automation failed after creation: ${message}`);
-                continue;
+                notes.push(
+                  `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${wrapUntrustedOcr(message) ?? message}.`,
+                );
+                return { ok: false, error };
               }
+            };
 
-              createdInvoiceIds.push(invoice.id);
-              linkedTransactionIds.push(transaction.id!);
+            const recordPostCreateFailure = (
+              error: unknown,
+              failedStage: PartialClassificationMutation["failed_stage"],
+              createdInvoiceStatus: PartialClassificationStatus,
+              transactionStatus: PartialClassificationStatus,
+            ): void => {
+              const ambiguous = isAmbiguousPostCreateFailure(error);
+              const nextAction = failedStage === "transaction_reread"
+                ? `Use existing purchase invoice ${invoiceId}. Freshly read transaction ${transaction.id}, then continue only after explicit approval.`
+                : failedStage === "invoice_invalidation"
+                  ? `Freshly read existing purchase invoice ${invoiceId} before any further action, then continue only after explicit approval.`
+                  : failedStage === "invoice_confirmation"
+                    ? `Use existing purchase invoice ${invoiceId}. Freshly read that invoice and transaction ${transaction.id}, then continue only after explicit approval.`
+                    : `Use existing confirmed purchase invoice ${invoiceId}. Freshly read transaction ${transaction.id}, then continue only after explicit approval.`;
+              partialMutations.push({
+                category: ambiguous ? "mutation_indeterminate" : "mutation_failed",
+                mutation_may_have_occurred: true,
+                failed_stage: failedStage,
+                created_invoice_id: invoiceId,
+                created_invoice_status: createdInvoiceStatus,
+                attempted_transaction_id: transaction.id!,
+                transaction_status: transactionStatus,
+                next_action: nextAction,
+              });
+              notes.push(nextAction);
+            };
+
+            let freshTransaction: Transaction;
+            try {
+              freshTransaction = await api.transactions.get(transaction.id!);
+            } catch (error) {
+              recordPostCreateFailure(error, "transaction_reread", observedInvoiceStatus, "UNKNOWN");
+              continue;
             }
+
+            if (!isProjectTransaction(freshTransaction)) {
+              const invalidation = await invalidateAutoCreatedInvoice(
+                `transaction ${transaction.id} is no longer bookable (status ${freshTransaction.status ?? "UNKNOWN"})`,
+              );
+              if (invalidation.ok) {
+                const createdIndex = createdInvoiceIds.lastIndexOf(invoiceId);
+                if (createdIndex >= 0) createdInvoiceIds.splice(createdIndex, 1);
+              } else {
+                recordPostCreateFailure(
+                  invalidation.error,
+                  "invoice_invalidation",
+                  isAmbiguousPostCreateFailure(invalidation.error) ? "UNKNOWN" : observedInvoiceStatus,
+                  transactionClassificationStatus(freshTransaction),
+                );
+              }
+              continue;
+            }
+
+            try {
+              await api.purchaseInvoices.confirmWithTotals(invoiceId, isVatRegistered);
+              observedInvoiceStatus = "CONFIRMED";
+              logAudit({
+                tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "purchase_invoice",
+                entity_id: invoiceId,
+                summary: `Auto-confirmed purchase invoice ${invoiceId} for transaction ${transaction.id}`,
+                details: { invoice_id: invoiceId, transaction_id: transaction.id },
+              });
+            } catch (error) {
+              recordPostCreateFailure(
+                error,
+                "invoice_confirmation",
+                isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : observedInvoiceStatus,
+                "PROJECT",
+              );
+              continue;
+            }
+
+            try {
+              await api.transactions.confirm(transaction.id!, [{
+                related_table: "purchase_invoices",
+                related_id: invoiceId,
+                amount: transaction.amount,
+              }]);
+              logAudit({
+                tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
+                entity_id: transaction.id!,
+                summary: `Auto-confirmed transaction ${transaction.id} against invoice ${invoiceId}`,
+                details: { amount: transaction.amount, invoice_id: invoiceId },
+              });
+            } catch (error) {
+              recordPostCreateFailure(
+                error,
+                "transaction_confirmation",
+                "CONFIRMED",
+                isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : "PROJECT",
+              );
+              continue;
+            }
+
+            linkedTransactionIds.push(transaction.id!);
           }
 
           const status = dryRun
             ? (wouldCreateCount > 0 ? "dry_run_preview" : "skipped")
-            : (attemptedCreateCount > 0 && createdInvoiceIds.length === attemptedCreateCount
+            : partialMutations.length > 0
+              ? "failed"
+              : attemptedCreateCount > 0 && linkedTransactionIds.length === attemptedCreateCount
                 ? "applied"
                 : attemptedCreateCount > 0
                   ? "failed"
-                  : "skipped");
+                  : "skipped";
 
           if (status === "failed" && linkedTransactionIds.length > 0) {
             notes.push(
@@ -2065,14 +2294,20 @@ export function registerReceiptInboxTools(
             transactions: transactionIds,
             created_invoice_ids: dryRun ? undefined : createdInvoiceIds,
             linked_transaction_ids: dryRun ? undefined : linkedTransactionIds,
+            partial_mutations: partialMutations.length > 0 ? partialMutations : undefined,
           });
         } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          notes.push(message);
           results.push({
             category: group.category,
             counterparty: group.display_counterparty,
             status: "failed",
-            notes: [error instanceof Error ? error.message : String(error)],
+            notes,
             transactions: transactionIds,
+            created_invoice_ids: dryRun ? undefined : createdInvoiceIds,
+            linked_transaction_ids: dryRun ? undefined : linkedTransactionIds,
+            partial_mutations: partialMutations.length > 0 ? partialMutations : undefined,
           });
         }
       }

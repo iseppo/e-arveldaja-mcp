@@ -28,6 +28,8 @@ Use that status when deciding whether VAT fields matter for the booking and whic
 Call `extract_pdf_invoice`:
 - `file_path`: absolute path to the invoice document
 
+Keep the `source_sha256` value it returns — you must pass it back unchanged to `create_purchase_invoice_from_pdf` in step 11 so the booking is bound to the exact bytes you reviewed.
+
 Use `hints.raw_text` as the source of truth for the whole document.
 - If `llm_fallback.recommended=true` or any identifier hint is missing, continue from `hints.raw_text` manually.
 - Do not stop just because the regex identifier hints are incomplete.
@@ -169,6 +171,7 @@ Call `create_purchase_invoice_from_pdf`:
 - `bank_account_no`
 - `notes`: leave empty by default; use it only for genuinely useful context such as assumptions made or manual adjustments. Do NOT put the source document filename here — the document is auto-uploaded and attached via `file_path` below.
 - `file_path`: the original file path (auto-uploads the source document)
+- `source_sha256`: the exact `source_sha256` value returned by `extract_pdf_invoice` in step 2. This binds the booking to the reviewed bytes; if the file changed since extraction the call is rejected before anything is created. Do not recompute or omit it.
 
 Use the exact `vat_price` and `gross_price` from the invoice; do not recalculate them. Omit them only when they are genuinely unknown.
 If source document upload fails after invoice creation, the draft invoice is invalidated.

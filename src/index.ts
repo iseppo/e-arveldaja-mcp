@@ -24,6 +24,7 @@ import {
 } from "./config.js";
 import { runWithExtra } from "./progress.js";
 import { HttpClient } from "./http-client.js";
+import { buildConnectionFingerprint } from "./connection-fingerprint.js";
 import { ClientsApi } from "./api/clients.api.js";
 import { ProductsApi } from "./api/products.api.js";
 import { JournalsApi } from "./api/journals.api.js";
@@ -78,6 +79,8 @@ import {
   AuditAction,
 } from "./audit-log.js";
 import { buildAuditLogLabels } from "./audit-log-labels.js";
+import { serializeToolMutationError } from "./mutation-audit.js";
+import { initAccountingRulesConnection } from "./accounting-rules.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
@@ -214,12 +217,6 @@ function normalizeAuditCompanyName(companyName: string | null | undefined): stri
   if (typeof companyName !== "string") return null;
   const normalized = companyName.replace(/\s+/g, " ").trim();
   return normalized || null;
-}
-
-function buildConnectionFingerprint(namedConfig: NamedConfig): string {
-  return createHash("sha256")
-    .update(`${namedConfig.config.baseUrl}\n${namedConfig.config.apiKeyId}\n${namedConfig.config.apiPublicValue}`)
-    .digest("hex");
 }
 
 function buildSetupInstructionsPayload(
@@ -385,9 +382,16 @@ async function main() {
   }
 
   const setupInfo = getCredentialSetupInfo();
+  const connectionNames = Object.freeze(allConfigs.map(config => config.name));
   const connectionState: ConnectionState = { activeIndex: 0, generation: 0 };
+  initAccountingRulesConnection(() => ({
+    name: allConfigs[connectionState.activeIndex]?.name ?? "setup",
+    stableIdentity: allConfigs[connectionState.activeIndex]
+      ? buildConnectionFingerprint(allConfigs[connectionState.activeIndex]!.config)
+      : "setup",
+  }));
   const connectionFingerprints = Object.fromEntries(
-    allConfigs.map((config) => [config.name, buildConnectionFingerprint(config)]),
+    allConfigs.map((config) => [config.name, buildConnectionFingerprint(config.config)]),
   );
   initAuditLog(
     () => allConfigs[connectionState.activeIndex]?.name ?? "setup",
@@ -929,7 +933,13 @@ async function main() {
             hint: error.hint,
           }));
         }
-        return toolError(error);
+        return serializeToolMutationError({
+          toolName,
+          error,
+          trackMutation,
+          snapshotIndex: snapshot.index,
+          connectionNames,
+        });
       } finally {
         if (trackMutation) {
           inFlightMutations.delete(snapshot);

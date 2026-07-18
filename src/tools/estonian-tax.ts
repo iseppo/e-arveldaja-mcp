@@ -17,11 +17,20 @@ import {
   VAT_REGISTRATION_THRESHOLD_EUR,
 } from "../estonian-tax-rules.js";
 import { logAudit } from "../audit-log.js";
+import { desandboxText } from "../external-text-renderer.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
 import { OPENING_BALANCE_API_LIMITATION_WARNING } from "../opening-balance-limitations.js";
-import { RETAINED_EARNINGS_ACCOUNT, DIVIDEND_PAYABLE_ACCOUNT, CIT_PAYABLE_ACCOUNT, INCOME_TAX_EXPENSE_ACCOUNT, SHARE_CAPITAL_ACCOUNT, DEFAULT_RESTRICTED_RESERVE_ACCOUNTS, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
+import { BookingGuard, formatDocNumber, type DocKey } from "../booking-guard.js";
+import { INCOME_TAX_EXPENSE_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
+import {
+  resolveRestrictedReserveAccounts,
+  resolveRetainedEarningsAccount,
+  resolveDividendPayableAccount,
+  resolveDividendCitPayableAccount,
+  resolveShareCapitalAccount,
+} from "../account-resolution.js";
 import type { Account, SaleInvoice } from "../types/api.js";
 import {
   getDefaultOwnerExpenseVatDeductionMode,
@@ -118,12 +127,12 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       net_dividend: z.number().finite().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: coerceId.describe("Shareholder client ID"),
       effective_date: isoDateSchema("Distribution date (YYYY-MM-DD)"),
-      retained_earnings_account: z.number().optional().describe("Retained earnings account debited with the NET dividend (default 3020)"),
-      dividend_payable_account: z.number().optional().describe("Dividend payable account (default 2370)"),
-      tax_payable_account: z.number().optional().describe("CIT payable (liability) account (default 2540)"),
+      retained_earnings_account: z.number().optional().describe("Retained earnings account debited with the NET dividend (default: auto-detect 'jaotamata kasum', standard 2960)"),
+      dividend_payable_account: z.number().optional().describe("Dividend payable account (default: auto-detect 'Dividendivõlad', standard 2650)"),
+      tax_payable_account: z.number().optional().describe("Dividend income-tax payable (liability) account (default: auto-detect 'Dividenditulumaksu võlg', standard 2656)"),
       income_tax_expense_account: z.number().optional().describe("Income-tax expense account debited with the CIT — the P&L 'Tulumaks' line (default: lowest Kulud account in 8900–8999, else 8900)"),
-      share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default 3000)"),
-      restricted_reserve_accounts: z.array(z.number().int()).optional().describe("Accounts whose balances ÄS §157(2) makes non-distributable (net assets must stay above share capital + these reserves). Default: auto-detect reservkapital 3010."),
+      share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default: auto-detect 'Osakapital', standard 2900)"),
+      restricted_reserve_accounts: z.array(z.number().int()).optional().describe("Accounts whose balances ÄS §157(2) makes non-distributable (net assets must stay above share capital + these reserves). Default: auto-detect every 'Kohustuslik reservkapital' account (active or inactive) AND always the standard reserve number 2940, so a funded-but-renamed 2940 is never missed; only booked balances raise the floor, so unfunded accounts add nothing. If your chart has REPURPOSED 2940 to a distributable reserve, pass this list explicitly (e.g. [] for no floor, or your real reserve account) to override the 2940 default."),
       force: z.boolean().optional().describe("Create journal even if retained earnings are insufficient (default false)"),
       dry_run: z.boolean().optional().describe("Preview calculation and postings without creating journal (default false)"),
     },
@@ -151,13 +160,16 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           hint: "Pass a net dividend of at least 0.01 EUR.",
         });
       }
-      const retainedAccount = retained_earnings_account ?? RETAINED_EARNINGS_ACCOUNT;
-      const payableAccount = dividend_payable_account ?? DIVIDEND_PAYABLE_ACCOUNT;
-      const taxAccount = tax_payable_account ?? CIT_PAYABLE_ACCOUNT;
-      const shareCapitalAccount = share_capital_account ?? SHARE_CAPITAL_ACCOUNT;
-
-      // Validate all accounts exist in chart of accounts
+      // Resolve every equity/liability account by NAME against the company's
+      // actual chart (falling back to the standard-chart number only when no
+      // active account matches), so the tool books to the right account whether
+      // or not this company kept the standard account numbers. An explicit
+      // caller override always wins.
       const accounts = await api.readonly.getAccounts();
+      const retainedAccount = resolveRetainedEarningsAccount(accounts, retained_earnings_account);
+      const payableAccount = resolveDividendPayableAccount(accounts, dividend_payable_account);
+      const taxAccount = resolveDividendCitPayableAccount(accounts, tax_payable_account);
+      const shareCapitalAccount = resolveShareCapitalAccount(accounts, share_capital_account);
       // The CIT is a P&L expense, not a retained-earnings debit, so it needs a
       // dedicated income-tax-expense account. Resolve it against the chart the
       // caller's company actually uses (auto-detects the 8900-series "Tulumaks"
@@ -166,12 +178,21 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // Restricted reserves for the §157(2) floor. An explicit override is
       // deduped and validated up front, so a mistyped or absent reserve account
       // errors rather than silently reading a 0 balance and LOWERING the floor —
-      // which could let an unlawful dividend through. The default [3010]
-      // auto-detect path is intentionally not required to exist: an absent
-      // reservkapital simply means no reserve floor (the conservative direction).
+      // which could let an unlawful dividend through. The default path
+      // name-detects "Kohustuslik reservkapital" in the actual chart and is
+      // intentionally not required to exist: an absent reservkapital simply means
+      // no reserve floor (the account exists in every standard chart but only a
+      // BOOKED BALANCE ring-fences net assets — see the balance filter below).
+      // resolveRestrictedReserveAccounts returns EVERY "Kohustuslik reservkapital"
+      // account (active or inactive, so a funded-but-deactivated reserve is not
+      // missed by this statutory gate; a distributable "Vabatahtlik reservkapital"
+      // is excluded) UNIONED with the standard 2940, always — so a funded-but-
+      // renamed 2940 is read even when an empty legacy exact-name account exists.
+      // The floor keys on the booked balance, so an unfunded/absent 2940 adds
+      // nothing; a genuinely repurposed 2940 needs an explicit override.
       const restrictedReserveAccounts = restricted_reserve_accounts
         ? [...new Set(restricted_reserve_accounts)]
-        : DEFAULT_RESTRICTED_RESERVE_ACCOUNTS;
+        : resolveRestrictedReserveAccounts(accounts);
       const accountErrors = validateAccounts(accounts, [
         { id: retainedAccount, label: "Retained earnings account" },
         { id: payableAccount, label: "Dividend payable account" },
@@ -246,7 +267,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // ÄS § 157(2): statutory/articles-mandated reserves (reservkapital) are not
       // distributable — the net-assets floor is share capital PLUS these reserves,
       // not share capital alone. restrictedReserveAccounts was resolved/validated
-      // above (default: auto-detect reservkapital 3010; override via
+      // above (default: name-detect "Kohustuslik reservkapital", standard 2940,
+      // and included only when it carries a non-zero balance; override via
       // restricted_reserve_accounts).
       const restrictedReserveDetails = restrictedReserveAccounts
         .map(id => ({ account: id, balance: roundMoney(balances.find(b => b.account_id === id)?.balance ?? 0) }))
@@ -332,14 +354,19 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
 
       // Transparency: when reservkapital was auto-detected (no explicit override)
       // and carries a balance, tell the operator the floor was raised above bare
-      // share capital — they may not realise reserves are being ring-fenced.
-      if (restricted_reserve_accounts === undefined && restrictedReserveTotal > 0) {
+      // share capital — they may not realise reserves are being ring-fenced. A
+      // mandatory reserve is not universal (it applies only when the company's
+      // articles / põhikiri require it), and the account exists in every standard
+      // e-arveldaja chart, so the floor is keyed on the BOOKED BALANCE, not the
+      // account's mere presence — an unfunded reserve (0 balance) adds no floor.
+      if (restricted_reserve_accounts === undefined && restrictedReserveFloor > 0) {
         warnings.push(
           `ÄS § 157(2) restricted-reserve floor applied: reservkapital ` +
           `${restrictedReserveDetails.map(r => `${r.account} (${r.balance} EUR)`).join(", ")} ` +
           `raises the minimum net-assets floor to ${legalCapitalFloor} EUR ` +
-          `(share capital ${roundedShareCapital} + reserves ${restrictedReserveTotal}). ` +
-          `Pass restricted_reserve_accounts to change which reserves are treated as non-distributable.`
+          `(share capital ${Math.max(0, roundedShareCapital)} + reserves ${restrictedReserveFloor}). ` +
+          `This assumes the company's articles (põhikiri) mandate this statutory reserve; ` +
+          `if they do not, pass restricted_reserve_accounts=[] to exclude it from the floor.`
         );
       }
       const violations: string[] = [];
@@ -402,13 +429,18 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       if (netAssetsBreach) {
         warnings.push(
           `Net assets after distribution (${netAssetsAfterDistribution} EUR) would fall below the ÄS § 157 floor of ${legalCapitalFloor} EUR ` +
-          `(share capital ${roundedShareCapital} EUR on account ${shareCapitalAccount}` +
-          `${restrictedReserveTotal > 0 ? ` + restricted reserves ${restrictedReserveTotal} EUR` : ""}). ` +
+          `(share capital ${Math.max(0, roundedShareCapital)} EUR on account ${shareCapitalAccount}` +
+          `${restrictedReserveFloor > 0 ? ` + restricted reserves ${restrictedReserveFloor} EUR` : ""}). ` +
           `Journal created because force=true. Verify ÄS § 157 compliance through a separate legal action (e.g. capital reduction).`
         );
       }
 
       const shareholder = await api.clients.get(shareholder_client_id);
+      const dividendKey: DocKey = {
+        ns: "DIV",
+        id: `${effective_date}-${shareholder_client_id}`,
+      };
+      const documentNumber = formatDocNumber(dividendKey);
 
       // Journal entry (Estonian GAAP / RTJ): the NET dividend is the only debit
       // to retained earnings (Jaotamata kasum) — it is what the resolution
@@ -437,9 +469,6 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         effective_date,
         clients_id: shareholder_client_id,
         cl_currencies_id: "EUR",
-        // Include shareholder ID so same-day distributions to different
-        // shareholders don't collide on document_number.
-        document_number: `DIV-${effective_date}-${shareholder_client_id}`,
         postings,
       };
 
@@ -462,8 +491,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
                 income_tax_expense_debit: cit,
                 note: "Only the net dividend drains retained earnings; the CIT is booked as income-tax expense (P&L 'Tulumaks').",
               },
-              proposed_journal: journalData,
-              shareholder: { id: shareholder.id, name: shareholder.name },
+              proposed_journal: { ...journalData, document_number: documentNumber },
+              shareholder: { id: shareholder_client_id, name: shareholder.name },
               // Mirror the executed path so the preview doesn't hide legality
               // context: an operator running dry_run with force=true must see
               // the same § 157 / retained-earnings signals they would on execute.
@@ -493,15 +522,36 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         };
       }
 
-      const result = await api.journals.create(journalData);
+      const guard = await BookingGuard.load(api);
+      const booking = await guard.createJournalOnce(dividendKey, journalData, { confirm: false });
+      const createdId = booking.journal_id;
+      const apiResponse = booking.status === "created" && booking.upstream_response
+        ? {
+            code: booking.upstream_response.code,
+            messages: booking.upstream_response.messages,
+            created_object_id: createdId,
+          }
+        : {
+            code: 200,
+            messages: [booking.status === "duplicate"
+              ? `Existing dividend journal ${createdId} reused.`
+              : `Dividend journal ${createdId} recovered after an ambiguous create.`],
+            created_object_id: createdId,
+          };
       logAudit({
-        tool: "prepare_dividend_package", action: "CREATED", entity_type: "journal",
-        entity_id: result.created_object_id,
-        summary: `Dividend journal: ${net_dividend} EUR net to ${shareholder.name}, CIT ${cit} EUR`,
+        tool: "prepare_dividend_package",
+        action: booking.status === "created" ? "CREATED" : "UPDATED",
+        entity_type: "journal",
+        entity_id: createdId,
+        summary: booking.status === "created"
+          ? `Dividend journal: ${net_dividend} EUR net to ${shareholder.name}, CIT ${cit} EUR`
+          : `Existing dividend journal ${createdId} reused for ${net_dividend} EUR net to ${shareholder.name}`,
         details: {
           effective_date, client_name: shareholder.name, amount: grossDividend,
           total_net: net_dividend, total_gross: roundMoney(grossDividend),
           postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+          booking_key: documentNumber,
+          booking_status: booking.status,
           ...(warnings.length > 0 && { warnings }),
         },
       });
@@ -543,7 +593,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             maximum_distributable: maximumDistributable,
             shareholder: { id: shareholder_client_id, name: shareholder.name },
             journal_entry: {
-              api_response: result,
+              api_response: apiResponse,
+              booking_status: booking.status,
+              ...(booking.status === "created" && booking.recovered ? { recovered: true } : {}),
               postings: [
                 { account: retainedAccount, type: "D", amount: net_dividend, description: `Dividend to ${shareholder.name} (net) — Jaotamata kasum` },
                 { account: incomeTaxExpenseAccount, type: "D", amount: cit, description: `Tulumaksukulu ${citRate.formatted}, dividend to ${shareholder.name}` },
@@ -590,6 +642,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       payable_account,
       document_number,
     }) => {
+      // Canonicalize free-text that will be persisted to the journal + audit log:
+      // a wrapped OCR receipt description/number can round-trip through the LLM
+      // into this booking, so strip markers before any of it reaches the ledger.
+      description = desandboxText(description);
+      document_number = document_number !== undefined ? desandboxText(document_number) : undefined;
       if (vat_rate > 1) {
         return toolError({
           error: `vat_rate=${vat_rate} looks like a percentage. Pass a decimal fraction instead (e.g. 0.24 for 24%).`,

@@ -1,11 +1,42 @@
 import type { HttpClient } from "../http-client.js";
-import { HttpError } from "../http-client.js";
+import { HttpError, type HttpMethod } from "../http-client.js";
 import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice, ApiResponse } from "../types/api.js";
+import { isMutationIndeterminate, MutationIndeterminateError } from "../mutation-outcome.js";
 import { BaseResource } from "./base-resource.js";
+
+function isHttpMethod(value: unknown): value is HttpMethod {
+  return value === "GET" || value === "POST" || value === "PUT" ||
+    value === "PATCH" || value === "DELETE";
+}
+
+export function getNormalizedNetworkCause(error: unknown): HttpError | undefined {
+  try {
+    if (!isMutationIndeterminate(error)) return undefined;
+    if (typeof error.cause !== "object" || error.cause === null) return undefined;
+    const cause = error.cause as unknown as Record<string, unknown>;
+    if (
+      cause.name !== "HttpError" ||
+      cause.status !== "network" ||
+      typeof cause.message !== "string" ||
+      typeof cause.path !== "string" ||
+      cause.path.trim() === "" ||
+      !isHttpMethod(cause.method)
+    ) {
+      return undefined;
+    }
+    return new HttpError(cause.message, "network", cause.method, cause.path);
+  } catch {
+    return undefined;
+  }
+}
 
 export class TransactionsApi extends BaseResource<Transaction> {
   constructor(client: HttpClient) {
     super(client, "/transactions");
+  }
+
+  public invalidateTransactionsAfterAmbiguousCleanup(): void {
+    this.invalidateCache();
   }
 
   /**
@@ -52,48 +83,79 @@ export class TransactionsApi extends BaseResource<Transaction> {
       this.invalidateCache("/journals");
       return result;
     } catch (error) {
-      // A network error on the register PATCH is ambiguous: the registration
-      // creates a journal server-side, so a lost response may mean it actually
-      // committed. Re-read the transaction (busting the stale cache — the
-      // failed PATCH never reached its own invalidateCache) and check its
-      // status before deciding. If it is CONFIRMED the registration landed, so
-      // we must NOT roll back clients_id (that would corrupt the committed
-      // journal's buyer/supplier) and must report success instead of a false
-      // failure that invites a duplicating retry.
+      this.invalidateCache();
       if (error instanceof HttpError && error.status === "network") {
-        this.invalidateCache();
-        let confirmed = false;
-        let reReadOk = false;
+        let freshTransaction: Transaction;
         try {
-          confirmed = (await this.get(id)).status === "CONFIRMED";
-          reReadOk = true;
-        } catch {
-          // Re-read failed — commit state is indeterminate (handled below).
+          freshTransaction = await this.get(id);
+        } catch (readError) {
+          this.invalidateCache("/journals");
+          throw new MutationIndeterminateError({
+            operation: "confirm",
+            entity: "transaction",
+            entityId: id,
+            businessKey: "transaction:" + id,
+            affectedCaches: ["/transactions", "/journals"],
+            cause: readError,
+            nextAction: "Freshly read transaction " + id +
+              " before any retry; registration may or may not have committed.",
+          });
         }
-        if (confirmed) {
+
+        if (freshTransaction.status === "CONFIRMED") {
           this.invalidateCache("/journals");
           // The tx re-read does not carry the new journal id; callers already
           // tolerate an absent created_object_id (recording the sentinel id).
           return { code: 200, messages: ["Registration recovered after network error"] };
         }
-        if (!reReadOk) {
-          // Indeterminate: the register PATCH may have committed a journal
-          // server-side, but we could not confirm. Rolling back clients_id now
-          // would corrupt that committed journal's buyer/supplier, so we leave
-          // clients_id AS SET and surface the ambiguity. Never roll back or
-          // blindly retry on an unknown commit state.
-          throw new Error(
-            `Transaction ${id} registration hit a network error and the status re-read also failed; ` +
-            `commit state is indeterminate. clients_id left as set (a rollback could corrupt a committed ` +
-            `journal). Verify the transaction in e-arveldaja before any retry.`
-          );
+
+        if (freshTransaction.status !== "PROJECT") {
+          this.invalidateCache();
+          this.invalidateCache("/journals");
+          throw new MutationIndeterminateError({
+            operation: "confirm",
+            entity: "transaction",
+            entityId: id,
+            businessKey: "transaction:" + id,
+            affectedCaches: ["/transactions", "/journals"],
+            cause: error,
+            nextAction: "Freshly read transaction " + id +
+              " before any retry; registration may or may not have committed.",
+          });
         }
-        // reReadOk && !confirmed → the register did NOT commit → safe to roll back.
       }
+
       if (clientsIdWasSet) {
         try {
           await this.update(id, { clients_id: null } as Partial<Transaction>);
         } catch (rollbackErr) {
+          const normalizedNetworkCause = getNormalizedNetworkCause(rollbackErr);
+          if (normalizedNetworkCause) {
+            this.invalidateTransactionsAfterAmbiguousCleanup();
+            throw new MutationIndeterminateError({
+              operation: "rollback",
+              entity: "transaction",
+              entityId: id,
+              businessKey: "transaction:" + id,
+              affectedCaches: ["/transactions"],
+              cause: normalizedNetworkCause,
+              nextAction: "Freshly read transaction " + id +
+                "; clients_id cleanup may or may not have committed.",
+            });
+          }
+          if (rollbackErr instanceof HttpError && rollbackErr.status === "network") {
+            this.invalidateTransactionsAfterAmbiguousCleanup();
+            throw new MutationIndeterminateError({
+              operation: "rollback",
+              entity: "transaction",
+              entityId: id,
+              businessKey: "transaction:" + id,
+              affectedCaches: ["/transactions"],
+              cause: rollbackErr,
+              nextAction: "Freshly read transaction " + id +
+                "; clients_id cleanup may or may not have committed.",
+            });
+          }
           const rollbackMsg = rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
           process.stderr.write(
             `WARNING: Failed to roll back clients_id on transaction ${id}: ${rollbackMsg}\n`

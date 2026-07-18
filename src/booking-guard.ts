@@ -1,6 +1,11 @@
 import type { ApiContext } from "./tools/crud-tools.js";
 import type { Journal, ApiResponse } from "./types/api.js";
 import { HttpError } from "./http-client.js";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { withOwnedFileLock } from "./file-lock.js";
+import { MutationIndeterminateError, isMutationIndeterminate } from "./mutation-outcome.js";
 import { roundMoney } from "./money.js";
 import {
   buildInterAccountJournalIndex,
@@ -13,7 +18,7 @@ import {
 } from "./tools/inter-account-utils.js";
 
 /**
- * BookingGuard — a single-snapshot idempotency layer for journal creation.
+ * BookingGuard — an idempotency layer for journal creation.
  *
  * The RIK e-Financials API signs only the request path (not the body), so it
  * offers no server-side idempotency: a retried or re-run POST creates a second
@@ -34,19 +39,12 @@ import {
  *            `sourceDim|targetDim|amount|date` with reference disambiguation.
  *            Delegates to the existing inter-account-utils index/matcher.
  *
- * `createJournalOnce` is the guarded write: find first, create with the
- * document_number stamped, best-effort confirm, then record into the in-run
- * index so a second call in the same run is also deduped.
- *
- * NOTE: the network-level verify-then-retry (re-scan after a network error to
- * recover a journal that may have been created despite a failed response) is
- * intentionally deferred to the http-client migration step. Today the
- * http-client does not retry non-idempotent POSTs at all, so a POST either
- * succeeds (we see the id) or throws (nothing created). The guard's find pass
- * still protects against cross-run and in-run duplicates.
+ * `createJournalOnce` serializes each connection/key across processes, performs
+ * a fresh upstream find, stamps the document number, creates at most once, and
+ * verifies ambiguous create/confirm outcomes without retrying a POST.
  */
 
-export type DocNamespace = "FX" | "LY";
+export type DocNamespace = "FX" | "LY" | "DIV";
 
 export interface DocKey {
   ns: DocNamespace;
@@ -56,7 +54,7 @@ export interface DocKey {
 
 /** "FX:123" / "LY:OR-EVN9C76R7A" */
 export function formatDocNumber(key: DocKey): string {
-  return `${key.ns}:${key.id}`;
+  return key.ns === "DIV" ? `DIV-${key.id}` : `${key.ns}:${key.id}`;
 }
 
 const KNOWN_NAMESPACES: readonly DocNamespace[] = ["FX", "LY"];
@@ -70,6 +68,7 @@ const KNOWN_NAMESPACES: readonly DocNamespace[] = ["FX", "LY"];
  */
 export function parseDocNumber(raw: string | null | undefined): DocKey | undefined {
   if (typeof raw !== "string") return undefined;
+  if (raw.startsWith("DIV-") && raw.length > 4) return { ns: "DIV", id: raw.slice(4) };
   const sep = raw.indexOf(":");
   if (sep <= 0) return undefined;
   const ns = raw.slice(0, sep);
@@ -139,8 +138,24 @@ export interface CreateOnceOptions {
 }
 
 export type CreateOnceResult =
-  | { status: "created"; journal_id: number; registered: boolean; recovered?: boolean }
+  | { status: "created"; journal_id: number; registered: boolean; recovered?: boolean; upstream_response?: ApiResponse }
   | { status: "duplicate"; journal_id: number };
+
+export async function withBookingKeyLock<T>(
+  connectionFingerprint: string,
+  key: DocKey,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const lockDir = process.env.EARVELDAJA_LOCK_DIR ?? resolve(tmpdir(), "e-arveldaja-mcp-locks");
+  const digest = createHash("sha256")
+    .update(`${connectionFingerprint}\0journal\0${formatDocNumber(key)}`)
+    .digest("hex");
+  return withOwnedFileLock(resolve(lockDir, `${digest}.lock`), fn, { timeoutMs: 30_000, pollMs: 25 });
+}
+
+function isAmbiguousMutation(error: unknown): boolean {
+  return isMutationIndeterminate(error) || (error instanceof HttpError && error.status === "network");
+}
 
 function interAccountKey(sourceDim: number, targetDim: number, amount: number, date: string): string {
   return `${sourceDim}|${targetDim}|${roundMoney(amount)}|${date}`;
@@ -234,8 +249,8 @@ export class BookingGuard {
   /**
    * Guarded journal write. Returns `duplicate` (with the existing journal id)
    * when a live artifact already carries this key; otherwise creates the
-   * journal with the document_number stamped, best-effort confirms it (unless
-   * `confirm:false`), records it, and returns `created`.
+   * journal with the document_number stamped, confirms it (unless
+   * `confirm:false`), records only a proven outcome, and returns `created`.
    *
    * The caller's `payload.document_number` is ignored — the guard stamps it
    * from `key` so the key and the stored document_number can never diverge.
@@ -245,98 +260,140 @@ export class BookingGuard {
     payload: Omit<Partial<Journal>, "document_number">,
     opts?: CreateOnceOptions,
   ): Promise<CreateOnceResult> {
-    const liveness = opts?.liveness ?? "not_deleted";
-    const existing = this.find(key, liveness);
-    if (existing) return { status: "duplicate", journal_id: existing.journal_id };
-
-    const stamped: Partial<Journal> = { ...payload, document_number: formatDocNumber(key) };
-    const wantConfirm = opts?.confirm !== false;
-
-    let created: ApiResponse;
-    try {
-      created = await this.api.journals.create(stamped);
-    } catch (err) {
-      // Only a network error is ambiguous — the POST may or may not have
-      // committed. An HTTP status (4xx/5xx with a body) means the server saw
-      // and rejected the request, so nothing was created: propagate as-is.
-      if (!(err instanceof HttpError) || err.status !== "network") throw err;
-
-      // The document_number is a checkable key, so re-scan the server to see
-      // whether the ambiguous write actually landed. create() only invalidates
-      // its cache on success, so bust the stale journals cache first — the
-      // snapshot could otherwise predate the write we are verifying.
+    return withBookingKeyLock(this.api.journals.connectionFingerprint, key, async () => {
+      const liveness = opts?.liveness ?? "not_deleted";
+      const wantConfirm = opts?.confirm !== false;
+      const businessKey = formatDocNumber(key);
       this.api.journals.invalidateListCache();
-      const found = BookingGuard.findKeyInJournals(await this.api.journals.listAll(), key);
-      if (found) {
-        // The ambiguous write DID commit — recover its id, do NOT retry. create()
-        // does not auto-confirm, so the recovered journal is typically left in
-        // PROJECT; confirm it now (when wanted) exactly as a fresh create would.
-        let registered = found.registered;
-        if (!registered && wantConfirm) {
+      const existing = BookingGuard.findKeyInJournals(
+        await this.api.journals.listAll(), key, liveness,
+      );
+      if (existing) return { status: "duplicate", journal_id: existing.journal_id };
+
+      const stamped: Partial<Journal> = { ...payload, document_number: businessKey };
+      let created: ApiResponse | undefined;
+      let journalId: number | undefined;
+      let registered = false;
+      let recovered = false;
+      let createAmbiguity: unknown;
+      try {
+        created = await this.api.journals.create(stamped);
+        journalId = created.created_object_id;
+        if (journalId == null) createAmbiguity = new Error("Create response did not contain created_object_id.");
+      } catch (error) {
+        if (!isAmbiguousMutation(error)) throw error;
+        createAmbiguity = error;
+      }
+
+      if (createAmbiguity !== undefined) {
+        try {
+          this.api.journals.invalidateListCache();
+          const found = BookingGuard.findKeyInJournals(
+            await this.api.journals.listAll(), key, liveness,
+          );
+          if (!found) {
+            throw BookingGuard.indeterminate("create", businessKey, createAmbiguity);
+          }
+          journalId = found.journal_id;
+          registered = found.registered;
+          recovered = true;
+        } catch (verificationError) {
+          if (verificationError instanceof MutationIndeterminateError && verificationError.businessKey === businessKey) {
+            throw verificationError;
+          }
+          throw BookingGuard.indeterminate("create", businessKey, verificationError);
+        }
+      }
+
+      if (journalId == null) throw BookingGuard.indeterminate("create", businessKey, createAmbiguity);
+
+      if (!registered && wantConfirm) {
+        try {
+          await this.api.journals.confirm(journalId);
+          registered = true;
+        } catch (error) {
+          if (!isAmbiguousMutation(error)) {
+            BookingGuard.attachCreatedJournalId(error, journalId);
+            throw error;
+          }
           try {
-            await this.api.journals.confirm(found.journal_id);
+            this.api.journals.invalidateListCache();
+            const verified = await this.api.journals.get(journalId);
+            if (verified?.registered !== true) {
+              throw BookingGuard.indeterminate("confirm", businessKey, error, journalId);
+            }
             registered = true;
-          } catch {
-            // Leave the recovered journal in PROJECT for the operator to inspect.
+            recovered = true;
+          } catch (verificationError) {
+            if (verificationError instanceof MutationIndeterminateError && verificationError.businessKey === businessKey) {
+              throw verificationError;
+            }
+            throw BookingGuard.indeterminate("confirm", businessKey, verificationError, journalId);
           }
         }
-        this.record(key, found.journal_id, { registered, is_deleted: false });
-        return { status: "created", journal_id: found.journal_id, registered, recovered: true };
       }
-      // The write did not commit — safe to retry exactly once. A second
-      // network failure propagates; the key is not double-booked because the
-      // next run's find pass (or another recovery) catches it by its
-      // document_number.
-      created = await this.api.journals.create(stamped);
-    }
 
-    const journalId = created.created_object_id;
-
-    let registered = false;
-    if (journalId != null && wantConfirm) {
-      try {
-        await this.api.journals.confirm(journalId);
-        registered = true;
-      } catch {
-        // Leave the journal in PROJECT for the operator to inspect if confirm
-        // fails — mirrors the established currency-rounding / Lightyear path.
-      }
-    }
-
-    if (journalId != null) {
       this.record(key, journalId, { registered, is_deleted: false });
-      return { status: "created", journal_id: journalId, registered };
-    }
+      return {
+        status: "created",
+        journal_id: journalId,
+        registered,
+        ...(recovered ? { recovered: true } : {}),
+        ...(created?.created_object_id != null ? { upstream_response: created } : {}),
+      };
+    });
+  }
 
-    // The API accepted the create but returned no object id. We cannot dedup a
-    // future run against an unknown id, but we still record the key so a second
-    // call within THIS run is deduped.
-    this.record(key, UNKNOWN_JOURNAL_ID, { registered, is_deleted: false });
-    return { status: "created", journal_id: UNKNOWN_JOURNAL_ID, registered };
+  private static indeterminate(
+    operation: "create" | "confirm",
+    businessKey: string,
+    cause: unknown,
+    entityId?: number,
+  ): MutationIndeterminateError {
+    return new MutationIndeterminateError({
+      operation,
+      entity: "journal",
+      entityId,
+      businessKey,
+      affectedCaches: ["/journals"],
+      cause,
+      nextAction: `List journals and verify ${businessKey} before retrying.`,
+    });
+  }
+
+  private static attachCreatedJournalId(error: unknown, journalId: number): void {
+    if ((typeof error === "object" && error !== null) || typeof error === "function") {
+      if (!("createdJournalId" in error)) {
+        Object.defineProperty(error, "createdJournalId", {
+          value: journalId, enumerable: true, configurable: true,
+        });
+      }
+    }
   }
 
   /**
-   * Scan a raw journal array for the first live (not-deleted) journal carrying
+   * Scan a raw journal array for the first journal carrying
    * `key`'s document_number. Used by the verify-then-retry path against a
-   * freshly-fetched snapshot, so it applies the same parse + `not_deleted`
-   * liveness that `find` uses without disturbing the in-memory index.
+   * freshly-fetched snapshot, applying the requested liveness without
+   * disturbing the in-memory index.
    */
   private static findKeyInJournals(
     journals: readonly Journal[],
     key: DocKey,
+    liveness: Liveness = "not_deleted",
   ): ExistingArtifact | undefined {
     const target = formatDocNumber(key);
     for (const j of journals) {
       if (j.id == null) continue;
       const k = parseDocNumber(j.document_number);
       if (!k || formatDocNumber(k) !== target) continue;
-      if (j.is_deleted === true) continue;
-      return {
+      const artifact: ExistingArtifact = {
         journal_id: j.id,
         document_number: target,
         registered: j.registered === true,
-        is_deleted: false,
+        is_deleted: j.is_deleted === true,
       };
+      if (passesLiveness(artifact, liveness)) return artifact;
     }
     return undefined;
   }

@@ -374,6 +374,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("list_account_dimensions");
     expect(text).toContain("execute: false");
     expect(text).toContain("execute: true");
+    expect(text).toContain("approved_command_digest");
+    expect(text).toContain("digest returned by the reviewed dry run");
     expect(text).toContain("execution.summary");
     expect(text).toContain("execution.skipped");
     expect(text).toContain("execution.errors");
@@ -440,6 +442,43 @@ describe("registerPrompts", () => {
     }
   });
 
+  it("exposes the dimension override arguments the workflows document (M24)", async () => {
+    const server = setupPromptServer();
+    const cases: Array<[string, string[]]> = [
+      // workflows/accounting-inbox.md documents these three overrides.
+      ["accounting-inbox", ["bank_account_dimension_id", "receipt_matching_dimension_id", "wise_account_dimension_id"]],
+      // workflows/import-wise.md documents inter_account_dimension_id.
+      ["import-wise", ["inter_account_dimension_id"]],
+      // workflows/reconcile-bank.md documents target_accounts_dimensions_id.
+      ["reconcile-bank", ["target_accounts_dimensions_id"]],
+    ];
+    for (const [promptName, names] of cases) {
+      const schema = getPromptArgsSchema(server, promptName);
+      for (const name of names) {
+        expect(schema).toHaveProperty(name);
+        // Optional (omittable) and accepts a numeric dimension ID.
+        expect(schema[name]!.safeParse(undefined).success).toBe(true);
+        expect(schema[name]!.safeParse(4242).success).toBe(true);
+      }
+    }
+  });
+
+  it("threads a provided dimension override into the workflow run arguments (M24)", async () => {
+    const server = setupPromptServer();
+
+    const inbox = await getPromptText(server, "accounting-inbox", { bank_account_dimension_id: 4242 });
+    expect(inbox).toContain("bank_account_dimension_id");
+    expect(inbox).toContain("4242");
+
+    const wise = await getPromptText(server, "import-wise", { file_path: "/tmp/w.csv", inter_account_dimension_id: 77 });
+    expect(wise).toContain("inter_account_dimension_id");
+    expect(wise).toContain("77");
+
+    const recon = await getPromptText(server, "reconcile-bank", { target_accounts_dimensions_id: 99 });
+    expect(recon).toContain("target_accounts_dimensions_id");
+    expect(recon).toContain("99");
+  });
+
   it("keeps new-supplier honest about what registry and VAT data is actually available", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "new-supplier", { identifier: "Acme OU" });
@@ -458,19 +497,43 @@ describe("registerPrompts", () => {
   it("keeps the Lightyear workflow explicit that portfolio value means accounting cost basis", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "lightyear-booking", {
-      statement_path: "/tmp/statement.csv",
+      file_path: "/tmp/statement.csv",
       investment_account: 1520,
       broker_account: 1120,
     });
 
-    expect(text).toContain("ask the user for it before booking sells");
+    // Sells now default the gain/loss accounts by name (8330/8335) instead of
+    // demanding gain_loss_account up front.
+    expect(text).toContain("gain → 8330");
+    expect(text).toContain("loss and expensed Buy/Sell fees → 8335");
     expect(text).toContain("gain_loss_account");
     expect(text).toContain("tax_account");
+    // The two fee prompt args are distinct and must be mapped to each tool's own
+    // `fee_account` — the workflow spells out the mapping so the agent never
+    // passes a literal trade_fee_account / distribution_fee_account to a tool,
+    // nor reuses one tool's fee account for the other (trades 8335 vs dist 8610).
+    const argsSchema = getPromptArgsSchema(server, "lightyear-booking");
+    expect(argsSchema).toHaveProperty("trade_fee_account");
+    expect(argsSchema).toHaveProperty("distribution_fee_account");
+    expect(argsSchema).not.toHaveProperty("fee_account");
+    expect(text).toContain('"fee_account": <trade_fee_account>');
+    expect(text).toContain('"fee_account": <distribution_fee_account>');
     expect(text).toContain("If there are distributions in the statement and no `income_account` is known, ask the user for an income_account number");
     expect(text).toContain("current accounting carrying value / cost basis");
     expect(text).toContain("Current portfolio carrying value / remaining cost basis");
     expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
     expect(text).not.toContain("Current portfolio value (from step 3)");
+  });
+
+  it("names the Lightyear statement argument file_path to match the tool (M25)", () => {
+    const server = setupPromptServer();
+    const schema = getPromptArgsSchema(server, "lightyear-booking");
+    // The statement arg now matches parse_lightyear_statement's own file_path param.
+    expect(schema).toHaveProperty("file_path");
+    expect(schema).not.toHaveProperty("statement_path");
+    // Capital gains keeps a distinct arg name: parse_lightyear_capital_gains ALSO
+    // takes file_path, so a single prompt cannot reuse it for the second file.
+    expect(schema).toHaveProperty("capital_gains_path");
   });
 
   it("keeps shipped Lightyear markdown prompts aligned with required distribution inputs", () => {
@@ -483,6 +546,10 @@ describe("registerPrompts", () => {
       expect(text).toContain("current accounting carrying value / cost basis");
       expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
       expect(text).not.toContain("Call `book_lightyear_distributions` with `dry_run: true`.");
+      // M25: both parse tools take `file_path`; the runbook must show the explicit
+      // mapping so an agent does not pass the prompt-arg name to the tool.
+      expect(text).toContain('parse_lightyear_statement { "file_path": "<file_path>" }');
+      expect(text).toContain('parse_lightyear_capital_gains { "file_path": "<capital_gains_path>" }');
     }
   });
 

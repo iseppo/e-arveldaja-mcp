@@ -3,6 +3,7 @@ import { TransactionsApi } from "./transactions.api.js";
 import { cache } from "./base-resource.js";
 import type { HttpClient } from "../http-client.js";
 import { HttpError } from "../http-client.js";
+import { MutationIndeterminateError } from "../mutation-outcome.js";
 
 vi.mock("../logger.js", () => ({ log: vi.fn() }));
 vi.mock("../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(undefined) }));
@@ -229,11 +230,7 @@ describe("TransactionsApi.confirm", () => {
     ]);
   });
 
-  it("does NOT roll back clients_id when the state is indeterminate (re-read also fails)", async () => {
-    // Network error on register AND the status re-read throws → we cannot tell
-    // whether the journal committed. Rolling back clients_id could corrupt a
-    // committed journal's buyer/supplier, so it must be LEFT AS SET and the
-    // error must flag the indeterminate state (never a silent rollback).
+  it("H03 API preserves an auto-set client when register and reread are ambiguous", async () => {
     let txReads = 0;
     const { client, patchCalls } = makeClient({
       getById: (path) => {
@@ -253,15 +250,272 @@ describe("TransactionsApi.confirm", () => {
       },
     });
     const api = new TransactionsApi(client);
+    cache.set("test:/transactions:list:page=1", { stale: true });
+    cache.set("test:/journals:list:page=1", { stale: true });
 
-    await expect(api.confirm(9, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
-      .rejects.toThrow(/indeterminate/i);
+    const outcome = api.confirm(9, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]);
+    await expect(outcome).rejects.toBeInstanceOf(MutationIndeterminateError);
+    await expect(outcome).rejects.toMatchObject({
+        name: "MutationIndeterminateError",
+        category: "mutation_indeterminate",
+        mutationMayHaveOccurred: true,
+        operation: "confirm",
+        entity: "transaction",
+        entityId: 9,
+        businessKey: "transaction:9",
+        affectedCaches: ["/transactions", "/journals"],
+        cause: {
+          name: "HttpError",
+          message: "fetch failed",
+          status: "network",
+          method: "GET",
+          path: "/transactions/9",
+        },
+      });
 
-    // clients_id was set by the auto-fix, register was attempted, but there is
-    // NO rollback patch ({ clients_id: null }) — the mutation stays intact.
     expect(patchCalls).toEqual([
       { path: "/transactions/9", body: { clients_id: 42 } },
       { path: "/transactions/9/register", body: expect.any(Array) },
+    ]);
+    expect(patchCalls).not.toContainEqual({ path: "/transactions/9", body: { clients_id: null } });
+    expect(cache.get("test:/transactions:list:page=1")).toBeUndefined();
+    expect(cache.get("test:/journals:list:page=1")).toBeUndefined();
+  });
+
+  it("H03 API preserves an already-set explicit client when register and reread are ambiguous", async () => {
+    let txReads = 0;
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/10") {
+          txReads += 1;
+          if (txReads === 1) return { id: 10, clients_id: 42 };
+          throw new HttpError("read lost", "network", "GET", "/transactions/10");
+        }
+        return undefined;
+      },
+      patchHandler: ({ path }) => {
+        if (path === "/transactions/10/register") {
+          throw new HttpError("register lost", "network", "PATCH", "/transactions/10/register");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(10, [{ related_table: "accounts", related_id: 4000, amount: 10 }]))
+      .rejects.toMatchObject({
+        category: "mutation_indeterminate",
+        mutationMayHaveOccurred: true,
+        operation: "confirm",
+        entity: "transaction",
+        entityId: 10,
+        businessKey: "transaction:10",
+        affectedCaches: ["/transactions", "/journals"],
+        cause: {
+          name: "HttpError",
+          message: "read lost",
+          status: "network",
+          method: "GET",
+          path: "/transactions/10",
+        },
+      });
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/10/register", body: expect.any(Array) },
+    ]);
+  });
+
+  it("H03 API preserves the client when a fresh reread has an unexpected status", async () => {
+    let txReads = 0;
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/11") {
+          txReads += 1;
+          return txReads === 1
+            ? { id: 11, clients_id: null }
+            : { id: 11, clients_id: 42, status: "VOID" };
+        }
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path }) => {
+        if (path === "/transactions/11/register") {
+          throw new HttpError("register lost", "network", "PATCH", "/transactions/11/register");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+    cache.set("test:/transactions:list:page=1", { stale: true });
+    cache.set("test:/journals:list:page=1", { stale: true });
+
+    await expect(api.confirm(11, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toMatchObject({
+        category: "mutation_indeterminate",
+        mutationMayHaveOccurred: true,
+        operation: "confirm",
+        entity: "transaction",
+        entityId: 11,
+        businessKey: "transaction:11",
+        affectedCaches: ["/transactions", "/journals"],
+        cause: {
+          name: "HttpError",
+          message: "register lost",
+          status: "network",
+          method: "PATCH",
+          path: "/transactions/11/register",
+        },
+      });
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/11", body: { clients_id: 42 } },
+      { path: "/transactions/11/register", body: expect.any(Array) },
+    ]);
+    expect(cache.get("test:/transactions:list:page=1")).toBeUndefined();
+    expect(cache.get("test:/transactions:11")).toBeUndefined();
+    expect(cache.get("test:/journals:list:page=1")).toBeUndefined();
+  });
+
+  it("H03 API exposes ambiguous API-auto cleanup as rollback and invalidates transactions", async () => {
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/12") return { id: 12, clients_id: null };
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path, body }) => {
+        if (path === "/transactions/12/register") {
+          throw new HttpError("rejected", 409, "PATCH", "/transactions/12/register");
+        }
+        if (path === "/transactions/12" && (body as Record<string, unknown>).clients_id === null) {
+          cache.set("test:/transactions:12", { stale: true });
+          throw new HttpError("cleanup lost", "network", "PATCH", "/transactions/12");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(12, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toMatchObject({
+        name: "MutationIndeterminateError",
+        category: "mutation_indeterminate",
+        mutationMayHaveOccurred: true,
+        operation: "rollback",
+        entity: "transaction",
+        entityId: 12,
+        businessKey: "transaction:12",
+        affectedCaches: ["/transactions"],
+        cause: {
+          name: "HttpError",
+          message: "cleanup lost",
+          status: "network",
+          method: "PATCH",
+          path: "/transactions/12",
+        },
+        nextAction: "Freshly read transaction 12; clients_id cleanup may or may not have committed.",
+      });
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/12", body: { clients_id: 42 } },
+      { path: "/transactions/12/register", body: expect.any(Array) },
+      { path: "/transactions/12", body: { clients_id: null } },
+    ]);
+    expect(cache.get("test:/transactions:12")).toBeUndefined();
+  });
+
+  it("M01 H03 leaves an incomplete structural cleanup ambiguity on the compound-failure path", async () => {
+    const incomplete = Object.assign(new Error("incomplete cleanup ambiguity"), {
+      category: "mutation_indeterminate" as const,
+      mutationMayHaveOccurred: true as const,
+      operation: "update" as const,
+      entity: "transaction",
+      entityId: 13,
+      businessKey: "/transactions:13",
+      affectedCaches: ["/transactions"],
+      cause: {
+        name: "HttpError",
+        message: "cleanup lost",
+        status: "network" as const,
+        method: "TRACE",
+        path: "/transactions/13",
+      },
+      nextAction: "Intermediate M01 recovery.",
+    });
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/13") return { id: 13, clients_id: null };
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path, body }) => {
+        if (path === "/transactions/13/register") {
+          throw new HttpError("rejected", 409, "PATCH", "/transactions/13/register");
+        }
+        if (path === "/transactions/13" && (body as Record<string, unknown>).clients_id === null) {
+          throw incomplete;
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(13, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toThrow(
+        /Transaction 13 confirmation failed: rejected.*Rollback of clients_id also failed: incomplete cleanup ambiguity.*manual review required/s,
+      );
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/13", body: { clients_id: 42 } },
+      { path: "/transactions/13/register", body: expect.any(Array) },
+      { path: "/transactions/13", body: { clients_id: null } },
+    ]);
+  });
+
+  it("M01 H03 contains a throwing cleanup cause getter on the compound-failure path", async () => {
+    const getterBacked = Object.assign(new Error("getter-backed cleanup ambiguity"), {
+      category: "mutation_indeterminate" as const,
+      mutationMayHaveOccurred: true as const,
+      operation: "update" as const,
+      entity: "transaction",
+      entityId: 14,
+      businessKey: "/transactions:14",
+      affectedCaches: ["/transactions"],
+      nextAction: "Intermediate M01 recovery.",
+    });
+    Object.defineProperty(getterBacked, "cause", {
+      enumerable: false,
+      get() {
+        throw new Error("malicious cause getter");
+      },
+    });
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/14") return { id: 14, clients_id: null };
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path, body }) => {
+        if (path === "/transactions/14/register") {
+          throw new HttpError("rejected", 409, "PATCH", "/transactions/14/register");
+        }
+        if (path === "/transactions/14" && (body as Record<string, unknown>).clients_id === null) {
+          throw getterBacked;
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(14, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toThrow(
+        /Transaction 14 confirmation failed: rejected.*Rollback of clients_id also failed: getter-backed cleanup ambiguity.*manual review required/s,
+      );
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/14", body: { clients_id: 42 } },
+      { path: "/transactions/14/register", body: expect.any(Array) },
+      { path: "/transactions/14", body: { clients_id: null } },
     ]);
   });
 

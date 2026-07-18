@@ -33,12 +33,14 @@ import {
   detectSelfVatOnly,
   detectSelfRegCodeOnly,
   resolveSupplierFromTransaction,
+  selectBatchBankTransactions,
   shouldGateCreation,
   supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
-import { readValidatedReceiptFile, revalidateReceiptFilePath } from "./receipt-inbox-files.js";
+import { readValidatedReceiptFile, revalidateReceiptFilePath, sha256Hex } from "./receipt-inbox-files.js";
+import type { ReceiptFileSnapshot } from "./receipt-inbox-types.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import { MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
@@ -57,6 +59,19 @@ vi.mock("fs/promises", async (importOriginal) => ({
 
 const mockedValidateFilePath = vi.mocked(validateFilePath);
 const mockedReadFile = vi.mocked(readFile);
+
+// H15: createAndMaybeMatchPurchaseInvoice now takes a ReceiptFileSnapshot whose
+// immutable `bytes` are uploaded. Wrap a plain ReceiptFileInfo for the legacy
+// unit tests that only exercise the non-upload branches.
+function toSnapshot(file: any, bytes: Buffer = Buffer.from("bytes")): ReceiptFileSnapshot {
+  return {
+    file,
+    relative_path: file.name,
+    sha256: sha256Hex(bytes),
+    bytes,
+    snapshot_path: file.path,
+  };
+}
 
 function makeTx(overrides: Partial<{
   type: string;
@@ -264,14 +279,14 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
         accounts: [],
         isVatRegistered: true,
       },
-      {
+      toSnapshot({
         name: "openai.pdf",
         path: "/tmp/openai.pdf",
         extension: ".pdf",
         file_type: "pdf",
         size_bytes: 123,
         modified_at: "2026-03-22T00:00:00.000Z",
-      },
+      }),
       {
         supplier_name: "OpenAI Ireland Limited",
         invoice_number: "INV-USD",
@@ -359,11 +374,11 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     const file = (name: string) => ({ name, path: `/tmp/${name}`, extension: ".pdf", file_type: "pdf", size_bytes: 123, modified_at: "2026-03-22T00:00:00.000Z" }) as any;
 
     const first = await createAndMaybeMatchPurchaseInvoice(
-      {} as any, context, file("a.pdf"), makeExtracted("INV-A"), supplierResolution, bookingSuggestion,
+      {} as any, context, toSnapshot(file("a.pdf")), makeExtracted("INV-A"), supplierResolution, bookingSuggestion,
       bankTransactions, "dry_run", false, consumed,
     );
     const second = await createAndMaybeMatchPurchaseInvoice(
-      {} as any, context, file("b.pdf"), makeExtracted("INV-B"), supplierResolution, bookingSuggestion,
+      {} as any, context, toSnapshot(file("b.pdf")), makeExtracted("INV-B"), supplierResolution, bookingSuggestion,
       bankTransactions, "dry_run", false, consumed,
     );
 
@@ -405,7 +420,7 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
       call: () => createAndMaybeMatchPurchaseInvoice(
         api,
         { clients: [], purchaseInvoices: [], purchaseArticlesWithVat: [], accounts: [], isVatRegistered: true },
-        { name: "receipt.pdf", path: "/tmp/receipt.pdf", extension: ".pdf", file_type: "pdf", size_bytes: 123, modified_at: "2026-03-22T00:00:00.000Z" },
+        toSnapshot({ name: "receipt.pdf", path: "/tmp/receipt.pdf", extension: ".pdf", file_type: "pdf", size_bytes: 123, modified_at: "2026-03-22T00:00:00.000Z" }),
         {
           supplier_name: "Supplier OÜ",
           invoice_number: "INV-EUR",
@@ -463,6 +478,59 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     expect(result.status).toBe("matched");
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm.mock.calls[0]![1][0].amount).toBe(100);
+  });
+
+  it("uploads the exact immutable receipt snapshot bytes", async () => {
+    const bytes = Buffer.from("%PDF-approved");
+    const snapshot: ReceiptFileSnapshot = {
+      file: {
+        name: "receipt.pdf", path: "/tmp/snapshot/receipt.pdf", extension: ".pdf", file_type: "pdf",
+        size_bytes: bytes.length, modified_at: "2026-07-15T00:00:00.000Z",
+      },
+      relative_path: "receipt.pdf",
+      sha256: sha256Hex(bytes),
+      bytes,
+      snapshot_path: "/tmp/snapshot/receipt.pdf",
+    };
+    const createdInvoice = { id: 900, number: "INV-1", status: "PROJECT" };
+    const api = {
+      purchaseInvoices: {
+        createAndSetTotals: vi.fn().mockResolvedValue(createdInvoice),
+        uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
+        invalidate: vi.fn(),
+      },
+    } as any;
+    const result = await createAndMaybeMatchPurchaseInvoice(
+      api,
+      { clients: [], purchaseInvoices: [], purchaseArticlesWithVat: [], accounts: [], isVatRegistered: true },
+      snapshot,
+      {
+        supplier_name: "Supplier OÜ", invoice_number: "INV-1", invoice_date: "2026-07-15",
+        total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", description: "Service",
+      },
+      {
+        found: true, created: false, match_type: "exact_name",
+        client: {
+          id: 7, name: "Supplier OÜ", is_supplier: true, is_client: false, cl_code_country: "EE",
+          is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false,
+        },
+      } as any,
+      {
+        source: "supplier_history",
+        item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 45, purchase_accounts_id: 5230, vat_rate_dropdown: "24" },
+      } as any,
+      [],
+      "create",
+      false,
+      new Set<number>(),
+    );
+
+    expect(result.status).toBe("created");
+    expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledWith(
+      900,
+      "receipt.pdf",
+      bytes.toString("base64"),
+    );
   });
 });
 
@@ -1182,35 +1250,114 @@ describe("applyReverseChargeAutoDetection (#18)", () => {
 
 describe("buildReferencedInvoiceForPaymentReceipt (#23)", () => {
   const invoices = [
-    { id: 501, number: "ABC-001", status: "CONFIRMED" },
-    { id: 502, number: "ABC-002", status: "DELETED" },
+    { id: 501, number: "ABC-001", status: "CONFIRMED", clients_id: 10, client_name: "Alpha OÜ" },
+    { id: 502, number: "ABC-002", status: "DELETED", clients_id: 10, client_name: "Alpha OÜ" },
   ] as Parameters<typeof buildReferencedInvoiceForPaymentReceipt>[1];
 
-  it("returns matched=true with invoice id when the receipt's invoice number resolves to a live invoice", () => {
-    const result = buildReferencedInvoiceForPaymentReceipt("ABC-001", invoices);
+  it("returns matched=true with invoice id when number + supplier client_id resolve to a live invoice", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-001", invoices, { client_id: 10 });
     expect(result).toEqual({ invoice_number: "ABC-001", matched: true, matched_invoice_id: 501 });
   });
 
   it("normalizes case and trims when matching invoice numbers", () => {
-    const result = buildReferencedInvoiceForPaymentReceipt(" abc-001 ", invoices);
+    const result = buildReferencedInvoiceForPaymentReceipt(" abc-001 ", invoices, { client_id: 10 });
     expect(result?.matched).toBe(true);
     expect(result?.matched_invoice_id).toBe(501);
   });
 
+  it("matches on normalized supplier name when no resolved client_id is available", () => {
+    // The payment-receipt call site has no resolved client_id — only the OCR
+    // supplier name. Legal-suffix/diacritic normalization must still link it.
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-001", invoices, { name: "Alpha OU" });
+    expect(result?.matched).toBe(true);
+    expect(result?.matched_invoice_id).toBe(501);
+  });
+
+  it("does not auto-match the same invoice number across suppliers (#23)", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt("INV-7", [
+      { id: 1, number: "INV-7", clients_id: 10, client_name: "Alpha" },
+      { id: 2, number: "INV-7", clients_id: 20, client_name: "Beta" },
+    ] as Parameters<typeof buildReferencedInvoiceForPaymentReceipt>[1], { client_id: 20, name: "Beta" });
+    expect(result).toMatchObject({ matched: true, matched_invoice_id: 2 });
+  });
+
+  it("requires supplier identity when the same number spans suppliers and identity is unknown", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt("INV-7", [
+      { id: 1, number: "INV-7", clients_id: 10, client_name: "Alpha" },
+      { id: 2, number: "INV-7", clients_id: 20, client_name: "Beta" },
+    ] as Parameters<typeof buildReferencedInvoiceForPaymentReceipt>[1], {});
+    expect(result).toMatchObject({ matched: false, ambiguity_reason: "supplier_identity_required" });
+  });
+
+  it("does not auto-link when one supplier has two invoices of the same number", () => {
+    // Duplicate numbers under the SAME supplier are still ambiguous — there is
+    // no unique target, so route to review instead of picking the first.
+    const result = buildReferencedInvoiceForPaymentReceipt("DUP-1", [
+      { id: 1, number: "DUP-1", clients_id: 30, client_name: "Gamma" },
+      { id: 2, number: "DUP-1", clients_id: 30, client_name: "Gamma" },
+    ] as Parameters<typeof buildReferencedInvoiceForPaymentReceipt>[1], { client_id: 30 });
+    expect(result).toMatchObject({ matched: false, ambiguity_reason: "supplier_identity_required" });
+  });
+
+  it("does not auto-link a single number match when supplier identity is absent", () => {
+    // No client_id and no name → cannot confirm the supplier, so even a unique
+    // number match must route to review rather than link blindly.
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-001", invoices, {});
+    expect(result?.matched).toBe(false);
+    expect(result?.ambiguity_reason).toBeUndefined();
+  });
+
   it("returns matched=false when no live invoice matches (caller can chain a fallback)", () => {
-    const result = buildReferencedInvoiceForPaymentReceipt("DOES-NOT-EXIST", invoices);
+    const result = buildReferencedInvoiceForPaymentReceipt("DOES-NOT-EXIST", invoices, { client_id: 10 });
     expect(result).toEqual({ invoice_number: "DOES-NOT-EXIST", matched: false });
   });
 
   it("does not match a DELETED/INVALIDATED invoice", () => {
-    const result = buildReferencedInvoiceForPaymentReceipt("ABC-002", invoices);
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-002", invoices, { client_id: 10 });
     expect(result?.matched).toBe(false);
   });
 
   it("returns undefined for an empty or AUTO-prefixed invoice number (synthetic placeholder)", () => {
-    expect(buildReferencedInvoiceForPaymentReceipt(undefined, invoices)).toBeUndefined();
-    expect(buildReferencedInvoiceForPaymentReceipt("", invoices)).toBeUndefined();
-    expect(buildReferencedInvoiceForPaymentReceipt("AUTO-20260320-RECEIPT", invoices)).toBeUndefined();
+    expect(buildReferencedInvoiceForPaymentReceipt(undefined, invoices, { client_id: 10 })).toBeUndefined();
+    expect(buildReferencedInvoiceForPaymentReceipt("", invoices, { client_id: 10 })).toBeUndefined();
+    expect(buildReferencedInvoiceForPaymentReceipt("AUTO-20260320-RECEIPT", invoices, { client_id: 10 })).toBeUndefined();
+  });
+});
+
+describe("selectBatchBankTransactions (M08 — file vs accounting date separation)", () => {
+  const txns = [
+    { id: 1, accounts_dimensions_id: 10, status: "PROJECT", type: "C", date: "2026-06-30", amount: 100 },
+    { id: 2, accounts_dimensions_id: 10, status: "PROJECT", type: "C", date: "2026-07-01", amount: 200 },
+    { id: 3, accounts_dimensions_id: 99, status: "PROJECT", type: "C", date: "2026-07-01", amount: 300 },
+    { id: 4, accounts_dimensions_id: 10, status: "CONFIRMED", type: "C", date: "2026-07-01", amount: 400 },
+    { id: 5, accounts_dimensions_id: 10, status: "PROJECT", type: "D", date: "2026-07-01", amount: 500 },
+  ] as unknown as Parameters<typeof selectBatchBankTransactions>[0];
+
+  it("retains bank transactions dated outside the receipt file window (no accounting bounds)", () => {
+    // The receipt FILE window (date_from/date_to) is NOT a parameter here — a
+    // June-dated bank row must survive even when receipts were filtered to July.
+    const result = selectBatchBankTransactions(txns, 10, {});
+    expect(result.map(t => t.id)).toEqual([1, 2]);
+  });
+
+  it("applies an explicit accounting-date lower bound", () => {
+    const result = selectBatchBankTransactions(txns, 10, { transaction_date_from: "2026-07-01" });
+    expect(result.map(t => t.id)).toEqual([2]);
+  });
+
+  it("applies an explicit accounting-date upper bound", () => {
+    const result = selectBatchBankTransactions(txns, 10, { transaction_date_to: "2026-06-30" });
+    expect(result.map(t => t.id)).toEqual([1]);
+  });
+
+  it("filters by the requested account dimension only", () => {
+    expect(selectBatchBankTransactions(txns, 99, {}).map(t => t.id)).toEqual([3]);
+  });
+
+  it("excludes non-PROJECT and non-C (legacy debit) rows", () => {
+    // ids 4 (CONFIRMED) and 5 (type D) must never enter auto-match.
+    const result = selectBatchBankTransactions(txns, 10, {});
+    expect(result.some(t => t.id === 4 || t.id === 5)).toBe(false);
   });
 });
 

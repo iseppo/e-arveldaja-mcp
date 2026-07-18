@@ -2,15 +2,24 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
+import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
 import { applyListView, viewParam } from "../../list-views.js";
-import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "../purchase-vat-defaults.js";
+import {
+  applyPurchaseVatDefaults,
+  getPurchaseArticlesWithVat,
+  validateNonVatItem,
+} from "../purchase-vat-defaults.js";
 import { validateItemDimensions } from "../../account-validation.js";
 import type { CreatePurchaseInvoiceData } from "../../types/api.js";
+import {
+  PurchaseInvoiceTotalsCorrectionError,
+  type PurchaseInvoiceTotalsCorrectionPreview,
+} from "../../api/purchase-invoices.api.js";
 import type { ApiContext } from "./shared.js";
 import {
   coerceId,
@@ -27,6 +36,26 @@ import {
   validateUpdateFields,
 } from "./shared.js";
 
+const purchaseInvoiceTotalsCorrectionApprovalSchema = z.object({
+  invoice_id: z.number().int().positive(),
+  is_vat_registered: z.boolean(),
+  current_vat_price: z.number().nullable(),
+  current_gross_price: z.number().nullable(),
+  proposed_vat_price: z.number(),
+  proposed_gross_price: z.number(),
+  correction_required: z.boolean(),
+  approval_digest: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
+
+function totalsCorrectionToolError(error: PurchaseInvoiceTotalsCorrectionError) {
+  return toolError({
+    category: "purchase_invoice_totals_correction",
+    code: error.code,
+    error: error.message,
+    next_action: error.nextAction,
+  });
+}
+
 export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext): void {
   // =====================
   // PURCHASE INVOICES
@@ -42,13 +71,13 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       ...(date_from !== undefined && { start_date: date_from }),
       ...(date_to !== undefined && { end_date: date_to }),
     });
-    const compact = { ...result, items: applyListView("purchase_invoice", result.items, view) };
+    const compact = { ...result, items: renderExternalEntity("purchase_invoice", applyListView("purchase_invoice", result.items, view)) };
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_purchase_invoice", "Get a purchase invoice by ID", idParam.shape, { ...readOnly, title: "Get Purchase Invoice" }, async ({ id }) => {
     const result = await api.purchaseInvoices.get(id);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(renderExternalEntity("purchase_invoice", result)) }] };
   });
 
   registerTool(server, "create_purchase_invoice",
@@ -74,10 +103,32 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       notes: z.string().optional().describe("Notes"),
       bank_ref_number: z.string().optional().describe("Payment reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
-    }, { ...create, title: "Create Purchase Invoice" }, async (params) => {
+    }, { ...create, title: "Create Purchase Invoice" }, async (rawParams) => {
+      // Strip any sandbox markers round-tripped from a wrapped read off EVERY field
+      // (client name, number, bank refs, notes, item titles) so no marker is
+      // persisted to the invoice or the audit log regardless of which field it lands in.
+      const params = desandboxAllStrings(rawParams);
+      const client_name = params.client_name;
       const isVatReg = await isCompanyVatRegistered(api);
+      // Parse items from the RAW payload, THEN deep-clean the parsed objects: if
+      // items arrives as a JSON string, stripping it before parse would leave the
+      // wrapper's framing newlines inside a nested title. Parse-then-clean unwraps.
+      const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(rawParams.items));
+      if (!isVatReg) {
+        const details = rawItems.flatMap((item, index) =>
+          validateNonVatItem(item).map(error => `items[${index}].${error}`)
+        );
+        if (details.length > 0) {
+          return toolError({
+            error: "Non-VAT purchase invoice contains deductible VAT fields",
+            category: "manual_review_required",
+            details,
+            next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+          });
+        }
+      }
+
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
-      const rawItems = parsePurchaseInvoiceItems(params.items);
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
 
       // Validate dimension requirements before hitting the API
@@ -99,7 +150,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
 
       const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.clients_id,
-        client_name: params.client_name,
+        client_name,
         number: params.number,
         create_date: params.create_date,
         journal_date: params.journal_date,
@@ -124,9 +175,9 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       logAudit({
         tool: "create_purchase_invoice", action: "CREATED", entity_type: "purchase_invoice",
         entity_id: result.id,
-        summary: `Created purchase invoice "${params.number}" from ${params.client_name}`,
+        summary: `Created purchase invoice "${params.number}" from ${client_name}`,
         details: {
-          supplier_name: params.client_name, invoice_number: params.number,
+          supplier_name: client_name, invoice_number: params.number,
           invoice_date: params.create_date, total_vat: params.vat_price, total_gross: params.gross_price,
           items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
         },
@@ -135,7 +186,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
         action: "created",
         entity: "purchase_invoice",
         id: result.id,
-        message: `Created purchase invoice "${params.number}" from ${params.client_name}.`,
+        message: `Created purchase invoice "${params.number}" from ${client_name}.`,
         raw: result,
       });
     });
@@ -144,10 +195,19 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     id: coerceId.describe("Invoice ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
-    const parsed = parseJsonObject(data, "data");
+    const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const current = await api.purchaseInvoices.get(id);
-    const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed: current.status === "CONFIRMED" });
+    const isConfirmed = current.status === "CONFIRMED";
+    const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed });
     if (updateErrors.length > 0) {
+      if (isConfirmed && Object.keys(parsed).length > 0) {
+        return toolError({
+          category: "confirmed_record_immutable",
+          error: "Confirmed purchase_invoice update contains ledger-bearing fields",
+          details: updateErrors,
+          next_action: "invalidate_purchase_invoice, fetch the draft, update it, then explicitly re-confirm",
+        });
+      }
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
     // The API rejects a metadata-only PATCH with "Products/services are
@@ -157,7 +217,11 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     // which PATCHes with the fetched invoice.items. A caller that supplies
     // items to change the lines keeps theirs.
     if (parsed.items === undefined && current.items !== undefined) {
-      parsed.items = current.items;
+      // Re-send the existing lines, but canonicalize them: a record created before
+      // this remediation could carry markers in a stored title, and re-sending it
+      // verbatim would persist them again. desandboxAllStrings is a no-op on the
+      // common (already-clean) path.
+      parsed.items = desandboxAllStrings(current.items.map(item => ({ ...item })));
     }
     const result = await api.purchaseInvoices.update(id, parsed);
     logAudit({
@@ -190,15 +254,67 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     });
   });
 
-  registerTool(server, "confirm_purchase_invoice",
-    "Confirm and lock a purchase invoice. Automatically fixes vat_price/gross_price if missing or inconsistent with item totals.",
-    idParam.shape, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id }) => {
+  registerTool(server, "preview_purchase_invoice_totals_correction",
+    "Preview an explicit EUR draft totals correction without changing or confirming the purchase invoice.",
+    { id: coerceId }, { ...readOnly, title: "Preview Purchase Invoice Totals Correction" }, async ({ id }) => {
       const isVatReg = await isCompanyVatRegistered(api);
-      const result = await api.purchaseInvoices.confirmWithTotals(id, isVatReg);
+      let preview: PurchaseInvoiceTotalsCorrectionPreview;
+      try {
+        preview = await api.purchaseInvoices.previewTotalsCorrection(id, isVatReg);
+      } catch (error) {
+        if (error instanceof PurchaseInvoiceTotalsCorrectionError) {
+          return totalsCorrectionToolError(error);
+        }
+        throw error;
+      }
+      return toolResponse({
+        action: "previewed",
+        entity: "purchase_invoice",
+        id,
+        message: `Previewed purchase invoice ${id} totals correction.`,
+        raw: preview,
+        next_actions: [
+          "Obtain approval for this correction preview, then resubmit it unchanged to confirm_purchase_invoice with recalculate_totals=true.",
+        ],
+      });
+    });
+
+  registerTool(server, "confirm_purchase_invoice",
+    "Confirm and lock a purchase invoice without changing approved totals. Totals correction requires a fresh approved preview.",
+    {
+      ...idParam.shape,
+      recalculate_totals: z.boolean().optional(),
+      approved_correction: purchaseInvoiceTotalsCorrectionApprovalSchema.optional(),
+    }, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id, recalculate_totals, approved_correction }) => {
+      const hasApprovedCorrection = approved_correction !== undefined;
+      if ((recalculate_totals === true && !hasApprovedCorrection) ||
+          (recalculate_totals !== true && hasApprovedCorrection)) {
+        return totalsCorrectionToolError(
+          new PurchaseInvoiceTotalsCorrectionError("correction_preview_required"),
+        );
+      }
+
+      const isVatReg = await isCompanyVatRegistered(api);
+      let result;
+      try {
+        result = recalculate_totals === true
+          ? await api.purchaseInvoices.confirmWithTotals(id, isVatReg, {
+              recalculateTotals: true,
+              approvedCorrection: approved_correction,
+            })
+          : await api.purchaseInvoices.confirmWithTotals(id, isVatReg);
+      } catch (error) {
+        if (error instanceof PurchaseInvoiceTotalsCorrectionError) {
+          return totalsCorrectionToolError(error);
+        }
+        throw error;
+      }
       logAudit({
         tool: "confirm_purchase_invoice", action: "CONFIRMED", entity_type: "purchase_invoice", entity_id: id,
         summary: `Confirmed purchase invoice ${id}`,
-        details: {},
+        details: recalculate_totals === true && approved_correction
+          ? { recalculate_totals: true, approval_digest: approved_correction.approval_digest }
+          : {},
       });
       return toolResponse({
         action: "confirmed",

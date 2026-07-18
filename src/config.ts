@@ -424,6 +424,40 @@ function isSecureEnvFile(envPath: string): boolean {
   }
 }
 
+// Test seam: lets a test force chmod to fail so the "preserve bytes on
+// hardening failure" path is verifiable. Never set in production.
+let chmodEnvHookForTesting: ((path: string, mode: number) => void) | undefined;
+export function setEnvChmodHookForTesting(hook?: (path: string, mode: number) => void): void {
+  chmodEnvHookForTesting = hook;
+}
+
+// Harden an existing regular .env to 0600 IN PLACE before a read-modify-write,
+// so an insecure (group/other-readable) file is not silently treated as empty by
+// parseEnvFile — which would drop its existing bytes when the merged result is
+// written back. This only changes permissions; it never truncates or rewrites
+// content, and it aborts (leaving the file untouched) on a symlink/non-regular
+// target or when private permissions cannot be established/verified.
+function ensurePrivateEnvFile(envPath: string): void {
+  if (!existsSync(envPath)) return;
+  const info = lstatSync(envPath);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error(`Refusing unsafe .env target: ${envPath}`);
+  }
+  if ((info.mode & 0o077) !== 0) {
+    try {
+      (chmodEnvHookForTesting ?? chmodSync)(envPath, 0o600);
+    } catch (error) {
+      throw new Error(
+        `Could not establish private .env permissions; existing bytes were preserved: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if ((lstatSync(envPath).mode & 0o077) !== 0) {
+    throw new Error("Could not verify private .env permissions; existing bytes were preserved");
+  }
+}
+
 function parseEnvFile(envPath: string): Record<string, string> {
   if (!existsSync(envPath)) return {};
   if (!isSecureEnvFile(envPath)) return {};
@@ -724,10 +758,23 @@ function writePrivateEnvFile(filePath: string, content: string): void {
   }
 }
 
-function serializeEnvFile(
+export function serializeEnvFile(
   env: Record<string, string>,
   metadataByTarget: CredentialMetadataMap = {},
 ): string {
+  // Credential metadata (company name, source path) can originate from an
+  // untrusted source — notably the API verification response's company name.
+  // A CR/LF/NUL or other control character embedded in a value would break out
+  // of its `# ...` comment line and inject an arbitrary `.env` line (e.g. a
+  // forged EARVELDAJA_API_PASSWORD=...), which parseEnvFile would then load as a
+  // real credential. Reject any control character (C0, DEL/C1, and the Unicode
+  // line/paragraph separators) so a comment can never become more than one line.
+  const serializeEnvComment = (label: string, value: string): string => {
+    if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/u.test(value)) {
+      throw new Error(`Credential metadata ${label} contains a control character`);
+    }
+    return `# ${label}: ${value.trim()}`;
+  };
   const serializeEnvValue = (v: string): string => {
     const needsQuoting = v === "" || /^[\s]|[\s]$/.test(v) || /[#\n\r]/.test(v);
     if (!needsQuoting) return v;
@@ -759,9 +806,9 @@ function serializeEnvFile(
 
   const buildMetadataLines = (metadata?: CredentialBlockMetadata): string[] => {
     const lines: string[] = [];
-    if (metadata?.companyName) lines.push(`# Company: ${metadata.companyName}`);
-    if (metadata?.verifiedAt) lines.push(`# Verified at: ${metadata.verifiedAt}`);
-    if (metadata?.sourceFile) lines.push(`# Imported from: ${metadata.sourceFile}`);
+    if (metadata?.companyName) lines.push(serializeEnvComment("Company", metadata.companyName));
+    if (metadata?.verifiedAt) lines.push(serializeEnvComment("Verified at", metadata.verifiedAt));
+    if (metadata?.sourceFile) lines.push(serializeEnvComment("Imported from", metadata.sourceFile));
     return lines;
   };
 
@@ -952,6 +999,9 @@ export async function importApiKeyCredentials(
 
   const targetEnvFile = getTargetEnvFile(options.storageScope, options);
 
+  // Harden an insecure existing file to 0600 BEFORE reading it, so its bytes are
+  // not treated as empty and dropped by the merge/write below.
+  ensurePrivateEnvFile(targetEnvFile);
   const existingEnv = parseEnvFile(targetEnvFile);
   const existingMetadata = parseEnvMetadata(targetEnvFile);
   const existingHasPrimaryCredentials = hasCompleteApiCredentialEnv(existingEnv);
@@ -1227,6 +1277,9 @@ export function removeStoredCredential(
 ): RemoveStoredCredentialResult {
   const target = parseStoredCredentialTarget(options.target);
   const envFile = getTargetEnvFile(options.storageScope, options);
+  // Harden an insecure existing file to 0600 before reading it, so its blocks are
+  // visible (not treated as empty) and the write below preserves the other bytes.
+  ensurePrivateEnvFile(envFile);
   const existingEnv = parseEnvFile(envFile);
   const existingMetadata = parseEnvMetadata(envFile);
   const existingTargets = new Set(

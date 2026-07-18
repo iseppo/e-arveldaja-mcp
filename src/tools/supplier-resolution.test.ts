@@ -405,3 +405,181 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
     expect(api.clients.create).not.toHaveBeenCalled();
   });
 });
+
+describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
+  it("does not name-match a client whose registry code conflicts", async () => {
+    // Invoice carries reg code 87654321, but the only same-name client on
+    // file has a DIFFERENT registry code (12345678). Booking against that
+    // client would attach the invoice to the wrong legal entity. The strong
+    // identifier must veto the name match and demand manual review.
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", code: "12345678" })],
+      { supplier_name: "Acme OÜ", supplier_reg_code: "87654321" },
+      false,
+    );
+
+    expect(result).toMatchObject({
+      found: false,
+      match_type: "strong_identifier_conflict",
+      requires_manual_review: true,
+    });
+    expect(result.client).toBeUndefined();
+    expect(typeof result.reason).toBe("string");
+  });
+
+  it("vetoes a fuzzy name match when the registry code conflicts", async () => {
+    // Names differ enough that the normalized-exact tier misses (different
+    // normalized keys) but the fuzzy tier's 0.7-similarity + substring
+    // inclusion still fires. The conflicting reg code must veto it at the
+    // fuzzy return site, not just the normalized one.
+    const client = makeClient({ id: 1, name: "Globex Trading House", code: "12345678" });
+    // Sanity: without a conflicting identifier this pair resolves via fuzzy.
+    const control = await resolveSupplierInternal(
+      stubApi,
+      [client],
+      { supplier_name: "Globex Trading Hous" },
+      false,
+    );
+    expect(control.match_type).toBe("name_fuzzy");
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [client],
+      { supplier_name: "Globex Trading Hous", supplier_reg_code: "87654321" },
+      false,
+    );
+
+    expect(result.found).toBe(false);
+    expect(result.match_type).toBe("strong_identifier_conflict");
+    expect(result.requires_manual_review).toBe(true);
+  });
+
+  it("vetoes a name match when the VAT number conflicts", async () => {
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", invoice_vat_no: "EE111111111" })],
+      { supplier_name: "Acme OÜ", supplier_vat_no: "EE999999999" },
+      false,
+    );
+
+    expect(result.found).toBe(false);
+    expect(result.match_type).toBe("strong_identifier_conflict");
+    expect(result.requires_manual_review).toBe(true);
+  });
+
+  it("still resolves by registry code when the strong identifier MATCHES a client (no conflict)", async () => {
+    // Control: a matching reg code is a positive strong match and must
+    // short-circuit to registry_code — the conflict gate must not fire.
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", code: "87654321" })],
+      { supplier_name: "Acme OÜ", supplier_reg_code: "87654321" },
+      false,
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.match_type).toBe("registry_code");
+    expect(result.client?.id).toBe(1);
+  });
+
+  it("still name-matches when the client carries no conflicting identifier (absence is not conflict)", async () => {
+    // The client has NO registry code on file, so the invoice's reg code
+    // does not contradict anything — the name match should resolve and the
+    // reg code can enrich the record later. Absence must not be treated as
+    // a conflict (that would refuse legitimate suppliers).
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", code: null })],
+      { supplier_name: "Acme OÜ", supplier_reg_code: "87654321" },
+      false,
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.match_type).toBe("name_normalized");
+    expect(result.client?.id).toBe(1);
+  });
+
+  it("does not treat the buyer's own reg code (mis-scanned as supplier) as a conflict", async () => {
+    // supplier_reg_code equals the active company's own code — a header
+    // mis-scan, not a supplier signal. It must not veto a legitimate name
+    // match against a real supplier whose own code differs.
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 1, name: "Acme OÜ", code: "12345678" })],
+      { supplier_name: "Acme OÜ", supplier_reg_code: "17133416" },
+      false,
+      { ownCompanyRegistryCode: "17133416" },
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.match_type).toBe("name_normalized");
+    expect(result.client?.id).toBe(1);
+  });
+});
+
+describe("resolveSupplierInternal — sandbox-marker canonicalization (write/match boundary)", () => {
+  const nonce = "deadbeef";
+  // Real wrapper framing (newlines around the content), so these exercise the
+  // whole-value unwrap loop, not just residual-token removal.
+  const wrap = (s: string) => `<<UNTRUSTED_OCR_START:${nonce}>>\n${s}\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+
+  it("strips markers from supplier_name before matching, so a wrapped name resolves the clean client", async () => {
+    // A wrapped supplier_name round-tripped from a wrapped extract response must
+    // resolve to the existing clean client. Without the strip, the normalized key
+    // would include the UNTRUSTED_OCR token text and never match.
+    const ownCompany = makeClient({ id: 100, invoice_vat_no: "EE102809963" });
+    const supplier = makeClient({ id: 300, name: "Fragmented Tools OÜ", cl_code_country: "USA" });
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [ownCompany, supplier],
+      { supplier_name: wrap("Fragmented Tools OÜ") },
+      false,
+      { ownCompanyVat: "EE102809963" },
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.client?.id).toBe(300);
+  });
+
+  it("strips markers from supplier_reg_code before the exact-code match", async () => {
+    const supplier = makeClient({ id: 400, name: "Registry Co", code: "16899999", cl_code_country: "EST" });
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [supplier],
+      { supplier_reg_code: wrap("16899999") },
+      false,
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.match_type).toBe("registry_code");
+    expect(result.client?.id).toBe(400);
+  });
+
+  it("persists a marker-free client name when auto-creating from a wrapped supplier_name", async () => {
+    // execute=true with a non-EE supplier (no registry lookup) reaches
+    // api.clients.create. The created client name must carry no marker.
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const get = vi.fn().mockResolvedValue({ id: 900, name: "Nonprofit Foreign LLC" });
+    const api = {
+      clients: { listAll: () => Promise.resolve([]), create, get },
+    } as unknown as ApiContext;
+
+    await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: wrap("Nonprofit Foreign LLC") },
+      true,
+      { _resolveSupplierOverrides: { country: wrap("USA"), is_physical_entity: false } },
+    );
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const created = create.mock.calls[0]![0] as { name: string; cl_code_country: string };
+    expect(created.name).not.toContain("UNTRUSTED_OCR");
+    expect(created.name).toContain("Nonprofit Foreign LLC");
+    // The wrapped country override is stripped before reaching api.clients.create.
+    expect(created.cl_code_country).toBe("USA");
+  });
+});

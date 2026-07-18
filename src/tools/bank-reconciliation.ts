@@ -171,6 +171,116 @@ function comparableTransactionAmount(tx: Transaction): number {
   return roundMoney(tx.base_amount ?? tx.amount);
 }
 
+type OneSidedEurAmountErrorCode =
+  | "one_sided_amount_invalid"
+  | "one_sided_currency_invalid"
+  | "one_sided_base_amount_invalid"
+  | "one_sided_currency_rate_invalid"
+  | "one_sided_eur_amount_missing"
+  | "one_sided_eur_amount_conflict";
+
+const ONE_SIDED_EUR_AMOUNT_ERROR_REASONS: Record<OneSidedEurAmountErrorCode, string> = {
+  one_sided_amount_invalid: "The one-sided transfer amount must be a finite positive number.",
+  one_sided_currency_invalid: "The one-sided transfer currency must be an explicit three-letter ASCII code.",
+  one_sided_base_amount_invalid: "The one-sided transfer base amount must be a finite positive number when provided.",
+  one_sided_currency_rate_invalid: "The one-sided transfer currency rate must be finite and positive and produce a finite positive EUR amount when used.",
+  one_sided_eur_amount_missing: "The foreign one-sided transfer has no base amount or currency rate for an authoritative EUR amount.",
+  one_sided_eur_amount_conflict: "The one-sided transfer EUR amount evidence conflicts by more than one cent.",
+};
+
+type OneSidedEurAmountResolution =
+  | { ok: true; nominalAmount: number; currency: string; amountEur: number }
+  | { ok: false; code: OneSidedEurAmountErrorCode; reason: string };
+
+function oneSidedEurAmountFailure(code: OneSidedEurAmountErrorCode): OneSidedEurAmountResolution {
+  return { ok: false, code, reason: ONE_SIDED_EUR_AMOUNT_ERROR_REASONS[code] };
+}
+
+function amountsDifferByMoreThanOneCent(left: number, right: number): boolean {
+  const maxCentSafeAmount = Number.MAX_SAFE_INTEGER / 100;
+  if (Math.abs(left) <= maxCentSafeAmount && Math.abs(right) <= maxCentSafeAmount) {
+    return Math.abs(Math.round(left * 100) - Math.round(right * 100)) > 1;
+  }
+  return left !== right;
+}
+
+function resolveOneSidedTransferAmount(tx: Transaction): OneSidedEurAmountResolution {
+  const runtime = tx as unknown as Record<string, unknown>;
+  const nominalValue = runtime.amount;
+  if (typeof nominalValue !== "number" || !Number.isFinite(nominalValue) || nominalValue <= 0) {
+    return oneSidedEurAmountFailure("one_sided_amount_invalid");
+  }
+
+  const currencyValue = runtime.cl_currencies_id;
+  if (typeof currencyValue !== "string") {
+    return oneSidedEurAmountFailure("one_sided_currency_invalid");
+  }
+  const currency = currencyValue.trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    return oneSidedEurAmountFailure("one_sided_currency_invalid");
+  }
+
+  const baseValue = runtime.base_amount;
+  const hasBase = baseValue !== undefined && baseValue !== null;
+  let roundedBase: number | undefined;
+  if (hasBase) {
+    if (typeof baseValue !== "number" || !Number.isFinite(baseValue) || baseValue <= 0) {
+      return oneSidedEurAmountFailure("one_sided_base_amount_invalid");
+    }
+    roundedBase = roundMoney(baseValue);
+    if (!Number.isFinite(roundedBase) || roundedBase <= 0) {
+      return oneSidedEurAmountFailure("one_sided_base_amount_invalid");
+    }
+  }
+
+  const rateValue = runtime.currency_rate;
+  const hasRate = rateValue !== undefined && rateValue !== null;
+  let roundedRateAmount: number | undefined;
+  if (hasRate) {
+    if (typeof rateValue !== "number" || !Number.isFinite(rateValue) || rateValue <= 0) {
+      return oneSidedEurAmountFailure("one_sided_currency_rate_invalid");
+    }
+    const rateAmount = nominalValue * rateValue;
+    if (!Number.isFinite(rateAmount) || rateAmount <= 0) {
+      return oneSidedEurAmountFailure("one_sided_currency_rate_invalid");
+    }
+    roundedRateAmount = roundMoney(rateAmount);
+    if (!Number.isFinite(roundedRateAmount) || roundedRateAmount <= 0) {
+      return oneSidedEurAmountFailure("one_sided_currency_rate_invalid");
+    }
+  }
+
+  const nominalAmount = nominalValue;
+  const roundedNominal = roundMoney(nominalAmount);
+  if (currency === "EUR") {
+    if (roundedNominal <= 0) {
+      return oneSidedEurAmountFailure("one_sided_amount_invalid");
+    }
+    if (roundedBase !== undefined) {
+      if (amountsDifferByMoreThanOneCent(roundedNominal, roundedBase)) {
+        return oneSidedEurAmountFailure("one_sided_eur_amount_conflict");
+      }
+    }
+    return { ok: true, nominalAmount, currency, amountEur: roundedNominal };
+  }
+
+  if (roundedBase === undefined && roundedRateAmount === undefined) {
+    return oneSidedEurAmountFailure("one_sided_eur_amount_missing");
+  }
+  if (roundedBase !== undefined && roundedRateAmount !== undefined) {
+    if (amountsDifferByMoreThanOneCent(roundedBase, roundedRateAmount)) {
+      return oneSidedEurAmountFailure("one_sided_eur_amount_conflict");
+    }
+  }
+
+  return {
+    ok: true,
+    nominalAmount,
+    currency,
+    amountEur: roundedBase ?? roundedRateAmount!,
+  };
+}
+
 function hasMeaningfulComparableAmount(tx: Transaction): boolean {
   return Math.abs(comparableTransactionAmount(tx) - roundMoney(tx.amount)) >= 0.01;
 }
@@ -678,6 +788,8 @@ export function registerBankReconciliationTools(
         transaction_id: number;
         type: string;
         amount: number;
+        currency: string;
+        amount_eur: number;
         date: string;
         source_account: string;
         source_dimension_id: number;
@@ -701,7 +813,10 @@ export function registerBankReconciliationTools(
       const matchedOneSided: OneSidedResult[] = [];
       const skippedAlreadyHandled: Array<{
         transaction_id: number; amount: number; date: string;
-        source_account: string; existing_journal_id: number; reason: string;
+        currency?: string; amount_eur?: number;
+        source_account: string; source_dimension_id?: number;
+        target_account?: string; target_dimension_id?: number;
+        existing_journal_id: number; reason: string;
       }> = [];
       // Ref-less same-key collisions the guard cannot safely resolve: an
       // existing journal covers a transfer with these (dims, amount, date) but
@@ -712,13 +827,16 @@ export function registerBankReconciliationTools(
       // auto-confirmed (would double-book).
       const ambiguousRefless: Array<{
         transaction_ids: number[]; amount: number; date: string;
+        currency?: string; amount_eur?: number;
         source_account: string; target_account: string; reason: string;
       }> = [];
       const crossCurrencyPairs: Array<{
         transaction_ids: number[]; amount_out: number; amount_in: number; date: string;
         source_account: string; target_account: string; reason: string;
       }> = [];
-      const errors: Array<{ transaction_ids: number[]; reason: string }> = [];
+      const errors: Array<{
+        transaction_ids: number[]; code?: OneSidedEurAmountErrorCode; reason: string;
+      }> = [];
       const consumedTxIds = new Set<number>();
       const blockedOneSidedTxIds = new Set<number>();
 
@@ -1447,11 +1565,22 @@ export function registerBankReconciliationTools(
         const sourceTitle = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;
         const targetTitle = dimensionToTitle.get(targetDimension) ?? `dim:${targetDimension}`;
 
+        const amountResolution = resolveOneSidedTransferAmount(tx);
+        if (!amountResolution.ok) {
+          errors.push({
+            transaction_ids: [tx.id],
+            code: amountResolution.code,
+            reason: amountResolution.reason,
+          });
+          continue;
+        }
+        const { nominalAmount, currency, amountEur } = amountResolution;
+
         // Check if this transfer is already journalized from the other side.
         const resolution = resolveExistingJournal(
           tx.accounts_dimensions_id,
           targetDimension,
-          comparableTransactionAmount(tx),
+          amountEur,
           tx.date,
           maxGap,
           tx.bank_ref_number ?? tx.ref_number,
@@ -1460,8 +1589,9 @@ export function registerBankReconciliationTools(
         if (resolution.status === "matched") {
           consumedTxIds.add(tx.id);
           skippedAlreadyHandled.push({
-            transaction_id: tx.id, amount: tx.amount, date: tx.date,
-            source_account: sourceTitle,
+            transaction_id: tx.id, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
+            source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
+            target_account: targetTitle, target_dimension_id: targetDimension,
             existing_journal_id: resolution.journal_id,
             reason: "Already journalized from the other account side",
           });
@@ -1470,7 +1600,7 @@ export function registerBankReconciliationTools(
         if (resolution.status === "ambiguous_refless") {
           consumedTxIds.add(tx.id);
           ambiguousRefless.push({
-            transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
+            transaction_ids: [tx.id], amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
             source_account: sourceTitle, target_account: targetTitle,
             reason: "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
           });
@@ -1481,7 +1611,7 @@ export function registerBankReconciliationTools(
 
         if (dryRun) {
           matchedOneSided.push({
-            transaction_id: tx.id, type: tx.type, amount: tx.amount, date: tx.date,
+            transaction_id: tx.id, type: tx.type, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
             source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
             target_account: targetTitle, target_dimension_id: targetDimension,
             description: wrapUntrustedOcr(tx.description ?? undefined), counterparty_name: wrapUntrustedOcr(tx.bank_account_name ?? undefined),
@@ -1490,22 +1620,22 @@ export function registerBankReconciliationTools(
         } else {
           try {
             await ensureClientsId(tx.id);
-            const confirmResult = await api.transactions.confirm(tx.id, [buildAccountDistribution(targetDimension, tx.amount)]);
+            const confirmResult = await api.transactions.confirm(tx.id, [buildAccountDistribution(targetDimension, amountEur)]);
             // Record the new journal so the opposite leg of this same transfer,
             // if still unconfirmed later in this run, is detected as already
             // journalized instead of being confirmed into a duplicate.
             recordInterAccountJournal(
-              tx.accounts_dimensions_id, targetDimension, comparableTransactionAmount(tx), tx.date,
+              tx.accounts_dimensions_id, targetDimension, amountEur, tx.date,
               confirmResult?.created_object_id, tx.bank_ref_number ?? tx.ref_number,
             );
             logAudit({
               tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
               entity_id: tx.id,
-              summary: `Confirmed one-sided inter-account transfer ${tx.amount} EUR (${sourceTitle} -> ${targetTitle})`,
-              details: { amount: tx.amount, date: tx.date },
+              summary: `Confirmed one-sided inter-account transfer ${amountEur} EUR (${sourceTitle} -> ${targetTitle})`,
+              details: { amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date },
             });
             matchedOneSided.push({
-              transaction_id: tx.id, type: tx.type, amount: tx.amount, date: tx.date,
+              transaction_id: tx.id, type: tx.type, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
               source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
               target_account: targetTitle, target_dimension_id: targetDimension,
               description: wrapUntrustedOcr(tx.description ?? undefined), counterparty_name: wrapUntrustedOcr(tx.bank_account_name ?? undefined),

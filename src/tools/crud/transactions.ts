@@ -2,11 +2,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
+import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { HttpError } from "../../http-client.js";
+import { MutationIndeterminateError, isMutationIndeterminate } from "../../mutation-outcome.js";
+import { getNormalizedNetworkCause } from "../../api/transactions.api.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
 import type { Transaction } from "../../types/api.js";
@@ -72,7 +75,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       if (!hasClientOnlyFilter) {
         // The API filters AND paginates — no client-side page-walking needed.
         const result = await api.transactions.list({ page: params.page, ...serverFilter });
-        const items = applyListView("transaction", result.items, params.view);
+        const items = renderExternalEntity("transaction", applyListView("transaction", result.items, params.view));
         // Always emit the same superset shape as the client-side path so callers
         // get a stable envelope regardless of which filter route was taken.
         const perPage = params.per_page ?? result.items.length;
@@ -120,7 +123,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
       const outOfRange = requestedPage > totalPages;
       const start = (requestedPage - 1) * perPage;
-      const items = applyListView("transaction", filtered.slice(start, start + perPage), params.view);
+      const items = renderExternalEntity("transaction", applyListView("transaction", filtered.slice(start, start + perPage), params.view));
       return {
         content: [{
           type: "text",
@@ -139,7 +142,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
 
   registerTool(server, "get_transaction", "Get a transaction by ID", idParam.shape, { ...readOnly, title: "Get Transaction" }, async ({ id }) => {
     const result = await api.transactions.get(id);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(renderExternalEntity("transaction", result)) }] };
   });
 
   registerTool(server, "create_transaction", "Create a bank transaction", {
@@ -152,7 +155,8 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     clients_id: z.number().optional().describe("Related client ID"),
     bank_account_name: z.string().optional().describe("Remitter/beneficiary name"),
     ref_number: z.string().optional().describe("Reference number"),
-  }, { ...create, title: "Create Transaction" }, async (params) => {
+  }, { ...create, title: "Create Transaction" }, async (rawParams) => {
+    const params = desandboxAllStrings(rawParams);
     const result = await api.transactions.create({
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
@@ -212,10 +216,42 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     try {
       result = await api.transactions.confirm(id, dist);
     } catch (error) {
-      if (clientsIdWasSet) {
+      if (clientsIdWasSet && !isMutationIndeterminate(error)) {
         try {
           await api.transactions.update(id, { clients_id: null } as Partial<Transaction>);
-        } catch { /* best effort rollback */ }
+        } catch (cleanupError) {
+          const normalizedNetworkCause = getNormalizedNetworkCause(cleanupError);
+          if (normalizedNetworkCause) {
+            api.transactions.invalidateTransactionsAfterAmbiguousCleanup();
+            throw new MutationIndeterminateError({
+              operation: "rollback",
+              entity: "transaction",
+              entityId: id,
+              businessKey: "transaction:" + id,
+              affectedCaches: ["/transactions"],
+              cause: normalizedNetworkCause,
+              nextAction: "Freshly read transaction " + id +
+                "; clients_id cleanup may or may not have committed.",
+            });
+          }
+          if (
+            cleanupError instanceof HttpError &&
+            cleanupError.status === "network"
+          ) {
+            api.transactions.invalidateTransactionsAfterAmbiguousCleanup();
+            throw new MutationIndeterminateError({
+              operation: "rollback",
+              entity: "transaction",
+              entityId: id,
+              businessKey: "transaction:" + id,
+              affectedCaches: ["/transactions"],
+              cause: cleanupError,
+              nextAction: "Freshly read transaction " + id +
+                "; clients_id cleanup may or may not have committed.",
+            });
+          }
+          throw cleanupError;
+        }
       }
       throw error;
     }
@@ -237,7 +273,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     id: coerceId.describe("Transaction ID"),
     data: jsonObjectInput.describe("Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description, ref_number."),
   }, { ...mutate, title: "Update Transaction" }, async ({ id, data }) => {
-    const parsed = parseJsonObject(data, "data");
+    const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const validationErrors = validateTransactionUpdateData(parsed);
     if (validationErrors.length > 0) {
       return toolError({ error: "Transaction metadata validation failed", details: validationErrors });

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { maskApiKeyId } from "./config.js";
+import { maskApiKeyId, serializeEnvFile } from "./config.js";
 
 const CONFIG_ENV_KEYS = [
   "EARVELDAJA_SERVER",
@@ -933,7 +933,9 @@ describe("loadAllConfigs", () => {
         storageScope: "local",
         workingDir: workDir,
         verify: async () => ({ companyName: "Gamma OÜ", verifiedAt: "2026-03-29T14:00:00.000Z" }),
-      })).rejects.toThrow(`Refusing to write .env through symlink: ${localEnvFile}`);
+      // The symlinked target is now rejected earlier, by the read-time
+      // ensurePrivateEnvFile guard, before any parse or write is attempted.
+      })).rejects.toThrow(`Refusing unsafe .env target: ${localEnvFile}`);
 
       expect(readFileSync(actualEnvFile, "utf8")).toBe("# original\n");
     } finally {
@@ -1099,5 +1101,111 @@ describe("loadAllConfigs", () => {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("importApiKeyCredentials .env preservation (M28)", () => {
+  const verifyStub = async () => ({ companyName: "Acme OÜ", verifiedAt: "2026-07-18T10:00:00.000Z" });
+
+  function setup() {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-m28-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+    mkdirSync(workDir, { recursive: true });
+    mkdirSync(globalDir, { recursive: true });
+    const apiKeyFile = join(workDir, "apikey.txt");
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: key-id",
+      "ApiKey public value: public-value",
+      "Password: secret-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    const envFile = join(globalDir, ".env");
+    for (const key of CONFIG_ENV_KEYS) delete process.env[key];
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+    return { tempDir, workDir, globalDir, apiKeyFile, envFile };
+  }
+
+  it("hardens an insecure regular env to 0600 without discarding existing bytes", async () => {
+    const { tempDir, workDir, globalDir, apiKeyFile, envFile } = setup();
+    writeFileSync(envFile, "KEEP=value\n", { mode: 0o644 });
+    process.chdir(workDir);
+    try {
+      const { importApiKeyCredentials } = await importFreshConfig(workDir);
+      await importApiKeyCredentials({ apiKeyFile, storageScope: "global", globalConfigDir: globalDir, verify: verifyStub });
+
+      const content = readFileSync(envFile, "utf8");
+      // Pre-existing unrelated bytes survive alongside the new credential block.
+      expect(content).toContain("KEEP=value");
+      expect(content).toContain("EARVELDAJA_API_KEY_ID=key-id");
+      // The insecure file was hardened in place, not left world-readable.
+      expect(statSync(envFile).mode & 0o777).toBe(0o600);
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves bytes and writes nothing when permission hardening fails", async () => {
+    const { tempDir, workDir, globalDir, apiKeyFile, envFile } = setup();
+    writeFileSync(envFile, "KEEP=value\n", { mode: 0o644 });
+    process.chdir(workDir);
+    try {
+      const cfg = await importFreshConfig(workDir);
+      cfg.setEnvChmodHookForTesting(() => { throw new Error("denied"); });
+
+      await expect(
+        cfg.importApiKeyCredentials({ apiKeyFile, storageScope: "global", globalConfigDir: globalDir, verify: verifyStub }),
+      ).rejects.toThrow(/private \.env permissions/i);
+
+      // Aborted before any write: original bytes intact and the secret never landed.
+      expect(readFileSync(envFile, "utf8")).toBe("KEEP=value\n");
+      expect(readFileSync(envFile, "utf8")).not.toContain("secret-password");
+      cfg.setEnvChmodHookForTesting(undefined);
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("serializeEnvFile credential metadata (M27)", () => {
+  const primaryEnv = {
+    EARVELDAJA_SERVER: "live",
+    EARVELDAJA_API_KEY_ID: "kid",
+    EARVELDAJA_API_PUBLIC_VALUE: "pub",
+    EARVELDAJA_API_PASSWORD: "pw",
+  };
+
+  it.each([
+    "Acme\nEARVELDAJA_API_PASSWORD=attacker", // LF injects a forged credential line
+    "source\r\nKEY=x",                        // CRLF
+    "bad\u0000name",                          // NUL
+    "line\u2028sep",                          // Unicode line separator
+    "tab\tname",                              // C0 control (tab)
+  ])("rejects control characters in credential metadata: %j", (value) => {
+    // companyName is the realistic vector (from the API verification response).
+    expect(() => serializeEnvFile(primaryEnv, { primary: { companyName: value } }))
+      .toThrow(/credential metadata.*control character/i);
+    // sourceFile is validated the same way.
+    expect(() => serializeEnvFile(primaryEnv, { primary: { sourceFile: value } }))
+      .toThrow(/credential metadata.*control character/i);
+  });
+
+  it("keeps legitimate Unicode and path metadata on a single comment line", () => {
+    const out = serializeEnvFile(primaryEnv, {
+      primary: {
+        companyName: "Õäö Kaubandus OÜ",
+        verifiedAt: "2026-07-18T10:00:00Z",
+        sourceFile: "/home/x/apikey (1).txt",
+      },
+    });
+    expect(out).toContain("# Company: Õäö Kaubandus OÜ");
+    expect(out).toContain("# Verified at: 2026-07-18T10:00:00Z");
+    expect(out).toContain("# Imported from: /home/x/apikey (1).txt");
+    // Exactly one Company comment line — no injected extra lines.
+    expect(out.match(/^# Company:/gm) ?? []).toHaveLength(1);
+    // Exactly one password line: metadata could not forge a second credential.
+    expect(out.match(/^EARVELDAJA_API_PASSWORD=/gm) ?? []).toHaveLength(1);
   });
 });
