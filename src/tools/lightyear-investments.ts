@@ -12,7 +12,12 @@ import { reportProgress } from "../progress.js";
 import { parseCSV } from "../csv.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
-import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT } from "../accounting-defaults.js";
+import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OTHER_FINANCIAL_INCOME_ACCOUNT } from "../accounting-defaults.js";
+import {
+  resolveSecuritiesIncomeAccount,
+  resolveSecuritiesExpenseAccount,
+  resolveOtherFinancialIncomeAccount,
+} from "../account-resolution.js";
 import { BookingGuard } from "../booking-guard.js";
 import type { Journal } from "../types/api.js";
 
@@ -2052,7 +2057,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const unhandledSuggestions = unhandled.map(r => {
         let suggestion = "Review manually";
         if (r.type === "Conversion") suggestion = "Unpaired FX conversion — likely matches a reward, deposit, withdrawal, or manual trade. Review before booking so broker cash stays reconciled; book FX gain/loss if material.";
-        else if (r.type === "Reward") suggestion = `Platform reward — book via book_lightyear_distributions (defaults to ${DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT} Muud äritulud).`;
+        else if (r.type === "Reward") suggestion = `Platform reward — book via book_lightyear_distributions (defaults to ${DEFAULT_OTHER_FINANCIAL_INCOME_ACCOUNT} Muud finantstulud).`;
         else if (r.type === "Interest") suggestion = "Interest income — book via book_lightyear_distributions.";
         else if (r.type === "Dividend" || r.type === "Distribution") suggestion = "Distribution — book via book_lightyear_distributions.";
         else if (r.type === "Buy" || r.type === "Sell") suggestion = `${r.type} of ${r.ticker} — missing FX pairing or unsupported trade flow. Check if intentional.`;
@@ -2295,9 +2300,9 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       investment_dimension_id: z.number().optional().describe("Dimension ID for investment account (accounts_dimensions_id)"),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
       broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
-      gain_loss_account: z.number().optional().describe("Realized gain account (credit for gains; also used for losses if loss_account not set)"),
-      loss_account: z.number().optional().describe("Realized loss account (debit for losses). If omitted, losses go to gain_loss_account."),
-      fee_account: z.number().optional().describe("Fee expense account (default: fees included in investment cost)"),
+      gain_loss_account: z.number().optional().describe("Realized gain account, credited on a sell gain (default: auto-detect 'Tulu aktsiatelt ja osadelt', standard 8330)"),
+      loss_account: z.number().optional().describe("Realized loss account, debited on a sell loss (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335)"),
+      fee_account: z.number().optional().describe("Account for EXPENSED trade fees — all Sell fees and a Buy's FX-conversion fee (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335). A Buy's trade platform fee is capitalized into the investment cost to match FIFO cost basis and is NOT posted here."),
       skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP, ICSUSSDP). Pass \"none\" to disable; the empty string is treated as the default."),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
@@ -2309,14 +2314,24 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         ? new Set<string>()
         : new Set(skipInput.split(",").map(t => t.trim()).filter(Boolean));
 
-      // Validate accounts exist and are active
+      // Validate accounts exist and are active. Securities trading results route
+      // to the standard securities account PAIR (name-resolved against the actual
+      // chart, standard fallbacks 8330/8335): realized gain → 8330 "Tulu
+      // aktsiatelt ja osadelt"; realized loss and EXPENSED trade fees → 8335 "Kulu
+      // aktsiatelt ja osadelt". Expensed fees = all Sell fees and a Buy's
+      // FX-conversion fee; a Buy's trade platform fee is capitalized into the
+      // investment cost (to match FIFO cost basis), not posted to 8335. Dimension
+      // is left null on 8330/8335. A caller override still wins per account.
       const accounts = await api.readonly.getAccounts();
+      const gainAccount = resolveSecuritiesIncomeAccount(accounts, gain_loss_account);
+      const lossAccount = resolveSecuritiesExpenseAccount(accounts, loss_account);
+      const feeAccount = resolveSecuritiesExpenseAccount(accounts, fee_account);
       const errors = validateAccounts(accounts, [
         { id: investment_account, label: "Investment account" },
         { id: broker_account, label: "Broker account" },
-        ...(fee_account ? [{ id: fee_account, label: "Fee account" }] : []),
-        ...(gain_loss_account ? [{ id: gain_loss_account, label: "Gain/loss account" }] : []),
-        ...(loss_account ? [{ id: loss_account, label: "Loss account" }] : []),
+        { id: feeAccount, label: "Fee account" },
+        { id: gainAccount, label: "Gain account" },
+        { id: lossAccount, label: "Loss account" },
       ]);
 
       if (errors.length > 0) {
@@ -2417,7 +2432,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
           // expensed separately — Lightyear's capital gains report does NOT include FX fees
           // in cost basis, so including them in the investment account would leave a residual
           // balance on every sell.
-          const feeAcct = fee_account ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
+          const feeAcct = feeAccount;
           const totalFees = roundMoney(trade.fx_fee_eur + tradeFeeEur);
           const investmentCostEur = roundMoney(trade.eur_amount + tradeFeeEur);
           const totalCashOutEur = roundMoney(trade.eur_amount + totalFees);
@@ -2467,7 +2482,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
             const sellTradeFees = tradeFeeEur;
             if (sellTradeFees > 0) {
-              const feeAcct = fee_account ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
+              const feeAcct = feeAccount;
               postings.push({ accounts_id: feeAcct, type: "D", amount: sellTradeFees });
               postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: sellTradeFees });
             }
@@ -2534,19 +2549,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             continue;
           }
 
-          if (!gain_loss_account) {
-            results.push({
-              reference: trade.reference,
-              ticker: trade.ticker,
-              type: trade.type,
-              date: trade.date,
-              eur_amount: trade.eur_amount,
-              status: "skipped",
-              skip_reason: "gain_loss_account is required for sell entries.",
-            });
-            continue;
-          }
-
           const costBasis = roundMoney(gainEntry.cost_basis_eur);
           const proceeds = roundMoney(gainEntry.proceeds_eur);
           // Derive gain/loss so the journal balances by construction (CSV columns are independently rounded)
@@ -2554,20 +2556,20 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
 
           // Dr broker_account: proceeds (what we receive)
           // Cr investment_account: cost_basis (what we originally paid)
-          // Cr/Dr gain_loss_account: gain (credit) or loss (debit)
+          // Cr securities-income (gainAccount, 8330) on a gain / Dr securities-
+          // expense (lossAccount, 8335) on a loss — both resolved above.
           postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "D", amount: proceeds });
           postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "C", amount: costBasis });
 
           if (gainLoss > 0) {
-            postings.push({ accounts_id: gain_loss_account, type: "C", amount: gainLoss });
+            postings.push({ accounts_id: gainAccount, type: "C", amount: gainLoss });
           } else if (gainLoss < 0) {
-            const lossAcct = loss_account ?? gain_loss_account;
-            postings.push({ accounts_id: lossAcct, type: "D", amount: Math.abs(gainLoss) });
+            postings.push({ accounts_id: lossAccount, type: "D", amount: Math.abs(gainLoss) });
           }
 
           const sellFees = roundMoney(tradeFeeEur + trade.fx_fee_eur);
           if (sellFees > 0) {
-            const feeAcct = fee_account ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
+            const feeAcct = feeAccount;
             if (trade.fx_fee_eur > 0) {
               postings.push({ accounts_id: feeAcct, type: "D", amount: trade.fx_fee_eur });
             }
@@ -2682,16 +2684,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const skippedSells = results.filter(r => r.status === "skipped" && r.type === "Sell");
       if (skippedSells.length > 0 && !capital_gains_file) {
         warnings.push(
-          `${skippedSells.length} sell trade(s) skipped — provide capital_gains_file and gain_loss_account to book non-cash-equivalent sells with correct cost basis.`
+          `${skippedSells.length} sell trade(s) skipped — provide capital_gains_file to book non-cash-equivalent sells with correct cost basis (the gain/loss accounts default to 8330/8335).`
         );
       }
 
-      if (fee_account && capital_gains_file) {
-        warnings.push(
-          "fee_account is set: buy fees are expensed separately, but capital gains cost_basis includes fees. " +
-          "The investment account balance may not match cost_basis exactly. Consider omitting fee_account to include fees in investment cost."
-        );
-      }
 
       return {
         content: [{
@@ -2708,9 +2704,9 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
             accounts: {
               investment: investment_account,
               broker: broker_account,
-              gain: gain_loss_account ?? "not configured (sells will be skipped)",
-              loss: loss_account ?? gain_loss_account ?? "not configured",
-              fee: fee_account ?? "included in cost",
+              gain: gainAccount,
+              loss: lossAccount,
+              fee: feeAccount,
             },
             ...(warnings.length > 0 && { warnings }),
             note: isDryRun
@@ -2728,8 +2724,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
       broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
-      income_account: z.number().describe("Investment income account (e.g. 8320 Tulu fondiosakutelt, 8400 Intressitulu)"),
-      reward_account: z.number().optional().describe(`Account for platform rewards (default: ${DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT} Muud äritulud). Rewards are non-investment income.`),
+      income_account: z.number().describe("Investment income account for the distribution. Dividends from directly-held shares → 8330 'Tulu aktsiatelt ja osadelt'; fund distributions → 8320; interest → 8400."),
+      reward_account: z.number().optional().describe(`Account for platform rewards/bonuses (default: auto-detect 'Muud finantstulud', standard ${DEFAULT_OTHER_FINANCIAL_INCOME_ACCOUNT}). Rewards are broker fee/campaign income, not securities income.`),
       tax_account: z.number().optional().describe("Withheld tax receivable/expense account (for tax_amount from CSV)"),
       fee_account: z.number().optional().describe(`Platform fee expense account (default ${DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT} Muud finantskulud)`),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
@@ -2737,7 +2733,6 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     { ...batch, openWorldHint: true, title: "Book Lightyear Distributions" },
     async ({ file_path, broker_account, broker_dimension_id, income_account, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
-      const reward_account = reward_account_param ?? DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT;
       const fee_account = fee_account_param ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
 
       const csv = await readCsvFile(file_path);
@@ -2791,6 +2786,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       const needsTax = bookable.some(distribution => (distribution.tax_eur ?? 0) > 0);
       const needsFee = bookable.some(distribution => (distribution.fee_eur ?? 0) > 0);
       const accounts = await api.readonly.getAccounts();
+      // Broker rewards/bonuses are broker fee/campaign income, not securities
+      // income — default to "Muud finantstulud" (standard 8600, name-resolved),
+      // NOT the 8330 securities-income account used for dividends/sell gains.
+      const reward_account = resolveOtherFinancialIncomeAccount(accounts, reward_account_param);
       const errors = validateAccounts(accounts, [
         { id: broker_account, label: "Broker account" },
         { id: income_account, label: "Income account" },

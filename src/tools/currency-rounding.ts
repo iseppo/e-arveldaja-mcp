@@ -10,6 +10,7 @@ import {
   DEFAULT_FX_GAIN_ACCOUNT,
   DEFAULT_FX_LOSS_ACCOUNT,
 } from "../accounting-defaults.js";
+import { resolveFxAccount } from "../account-resolution.js";
 import type { PurchaseInvoice, Transaction, TransactionItem } from "../types/api.js";
 import { BookingGuard } from "../booking-guard.js";
 
@@ -401,8 +402,8 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
       execute: z.boolean().optional().describe("Apply the proposed fixes (default false = dry run)"),
       max_candidates: z.number().int().positive().optional().describe("Limit to first N PARTIALLY_PAID invoices"),
       liability_accounts_id: z.number().int().positive().optional().describe("Deprecated compatibility assertion. When supplied, it must match the invoice liability account; it never overrides or supplies that account."),
-      fx_gain_account_id: z.number().int().positive().optional().describe(`Account for FX gains (diff < 0, paid less than booked) — default ${DEFAULT_FX_GAIN_ACCOUNT}`),
-      fx_loss_account_id: z.number().int().positive().optional().describe(`Account for FX losses (diff > 0, paid more than booked) — default ${DEFAULT_FX_LOSS_ACCOUNT}`),
+      fx_gain_account_id: z.number().int().positive().optional().describe(`Account for FX gains (diff > 0, paid less than booked) — default: auto-detect combined "Kasum/kahjum valuutakursi muutustest" (standard ${DEFAULT_FX_GAIN_ACCOUNT})`),
+      fx_loss_account_id: z.number().int().positive().optional().describe(`Account for FX losses (diff < 0, paid more than booked) — default: same combined FX account as gains (standard ${DEFAULT_FX_LOSS_ACCOUNT})`),
     },
     { ...mutate, openWorldHint: true, title: "Reconcile Currency Rounding" },
     async ({
@@ -413,8 +414,16 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
       fx_loss_account_id,
     }) => {
       const dryRun = execute !== true;
-      const fxGainAccount = fx_gain_account_id ?? DEFAULT_FX_GAIN_ACCOUNT;
-      const fxLossAccount = fx_loss_account_id ?? DEFAULT_FX_LOSS_ACCOUNT;
+      // Resolve the FX account by name against the company's actual chart. Both
+      // the gain and the loss default to the SAME combined account "Kasum/kahjum
+      // valuutakursi muutustest" (standard 8500) — the standard chart has one
+      // combined FX result account, not a separate gain/loss pair. A caller
+      // override still lets the two diverge. (The old DEFAULT_FX_LOSS_ACCOUNT=8600
+      // pointed at "Muud finantstulud", a financial INCOME account, so an FX loss
+      // would have posted to income with the wrong sign.)
+      const fxAccounts = await api.readonly.getAccounts();
+      const fxGainAccount = resolveFxAccount(fxAccounts, fx_gain_account_id);
+      const fxLossAccount = resolveFxAccount(fxAccounts, fx_loss_account_id);
 
       const allInvoices = await api.purchaseInvoices.listAll();
       let partiallyPaid = allInvoices.filter(inv =>
@@ -542,7 +551,7 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
           // liability higher than what actually settled in EUR → liability is
           // overstated, reduce it (D liability) and book the offset as FX gain
           // (C 8500). diff < 0 is the mirror: liability understated, debit FX
-          // loss (D 8600) and credit liability.
+          // loss (D 8500, the same combined FX account) and credit liability.
           const isOverstated = diff > 0;
           const fxAccount = isOverstated ? fxGainAccount : fxLossAccount;
           if (isFxReconciled(full.id!)) {

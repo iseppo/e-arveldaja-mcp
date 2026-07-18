@@ -28,6 +28,13 @@ function setupTool(options: SetupOptions) {
     return Promise.resolve(tx);
   });
   const api = {
+    readonly: {
+      // The FX account is name-resolved from the chart; provide the standard
+      // combined FX account 8500 so gains and losses both post to it.
+      getAccounts: vi.fn().mockResolvedValue([
+        { id: 8500, name_est: "Kasum/kahjum valuutakursi muutustest", is_valid: true },
+      ]),
+    },
     purchaseInvoices: {
       listAll: vi.fn().mockResolvedValue(options.invoices),
       get: vi.fn().mockImplementation((id: number) => {
@@ -378,7 +385,7 @@ describe("reconcile_currency_rounding", () => {
     expect(journalCreate).toHaveBeenCalledTimes(1);
   });
 
-  it("posts D 8600 / C 2310 when liability is understated (paid more than booked)", async () => {
+  it("posts D 8500 / C 2310 when liability is understated (paid more than booked)", async () => {
     const journalCreate = vi.fn().mockResolvedValue({ created_object_id: 778 });
     const { handler } = setupTool({
       invoices: [
@@ -408,9 +415,9 @@ describe("reconcile_currency_rounding", () => {
     await handler({ execute: true });
     const journal = journalCreate.mock.calls[0]![0];
     // diff_eur = booked (89) - paid (89.50) = -0.50 → liability understated
-    // → D 8600 (FX loss) + C 2310 (increase payable).
+    // → D 8500 (combined FX result) + C 2310 (increase payable).
     expect(journal.postings).toEqual([
-      { accounts_id: 8600, type: "D", amount: 0.5 },
+      { accounts_id: 8500, type: "D", amount: 0.5 },
       { accounts_id: 2310, type: "C", amount: 0.5 },
     ]);
   });

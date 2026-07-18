@@ -15,13 +15,13 @@ function makeStandardAccounts(): Account[] {
   return [
     // Assets
     makeAccount(1000, "D", "Varad", "Pangakonto", "Bank account"),
-    // Liabilities
-    makeAccount(2370, "C", "Kohustused", "Dividendide võlgnevus", "Dividend payable"),
-    makeAccount(2540, "C", "Kohustused", "Tulumaksu kohustus", "CIT payable"),
+    // Liabilities — standard e-arveldaja chart numbers/names (resolvers match by name)
+    makeAccount(2650, "C", "Kohustused", "Dividendivõlad", "Dividend payable"),
+    makeAccount(2656, "C", "Kohustused", "Dividenditulumaksu võlg", "CIT payable"),
     makeAccount(2110, "C", "Kohustused", "Võlg omanikule", "Owner payable"),
     // Equity
-    makeAccount(3000, "C", "Omakapital", "Osakapital", "Share capital"),
-    makeAccount(3020, "C", "Omakapital", "Jaotamata kasum", "Retained earnings"),
+    makeAccount(2900, "C", "Omakapital", "Osakapital või aktsiakapital nimiväärtuses", "Share capital"),
+    makeAccount(2960, "C", "Omakapital", "Eelmiste perioodide jaotamata kasum (kahjum)", "Retained earnings"),
     // Expenses
     makeAccount(5000, "D", "Kulud", "Kulud", "Expenses"),
     // Income tax expense (RTJ Schema 1 "Tulumaks" line, 8900–8999)
@@ -143,12 +143,12 @@ describe("prepare_dividend_package", () => {
       // Retained earnings credit
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 20000),
-        makePosting(3020, "C", 20000),
+        makePosting(2960, "C", 20000),
       ]),
       // Share capital
       makeJournal("2023-01-01", [
         makePosting(1000, "D", 2500),
-        makePosting(3000, "C", 2500),
+        makePosting(2900, "C", 2500),
       ]),
       // Additional assets (brings total assets to 22 500; no liabilities)
     ];
@@ -236,19 +236,19 @@ describe("prepare_dividend_package", () => {
     // retained-earnings debit.
     const debitPostings = je.postings.filter(p => p.type === "D");
     expect(debitPostings).toHaveLength(2);
-    const retainedDebit = debitPostings.find(p => p.account === 3020);
+    const retainedDebit = debitPostings.find(p => p.account === 2960);
     expect(retainedDebit?.amount).toBe(10000);
     const taxExpenseDebit = debitPostings.find(p => p.account === 8900);
     expect(taxExpenseDebit?.amount).toBe(2820.51);
     // Retained earnings must NOT be debited with the CIT — this is the exact
     // bug the net-dividend rule fixes (gross was previously drained from equity).
-    expect(debitPostings.filter(p => p.account === 3020)).toHaveLength(1);
+    expect(debitPostings.filter(p => p.account === 2960)).toHaveLength(1);
     // Net dividend credited to payable
-    const creditDividend = je.postings.find(p => p.account === 2370);
+    const creditDividend = je.postings.find(p => p.account === 2650);
     expect(creditDividend?.type).toBe("C");
     expect(creditDividend?.amount).toBe(10000);
     // CIT credited to tax payable
-    const creditTax = je.postings.find(p => p.account === 2540);
+    const creditTax = je.postings.find(p => p.account === 2656);
     expect(creditTax?.type).toBe("C");
     expect(creditTax?.amount).toBe(2820.51);
     // Journal balances: total debits == total credits
@@ -258,7 +258,7 @@ describe("prepare_dividend_package", () => {
     expect(totalDebit).toBeCloseTo(10000 + 2820.51, 2);
     // Booking summary is surfaced for operator verification
     const booking = data.booking as { retained_earnings_account: number; income_tax_expense_account: number; income_tax_expense_debit: number };
-    expect(booking.retained_earnings_account).toBe(3020);
+    expect(booking.retained_earnings_account).toBe(2960);
     expect(booking.income_tax_expense_account).toBe(8900);
     expect(booking.income_tax_expense_debit).toBe(2820.51);
   });
@@ -286,7 +286,7 @@ describe("prepare_dividend_package", () => {
     const taxExpenseDebit = je.postings.find(p => p.type === "D" && p.account === 8910);
     expect(taxExpenseDebit?.amount).toBe(2820.51);
     // Retained earnings only carries the net dividend
-    const retainedDebit = je.postings.find(p => p.type === "D" && p.account === 3020);
+    const retainedDebit = je.postings.find(p => p.type === "D" && p.account === 2960);
     expect(retainedDebit?.amount).toBe(10000);
   });
 
@@ -354,7 +354,7 @@ describe("prepare_dividend_package", () => {
       net_dividend: 10000,
       shareholder_client_id: 1,
       effective_date: "2026-06-01",
-      income_tax_expense_account: 3020,
+      income_tax_expense_account: 2960,
     });
 
     expect(isError(result)).toBe(false);
@@ -492,11 +492,11 @@ describe("prepare_dividend_package", () => {
     const journals = [
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 5000),
-        makePosting(3020, "C", 5000),
+        makePosting(2960, "C", 5000),
       ]),
       makeJournal("2023-01-01", [
         makePosting(1000, "D", 2500),
-        makePosting(3000, "C", 2500),
+        makePosting(2900, "C", 2500),
       ]),
     ];
     api = makeApi(journals, makeStandardAccounts());
@@ -530,11 +530,11 @@ describe("prepare_dividend_package", () => {
     const journals = [
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 5000),
-        makePosting(3020, "C", 5000),
+        makePosting(2960, "C", 5000),
       ]),
       makeJournal("2023-01-01", [
         makePosting(1000, "D", 2500),
-        makePosting(3000, "C", 2500),
+        makePosting(2900, "C", 2500),
       ]),
     ];
     api = makeApi(journals, makeStandardAccounts());
@@ -564,11 +564,11 @@ describe("prepare_dividend_package", () => {
     const journals = [
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 100),
-        makePosting(3020, "C", 100),
+        makePosting(2960, "C", 100),
       ]),
       makeJournal("2023-01-01", [
         makePosting(1000, "D", 2500),
-        makePosting(3000, "C", 2500),
+        makePosting(2900, "C", 2500),
       ]),
     ];
     api = makeApi(journals, makeStandardAccounts());
@@ -602,8 +602,8 @@ describe("prepare_dividend_package", () => {
       makeAccount(4000, "C", "Tulud", "Müügitulu", "Sales revenue"),
     ];
     const journals = [
-      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]),
-      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(3000, "C", 2500)]),
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(2960, "C", 20000)]),
+      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)]),
       makeJournal("2026-02-01", [makePosting(1000, "D", 10000), makePosting(4000, "C", 10000)]),
     ];
     api = makeApi(journals, accounts);
@@ -637,8 +637,8 @@ describe("prepare_dividend_package", () => {
       makeAccount(4000, "C", "Tulud", "Müügitulu", "Sales revenue"),
     ];
     const journals = [
-      makeJournal("2024-01-01", [makePosting(1000, "D", 5000), makePosting(3020, "C", 5000)]),
-      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(3000, "C", 2500)]),
+      makeJournal("2024-01-01", [makePosting(1000, "D", 5000), makePosting(2960, "C", 5000)]),
+      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)]),
       makeJournal("2026-02-01", [makePosting(1000, "D", 50000), makePosting(4000, "C", 50000)]),
     ];
     api = makeApi(journals, accounts);
@@ -715,16 +715,16 @@ describe("prepare_dividend_package", () => {
     //   retained 20000 >= 2564.10  ✓ (retained check passes)
     //   net_assets_after = 7000 - 2564.10 = 4435.90 < 5000 → § 157 block
     const accounts = makeStandardAccounts().map(a =>
-      a.id === 3000 ? makeAccount(3000, "C", "Omakapital", "Osakapital", "Share capital") : a
+      a.id === 2900 ? makeAccount(2900, "C", "Omakapital", "Osakapital", "Share capital") : a
     );
     const journals = [
       makeJournal("2023-01-01", [
         makePosting(1000, "D", 5000),
-        makePosting(3000, "C", 5000),
+        makePosting(2900, "C", 5000),
       ]),
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 20000),
-        makePosting(3020, "C", 20000),
+        makePosting(2960, "C", 20000),
       ]),
       makeJournal("2026-03-01", [
         makePosting(5000, "D", 18000),
@@ -757,12 +757,12 @@ describe("prepare_dividend_package", () => {
     // distribution through; clamped, the floor stays at the 5000 share capital.
     const accounts = [
       ...makeStandardAccounts(),
-      makeAccount(3010, "C", "Omakapital", "Reservkapital", "Reserve capital"),
+      makeAccount(2940, "C", "Omakapital", "Kohustuslik reservkapital", "Reserve capital"),
     ];
     const journals = [
-      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(3000, "C", 5000)]),   // share capital 5000
-      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]), // retained 20000
-      makeJournal("2024-06-01", [makePosting(3010, "D", 3000), makePosting(1000, "C", 3000)]),   // reserve → −3000
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(2900, "C", 5000)]),   // share capital 5000
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(2960, "C", 20000)]), // retained 20000
+      makeJournal("2024-06-01", [makePosting(2940, "D", 3000), makePosting(1000, "C", 3000)]),   // reserve → −3000
       makeJournal("2026-03-01", [makePosting(5000, "D", 18000), makePosting(1000, "C", 18000)]), // current-year loss
     ];
     // net_assets_before = equity (5000+20000−3000) + P&L (−18000) = 4000
@@ -790,13 +790,13 @@ describe("prepare_dividend_package", () => {
     // sits between the two, so the per-account clamp must BLOCK this distribution.
     const accounts = [
       ...makeStandardAccounts(),
-      makeAccount(3010, "C", "Omakapital", "Reservkapital", "Reserve capital"),
+      makeAccount(2940, "C", "Omakapital", "Kohustuslik reservkapital", "Reserve capital"),
       makeAccount(3011, "C", "Omakapital", "Muu reserv", "Other reserve"),
     ];
     const journals = [
-      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(3000, "C", 5000)]),    // share capital 5000
-      makeJournal("2024-01-01", [makePosting(1000, "D", 30000), makePosting(3020, "C", 30000)]),  // retained 30000
-      makeJournal("2024-02-01", [makePosting(1000, "D", 3000), makePosting(3010, "C", 3000)]),    // reserve 3010 = +3000
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(2900, "C", 5000)]),    // share capital 5000
+      makeJournal("2024-01-01", [makePosting(1000, "D", 30000), makePosting(2960, "C", 30000)]),  // retained 30000
+      makeJournal("2024-02-01", [makePosting(1000, "D", 3000), makePosting(2940, "C", 3000)]),    // reserve 3010 = +3000
       makeJournal("2024-03-01", [makePosting(3011, "D", 2000), makePosting(1000, "C", 2000)]),    // reserve 3011 = −2000
       makeJournal("2026-03-01", [makePosting(5000, "D", 28900), makePosting(1000, "C", 28900)]),  // current-year loss
     ];
@@ -811,7 +811,7 @@ describe("prepare_dividend_package", () => {
       net_dividend: 100,
       shareholder_client_id: 1,
       effective_date: "2026-06-01",
-      restricted_reserve_accounts: [3010, 3011],
+      restricted_reserve_accounts: [2940, 3011],
     });
 
     expect(isError(result)).toBe(true);
@@ -826,16 +826,16 @@ describe("prepare_dividend_package", () => {
     // Same fixture, but with force=true: the journal is created and the
     // warning mentions both § 157 and "Net assets after distribution".
     const accounts = makeStandardAccounts().map(a =>
-      a.id === 3000 ? makeAccount(3000, "C", "Omakapital", "Osakapital", "Share capital") : a
+      a.id === 2900 ? makeAccount(2900, "C", "Omakapital", "Osakapital", "Share capital") : a
     );
     const journals = [
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 25000),
-        makePosting(3020, "C", 25000),
+        makePosting(2960, "C", 25000),
       ]),
       makeJournal("2023-01-01", [
         makePosting(1000, "D", 5000),
-        makePosting(3000, "C", 5000),
+        makePosting(2900, "C", 5000),
       ]),
     ];
     api = makeApi(journals, accounts);
@@ -887,18 +887,18 @@ describe("prepare_dividend_package", () => {
   // § 157(2) floor of share + reserves (8000).
   function reserveFloorJournals(): Journal[] {
     return [
-      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(3000, "C", 5000)]),
-      makeJournal("2023-02-01", [makePosting(1000, "D", 3000), makePosting(3010, "C", 3000)]),
-      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]),
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(2900, "C", 5000)]),
+      makeJournal("2023-02-01", [makePosting(1000, "D", 3000), makePosting(2940, "C", 3000)]),
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(2960, "C", 20000)]),
       makeJournal("2026-03-01", [makePosting(5000, "D", 18000), makePosting(1000, "C", 18000)]),
     ];
   }
   function accountsWithReserveCapital(): Account[] {
     return [
       ...makeStandardAccounts().map(a =>
-        a.id === 3000 ? makeAccount(3000, "C", "Omakapital", "Osakapital", "Share capital") : a
+        a.id === 2900 ? makeAccount(2900, "C", "Omakapital", "Osakapital", "Share capital") : a
       ),
-      makeAccount(3010, "C", "Omakapital", "Reservkapital", "Statutory reserve"),
+      makeAccount(2940, "C", "Omakapital", "Kohustuslik reservkapital", "Statutory reserve"),
     ];
   }
 
@@ -955,9 +955,9 @@ describe("prepare_dividend_package", () => {
 
   it("auto-detects reservkapital, raises the floor, and warns on an otherwise lawful distribution", async () => {
     const journals = [
-      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(3000, "C", 2500)]),
-      makeJournal("2023-02-01", [makePosting(1000, "D", 1000), makePosting(3010, "C", 1000)]),
-      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]),
+      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)]),
+      makeJournal("2023-02-01", [makePosting(1000, "D", 1000), makePosting(2940, "C", 1000)]),
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(2960, "C", 20000)]),
     ];
     api = makeApi(journals, accountsWithReserveCapital());
     const mock = makeMockServer();
@@ -980,13 +980,90 @@ describe("prepare_dividend_package", () => {
     expect(warnings.some(w => w.includes("restricted-reserve floor applied"))).toBe(true);
   });
 
+  it("aggregates a funded-but-renamed 2940 into the §157(2) floor even when an empty legacy account owns the exact name", async () => {
+    // Composed fallback hole (regression guard): an inactive legacy 2930 still
+    // carries the exact statutory name "Kohustuslik reservkapital" with a ZERO
+    // balance, while the funded reserve lives on 2940 that was RENAMED to a
+    // synonym. Name-matching alone would resolve only [2930] and read a 0 reserve,
+    // dropping the floor to bare share capital (5000) and letting this dividend
+    // through. resolveRestrictedReserveAccounts always unions 2940 in, so the
+    // +3000 reserve is read and the floor is 8000 → the distribution is BLOCKED.
+    const accounts = [
+      ...makeStandardAccounts(),
+      makeAccount(2930, "C", "Omakapital", "Kohustuslik reservkapital", "Legacy statutory reserve", { is_valid: false }),
+      makeAccount(2940, "C", "Omakapital", "Seadusjärgne reserv", "Statutory reserve (renamed)"),
+    ];
+    const journals = [
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(2900, "C", 5000)]),   // share capital 5000
+      makeJournal("2023-02-01", [makePosting(1000, "D", 3000), makePosting(2940, "C", 3000)]),   // reserve on the renamed 2940 = +3000
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(2960, "C", 20000)]), // retained 20000
+      makeJournal("2026-03-01", [makePosting(5000, "D", 18000), makePosting(1000, "C", 18000)]), // current-year loss
+    ];
+    // net_assets_before = equity (5000+3000+20000) + P&L (−18000) = 10000
+    // net_dividend 2000 → gross 2564.10 → net_assets_after = 7435.90
+    //   floor with reserve = 8000 → 7435.90 < 8000 → BLOCKED (would pass at the 5000 bare-share floor)
+    api = makeApi(journals, accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({ net_dividend: 2000, shareholder_client_id: 1, effective_date: "2026-06-01" });
+
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(data.error).toBe("ÄS § 157 net assets breach");
+    const netCheck = data.net_assets_check as {
+      share_capital: number; restricted_reserves: number; minimum_net_assets: number;
+      net_assets_after_distribution: number; shortfall: number;
+    };
+    expect(netCheck.share_capital).toBe(5000);
+    expect(netCheck.restricted_reserves).toBe(3000); // the renamed 2940 balance, not the empty legacy 2930
+    expect(netCheck.minimum_net_assets).toBe(8000);
+    expect(netCheck.net_assets_after_distribution).toBe(7435.9);
+    expect(netCheck.shortfall).toBe(564.1);
+  });
+
+  it("aggregates TWO funded auto-detected reserve accounts into the §157(2) floor (no override)", async () => {
+    // Both 2940 and 2941 carry the exact statutory name and a positive balance,
+    // with NO explicit restricted_reserve_accounts override. The floor must sum
+    // both auto-detected balances (2000 + 1000 = 3000), not just one.
+    const accounts = [
+      ...makeStandardAccounts(),
+      makeAccount(2940, "C", "Omakapital", "Kohustuslik reservkapital", "Statutory reserve A"),
+      makeAccount(2941, "C", "Omakapital", "Kohustuslik reservkapital", "Statutory reserve B"),
+    ];
+    const journals = [
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(2900, "C", 5000)]),   // share capital 5000
+      makeJournal("2023-02-01", [makePosting(1000, "D", 2000), makePosting(2940, "C", 2000)]),   // reserve A = +2000
+      makeJournal("2023-03-01", [makePosting(1000, "D", 1000), makePosting(2941, "C", 1000)]),   // reserve B = +1000
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(2960, "C", 20000)]), // retained 20000
+      makeJournal("2026-03-01", [makePosting(5000, "D", 18000), makePosting(1000, "C", 18000)]), // current-year loss
+    ];
+    // net_assets_before = equity (5000+2000+1000+20000) + P&L (−18000) = 10000
+    // net_dividend 2000 → gross 2564.10 → net_assets_after 7435.90; floor 8000 → BLOCKED
+    api = makeApi(journals, accounts);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const result = await cb({ net_dividend: 2000, shareholder_client_id: 1, effective_date: "2026-06-01" });
+
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(data.error).toBe("ÄS § 157 net assets breach");
+    const netCheck = data.net_assets_check as { restricted_reserves: number; minimum_net_assets: number; shortfall: number };
+    expect(netCheck.restricted_reserves).toBe(3000); // 2000 + 1000, both auto-detected
+    expect(netCheck.minimum_net_assets).toBe(8000);
+    expect(netCheck.shortfall).toBe(564.1);
+  });
+
   it("surfaces the opening-balance API limitation when share capital or retained earnings reads as zero", async () => {
     // Retained earnings present but no share-capital postings — the classic
     // symptom of opening balances entered as "Algbilansi kanded" that the
     // /journals API omits, so the § 157 check runs on incomplete data. Warn
     // (don't block): the operator verifies opening balances in the UI.
     const journals = [
-      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(3020, "C", 20000)]),
+      makeJournal("2024-01-01", [makePosting(1000, "D", 20000), makePosting(2960, "C", 20000)]),
     ];
     api = makeApi(journals, makeStandardAccounts());
     const mock = makeMockServer();
@@ -1028,7 +1105,7 @@ describe("prepare_dividend_package", () => {
     // the check ran on possibly-incomplete data must still reach the operator on
     // the error path — not just on dry_run / executed.
     const journals = [
-      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(3000, "C", 5000)]),
+      makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(2900, "C", 5000)]),
     ];
     api = makeApi(journals, makeStandardAccounts());
     const mock = makeMockServer();
@@ -1054,7 +1131,7 @@ describe("prepare_dividend_package", () => {
   // -------------------------------------------------------------------------
 
   it("returns error when a required account is missing from chart of accounts", async () => {
-    const accountsWithoutTaxAccount = makeStandardAccounts().filter(a => a.id !== 2540);
+    const accountsWithoutTaxAccount = makeStandardAccounts().filter(a => a.id !== 2656);
     api = makeApi(makeHealthyJournals(), accountsWithoutTaxAccount);
     const mock = makeMockServer();
     registerEstonianTaxTools(mock.server, api);
@@ -1132,17 +1209,17 @@ describe("prepare_dividend_package", () => {
     const journals = [
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 30000),
-        makePosting(3020, "C", 30000),
+        makePosting(2960, "C", 30000),
       ]),
       makeJournal("2023-01-01", [
         makePosting(1000, "D", 5000),
-        makePosting(3000, "C", 5000),
+        makePosting(2900, "C", 5000),
       ]),
       // Partially-deleted journal: D side of cash stays, C side of equity is deleted.
       // Result: assets = 30000 + 5000 + 100 = 35100; equity + P&L = 30000 + 5000 = 35000.
       makeJournal("2024-06-01", [
         makePosting(1000, "D", 100),
-        makePosting(3020, "C", 100, undefined, { is_deleted: true }),
+        makePosting(2960, "C", 100, undefined, { is_deleted: true }),
       ]),
     ];
     const api2 = makeApi(journals, makeStandardAccounts());
@@ -1165,15 +1242,15 @@ describe("prepare_dividend_package", () => {
     const journals = [
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 30000),
-        makePosting(3020, "C", 30000),
+        makePosting(2960, "C", 30000),
       ]),
       makeJournal("2023-01-01", [
         makePosting(1000, "D", 5000),
-        makePosting(3000, "C", 5000),
+        makePosting(2900, "C", 5000),
       ]),
       makeJournal("2024-06-01", [
         makePosting(1000, "D", 100),
-        makePosting(3020, "C", 100, undefined, { is_deleted: true }),
+        makePosting(2960, "C", 100, undefined, { is_deleted: true }),
       ]),
     ];
     const api2 = makeApi(journals, makeStandardAccounts());
@@ -1221,13 +1298,13 @@ describe("prepare_dividend_package", () => {
     const byAccount = (id: number) => booked.postings.find(p => p.accounts_id === id);
     // NET dividend debited to retained earnings (3020); CIT debited to the
     // 8900 income-tax expense account — NOT a second debit to retained earnings.
-    expect(byAccount(3020)).toEqual({ accounts_id: 3020, type: "D", amount: 10000 });
+    expect(byAccount(2960)).toEqual({ accounts_id: 2960, type: "D", amount: 10000 });
     expect(byAccount(8900)).toEqual({ accounts_id: 8900, type: "D", amount: 2820.51 });
     // NET dividend credited to payable (2370); CIT credited to tax payable (2540).
-    expect(byAccount(2370)).toEqual({ accounts_id: 2370, type: "C", amount: 10000 });
-    expect(byAccount(2540)).toEqual({ accounts_id: 2540, type: "C", amount: 2820.51 });
+    expect(byAccount(2650)).toEqual({ accounts_id: 2650, type: "C", amount: 10000 });
+    expect(byAccount(2656)).toEqual({ accounts_id: 2656, type: "C", amount: 2820.51 });
     // Retained earnings is debited exactly once — the gross was never drained.
-    expect(booked.postings.filter(p => p.accounts_id === 3020)).toHaveLength(1);
+    expect(booked.postings.filter(p => p.accounts_id === 2960)).toHaveLength(1);
     // Double-entry balances.
     const debits = booked.postings.filter(p => p.type === "D").reduce((s, p) => s + p.amount, 0);
     const credits = booked.postings.filter(p => p.type === "C").reduce((s, p) => s + p.amount, 0);
@@ -1302,7 +1379,7 @@ describe("prepare_dividend_package", () => {
       expect(p.amount).toBe(roundMoney(p.amount));
     }
     // Net dividend booked at the rounded value, not the raw 100.006.
-    const retainedDebit = booked.postings.find(p => p.accounts_id === 3020 && p.type === "D");
+    const retainedDebit = booked.postings.find(p => p.accounts_id === 2960 && p.type === "D");
     expect(retainedDebit?.amount).toBe(100.01);
     // Debits balance credits exactly, and the reported gross is that same total.
     const debits = roundMoney(booked.postings.filter(p => p.type === "D").reduce((s, p) => s + p.amount, 0));

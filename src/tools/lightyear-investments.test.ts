@@ -233,11 +233,13 @@ function setupLightyearTool(
   const api = {
     readonly: {
       getAccounts: vi.fn().mockResolvedValue(options.accounts ?? [
-        { id: 1120, is_deleted: false, code: "1120", title_est: "Lightyear konto" },
-        { id: 1550, is_deleted: false, code: "1550", title_est: "Finantsinvesteeringud" },
-        { id: 8610, is_deleted: false, code: "8610", title_est: "Muud finantskulud" },
-        { id: 8320, is_deleted: false, code: "8320", title_est: "Investeeringutulu" },
-        { id: 3800, is_deleted: false, code: "3800", title_est: "Muud äritulud" },
+        { id: 1120, is_deleted: false, is_valid: true, code: "1120", title_est: "Lightyear konto", name_est: "Lightyear konto" },
+        { id: 1550, is_deleted: false, is_valid: true, code: "1550", title_est: "Finantsinvesteeringud", name_est: "Finantsinvesteeringud" },
+        { id: 8320, is_deleted: false, is_valid: true, code: "8320", title_est: "Investeeringutulu", name_est: "Investeeringutulu" },
+        { id: 8330, is_deleted: false, is_valid: true, code: "8330", title_est: "Tulu aktsiatelt ja osadelt", name_est: "Tulu aktsiatelt ja osadelt" },
+        { id: 8335, is_deleted: false, is_valid: true, code: "8335", title_est: "Kulu aktsiatelt ja osadelt", name_est: "Kulu aktsiatelt ja osadelt" },
+        { id: 8600, is_deleted: false, is_valid: true, code: "8600", title_est: "Muud finantstulud", name_est: "Muud finantstulud" },
+        { id: 8610, is_deleted: false, is_valid: true, code: "8610", title_est: "Muud finantskulud", name_est: "Muud finantskulud" },
       ]),
     },
     journals: {
@@ -787,10 +789,10 @@ describe("lightyear investments tools", () => {
     expect(api.journals.create).toHaveBeenCalled();
   });
 
-  it("books a platform reward to Muud äritulud (3800) income by default, not the FX-loss account", async () => {
-    // Reward = non-investment other income. It must be CREDITED to an income
-    // account (3800 Muud äritulud), not the old 8600 default which is the
-    // FX-loss expense account (wrong statement line and wrong sign).
+  it("books a platform reward to Muud finantstulud (8600) by default, not the securities-income account", async () => {
+    // Reward = broker fee/campaign income, not securities income. It must be
+    // CREDITED to "Muud finantstulud" (8600, name-resolved), NOT the 8330
+    // securities-income account used for dividends/sell gains.
     mockedReadFile.mockResolvedValue(
       buildStatementCsv([
         // Date, Reference, Ticker, ISIN, Type, Quantity, CCY, Price/share,
@@ -813,18 +815,18 @@ describe("lightyear investments tools", () => {
       postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }>;
     };
     const credit = journal.postings.find((p) => p.type === "C");
-    // Credited to 3800 (Muud äritulud), NOT 8320 (investment income) and NOT 8600.
-    expect(credit?.accounts_id).toBe(3800);
+    // Credited to 8600 (Muud finantstulud), NOT 8320 (investment income) and NOT 8330.
+    expect(credit?.accounts_id).toBe(8600);
     expect(credit?.amount).toBe(5);
-    expect(journal.postings.some((p) => p.accounts_id === 8600)).toBe(false);
+    expect(journal.postings.some((p) => p.accounts_id === 8330)).toBe(false);
     // Broker cash (1120) is debited with the net received.
     expect(journal.postings.find((p) => p.type === "D")?.accounts_id).toBe(1120);
   });
 
   it("does not require the reward account for a dividend-only import (no Reward row)", async () => {
-    // reward_account defaults to 3800; a dividend/interest-only statement must
-    // still book even when the chart lacks that reward income account, because
-    // no reward is credited. (Regression from moving the default off 8600.)
+    // reward_account defaults to 8600 (name-resolved); a dividend/interest-only
+    // statement must still book even when the chart lacks that reward income
+    // account, because no reward is credited and it is therefore not validated.
     mockedReadFile.mockResolvedValue(
       buildStatementCsv([
         ["2026-03-01", "DIV-001", "VWCE", "IE00BK5BQT80", "Dividend", "0", "EUR", "0", "10.00", "1", "0", "10.00", "0"],
@@ -1467,7 +1469,7 @@ describe("H17 distribution currency and EUR provenance", () => {
   it("H17 accepts valid explicit optional overrides even when unused", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv([["02/03/2026", "OK-H17-ACCOUNT", "", "", "Interest", "0", "EUR", "0", "5", "1", "0", "5", "0"]]));
     const { handler } = setupLightyearTool("book_lightyear_distributions");
-    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, reward_account: 3800, tax_account: 8610, fee_account: 8610, dry_run: true })).content[0]!.text) as any;
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, reward_account: 8600, tax_account: 8610, fee_account: 8610, dry_run: true })).content[0]!.text) as any;
     expect(payload.error).toBeUndefined();
     expect(payload.results[0].status).toBe("would_create");
   });
@@ -3066,7 +3068,7 @@ describe("H16 Lightyear handler provenance", () => {
     expect(payload.skipped).toBe(0);
     expect(created[0].postings).toEqual([
       { accounts_id: 1550, type: "D", amount: 1128.01 },
-      { accounts_id: 8610, type: "D", amount: 3.96 },
+      { accounts_id: 8335, type: "D", amount: 3.96 },
       { accounts_id: 1120, type: "C", amount: 1131.97 },
     ]);
     expect(vi.mocked(logAudit)).toHaveBeenCalledTimes(1);
@@ -3106,8 +3108,8 @@ describe("H16 Lightyear handler provenance", () => {
       { accounts_id: 1120, type: "D", amount: 1126.28 },
       { accounts_id: 1550, type: "C", amount: 1000 },
       { accounts_id: 8320, type: "C", amount: 126.28 },
-      { accounts_id: 8610, type: "D", amount: 3.96 },
-      { accounts_id: 8610, type: "D", amount: 1.73 },
+      { accounts_id: 8335, type: "D", amount: 3.96 },
+      { accounts_id: 8335, type: "D", amount: 1.73 },
       { accounts_id: 1120, type: "C", amount: 5.69 },
     ]);
   });

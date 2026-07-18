@@ -12,14 +12,25 @@ export const DEFAULT_OWNER_PAYABLE_ACCOUNT = 2110;
 /** Accounts receivable (Ostjate ettemaksed / nõuded) */
 export const DEFAULT_ACCOUNTS_RECEIVABLE = 1210;
 
-/** Retained earnings (Jaotamata kasum) */
-export const RETAINED_EARNINGS_ACCOUNT = 3020;
+/**
+ * Retained earnings (Eelmiste perioodide jaotamata kasum), e-arveldaja standard
+ * chart account 2960. Used only as a last-resort fallback — the tools resolve
+ * the account by name against the company's actual chart first (see
+ * `src/account-resolution.ts`), because account NUMBERS can differ across
+ * companies while the RTJ-standard NAMES are stable.
+ */
+export const RETAINED_EARNINGS_ACCOUNT = 2960;
 
-/** Dividend payable (Dividendide võlgnevus) */
-export const DIVIDEND_PAYABLE_ACCOUNT = 2370;
+/** Dividend payable (Dividendivõlad), standard chart 2650. Name-resolved first. */
+export const DIVIDEND_PAYABLE_ACCOUNT = 2650;
 
-/** Corporate income tax payable (Tulumaksu kohustus) */
-export const CIT_PAYABLE_ACCOUNT = 2540;
+/**
+ * Dividend income-tax payable (Dividenditulumaksu võlg), standard chart 2656 —
+ * the liability for the 22/78 CIT triggered by a dividend distribution (TuMS
+ * § 50). Name-resolved first. (NOT 2540 "Kogumispensioni maksed" — the old
+ * default pointed at the mandatory-pension-payments account.)
+ */
+export const CIT_PAYABLE_ACCOUNT = 2656;
 
 /**
  * Corporate income tax expense (Tulumaksukulu) — the profit-and-loss "Tulumaks"
@@ -43,18 +54,20 @@ export const INCOME_TAX_EXPENSE_ACCOUNT = 8900;
  */
 export const EMTA_PREPAYMENT_ACCOUNT = 1516;
 
-/** Share capital (Osakapital) */
-export const SHARE_CAPITAL_ACCOUNT = 3000;
-
-/** Statutory reserve capital (Reservkapital), ÄS § 157(2) restricted reserve. */
-export const RESERVE_CAPITAL_ACCOUNT = 3010;
+/**
+ * Share capital (Osakapital või aktsiakapital nimiväärtuses), e-arveldaja
+ * standard chart 2900. Name-resolved first. (NOT 3000 "Põhivara müügi
+ * vahekonto" — the old default pointed at the fixed-asset-sale clearing account,
+ * which would make the ÄS § 157(2) net-assets legality check read the wrong
+ * balance.)
+ */
+export const SHARE_CAPITAL_ACCOUNT = 2900;
 
 /**
- * Reserves that ÄS § 157(2) makes non-distributable: net assets must stay at or
- * above share capital PLUS these reserves. Defaults to reservkapital (3010);
- * override per company when the articles mandate additional restricted reserves.
+ * Statutory reserve capital (Kohustuslik reservkapital), standard chart 2940 —
+ * an ÄS § 157(2) restricted reserve. Name-resolved first.
  */
-export const DEFAULT_RESTRICTED_RESERVE_ACCOUNTS = [RESERVE_CAPITAL_ACCOUNT];
+export const RESERVE_CAPITAL_ACCOUNT = 2940;
 
 /** Current year profit/loss (Aruandeaasta kasum/kahjum) */
 export const CURRENT_YEAR_PROFIT_ACCOUNT = 2970;
@@ -63,18 +76,38 @@ export const CURRENT_YEAR_PROFIT_ACCOUNT = 2970;
 export const DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT = 8610;
 
 /**
- * Other operating income (Muud äritulud), 3800-series. Default for booking
- * Lightyear platform rewards, which are non-investment other income (real
- * investment income — fund distributions, interest — uses a caller-supplied
- * income account such as 8320/8400).
+ * Other financial income (Muud finantstulud), e-arveldaja standard chart 8600.
+ * Name-resolved first. Default for booking Lightyear platform rewards/bonuses,
+ * which the owner classifies as broker fee/campaign income, NOT securities
+ * income (securities gains/dividends use 8330) — see the Lightyear booking
+ * workflow. (The old default pointed at "Muud äritulud" 3800, which did not
+ * exist in the standard chart.)
  */
-export const DEFAULT_OTHER_OPERATING_INCOME_ACCOUNT = 3800;
+export const DEFAULT_OTHER_FINANCIAL_INCOME_ACCOUNT = 8600;
 
-/** Exchange rate gain (Kasum valuutakursi muutusest) */
+/**
+ * Exchange-rate gain/loss (Kasum/kahjum valuutakursi muutustest), e-arveldaja
+ * standard chart 8500 — a SINGLE combined account for both directions. Both the
+ * gain and the loss default resolve to it (name-resolved first). (The old
+ * DEFAULT_FX_LOSS_ACCOUNT=8600 pointed at "Muud finantstulud", a financial
+ * INCOME account, so an FX loss would post to income with the wrong sign.)
+ */
 export const DEFAULT_FX_GAIN_ACCOUNT = 8500;
 
-/** Exchange rate loss (Kahjum valuutakursi muutusest) */
-export const DEFAULT_FX_LOSS_ACCOUNT = 8600;
+/** Exchange-rate loss — same combined standard account 8500 as the gain. */
+export const DEFAULT_FX_LOSS_ACCOUNT = 8500;
+
+/**
+ * Securities income (Tulu aktsiatelt ja osadelt), standard chart 8330 — realized
+ * gains on sells and dividends from directly-held shares. Name-resolved first.
+ */
+export const SECURITIES_INCOME_ACCOUNT = 8330;
+
+/**
+ * Securities expense (Kulu aktsiatelt ja osadelt), standard chart 8335 — realized
+ * losses on sells and securities-trade fees. Name-resolved first.
+ */
+export const SECURITIES_EXPENSE_ACCOUNT = 8335;
 
 /** Default debt-check accounts for compute_client_debt */
 export const DEFAULT_DEBT_CHECK_ACCOUNTS = [DEFAULT_OWNER_PAYABLE_ACCOUNT, DEFAULT_LIABILITY_ACCOUNT, DEFAULT_ACCOUNTS_RECEIVABLE];

@@ -502,9 +502,22 @@ describe("registerPrompts", () => {
       broker_account: 1120,
     });
 
-    expect(text).toContain("ask the user for it before booking sells");
+    // Sells now default the gain/loss accounts by name (8330/8335) instead of
+    // demanding gain_loss_account up front.
+    expect(text).toContain("gain → 8330");
+    expect(text).toContain("loss and expensed Buy/Sell fees → 8335");
     expect(text).toContain("gain_loss_account");
     expect(text).toContain("tax_account");
+    // The two fee prompt args are distinct and must be mapped to each tool's own
+    // `fee_account` — the workflow spells out the mapping so the agent never
+    // passes a literal trade_fee_account / distribution_fee_account to a tool,
+    // nor reuses one tool's fee account for the other (trades 8335 vs dist 8610).
+    const argsSchema = getPromptArgsSchema(server, "lightyear-booking");
+    expect(argsSchema).toHaveProperty("trade_fee_account");
+    expect(argsSchema).toHaveProperty("distribution_fee_account");
+    expect(argsSchema).not.toHaveProperty("fee_account");
+    expect(text).toContain('"fee_account": <trade_fee_account>');
+    expect(text).toContain('"fee_account": <distribution_fee_account>');
     expect(text).toContain("If there are distributions in the statement and no `income_account` is known, ask the user for an income_account number");
     expect(text).toContain("current accounting carrying value / cost basis");
     expect(text).toContain("Current portfolio carrying value / remaining cost basis");
