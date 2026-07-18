@@ -1,6 +1,6 @@
 # Prompt Contract Remediation Design
 
-**Status:** Architecture approved by the user; detailed specification revised after independent review and pending user acceptance before implementation planning
+**Status:** Accepted by the user on 2026-07-19 after independent contract, quality, and safety review
 
 **Review baseline:** `e4e5503` on `master`
 
