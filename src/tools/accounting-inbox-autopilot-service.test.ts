@@ -65,7 +65,66 @@ async function summarizePipelineWithClassificationGroups(
   });
 }
 
+async function pipelineWithPendingCamtAndReconciliation() {
+  const importCamt = vi.fn<AutopilotInternalToolHandler>().mockResolvedValue({
+    content: [{
+      text: toMcpJson({
+        execution: {
+          summary: { created_count: 1, skipped_count: 0, error_count: 0 },
+          needs_review: [],
+        },
+      }),
+    }],
+  });
+  const reconcile = vi.fn<AutopilotInternalToolHandler>().mockResolvedValue({
+    content: [{ text: toMcpJson({ execution: { summary: { matched_pairs: 0, matched_one_sided: 0, skipped_ambiguous: 0, error_count: 0 } } }) }],
+  });
+  const handlers = new Map<string, AutopilotInternalToolHandler>([
+    ["import_camt053", importCamt],
+    ["reconcile_inter_account_transfers", reconcile],
+  ]);
+  const result = await runAccountingInboxDryRunPipeline({
+    prepared: preparedInbox({
+      camtFiles: ["/tmp/accounting-inbox/statement.xml"],
+      steps: [
+        {
+          step: 1,
+          tool: "import_camt053",
+          purpose: "Import CAMT",
+          recommended: true,
+          suggested_args: { file_path: "/tmp/accounting-inbox/statement.xml", execute: false },
+          missing_inputs: [],
+          reason: "CAMT found",
+        },
+        {
+          step: 2,
+          tool: "reconcile_inter_account_transfers",
+          purpose: "Reconcile inter-account transfers",
+          recommended: true,
+          suggested_args: { execute: false },
+          missing_inputs: [],
+          reason: "Reconcile after imports",
+        },
+      ],
+    }),
+    handlers,
+  });
+  return { result, handlers, reconcile };
+}
+
 describe("runAccountingInboxDryRunPipeline", () => {
+  it("marks reconciliation deferred when an import dry run has pending rows (M12)", async () => {
+    const { result, reconcile } = await pipelineWithPendingCamtAndReconciliation();
+    expect(result.skipped_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "reconcile_inter_account_transfers",
+        status: "deferred",
+        materialization_state: "pending_imports",
+      }),
+    ]));
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
   it("returns every review item with stable resumable IDs (M11)", async () => {
     const output = await summarizePipelineWithClassificationGroups(7);
     expect(output.needs_accountant_review).toHaveLength(7);
@@ -214,8 +273,9 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(result.skipped_steps).toEqual([
       expect.objectContaining({
         tool: "classify_unmatched_transactions",
-        status: "skipped",
-        summary: expect.stringContaining("pending changes"),
+        status: "deferred",
+        materialization_state: "pending_imports",
+        summary: expect.stringContaining("Deferred until approved imports are materialized"),
       }),
     ]);
     expect(result.next_recommended_action).toBeUndefined();

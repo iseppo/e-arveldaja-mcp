@@ -42,14 +42,30 @@ export interface AutopilotPreparedInboxData {
   liveApiDefaultsAvailable: boolean;
 }
 
+/**
+ * Freshness of the live ledger the autopilot's ledger-dependent steps read:
+ * - `current`: no approved import is waiting to be materialized.
+ * - `pending_imports`: an import/receipt dry run would create rows that are not
+ *   yet in the ledger, so reading it now would reflect the OLD state.
+ * - `failed`: an earlier import/receipt step failed, so the ledger is
+ *   incomplete and unsafe to reconcile against.
+ */
+export type AutopilotMaterializationState = "current" | "pending_imports" | "failed";
+
 export interface AutopilotStepResult {
   step: number;
   tool: string;
-  status: "completed" | "skipped" | "failed";
+  status: "completed" | "skipped" | "failed" | "deferred";
   purpose: string;
   summary: string;
   suggested_args: Record<string, unknown>;
   preview?: Record<string, unknown>;
+  /**
+   * Set on a step deferred because the ledger it reads is not `current` (M12).
+   * The step is safe to run only after the pending imports are materialized and
+   * a fresh ledger is loaded.
+   */
+  materialization_state?: AutopilotMaterializationState;
 }
 
 export interface AutopilotFollowUp {
@@ -472,6 +488,27 @@ function isMaterializationStep(tool: string): boolean {
     tool === "process_receipt_batch";
 }
 
+/**
+ * Steps that READ the live ledger and would therefore act on stale data if an
+ * approved import has not been materialized yet: classification of unmatched
+ * transactions and inter-account transfer reconciliation. These are the only
+ * ledger-reading tools the autopilot ever runs. Both are deferred until the
+ * ledger is `current` (M12) — previously only classification was gated, so
+ * reconciliation ran against the pre-import ledger.
+ */
+const LEDGER_DEPENDENT_TOOLS = new Set([
+  "classify_unmatched_transactions",
+  "reconcile_inter_account_transfers",
+]);
+
+function materializationStateFromBlockReason(
+  reason: "pending_materialization" | "earlier_step_failed" | undefined,
+): AutopilotMaterializationState {
+  if (reason === "pending_materialization") return "pending_imports";
+  if (reason === "earlier_step_failed") return "failed";
+  return "current";
+}
+
 function leavesPendingMaterializationAfterDryRun(
   tool: string,
   preview: Record<string, unknown> | undefined,
@@ -513,16 +550,27 @@ export async function runAccountingInboxDryRunPipeline({
 
   for (const step of prepared.steps) {
     const failedPrereqTool = failedPrerequisiteForStep(step, [...executedSteps, ...skippedSteps]);
-    const blockedByPendingMaterialization = step.tool === "classify_unmatched_transactions" &&
+    const runnable = isAutopilotRunnableStep(step, prepared.liveApiDefaultsAvailable);
+    const blockedByMaterialization = LEDGER_DEPENDENT_TOOLS.has(step.tool) &&
       materializationBlockReason !== undefined;
-    if (failedPrereqTool || !isAutopilotRunnableStep(step, prepared.liveApiDefaultsAvailable) || blockedByPendingMaterialization) {
+    // A ledger-dependent step is DEFERRED (not merely skipped) only when the
+    // stale ledger is its sole obstacle — an independent skip reason (failed
+    // prerequisite, not runnable, missing inputs) keeps the ordinary "skipped"
+    // status and its more specific message.
+    const deferredForMaterialization = blockedByMaterialization &&
+      !failedPrereqTool && runnable && step.missing_inputs.length === 0;
+    if (failedPrereqTool || !runnable || blockedByMaterialization) {
       let skipSummary: string;
-      if (failedPrereqTool) {
-        skipSummary = `Skipped because prerequisite ${failedPrereqTool} failed for the same input.`;
-      } else if (blockedByPendingMaterialization) {
+      let status: "skipped" | "deferred" = "skipped";
+      let materializationState: AutopilotMaterializationState | undefined;
+      if (deferredForMaterialization) {
+        status = "deferred";
+        materializationState = materializationStateFromBlockReason(materializationBlockReason);
         skipSummary = materializationBlockReason === "earlier_step_failed"
-          ? "Skipped because an earlier import or receipt step failed; classification would otherwise reflect an incomplete ledger."
-          : "Skipped because earlier import or receipt steps are still unresolved or still show pending changes; classification would otherwise reflect the old live ledger.";
+          ? `Deferred until approved imports are materialized and a fresh ledger is loaded: an earlier import or receipt step failed, so ${step.tool} would otherwise reflect an incomplete ledger.`
+          : `Deferred until approved imports are materialized and a fresh ledger is loaded: earlier import or receipt steps still show pending changes, so ${step.tool} would otherwise reflect the old live ledger.`;
+      } else if (failedPrereqTool) {
+        skipSummary = `Skipped because prerequisite ${failedPrereqTool} failed for the same input.`;
       } else if (step.missing_inputs.length > 0) {
         skipSummary = `Skipped because ${step.missing_inputs.join(", ")} is still missing.`;
       } else if (!prepared.liveApiDefaultsAvailable && step.tool !== "parse_camt053") {
@@ -533,10 +581,11 @@ export async function runAccountingInboxDryRunPipeline({
       skippedSteps.push({
         step: step.step,
         tool: step.tool,
-        status: "skipped",
+        status,
         purpose: step.purpose,
         summary: skipSummary,
         suggested_args: step.suggested_args,
+        ...(materializationState !== undefined ? { materialization_state: materializationState } : {}),
       });
       if (isMaterializationStep(step.tool) && materializationBlockReason === undefined) {
         materializationBlockReason = "earlier_step_failed";

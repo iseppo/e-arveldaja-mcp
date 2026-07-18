@@ -324,9 +324,10 @@ describe("accounting_inbox (scan mode)", () => {
     });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
+    // M12: with import_camt053 unresolved (unmappable IBAN → the ledger is not
+    // "current"), reconciliation must NOT run against the stale ledger either.
     expect(payload.autopilot.executed_steps.map((step: any) => step.tool)).toEqual([
       "parse_camt053",
-      "reconcile_inter_account_transfers",
     ]);
     expect(payload.autopilot.skipped_steps).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -335,7 +336,14 @@ describe("accounting_inbox (scan mode)", () => {
       }),
       expect.objectContaining({
         tool: "classify_unmatched_transactions",
+        status: "deferred",
+        materialization_state: "failed",
         summary: expect.stringContaining("failed"),
+      }),
+      expect.objectContaining({
+        tool: "reconcile_inter_account_transfers",
+        status: "deferred",
+        materialization_state: "failed",
       }),
     ]));
     expect(payload.autopilot.needs_accountant_review).toEqual([]);
