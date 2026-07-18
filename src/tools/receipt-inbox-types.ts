@@ -19,6 +19,14 @@ export const SUPPORTED_RECEIPT_EXTENSIONS = [
 
 export const MAX_RECEIPT_SIZE = 50 * 1024 * 1024; // 50 MB
 
+// Aggregate ceiling for a single receipt batch. prepareReceiptBatchSnapshot
+// holds every file's bytes in memory AND on temp disk at once (to bind the
+// approved SHA-256 manifest to immutable bytes), so without a batch-wide bound
+// a pathological folder could exhaust memory/disk. Realistic monthly receipt
+// folders are far below this; oversized batches are refused with a clear
+// message to split them rather than risking an OOM.
+export const MAX_RECEIPT_BATCH_TOTAL_SIZE = 256 * 1024 * 1024; // 256 MB
+
 export const RECEIPT_BATCH_EXECUTION_MODES = ["dry_run", "create", "create_and_confirm"] as const;
 
 export type FileType = keyof typeof FILE_TYPE_EXTENSIONS;
@@ -46,6 +54,26 @@ export interface ReceiptScanResult {
   skipped: Array<{ name: string; reason: string }>;
   folder_path: string;
   total_candidates: number;
+}
+
+export interface ReceiptApprovedManifestEntry {
+  relative_path: string;
+  sha256: string;
+}
+
+export interface ReceiptFileSnapshot {
+  file: ReceiptFileInfo;
+  relative_path: string;
+  sha256: string;
+  bytes: Buffer;
+  snapshot_path: string;
+}
+
+export interface ReceiptBatchSnapshot {
+  scan: ReceiptScanResult;
+  files: ReceiptFileSnapshot[];
+  manifest: ReceiptApprovedManifestEntry[];
+  cleanup(): Promise<void>;
 }
 
 export interface TransactionMatchCandidate {

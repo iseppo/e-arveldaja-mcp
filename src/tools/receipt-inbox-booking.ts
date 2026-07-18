@@ -9,12 +9,11 @@ import { applyPurchaseVatDefaults } from "./purchase-vat-defaults.js";
 import type { BookingSuggestion, ExtractedReceiptFields, InvoiceSummaryForMatching } from "./receipt-extraction.js";
 import { computeTermDays } from "./receipt-extraction.js";
 import type { SupplierResolution } from "./supplier-resolution.js";
-import { readValidatedReceiptFile } from "./receipt-inbox-files.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import type {
   ReceiptBatchExecutionMode,
   ReceiptBatchFileResult,
-  ReceiptFileInfo,
+  ReceiptFileSnapshot,
   ReceiptProcessingContext,
 } from "./receipt-inbox-types.js";
 
@@ -74,7 +73,7 @@ function buildSyntheticItem(
 export async function createAndMaybeMatchPurchaseInvoice(
   api: ApiContext,
   context: ReceiptProcessingContext,
-  file: ReceiptFileInfo,
+  snapshot: ReceiptFileSnapshot,
   extracted: ExtractedReceiptFields,
   supplierResolution: SupplierResolution,
   bookingSuggestion: BookingSuggestion,
@@ -83,6 +82,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
   legacyExecuteCreate: boolean,
   consumedTransactionIds: Set<number>,
 ): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error">> {
+  const file = snapshot.file;
   const notes: string[] = [];
   const dryRun = executionMode === "dry_run";
   const shouldConfirm = executionMode === "create_and_confirm";
@@ -266,7 +266,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
 
   if (createdInvoice.id) {
     try {
-      const contents = (await readValidatedReceiptFile(file)).toString("base64");
+      const contents = snapshot.bytes.toString("base64");
       await api.purchaseInvoices.uploadDocument(createdInvoice.id, file.name, contents);
       uploadedDocument = true;
       notes.push("Uploaded source document to created purchase invoice.");

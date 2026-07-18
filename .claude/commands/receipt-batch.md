@@ -83,6 +83,7 @@ Call `receipt_batch` again:
 - `mode`: `create`
 - `folder_path`: the provided folder
 - `accounts_dimensions_id`: the confirmed or provided dimension ID
+- `approved_manifest`: the exact `result.approved_manifest` array returned by the `mode: "dry_run"` preview. This is REQUIRED for `mode: "create"` / `mode: "create_and_confirm"` — it binds the booking to the exact bytes the operator reviewed; if any file changed, was added, or was removed since the preview the call is rejected before anything is created. Pass it back unchanged.
 - include `date_from` / `date_to` when provided
 
 Report:

@@ -38,7 +38,8 @@ import {
 } from "./receipt-inbox.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
-import { readValidatedReceiptFile, revalidateReceiptFilePath } from "./receipt-inbox-files.js";
+import { readValidatedReceiptFile, revalidateReceiptFilePath, sha256Hex } from "./receipt-inbox-files.js";
+import type { ReceiptFileSnapshot } from "./receipt-inbox-types.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import { MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
@@ -57,6 +58,19 @@ vi.mock("fs/promises", async (importOriginal) => ({
 
 const mockedValidateFilePath = vi.mocked(validateFilePath);
 const mockedReadFile = vi.mocked(readFile);
+
+// H15: createAndMaybeMatchPurchaseInvoice now takes a ReceiptFileSnapshot whose
+// immutable `bytes` are uploaded. Wrap a plain ReceiptFileInfo for the legacy
+// unit tests that only exercise the non-upload branches.
+function toSnapshot(file: any, bytes: Buffer = Buffer.from("bytes")): ReceiptFileSnapshot {
+  return {
+    file,
+    relative_path: file.name,
+    sha256: sha256Hex(bytes),
+    bytes,
+    snapshot_path: file.path,
+  };
+}
 
 function makeTx(overrides: Partial<{
   type: string;
@@ -264,14 +278,14 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
         accounts: [],
         isVatRegistered: true,
       },
-      {
+      toSnapshot({
         name: "openai.pdf",
         path: "/tmp/openai.pdf",
         extension: ".pdf",
         file_type: "pdf",
         size_bytes: 123,
         modified_at: "2026-03-22T00:00:00.000Z",
-      },
+      }),
       {
         supplier_name: "OpenAI Ireland Limited",
         invoice_number: "INV-USD",
@@ -359,11 +373,11 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     const file = (name: string) => ({ name, path: `/tmp/${name}`, extension: ".pdf", file_type: "pdf", size_bytes: 123, modified_at: "2026-03-22T00:00:00.000Z" }) as any;
 
     const first = await createAndMaybeMatchPurchaseInvoice(
-      {} as any, context, file("a.pdf"), makeExtracted("INV-A"), supplierResolution, bookingSuggestion,
+      {} as any, context, toSnapshot(file("a.pdf")), makeExtracted("INV-A"), supplierResolution, bookingSuggestion,
       bankTransactions, "dry_run", false, consumed,
     );
     const second = await createAndMaybeMatchPurchaseInvoice(
-      {} as any, context, file("b.pdf"), makeExtracted("INV-B"), supplierResolution, bookingSuggestion,
+      {} as any, context, toSnapshot(file("b.pdf")), makeExtracted("INV-B"), supplierResolution, bookingSuggestion,
       bankTransactions, "dry_run", false, consumed,
     );
 
@@ -405,7 +419,7 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
       call: () => createAndMaybeMatchPurchaseInvoice(
         api,
         { clients: [], purchaseInvoices: [], purchaseArticlesWithVat: [], accounts: [], isVatRegistered: true },
-        { name: "receipt.pdf", path: "/tmp/receipt.pdf", extension: ".pdf", file_type: "pdf", size_bytes: 123, modified_at: "2026-03-22T00:00:00.000Z" },
+        toSnapshot({ name: "receipt.pdf", path: "/tmp/receipt.pdf", extension: ".pdf", file_type: "pdf", size_bytes: 123, modified_at: "2026-03-22T00:00:00.000Z" }),
         {
           supplier_name: "Supplier OÜ",
           invoice_number: "INV-EUR",
@@ -463,6 +477,59 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     expect(result.status).toBe("matched");
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm.mock.calls[0]![1][0].amount).toBe(100);
+  });
+
+  it("uploads the exact immutable receipt snapshot bytes", async () => {
+    const bytes = Buffer.from("%PDF-approved");
+    const snapshot: ReceiptFileSnapshot = {
+      file: {
+        name: "receipt.pdf", path: "/tmp/snapshot/receipt.pdf", extension: ".pdf", file_type: "pdf",
+        size_bytes: bytes.length, modified_at: "2026-07-15T00:00:00.000Z",
+      },
+      relative_path: "receipt.pdf",
+      sha256: sha256Hex(bytes),
+      bytes,
+      snapshot_path: "/tmp/snapshot/receipt.pdf",
+    };
+    const createdInvoice = { id: 900, number: "INV-1", status: "PROJECT" };
+    const api = {
+      purchaseInvoices: {
+        createAndSetTotals: vi.fn().mockResolvedValue(createdInvoice),
+        uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
+        invalidate: vi.fn(),
+      },
+    } as any;
+    const result = await createAndMaybeMatchPurchaseInvoice(
+      api,
+      { clients: [], purchaseInvoices: [], purchaseArticlesWithVat: [], accounts: [], isVatRegistered: true },
+      snapshot,
+      {
+        supplier_name: "Supplier OÜ", invoice_number: "INV-1", invoice_date: "2026-07-15",
+        total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", description: "Service",
+      },
+      {
+        found: true, created: false, match_type: "exact_name",
+        client: {
+          id: 7, name: "Supplier OÜ", is_supplier: true, is_client: false, cl_code_country: "EE",
+          is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false,
+        },
+      } as any,
+      {
+        source: "supplier_history",
+        item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 45, purchase_accounts_id: 5230, vat_rate_dropdown: "24" },
+      } as any,
+      [],
+      "create",
+      false,
+      new Set<number>(),
+    );
+
+    expect(result.status).toBe("created");
+    expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledWith(
+      900,
+      "receipt.pdf",
+      bytes.toString("base64"),
+    );
   });
 });
 

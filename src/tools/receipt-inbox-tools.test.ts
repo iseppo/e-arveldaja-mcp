@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, truncateSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
+import { prepareReceiptBatchSnapshot } from "./receipt-inbox-files.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { HttpError } from "../http-client.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
@@ -680,6 +681,9 @@ describe("receipt inbox tool status handling", () => {
           mode,
           folder_path: tempDir,
           accounts_dimensions_id: 100,
+          // H15: create/create_and_confirm require the dry-run manifest; the
+          // folder is empty, so the approved manifest is [].
+          ...(mode === "dry_run" ? {} : { approved_manifest: [] }),
         });
         const payload = parseMcpResponse(result.content[0]!.text) as any;
 
@@ -699,6 +703,75 @@ describe("receipt inbox tool status handling", () => {
       }
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["replacement", { "a.pdf": "%PDF-B" }],
+    ["addition", { "a.pdf": "%PDF-A", "b.pdf": "%PDF-B" }],
+    ["deletion", {}],
+  ])("rejects receipt manifest %s before mutation", async (_case, replacement) => {
+    const folder = createReceiptFolder({ "a.pdf": "%PDF-A" });
+    try {
+      const dry = await prepareReceiptBatchSnapshot(folder);
+      const approved = dry.manifest;
+      await dry.cleanup();
+      rmSync(folder, { recursive: true, force: true });
+      mkdirSync(folder, { recursive: true });
+      for (const [name, bytes] of Object.entries(replacement)) writeFileSync(join(folder, name), bytes);
+      await expect(prepareReceiptBatchSnapshot(folder, undefined, undefined, undefined, approved))
+        .rejects.toMatchObject({ category: "manifest_mismatch" });
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a receipt batch whose total size exceeds the aggregate cap before allocating", async () => {
+    const folder = createReceiptFolder({});
+    try {
+      // Six sparse 45 MB files: each is under the 50 MB per-file limit (so the
+      // scan accepts them) but together exceed MAX_RECEIPT_BATCH_TOTAL_SIZE
+      // (256 MB). truncateSync makes them sparse, so this costs ~no real disk;
+      // the cap must fire from the stat sizes BEFORE any file is read into
+      // memory or copied to a snapshot.
+      const sizeEach = 45 * 1024 * 1024;
+      for (let i = 0; i < 6; i++) {
+        const p = join(folder, `big${i}.pdf`);
+        writeFileSync(p, "%PDF-");
+        truncateSync(p, sizeEach);
+      }
+      await expect(prepareReceiptBatchSnapshot(folder))
+        .rejects.toMatchObject({ category: "batch_too_large" });
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  it("requires and threads the approved manifest through both receipt tools", async () => {
+    const folder = createReceiptFolder({});
+    try {
+      const granular = setupReceiptTool("process_receipt_batch");
+      const missing = await granular.handler({
+        folder_path: folder, accounts_dimensions_id: 100, execution_mode: "create",
+      });
+      expect(parseMcpResponse(missing.content[0]!.text)).toMatchObject({ category: "approved_manifest_required" });
+      expect(granular.api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+
+      const merged = setupReceiptTool("receipt_batch");
+      const dry = await merged.handler({ mode: "dry_run", folder_path: folder, accounts_dimensions_id: 100 });
+      const dryPayload = parseMcpResponse(dry.content[0]!.text) as any;
+      // The dry-run echoes the exact manifest the operator must approve.
+      expect(dryPayload.result.approved_manifest).toEqual([]);
+
+      const execute = await merged.handler({
+        mode: "create", folder_path: folder, accounts_dimensions_id: 100,
+        approved_manifest: dryPayload.result.approved_manifest,
+      });
+      expect((parseMcpResponse(execute.content[0]!.text) as any).delegated_args).toMatchObject({
+        execution_mode: "create", approved_manifest: [],
+      });
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
     }
   });
 
@@ -1395,28 +1468,42 @@ describe("receipt inbox tool status handling", () => {
     expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
   });
 
-  it("process_receipt_batch warns that create mode re-scans the folder at execution time (#5)", async () => {
+  it("process_receipt_batch binds create to the approved manifest instead of re-scanning (H15)", async () => {
     const tempDir = createReceiptFolder({});
     try {
-      const { handler } = setupReceiptTool("process_receipt_batch");
+      const { handler, api } = setupReceiptTool("process_receipt_batch");
 
-      const createResult = await handler({
+      // create without the dry-run manifest is refused before any mutation.
+      const missing = await handler({
         folder_path: tempDir,
         accounts_dimensions_id: 100,
         execution_mode: "create",
       });
-      const createPayload = parseMcpResponse(createResult.content[0]!.text) as any;
-      expect(typeof createPayload.warning).toBe("string");
-      expect(createPayload.warning).toContain("RE-SCANNED");
+      const missingPayload = parseMcpResponse(missing.content[0]!.text) as any;
+      expect(missingPayload.category).toBe("approved_manifest_required");
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
 
-      // The dry-run preview must NOT carry the execution-time re-scan warning.
+      // dry_run echoes the manifest to approve; no obsolete re-scan warning.
       const dryResult = await handler({
         folder_path: tempDir,
         accounts_dimensions_id: 100,
         execution_mode: "dry_run",
       });
       const dryPayload = parseMcpResponse(dryResult.content[0]!.text) as any;
+      expect(dryPayload.approved_manifest).toEqual([]);
       expect(dryPayload.warning).toBeUndefined();
+
+      // create with the approved manifest proceeds; the snapshot binding means
+      // there is no execution-time re-scan warning.
+      const createResult = await handler({
+        folder_path: tempDir,
+        accounts_dimensions_id: 100,
+        execution_mode: "create",
+        approved_manifest: dryPayload.approved_manifest,
+      });
+      const createPayload = parseMcpResponse(createResult.content[0]!.text) as any;
+      expect(createPayload.warning).toBeUndefined();
+      expect(createPayload.approved_manifest).toEqual([]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

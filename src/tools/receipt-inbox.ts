@@ -3,6 +3,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { toolError } from "../tool-error.js";
 import { HttpError } from "../http-client.js";
 import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
@@ -69,14 +70,16 @@ import { buildWorkflowEnvelope, remapHiddenGranularWorkflowResult } from "../wor
 import { DEFAULT_LIABILITY_ACCOUNT, EMTA_PREPAYMENT_ACCOUNT } from "../accounting-defaults.js";
 import {
   RECEIPT_BATCH_EXECUTION_MODES,
+  type ReceiptApprovedManifestEntry,
   type ReceiptBatchExecutionMode,
   type ReceiptBatchFileResult,
   type ReceiptFileInfo,
+  type ReceiptFileSnapshot,
   type ReceiptInboxToolHandler,
   type ReceiptInboxToolResult,
   type ReceiptProcessingContext,
 } from "./receipt-inbox-types.js";
-import { readValidatedReceiptFile, revalidateReceiptFilePath, scanReceiptFolderInternal } from "./receipt-inbox-files.js";
+import { prepareReceiptBatchSnapshot, scanReceiptFolderInternal } from "./receipt-inbox-files.js";
 import { findDuplicateInvoice } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import {
@@ -91,6 +94,14 @@ import {
 } from "./receipt-inbox-summary.js";
 
 const POSSIBLE_MATCH_THRESHOLD = 70;
+
+// H15: the exact SHA-256 manifest a dry-run returned. Binding create/confirm to
+// it lets prepareReceiptBatchSnapshot reject a folder that changed since the
+// operator approved the preview, before any API mutation.
+const manifestSchema = z.array(z.object({
+  relative_path: z.string().min(1).refine(value => !value.includes("/") && !value.includes("\\")),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+}));
 
 export { buildDryRunCreatedInvoicePreview };
 
@@ -817,19 +828,20 @@ async function resolveClassificationSuggestion(
 }
 
 async function extractReceiptFields(
-  file: ReceiptFileInfo,
+  snapshot: ReceiptFileSnapshot,
   ownCompanyVat?: string,
   ownCompanyRegistryCode?: string,
 ): Promise<ExtractedReceiptFields> {
-  const validatedPath = await revalidateReceiptFilePath(file);
-  const parsedDocument = await parseDocument(validatedPath);
+  // Parse the immutable snapshot bytes (snapshot_path), never the live folder
+  // file, so the parser and the later uploader observe byte-identical content.
+  const parsedDocument = await parseDocument(snapshot.snapshot_path);
   const allTextItems = parsedDocument.result?.pages?.flatMap(page =>
     (page.textItems ?? []).map(item => ({
       ...item,
       pageNum: page.pageNum,
     }))
   );
-  return extractReceiptFieldsFromText(parsedDocument.text, file.name, {
+  return extractReceiptFieldsFromText(parsedDocument.text, snapshot.file.name, {
     ownCompanyVat,
     ownCompanyRegistryCode,
     textItems: allTextItems,
@@ -1058,13 +1070,14 @@ interface ProcessSingleReceiptOptions {
 async function processSingleReceipt(
   api: ApiContext,
   context: ReceiptProcessingContext,
-  file: ReceiptFileInfo,
+  snapshot: ReceiptFileSnapshot,
   options: ProcessSingleReceiptOptions,
 ): Promise<ReceiptBatchFileResult> {
+  const file = snapshot.file;
   const notes: string[] = [];
 
   try {
-    const extracted = await extractReceiptFields(file, options.ownCompanyVat, options.ownCompanyRegistryCode);
+    const extracted = await extractReceiptFields(snapshot, options.ownCompanyVat, options.ownCompanyRegistryCode);
     const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
     const selfVatDetected = detectSelfVatOnly(extracted, options.ownCompanyVat);
     const signals: ExtractionConfidenceSignals = {};
@@ -1311,7 +1324,7 @@ async function processSingleReceipt(
     const created = await createAndMaybeMatchPurchaseInvoice(
       api,
       context,
-      file,
+      snapshot,
       extracted,
       materializedSupplierResolution,
       bookingSuggestion,
@@ -1534,15 +1547,31 @@ export function registerReceiptInboxTools(
       execute: z.boolean().optional().describe("Deprecated boolean alias for execution_mode."),
       date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
+      approved_manifest: manifestSchema.optional().describe("Exact manifest returned by dry_run; required for create/create_and_confirm."),
     },
     { ...batch, openWorldHint: true, title: "Process Receipt Batch" },
-    async ({ folder_path, accounts_dimensions_id, execution_mode, execute, date_from, date_to }) => {
+    async ({ folder_path, accounts_dimensions_id, execution_mode, execute, date_from, date_to, approved_manifest }) => {
       const { mode: executionMode, legacyExecuteCreate } = resolveReceiptBatchExecutionMode(
         execute,
         execution_mode as ReceiptBatchExecutionMode | undefined,
       );
       const dryRun = executionMode === "dry_run";
-      const scan = await scanReceiptFolderInternal(folder_path, undefined, date_from, date_to);
+      // H15: creating/confirming without the dry-run manifest is refused so the
+      // approved-bytes binding below cannot be bypassed.
+      if (!dryRun && approved_manifest === undefined) {
+        return toolError({ category: "approved_manifest_required", error: "approved_manifest is required for receipt mutation" });
+      }
+      // Snapshot every receipt's bytes ONCE and (for create/confirm) verify the
+      // folder still matches the approved manifest before any API mutation.
+      const snapshot = await prepareReceiptBatchSnapshot(
+        folder_path,
+        undefined,
+        date_from,
+        date_to,
+        dryRun ? undefined : (approved_manifest as ReceiptApprovedManifestEntry[]),
+      );
+      try {
+      const scan = snapshot.scan;
       const vatInfo = await api.readonly.getVatInfo();
       // getInvoiceInfo is best-effort: a missing endpoint or test stub means
       // we lose the name-based fallback for ownCompanyRegistryCode (#22),
@@ -1575,10 +1604,10 @@ export function registerReceiptInboxTools(
       const consumedTransactionIds = new Set<number>();
       const results: ReceiptBatchFileResult[] = [];
 
-      for (let index = 0; index < scan.files.length; index++) {
-        const file = scan.files[index]!;
-        await reportProgress(index, scan.files.length);
-        results.push(await processSingleReceipt(api, context, file, {
+      for (let index = 0; index < snapshot.files.length; index++) {
+        const fileSnapshot = snapshot.files[index]!;
+        await reportProgress(index, snapshot.files.length);
+        results.push(await processSingleReceipt(api, context, fileSnapshot, {
           ownCompanyVat,
           ownCompanyRegistryCode,
           bankTransactions,
@@ -1606,6 +1635,7 @@ export function registerReceiptInboxTools(
         ...(date_from ? { date_from } : {}),
         ...(date_to ? { date_to } : {}),
         execution_mode: "create",
+        approved_manifest: snapshot.manifest,
       };
       const workflowSummary = buildReceiptBatchWorkflowSummary(summary);
       const workflow = buildReceiptBatchWorkflow({
@@ -1625,14 +1655,11 @@ export function registerReceiptInboxTools(
             accounts_dimensions_id,
             summary,
             workflow,
-            // TOCTOU warning: create/create_and_confirm rescans the folder at
-            // execution time (there is no manifest/hash carried over from the
-            // dry-run preview), so any file replaced or added since the preview
-            // is processed as-is. Surface this so the operator re-reviews when
-            // the folder may have changed between preview and execution.
-            ...(dryRun ? {} : {
-              warning: "Folder was RE-SCANNED at execution time; files changed or added since the dry-run preview were processed as-is. Re-review the results below if the folder may have changed since the preview.",
-            }),
+            // H15: bytes were snapshotted once and (for create/confirm) checked
+            // against the approved manifest, so there is no execution-time
+            // re-scan drift. Echo the manifest the operator approved / must
+            // approve so the create call can bind to these exact bytes.
+            approved_manifest: snapshot.manifest,
             skipped: scan.skipped,
             results: sanitizedResults,
             execution: buildReceiptBatchExecution({
@@ -1643,6 +1670,9 @@ export function registerReceiptInboxTools(
           }),
         }],
       };
+      } finally {
+        await snapshot.cleanup();
+      }
     },
   );
 
@@ -1656,9 +1686,10 @@ export function registerReceiptInboxTools(
       date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
       file_types: z.array(z.enum(["pdf", "jpg", "png"])).optional().describe("Optional file type filter for scan mode"),
+      approved_manifest: manifestSchema.optional().describe("Exact manifest returned by dry_run; required for create/create_and_confirm."),
     },
     { ...batch, openWorldHint: true, title: "Receipt Batch" },
-    async ({ mode, folder_path, accounts_dimensions_id, date_from, date_to, file_types }) => {
+    async ({ mode, folder_path, accounts_dimensions_id, date_from, date_to, file_types, approved_manifest }) => {
       const selectedMode = mode ?? "scan";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
@@ -1677,6 +1708,11 @@ export function registerReceiptInboxTools(
         if (accounts_dimensions_id === undefined) {
           throw new Error("accounts_dimensions_id is required when mode is dry_run, create, or create_and_confirm");
         }
+        // H15: create/create_and_confirm must carry the exact manifest a dry_run
+        // returned so the snapshot layer can reject a folder that changed.
+        if (selectedMode !== "dry_run" && approved_manifest === undefined) {
+          return toolError({ category: "approved_manifest_required", error: "approved_manifest is required for receipt mutation" });
+        }
         delegatedTool = "process_receipt_batch";
         delegatedArgs = {
           folder_path,
@@ -1684,6 +1720,7 @@ export function registerReceiptInboxTools(
           execution_mode: selectedMode,
           ...(date_from !== undefined ? { date_from } : {}),
           ...(date_to !== undefined ? { date_to } : {}),
+          ...(approved_manifest !== undefined ? { approved_manifest } : {}),
         };
         result = await invokeCapturedTool(delegatedTool, delegatedArgs);
       }

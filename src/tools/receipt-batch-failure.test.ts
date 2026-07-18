@@ -13,6 +13,7 @@ import {
 } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
+import { prepareReceiptBatchSnapshot } from "./receipt-inbox-files.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 
@@ -62,6 +63,16 @@ afterEach(() => {
   }
   resetAccountingRulesCache();
 });
+
+// H15: create/create_and_confirm require the exact dry-run manifest. These
+// tests fully mock the filesystem, so derive the manifest from the same mocks
+// (readFile/readdir/stat are persistent mockResolvedValue, so a pre-call
+// snapshot reproduces exactly what the handler will compute).
+async function approvedManifest(folder = "/tmp/receipts") {
+  const snap = await prepareReceiptBatchSnapshot(folder);
+  await snap.cleanup();
+  return snap.manifest;
+}
 
 describe("process_receipt_batch rollback handling", () => {
   it("prefers accounting-rules.md over generic fallback suggestions in dry run", async () => {
@@ -860,6 +871,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
+      approved_manifest: await approvedManifest(),
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1040,6 +1052,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
+      approved_manifest: await approvedManifest(),
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1201,6 +1214,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execution_mode: "create_and_confirm",
+      approved_manifest: await approvedManifest(),
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1358,6 +1372,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
+      approved_manifest: await approvedManifest(),
     });
 
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
@@ -1498,6 +1513,7 @@ describe("process_receipt_batch rollback handling", () => {
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
+      approved_manifest: await approvedManifest(),
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
