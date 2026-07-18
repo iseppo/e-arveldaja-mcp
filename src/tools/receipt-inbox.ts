@@ -945,18 +945,28 @@ export function deriveOwnCompanyRegistryCode(
 }
 
 /**
- * Resolve `invoice_info` defensively. The endpoint is a recent addition;
- * test stubs and older API client mocks may not implement it. Returning an
- * empty object on any failure keeps the receipt-batch flow working — we
- * just lose the name-based fallback path for ownCompanyRegistryCode (#22).
+ * Load the active company's own identity (`invoice_company_name`), which feeds
+ * the name-based self-match guard for `ownCompanyRegistryCode` (#22). Two
+ * failure modes are deliberately treated DIFFERENTLY (M09):
+ *
+ *  - **Endpoint absent** (`getInvoiceInfo` is not a function): a known static
+ *    configuration — older API clients / test stubs never had it, and VAT-based
+ *    self-match still protects booking. Stay best-effort: `available` with no
+ *    name, preserving the pre-M09 behaviour.
+ *  - **Endpoint present but the call throws** (e.g. a transient 5xx): we cannot
+ *    tell whether identity would have blocked a self-match, so we FAIL CLOSED
+ *    (`retryable_error`) rather than silently book with weakened protection.
  */
-async function safeGetInvoiceInfo(api: ApiContext): Promise<{ invoice_company_name?: string | null }> {
+export async function loadOwnCompanyIdentity(
+  api: ApiContext,
+): Promise<{ status: "available"; invoiceCompanyName?: string } | { status: "retryable_error"; reason: string }> {
+  const fn = api.readonly.getInvoiceInfo;
+  if (typeof fn !== "function") return { status: "available" };
   try {
-    const fn = api.readonly.getInvoiceInfo;
-    if (typeof fn !== "function") return {};
-    return await fn.call(api.readonly);
-  } catch {
-    return {};
+    const info = await fn.call(api.readonly);
+    return { status: "available", invoiceCompanyName: info.invoice_company_name?.trim() || undefined };
+  } catch (error) {
+    return { status: "retryable_error", reason: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -1605,6 +1615,21 @@ export function registerReceiptInboxTools(
         execution_mode as ReceiptBatchExecutionMode | undefined,
       );
       const dryRun = executionMode === "dry_run";
+      // M09: the active company's identity feeds the #22 self-match guard. If a
+      // PRESENT invoice_info endpoint fails transiently we cannot tell whether
+      // identity would have blocked a self-match, so fail closed BEFORE any
+      // snapshot/mutation instead of booking with weakened protection. (A
+      // permanently-absent endpoint stays best-effort — see loadOwnCompanyIdentity.)
+      const ownCompanyIdentity = await loadOwnCompanyIdentity(api);
+      if (ownCompanyIdentity.status === "retryable_error") {
+        return toolError({
+          error: "Could not load own-company identity; refusing to auto-process receipts",
+          category: "manual_review_required",
+          protection_state: "retryable_error",
+          reason: ownCompanyIdentity.reason,
+          next_action: "Retry once the invoice_info endpoint is reachable again.",
+        });
+      }
       // H15: creating/confirming without the dry-run manifest is refused so the
       // approved-bytes binding below cannot be bypassed.
       if (!dryRun && approved_manifest === undefined) {
@@ -1622,10 +1647,6 @@ export function registerReceiptInboxTools(
       try {
       const scan = snapshot.scan;
       const vatInfo = await api.readonly.getVatInfo();
-      // getInvoiceInfo is best-effort: a missing endpoint or test stub means
-      // we lose the name-based fallback for ownCompanyRegistryCode (#22),
-      // but VAT-based self-match still works.
-      const invoiceInfo = await safeGetInvoiceInfo(api);
       const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
       const context: ReceiptProcessingContext = {
         clients: await api.clients.listAll(),
@@ -1637,7 +1658,7 @@ export function registerReceiptInboxTools(
       const ownCompanyRegistryCode = deriveOwnCompanyRegistryCode(
         context.clients,
         ownCompanyVat,
-        invoiceInfo.invoice_company_name?.trim() || undefined,
+        ownCompanyIdentity.invoiceCompanyName,
       );
       const allTransactions = await api.transactions.listAll();
       const bankTransactions = selectBatchBankTransactions(allTransactions, accounts_dimensions_id, {
