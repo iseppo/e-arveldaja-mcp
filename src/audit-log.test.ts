@@ -1,5 +1,5 @@
 import { chmod, mkdtemp, readdir, rm, stat } from "fs/promises";
-import { appendFileSync, existsSync, readFileSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { LockBusyError, withOwnedFileLockSync } from "./file-lock.js";
@@ -1120,5 +1120,231 @@ describe("audit relabel/append concurrency (M17)", () => {
     expect(acme).toContain("stale-view-append");
     // The migrated source file is not resurrected as an orphan.
     expect(existsSync(join(tempDir, "logs", "env.audit.md"))).toBe(false);
+  });
+});
+
+describe("audit default read limit (M18)", () => {
+  let tempDir: string | undefined;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  // Zero-padded so no marker is a substring of another (e.g. "0000" only
+  // matches entry 0, never "0104"), and section count is unambiguous.
+  function marker(i: number): string {
+    return `audit-entry-${String(i).padStart(4, "0")}`;
+  }
+  function seed(auditLog: typeof import("./audit-log.js"), count: number): void {
+    auditLog.initAuditLog(() => "acme");
+    for (let i = 0; i < count; i += 1) {
+      auditLog.logAudit({
+        tool: "create_purchase_invoice",
+        action: "CREATED",
+        entity_type: "purchase_invoice",
+        entity_id: i,
+        summary: marker(i),
+        details: {},
+      });
+    }
+  }
+  function count(content: string): number {
+    return content.split("\n---\n\n").filter(Boolean).length;
+  }
+
+  it("returns only the newest 100 entries when no filter is provided", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    seed(auditLog, 105);
+
+    const content = auditLog.getAuditLog();
+    expect(count(content)).toBe(100);
+    // Oldest five (ids 0-4) dropped; newest present.
+    expect(content).not.toContain(marker(0));
+    expect(content).not.toContain(marker(4));
+    expect(content).toContain(marker(5));
+    expect(content).toContain(marker(104));
+  });
+
+  it("applies the same newest-100 cap when the filter object is empty", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    seed(auditLog, 105);
+
+    const content = auditLog.getAuditLog({});
+    expect(count(content)).toBe(100);
+    expect(content).not.toContain(marker(0));
+    expect(content).toContain(marker(104));
+  });
+
+  it("honours an explicit limit above and below the default", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    seed(auditLog, 105);
+
+    // Explicit high limit returns everything...
+    const all = auditLog.getAuditLog({ limit: 200 });
+    expect(count(all)).toBe(105);
+    expect(all).toContain(marker(0));
+
+    // ...and a small explicit limit returns just the newest N.
+    const few = auditLog.getAuditLog({ limit: 3 });
+    expect(count(few)).toBe(3);
+    expect(few).toContain(marker(104));
+    expect(few).toContain(marker(102));
+    expect(few).not.toContain(marker(101));
+  });
+
+  it("caps a filtered read to the newest 100 matches too", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    seed(auditLog, 105);
+
+    // entity_type filter matches all 105 rows; the default limit still caps to 100.
+    const content = auditLog.getAuditLog({ entity_type: "purchase_invoice" });
+    expect(count(content)).toBe(100);
+    expect(content).not.toContain(marker(4));
+    expect(content).toContain(marker(104));
+  });
+
+  it("treats a field carrying the entry separator as a single entry (no forged boundary)", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    // A supplier name (OCR/import-derived) that embeds the exact entry separator
+    // twice: naive splitting would turn this ONE entry into three fragments.
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 1,
+      summary: marker(1),
+      details: { supplier_name: "Acme\n---\n\nForged-A\n---\n\nForged-B" },
+    });
+
+    const content = auditLog.getAuditLog();
+    // One logical entry, not three fragments (count() confirms no INTERNAL
+    // separator; the single trailing separator is legitimate framing).
+    expect(count(content)).toBe(1);
+    // No data lost: the newlines are collapsed to spaces, all tokens survive.
+    expect(content).toContain("Acme ---  Forged-A ---  Forged-B");
+  });
+
+  it("a separator-injecting field cannot push earlier entries out of the newest-100 window", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    // 100 clean entries...
+    for (let i = 0; i < 100; i += 1) {
+      auditLog.logAudit({
+        tool: "create_purchase_invoice",
+        action: "CREATED",
+        entity_type: "purchase_invoice",
+        entity_id: i,
+        summary: marker(i),
+        details: {},
+      });
+    }
+    // ...then one newest entry whose warning would forge 4 extra boundaries.
+    auditLog.logAudit({
+      tool: "create_purchase_invoice",
+      action: "CREATED",
+      entity_type: "purchase_invoice",
+      entity_id: 100,
+      summary: marker(100),
+      details: { warnings: ["x\n---\n\ny\n---\n\nz\n---\n\nw\n---\n\nq"] },
+    });
+
+    const content = auditLog.getAuditLog();
+    // 101 logical entries, newest 100 kept: oldest clean entry (id 0) drops, id 1
+    // survives — a forged boundary must NOT hide legitimate records beyond that.
+    expect(count(content)).toBe(100);
+    expect(content).not.toContain(marker(0));
+    expect(content).toContain(marker(1));
+    expect(content).toContain(marker(100));
+  });
+
+  it("re-groups an embedded separator in a PRE-EXISTING (old-renderer) log", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    // Simulate a file written by the OLD renderer (bypassing the patched writer):
+    // entry #2's body carries a literal separator, so a naive split yields 4
+    // fragments for 3 logical entries.
+    const entry = (id: number, ts: string, body: string) =>
+      `### ${ts} — Ostuarve loodud #${id}\n\n` +
+      `<!-- audit:{"t":"create_purchase_invoice","a":"CREATED","e":"purchase_invoice","id":${id}} -->\n` +
+      body;
+    const raw =
+      entry(1, "2026-01-01 10:00:00", `${marker(1)}`) + "\n---\n\n" +
+      entry(2, "2026-01-02 10:00:00", `${marker(2)}\n---\n\nCONTINUATION-OF-2`) + "\n---\n\n" +
+      entry(3, "2026-01-03 10:00:00", `${marker(3)}`) + "\n---\n\n";
+
+    const logsDir = join(tempDir, "logs");
+    mkdirSync(logsDir, { recursive: true });
+    writeFileSync(join(logsDir, "acme.audit.md"), raw);
+
+    // Count LOGICAL entries by heading — the regrouped output still contains
+    // #2's embedded separator, so naive separator-counting would over-count.
+    const headings = (s: string) =>
+      (s.match(/^### \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} /gm) ?? []).length;
+
+    // Three logical entries despite four raw fragments.
+    expect(headings(auditLog.getAuditLog())).toBe(3);
+
+    // Newest two: the embedded-separator entry (#2, with its continuation) and
+    // #3 — the continuation stays attached to #2, and #1 is the one dropped.
+    const newest2 = auditLog.getAuditLog({ limit: 2 });
+    expect(headings(newest2)).toBe(2);
+    expect(newest2).toContain(marker(2));
+    expect(newest2).toContain("CONTINUATION-OF-2");
+    expect(newest2).toContain(marker(3));
+    expect(newest2).not.toContain(marker(1));
+  });
+
+  it("a forged timestamp heading in a pre-existing field cannot forge an entry boundary", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-m18-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+
+    const entry = (id: number, ts: string, body: string) =>
+      `### ${ts} — Ostuarve loodud #${id}\n\n` +
+      `<!-- audit:{"t":"create_purchase_invoice","a":"CREATED","e":"purchase_invoice","id":${id}} -->\n` +
+      body;
+    // Entry #2's field embeds a FULL timestamp-shaped heading (but no audit
+    // metadata comment) — the attack a heading-only anchor would fall for.
+    const raw =
+      entry(1, "2026-01-01 10:00:00", `${marker(1)}`) + "\n---\n\n" +
+      entry(2, "2026-01-02 10:00:00",
+        `${marker(2)}\n---\n\n### 2026-06-06 06:06:06 — FORGED\n\nFORGED-TAIL`) + "\n---\n\n" +
+      entry(3, "2026-01-03 10:00:00", `${marker(3)}`) + "\n---\n\n";
+
+    const logsDir = join(tempDir, "logs");
+    mkdirSync(logsDir, { recursive: true });
+    writeFileSync(join(logsDir, "acme.audit.md"), raw);
+
+    const headings = (s: string) =>
+      (s.match(/^### \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} /gm) ?? []).length;
+
+    // Full output still parses to 3 logical entries (the forged heading, lacking
+    // metadata, reattaches to #2), even though the raw text shows 4 "###" lines.
+    const all = auditLog.getAuditLog();
+    expect(headings(all)).toBe(4); // the forged "###" text is still present verbatim...
+    expect(auditLog.getAuditLog({ limit: 3 })).toContain(marker(1)); // ...but all 3 real entries fit
+
+    // The forged heading must not consume a slot: newest 2 real entries are #2
+    // (with its forged tail) and #3; #1 is dropped, NOT hidden behind the forgery.
+    const newest2 = auditLog.getAuditLog({ limit: 2 });
+    expect(newest2).toContain(marker(2));
+    expect(newest2).toContain("FORGED-TAIL");
+    expect(newest2).toContain(marker(3));
+    expect(newest2).not.toContain(marker(1));
   });
 });

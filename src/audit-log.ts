@@ -114,6 +114,9 @@ export function setAuditMergeTestHookForTesting(
 const META_RE = /^<!-- audit:(\{.*\}) -->$/m;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const AUDIT_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+// A rendered entry always begins with this heading (see renderEntry). Used to
+// re-group separator fragments back into logical entries when reading.
+const ENTRY_HEADING_START = /^### \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} /;
 const ISO_TS_NO_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?$/;
 const PRIVATE_FILE_MODE = 0o600;
 
@@ -250,8 +253,47 @@ function getLogFilePath(): string {
   return getLogFilePathForConnection(activeConnectionNameGetter());
 }
 
+// A fragment begins a genuine entry only if it carries BOTH structural markers
+// renderEntry always emits: the timestamped heading at the start AND the
+// machine-generated audit-metadata comment (valid JSON with the t/a/e keys).
+// Requiring both — not just a timestamp-shaped heading — means a HISTORICAL
+// field value (attacker-influenced, written before field newlines were
+// normalized) that merely embeds "\n---\n\n### <ts> — forged" cannot forge an
+// entry boundary: it lacks the metadata comment, so it is treated as a
+// continuation of the preceding entry.
+function startsNewAuditEntry(fragment: string): boolean {
+  if (!ENTRY_HEADING_START.test(fragment)) return false;
+  const meta = fragment.match(META_RE);
+  if (!meta) return false;
+  try {
+    const parsed = JSON.parse(meta[1]!) as Record<string, unknown>;
+    return typeof parsed === "object" && parsed !== null
+      && "t" in parsed && "a" in parsed && "e" in parsed;
+  } catch {
+    return false;
+  }
+}
+
 function splitAuditSections(content: string): string[] {
-  return content.split(ENTRY_SEPARATOR).filter(Boolean);
+  const fragments = content.split(ENTRY_SEPARATOR).filter(Boolean);
+  // An entry body can itself contain the separator — notably in HISTORICAL logs
+  // written before the renderer normalized newlines in every field (a supplier
+  // name or warning could carry a literal "\n---\n\n"). A naive split would
+  // shatter one logical entry into several fragments, inflating counts and
+  // letting a newest-N cap hide earlier records. Re-group: a fragment that does
+  // not begin a genuine entry (heading + metadata) is a continuation of the
+  // previous logical entry, split off by an embedded separator — re-attach it
+  // with the exact separator it was split on, so counting/limiting operates on
+  // logical entries.
+  const sections: string[] = [];
+  for (const fragment of fragments) {
+    if (sections.length > 0 && !startsNewAuditEntry(fragment)) {
+      sections[sections.length - 1] += ENTRY_SEPARATOR + fragment;
+    } else {
+      sections.push(fragment);
+    }
+  }
+  return sections;
 }
 
 function getSectionTimestampMs(section: string): number | undefined {
@@ -481,7 +523,16 @@ function formatTimestamp(iso: string): string {
 // ---------------------------------------------------------------------------
 
 function escapeMarkdown(s: string): string {
-  return s.replace(/[|*_`[\]\\]/g, "\\$&");
+  // Collapse every line break (CRLF, lone CR, lone LF) to a space BEFORE
+  // escaping. Rendered field values live in single-line Markdown table cells,
+  // so a stray newline would break the table — and, critically, an
+  // (OCR/import-derived) value such as a supplier name or warning could emit
+  // the `\n---\n\n` entry separator, forging a section boundary. The read path
+  // splits on that separator and caps to the newest N entries, so a forged
+  // boundary would inflate the fragment count and could hide earlier audit
+  // records. Normalizing here (the single choke point for every escaped field)
+  // guarantees `\n---\n\n` can never appear inside a rendered entry body.
+  return s.replace(/\r\n?|\n/g, " ").replace(/[|*_`[\]\\]/g, "\\$&");
 }
 
 function humanizeFieldKey(key: string): string {
@@ -508,7 +559,9 @@ function isMoneyLikeField(key: string): boolean {
 
 function formatDetailValue(key: string, value: unknown, opts?: { code?: boolean }): string {
   if (opts?.code) {
-    return `\`${String(value).replace(/`/g, "\\`")}\``;
+    // Normalize line breaks here too: the code path skips escapeMarkdown, and a
+    // newline in a backtick span would still break the single-line table cell.
+    return `\`${String(value).replace(/\r\n?|\n/g, " ").replace(/`/g, "\\`")}\``;
   }
   if (typeof value === "number") {
     return isMoneyLikeField(key) ? value.toFixed(2) : String(value);
@@ -539,8 +592,8 @@ function renderPostingsTable(postings: unknown): string {
 
   const rows = postings.map((p: Record<string, unknown>) => {
     const account = String(p.account_name ?? p.accounts_id ?? "");
-    const type = p.type === "D" ? "D" : p.type === "C" ? "K" : String(p.type);
-    const amount = typeof p.amount === "number" ? p.amount.toFixed(2) : String(p.amount ?? "");
+    const type = p.type === "D" ? "D" : p.type === "C" ? "K" : escapeMarkdown(String(p.type));
+    const amount = typeof p.amount === "number" ? p.amount.toFixed(2) : escapeMarkdown(String(p.amount ?? ""));
     const cells = [escapeMarkdown(account), type, amount];
     if (hasDimension) cells.push(p.accounts_dimensions_id === undefined ? "" : escapeMarkdown(String(p.accounts_dimensions_id)));
     if (hasBaseAmount) cells.push(typeof p.base_amount === "number" ? p.base_amount.toFixed(2) : escapeMarkdown(String(p.base_amount ?? "")));
@@ -860,12 +913,13 @@ function getAuditLogFromFile(filePath: string, filter?: AuditLogFilter): string 
     return "";
   }
 
-  if (!filter?.entity_type && !filter?.action && !filter?.date_from && !filter?.date_to && !filter?.limit) {
-    return content;
-  }
-
-  // Split into sections by separator
-  const sections = content.split(ENTRY_SEPARATOR).filter(Boolean);
+  // No raw-content fast path: an unfiltered read must still honour the default
+  // limit (parseLimitFilter(undefined) === 100), so every read splits, filters,
+  // and caps to the newest `limit` entries — otherwise an unbounded log floods
+  // the caller. splitAuditSections re-groups separator fragments into logical
+  // entries, so the cap can't be defeated by an embedded separator (incl. in
+  // pre-existing logs written before field newlines were normalized).
+  const sections = splitAuditSections(content);
   let filtered = sections;
 
   if (filter?.date_from || filter?.date_to) {
