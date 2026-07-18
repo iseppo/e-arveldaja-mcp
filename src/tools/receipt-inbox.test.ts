@@ -33,6 +33,7 @@ import {
   detectSelfVatOnly,
   detectSelfRegCodeOnly,
   resolveSupplierFromTransaction,
+  selectBatchBankTransactions,
   shouldGateCreation,
   supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
@@ -1320,6 +1321,43 @@ describe("buildReferencedInvoiceForPaymentReceipt (#23)", () => {
     expect(buildReferencedInvoiceForPaymentReceipt(undefined, invoices, { client_id: 10 })).toBeUndefined();
     expect(buildReferencedInvoiceForPaymentReceipt("", invoices, { client_id: 10 })).toBeUndefined();
     expect(buildReferencedInvoiceForPaymentReceipt("AUTO-20260320-RECEIPT", invoices, { client_id: 10 })).toBeUndefined();
+  });
+});
+
+describe("selectBatchBankTransactions (M08 — file vs accounting date separation)", () => {
+  const txns = [
+    { id: 1, accounts_dimensions_id: 10, status: "PROJECT", type: "C", date: "2026-06-30", amount: 100 },
+    { id: 2, accounts_dimensions_id: 10, status: "PROJECT", type: "C", date: "2026-07-01", amount: 200 },
+    { id: 3, accounts_dimensions_id: 99, status: "PROJECT", type: "C", date: "2026-07-01", amount: 300 },
+    { id: 4, accounts_dimensions_id: 10, status: "CONFIRMED", type: "C", date: "2026-07-01", amount: 400 },
+    { id: 5, accounts_dimensions_id: 10, status: "PROJECT", type: "D", date: "2026-07-01", amount: 500 },
+  ] as unknown as Parameters<typeof selectBatchBankTransactions>[0];
+
+  it("retains bank transactions dated outside the receipt file window (no accounting bounds)", () => {
+    // The receipt FILE window (date_from/date_to) is NOT a parameter here — a
+    // June-dated bank row must survive even when receipts were filtered to July.
+    const result = selectBatchBankTransactions(txns, 10, {});
+    expect(result.map(t => t.id)).toEqual([1, 2]);
+  });
+
+  it("applies an explicit accounting-date lower bound", () => {
+    const result = selectBatchBankTransactions(txns, 10, { transaction_date_from: "2026-07-01" });
+    expect(result.map(t => t.id)).toEqual([2]);
+  });
+
+  it("applies an explicit accounting-date upper bound", () => {
+    const result = selectBatchBankTransactions(txns, 10, { transaction_date_to: "2026-06-30" });
+    expect(result.map(t => t.id)).toEqual([1]);
+  });
+
+  it("filters by the requested account dimension only", () => {
+    expect(selectBatchBankTransactions(txns, 99, {}).map(t => t.id)).toEqual([3]);
+  });
+
+  it("excludes non-PROJECT and non-C (legacy debit) rows", () => {
+    // ids 4 (CONFIRMED) and 5 (type D) must never enter auto-match.
+    const result = selectBatchBankTransactions(txns, 10, {});
+    expect(result.some(t => t.id === 4 || t.id === 5)).toBe(false);
   });
 });
 

@@ -1075,6 +1075,32 @@ export function buildReferencedInvoiceForPaymentReceipt(
   };
 }
 
+/**
+ * Select the bank transactions eligible for receipt auto-matching in a batch.
+ *
+ * Accounting-date bounds are SEPARATE from the receipt file-modified-date window
+ * (`date_from`/`date_to`): a receipt saved in July can settle a bank transaction
+ * dated in June, so the file-scan window must never narrow the bank rows (M08).
+ * This helper accepts ONLY accounting-date bounds — it has no access to the
+ * file-date params, so the two windows cannot be conflated by construction.
+ */
+export function selectBatchBankTransactions(
+  allTransactions: Transaction[],
+  accountsDimensionsId: number,
+  bounds: { transaction_date_from?: string; transaction_date_to?: string },
+): Transaction[] {
+  return allTransactions.filter(transaction =>
+    transaction.accounts_dimensions_id === accountsDimensionsId &&
+    isProjectTransaction(transaction) &&
+    // All API-created and CAMT-imported bank transactions are type "C" regardless of
+    // debit/credit direction (see CLAUDE.md). This filter is a defensive guard — any
+    // legacy type="D" rows are intentionally excluded from auto-match.
+    transaction.type === "C" &&
+    (!bounds.transaction_date_from || transaction.date >= bounds.transaction_date_from) &&
+    (!bounds.transaction_date_to || transaction.date <= bounds.transaction_date_to),
+  );
+}
+
 interface ProcessSingleReceiptOptions {
   ownCompanyVat?: string;
   ownCompanyRegistryCode?: string;
@@ -1566,12 +1592,14 @@ export function registerReceiptInboxTools(
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID used when matching bank transactions"),
       execution_mode: z.enum(RECEIPT_BATCH_EXECUTION_MODES).optional().describe("Execution phase: dry_run (default), create (create/upload PROJECT invoices only), or create_and_confirm (create, upload, confirm, and exact-match bank transactions after explicit approval)"),
       execute: z.boolean().optional().describe("Deprecated boolean alias for execution_mode."),
-      date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
-      date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
+      date_from: z.string().optional().describe("Optional receipt file modified-date lower bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
+      date_to: z.string().optional().describe("Optional receipt file modified-date upper bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
+      transaction_date_from: z.string().optional().describe("Optional bank accounting-date lower bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_from."),
+      transaction_date_to: z.string().optional().describe("Optional bank accounting-date upper bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_to."),
       approved_manifest: manifestSchema.optional().describe("Exact manifest returned by dry_run; required for create/create_and_confirm."),
     },
     { ...batch, openWorldHint: true, title: "Process Receipt Batch" },
-    async ({ folder_path, accounts_dimensions_id, execution_mode, execute, date_from, date_to, approved_manifest }) => {
+    async ({ folder_path, accounts_dimensions_id, execution_mode, execute, date_from, date_to, transaction_date_from, transaction_date_to, approved_manifest }) => {
       const { mode: executionMode, legacyExecuteCreate } = resolveReceiptBatchExecutionMode(
         execute,
         execution_mode as ReceiptBatchExecutionMode | undefined,
@@ -1612,16 +1640,10 @@ export function registerReceiptInboxTools(
         invoiceInfo.invoice_company_name?.trim() || undefined,
       );
       const allTransactions = await api.transactions.listAll();
-      const bankTransactions = allTransactions.filter(transaction =>
-        transaction.accounts_dimensions_id === accounts_dimensions_id &&
-        isProjectTransaction(transaction) &&
-        // All API-created and CAMT-imported bank transactions are type "C" regardless of
-        // debit/credit direction (see CLAUDE.md). This filter is a defensive guard — any
-        // legacy type="D" rows are intentionally excluded from auto-match.
-        transaction.type === "C" &&
-        (!date_from || transaction.date >= date_from) &&
-        (!date_to || transaction.date <= date_to),
-      );
+      const bankTransactions = selectBatchBankTransactions(allTransactions, accounts_dimensions_id, {
+        ...(transaction_date_from ? { transaction_date_from } : {}),
+        ...(transaction_date_to ? { transaction_date_to } : {}),
+      });
       const consumedTransactionIds = new Set<number>();
       const results: ReceiptBatchFileResult[] = [];
 
@@ -1655,6 +1677,8 @@ export function registerReceiptInboxTools(
         accounts_dimensions_id,
         ...(date_from ? { date_from } : {}),
         ...(date_to ? { date_to } : {}),
+        ...(transaction_date_from ? { transaction_date_from } : {}),
+        ...(transaction_date_to ? { transaction_date_to } : {}),
         execution_mode: "create",
         approved_manifest: snapshot.manifest,
       };
@@ -1704,13 +1728,15 @@ export function registerReceiptInboxTools(
       mode: z.enum(["scan", "dry_run", "create", "create_and_confirm"]).optional().describe("Workflow phase to run. Defaults to scan."),
       folder_path: z.string().describe("Folder path with receipts"),
       accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID used when matching bank transactions. Required except in scan mode."),
-      date_from: z.string().optional().describe("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
-      date_to: z.string().optional().describe("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
+      date_from: z.string().optional().describe("Optional receipt file modified-date lower bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
+      date_to: z.string().optional().describe("Optional receipt file modified-date upper bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
+      transaction_date_from: z.string().optional().describe("Optional bank accounting-date lower bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_from."),
+      transaction_date_to: z.string().optional().describe("Optional bank accounting-date upper bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_to."),
       file_types: z.array(z.enum(["pdf", "jpg", "png"])).optional().describe("Optional file type filter for scan mode"),
       approved_manifest: manifestSchema.optional().describe("Exact manifest returned by dry_run; required for create/create_and_confirm."),
     },
     { ...batch, openWorldHint: true, title: "Receipt Batch" },
-    async ({ mode, folder_path, accounts_dimensions_id, date_from, date_to, file_types, approved_manifest }) => {
+    async ({ mode, folder_path, accounts_dimensions_id, date_from, date_to, transaction_date_from, transaction_date_to, file_types, approved_manifest }) => {
       const selectedMode = mode ?? "scan";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
@@ -1741,6 +1767,8 @@ export function registerReceiptInboxTools(
           execution_mode: selectedMode,
           ...(date_from !== undefined ? { date_from } : {}),
           ...(date_to !== undefined ? { date_to } : {}),
+          ...(transaction_date_from !== undefined ? { transaction_date_from } : {}),
+          ...(transaction_date_to !== undefined ? { transaction_date_to } : {}),
           ...(approved_manifest !== undefined ? { approved_manifest } : {}),
         };
         result = await invokeCapturedTool(delegatedTool, delegatedArgs);
