@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+> **Significant behaviour-changing release — the default/recommended account numbers were rewritten.** The hardcoded chart-of-accounts defaults were originally written for a non-standard template and were wrong for the real e-arveldaja RTJ standard chart (verified byte-identical across two real company charts). Every default was audited and corrected, and — more importantly — the tools now resolve each account **by its Estonian name** against the company's *actual* chart, using the standard number only as a last-resort fallback. If you previously relied on a specific default account number, re-check your postings: several defaults now point at different accounts (see below). This also corrects the default accounts used when booking Lightyear investment activity.
+
+### Changed
+- **Chart-of-accounts defaults corrected to the RTJ standard chart, with name-based resolution (`src/account-resolution.ts`, new).** Every tool that books to an equity/liability/financial account now resolves the account by its Estonian `name_est` against the company's real chart (anchored regexes), falling back to the standard number only when no active name match exists — robust across custom or older charts where a hardcoded number can be wrong. The corrected standard-number fallbacks (`src/accounting-defaults.ts`):
+  - **Retained earnings** (Eelmiste perioodide jaotamata kasum) `3020 → 2960`.
+  - **Dividend payable** (Dividendivõlad) `2370 → 2650`.
+  - **Dividend income-tax payable** (Dividenditulumaksu võlg) `2540 → 2656`. The old **2540 is "Kogumispensioni maksed"** (mandatory-pension payments) — the 22/78 dividend CIT liability was being booked against the wrong liability account.
+  - **Share capital** (Osakapital) `3000 → 2900`. The old **3000 is "Põhivara müügi vahekonto"** (fixed-asset-sale clearing) — so the ÄS § 157(2) net-assets legality check was reading share capital off the wrong balance.
+  - **Reserve capital** (Kohustuslik reservkapital) `3010 → 2940`.
+  - **FX gain/loss** now a **single combined account 8500** (Kasum/kahjum valuutakursi muutustest) for both directions. The old loss default **8600 is "Muud finantstulud"** (a financial *income* account), so an FX loss was posting to income with the wrong sign.
+  - **Other financial income** `3800 → 8600`. The old **3800 ("Muud äritulud") did not exist in the standard chart**.
+- **Lightyear investment booking routes to the corrected securities accounts** (per the owner's booking policy): realized **gain → 8330**, realized **loss and expensed trade/FX fees → 8335**, **dividends → 8330**, platform **rewards/bonuses → 8600** (other financial income, not securities income), **withholding → 8610**. A Buy trade's platform fee stays capitalised into FIFO cost basis; only the Buy FX conversion fee is expensed. The shared prompt fee argument was split into `trade_fee_account` (8335) and `distribution_fee_account` (8610) so trade and distribution fees can no longer cross-contaminate.
+- **ÄS § 157(2) restricted-reserve floor now sums *every* "Kohustuslik reservkapital" account (active or inactive) unioned with the standard 2940.** A funded-but-renamed or deactivated reserve is never missed, so the statutory net-assets floor can never be silently understated. The floor keys on the booked balance (unfunded accounts add nothing); a transparency warning and põhikiri guidance are surfaced, and `restricted_reserve_accounts` still overrides.
+
+### Fixed
+- **Sandbox (untrusted-OCR) markers are now stripped at every write/persist boundary, closing a second-order prompt-injection path.** External text (PDF/OCR, CAMT, broker CSV, upstream errors) is wrapped in a per-call nonce sandbox on read; a wrapped value could previously round-trip through the LLM back into a create/update/save with the `<<UNTRUSTED_OCR_…>>` framing intact. A new field-agnostic `desandboxAllStrings` helper (recurses objects/arrays, prototype-pollution-guarded) now cleans every string at each write boundary — the generic CRUD create/update handlers, `saveAutoBookingRule` and the save-rule/prepare paths, the CAMT duplicate-cleanup ledger patch, supplier resolution, the PDF booking flow, owner-expense reimbursement, and the reference-data mutation tools. Identity fields (`file_path`, `source_sha256`) are read verbatim and never canonicalised. JSON-string item payloads are parsed *before* cleaning so wrapper framing can't survive inside nested line-item titles.
+
 ## [0.21.0] - 2026-07-12
 
 ### Fixed
