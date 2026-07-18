@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { open, readdir, realpath, stat } from "fs/promises";
+import { open, opendir, realpath, stat } from "fs/promises";
 import { basename, extname, resolve } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
@@ -46,7 +46,7 @@ const SUPPORTED_REVIEW_TYPES = [
 const RECEIPT_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
 const DEFAULT_SCAN_DEPTH = 2;
 const MAX_SCAN_DEPTH = 4;
-const MAX_SCANNED_FILES = 1500;
+export const MAX_SCANNED_FILES = 1500;
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
   "node_modules",
@@ -118,7 +118,10 @@ interface PreparedInboxData {
     max_depth: number;
     scanned_directories: number;
     scanned_candidate_files: number;
+    inspected_entries: number;
+    entry_limit: number;
     truncated: boolean;
+    continuation_guidance?: string;
   };
   camtFiles: InboxFileCandidate[];
   wiseFiles: InboxFileCandidate[];
@@ -209,27 +212,51 @@ async function readFileSnippet(filePath: string, maxBytes = 4096): Promise<strin
   }
 }
 
-async function scanWorkspaceFiles(
+export interface WorkspaceScanResult {
+  files: ScannedFileInfo[];
+  scanned_directories: number;
+  inspected_entries: number;
+  entry_limit: number;
+  truncated: boolean;
+  continuation_guidance?: string;
+}
+
+export async function scanWorkspaceFiles(
   root: string,
   maxDepth: number,
-): Promise<{ files: ScannedFileInfo[]; scanned_directories: number; truncated: boolean }> {
+): Promise<WorkspaceScanResult> {
   const files: ScannedFileInfo[] = [];
   let scannedDirectories = 0;
+  let inspectedEntries = 0;
   let truncated = false;
 
   async function walk(current: string, depth: number): Promise<void> {
-    if (files.length >= MAX_SCANNED_FILES || truncated) {
+    if (truncated || inspectedEntries >= MAX_SCANNED_FILES) {
       truncated = true;
       return;
     }
     scannedDirectories += 1;
 
-    const entries = await readdir(current, { withFileTypes: true });
-    for (const entry of entries) {
-      if (files.length >= MAX_SCANNED_FILES) {
+    // Stream the directory with opendir (lazy, buffered reads) instead of
+    // readdir, which would materialize — and, with an added sort, O(n log n)
+    // process — the ENTIRE directory before the budget could stop it. Streaming
+    // lets a pathologically large directory be abandoned after ~the budget is
+    // reached without reading the rest, which is the point of the cap. Entries
+    // therefore arrive in filesystem order (no total sort is possible while
+    // streaming), so which entries are inspected before truncation is not
+    // ordered — acceptable: the finding is about bounding traversal, not
+    // selecting a deterministic prefix. The async iterator closes the dir handle
+    // on normal completion and on the early `return` below.
+    const dir = await opendir(current);
+    for await (const entry of dir) {
+      // Count EVERY traversed entry against the budget — not only matching
+      // candidate files. Otherwise a workspace full of non-matching files never
+      // consumes the cap and traversal cost is unbounded.
+      if (inspectedEntries >= MAX_SCANNED_FILES) {
         truncated = true;
         return;
       }
+      inspectedEntries += 1;
 
       const entryPath = resolve(current, entry.name);
       if (entry.isDirectory()) {
@@ -256,7 +283,16 @@ async function scanWorkspaceFiles(
   }
 
   await walk(root, 0);
-  return { files, scanned_directories: scannedDirectories, truncated };
+  return {
+    files,
+    scanned_directories: scannedDirectories,
+    inspected_entries: inspectedEntries,
+    entry_limit: MAX_SCANNED_FILES,
+    truncated,
+    ...(truncated
+      ? { continuation_guidance: "Re-run accounting_inbox with a narrower workspace_path." }
+      : {}),
+  };
 }
 
 function looksLikeCamtFileName(name: string): boolean {
@@ -750,7 +786,8 @@ async function prepareAccountingInbox(
 ): Promise<PreparedInboxData> {
   const root = await validateWorkspacePath(params.workspace_path);
   const depth = params.max_depth ?? DEFAULT_SCAN_DEPTH;
-  const { files, scanned_directories, truncated } = await scanWorkspaceFiles(root, depth);
+  const { files, scanned_directories, inspected_entries, entry_limit, truncated, continuation_guidance } =
+    await scanWorkspaceFiles(root, depth);
   let bankAccounts: BankAccount[] = [];
   let accountDimensions: AccountDimension[] = [];
   let liveApiDefaultsAvailable = true;
@@ -787,7 +824,10 @@ async function prepareAccountingInbox(
       max_depth: depth,
       scanned_directories,
       scanned_candidate_files: files.length,
+      inspected_entries,
+      entry_limit,
       truncated,
+      ...(continuation_guidance !== undefined ? { continuation_guidance } : {}),
     },
     camtFiles,
     wiseFiles,

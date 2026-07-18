@@ -1,9 +1,16 @@
-import { mkdir, readFile, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import { parseDocument } from "../document-parser.js";
-import { buildRecommendedSteps, registerAccountingInboxTools, resolveReviewItemPlan } from "./accounting-inbox.js";
+import {
+  buildRecommendedSteps,
+  MAX_SCANNED_FILES,
+  registerAccountingInboxTools,
+  resolveReviewItemPlan,
+  scanWorkspaceFiles,
+} from "./accounting-inbox.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import * as auditLogModule from "../audit-log.js";
 import {
@@ -161,6 +168,45 @@ describe("resolveReviewItemPlan unknown review type (M14)", () => {
     expect(result.status).not.toBe("unsupported_review_type");
     expect(result.error).toMatch(/missing.*"group"/i);
     expect(result.unresolved_questions.length).toBeGreaterThan(0);
+  });
+});
+
+describe("scanWorkspaceFiles traversal budget (M15)", () => {
+  // Sequential writes avoid EMFILE from thousands of concurrent open handles.
+  async function writeFiles(root: string, names: string[]): Promise<void> {
+    for (const name of names) {
+      await writeFile(join(root, name), "x");
+    }
+  }
+
+  it("stops after the entry budget even when entries do not match", async () => {
+    const root = await mkdtemp(join(tmpdir(), "m15-budget-"));
+    workspacesToClean.push(root);
+    // All .txt — none match the candidate extensions, so nothing is collected;
+    // only the per-entry traversal budget can stop the walk.
+    await writeFiles(
+      root,
+      Array.from({ length: MAX_SCANNED_FILES + 5 }, (_, i) => `note-${String(i).padStart(5, "0")}.txt`),
+    );
+    const result = await scanWorkspaceFiles(root, 2);
+    expect(result.inspected_entries).toBe(MAX_SCANNED_FILES);
+    expect(result.truncated).toBe(true);
+    expect(result.continuation_guidance).toMatch(/narrower workspace/i);
+    expect(result.files).toHaveLength(0);
+  });
+
+  it("does not truncate or emit guidance for a small workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "m15-small-"));
+    workspacesToClean.push(root);
+    await writeFiles(root, ["a.txt", "b.pdf", "c.txt"]);
+    const result = await scanWorkspaceFiles(root, 2);
+    expect(result.truncated).toBe(false);
+    expect(result.continuation_guidance).toBeUndefined();
+    // Every entry is counted, matching or not.
+    expect(result.inspected_entries).toBe(3);
+    expect(result.entry_limit).toBe(MAX_SCANNED_FILES);
+    // Only b.pdf is a candidate file.
+    expect(result.files).toHaveLength(1);
   });
 });
 
