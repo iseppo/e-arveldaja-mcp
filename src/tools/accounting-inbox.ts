@@ -32,6 +32,17 @@ import {
 
 const MIN_AUTO_BOOKING_RULE_MATCH_LENGTH = 3;
 
+// The review types the resolver knows how to plan an action for. Surfaced as a
+// fixed list on the unsupported-review-type contract so a caller that emitted a
+// foreign review_type learns which types are actionable — without ever echoing
+// the (untrusted) foreign value or the caller-supplied id back into the
+// unwrapped resolution.
+const SUPPORTED_REVIEW_TYPES = [
+  "receipt_review",
+  "classification_group",
+  "camt_possible_duplicate",
+] as const;
+
 const RECEIPT_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
 const DEFAULT_SCAN_DEPTH = 2;
 const MAX_SCAN_DEPTH = 4;
@@ -120,7 +131,7 @@ interface PreparedInboxData {
 
 interface ReviewResolutionResult {
   review_type: "receipt_review" | "classification_group" | "camt_possible_duplicate" | "unknown";
-  status: "ready_for_action" | "needs_answers";
+  status: "ready_for_action" | "needs_answers" | "unsupported_review_type";
   recommendation: string;
   compliance_basis: string[];
   unresolved_questions: string[];
@@ -128,6 +139,8 @@ interface ReviewResolutionResult {
   suggested_workflow?: string;
   suggested_tools?: string[];
   next_step_summary: string;
+  error?: string;
+  supported_review_types?: string[];
 }
 
 interface ReviewActionPreparationResult {
@@ -1017,7 +1030,7 @@ function mergeRuleOverrides(
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
-function resolveReviewItemPlan(
+export function resolveReviewItemPlan(
   reviewItem: Record<string, unknown>,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): ReviewResolutionResult {
@@ -1106,15 +1119,47 @@ function resolveReviewItemPlan(
     };
   }
 
+  // A recognized review_type only reaches this fallback when its required
+  // payload (`item` for receipt_review/camt_possible_duplicate, `group` for
+  // classification_group) is missing. That is a supplied-data problem, not an
+  // unsupported type — telling the caller to change the type would be wrong.
+  // `reviewType` here is exactly one of the SUPPORTED_REVIEW_TYPES literals (the
+  // `.includes` guard validated it), so naming it is safe; the caller-supplied
+  // `id` is never echoed into this unwrapped response.
+  if (reviewType !== undefined && (SUPPORTED_REVIEW_TYPES as readonly string[]).includes(reviewType)) {
+    const requiredPayloadKey = reviewType === "classification_group" ? "group" : "item";
+    return {
+      review_type: reviewType as ReviewResolutionResult["review_type"],
+      status: "needs_answers",
+      error: `This ${reviewType} review item is missing its required "${requiredPayloadKey}" payload.`,
+      supported_review_types: [...SUPPORTED_REVIEW_TYPES],
+      recommendation: `Re-emit this review item from its source tool with the "${requiredPayloadKey}" payload populated.`,
+      compliance_basis: [],
+      unresolved_questions: [
+        `Re-emit this review item with its "${requiredPayloadKey}" payload so the ${reviewType} review can be actioned.`,
+      ],
+      suggested_workflow: undefined,
+      suggested_tools: [],
+      next_step_summary: "Supply the missing review payload before preparing any action.",
+    };
+  }
+
+  // Genuinely foreign / unrecognized review_type. Emit a fixed, actionable
+  // contract with NO caller-supplied value interpolated — the foreign type and
+  // the id are untrusted text and this response is emitted unwrapped.
   return {
     review_type: "unknown",
-    status: "needs_answers",
-    recommendation: "This review item is not yet recognized by the resolver. Inspect the source payload directly before continuing.",
+    status: "unsupported_review_type",
+    error: "This review item has an unsupported review_type.",
+    supported_review_types: [...SUPPORTED_REVIEW_TYPES],
+    recommendation: "Re-emit the item from its source tool with a supported review_type before preparing any action.",
     compliance_basis: [],
-    unresolved_questions: [],
+    unresolved_questions: [
+      `Re-emit this review item with a supported type — one of ${SUPPORTED_REVIEW_TYPES.join(", ")}.`,
+    ],
     suggested_workflow: undefined,
     suggested_tools: [],
-    next_step_summary: "Use the original tool output as the source of truth for this item.",
+    next_step_summary: "Correct the review type before preparing any action.",
   };
 }
 
