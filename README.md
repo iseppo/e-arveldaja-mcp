@@ -4,6 +4,8 @@
 
 MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 121 tools, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
+> **Correct standard-chart accounts (behaviour change).** Every hardcoded default account was audited against the e-arveldaja RTJ standard chart and corrected — several earlier defaults pointed at the wrong account (e.g. the dividend income-tax liability at 2540 "Kogumispensioni maksed", an FX loss at an income account). More importantly, the tools now resolve each equity/liability/financial account **by its Estonian name** against your company's actual chart, using the standard number only as a fallback, so dividend, share-capital, reserve, FX, and Lightyear postings land on the right account even on a custom or renumbered chart. If you booked with an earlier version this year, the read-only `npm run audit:legacy-accounts` script flags any entries still sitting on an old default account. See the [changelog](CHANGELOG.md) for full details.
+>
 > **Correct dividend legality checks.** `prepare_dividend_package` now applies ÄS § 157 clause by clause: the retained-earnings ceiling is **net-based** — the entire retained-earnings balance is distributable as net dividend, with the 22/78 income tax booking as a current-period expense on top — while the net-assets floor stays gross-based. Every response reports the largest lawful net dividend (`maximum_distributable.max_net_dividend`) and statutory `compliance_notes` (approved annual report + profit-distribution decision, TSD annex 7 deadline). The `earveldaja://tax_rules` reference now also covers profit distribution (ÄS § 157, TuMS § 50) and RPS process rules (corrections, inventory, retention). See the [changelog](CHANGELOG.md) for full details.
 >
 > **Guided workflow actions.** `recommend_workflow` suggests the safest accounting flow for a natural-language goal, and key workflow/batch tools return a `workflow_action_v1` envelope with `recommended_next_action`, review questions, and approval previews. `accounting_inbox` is the preferred merged entry point for workspace triage, `continue_accounting_workflow` is the preferred merged continuation tool, `receipt_batch` and `process_camt053` are the preferred mode-based import/batch entry points, and bank work has `reconcile_bank_transactions` plus `classify_bank_transactions` as mode-based entry points. Older focused tools such as `resolve_accounting_review_item`, `prepare_accounting_review_action`, `scan_receipt_folder`, `process_receipt_batch`, `parse_camt053`, `import_camt053`, `reconcile_transactions`, and `apply_transaction_classifications` are hidden from the tool list by default to keep the per-session token cost down (the merged tools route to the same internals); set `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` to register them again. See the [changelog](CHANGELOG.md) for full details.
@@ -290,6 +292,17 @@ This now runs self-contained MCP surface checks by default against a locally spa
 ```bash
 EARVELDAJA_INTEGRATION_TEST=true npm run test:integration
 ```
+
+### Auditing legacy default accounts
+
+If you booked dividends, Lightyear activity, or FX-rounding differences with a version before the chart-of-accounts correction, this read-only script scans the current year's ledger for entries still sitting on an old default account and reports them for review (it never mutates anything):
+
+```bash
+npm run audit:legacy-accounts                 # every configured company, current year
+npm run audit:legacy-accounts -- --connection 0 --since 2026-01-01 --json
+```
+
+Run it from the directory where your credentials live. It flags both direct postings to the old account numbers and `LY:`/`FX:`/dividend journals that used a wrong or dual-purpose account; some old numbers are also legitimate real accounts (e.g. 2540 pension payments), so treat the output as a review list, not an automatic error report.
 
 ### Releasing to the MCP Registry
 
