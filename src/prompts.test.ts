@@ -442,6 +442,43 @@ describe("registerPrompts", () => {
     }
   });
 
+  it("exposes the dimension override arguments the workflows document (M24)", async () => {
+    const server = setupPromptServer();
+    const cases: Array<[string, string[]]> = [
+      // workflows/accounting-inbox.md documents these three overrides.
+      ["accounting-inbox", ["bank_account_dimension_id", "receipt_matching_dimension_id", "wise_account_dimension_id"]],
+      // workflows/import-wise.md documents inter_account_dimension_id.
+      ["import-wise", ["inter_account_dimension_id"]],
+      // workflows/reconcile-bank.md documents target_accounts_dimensions_id.
+      ["reconcile-bank", ["target_accounts_dimensions_id"]],
+    ];
+    for (const [promptName, names] of cases) {
+      const schema = getPromptArgsSchema(server, promptName);
+      for (const name of names) {
+        expect(schema).toHaveProperty(name);
+        // Optional (omittable) and accepts a numeric dimension ID.
+        expect(schema[name]!.safeParse(undefined).success).toBe(true);
+        expect(schema[name]!.safeParse(4242).success).toBe(true);
+      }
+    }
+  });
+
+  it("threads a provided dimension override into the workflow run arguments (M24)", async () => {
+    const server = setupPromptServer();
+
+    const inbox = await getPromptText(server, "accounting-inbox", { bank_account_dimension_id: 4242 });
+    expect(inbox).toContain("bank_account_dimension_id");
+    expect(inbox).toContain("4242");
+
+    const wise = await getPromptText(server, "import-wise", { file_path: "/tmp/w.csv", inter_account_dimension_id: 77 });
+    expect(wise).toContain("inter_account_dimension_id");
+    expect(wise).toContain("77");
+
+    const recon = await getPromptText(server, "reconcile-bank", { target_accounts_dimensions_id: 99 });
+    expect(recon).toContain("target_accounts_dimensions_id");
+    expect(recon).toContain("99");
+  });
+
   it("keeps new-supplier honest about what registry and VAT data is actually available", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "new-supplier", { identifier: "Acme OU" });

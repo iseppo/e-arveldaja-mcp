@@ -152,6 +152,9 @@ export function registerPrompts(
     "Scan a workspace for likely accounting inputs, propose the next safe dry-run steps, and ask only the smallest necessary follow-up questions.",
     {
       workspace_path: z.string().optional().describe("Optional folder to scan for CAMT statements, Wise CSV files, and receipt folders"),
+      bank_account_dimension_id: z.number().optional().describe("Optional default bank-account dimension ID reused for CAMT and receipt suggestions"),
+      receipt_matching_dimension_id: z.number().optional().describe("Optional bank-account dimension ID used specifically for receipt matching"),
+      wise_account_dimension_id: z.number().optional().describe("Optional bank-account dimension ID used specifically for Wise suggestions"),
     },
   );
 
@@ -232,6 +235,7 @@ export function registerPrompts(
       file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export"),
       accounts_dimensions_id: z.number().optional().describe("Optional bank account dimension ID for the Wise account; if omitted, list account dimensions and ask the user to confirm the Wise bank account"),
       fee_account_dimensions_id: z.number().optional().describe("Optional Wise fee expense account dimension ID"),
+      inter_account_dimension_id: z.number().optional().describe("Optional other own bank account dimension for Wise inter-account transfers; required when there are 3+ bank accounts and auto-detection cannot pick one"),
       date_from: z.string().optional().describe("Optional transaction-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional transaction-date upper bound (YYYY-MM-DD)"),
       skip_jar_transfers: z.boolean().optional().describe("Skip Jar transfers (default true)"),
@@ -264,6 +268,7 @@ export function registerPrompts(
     {
       mode: z.enum(["auto", "review", "transaction"]).optional().describe('Reconciliation mode: "auto" (default), "review", or "transaction"'),
       transaction_id: z.number().int().positive().optional().describe('Specific bank transaction ID when mode is "transaction"'),
+      target_accounts_dimensions_id: z.number().optional().describe("Optional target own-bank account dimension for one-sided inter-account reconciliation; provide when there are 3+ bank accounts and the IBAN is missing"),
     },
     {
       note: "Bank reconciliation requires live transactions, invoices, and journals from e-arveldaja, so it cannot run in setup mode.",
