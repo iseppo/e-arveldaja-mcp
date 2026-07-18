@@ -497,7 +497,7 @@ describe("registerPrompts", () => {
   it("keeps the Lightyear workflow explicit that portfolio value means accounting cost basis", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "lightyear-booking", {
-      statement_path: "/tmp/statement.csv",
+      file_path: "/tmp/statement.csv",
       investment_account: 1520,
       broker_account: 1120,
     });
@@ -512,6 +512,17 @@ describe("registerPrompts", () => {
     expect(text).not.toContain("Current portfolio value (from step 3)");
   });
 
+  it("names the Lightyear statement argument file_path to match the tool (M25)", () => {
+    const server = setupPromptServer();
+    const schema = getPromptArgsSchema(server, "lightyear-booking");
+    // The statement arg now matches parse_lightyear_statement's own file_path param.
+    expect(schema).toHaveProperty("file_path");
+    expect(schema).not.toHaveProperty("statement_path");
+    // Capital gains keeps a distinct arg name: parse_lightyear_capital_gains ALSO
+    // takes file_path, so a single prompt cannot reuse it for the second file.
+    expect(schema).toHaveProperty("capital_gains_path");
+  });
+
   it("keeps shipped Lightyear markdown prompts aligned with required distribution inputs", () => {
     for (const relativePath of ["workflows/lightyear-booking.md", ".claude/commands/lightyear-booking.md"]) {
       const text = readPromptSurface(relativePath);
@@ -522,6 +533,10 @@ describe("registerPrompts", () => {
       expect(text).toContain("current accounting carrying value / cost basis");
       expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
       expect(text).not.toContain("Call `book_lightyear_distributions` with `dry_run: true`.");
+      // M25: both parse tools take `file_path`; the runbook must show the explicit
+      // mapping so an agent does not pass the prompt-arg name to the tool.
+      expect(text).toContain('parse_lightyear_statement { "file_path": "<file_path>" }');
+      expect(text).toContain('parse_lightyear_capital_gains { "file_path": "<capital_gains_path>" }');
     }
   });
 

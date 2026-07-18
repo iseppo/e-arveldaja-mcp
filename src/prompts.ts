@@ -318,7 +318,7 @@ export function registerPrompts(
       "lightyear-booking",
       "Book Lightyear investment trades and distributions into e-arveldaja journals. Parses CSV exports, pairs FX conversions, matches capital gains, and creates journal entries.",
       {
-        statement_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
+        file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file"),
         capital_gains_path: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sells)"),
         investment_account: z.number().describe("Investment asset account number (e.g. 1550)"),
         broker_account: z.number().describe("Broker cash account number (e.g. 1120)"),

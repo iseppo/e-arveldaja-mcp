@@ -13,7 +13,7 @@ User-facing phases:
 
 ## Arguments
 
-- `statement_path`: absolute path to the Lightyear AccountStatement CSV
+- `file_path`: absolute path to the Lightyear AccountStatement CSV
 - Optional `capital_gains_path`: Lightyear CapitalGainsStatement CSV, required for non-cash-equivalent sells
 - `investment_account`: investment asset account number
 - `broker_account`: broker cash account number
@@ -27,13 +27,13 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 ### Step 1: Parse the statement
 
-Call `parse_lightyear_statement` for the account statement CSV.
+Call `parse_lightyear_statement` for the account statement CSV. The tool's own argument is `file_path`, so pass the statement path there: `parse_lightyear_statement { "file_path": "<file_path>" }`.
 - Leave `include_rows` unset for the first pass.
 - Show buy/sell trades, distributions, deposits/withdrawals, FX pairing warnings, and the cash-equivalent entries skipped by default.
 
 ### Step 2: Parse capital gains when needed
 
-If sales are present, call `parse_lightyear_capital_gains` for the FIFO capital-gains CSV.
+If sales are present, call `parse_lightyear_capital_gains` for the FIFO capital-gains CSV. This tool's own argument is also `file_path`, so pass `capital_gains_path` there: `parse_lightyear_capital_gains { "file_path": "<capital_gains_path>" }`.
 - If no `capital_gains_path` is available, explain that non-cash-equivalent sells will be skipped.
 - If sell trades are present and no `gain_loss_account` is known, ask the user for it before booking sells.
 
