@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { maskApiKeyId } from "./config.js";
+import { maskApiKeyId, serializeEnvFile } from "./config.js";
 
 const CONFIG_ENV_KEYS = [
   "EARVELDAJA_SERVER",
@@ -1099,5 +1099,46 @@ describe("loadAllConfigs", () => {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("serializeEnvFile credential metadata (M27)", () => {
+  const primaryEnv = {
+    EARVELDAJA_SERVER: "live",
+    EARVELDAJA_API_KEY_ID: "kid",
+    EARVELDAJA_API_PUBLIC_VALUE: "pub",
+    EARVELDAJA_API_PASSWORD: "pw",
+  };
+
+  it.each([
+    "Acme\nEARVELDAJA_API_PASSWORD=attacker", // LF injects a forged credential line
+    "source\r\nKEY=x",                        // CRLF
+    "bad\u0000name",                          // NUL
+    "line\u2028sep",                          // Unicode line separator
+    "tab\tname",                              // C0 control (tab)
+  ])("rejects control characters in credential metadata: %j", (value) => {
+    // companyName is the realistic vector (from the API verification response).
+    expect(() => serializeEnvFile(primaryEnv, { primary: { companyName: value } }))
+      .toThrow(/credential metadata.*control character/i);
+    // sourceFile is validated the same way.
+    expect(() => serializeEnvFile(primaryEnv, { primary: { sourceFile: value } }))
+      .toThrow(/credential metadata.*control character/i);
+  });
+
+  it("keeps legitimate Unicode and path metadata on a single comment line", () => {
+    const out = serializeEnvFile(primaryEnv, {
+      primary: {
+        companyName: "Õäö Kaubandus OÜ",
+        verifiedAt: "2026-07-18T10:00:00Z",
+        sourceFile: "/home/x/apikey (1).txt",
+      },
+    });
+    expect(out).toContain("# Company: Õäö Kaubandus OÜ");
+    expect(out).toContain("# Verified at: 2026-07-18T10:00:00Z");
+    expect(out).toContain("# Imported from: /home/x/apikey (1).txt");
+    // Exactly one Company comment line — no injected extra lines.
+    expect(out.match(/^# Company:/gm) ?? []).toHaveLength(1);
+    // Exactly one password line: metadata could not forge a second credential.
+    expect(out.match(/^EARVELDAJA_API_PASSWORD=/gm) ?? []).toHaveLength(1);
   });
 });

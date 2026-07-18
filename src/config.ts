@@ -724,10 +724,23 @@ function writePrivateEnvFile(filePath: string, content: string): void {
   }
 }
 
-function serializeEnvFile(
+export function serializeEnvFile(
   env: Record<string, string>,
   metadataByTarget: CredentialMetadataMap = {},
 ): string {
+  // Credential metadata (company name, source path) can originate from an
+  // untrusted source — notably the API verification response's company name.
+  // A CR/LF/NUL or other control character embedded in a value would break out
+  // of its `# ...` comment line and inject an arbitrary `.env` line (e.g. a
+  // forged EARVELDAJA_API_PASSWORD=...), which parseEnvFile would then load as a
+  // real credential. Reject any control character (C0, DEL/C1, and the Unicode
+  // line/paragraph separators) so a comment can never become more than one line.
+  const serializeEnvComment = (label: string, value: string): string => {
+    if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/u.test(value)) {
+      throw new Error(`Credential metadata ${label} contains a control character`);
+    }
+    return `# ${label}: ${value.trim()}`;
+  };
   const serializeEnvValue = (v: string): string => {
     const needsQuoting = v === "" || /^[\s]|[\s]$/.test(v) || /[#\n\r]/.test(v);
     if (!needsQuoting) return v;
@@ -759,9 +772,9 @@ function serializeEnvFile(
 
   const buildMetadataLines = (metadata?: CredentialBlockMetadata): string[] => {
     const lines: string[] = [];
-    if (metadata?.companyName) lines.push(`# Company: ${metadata.companyName}`);
-    if (metadata?.verifiedAt) lines.push(`# Verified at: ${metadata.verifiedAt}`);
-    if (metadata?.sourceFile) lines.push(`# Imported from: ${metadata.sourceFile}`);
+    if (metadata?.companyName) lines.push(serializeEnvComment("Company", metadata.companyName));
+    if (metadata?.verifiedAt) lines.push(serializeEnvComment("Verified at", metadata.verifiedAt));
+    if (metadata?.sourceFile) lines.push(serializeEnvComment("Imported from", metadata.sourceFile));
     return lines;
   };
 
