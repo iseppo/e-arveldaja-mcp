@@ -1,4 +1,5 @@
-import { parseMcpResponse, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
+import { createHash } from "crypto";
+import { canonicalBusinessText, parseMcpResponse, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import {
   buildCamtDuplicateReviewGuidance,
@@ -52,6 +53,13 @@ export interface AutopilotStepResult {
 }
 
 export interface AutopilotFollowUp {
+  /**
+   * Deterministic, resume-stable identifier for a resolvable review item (see
+   * stableReviewId). Present on every follow-up that carries a resolver_input
+   * (CAMT/receipt/classification review items); absent on aggregate notices that
+   * have nothing to resume against (e.g. a failed-step message).
+   */
+  id?: string;
   source: string;
   summary: string;
   recommendation?: string;
@@ -59,6 +67,22 @@ export interface AutopilotFollowUp {
   follow_up_questions?: string[];
   policy_hint?: string;
   resolver_input?: Record<string, unknown>;
+}
+
+export interface AutopilotReviewPage {
+  /**
+   * Number of review items on this page (i.e. `needs_accountant_review.length`).
+   * Each resolvable item carries an `id`; a few aggregate notices (e.g. a
+   * failed-step message) have none but are still counted as page rows.
+   */
+  total: number;
+  /**
+   * True when the page is guaranteed to contain every review item. The
+   * summarizer never slices, so incompleteness can only come from upstream: a
+   * truncated file scan may have missed CAMT/receipt files whose reviews would
+   * belong here, so `complete` is false whenever `prepared.scan.truncated` is set.
+   */
+  complete: boolean;
 }
 
 export interface AccountingInboxDryRunPipelineResult {
@@ -69,6 +93,7 @@ export interface AccountingInboxDryRunPipelineResult {
   done_automatically: string[];
   needs_one_decision: AutopilotFollowUp[];
   needs_accountant_review: AutopilotFollowUp[];
+  review_page: AutopilotReviewPage;
   next_question?: AutopilotFollowUp;
   next_recommended_action?: AutopilotRecommendedStep;
   user_summary: string;
@@ -78,20 +103,88 @@ export type AutopilotInternalToolHandler = (
   args: Record<string, unknown>,
 ) => Promise<{ content: Array<{ text?: string }> }>;
 
+/**
+ * Deterministic, resume-stable identifier for one accountant-review item.
+ *
+ * The identity is a curated set of STABLE business keys spanning the three
+ * review sources (CAMT possible-duplicate, receipt, classification group) — not
+ * the whole item, whose free-text fields are wrapped with a per-call random
+ * nonce (see wrapUntrustedOcr) and would change the id on every dry-run. Text
+ * keys are run through canonicalBusinessText so a re-run that re-wraps the same
+ * counterparty with a fresh nonce still yields the same id — that stability is
+ * what makes a review item resumable by id across dry-runs.
+ */
+export function stableReviewId(sourceTool: string, item: Record<string, unknown>): string {
+  const file = recordAt(item, "file");
+  // Filesystem path is a trusted, per-item-unique key (two receipts can share a
+  // name across folders); it is not OCR-derived, so it is used verbatim.
+  const filePath = typeof item.file_path === "string" && item.file_path
+    ? item.file_path
+    : (file ? (stringAt(file, "path") ?? stringAt(file, "name") ?? "") : "");
+  // Counterparty/reference arrive under different field names per source
+  // (classification: normalized/display_counterparty; CAMT: counterparty,
+  // bank_reference, ref_number) and may be nonce-wrapped, so canonicalize each
+  // and take the first non-empty — an empty normalized value must not suppress a
+  // present display value.
+  const counterparty =
+    canonicalBusinessText(item.normalized_counterparty)
+    || canonicalBusinessText(item.display_counterparty)
+    || canonicalBusinessText(item.counterparty);
+  const reference =
+    canonicalBusinessText(item.bank_reference)
+    || canonicalBusinessText(item.bank_ref_number)
+    || canonicalBusinessText(item.ref_number)
+    || canonicalBusinessText(item.reference_number);
+  // A reference-less CAMT row can still differ from another by direction and by
+  // which existing transactions it matched, so fold both in: a debit and a
+  // credit for the same date/amount/counterparty, or rows matched to different
+  // candidates, get distinct ids. The candidate ids are sorted for determinism.
+  const candidateIds = arrayAt(item, "existing_transactions")
+    .map((candidate) => (isRecord(candidate) ? numberAt(candidate, "id") : undefined))
+    .filter((id): id is number => id !== undefined)
+    .sort((left, right) => left - right);
+  const identity = JSON.stringify([
+    sourceTool,
+    item.transaction_id ?? null,
+    item.new_transaction_api_id ?? null,
+    filePath || null,
+    canonicalBusinessText(item.category) || null,
+    counterparty || null,
+    item.date ?? null,
+    item.amount ?? null,
+    item.currency ?? null,
+    typeof item.type === "string" ? item.type : null,
+    reference || null,
+    candidateIds,
+  ]);
+  return `${sourceTool}:${createHash("sha256").update(identity).digest("hex").slice(0, 16)}`;
+}
+
 function toAutopilotFollowUp(
   source: string,
   summary: string,
   guidance?: Partial<ReviewGuidance> & { recommendation?: string },
   resolverInput?: Record<string, unknown>,
 ): AutopilotFollowUp {
+  // The resolver_input's `item`/`group` is the raw review record; derive the
+  // resume-stable id from it and thread it back into resolver_input so the id
+  // the caller sees is the same id continuation payloads carry.
+  const identityItem = resolverInput
+    ? (recordAt(resolverInput, "item") ?? recordAt(resolverInput, "group"))
+    : undefined;
+  const id = identityItem ? stableReviewId(source, identityItem) : undefined;
+  const resolver_input = resolverInput && id !== undefined
+    ? { ...resolverInput, id }
+    : resolverInput;
   return {
+    ...(id !== undefined ? { id } : {}),
     source,
     summary,
     recommendation: guidance?.recommendation,
     compliance_basis: guidance?.compliance_basis,
     follow_up_questions: guidance?.follow_up_questions,
     policy_hint: guidance?.policy_hint,
-    resolver_input: resolverInput,
+    resolver_input,
   };
 }
 
@@ -271,7 +364,6 @@ function summarizeAutopilotToolResult(
       const preview = buildReceiptDryRunPreview(summary);
       const followUps: AutopilotFollowUp[] = arrayAt(execution, "needs_review")
         .filter(isRecord)
-        .slice(0, 5)
         .map((item) => {
           const file = recordAt(item, "file");
           const fileName = stringAt(file ?? {}, "name") ?? "receipt";
@@ -316,7 +408,7 @@ function summarizeAutopilotToolResult(
           group_count: groups.length,
           category_counts: recordAt(payload, "category_counts") ?? {},
         },
-        followUps: reviewGroups.slice(0, 5).map((group) => {
+        followUps: reviewGroups.map((group) => {
           const record = group as Record<string, unknown>;
           const displayCounterparty = stringAt(record, "display_counterparty") ?? "transaction group";
           const category = stringAt(record, "category") ?? "review_only";
@@ -508,6 +600,9 @@ export async function runAccountingInboxDryRunPipeline({
     done_automatically: doneAutomatically,
     needs_one_decision: needsOneDecision,
     needs_accountant_review: needsAccountantReview,
+    // No review item is ever sliced away; the page is complete unless the
+    // upstream file scan was truncated and may have missed source files.
+    review_page: { total: needsAccountantReview.length, complete: !prepared.scan.truncated },
     next_question: nextQuestion,
     next_recommended_action: nextRecommendedAction,
     user_summary: doneAutomatically.length > 0

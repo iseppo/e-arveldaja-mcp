@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { toMcpJson } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import {
   runAccountingInboxDryRunPipeline,
+  stableReviewId,
   type AutopilotInternalToolHandler,
   type AutopilotPreparedInboxData,
 } from "./accounting-inbox-autopilot-service.js";
@@ -26,7 +27,132 @@ function preparedInbox(overrides: Partial<AutopilotPreparedInboxData> = {}): Aut
   };
 }
 
+function classificationReviewGroups(count: number): Array<Record<string, unknown>> {
+  return Array.from({ length: count }, (_unused, index) => ({
+    apply_mode: "review_only",
+    category: `review_category_${index}`,
+    display_counterparty: `Counterparty ${index}`,
+    normalized_counterparty: `counterparty ${index}`,
+  }));
+}
+
+async function summarizePipelineWithClassificationGroups(
+  groups: Array<Record<string, unknown>> | number,
+) {
+  const resolvedGroups = typeof groups === "number" ? classificationReviewGroups(groups) : groups;
+  const classifyUnmatched = vi.fn<AutopilotInternalToolHandler>().mockResolvedValue({
+    content: [{
+      text: toMcpJson({
+        total_unmatched: resolvedGroups.length,
+        groups: resolvedGroups,
+        category_counts: {},
+      }),
+    }],
+  });
+  return runAccountingInboxDryRunPipeline({
+    prepared: preparedInbox({
+      steps: [{
+        step: 1,
+        tool: "classify_unmatched_transactions",
+        purpose: "Classify unmatched transactions",
+        recommended: true,
+        suggested_args: { execute: false },
+        missing_inputs: [],
+        reason: "Classify unmatched",
+      }],
+    }),
+    handlers: new Map([["classify_unmatched_transactions", classifyUnmatched]]),
+  });
+}
+
 describe("runAccountingInboxDryRunPipeline", () => {
+  it("returns every review item with stable resumable IDs (M11)", async () => {
+    const output = await summarizePipelineWithClassificationGroups(7);
+    expect(output.needs_accountant_review).toHaveLength(7);
+    expect(new Set(output.needs_accountant_review.map((item) => item.id)).size).toBe(7);
+    expect(output.review_page).toMatchObject({ total: 7, complete: true });
+  });
+
+  it("assigns the same review ID across runs even when the counterparty arrives sandbox-wrapped (M11)", async () => {
+    // wrapUntrustedOcr uses a fresh nonce per call, so the two wrapped strings
+    // differ byte-for-byte; the stable ID must canonicalize the counterparty so
+    // resuming the same logical review item works across dry-run re-runs.
+    const groupsFor = (wrappedCounterparty: string) => [{
+      apply_mode: "review_only",
+      category: "saas_subscriptions",
+      display_counterparty: wrappedCounterparty,
+      normalized_counterparty: wrappedCounterparty,
+    }];
+    const first = await summarizePipelineWithClassificationGroups(groupsFor(wrapUntrustedOcr("Acme OÜ")!));
+    const second = await summarizePipelineWithClassificationGroups(groupsFor(wrapUntrustedOcr("Acme OÜ")!));
+
+    expect(first.needs_accountant_review[0]!.id).toBeTruthy();
+    expect(first.needs_accountant_review[0]!.id).toBe(second.needs_accountant_review[0]!.id);
+  });
+
+  it("stableReviewId distinguishes distinct items and is deterministic (M11)", () => {
+    const a = stableReviewId("classify_unmatched_transactions", { category: "x", normalized_counterparty: "acme" });
+    const b = stableReviewId("classify_unmatched_transactions", { category: "y", normalized_counterparty: "acme" });
+    const aAgain = stableReviewId("classify_unmatched_transactions", { category: "x", normalized_counterparty: "acme" });
+    expect(a).not.toBe(b);
+    expect(a).toBe(aAgain);
+    expect(a.startsWith("classify_unmatched_transactions:")).toBe(true);
+  });
+
+  it("stableReviewId separates receipts that share a name in different folders (M11)", () => {
+    const a = stableReviewId("process_receipt_batch", { file: { name: "invoice.pdf", path: "/inbox/a/invoice.pdf" } });
+    const b = stableReviewId("process_receipt_batch", { file: { name: "invoice.pdf", path: "/inbox/b/invoice.pdf" } });
+    expect(a).not.toBe(b);
+  });
+
+  it("stableReviewId separates CAMT rows by bank_reference when other fields coincide (M11)", () => {
+    const base = { date: "2026-07-01", amount: 42.5, currency: "EUR", counterparty: "Selver" };
+    const a = stableReviewId("import_camt053", { ...base, bank_reference: "REF-AAA" });
+    const b = stableReviewId("import_camt053", { ...base, bank_reference: "REF-BBB" });
+    expect(a).not.toBe(b);
+  });
+
+  it("stableReviewId does not let an empty normalized counterparty suppress the display value (M11)", () => {
+    const a = stableReviewId("classify_unmatched_transactions", { category: "c", normalized_counterparty: "", display_counterparty: "Acme" });
+    const b = stableReviewId("classify_unmatched_transactions", { category: "c", normalized_counterparty: "", display_counterparty: "Beeta" });
+    expect(a).not.toBe(b);
+  });
+
+  it("stableReviewId separates reference-less CAMT rows by direction and matched candidates (M11)", () => {
+    const base = { date: "2026-07-01", amount: 42.5, currency: "EUR", counterparty: "Kohvik", existing_transactions: [{ id: 10 }] };
+    const debit = stableReviewId("import_camt053", { ...base, type: "C" });
+    const credit = stableReviewId("import_camt053", { ...base, type: "D" });
+    const otherCandidate = stableReviewId("import_camt053", { ...base, type: "C", existing_transactions: [{ id: 11 }] });
+    expect(debit).not.toBe(credit);
+    expect(debit).not.toBe(otherCandidate);
+    // candidate ordering must not change the id
+    const reordered = stableReviewId("import_camt053", { ...base, type: "C", existing_transactions: [{ id: 20 }, { id: 10 }] });
+    const sorted = stableReviewId("import_camt053", { ...base, type: "C", existing_transactions: [{ id: 10 }, { id: 20 }] });
+    expect(reordered).toBe(sorted);
+  });
+
+  it("review_page.complete is false when the upstream file scan was truncated (M11)", async () => {
+    const classifyUnmatched = vi.fn<AutopilotInternalToolHandler>().mockResolvedValue({
+      content: [{ text: toMcpJson({ total_unmatched: 1, groups: classificationReviewGroups(1), category_counts: {} }) }],
+    });
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        scan: { max_depth: 2, scanned_directories: 1, scanned_candidate_files: 1, truncated: true },
+        steps: [{
+          step: 1,
+          tool: "classify_unmatched_transactions",
+          purpose: "Classify unmatched transactions",
+          recommended: true,
+          suggested_args: { execute: false },
+          missing_inputs: [],
+          reason: "Classify unmatched",
+        }],
+      }),
+      handlers: new Map([["classify_unmatched_transactions", classifyUnmatched]]),
+    });
+    expect(result.review_page).toMatchObject({ total: 1, complete: false });
+  });
+
   it("keeps receipt pending-approval blocking testable without MCP tool registration", async () => {
     const processReceiptBatch = vi.fn<AutopilotInternalToolHandler>().mockResolvedValue({
       content: [{
