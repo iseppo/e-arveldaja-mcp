@@ -3,10 +3,12 @@ import { z } from "zod";
 import { registerPrompt as registerMcpPrompt } from "./mcp-compat.js";
 import type { CredentialSetupInfo, ToolExposureConfig } from "./config.js";
 import {
+  buildWorkflowRunData,
   buildWorkflowPromptSourceText,
   WORKFLOW_PROMPT_SOURCE_BY_PROMPT,
   type WorkflowPromptName,
 } from "./workflow-prompt-source.js";
+import { renderPromptSurface } from "./prompt-surface.js";
 
 interface SetupPromptOptions {
   offlineTools?: string[];
@@ -35,6 +37,7 @@ function promptText(text: string): PromptResult {
 function buildSetupModePromptText(
   workflowName: string,
   setupInfo: CredentialSetupInfo,
+  args: unknown,
   options: SetupPromptOptions = {},
 ): string {
   const availableTools = [
@@ -44,24 +47,25 @@ function buildSetupModePromptText(
     ...(options.offlineTools ?? []),
   ];
 
-  return `The server is currently running in setup mode, so the \`${workflowName}\` workflow cannot complete yet.
+  const trustedBody = `The server is currently running in setup mode, so the \`${workflowName}\` workflow cannot complete yet.
 
 First call \`get_setup_instructions\` and configure credentials.
-- Working directory: ${setupInfo.working_directory}
-- Searched directories: ${setupInfo.searched_directories.join(", ")}
-- Shared config directory used when the configuration should work from any folder: ${setupInfo.global_config_directory}
-- Shared env file: ${setupInfo.global_env_file}
+- Read the working directory and searched directories from the bounded \`setup\` run data.
+- Read the shared config directory and shared env file from the bounded \`setup\` run data when configuration should work from any folder.
 - Import tool: \`import_apikey_credentials\`
-- Required environment variables: ${setupInfo.env_vars.join(", ")}
-- Optional direct credential file env var: ${setupInfo.credential_file_env_var}
-- Credential file pattern: ${setupInfo.credential_file_pattern} (working directory import source)
-- If exactly one secure \`${setupInfo.credential_file_pattern}\` is present and the client supports prompts, the server may offer to verify it and save the resulting \`.env\` either only for this folder or so it works when you start the MCP server from any folder.
+- Read required environment variable names, the optional direct credential-file variable, and the credential-file pattern from the bounded \`setup\` run data.
+- If exactly one secure matching credential file is present and the client supports prompts, the server may offer to verify it and save the resulting \`.env\` either only for this folder or so it works when you start the MCP server from any folder.
 
 Tools you can use right now:
 ${availableTools.map(tool => `- \`${tool}\``).join("\n")}
 ${options.note ? `\nSpecific guidance:\n- ${options.note}` : ""}
 
 After credentials are configured and the MCP server is restarted, run \`${workflowName}\` again.`;
+
+  return renderPromptSurface(trustedBody, {
+    ...buildWorkflowRunData(args),
+    setup: setupInfo,
+  });
 }
 
 function workflowPromptText(name: WorkflowPromptName, args: unknown): string {
@@ -78,7 +82,7 @@ function registerWorkflowPrompt<Args extends z.ZodRawShape>(
 ): void {
   registerMcpPrompt(server, name, description, argsSchema, async (args) => {
     if (setupInfo && options) {
-      return promptText(buildSetupModePromptText(name, setupInfo, options));
+      return promptText(buildSetupModePromptText(name, setupInfo, args, options));
     }
     return promptText(workflowPromptText(name, args));
   });
@@ -93,7 +97,7 @@ function registerWorkflowPromptWithoutArgs(
 ): void {
   registerMcpPrompt(server, name, description, async () => {
     if (setupInfo && options) {
-      return promptText(buildSetupModePromptText(name, setupInfo, options));
+      return promptText(buildSetupModePromptText(name, setupInfo, {}, options));
     }
     return promptText(workflowPromptText(name, {}));
   });
