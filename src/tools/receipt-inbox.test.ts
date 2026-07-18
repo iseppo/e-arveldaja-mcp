@@ -1249,35 +1249,77 @@ describe("applyReverseChargeAutoDetection (#18)", () => {
 
 describe("buildReferencedInvoiceForPaymentReceipt (#23)", () => {
   const invoices = [
-    { id: 501, number: "ABC-001", status: "CONFIRMED" },
-    { id: 502, number: "ABC-002", status: "DELETED" },
+    { id: 501, number: "ABC-001", status: "CONFIRMED", clients_id: 10, client_name: "Alpha OÜ" },
+    { id: 502, number: "ABC-002", status: "DELETED", clients_id: 10, client_name: "Alpha OÜ" },
   ] as Parameters<typeof buildReferencedInvoiceForPaymentReceipt>[1];
 
-  it("returns matched=true with invoice id when the receipt's invoice number resolves to a live invoice", () => {
-    const result = buildReferencedInvoiceForPaymentReceipt("ABC-001", invoices);
+  it("returns matched=true with invoice id when number + supplier client_id resolve to a live invoice", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-001", invoices, { client_id: 10 });
     expect(result).toEqual({ invoice_number: "ABC-001", matched: true, matched_invoice_id: 501 });
   });
 
   it("normalizes case and trims when matching invoice numbers", () => {
-    const result = buildReferencedInvoiceForPaymentReceipt(" abc-001 ", invoices);
+    const result = buildReferencedInvoiceForPaymentReceipt(" abc-001 ", invoices, { client_id: 10 });
     expect(result?.matched).toBe(true);
     expect(result?.matched_invoice_id).toBe(501);
   });
 
+  it("matches on normalized supplier name when no resolved client_id is available", () => {
+    // The payment-receipt call site has no resolved client_id — only the OCR
+    // supplier name. Legal-suffix/diacritic normalization must still link it.
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-001", invoices, { name: "Alpha OU" });
+    expect(result?.matched).toBe(true);
+    expect(result?.matched_invoice_id).toBe(501);
+  });
+
+  it("does not auto-match the same invoice number across suppliers (#23)", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt("INV-7", [
+      { id: 1, number: "INV-7", clients_id: 10, client_name: "Alpha" },
+      { id: 2, number: "INV-7", clients_id: 20, client_name: "Beta" },
+    ] as Parameters<typeof buildReferencedInvoiceForPaymentReceipt>[1], { client_id: 20, name: "Beta" });
+    expect(result).toMatchObject({ matched: true, matched_invoice_id: 2 });
+  });
+
+  it("requires supplier identity when the same number spans suppliers and identity is unknown", () => {
+    const result = buildReferencedInvoiceForPaymentReceipt("INV-7", [
+      { id: 1, number: "INV-7", clients_id: 10, client_name: "Alpha" },
+      { id: 2, number: "INV-7", clients_id: 20, client_name: "Beta" },
+    ] as Parameters<typeof buildReferencedInvoiceForPaymentReceipt>[1], {});
+    expect(result).toMatchObject({ matched: false, ambiguity_reason: "supplier_identity_required" });
+  });
+
+  it("does not auto-link when one supplier has two invoices of the same number", () => {
+    // Duplicate numbers under the SAME supplier are still ambiguous — there is
+    // no unique target, so route to review instead of picking the first.
+    const result = buildReferencedInvoiceForPaymentReceipt("DUP-1", [
+      { id: 1, number: "DUP-1", clients_id: 30, client_name: "Gamma" },
+      { id: 2, number: "DUP-1", clients_id: 30, client_name: "Gamma" },
+    ] as Parameters<typeof buildReferencedInvoiceForPaymentReceipt>[1], { client_id: 30 });
+    expect(result).toMatchObject({ matched: false, ambiguity_reason: "supplier_identity_required" });
+  });
+
+  it("does not auto-link a single number match when supplier identity is absent", () => {
+    // No client_id and no name → cannot confirm the supplier, so even a unique
+    // number match must route to review rather than link blindly.
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-001", invoices, {});
+    expect(result?.matched).toBe(false);
+    expect(result?.ambiguity_reason).toBeUndefined();
+  });
+
   it("returns matched=false when no live invoice matches (caller can chain a fallback)", () => {
-    const result = buildReferencedInvoiceForPaymentReceipt("DOES-NOT-EXIST", invoices);
+    const result = buildReferencedInvoiceForPaymentReceipt("DOES-NOT-EXIST", invoices, { client_id: 10 });
     expect(result).toEqual({ invoice_number: "DOES-NOT-EXIST", matched: false });
   });
 
   it("does not match a DELETED/INVALIDATED invoice", () => {
-    const result = buildReferencedInvoiceForPaymentReceipt("ABC-002", invoices);
+    const result = buildReferencedInvoiceForPaymentReceipt("ABC-002", invoices, { client_id: 10 });
     expect(result?.matched).toBe(false);
   });
 
   it("returns undefined for an empty or AUTO-prefixed invoice number (synthetic placeholder)", () => {
-    expect(buildReferencedInvoiceForPaymentReceipt(undefined, invoices)).toBeUndefined();
-    expect(buildReferencedInvoiceForPaymentReceipt("", invoices)).toBeUndefined();
-    expect(buildReferencedInvoiceForPaymentReceipt("AUTO-20260320-RECEIPT", invoices)).toBeUndefined();
+    expect(buildReferencedInvoiceForPaymentReceipt(undefined, invoices, { client_id: 10 })).toBeUndefined();
+    expect(buildReferencedInvoiceForPaymentReceipt("", invoices, { client_id: 10 })).toBeUndefined();
+    expect(buildReferencedInvoiceForPaymentReceipt("AUTO-20260320-RECEIPT", invoices, { client_id: 10 })).toBeUndefined();
   });
 });
 

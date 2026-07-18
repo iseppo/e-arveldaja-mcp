@@ -1041,19 +1041,38 @@ export function applyReverseChargeAutoDetection(
 export function buildReferencedInvoiceForPaymentReceipt(
   invoiceNumber: string | undefined,
   purchaseInvoices: PurchaseInvoice[],
-): { invoice_number: string; matched: boolean; matched_invoice_id?: number } | undefined {
+  supplier: { client_id?: number; name?: string },
+): { invoice_number: string; matched: boolean; matched_invoice_id?: number; ambiguity_reason?: string } | undefined {
   const trimmed = invoiceNumber?.trim();
   if (!trimmed || trimmed.toUpperCase().startsWith("AUTO-")) return undefined;
   const normalized = trimmed.toLowerCase();
-  const found = purchaseInvoices.find(invoice =>
+  const numberMatches = purchaseInvoices.filter(invoice =>
     invoice.status !== "DELETED" &&
     invoice.status !== "INVALIDATED" &&
     invoice.number.trim().toLowerCase() === normalized,
   );
-  if (found?.id !== undefined) {
-    return { invoice_number: trimmed, matched: true, matched_invoice_id: found.id };
+
+  // An invoice number is not unique across suppliers, so a bare number match
+  // must never auto-link — it could book the receipt against a different legal
+  // entity's identically-numbered invoice (#23). Confirm the supplier: prefer
+  // a resolved client_id; otherwise require the receipt's supplier name to
+  // normalise-equal the invoice's client_name. Absent any supplier identity we
+  // cannot confirm the link, so nothing matches and the caller routes to review.
+  const supplierNameKey = supplier.name ? normalizeCompanyName(supplier.name) : "";
+  const supplierMatches = numberMatches.filter(invoice => {
+    if (supplier.client_id !== undefined) return invoice.clients_id === supplier.client_id;
+    if (!supplierNameKey) return false;
+    return normalizeCompanyName(invoice.client_name) === supplierNameKey;
+  });
+
+  if (supplierMatches.length === 1 && supplierMatches[0]!.id !== undefined) {
+    return { invoice_number: trimmed, matched: true, matched_invoice_id: supplierMatches[0]!.id };
   }
-  return { invoice_number: trimmed, matched: false };
+  return {
+    invoice_number: trimmed,
+    matched: false,
+    ...(numberMatches.length > 1 ? { ambiguity_reason: "supplier_identity_required" } : {}),
+  };
 }
 
 interface ProcessSingleReceiptOptions {
@@ -1123,7 +1142,9 @@ async function processSingleReceipt(
     if (classification !== "purchase_invoice") {
       const referencedInvoice =
         classification === "payment_receipt"
-          ? buildReferencedInvoiceForPaymentReceipt(extracted.invoice_number, context.purchaseInvoices)
+          ? buildReferencedInvoiceForPaymentReceipt(extracted.invoice_number, context.purchaseInvoices, {
+              ...(extracted.supplier_name ? { name: extracted.supplier_name } : {}),
+            })
           : undefined;
       notes.push(
         classification === "owner_paid_expense_reimbursement"

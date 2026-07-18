@@ -127,6 +127,7 @@ export interface ReceiptBatchFileResult {
     invoice_number: string;
     matched: boolean;
     matched_invoice_id?: number;
+    ambiguity_reason?: string;
   };
   notes: string[];
   error?: string;
