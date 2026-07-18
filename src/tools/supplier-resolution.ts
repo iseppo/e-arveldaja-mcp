@@ -4,6 +4,7 @@ import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { normalizeVatValue } from "../document-identifiers.js";
+import { desandboxText } from "../external-text-renderer.js";
 import {
   type ExtractedReceiptFields,
   type TransactionClassificationCategory,
@@ -127,6 +128,21 @@ export async function resolveSupplierInternal(
   execute: boolean,
   options?: SupplierResolutionOptions,
 ): Promise<SupplierResolution> {
+  // Canonicalize the external-origin identity fields at this shared resolution/
+  // creation boundary: supplier_name/reg_code/vat_no/iban can arrive sandbox-
+  // wrapped from a round-tripped extract response, and this function both MATCHES
+  // on them and (with execute=true) CREATES a client from them via
+  // api.clients.create — a path that bypasses the create_client tool's own strip.
+  // Removing every marker here guarantees none is used as a match key or persisted
+  // onto a new client, for all callers (pdf-workflow + receipt-inbox). raw_text is
+  // left untouched (detection input, never persisted or matched as a key).
+  fields = {
+    ...fields,
+    supplier_name: fields.supplier_name !== undefined ? desandboxText(fields.supplier_name) : undefined,
+    supplier_reg_code: fields.supplier_reg_code !== undefined ? desandboxText(fields.supplier_reg_code) : undefined,
+    supplier_vat_no: fields.supplier_vat_no !== undefined ? desandboxText(fields.supplier_vat_no) : undefined,
+    supplier_iban: fields.supplier_iban !== undefined ? desandboxText(fields.supplier_iban) : undefined,
+  };
   const ownVat = normalizeVatForCompare(options?.ownCompanyVat);
   const ownCode = options?.ownCompanyRegistryCode?.trim() || undefined;
   const isSelfClient = (client: Client): boolean => {
@@ -278,11 +294,20 @@ export async function resolveSupplierInternal(
   }
 
   const overrides = options?._resolveSupplierOverrides;
-  const supplierCountry = overrides?.country ?? inferSupplierCountry(fields);
+  // The caller-supplied country override reaches previewClient.cl_code_country and
+  // api.clients.create, so strip markers here too (a wrapped value must never be
+  // forwarded to the API). Empty/invalid codes fall back to inference.
+  const overrideCountry = overrides?.country !== undefined ? desandboxText(overrides.country) : undefined;
+  const supplierCountry = (overrideCountry || undefined) ?? inferSupplierCountry(fields);
   const registryData = supplierCountry
     ? await fetchRegistryData(fields.supplier_reg_code, supplierCountry, fields.supplier_name)
     : null;
-  const clientName = registryData?.name ?? fields.supplier_name;
+  // registryData comes from an external network lookup (fetchRegistryData) and
+  // is incorporated AFTER the top-of-function field canonicalization, so strip
+  // markers from it too before it becomes a persisted client name. supplier_name
+  // is already marker-free from the entry canonicalization (no-op here).
+  const rawClientName = registryData?.name ?? fields.supplier_name;
+  const clientName = rawClientName !== undefined ? desandboxText(rawClientName) : undefined;
   if (!clientName) {
     return {
       found: false,
@@ -327,7 +352,7 @@ export async function resolveSupplierInternal(
     send_invoice_to_accounting_email: false,
     invoice_vat_no: previewVatNo,
     bank_account_no: fields.supplier_iban,
-    address_text: registryData?.address,
+    address_text: registryData?.address !== undefined ? desandboxText(registryData.address) : undefined,
   };
 
   if (!execute) {

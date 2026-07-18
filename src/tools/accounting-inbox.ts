@@ -3,7 +3,8 @@ import { open, opendir, realpath, stat } from "fs/promises";
 import { basename, extname, resolve } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson, unwrapUntrustedOcr } from "../mcp-json.js";
+import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
+import { desandboxText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
@@ -1003,9 +1004,11 @@ function extractTransactionPatchFields(record: Record<string, unknown> | undefin
     if (value === undefined || value === null) continue;
     const coerced = typeof value === "string"
       // The value round-tripped through the LLM as a sandbox-wrapped review
-      // field; strip the display-only delimiters before it is written to the
-      // ledger, otherwise the literal <<UNTRUSTED_OCR_START:…>> markers persist.
-      ? unwrapUntrustedOcr(value)
+      // field; strip EVERY wrapper layer and any residual delimiter before it is
+      // written to the ledger, otherwise a nested/forged <<UNTRUSTED_OCR_*>>
+      // marker persists. desandboxText preserves internal whitespace (CAMT
+      // descriptions/refs are stored verbatim apart from the markers).
+      ? desandboxText(value)
       : (typeof value === "number" && Number.isFinite(value))
         ? String(value)
         : typeof value === "bigint"
@@ -1258,12 +1261,26 @@ function prepareReviewAction(
 
   if (options.saveAsRule) {
     const mergedRuleOverride = mergeRuleOverrides(reviewItem, options.ruleOverride);
+    // Canonicalize a marker-/whitespace-only wrapped vat_rate_dropdown to nothing
+    // (mergedRuleOverride is a fresh object, safe to mutate): otherwise it would
+    // pass the readiness guard below as the sole "concrete" field yet canonicalize
+    // to "" at persist, reporting a ready/saved rule with no effective action.
+    if (mergedRuleOverride && typeof mergedRuleOverride.vat_rate_dropdown === "string") {
+      const cleanedVat = canonicalBusinessText(mergedRuleOverride.vat_rate_dropdown);
+      if (cleanedVat) mergedRuleOverride.vat_rate_dropdown = cleanedVat;
+      else delete mergedRuleOverride.vat_rate_dropdown;
+    }
     // Prefer the resolved/normalized counterparty label over the raw OCR
     // `extracted.supplier_name` so a prompt-injected supplier name can't land
     // in `accounting-rules.md` as a rule match key unless the user types it in.
-    const match = stringAt(mergedRuleOverride ?? {}, "match") ??
+    // Canonicalize: the display_counterparty can be a sandbox-wrapped value
+    // round-tripped from a wrapped classify/review response, so strip markers
+    // before it becomes the proposed rule KEY (saveAutoBookingRule canonicalizes
+    // again at persist, but the proposed/echoed key must also be marker-free).
+    const rawMatch = stringAt(mergedRuleOverride ?? {}, "match") ??
       stringAt(item ?? {}, "display_counterparty") ??
       stringAt(group ?? {}, "display_counterparty");
+    const match = rawMatch !== undefined ? canonicalBusinessText(rawMatch) || undefined : undefined;
     const category = stringAt(mergedRuleOverride ?? {}, "category") ??
       stringAt(group ?? {}, "category");
     if (match) {
@@ -1290,7 +1307,12 @@ function prepareReviewAction(
       ]) {
         const value = (mergedRuleOverride ?? {})[key];
         if (value !== undefined) {
-          ruleArgs[PUBLIC_RULE_ARG_NAME[key] ?? key] = value;
+          // Canonicalize the echoed free-text so proposed_action.args carries no
+          // sandbox marker (persistence is protected again in saveAutoBookingRule).
+          const cleaned = (key === "reason" || key === "vat_rate_dropdown") && typeof value === "string"
+            ? canonicalBusinessText(value)
+            : value;
+          ruleArgs[PUBLIC_RULE_ARG_NAME[key] ?? key] = cleaned;
         }
       }
       const hasConcreteRuleField = hasConcreteRuleOverrideField(mergedRuleOverride);
@@ -1732,12 +1754,26 @@ export function registerAccountingInboxTools(
       // its downstream consumers keep the legacy singular field names.
       const purchase_account_id = purchase_accounts_id;
       const liability_account_id = liability_accounts_id;
+      // Canonicalize the free text up front so the length guard and error message
+      // operate on marker-free text (a marker-only match then fails the friendly
+      // "too short" check, not an opaque schema error). saveAutoBookingRule
+      // canonicalizes again at the persist boundary — this is defense in depth.
+      const cleanMatch = canonicalBusinessText(match);
+      const cleanReason = reason !== undefined ? canonicalBusinessText(reason) : undefined;
+      // Canonicalize vat_rate_dropdown BEFORE the concrete-field guard: a
+      // marker-/whitespace-only wrapped value would otherwise pass the guard as
+      // the sole "concrete" field, then canonicalize to "" at persist and save a
+      // rule with no effective booking action. Empty after canonicalization →
+      // undefined, so it no longer counts as a concrete field.
+      const cleanVatRateDropdown = vat_rate_dropdown !== undefined
+        ? (canonicalBusinessText(vat_rate_dropdown) || undefined)
+        : undefined;
       if (!hasConcreteRuleOverrideField({
         purchase_article_id,
         purchase_account_id,
         purchase_account_dimensions_id,
         liability_account_id,
-        vat_rate_dropdown,
+        vat_rate_dropdown: cleanVatRateDropdown,
         reversed_vat_id,
       })) {
         throw new Error("save_auto_booking_rule requires at least one concrete booking field besides match/category/reason");
@@ -1746,22 +1782,22 @@ export function registerAccountingInboxTools(
       // Guard against 1–2 char stems (e.g. "AS", "OÜ") that would substring-match
       // every Estonian company. findAutoBookingRule uses String.includes, so a
       // short normalized stem silently hijacks unrelated counterparties.
-      if (normalizeAutoBookingRuleMatch(match).length < MIN_AUTO_BOOKING_RULE_MATCH_LENGTH) {
+      if (normalizeAutoBookingRuleMatch(cleanMatch).length < MIN_AUTO_BOOKING_RULE_MATCH_LENGTH) {
         throw new Error(
-          `save_auto_booking_rule match "${match}" is too short after normalization (need at least ${MIN_AUTO_BOOKING_RULE_MATCH_LENGTH} characters) — use a more specific counterparty stem to avoid accidental matches.`,
+          `save_auto_booking_rule match "${cleanMatch}" is too short after normalization (need at least ${MIN_AUTO_BOOKING_RULE_MATCH_LENGTH} characters) — use a more specific counterparty stem to avoid accidental matches.`,
         );
       }
 
       const result = saveAutoBookingRule({
-        match,
+        match: cleanMatch,
         category,
         purchase_article_id,
         purchase_account_id,
         purchase_account_dimensions_id,
         liability_account_id,
-        vat_rate_dropdown,
+        vat_rate_dropdown: cleanVatRateDropdown,
         reversed_vat_id,
-        reason,
+        reason: cleanReason,
       });
 
       return {

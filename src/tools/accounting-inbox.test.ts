@@ -1802,6 +1802,21 @@ ${entryXml}
     })).rejects.toThrow(/requires at least one concrete booking field/i);
   });
 
+  it("save_auto_booking_rule rejects a rule whose only 'concrete' field is a marker-only vat_rate_dropdown", async () => {
+    // A marker-/whitespace-only wrapped VAT value canonicalizes to "" and must NOT
+    // count as a concrete booking field — otherwise a rule with no effective action
+    // would be saved.
+    const { handler } = setupAccountingInboxTool({}, "save_auto_booking_rule");
+    const nonce = "deadbeef";
+    const wrap = (s: string) => `<<UNTRUSTED_OCR_START:${nonce}>>\n${s}\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+
+    await expect(handler({
+      match: "openai",
+      category: "saas_subscriptions",
+      vat_rate_dropdown: wrap("   "),
+    })).rejects.toThrow(/requires at least one concrete booking field/i);
+  });
+
   it("prepare_accounting_review_action can prepare save_auto_booking_rule directly from suggested_booking", async () => {
     const { handler } = setupAccountingInboxTool({}, "prepare_accounting_review_action");
 

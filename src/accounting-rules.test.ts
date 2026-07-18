@@ -349,6 +349,62 @@ Current year profit account: 2999
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("canonicalizes sandbox-wrapped match and reason before persisting (F-RULE-SAVE-CANONICAL)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "accounting-rules.md");
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    const nonce = "deadbeef";
+    // Real wrapper framing (newlines around the content), so the test exercises
+    // the whole-value unwrap loop, not just residual-token removal.
+    const wrap = (s: string) => `<<UNTRUSTED_OCR_START:${nonce}>>\n${s}\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+    const result = saveAutoBookingRule({
+      match: wrap("Stripe Payments OÜ"),
+      category: "saas_subscriptions",
+      purchase_article_id: 501,
+      purchase_account_id: 5230,
+      liability_account_id: 2315,
+      vat_rate_dropdown: wrap("24"),
+      reason: wrap("auto-detected"),
+    });
+
+    // The returned key and the persisted store carry no sandbox marker — across
+    // match, reason, AND vat_rate_dropdown (all free-text rule fields).
+    expect(result.match).toBe("Stripe Payments OÜ");
+    const persisted = readFileSync(filePath, "utf-8");
+    expect(persisted).not.toContain("UNTRUSTED_OCR");
+    expect(persisted).toContain("Stripe Payments OÜ");
+    expect(persisted).toContain("auto-detected");
+    // The persisted rule resolves on the clean stem, not the marker text.
+    expect(findAutoBookingRule("stripe payments oü", "saas_subscriptions")).toMatchObject({
+      purchase_account_id: 5230,
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("rejects a direct saveAutoBookingRule call whose only action field is a marker-only vat_rate_dropdown", () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+    const filePath = join(dir, "accounting-rules.md");
+    process.env.EARVELDAJA_RULES_FILE = filePath;
+    resetAccountingRulesCache();
+
+    const nonce = "deadbeef";
+    const wrap = (s: string) => `<<UNTRUSTED_OCR_START:${nonce}>>\n${s}\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+
+    // The authoritative boundary maps the canonicalized-empty VAT to undefined, so
+    // the schema's "at least one concrete field" refinement rejects the call even
+    // though it bypasses the tool-handler / prepare-path guards.
+    expect(() => saveAutoBookingRule({
+      match: "openai",
+      category: "saas_subscriptions",
+      vat_rate_dropdown: wrap("   "),
+    })).toThrow(/at least one concrete/i);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("updates an existing rule when the saved match normalizes to the same counterparty stem", () => {
     const dir = mkdtempSync(join(tmpdir(), "earv-rules-"));
     const filePath = join(dir, "accounting-rules.md");

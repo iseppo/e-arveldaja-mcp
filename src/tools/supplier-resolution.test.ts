@@ -517,3 +517,69 @@ describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
     expect(result.client?.id).toBe(1);
   });
 });
+
+describe("resolveSupplierInternal — sandbox-marker canonicalization (write/match boundary)", () => {
+  const nonce = "deadbeef";
+  // Real wrapper framing (newlines around the content), so these exercise the
+  // whole-value unwrap loop, not just residual-token removal.
+  const wrap = (s: string) => `<<UNTRUSTED_OCR_START:${nonce}>>\n${s}\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+
+  it("strips markers from supplier_name before matching, so a wrapped name resolves the clean client", async () => {
+    // A wrapped supplier_name round-tripped from a wrapped extract response must
+    // resolve to the existing clean client. Without the strip, the normalized key
+    // would include the UNTRUSTED_OCR token text and never match.
+    const ownCompany = makeClient({ id: 100, invoice_vat_no: "EE102809963" });
+    const supplier = makeClient({ id: 300, name: "Fragmented Tools OÜ", cl_code_country: "USA" });
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [ownCompany, supplier],
+      { supplier_name: wrap("Fragmented Tools OÜ") },
+      false,
+      { ownCompanyVat: "EE102809963" },
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.client?.id).toBe(300);
+  });
+
+  it("strips markers from supplier_reg_code before the exact-code match", async () => {
+    const supplier = makeClient({ id: 400, name: "Registry Co", code: "16899999", cl_code_country: "EST" });
+
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [supplier],
+      { supplier_reg_code: wrap("16899999") },
+      false,
+    );
+
+    expect(result.found).toBe(true);
+    expect(result.match_type).toBe("registry_code");
+    expect(result.client?.id).toBe(400);
+  });
+
+  it("persists a marker-free client name when auto-creating from a wrapped supplier_name", async () => {
+    // execute=true with a non-EE supplier (no registry lookup) reaches
+    // api.clients.create. The created client name must carry no marker.
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const get = vi.fn().mockResolvedValue({ id: 900, name: "Nonprofit Foreign LLC" });
+    const api = {
+      clients: { listAll: () => Promise.resolve([]), create, get },
+    } as unknown as ApiContext;
+
+    await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: wrap("Nonprofit Foreign LLC") },
+      true,
+      { _resolveSupplierOverrides: { country: wrap("USA"), is_physical_entity: false } },
+    );
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const created = create.mock.calls[0]![0] as { name: string; cl_code_country: string };
+    expect(created.name).not.toContain("UNTRUSTED_OCR");
+    expect(created.name).toContain("Nonprofit Foreign LLC");
+    // The wrapped country override is stripped before reaching api.clients.create.
+    expect(created.cl_code_country).toBe("USA");
+  });
+});

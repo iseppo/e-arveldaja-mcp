@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
-import { desandboxExternalEntity, renderExternalEntity } from "../../external-text-renderer.js";
+import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -140,7 +140,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       "projects_* fields link the posting to project tracking dimensions."
     ),
   }, { ...create, title: "Create Journal" }, async (rawParams) => {
-    const params = desandboxExternalEntity("journal", rawParams);
+    const params = desandboxAllStrings(rawParams);
     const postings = parsePostings(params.postings);
     const [accounts, accountDimensions] = await Promise.all([
       api.readonly.getAccounts(),
@@ -187,7 +187,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     id: coerceId.describe("Journal ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
-    const parsed = desandboxExternalEntity("journal", parseJsonObject(data, "data"));
+    const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const current = await api.journals.get(id);
     const isConfirmed = current.registered === true;
     const updateErrors = validateUpdateFields(parsed, "journal", { isConfirmed });

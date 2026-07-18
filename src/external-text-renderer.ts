@@ -112,3 +112,41 @@ export function renderExternalEntity<T>(entity: ExternalEntity, value: T): T {
 export function desandboxExternalEntity<T>(entity: ExternalEntity, value: T): T {
   return applyPolicy(value, EXTERNAL_TEXT_POLICY[entity], desandboxText as TextTransform) as T;
 }
+
+/**
+ * Strip sandbox markers from EVERY string in `value`, recursing through arrays
+ * and plain objects, returning a copy (the input is never mutated). Use on a
+ * write payload whose entire field set is metadata/free text that must never
+ * carry a marker to the API or audit log — e.g. update_transaction and
+ * create_transaction, where allowed fields (description, bank_account_name,
+ * ref_number, …) are all import-origin bank metadata. Unlike the policy-scoped
+ * desandboxExternalEntity, this needs no per-field list, so a wrapped value
+ * round-tripped from a read is neutralised regardless of which field it lands in.
+ *
+ * NOTE — pass PARSED structures, not a JSON string that embeds wrapped values.
+ * Stripping markers from a raw JSON string only removes the delimiter TOKENS and
+ * leaves the wrapper's framing newlines inside the nested value ("\nWidget\n").
+ * Parse first (so each nested string is a whole value), then desandboxAllStrings,
+ * and the loop-unwrap in desandboxText recovers the clean inner text ("Widget").
+ */
+export function desandboxAllStrings<T>(value: T): T {
+  if (typeof value === "string") return desandboxText(value) as T;
+  if (Array.isArray(value)) return value.map(item => desandboxAllStrings(item)) as unknown as T;
+  if (value === null || typeof value !== "object") return value;
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(source)) {
+    const cleaned = desandboxAllStrings(child);
+    // JSON.parse can produce an OWN "__proto__" key; a plain `output[key] = …`
+    // would fire the prototype setter and repoint the object's prototype (a
+    // local prototype-pollution that could, e.g., inject an inherited `items`
+    // and suppress a downstream `x.items === undefined` check). Store it as real
+    // own data via defineProperty instead, so no assignment ever mutates a proto.
+    if (key === "__proto__") {
+      Object.defineProperty(output, key, { value: cleaned, enumerable: true, writable: true, configurable: true });
+    } else {
+      output[key] = cleaned;
+    }
+  }
+  return output as T;
+}

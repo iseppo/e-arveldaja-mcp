@@ -99,6 +99,17 @@ describe("reference-data edit tools", () => {
     expect(logAudit).not.toHaveBeenCalled();
   });
 
+  it("update_bank_account strips sandbox markers from patched fields before the API", async () => {
+    const readonly = makeReadonly();
+    const handlers = register(readonly);
+    const nonce = "deadbeef";
+    const wrap = (s: string) => `<<UNTRUSTED_OCR_START:${nonce}>>\n${s}\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+
+    await handlers.update_bank_account({ id: 5, account_name_est: wrap("LHV Pank") });
+
+    expect(readonly.updateBankAccount).toHaveBeenCalledWith(5, { account_name_est: "LHV Pank" });
+  });
+
   it("get_invoice_series fetches a single series by id", async () => {
     const readonly = makeReadonly();
     const handlers = register(readonly);

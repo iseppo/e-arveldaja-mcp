@@ -1450,6 +1450,30 @@ describe("create_owner_expense_reimbursement", () => {
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 
+  it("strips sandbox markers from description and document_number before the journal and audit", async () => {
+    setup(false);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+    const nonce = "deadbeef";
+    const wrap = (s: string) => `<<UNTRUSTED_OCR_START:${nonce}>>\n${s}\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+
+    const result = await cb({
+      owner_client_id: 1,
+      effective_date: "2026-06-01",
+      description: wrap("Office chair"),
+      document_number: wrap("R-2026-14"),
+      net_amount: 100,
+      vat_rate: 0,
+      expense_account: 5000,
+    });
+
+    expect(isError(result)).toBe(false);
+    const createCall = vi.mocked(api.journals.create).mock.calls[0][0] as { title: string; document_number?: string };
+    expect(createCall.title).toBe("Office chair");
+    expect(createCall.document_number).toBe("R-2026-14");
+    const auditCall = mockedLogAudit.mock.lastCall?.[0] as { summary: string } | undefined;
+    expect(auditCall?.summary).not.toContain("UNTRUSTED_OCR");
+  });
+
   // -------------------------------------------------------------------------
   // VAT-registered company: splits input VAT
   // -------------------------------------------------------------------------

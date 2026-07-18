@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
-import { desandboxExternalEntity, desandboxText, renderExternalEntity } from "../../external-text-renderer.js";
+import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -103,16 +103,17 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       notes: z.string().optional().describe("Notes"),
       bank_ref_number: z.string().optional().describe("Payment reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
-    }, { ...create, title: "Create Purchase Invoice" }, async (params) => {
-      // Strip any sandbox markers round-tripped from a wrapped read so no marker
-      // is persisted to the invoice, the audit log, or the item titles.
-      const client_name = desandboxText(params.client_name);
+    }, { ...create, title: "Create Purchase Invoice" }, async (rawParams) => {
+      // Strip any sandbox markers round-tripped from a wrapped read off EVERY field
+      // (client name, number, bank refs, notes, item titles) so no marker is
+      // persisted to the invoice or the audit log regardless of which field it lands in.
+      const params = desandboxAllStrings(rawParams);
+      const client_name = params.client_name;
       const isVatReg = await isCompanyVatRegistered(api);
-      const rawItems = parsePurchaseInvoiceItems(params.items).map(item =>
-        typeof item.custom_title === "string"
-          ? { ...item, custom_title: desandboxText(item.custom_title) }
-          : item,
-      );
+      // Parse items from the RAW payload, THEN deep-clean the parsed objects: if
+      // items arrives as a JSON string, stripping it before parse would leave the
+      // wrapper's framing newlines inside a nested title. Parse-then-clean unwraps.
+      const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(rawParams.items));
       if (!isVatReg) {
         const details = rawItems.flatMap((item, index) =>
           validateNonVatItem(item).map(error => `items[${index}].${error}`)
@@ -194,7 +195,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     id: coerceId.describe("Invoice ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
-    const parsed = desandboxExternalEntity("purchase_invoice", parseJsonObject(data, "data"));
+    const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const current = await api.purchaseInvoices.get(id);
     const isConfirmed = current.status === "CONFIRMED";
     const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed });
@@ -216,7 +217,11 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     // which PATCHes with the fetched invoice.items. A caller that supplies
     // items to change the lines keeps theirs.
     if (parsed.items === undefined && current.items !== undefined) {
-      parsed.items = current.items.map(item => ({ ...item }));
+      // Re-send the existing lines, but canonicalize them: a record created before
+      // this remediation could carry markers in a stored title, and re-sending it
+      // verbatim would persist them again. desandboxAllStrings is a no-op on the
+      // common (already-clean) path.
+      parsed.items = desandboxAllStrings(current.items.map(item => ({ ...item })));
     }
     const result = await api.purchaseInvoices.update(id, parsed);
     logAudit({

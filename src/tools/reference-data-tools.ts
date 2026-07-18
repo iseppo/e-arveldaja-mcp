@@ -4,6 +4,7 @@ import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import { create, readOnly, mutate, destructive } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
+import { desandboxAllStrings } from "../external-text-renderer.js";
 import { toolError } from "../tool-error.js";
 import { toolResponse } from "../tool-response.js";
 import { coerceId } from "./crud/shared.js";
@@ -94,7 +95,9 @@ export function registerReferenceDataTools(
     balance_email_body: z.string().optional().describe("Default body for balance-reminder emails"),
     balance_document_footer: z.string().optional().describe("Footer text on balance documents"),
   }, { ...mutate, title: "Update Invoice Settings" }, async (fields) => {
-    const patch = pruneUndefined(fields);
+    // Strip sandbox markers off every field before persisting: an LLM could
+    // compose email subject/body/footer text from a wrapped read.
+    const patch = desandboxAllStrings(pruneUndefined(fields));
     if (Object.keys(patch).length === 0) {
       return toolError({ error: "Provide at least one invoice-settings field to update." });
     }
@@ -136,7 +139,8 @@ export function registerReferenceDataTools(
     is_active: z.boolean().describe("Is active"),
     is_default: z.boolean().describe("Is default series"),
     overdue_charge: z.number().optional().describe("Delinquency charge per day"),
-  }, { ...create, title: "Create Invoice Series" }, async (params) => {
+  }, { ...create, title: "Create Invoice Series" }, async (rawParams) => {
+    const params = desandboxAllStrings(rawParams);
     const result = await api.readonly.createInvoiceSeries(params);
     logAudit({
       tool: "create_invoice_series", action: "CREATED", entity_type: "invoice_series",
@@ -162,7 +166,7 @@ export function registerReferenceDataTools(
     is_default: z.boolean().optional().describe("Is the default series"),
     overdue_charge: z.number().optional().describe("Delinquency charge per day"),
   }, { ...mutate, title: "Update Invoice Series" }, async ({ id, ...fields }) => {
-    const patch = pruneUndefined(fields);
+    const patch = desandboxAllStrings(pruneUndefined(fields));
     if (Object.keys(patch).length === 0) {
       return toolError({ error: "Provide at least one invoice-series field to update." });
     }
@@ -219,7 +223,8 @@ export function registerReferenceDataTools(
     cl_banks_id: z.number().optional().describe("Bank ID"),
     swift_code: z.string().optional().describe("SWIFT/BIC code"),
     show_in_sale_invoices: z.boolean().optional().describe("Show on invoices"),
-  }, { ...create, title: "Create Bank Account" }, async (params) => {
+  }, { ...create, title: "Create Bank Account" }, async (rawParams) => {
+    const params = desandboxAllStrings(rawParams);
     const result = await api.readonly.createBankAccount(params);
     logAudit({
       tool: "create_bank_account", action: "CREATED", entity_type: "bank_account",
@@ -244,7 +249,7 @@ export function registerReferenceDataTools(
     swift_code: z.string().optional().describe("SWIFT/BIC code"),
     show_in_sale_invoices: z.boolean().optional().describe("Show on invoices"),
   }, { ...mutate, title: "Update Bank Account" }, async ({ id, ...fields }) => {
-    const patch = pruneUndefined(fields);
+    const patch = desandboxAllStrings(pruneUndefined(fields));
     if (Object.keys(patch).length === 0) {
       return toolError({ error: "Provide at least one bank-account field to update." });
     }

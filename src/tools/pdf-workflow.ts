@@ -6,6 +6,7 @@ import { join } from "path";
 import { registerTool } from "../mcp-compat.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
+import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
@@ -729,18 +730,31 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       source_sha256: z.string().regex(/^[0-9a-f]{64}$/).describe("SHA-256 of the document returned by extract_pdf_invoice; binds this booking to the exact reviewed bytes."),
     },
     { ...create, openWorldHint: true, title: "Create Purchase Invoice from PDF" },
-    async (params) => {
+    async (rawParams) => {
+      // Strip any sandbox markers round-tripped from a wrapped extract response
+      // off the persisted business fields (invoice_number, notes, ref_number,
+      // bank_account_no, item titles) before they reach the invoice or audit log.
+      // file_path and source_sha256 are IDENTITY/lookup values, not persisted
+      // business text — they must be used verbatim (a marker-shaped path component
+      // must not be silently rewritten), so read them from rawParams.
+      const params = desandboxAllStrings(rawParams);
       // H15: refuse to book unless the caller echoes the extract_pdf_invoice
       // digest, then snapshot-and-verify the bytes BEFORE any API mutation.
-      if (!/^[0-9a-f]{64}$/.test(params.source_sha256 ?? "")) {
+      if (!/^[0-9a-f]{64}$/.test(rawParams.source_sha256 ?? "")) {
         return toolError({ category: "source_sha256_required", error: "source_sha256 from extract_pdf_invoice is required" });
       }
-      const documentUpload = await prepareInvoiceDocumentUpload(params.file_path, params.source_sha256);
+      const documentUpload = await prepareInvoiceDocumentUpload(rawParams.file_path, rawParams.source_sha256);
       try {
       const supplier = await api.clients.get(params.supplier_client_id);
+      // supplier.name is a trusted API read, but a client created before this
+      // remediation could carry a marker; strip once and use for BOTH the invoice
+      // and the audit log (no-op when already clean).
+      const supplierName = desandboxText(supplier.name);
       const isVatReg = await isCompanyVatRegistered(api);
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
-      const rawItems = parsePurchaseInvoiceItems(params.items);
+      // Parse items from the RAW payload, THEN deep-clean the parsed objects (a
+      // JSON-string items field would otherwise keep wrapper framing in a title).
+      const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(rawParams.items));
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
 
       // Validate dimension requirements before hitting the API
@@ -762,7 +776,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
 
       const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.supplier_client_id,
-        client_name: supplier.name,
+        client_name: supplierName,
         number: params.invoice_number,
         create_date: params.invoice_date,
         journal_date: params.journal_date,
@@ -828,7 +842,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         entity_id: result.id,
         summary: `Created purchase invoice "${params.invoice_number}" from PDF`,
         details: {
-          supplier_name: supplier.name, invoice_number: params.invoice_number,
+          supplier_name: supplierName, invoice_number: params.invoice_number,
           invoice_date: params.invoice_date, total_vat: params.vat_price, total_gross: params.gross_price,
           items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
           file_name: documentUpload.fileName,

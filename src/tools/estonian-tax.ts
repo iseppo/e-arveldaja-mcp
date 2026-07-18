@@ -17,6 +17,7 @@ import {
   VAT_REGISTRATION_THRESHOLD_EUR,
 } from "../estonian-tax-rules.js";
 import { logAudit } from "../audit-log.js";
+import { desandboxText } from "../external-text-renderer.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
@@ -641,6 +642,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       payable_account,
       document_number,
     }) => {
+      // Canonicalize free-text that will be persisted to the journal + audit log:
+      // a wrapped OCR receipt description/number can round-trip through the LLM
+      // into this booking, so strip markers before any of it reaches the ledger.
+      description = desandboxText(description);
+      document_number = document_number !== undefined ? desandboxText(document_number) : undefined;
       if (vat_rate > 1) {
         return toolError({
           error: `vat_rate=${vat_rate} looks like a percentage. Pass a decimal fraction instead (e.g. 0.24 for 24%).`,

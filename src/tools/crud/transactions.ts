@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
-import { desandboxExternalEntity, renderExternalEntity } from "../../external-text-renderer.js";
+import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -156,7 +156,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     bank_account_name: z.string().optional().describe("Remitter/beneficiary name"),
     ref_number: z.string().optional().describe("Reference number"),
   }, { ...create, title: "Create Transaction" }, async (rawParams) => {
-    const params = desandboxExternalEntity("transaction", rawParams);
+    const params = desandboxAllStrings(rawParams);
     const result = await api.transactions.create({
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
@@ -273,7 +273,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     id: coerceId.describe("Transaction ID"),
     data: jsonObjectInput.describe("Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description, ref_number."),
   }, { ...mutate, title: "Update Transaction" }, async ({ id, data }) => {
-    const parsed = desandboxExternalEntity("transaction", parseJsonObject(data, "data"));
+    const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const validationErrors = validateTransactionUpdateData(parsed);
     if (validationErrors.length > 0) {
       return toolError({ error: "Transaction metadata validation failed", details: validationErrors });

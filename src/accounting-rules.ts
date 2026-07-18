@@ -5,6 +5,7 @@ import { z } from "zod";
 import { getProjectRoot } from "./paths.js";
 import { getGlobalConfigDir } from "./config.js";
 import { normalizeCompanyName } from "./company-name.js";
+import { canonicalBusinessText } from "./mcp-json.js";
 
 const liabilityClassificationSchema = z.enum(["current", "non_current"]);
 const cashFlowCategorySchema = z.enum(["operating", "investing", "financing"]);
@@ -873,12 +874,31 @@ function ensureAutoBookingTable(lines: string[], sectionStart: number, sectionEn
   };
 }
 
-export function saveAutoBookingRule(input: SaveAutoBookingRuleInput): {
+export function saveAutoBookingRule(rawInput: SaveAutoBookingRuleInput): {
   path: string;
   action: "inserted" | "updated";
   match: string;
   category?: string;
 } {
+  // Canonicalize the free-text fields at the authoritative persist boundary: a
+  // sandbox-wrapped value can round-trip from a wrapped read (e.g. a classify
+  // response's display_counterparty) into the rule KEY (match) or reason. Doing
+  // it here covers EVERY caller — the public save_auto_booking_rule tool and any
+  // internal prepare/save path — so no `<<UNTRUSTED_OCR_*>>` marker can ever land
+  // in the persisted rule store or a match key. Idempotent on already-clean text.
+  // A marker-/whitespace-only vat_rate_dropdown canonicalizes to "" — map that to
+  // undefined so it is not counted as a concrete action field. Otherwise a direct
+  // saveAutoBookingRule({ match, vat_rate_dropdown: wrapped-blank }) call would
+  // bypass the callers' guards and persist a rule with no effective booking action.
+  const cleanVatRateDropdown = rawInput.vat_rate_dropdown !== undefined
+    ? (canonicalBusinessText(rawInput.vat_rate_dropdown) || undefined)
+    : undefined;
+  const input: SaveAutoBookingRuleInput = {
+    ...rawInput,
+    match: canonicalBusinessText(rawInput.match),
+    ...(rawInput.reason !== undefined ? { reason: canonicalBusinessText(rawInput.reason) } : {}),
+    vat_rate_dropdown: cleanVatRateDropdown,
+  };
   const storage = resolveStorage();
   if (storage.mode === "file") {
     return legacySaveAutoBookingRule(input, storage.file);

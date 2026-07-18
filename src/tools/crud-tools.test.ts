@@ -2275,4 +2275,80 @@ describe("D01 external-text stripping at CRUD write boundaries", () => {
     await handler({ name: marker("Acme") });
     expect(findByName).toHaveBeenCalledWith("Acme");
   });
+
+  // F-MUTATION-BOUNDARY-CANONICAL: the write boundary now strips markers from
+  // EVERY field, not only the D01-scoped ones, so a wrapped value round-tripped
+  // into any create/update field can never persist a marker.
+  it("strips markers from a NON-scoped create_client field (notes)", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 7 });
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    await handler({ name: "Clean OÜ", notes: marker("hidden note"), is_client: true, is_supplier: false, is_physical_entity: false, code: "12345678" });
+    const arg = create.mock.calls[0]![0] as { notes: string };
+    expect(arg.notes).toBe("hidden note");
+  });
+
+  it("strips markers from NON-scoped create_journal fields (title, document_number)", async () => {
+    const create = vi.fn().mockResolvedValue({ code: 0, messages: [], created_object_id: 77 });
+    const { handler } = getCrudToolHarness("create_journal", {
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([{ id: 4000, account_code: "4000", allows_dimensions: false, is_valid: true }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+      journals: { create },
+    });
+    await handler({
+      effective_date: "2026-04-24",
+      title: marker("Monthly close"),
+      document_number: marker("DOC-1"),
+      postings: [{ accounts_id: 4000, type: "D", amount: 10 }],
+    });
+    const arg = create.mock.calls[0]![0] as { title: string; document_number: string };
+    expect(arg.title).toBe("Monthly close");
+    expect(arg.document_number).toBe("DOC-1");
+  });
+
+  it("strips markers from NON-scoped create_purchase_invoice fields (number, notes)", async () => {
+    const createAndSetTotals = vi.fn().mockResolvedValue({ id: 13 });
+    const { handler } = getCrudToolHarness("create_purchase_invoice", {
+      readonly: {
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getPurchaseArticles: vi.fn().mockResolvedValue([{ id: 45, name_est: "X", name_eng: "X", vat_accounts_id: 1510, cl_vat_articles_id: 1, vat_rate_dropdown: "24" }]),
+        getAccounts: vi.fn().mockResolvedValue([{ id: 1510, name_est: "X", allows_dimensions: false, is_valid: true }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: { createAndSetTotals },
+    });
+    await handler({
+      ...purchaseInvoiceCreateParams([{ cl_purchase_articles_id: 45, custom_title: "Widget", total_net_price: 100 }]),
+      client_name: "Supplier OÜ",
+      number: marker("INV-9"),
+      notes: marker("secret note"),
+    });
+    const arg = createAndSetTotals.mock.calls[0]![0] as { number: string; notes: string };
+    expect(arg.number).toBe("INV-9");
+    expect(arg.notes).not.toContain("UNTRUSTED_OCR");
+    expect(arg.notes).toContain("secret note");
+  });
+
+  it("cleanly unwraps a wrapped item title even when items arrives as a JSON string (parse-then-clean, no framing newlines left)", async () => {
+    // Regression guard: stripping the items JSON STRING before parse would remove
+    // only the marker tokens and leave the wrapper's framing newlines inside the
+    // title ("\nWidget\n"). Parsing first, then deep-cleaning, recovers "Widget".
+    const createAndSetTotals = vi.fn().mockResolvedValue({ id: 14 });
+    const { handler } = getCrudToolHarness("create_purchase_invoice", {
+      readonly: {
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getPurchaseArticles: vi.fn().mockResolvedValue([{ id: 45, name_est: "X", name_eng: "X", vat_accounts_id: 1510, cl_vat_articles_id: 1, vat_rate_dropdown: "24" }]),
+        getAccounts: vi.fn().mockResolvedValue([{ id: 1510, name_est: "X", allows_dimensions: false, is_valid: true }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: { createAndSetTotals },
+    });
+    await handler({
+      ...purchaseInvoiceCreateParams([]),
+      items: JSON.stringify([{ cl_purchase_articles_id: 45, custom_title: marker("Widget"), total_net_price: 100 }]),
+    });
+    const arg = createAndSetTotals.mock.calls[0]![0] as { items: Array<{ custom_title: string }> };
+    expect(arg.items[0]!.custom_title).toBe("Widget");
+  });
 });

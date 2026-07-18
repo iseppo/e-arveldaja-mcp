@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
-import { desandboxExternalEntity, desandboxText, renderExternalEntity } from "../../external-text-renderer.js";
+import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive, send } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -65,13 +65,16 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       "Note: SaleInvoicesItems schema has no vat_accounts_dimensions_id field — only the purchase side does."
     ),
     notes: z.string().optional().describe("Internal notes"),
-  }, { ...create, title: "Create Sale Invoice" }, async (params) => {
-    // Strip any sandbox markers round-tripped from a wrapped read off item titles.
-    const items = parseSaleInvoiceItems(params.items).map(item =>
-      typeof item.custom_title === "string"
-        ? { ...item, custom_title: desandboxText(item.custom_title) }
-        : item,
-    );
+  }, { ...create, title: "Create Sale Invoice" }, async (rawParams) => {
+    // Strip any sandbox markers round-tripped from a wrapped read off EVERY field
+    // (header fields, notes, and item titles), so no marker is persisted to the
+    // invoice or the audit log regardless of which field it lands in.
+    const params = desandboxAllStrings(rawParams);
+    // Parse items from the RAW payload, THEN deep-clean the parsed objects: if
+    // items arrives as a JSON string, stripping it before parse would leave the
+    // wrapper's framing newlines inside a nested title ("\nWidget\n"). Parsing
+    // first makes each title a whole value that desandboxAllStrings can unwrap.
+    const items = desandboxAllStrings(parseSaleInvoiceItems(rawParams.items));
     const [accounts, accountDimensions] = await Promise.all([
       api.readonly.getAccounts(),
       api.readonly.getAccountDimensions(),
@@ -109,7 +112,7 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     id: coerceId.describe("Invoice ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
-    const parsed = desandboxExternalEntity("sale_invoice", parseJsonObject(data, "data"));
+    const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const current = await api.saleInvoices.get(id);
     const isConfirmed = current.status === "CONFIRMED";
     const updateErrors = validateUpdateFields(parsed, "sale_invoice", { isConfirmed });
