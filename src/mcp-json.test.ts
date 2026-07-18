@@ -9,6 +9,7 @@ vi.mock("@toon-format/toon", async (importOriginal) => {
 const mockedDecode = vi.mocked(decode);
 
 import {
+  canonicalBusinessText,
   capUntrustedText,
   MAX_UNTRUSTED_TEXT_CHARS,
   parseMcpResponse,
@@ -121,6 +122,55 @@ describe("unwrapUntrustedOcr", () => {
     const persisted = unwrapUntrustedOcr(wrapUntrustedOcr("EE471000001020145685 / Acme OÜ")!);
     expect(persisted).toBe("EE471000001020145685 / Acme OÜ");
     expect(persisted).not.toContain(UNTRUSTED_OCR_START_PREFIX);
+  });
+});
+
+describe("canonicalBusinessText", () => {
+  it("strips a single sandbox wrapper and trims/collapses whitespace", () => {
+    expect(canonicalBusinessText(wrapUntrustedOcr("  Acme   OÜ ")!)).toBe("Acme OÜ");
+  });
+
+  it("returns a plain string trimmed and whitespace-collapsed", () => {
+    expect(canonicalBusinessText("  Acme    OÜ  ")).toBe("Acme OÜ");
+  });
+
+  it("strips nested wrappers (a wrapped value re-wrapped on round-trip)", () => {
+    const doubleWrapped = wrapUntrustedOcr(wrapUntrustedOcr("Acme OÜ")!)!;
+    const canonical = canonicalBusinessText(doubleWrapped);
+    expect(canonical).toBe("Acme OÜ");
+    expect(canonical).not.toContain(UNTRUSTED_OCR_START_PREFIX);
+    expect(canonical).not.toContain(UNTRUSTED_OCR_END_PREFIX);
+  });
+
+  it("strips an attacker-embedded well-formed inner wrapper", () => {
+    // Original counterparty text is itself a valid-looking wrapper; wrapping it
+    // for the response and canonicalizing on the way back must leave no marker.
+    const embedded = wrapUntrustedOcr("Acme OÜ")!; // a well-formed wrapper as content
+    const canonical = canonicalBusinessText(wrapUntrustedOcr(embedded)!);
+    expect(canonical).toBe("Acme OÜ");
+    expect(canonical).not.toContain(UNTRUSTED_OCR_START_PREFIX);
+  });
+
+  it("removes residual mid-string / partial sandbox delimiters", () => {
+    // A wrapper embedded within other text (not spanning the whole value) is not
+    // a whole-value wrapper, so loop-unwrapping leaves it — the residual scrub
+    // must still strip every delimiter token so nothing persisted carries one.
+    const start = `${UNTRUSTED_OCR_START_PREFIX}abc123>>`;
+    const end = `${UNTRUSTED_OCR_END_PREFIX}abc123>>`;
+    const canonical = canonicalBusinessText(`Foo ${start}bar${end} Baz`);
+    expect(canonical).not.toContain("UNTRUSTED_OCR");
+    expect(canonical).toBe("Foo bar Baz");
+  });
+
+  it("strips a dangling start delimiter with no matching end", () => {
+    expect(canonicalBusinessText(`Acme ${UNTRUSTED_OCR_START_PREFIX}deadbeef>> OÜ`))
+      .toBe("Acme OÜ");
+  });
+
+  it("canonicalizes non-strings to an empty string", () => {
+    expect(canonicalBusinessText(undefined)).toBe("");
+    expect(canonicalBusinessText(null)).toBe("");
+    expect(canonicalBusinessText(42)).toBe("");
   });
 });
 

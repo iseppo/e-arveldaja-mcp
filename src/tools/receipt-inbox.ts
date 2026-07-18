@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { canonicalBusinessText, parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { toolError } from "../tool-error.js";
 import { HttpError } from "../http-client.js";
 import { isMutationIndeterminate } from "../mutation-outcome.js";
@@ -2042,9 +2042,15 @@ export function registerReceiptInboxTools(
             const grossAmount = roundMoney(Math.abs(transaction.amount));
             const transactionCurrency = (transaction.cl_currencies_id ?? "EUR").toUpperCase();
             const transactionCurrencyRate = transaction.currency_rate;
+            // M10: the caller echoes classify output back in classifications_json,
+            // where counterparty fields were sandbox-wrapped for display. Strip
+            // the markers to the canonical business value BEFORE it drives rule
+            // matching (findAutoBookingRule), booking suggestions, or is written
+            // into the audit summary below — nothing persisted/matched may carry
+            // a sandbox marker. The response still re-wraps counterparty text.
             const transactionGroup: TransactionGroup = {
-              normalized_counterparty: group.normalized_counterparty,
-              display_counterparty: group.display_counterparty,
+              normalized_counterparty: canonicalBusinessText(group.normalized_counterparty),
+              display_counterparty: canonicalBusinessText(group.display_counterparty),
               transactions: [transaction],
             };
             const resolved = await resolveClassificationSuggestion(api, {
@@ -2143,7 +2149,7 @@ export function registerReceiptInboxTools(
             logAudit({
               tool: "apply_transaction_classifications", action: "CREATED", entity_type: "purchase_invoice",
               entity_id: invoiceId,
-              summary: `Auto-booked purchase invoice from transaction ${transaction.id} (${group.display_counterparty})`,
+              summary: `Auto-booked purchase invoice from transaction ${transaction.id} (${transactionGroup.display_counterparty})`,
               details: { supplier_name: supplier.name, invoice_number: `AUTO-TX-${transaction.id}`, date: transaction.date, total_gross: grossAmount },
             });
 

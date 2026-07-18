@@ -4,7 +4,8 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { prepareReceiptBatchSnapshot } from "./receipt-inbox-files.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse, wrapUntrustedOcr } from "../mcp-json.js";
+import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
@@ -15,6 +16,11 @@ import {
   getRegisteredToolHandler,
   type AccountingWorkflowApiOptions,
 } from "../__fixtures__/accounting-workflow.js";
+
+vi.mock("../audit-log.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../audit-log.js")>()),
+  logAudit: vi.fn(),
+}));
 
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
 
@@ -2136,5 +2142,31 @@ describe("receipt inbox tool status handling", () => {
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.purchaseInvoices.invalidate).toHaveBeenCalledTimes(1);
     expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9002);
+  });
+});
+
+describe("apply_transaction_classifications persists canonical counterparty text (M10)", () => {
+  it("writes a clean audit summary when the classify counterparty was sandbox-wrapped", async () => {
+    // The client echoes classify output back into classifications_json, where
+    // counterparty fields were sandbox-wrapped for display. The persisted audit
+    // summary must carry the canonical name, not the nonce delimiters.
+    vi.mocked(logAudit).mockClear();
+    const { handler } = setupH14Tool("apply_transaction_classifications");
+    const wrappedClassification = {
+      ...H14_CLASSIFICATION,
+      normalized_counterparty: wrapUntrustedOcr("openai"),
+      display_counterparty: wrapUntrustedOcr("OpenAI"),
+    };
+
+    const result = await handler({ classifications_json: [wrappedClassification], execute: true });
+
+    const createdCall = vi.mocked(logAudit).mock.calls.find(([entry]) => entry.action === "CREATED");
+    expect(createdCall).toBeDefined();
+    // Exact canonical summary — no nonce delimiters, clean counterparty.
+    expect(createdCall![0].summary).toBe("Auto-booked purchase invoice from transaction 99 (OpenAI)");
+
+    // No output regression: the response still echoes the caller's wrapped
+    // counterparty (sandbox boundary preserved for anything the LLM re-reads).
+    expect(result.content[0]!.text).toContain("UNTRUSTED_OCR_START");
   });
 });

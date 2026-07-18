@@ -39,6 +39,36 @@ export function unwrapUntrustedOcr(text: string): string {
 }
 
 /**
+ * Reduce a possibly sandbox-wrapped, external-origin string to the canonical
+ * business value that is safe to PERSIST (auto-booking-rule keys, audit
+ * summaries, API payloads) and to MATCH on. A wrapped response can round-trip
+ * back through the LLM and be wrapped a second time (or an attacker can embed a
+ * well-formed inner wrapper in the original text), so every layer of
+ * well-formed wrapper is stripped — not just one — before the value is trimmed
+ * and its internal whitespace collapsed. Non-strings canonicalize to "".
+ *
+ * The sandbox boundary is a display-only guard: response builders re-wrap the
+ * canonical value with `wrapUntrustedOcr` AFTER business logic, so anything the
+ * LLM sees stays sandboxed while nothing persisted or matched carries a marker.
+ */
+export function canonicalBusinessText(value: unknown): string {
+  if (typeof value !== "string") return "";
+  let text = value;
+  for (let unwrapped = unwrapUntrustedOcr(text); unwrapped !== text; unwrapped = unwrapUntrustedOcr(text)) {
+    text = unwrapped;
+  }
+  // Defense in depth: after stripping every whole-value wrapper, remove any
+  // RESIDUAL sandbox delimiter tokens — a partial or mid-string marker that an
+  // attacker crafted into the source text and that loop-unwrapping (which only
+  // matches a wrapper spanning the WHOLE value) would leave behind. These
+  // delimiters are server-generated nonce markers that never occur in genuine
+  // business text, so removing them guarantees no `UNTRUSTED_OCR_*` marker can
+  // reach a persisted or matched value.
+  text = text.replace(/<<UNTRUSTED_OCR_(?:START|END):[0-9a-f]*>>/g, "");
+  return text.trim().replace(/\s+/g, " ");
+}
+
+/**
  * Default character budget for OCR-derived free text inlined into an MCP
  * response. Booking decisions use the structured `extracted` fields, not the
  * raw blob — so a generous cap that still bounds a pathological or maliciously
