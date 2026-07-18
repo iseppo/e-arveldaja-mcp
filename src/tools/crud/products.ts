@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
+import { desandboxExternalEntity, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -27,13 +28,13 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
     { ...pageParam.shape, ...viewParam },
     { ...readOnly, title: "List Products" }, async (params) => {
     const result = await api.products.list(params);
-    const compact = { ...result, items: applyListView("product", result.items, params.view) };
+    const compact = { ...result, items: renderExternalEntity("product", applyListView("product", result.items, params.view)) };
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_product", "Get a single product by ID", idParam.shape, { ...readOnly, title: "Get Product" }, async ({ id }) => {
     const result = await api.products.get(id);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(renderExternalEntity("product", result)) }] };
   });
 
   registerTool(server, "create_product", "Create a new product/service", {
@@ -48,7 +49,8 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
     purchase_accounts_dimensions_id: coerceId.optional().describe("Purchase account dimension ID"),
     sales_price: z.coerce.number().optional().describe("Sales price"),
     unit: z.string().optional().describe("Unit (e.g. tk, h, km)"),
-  }, { ...create, title: "Create Product" }, async (params) => {
+  }, { ...create, title: "Create Product" }, async (rawParams) => {
+    const params = desandboxExternalEntity("product", rawParams);
     const result = await api.products.create(params);
     logAudit({
       tool: "create_product", action: "CREATED", entity_type: "product",
@@ -69,7 +71,7 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
     id: coerceId.describe("Product ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Product" }, async ({ id, data }) => {
-    const parsed = parseJsonObject(data, "data");
+    const parsed = desandboxExternalEntity("product", parseJsonObject(data, "data"));
     const updateErrors = validateUpdateFields(parsed, "product");
     if (updateErrors.length > 0) {
       return toolError({ error: "Invalid update fields", details: updateErrors });

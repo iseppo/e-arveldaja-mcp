@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
+import { desandboxExternalEntity, desandboxText, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive, send } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -38,13 +39,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       ...(date_from !== undefined && { start_date: date_from }),
       ...(date_to !== undefined && { end_date: date_to }),
     });
-    const compact = { ...result, items: applyListView("sale_invoice", result.items, view) };
+    const compact = { ...result, items: renderExternalEntity("sale_invoice", applyListView("sale_invoice", result.items, view)) };
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_sale_invoice", "Get a sales invoice by ID (includes items, deliveries)", idParam.shape, { ...readOnly, title: "Get Sale Invoice" }, async ({ id }) => {
     const result = await api.saleInvoices.get(id);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(renderExternalEntity("sale_invoice", result)) }] };
   });
 
   registerTool(server, "create_sale_invoice", "Create a sales invoice", {
@@ -65,7 +66,12 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     ),
     notes: z.string().optional().describe("Internal notes"),
   }, { ...create, title: "Create Sale Invoice" }, async (params) => {
-    const items = parseSaleInvoiceItems(params.items);
+    // Strip any sandbox markers round-tripped from a wrapped read off item titles.
+    const items = parseSaleInvoiceItems(params.items).map(item =>
+      typeof item.custom_title === "string"
+        ? { ...item, custom_title: desandboxText(item.custom_title) }
+        : item,
+    );
     const [accounts, accountDimensions] = await Promise.all([
       api.readonly.getAccounts(),
       api.readonly.getAccountDimensions(),
@@ -103,7 +109,7 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     id: coerceId.describe("Invoice ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
-    const parsed = parseJsonObject(data, "data");
+    const parsed = desandboxExternalEntity("sale_invoice", parseJsonObject(data, "data"));
     const current = await api.saleInvoices.get(id);
     const isConfirmed = current.status === "CONFIRMED";
     const updateErrors = validateUpdateFields(parsed, "sale_invoice", { isConfirmed });

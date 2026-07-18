@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
 import { toMcpJson } from "../../mcp-json.js";
+import { desandboxExternalEntity, desandboxText, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
@@ -70,13 +71,13 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       ...(date_from !== undefined && { start_date: date_from }),
       ...(date_to !== undefined && { end_date: date_to }),
     });
-    const compact = { ...result, items: applyListView("purchase_invoice", result.items, view) };
+    const compact = { ...result, items: renderExternalEntity("purchase_invoice", applyListView("purchase_invoice", result.items, view)) };
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
   registerTool(server, "get_purchase_invoice", "Get a purchase invoice by ID", idParam.shape, { ...readOnly, title: "Get Purchase Invoice" }, async ({ id }) => {
     const result = await api.purchaseInvoices.get(id);
-    return { content: [{ type: "text", text: toMcpJson(result) }] };
+    return { content: [{ type: "text", text: toMcpJson(renderExternalEntity("purchase_invoice", result)) }] };
   });
 
   registerTool(server, "create_purchase_invoice",
@@ -103,8 +104,15 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       bank_ref_number: z.string().optional().describe("Payment reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
     }, { ...create, title: "Create Purchase Invoice" }, async (params) => {
+      // Strip any sandbox markers round-tripped from a wrapped read so no marker
+      // is persisted to the invoice, the audit log, or the item titles.
+      const client_name = desandboxText(params.client_name);
       const isVatReg = await isCompanyVatRegistered(api);
-      const rawItems = parsePurchaseInvoiceItems(params.items);
+      const rawItems = parsePurchaseInvoiceItems(params.items).map(item =>
+        typeof item.custom_title === "string"
+          ? { ...item, custom_title: desandboxText(item.custom_title) }
+          : item,
+      );
       if (!isVatReg) {
         const details = rawItems.flatMap((item, index) =>
           validateNonVatItem(item).map(error => `items[${index}].${error}`)
@@ -141,7 +149,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
 
       const invoiceData: CreatePurchaseInvoiceData = {
         clients_id: params.clients_id,
-        client_name: params.client_name,
+        client_name,
         number: params.number,
         create_date: params.create_date,
         journal_date: params.journal_date,
@@ -166,9 +174,9 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       logAudit({
         tool: "create_purchase_invoice", action: "CREATED", entity_type: "purchase_invoice",
         entity_id: result.id,
-        summary: `Created purchase invoice "${params.number}" from ${params.client_name}`,
+        summary: `Created purchase invoice "${params.number}" from ${client_name}`,
         details: {
-          supplier_name: params.client_name, invoice_number: params.number,
+          supplier_name: client_name, invoice_number: params.number,
           invoice_date: params.create_date, total_vat: params.vat_price, total_gross: params.gross_price,
           items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
         },
@@ -177,7 +185,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
         action: "created",
         entity: "purchase_invoice",
         id: result.id,
-        message: `Created purchase invoice "${params.number}" from ${params.client_name}.`,
+        message: `Created purchase invoice "${params.number}" from ${client_name}.`,
         raw: result,
       });
     });
@@ -186,7 +194,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     id: coerceId.describe("Invoice ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
-    const parsed = parseJsonObject(data, "data");
+    const parsed = desandboxExternalEntity("purchase_invoice", parseJsonObject(data, "data"));
     const current = await api.purchaseInvoices.get(id);
     const isConfirmed = current.status === "CONFIRMED";
     const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed });

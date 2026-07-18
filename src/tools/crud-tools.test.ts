@@ -1033,14 +1033,23 @@ describe("search_client", () => {
 
     const result = await handler({ name: "Acme" }) as { content: Array<{ text: string }> };
 
-    expect(parseMcpResponse(result.content[0]!.text)).toEqual({
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      ok: boolean; action: string; entity: string; message: string; count: number;
+      raw: Array<{ id: number; name: string }>;
+    };
+    expect(payload).toMatchObject({
       ok: true,
       action: "searched",
       entity: "client",
       message: 'Found 2 client(s) matching "Acme".',
       count: 2,
-      raw: [{ id: 1, name: "Acme OÜ" }, { id: 2, name: "Acme Trading" }],
     });
+    // ids are structural and unchanged; the import-origin name is now sandboxed (D01)
+    expect(payload.raw.map(r => r.id)).toEqual([1, 2]);
+    expect(payload.raw[0]!.name).toContain("UNTRUSTED_OCR_START:");
+    expect(payload.raw[0]!.name).toContain("Acme OÜ");
+    expect(payload.raw[1]!.name).toContain("UNTRUSTED_OCR_START:");
+    expect(payload.raw[1]!.name).toContain("Acme Trading");
   });
 
   it("returns count:0 and an empty array (still ok) when nothing matches", async () => {
@@ -2161,5 +2170,109 @@ describe("H05 correction tool inventory and workflow", () => {
 
     await expect(handler({ id: 7 })).rejects.toThrow("transport failed");
     expect(logAudit).not.toHaveBeenCalled();
+  });
+});
+
+describe("D01 external-text sandboxing at CRUD read boundaries", () => {
+  const crudRenderCases = [
+    ["client", "clients", "list_clients", "get_client", { id: 7, name: "Injected client" }],
+    ["product", "products", "list_products", "get_product", { id: 7, name: "Injected product" }],
+    ["journal", "journals", "list_journals", "get_journal", { id: 7, title: "Injected journal", postings: [] }],
+    ["transaction", "transactions", "list_transactions", "get_transaction", { id: 7, description: "Injected transaction", bank_account_name: "Injected party" }],
+    ["sale_invoice", "saleInvoices", "list_sale_invoices", "get_sale_invoice", { id: 7, client_name: "Injected buyer", items: [{ custom_title: "Injected line" }] }],
+    ["purchase_invoice", "purchaseInvoices", "list_purchase_invoices", "get_purchase_invoice", { id: 7, client_name: "Injected supplier", items: [{ custom_title: "Injected line" }] }],
+  ] as const;
+
+  it.each(crudRenderCases)("sandboxes %s list and get output", async (_entity, apiKey, listTool, getTool, source) => {
+    const listApi = { list: vi.fn().mockResolvedValue({ current_page: 1, total_pages: 1, items: [source] }) };
+    const listHarness = getCrudToolHarness(listTool, { [apiKey]: listApi } as never);
+    const list = await listHarness.handler({ page: 1, view: "full" }) as { content: Array<{ text: string }> };
+    const getHarness = getCrudToolHarness(getTool, { [apiKey]: { get: vi.fn().mockResolvedValue(source) } } as never);
+    const get = await getHarness.handler({ id: 7 }) as { content: Array<{ text: string }> };
+    expect(JSON.stringify(parseMcpResponse(list.content[0]!.text))).toContain("UNTRUSTED_OCR_START:");
+    expect(JSON.stringify(parseMcpResponse(get.content[0]!.text))).toContain("UNTRUSTED_OCR_START:");
+  });
+
+  it("sandboxes search_client and find_client_by_code raw client records without mutating them", async () => {
+    const searchSource = { id: 7, name: "Injected supplier", code: "12345678" };
+    const foundSource = { id: 8, name: "Injected found", code: "87654321" };
+    const search = getCrudToolHarness("search_client", { clients: { findByName: vi.fn().mockResolvedValue([searchSource]) } });
+    const found = getCrudToolHarness("find_client_by_code", { clients: { findByCode: vi.fn().mockResolvedValue(foundSource) } });
+    const searchPayload = parseMcpResponse(((await search.handler({ name: "supplier" })) as { content: Array<{ text: string }> }).content[0]!.text) as { raw: Array<{ name: string; code: string }> };
+    const foundPayload = parseMcpResponse(((await found.handler({ code: "87654321" })) as { content: Array<{ text: string }> }).content[0]!.text) as { raw: { name: string; code: string } };
+    expect(searchPayload.raw[0]!.name).toContain("UNTRUSTED_OCR_START:");
+    expect(foundPayload.raw.name).toContain("UNTRUSTED_OCR_START:");
+    // structured registry code stays raw; source objects unmutated
+    expect(foundPayload.raw.code).toBe("87654321");
+    expect(searchSource.name).toBe("Injected supplier");
+    expect(foundSource.name).toBe("Injected found");
+  });
+});
+
+describe("D01 external-text stripping at CRUD write boundaries", () => {
+  const marker = (s: string) => `<<UNTRUSTED_OCR_START:deadbeef>>\n${s}\n<<UNTRUSTED_OCR_END:deadbeef>>`;
+
+  it("strips sandbox markers from create_client name before API and audit", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 5 });
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    await handler({ name: marker("Acme OÜ"), is_client: true, is_supplier: false, is_physical_entity: false, code: "12345678" });
+    const arg = create.mock.calls[0]![0] as { name: string };
+    expect(arg.name).toBe("Acme OÜ");
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      summary: expect.not.stringContaining("UNTRUSTED_OCR"),
+    }));
+  });
+
+  it("strips sandbox markers from update_client data.name before API", async () => {
+    const update = vi.fn().mockResolvedValue({ code: 200, messages: [] });
+    const { handler } = getCrudToolHarness("update_client", { clients: { update } });
+    await handler({ id: 3, data: JSON.stringify({ name: marker("New Name") }) });
+    const arg = update.mock.calls[0]![1] as { name: string };
+    expect(arg.name).toBe("New Name");
+  });
+
+  it("strips sandbox markers from create_transaction description and bank_account_name", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9 });
+    const { handler } = getCrudToolHarness("create_transaction", { transactions: { create } });
+    await handler({ accounts_dimensions_id: 1, type: "C", amount: 10, date: "2026-07-17", description: marker("PAYMENT"), bank_account_name: marker("Bob") });
+    const arg = create.mock.calls[0]![0] as { description: string; bank_account_name: string };
+    expect(arg.description).toBe("PAYMENT");
+    expect(arg.bank_account_name).toBe("Bob");
+  });
+
+  it("strips sandbox markers from update_transaction data fields before API", async () => {
+    const update = vi.fn().mockResolvedValue({ code: 200, messages: [] });
+    const { handler } = getCrudToolHarness("update_transaction", { transactions: { update } });
+    await handler({ id: 4, data: JSON.stringify({ description: marker("desc"), bank_account_name: marker("party") }) });
+    const arg = update.mock.calls[0]![1] as { description: string; bank_account_name: string };
+    expect(arg.description).toBe("desc");
+    expect(arg.bank_account_name).toBe("party");
+  });
+
+  it("strips sandbox markers from create_purchase_invoice client_name and item custom_title", async () => {
+    const createAndSetTotals = vi.fn().mockResolvedValue({ id: 12 });
+    const { handler } = getCrudToolHarness("create_purchase_invoice", {
+      readonly: {
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+        getPurchaseArticles: vi.fn().mockResolvedValue([{ id: 45, name_est: "X", name_eng: "X", vat_accounts_id: 1510, cl_vat_articles_id: 1, vat_rate_dropdown: "24" }]),
+        getAccounts: vi.fn().mockResolvedValue([{ id: 1510, name_est: "X", allows_dimensions: false, is_valid: true }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+      purchaseInvoices: { createAndSetTotals },
+    });
+    await handler({
+      ...purchaseInvoiceCreateParams([{ cl_purchase_articles_id: 45, custom_title: marker("Widget"), total_net_price: 100 }]),
+      client_name: marker("Supplier OÜ"),
+    });
+    const arg = createAndSetTotals.mock.calls[0]![0] as { client_name: string; items: Array<{ custom_title: string }> };
+    expect(arg.client_name).toBe("Supplier OÜ");
+    expect(arg.items[0]!.custom_title).toBe("Widget");
+  });
+
+  it("strips sandbox markers from search_client name before matching", async () => {
+    const findByName = vi.fn().mockResolvedValue([]);
+    const { handler } = getCrudToolHarness("search_client", { clients: { findByName } });
+    await handler({ name: marker("Acme") });
+    expect(findByName).toHaveBeenCalledWith("Acme");
   });
 });
