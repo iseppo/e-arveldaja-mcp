@@ -12,13 +12,37 @@ export interface StderrTeeResult {
 }
 
 /**
+ * Injectable filesystem primitives, used only so unit tests can drive the
+ * permission-hardening failure paths (a real chmod on an owned file succeeds
+ * on the CI filesystem, so the fail-closed behavior is otherwise untestable).
+ * Production always uses the node:fs defaults.
+ */
+export interface StderrTeeFsOps {
+  openSync: typeof openSync;
+  statSync: typeof statSync;
+  fstatSync: typeof fstatSync;
+  fchmodSync: typeof fchmodSync;
+  closeSync: typeof closeSync;
+}
+
+const defaultFsOps: StderrTeeFsOps = { openSync, statSync, fstatSync, fchmodSync, closeSync };
+
+/** Test-only helper: default fs ops with selected primitives overridden. */
+export function stderrFsOps(overrides: Partial<StderrTeeFsOps> = {}): StderrTeeFsOps {
+  return { ...defaultFsOps, ...overrides };
+}
+
+/**
  * If EARVELDAJA_LOG_FILE is set, tee everything written to process.stderr
  * into that file (append mode). Cross-platform: uses Node fs primitives,
  * works on Linux, macOS, and Windows. No-op when the env var is unset.
  *
  * Safe to call multiple times — only the first call installs the hook.
  */
-export function installStderrTee(env: NodeJS.ProcessEnv = process.env): StderrTeeResult {
+export function installStderrTee(
+  env: NodeJS.ProcessEnv = process.env,
+  ops: StderrTeeFsOps = defaultFsOps,
+): StderrTeeResult {
   if (installed) return { enabled: fd !== null };
   installed = true;
 
@@ -37,7 +61,7 @@ export function installStderrTee(env: NodeJS.ProcessEnv = process.env): StderrTe
   const REGULAR_FILE_REQUIRED =
     "EARVELDAJA_LOG_FILE must point at a regular file (refusing pipes, devices, sockets, /dev/stdout, /proc/self/fd/*)";
   try {
-    const pre = statSync(path, { throwIfNoEntry: false });
+    const pre = ops.statSync(path, { throwIfNoEntry: false });
     if (pre && !pre.isFile()) {
       process.stderr.write(`WARNING: ${REGULAR_FILE_REQUIRED}: ${path}\n`);
       return { enabled: false, path, error: REGULAR_FILE_REQUIRED };
@@ -52,7 +76,7 @@ export function installStderrTee(env: NodeJS.ProcessEnv = process.env): StderrTe
   let openedFd: number;
   try {
     // 'a' = append, create if missing. 0o600 so secrets aren't world-readable.
-    openedFd = openSync(path, "a", 0o600);
+    openedFd = ops.openSync(path, "a", 0o600);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`WARNING: EARVELDAJA_LOG_FILE could not be opened (${path}): ${message}\n`);
@@ -62,28 +86,38 @@ export function installStderrTee(env: NodeJS.ProcessEnv = process.env): StderrTe
   // Post-open verification belt-and-braces: if the path was a regular file at
   // pre-open and got swapped (TOCTOU), the fstat catches it before we tee.
   try {
-    const st = fstatSync(openedFd);
+    const st = ops.fstatSync(openedFd);
     if (!st.isFile()) {
-      try { closeSync(openedFd); } catch { /* ignore */ }
+      try { ops.closeSync(openedFd); } catch { /* ignore */ }
       process.stderr.write(`WARNING: ${REGULAR_FILE_REQUIRED}: ${path}\n`);
       return { enabled: false, path, error: REGULAR_FILE_REQUIRED };
     }
   } catch (err) {
-    try { closeSync(openedFd); } catch { /* ignore */ }
+    try { ops.closeSync(openedFd); } catch { /* ignore */ }
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`WARNING: EARVELDAJA_LOG_FILE fstat failed (${path}): ${message}\n`);
     return { enabled: false, path, error: message };
   }
 
-  // Tighten permissions to 0600 on the OPEN fd. `openSync(..., "a", 0o600)`
-  // applies its mode only when creating the file, so an existing world-readable
-  // (0644) log would otherwise keep leaking any secret-bearing line to other
-  // local users. fchmod acts on the verified fd (no TOCTOU re-path).
+  // Tighten permissions to 0600 on the OPEN fd and PROVE it took effect before
+  // teeing. `openSync(..., "a", 0o600)` applies its mode only when creating the
+  // file, so an existing world-readable (0644) log would otherwise keep leaking
+  // any secret-bearing line to other local users. fchmod acts on the verified
+  // fd (no TOCTOU re-path). If chmod throws, or the fd is still not 0600
+  // afterward (e.g. a filesystem that ignores chmod), fail CLOSED: close the fd
+  // and disable the tee rather than write secrets to a file we cannot prove is
+  // private.
   try {
-    fchmodSync(openedFd, 0o600);
+    ops.fchmodSync(openedFd, 0o600);
+    const mode = ops.fstatSync(openedFd).mode & 0o777;
+    if (mode !== 0o600) {
+      throw new Error(`mode is ${mode.toString(8)}, expected 600`);
+    }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`WARNING: EARVELDAJA_LOG_FILE could not be made private (0600) (${path}): ${message}\n`);
+    try { ops.closeSync(openedFd); } catch { /* already closed */ }
+    const message = `EARVELDAJA_LOG_FILE could not be verified private (0600) (${path}): ${err instanceof Error ? err.message : String(err)}`;
+    process.stderr.write(`WARNING: ${message}\n`);
+    return { enabled: false, path, error: message };
   }
 
   fd = openedFd;

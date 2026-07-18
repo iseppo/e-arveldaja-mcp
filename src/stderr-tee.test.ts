@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
-import { installStderrTee, _resetStderrTeeForTesting } from "./stderr-tee.js";
+import { installStderrTee, stderrFsOps, _resetStderrTeeForTesting } from "./stderr-tee.js";
 
 let tmpDir: string;
 let originalWrite: typeof process.stderr.write;
@@ -103,6 +103,42 @@ describe("installStderrTee", () => {
     spy.mockRestore();
     expect(r.enabled).toBe(false);
     expect(r.error).toMatch(/regular file/);
+  });
+
+  it("fails closed and tees nothing when chmod cannot establish 0600 (M29)", () => {
+    const path = join(tmpDir, "insecure.log");
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const result = installStderrTee(
+      { EARVELDAJA_LOG_FILE: path },
+      stderrFsOps({ fchmodSync: () => { throw new Error("denied"); } }),
+    );
+    process.stderr.write("secret\n");
+    spy.mockRestore();
+    expect(result.enabled).toBe(false);
+    expect(result.error).toContain("0600");
+    expect(existsSync(path) ? readFileSync(path, "utf8") : "").not.toContain("secret");
+  });
+
+  it("fails closed and tees nothing when the fd stays non-0600 after chmod (M29)", () => {
+    const path = join(tmpDir, "still-open.log");
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    // chmod silently no-ops (e.g. a mode-ignoring filesystem) so the fd keeps
+    // its world-readable bits; the post-chmod verification must catch this.
+    const result = installStderrTee(
+      { EARVELDAJA_LOG_FILE: path },
+      stderrFsOps({
+        fchmodSync: () => {},
+        fstatSync: (fd: number) => {
+          const real = statSync(path);
+          return { ...real, isFile: () => true, mode: (real.mode & ~0o777) | 0o644 } as ReturnType<typeof statSync>;
+        },
+      }),
+    );
+    process.stderr.write("secret\n");
+    spy.mockRestore();
+    expect(result.enabled).toBe(false);
+    expect(result.error).toContain("0600");
+    expect(existsSync(path) ? readFileSync(path, "utf8") : "").not.toContain("secret");
   });
 
   it("is idempotent — second call does not re-install or duplicate the open stamp", () => {
