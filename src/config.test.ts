@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { maskApiKeyId, serializeEnvFile } from "./config.js";
@@ -933,7 +933,9 @@ describe("loadAllConfigs", () => {
         storageScope: "local",
         workingDir: workDir,
         verify: async () => ({ companyName: "Gamma OÜ", verifiedAt: "2026-03-29T14:00:00.000Z" }),
-      })).rejects.toThrow(`Refusing to write .env through symlink: ${localEnvFile}`);
+      // The symlinked target is now rejected earlier, by the read-time
+      // ensurePrivateEnvFile guard, before any parse or write is attempted.
+      })).rejects.toThrow(`Refusing unsafe .env target: ${localEnvFile}`);
 
       expect(readFileSync(actualEnvFile, "utf8")).toBe("# original\n");
     } finally {
@@ -1096,6 +1098,71 @@ describe("loadAllConfigs", () => {
       expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("Ignoring symlinked credential file"));
     } finally {
       stderrSpy.mockRestore();
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("importApiKeyCredentials .env preservation (M28)", () => {
+  const verifyStub = async () => ({ companyName: "Acme OÜ", verifiedAt: "2026-07-18T10:00:00.000Z" });
+
+  function setup() {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-m28-"));
+    const workDir = join(tempDir, "work");
+    const globalDir = join(tempDir, "global");
+    mkdirSync(workDir, { recursive: true });
+    mkdirSync(globalDir, { recursive: true });
+    const apiKeyFile = join(workDir, "apikey.txt");
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: key-id",
+      "ApiKey public value: public-value",
+      "Password: secret-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    const envFile = join(globalDir, ".env");
+    for (const key of CONFIG_ENV_KEYS) delete process.env[key];
+    process.env.EARVELDAJA_CONFIG_DIR = globalDir;
+    return { tempDir, workDir, globalDir, apiKeyFile, envFile };
+  }
+
+  it("hardens an insecure regular env to 0600 without discarding existing bytes", async () => {
+    const { tempDir, workDir, globalDir, apiKeyFile, envFile } = setup();
+    writeFileSync(envFile, "KEEP=value\n", { mode: 0o644 });
+    process.chdir(workDir);
+    try {
+      const { importApiKeyCredentials } = await importFreshConfig(workDir);
+      await importApiKeyCredentials({ apiKeyFile, storageScope: "global", globalConfigDir: globalDir, verify: verifyStub });
+
+      const content = readFileSync(envFile, "utf8");
+      // Pre-existing unrelated bytes survive alongside the new credential block.
+      expect(content).toContain("KEEP=value");
+      expect(content).toContain("EARVELDAJA_API_KEY_ID=key-id");
+      // The insecure file was hardened in place, not left world-readable.
+      expect(statSync(envFile).mode & 0o777).toBe(0o600);
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves bytes and writes nothing when permission hardening fails", async () => {
+    const { tempDir, workDir, globalDir, apiKeyFile, envFile } = setup();
+    writeFileSync(envFile, "KEEP=value\n", { mode: 0o644 });
+    process.chdir(workDir);
+    try {
+      const cfg = await importFreshConfig(workDir);
+      cfg.setEnvChmodHookForTesting(() => { throw new Error("denied"); });
+
+      await expect(
+        cfg.importApiKeyCredentials({ apiKeyFile, storageScope: "global", globalConfigDir: globalDir, verify: verifyStub }),
+      ).rejects.toThrow(/private \.env permissions/i);
+
+      // Aborted before any write: original bytes intact and the secret never landed.
+      expect(readFileSync(envFile, "utf8")).toBe("KEEP=value\n");
+      expect(readFileSync(envFile, "utf8")).not.toContain("secret-password");
+      cfg.setEnvChmodHookForTesting(undefined);
+    } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });
     }
