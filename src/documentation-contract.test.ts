@@ -120,16 +120,21 @@ describe("documentation contract: safe prompt pipeline", () => {
   });
 
   describe("CHANGELOG.md records the P01–P25 prompt remediation", () => {
-    it("has an Unreleased section that documents the safe prompt pipeline", () => {
+    it("documents the safe prompt pipeline in the 0.22.0 release section", () => {
       const doc = CHANGELOG();
-      const unreleasedStart = doc.indexOf("## [Unreleased]");
-      expect(unreleasedStart).toBeGreaterThanOrEqual(0);
-      const nextRelease = doc.indexOf("\n## [", unreleasedStart + 1);
-      const unreleased = doc.slice(unreleasedStart, nextRelease === -1 ? undefined : nextRelease);
-      expect(unreleased).toMatch(/prompt/i);
-      expect(unreleased).toContain("src/prompt-registry.ts");
-      expect(unreleased).toMatch(/plan handle is not (user )?approval/i);
-      expect(unreleased).toMatch(/string prompt argument/i);
+      // The P01–P25 remediation shipped in 0.22.0, so its documentation now
+      // lives under that versioned heading (it was under [Unreleased] until the
+      // release was cut). A fresh, possibly-empty [Unreleased] section must
+      // still exist for the next cycle.
+      expect(doc).toContain("## [Unreleased]");
+      const start = doc.indexOf("## [0.22.0]");
+      expect(start).toBeGreaterThanOrEqual(0);
+      const nextRelease = doc.indexOf("\n## [", start + 1);
+      const section = doc.slice(start, nextRelease === -1 ? undefined : nextRelease);
+      expect(section).toMatch(/prompt/i);
+      expect(section).toContain("src/prompt-registry.ts");
+      expect(section).toMatch(/plan handle is not (user )?approval/i);
+      expect(section).toMatch(/string prompt argument/i);
     });
   });
 });

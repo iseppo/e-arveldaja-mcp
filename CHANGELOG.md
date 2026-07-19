@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-19
+
 > **Significant behaviour-changing release — the default/recommended account numbers were rewritten.** The hardcoded chart-of-accounts defaults were originally written for a non-standard template and were wrong for the real e-arveldaja RTJ standard chart (verified byte-identical across two real company charts). Every default was audited and corrected, and — more importantly — the tools now resolve each account **by its Estonian name** against the company's *actual* chart, using the standard number only as a last-resort fallback. If you previously relied on a specific default account number, re-check your postings: several defaults now point at different accounts (see below). This also corrects the default accounts used when booking Lightyear investment activity.
 
 This release also lands a full code-review remediation pass (49 findings across the H- and M-series, plus dependency/release findings D01–D02). Each finding was reproduced with a red-green regression, independently reviewed, and committed atomically. Entries below lead with the finding ID for traceability.
