@@ -626,9 +626,10 @@ describe("registerPrompts", () => {
       const schema = getPromptArgsSchema(server, promptName);
       for (const name of names) {
         expect(schema).toHaveProperty(name);
-        // Optional (omittable) and accepts a numeric dimension ID.
+        // Optional (omittable) and accepts an MCP wire-format string ID.
         expect(schema[name]!.safeParse(undefined).success).toBe(true);
-        expect(schema[name]!.safeParse(4242).success).toBe(true);
+        expect(schema[name]!.safeParse("4242")).toMatchObject({ success: true, data: 4242 });
+        expect(schema[name]!.safeParse(4242).success).toBe(false);
       }
     }
   });

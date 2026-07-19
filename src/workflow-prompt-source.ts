@@ -2,28 +2,7 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 import { getProjectRoot } from "./paths.js";
 import { renderPromptSurface } from "./prompt-surface.js";
-
-export const WORKFLOW_PROMPT_SOURCE_BY_PROMPT = {
-  "vat-registration-threshold": "vat-registration-threshold",
-  "setup-credentials": "setup-credentials",
-  "setup-e-arveldaja": "setup-e-arveldaja",
-  "accounting-inbox": "accounting-inbox",
-  "resolve-accounting-review": "resolve-accounting-review",
-  "prepare-accounting-review-action": "prepare-accounting-review-action",
-  "book-invoice": "book-invoice",
-  "receipt-batch": "receipt-batch",
-  "import-camt": "import-camt",
-  "import-wise": "import-wise",
-  "classify-unmatched": "classify-unmatched",
-  "reconcile-bank": "reconcile-bank",
-  "month-end-close": "month-end",
-  "new-supplier": "new-supplier",
-  "company-overview": "company-overview",
-  "lightyear-booking": "lightyear-booking",
-} as const;
-
-export type WorkflowPromptName = keyof typeof WORKFLOW_PROMPT_SOURCE_BY_PROMPT;
-export type WorkflowPromptSlug = typeof WORKFLOW_PROMPT_SOURCE_BY_PROMPT[WorkflowPromptName];
+import type { WorkflowPromptSlug } from "./prompt-registry.js";
 
 export function workflowPromptSourcePath(slug: WorkflowPromptSlug): string {
   return `workflows/${slug}.md`;
