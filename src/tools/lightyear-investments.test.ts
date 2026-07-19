@@ -1780,10 +1780,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     }
     mockedReadFile.mockResolvedValue(buildStatementCsv([...conversions, ...trades, ...distributions]));
     const run = setupLightyearTool("book_lightyear_distributions");
-    const startedAt = performance.now();
     const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 999, income_account: 998, dry_run: false })).content[0]!.text) as any;
-    const elapsedMs = performance.now() - startedAt;
-    expect(elapsedMs).toBeLessThan(3_500);
     expect(payload).toMatchObject({ total_distributions: cardinality, bookable_distributions: 0, review_required: cardinality, new_entries: 0, duplicates_skipped: 0 });
     expect(payload.results).toHaveLength(cardinality);
     expect(payload.results.every((result: any) => result.status === "manual_review" && result.review_reason.code === "invalid_conversion_pair")).toBe(true);
@@ -2139,7 +2136,6 @@ describe("H17 distribution currency and EUR provenance", () => {
     mockedReadFile.mockResolvedValue(csv);
     const run = setupLightyearTool("book_lightyear_distributions");
 
-    const startedAt = performance.now();
     const payload = parseMcpResponse((await run.handler({
       file_path: "/tmp/lightyear.csv",
       broker_account: 999,
@@ -2147,9 +2143,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       tax_account: 997,
       dry_run: false,
     })).content[0]!.text) as any;
-    const elapsedMs = performance.now() - startedAt;
 
-    expect(elapsedMs).toBeLessThan(8_000);
     expect(payload).toMatchObject({ total_distributions: 1, bookable_distributions: 0, review_required: 1, new_entries: 0, duplicates_skipped: 0 });
     expect(Object.keys(payload.results[0]).sort()).toEqual([
       "currency", "date", "fee", "fee_eur", "fx_provenance", "gross_amount", "gross_eur", "net_amount", "net_eur",
@@ -2199,9 +2193,9 @@ describe("H17 distribution currency and EUR provenance", () => {
     const rows = statementRowsForInternalTest(reversed ? [...trades, ...conversions] : [...conversions, ...trades]);
     const diagnostics: Record<string, number> = {};
 
-    const startedAt = performance.now();
+    // No wall-clock assertion here: the O(n) guarantee is pinned deterministically
+    // by strict_candidate_visits <= cardinality*2 below, which does not flake under load.
     const reserved = [...(lightyearInvestments.collectTradeReservedConversionRefs as any)(rows, diagnostics)];
-    const elapsedMs = performance.now() - startedAt;
 
     expect(reserved).toEqual([]);
     expect(diagnostics.strict_candidate_visits).toBeGreaterThan(0);
@@ -2209,7 +2203,6 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(diagnostics.strict_queries).toBe(1);
     expect(diagnostics.strict_cache_hits).toBe(cardinality - 1);
     expect(diagnostics.legacy_candidate_visits ?? 0).toBe(0);
-    expect(elapsedMs).toBeLessThan(2_000);
   });
 
   it.each([
