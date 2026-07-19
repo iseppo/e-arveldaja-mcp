@@ -388,6 +388,41 @@ describe("opening balance folding", () => {
       expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
     );
   });
+
+  it("excludes the stored opening balance and does NOT claim 'applied' when clients_id is passed", async () => {
+    writeOpeningBalances(
+      {
+        openingDate: "2024-12-12",
+        accounts: [
+          { code: String(ACCOUNT_ID), name: "Pank", debit: 1000, credit: 0 },
+          { code: String(CONTRA_ACCOUNT_ID), name: "Kapital", debit: 0, credit: 1000 },
+        ],
+        totals: { debit: 1000, credit: 1000 },
+        rawText: "n/a",
+      },
+      "2024-12-12T00:00:00.000Z",
+    );
+
+    const CLIENT_ID = 42;
+    const journals = [journal({ id: 1, clients_id: CLIENT_ID, postings: [posting(ACCOUNT_ID, "D", 500)] })];
+    const handler = registerWithApi(journals, CHART);
+    const result = await handler({ account_id: ACCOUNT_ID, clients_id: CLIENT_ID });
+    const data = parseMcpResponse((result.content[0] as { text: string }).text) as Record<string, unknown>;
+
+    // The synthetic opening journal has clients_id: null, so the client
+    // filter excludes it — the figure must reflect ONLY the client's own
+    // 500, not 500 + 1000 opening.
+    expect(data.debit_total).toBe(500);
+    expect(data.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("account-level (no client attribution)")]),
+    );
+    expect(data.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
+    expect(data.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
 });
 
 describe("compute_client_debt tool", () => {
@@ -471,5 +506,79 @@ describe("compute_client_debt tool", () => {
     expect(data.opening_balance_status).toBe("api_incomplete");
     expect(data.balance_scope).toBe("journal_api_visible_entries_only");
     expect(data.warnings).toEqual(withOpeningBalanceStatus([], { captured: false }));
+  });
+});
+
+describe("compute_client_debt tool — opening balance folding", () => {
+  const CLIENT_ID = 42;
+  const ACCOUNT_ID = 2110;
+  const CLIENT_DEBT_ACCOUNT = {
+    id: ACCOUNT_ID,
+    name_est: "Võlg kliendile",
+    name_eng: "Debt to client",
+    balance_type: "C",
+  };
+  const CHART: Account[] = [makeAccount(ACCOUNT_ID, "C", "Kohustused", "Võlg kliendile", "Debt to client")];
+
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ob-client-debt-"));
+    process.env.EARVELDAJA_RULES_DIR = dir;
+    resetOpeningBalanceCache();
+  });
+
+  afterEach(() => {
+    delete process.env.EARVELDAJA_RULES_DIR;
+    resetOpeningBalanceCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("excludes the stored opening balance (clients_id is mandatory) and does NOT report 'complete'", async () => {
+    writeOpeningBalances(
+      {
+        openingDate: "2024-12-12",
+        accounts: [
+          { code: String(ACCOUNT_ID), name: "Võlg kliendile", debit: 0, credit: 1000 },
+        ],
+        totals: { debit: 1000, credit: 1000 },
+        rawText: "n/a",
+      },
+      "2024-12-12T00:00:00.000Z",
+    );
+
+    const api = makeApi([
+      journal({ id: 1, clients_id: CLIENT_ID, postings: [posting(ACCOUNT_ID, "C", 100)] }),
+      journal({ id: 2, clients_id: CLIENT_ID, postings: [posting(ACCOUNT_ID, "D", 30)] }),
+    ], CLIENT_DEBT_ACCOUNT, CHART);
+    const server = {} as Parameters<typeof registerAccountBalanceTools>[0];
+    registerAccountBalanceTools(server, api as unknown as Parameters<typeof registerAccountBalanceTools>[1]);
+
+    const result = await capturedHandlers["compute_client_debt"]!({
+      clients_id: CLIENT_ID,
+      account_ids: String(ACCOUNT_ID),
+    });
+    const data = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    // The 1000 EUR opening balance carries no client attribution
+    // (clients_id: null) and clients_id is mandatory here, so it must be
+    // excluded — balance stays 70 (100 credit - 30 debit), not 1070.
+    expect(data.accounts).toEqual([{
+      account_id: ACCOUNT_ID,
+      account_name: "Võlg kliendile",
+      balance_type: "C",
+      balance: 70,
+      debit_total: 30,
+      credit_total: 100,
+      entry_count: 2,
+    }]);
+    expect(data.opening_balance_status).not.toBe("complete");
+    expect(data.balance_scope).not.toBe("complete_balance");
+    expect(data.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("account-level (no client attribution)")]),
+    );
+    expect(data.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
   });
 });

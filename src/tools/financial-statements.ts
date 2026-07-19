@@ -163,8 +163,10 @@ export function registerFinancialStatementTools(
     { ...readOnly, title: "Compute Trial Balance" },
     async ({ date_from, date_to, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
-      const opening = await loadOpeningBalanceJournal(api);
-      const journalsFromApi = await api.journals.listAllWithPostings();
+      const [opening, journalsFromApi] = await Promise.all([
+        loadOpeningBalanceJournal(api),
+        api.journals.listAllWithPostings(),
+      ]);
       const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
       const balances = await computeAllBalances(api, date_from, date_to, { preloadedJournals: allJournals });
 
@@ -209,8 +211,10 @@ export function registerFinancialStatementTools(
     { ...readOnly, title: "Compute Balance Sheet" },
     async ({ date_to, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
-      const opening = await loadOpeningBalanceJournal(api);
-      const journalsFromApi = await api.journals.listAllWithPostings();
+      const [opening, journalsFromApi] = await Promise.all([
+        loadOpeningBalanceJournal(api),
+        api.journals.listAllWithPostings(),
+      ]);
       const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
       const balances = await computeAllBalances(api, undefined, date_to, { preloadedJournals: allJournals });
 
@@ -289,8 +293,10 @@ export function registerFinancialStatementTools(
     { ...readOnly, title: "Compute Profit and Loss" },
     async ({ date_from, date_to, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
-      const opening = await loadOpeningBalanceJournal(api);
-      const journalsFromApi = await api.journals.listAllWithPostings();
+      const [opening, journalsFromApi] = await Promise.all([
+        loadOpeningBalanceJournal(api),
+        api.journals.listAllWithPostings(),
+      ]);
       const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
       const balances = await computeAllBalances(api, date_from, date_to, { preloadedJournals: allJournals });
 

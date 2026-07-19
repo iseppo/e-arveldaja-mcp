@@ -373,6 +373,82 @@ describe("opening balance folding", () => {
       expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
     );
   });
+
+  it("leaves compute_balance_sheet unchanged without a stored algbilanss", async () => {
+    const handler = setupTool("compute_balance_sheet", {
+      accounts: CHART,
+      journals: [
+        makeJournal("2025-01-10", [
+          makePosting(BANK_ACCOUNT_ID, "D", 500),
+          makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
+        ]),
+      ],
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      assets: { total: number };
+      equity: { total: number };
+      warnings: string[];
+    };
+
+    expect(payload.assets.total).toBe(500);
+    expect(payload.equity.total).toBe(500);
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+
+  it("folds a stored opening balance into compute_profit_and_loss", async () => {
+    storeOpeningBalances();
+    const handler = setupTool("compute_profit_and_loss", {
+      accounts: CHART,
+      journals: [
+        makeJournal("2025-01-10", [
+          makePosting(BANK_ACCOUNT_ID, "D", 500),
+          makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
+        ]),
+      ],
+    });
+
+    const result = await handler({ date_from: "2025-01-01", date_to: "2025-01-31" });
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      warnings: string[];
+    };
+
+    // Opening balance is dated 2024-12-12, outside the P&L period, but the
+    // status/warning must still reflect that it was captured (it applies to
+    // the trial-balance/balance-sheet computations that share the same
+    // merged journal set; P&L itself is Tulud/Kulud-only so BANK/CAPITAL
+    // opening entries don't move revenue/expense totals).
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
+    expect(payload.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+
+  it("leaves compute_profit_and_loss unchanged without a stored algbilanss", async () => {
+    const handler = setupTool("compute_profit_and_loss", {
+      accounts: CHART,
+      journals: [
+        makeJournal("2025-01-10", [
+          makePosting(BANK_ACCOUNT_ID, "D", 500),
+          makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
+        ]),
+      ],
+    });
+
+    const result = await handler({ date_from: "2025-01-01", date_to: "2025-01-31" });
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      warnings: string[];
+    };
+
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

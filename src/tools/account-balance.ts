@@ -8,7 +8,7 @@ import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { DEFAULT_DEBT_CHECK_ACCOUNTS } from "../accounting-defaults.js";
 import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
-import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
+import { loadOpeningBalanceJournal, type OpeningBalanceJournal } from "../opening-balance-journal.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 
 interface BalanceDetail {
@@ -114,6 +114,31 @@ export async function computeAccountBalance(
   };
 }
 
+// The synthetic opening-balance journal is always account-level
+// (`clients_id: null`) — it carries no client attribution. Whenever a caller
+// filters by `clients_id`, `computeAccountBalance`'s
+// `journal.clients_id !== clientId` check drops it from the figure, so a
+// client-scoped result must never claim the opening balance was "applied".
+// This mirrors `withOpeningBalanceStatus`'s captured/not-captured split but
+// adds the third, client-scoped-exclusion state without touching that
+// function's existing two-state contract (other consumers depend on it).
+function clientScopedOpeningBalanceWarnings(
+  warnings: string[],
+  opening: OpeningBalanceJournal | null,
+): string[] {
+  if (opening === null) {
+    return withOpeningBalanceStatus(warnings, { captured: false });
+  }
+  const out = [...warnings];
+  out.push(
+    `Opening balances are stored (as of ${opening.openingDate}) but are account-level (no client attribution) and are excluded from this client-scoped figure.`
+  );
+  if (opening.unmappedCodes.length > 0) {
+    out.push(`Opening-balance accounts not in the chart were skipped: ${opening.unmappedCodes.join(", ")}. Re-check these account codes.`);
+  }
+  return out;
+}
+
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "compute_account_balance",
@@ -129,8 +154,10 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     { ...readOnly, title: "Compute Account Balance" },
     async ({ account_id, clients_id, date_from, date_to, include_entries, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
-      const opening = await loadOpeningBalanceJournal(api);
-      const journalsFromApi = await api.journals.listAllWithPostings();
+      const [opening, journalsFromApi] = await Promise.all([
+        loadOpeningBalanceJournal(api),
+        api.journals.listAllWithPostings(),
+      ]);
       const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
       const result = await computeAccountBalance(api, account_id, clients_id, date_from, date_to, allJournals);
 
@@ -152,11 +179,13 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(include_entries && {
           entries: result.entries.map(e => ({ ...e, title: wrapUntrustedOcr(e.title) ?? e.title })),
         }),
-        warnings: withOpeningBalanceStatus([], {
-          captured: opening !== null,
-          openingDate: opening?.openingDate,
-          unmappedCodes: opening?.unmappedCodes,
-        }),
+        warnings: clients_id === undefined
+          ? withOpeningBalanceStatus([], {
+              captured: opening !== null,
+              openingDate: opening?.openingDate,
+              unmappedCodes: opening?.unmappedCodes,
+            })
+          : clientScopedOpeningBalanceWarnings([], opening),
       };
 
       return { content: [{ type: "text", text: toMcpJson(summary) }] };
@@ -178,8 +207,10 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         : DEFAULT_DEBT_CHECK_ACCOUNTS;
 
       // Load journals once, share across all account balance computations
-      const opening = await loadOpeningBalanceJournal(api);
-      const journalsFromApi = await api.journals.listAllWithPostings();
+      const [opening, journalsFromApi] = await Promise.all([
+        loadOpeningBalanceJournal(api),
+        api.journals.listAllWithPostings(),
+      ]);
       const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
 
       const results = [];
@@ -206,12 +237,10 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         .filter(r => r.balance_type === "D") // asset accounts
         .reduce((sum, r) => sum + r.balance, 0);
 
-      const openingBalanceCaptured = opening !== null;
-      const openingBalanceWarnings = withOpeningBalanceStatus([], {
-        captured: openingBalanceCaptured,
-        openingDate: opening?.openingDate,
-        unmappedCodes: opening?.unmappedCodes,
-      });
+      // clients_id is mandatory here, so the account-level, client-less
+      // opening-balance journal is ALWAYS excluded from these figures (see
+      // clientScopedOpeningBalanceWarnings) — never report "complete".
+      const openingBalanceWarnings = clientScopedOpeningBalanceWarnings([], opening);
 
       return {
         content: [{
@@ -224,11 +253,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
               total_receivable_from_client: roundMoney(totalReceivable),
               net_position: roundMoney(totalReceivable - totalDebt),
             },
-            opening_balance_status: openingBalanceCaptured
-              ? "complete"
+            opening_balance_status: opening !== null
+              ? "excluded_client_scoped"
               : "api_incomplete",
-            balance_scope: openingBalanceCaptured
-              ? "complete_balance"
+            balance_scope: opening !== null
+              ? "client_scoped_excludes_opening_balance"
               : "journal_api_visible_entries_only",
             warnings: openingBalanceWarnings,
             ...cacheClearMetadata(cacheClear),
