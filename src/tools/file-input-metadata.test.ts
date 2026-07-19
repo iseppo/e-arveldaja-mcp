@@ -7,15 +7,29 @@ import { registerLightyearTools } from "./lightyear-investments.js";
 import { registerPdfWorkflowTools } from "./pdf-workflow.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { registerWiseImportTools } from "./wise-import.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+
+const scopedRegistrars = new Set<unknown>([
+  registerAccountingInboxTools,
+  registerCamtImportTools,
+  registerLightyearTools,
+  registerReceiptInboxTools,
+  registerWiseImportTools,
+]);
 
 function getToolConfig(
-  register: (server: any, api: any, exposure?: { enableLightyear: boolean; exposeGranularTools: boolean }) => void,
+  register: (...args: any[]) => void,
   toolName: string,
 ) {
   const server = { registerTool: vi.fn() } as any;
   // Metadata assertions cover the granular constituent tools too, so register
   // with the full surface exposed (default hides them behind the merged tools).
-  register(server, {} as any, { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
+  const exposure = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
+  if (scopedRegistrars.has(register)) {
+    register(server, {} as any, createTestRuntimeSafetyContext(), exposure);
+  } else {
+    register(server, {} as any, exposure);
+  }
   const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
   if (!registration) throw new Error(`Missing tool registration for ${toolName}`);
   return registration[1] as { description?: string; inputSchema?: Record<string, unknown>; annotations?: { openWorldHint?: boolean } };

@@ -15,6 +15,7 @@ import {
   fixtureCamtXml,
   getRegisteredToolHandler,
 } from "../__fixtures__/accounting-workflow.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 // CAMT free-form text is wrapped with a per-call OCR-sandbox nonce when
 // returned to MCP. These helpers check the plain value inside the wrap.
@@ -164,7 +165,7 @@ function setupCamtTool(options: {
   // Behavior tests exercise the granular constituent tools directly, so
   // register with the full surface exposed (default hides them behind the
   // merged process_camt053 tool).
-  registerCamtImportTools(server, api, { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
+  registerCamtImportTools(server, api, createTestRuntimeSafetyContext(), { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
 
   return {
     api,

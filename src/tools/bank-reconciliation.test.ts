@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { registerBankReconciliationTools, matchScore } from "./bank-reconciliation.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -37,7 +38,7 @@ function setupReconciliationTool(options: {
     clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
 
-  registerBankReconciliationTools(server, api, EXPOSE_GRANULAR);
+  registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
   const registration = server.registerTool.mock.calls.find(([name]) => name === (options.toolName ?? "reconcile_transactions"));
   if (!registration) {
@@ -62,7 +63,7 @@ function getReconciliationToolOptions(toolName: string): { description?: string;
     clients: { findByName: vi.fn() },
   } as any;
 
-  registerBankReconciliationTools(server, api, EXPOSE_GRANULAR);
+  registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
   const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
   if (!registration) throw new Error(`Tool was not registered: ${toolName}`);
   return registration[1] as { description?: string; inputSchema?: Record<string, unknown> };
@@ -113,7 +114,7 @@ function setupInterAccountTool(options: {
     },
   } as any;
 
-  registerBankReconciliationTools(server, api, EXPOSE_GRANULAR);
+  registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
   const registration = server.registerTool.mock.calls.find(
     ([name]: [string]) => name === (options.toolName ?? "reconcile_inter_account_transfers")
@@ -331,7 +332,7 @@ describe("reconcile_transactions", () => {
         journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
         clients: { findByName: vi.fn().mockResolvedValue([]) },
       } as any;
-      registerBankReconciliationTools(server, api, EXPOSE_GRANULAR);
+      registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
       const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "reconcile_bank_transactions");
       if (!registration) throw new Error("Tool was not registered");
 
@@ -699,7 +700,7 @@ function setupAutoConfirmTool(options: {
     clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
 
-  registerBankReconciliationTools(server, api, EXPOSE_GRANULAR);
+  registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
   const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "auto_confirm_exact_matches");
   if (!registration) throw new Error("Tool was not registered");

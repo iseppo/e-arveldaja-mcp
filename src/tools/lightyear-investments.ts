@@ -2,9 +2,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
-import { readFile } from "fs/promises";
 import type { ApiContext } from "./crud-tools.js";
-import { resolveFileInput } from "../file-validation.js";
+import { captureFileInputSnapshot, type FileInputSource } from "../file-input-snapshot.js";
+import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
+import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
@@ -232,13 +233,24 @@ function buildHeaderIndex<T extends readonly string[]>(actual: string[], require
   return Object.fromEntries(required.map((header) => [header, indexes.get(header)!])) as Record<T[number], number>;
 }
 
-async function readCsvFile(filePath: string): Promise<string> {
-  const { path, cleanup } = await resolveFileInput(filePath, [".csv"], MAX_CSV_SIZE);
-  try {
-    return await readFile(path, "utf-8");
-  } finally {
-    if (cleanup) await cleanup();
-  }
+async function readCsvFile(
+  source: FileInputSource,
+  operation: string,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Promise<string> {
+  return (await captureFileInputSnapshot(source, {
+    runtimeSafetyContext,
+    operation,
+    allowedExtensions: [".csv"],
+    maxSize: MAX_CSV_SIZE,
+  })).text();
+}
+
+function fileInputSource(filePath: string | undefined, fileRef: string | undefined): FileInputSource {
+  return {
+    ...(filePath !== undefined ? { file_path: filePath } : {}),
+    ...(fileRef !== undefined ? { file_ref: fileRef } : {}),
+  };
 }
 
 function parseAccountStatement(csv: string): AccountStatementRow[] {
@@ -1997,19 +2009,25 @@ function matchSellsToCapitalGains(
   return result;
 }
 
-export function registerLightyearTools(server: McpServer, api: ApiContext): void {
+export function registerLightyearTools(
+  server: McpServer,
+  api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): void {
+  assertRuntimeSafetyContext(runtimeSafetyContext);
 
   registerTool(server, "parse_lightyear_statement",
     "Parse a Lightyear account statement CSV. Returns summary by default; set include_rows=true for trade/distribution details.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
+      file_path: z.string().optional().describe("AccountStatement path/base64 input. Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
       date_from: z.string().optional().describe("Only include entries from this date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Only include entries up to this date (YYYY-MM-DD)"),
       include_rows: z.boolean().optional().describe("Include individual trade/distribution rows (default false — summary only)"),
     },
     { ...readOnly, openWorldHint: true, title: "Parse Lightyear Account Statement" },
-    async ({ file_path, date_from, date_to, include_rows }) => {
-      const csv = await readCsvFile(file_path);
+    async ({ file_path, file_ref, date_from, date_to, include_rows }) => {
+      const csv = await readCsvFile(fileInputSource(file_path, file_ref), FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
       let rows = parseAccountStatement(csv);
 
       // Apply date filters
@@ -2248,11 +2266,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
     "Parse a Lightyear Capital Gains Statement CSV (FIFO method). " +
     "Shows cost basis, proceeds, and realized capital gains per sale.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear CapitalGainsStatement CSV file"),
+      file_path: z.string().optional().describe("CapitalGainsStatement path/base64 input. Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Lightyear capital-gains file reference."),
     },
     { ...readOnly, openWorldHint: true, title: "Parse Lightyear Capital Gains" },
-    async ({ file_path }) => {
-      const csv = await readCsvFile(file_path);
+    async ({ file_path, file_ref }) => {
+      const csv = await readCsvFile(fileInputSource(file_path, file_ref), FILE_REFERENCE_OPERATIONS.lightyearGains, runtimeSafetyContext);
       const gains = parseCapitalGains(csv);
 
       const totalGains = gains.reduce((s, g) => s + g.capital_gains_eur, 0);
@@ -2294,8 +2313,10 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   registerTool(server, "book_lightyear_trades",
     "Book Lightyear stock Buy/Sell trades. DRY RUN by default. For sells, capital_gains_file is required for FIFO cost basis and recognized gain/loss.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
+      file_path: z.string().optional().describe("AccountStatement path/base64 input. Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
       capital_gains_file: z.string().optional().describe("Absolute path to Lightyear CapitalGainsStatement CSV (required for sell entries)"),
+      capital_gains_file_ref: z.string().optional().describe("Opaque Lightyear capital-gains file reference; exclusive with capital_gains_file."),
       investment_account: z.number().describe("Investment/securities account (e.g. 1550 Finantsinvesteeringud)"),
       investment_dimension_id: z.number().optional().describe("Dimension ID for investment account (accounts_dimensions_id)"),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
@@ -2307,7 +2328,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
     { ...batch, openWorldHint: true, title: "Book Lightyear Trades" },
-    async ({ file_path, capital_gains_file, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
+    async ({ file_path, file_ref, capital_gains_file, capital_gains_file_ref, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
       const isDryRun = dry_run !== false;
       const skipInput = skip_tickers?.trim() || [...KNOWN_CASH_EQUIVALENT_TICKERS].join(",");
       const skipSet = skipInput.toLowerCase() === "none"
@@ -2342,7 +2363,7 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
         });
       }
 
-      const csv = await readCsvFile(file_path);
+      const csv = await readCsvFile(fileInputSource(file_path, file_ref), FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
       const rows = parseAccountStatement(csv);
       const extraction = extractTrades(rows);
       const trades = extraction.trades.filter(t => !skipSet.has(t.ticker));
@@ -2350,8 +2371,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       // Parse capital gains if provided
       let gainsMap = new Map<string, CapitalGainsRow>();
       const gainsWarnings: string[] = [];
-      if (capital_gains_file) {
-        const gainsCsv = await readCsvFile(capital_gains_file);
+      if (capital_gains_file || capital_gains_file_ref) {
+        const gainsCsv = await readCsvFile(
+          fileInputSource(capital_gains_file, capital_gains_file_ref),
+          FILE_REFERENCE_OPERATIONS.lightyearGains,
+          runtimeSafetyContext,
+        );
         const gainsRows = parseCapitalGains(gainsCsv);
         const sells = trades.filter(t => t.type === "Sell");
         gainsMap = matchSellsToCapitalGains(sells, gainsRows, gainsWarnings);
@@ -2721,7 +2746,8 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   registerTool(server, "book_lightyear_distributions",
     "Create journal entries for Lightyear dividend, interest, and reward distributions, including withheld tax. DRY RUN by default.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
+      file_path: z.string().optional().describe("AccountStatement path/base64 input. Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
       broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
       income_account: z.number().describe("Investment income account for the distribution. Dividends from directly-held shares → 8330 'Tulu aktsiatelt ja osadelt'; fund distributions → 8320; interest → 8400."),
@@ -2731,11 +2757,11 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
     },
     { ...batch, openWorldHint: true, title: "Book Lightyear Distributions" },
-    async ({ file_path, broker_account, broker_dimension_id, income_account, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run }) => {
+    async ({ file_path, file_ref, broker_account, broker_dimension_id, income_account, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run }) => {
       const isDryRun = dry_run !== false;
       const fee_account = fee_account_param ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
 
-      const csv = await readCsvFile(file_path);
+      const csv = await readCsvFile(fileInputSource(file_path, file_ref), FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
       const rows = parseAccountStatement(csv);
       const extraction = extractDistributions(rows, collectTradeReservedConversionRefs(rows));
       const distributions = extraction.distributions;
@@ -2921,11 +2947,12 @@ export function registerLightyearTools(server: McpServer, api: ApiContext): void
   registerTool(server, "lightyear_portfolio_summary",
     "Compute current holdings and cost basis from a Lightyear account statement. Useful for verifying investment account balance.",
     {
-      file_path: z.string().describe("Absolute path to Lightyear AccountStatement CSV file."),
+      file_path: z.string().optional().describe("AccountStatement path/base64 input. Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
     },
     { ...readOnly, openWorldHint: true, title: "Lightyear Portfolio Summary" },
-    async ({ file_path }) => {
-      const csv = await readCsvFile(file_path);
+    async ({ file_path, file_ref }) => {
+      const csv = await readCsvFile(fileInputSource(file_path, file_ref), FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
       const rows = parseAccountStatement(csv);
       const { trades, warnings: fxWarnings } = extractTrades(rows);
 

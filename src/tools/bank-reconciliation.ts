@@ -15,6 +15,7 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
 import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { BookingGuard, type InterAccountResolution } from "../booking-guard.js";
+import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -371,8 +372,10 @@ export function getInvoiceMatchEligibility(
 export function registerBankReconciliationTools(
   server: McpServer,
   api: ApiContext,
+  _runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): void {
+  assertRuntimeSafetyContext(_runtimeSafetyContext);
   const handlers = new Map<string, BankReconciliationToolHandler>();
 
   // Constituents fully covered by the merged reconcile_bank_transactions modes

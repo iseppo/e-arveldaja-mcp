@@ -17,18 +17,36 @@ import { prepareReceiptBatchSnapshot } from "./receipt-inbox-files.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { HttpError } from "../http-client.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 // Behavior tests exercise the granular constituent tools directly, so register
 // with the full surface exposed (default hides them behind the merged tools).
 const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
 
-vi.mock("fs/promises", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("fs/promises")>()),
-  readFile: vi.fn(),
-  readdir: vi.fn(),
-  realpath: vi.fn(),
-  stat: vi.fn(),
-}));
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  const readFileMock = vi.fn();
+  return {
+    ...actual,
+    open: vi.fn().mockImplementation(async (path: unknown) => {
+      const isFile = String(path).toLowerCase().endsWith(".pdf");
+      return {
+        fd: 42,
+        stat: vi.fn().mockResolvedValue({
+          isDirectory: () => !isFile,
+          isFile: () => isFile,
+          size: isFile ? 512 : 0,
+        }),
+        readFile: vi.fn().mockImplementation(() => readFileMock(path)),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+    }),
+    readFile: readFileMock,
+    readdir: vi.fn(),
+    realpath: vi.fn(),
+    stat: vi.fn(),
+  };
+});
 
 vi.mock("../file-validation.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../file-validation.js")>()),
@@ -55,6 +73,14 @@ vi.mock("./supplier-resolution.js", async (importOriginal) => ({
 }));
 
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
+
+async function receiptRealpath(path: unknown): Promise<string> {
+  const value = String(path);
+  if (value === "/proc/self/fd/42" || value === "/dev/fd/42") {
+    throw Object.assign(new Error("descriptor namespace unavailable"), { code: "ENOENT" });
+  }
+  return value;
+}
 
 afterEach(() => {
   if (ORIGINAL_RULES_FILE === undefined) {
@@ -89,7 +115,7 @@ describe("process_receipt_batch rollback handling", () => {
     process.env.EARVELDAJA_RULES_FILE = rulesFile;
     resetAccountingRulesCache();
 
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
@@ -199,7 +225,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -248,7 +274,7 @@ describe("process_receipt_batch rollback handling", () => {
     // even when the receipt FILE window (date_from/date_to) is July-only. If the
     // handler ever mapped date_from/date_to onto the bank filter again, the June
     // transaction would be dropped and no bank_match candidate would surface.
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([{ name: "receipt.pdf", isFile: () => true }] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
@@ -291,7 +317,7 @@ describe("process_receipt_batch rollback handling", () => {
       ]) },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
     const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
@@ -323,7 +349,7 @@ describe("process_receipt_batch rollback handling", () => {
     process.env.EARVELDAJA_RULES_FILE = rulesFile;
     resetAccountingRulesCache();
 
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
@@ -441,7 +467,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -480,7 +506,7 @@ describe("process_receipt_batch rollback handling", () => {
     process.env.EARVELDAJA_RULES_FILE = rulesFile;
     resetAccountingRulesCache();
 
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
@@ -620,7 +646,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -658,7 +684,7 @@ describe("process_receipt_batch rollback handling", () => {
     process.env.EARVELDAJA_RULES_FILE = rulesFile;
     resetAccountingRulesCache();
 
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
@@ -776,7 +802,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -802,7 +828,7 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("invalidates the created invoice when document upload fails", async () => {
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
@@ -929,7 +955,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -983,7 +1009,7 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("legacy execute=true creates and uploads without confirming (#19)", async () => {
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
@@ -1110,7 +1136,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -1143,7 +1169,7 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("H05 execution_mode=create_and_confirm uses the default-preserving confirmation call", async () => {
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
@@ -1272,7 +1298,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -1301,7 +1327,7 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("preserves supplier-history VAT metadata when OCR misses invoice VAT totals", async () => {
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
@@ -1430,7 +1456,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -1456,7 +1482,7 @@ describe("process_receipt_batch rollback handling", () => {
     // the default; the row's confidence drops to medium with the
     // foreign_reverse_charge_default_unverified signal; the contract
     // gate routes it to needs_review instead of create+confirm.
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "anthropic.pdf", isFile: () => true },
     ] as any);
@@ -1572,7 +1598,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -1603,7 +1629,7 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("threads parser OCR quality metadata into receipt confidence signals", async () => {
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
@@ -1659,7 +1685,7 @@ describe("process_receipt_batch rollback handling", () => {
       transactions: { listAll: vi.fn().mockResolvedValue([]) },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
@@ -1690,7 +1716,7 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
   // Build a fully-mocked, otherwise-bookable batch; `getInvoiceInfo` is supplied
   // per test so we can exercise available / transient-failure / absent-endpoint.
   function setup(getInvoiceInfo: unknown) {
-    vi.mocked(realpath).mockImplementation(async (path) => String(path));
+    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([{ name: "receipt.pdf", isFile: () => true }] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
@@ -1731,7 +1757,7 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
       transactions: { listAll: vi.fn().mockResolvedValue([]) },
     } as any;
 
-    registerReceiptInboxTools(server, api, EXPOSE_GRANULAR);
+    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
     const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;

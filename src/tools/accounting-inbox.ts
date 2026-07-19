@@ -4,7 +4,7 @@ import { basename, extname, resolve } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
-import { desandboxText } from "../external-text-renderer.js";
+import { desandboxText, sandboxExternalText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
@@ -30,6 +30,8 @@ import {
   runAccountingInboxDryRunPipeline,
   type AutopilotInternalToolHandler,
 } from "./accounting-inbox-autopilot-service.js";
+import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
+import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 
 const MIN_AUTO_BOOKING_RULE_MATCH_LENGTH = 3;
 
@@ -725,24 +727,254 @@ function remapRecommendedStepTool<T extends { tool: string; suggested_args: Reco
   return remapped ? { ...step, tool: remapped.tool, suggested_args: remapped.args } : step;
 }
 
+function publicInboxFile(
+  file: InboxFileCandidate,
+  runtimeSafetyContext: RuntimeSafetyContext,
+  operation: string,
+): Record<string, unknown> {
+  return {
+    display_path: sandboxExternalText(file.path),
+    display_name: sandboxExternalText(file.name),
+    file_ref: runtimeSafetyContext.fileReferenceStore.issue({
+      canonicalPath: file.path,
+      kind: "file",
+      operation,
+    }),
+    modified_at: file.modified_at,
+    size_bytes: file.size_bytes,
+    ...(file.detected_iban !== undefined ? { detected_iban: file.detected_iban } : {}),
+  };
+}
+
+function publicReceiptFolder(
+  folder: ReceiptFolderCandidate,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Record<string, unknown> {
+  return {
+    display_path: sandboxExternalText(folder.path),
+    file_ref: runtimeSafetyContext.fileReferenceStore.issue({
+      canonicalPath: folder.path,
+      kind: "directory",
+      operation: FILE_REFERENCE_OPERATIONS.receipt,
+    }),
+    receipt_file_count: folder.receipt_file_count,
+    sample_files: folder.sample_files.map(name => sandboxExternalText(name)),
+    ...(folder.last_modified_at !== undefined ? { last_modified_at: folder.last_modified_at } : {}),
+  };
+}
+
+function publicRecommendedStep(
+  step: RecommendedStep,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): RecommendedStep {
+  const suggestedArgs = publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext);
+  return {
+    ...step,
+    purpose: sandboxExternalText(step.purpose),
+    suggested_args: suggestedArgs,
+    reason: sandboxExternalText(step.reason),
+  };
+}
+
+function publicSuggestedArgs(
+  tool: string,
+  args: Record<string, unknown>,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Record<string, unknown> {
+  const suggestedArgs = { ...args };
+  const directFilePath = typeof suggestedArgs.file_path === "string" ? suggestedArgs.file_path : undefined;
+  const directFolderPath = typeof suggestedArgs.folder_path === "string" ? suggestedArgs.folder_path : undefined;
+  if (directFilePath !== undefined) {
+    const operation = tool === "import_wise_transactions"
+      ? FILE_REFERENCE_OPERATIONS.wise
+      : FILE_REFERENCE_OPERATIONS.camt;
+    delete suggestedArgs.file_path;
+    suggestedArgs.file_ref = runtimeSafetyContext.fileReferenceStore.issue({
+      canonicalPath: directFilePath,
+      kind: "file",
+      operation,
+    });
+  }
+  if (directFolderPath !== undefined) {
+    delete suggestedArgs.folder_path;
+    suggestedArgs.file_ref = runtimeSafetyContext.fileReferenceStore.issue({
+      canonicalPath: directFolderPath,
+      kind: "directory",
+      operation: FILE_REFERENCE_OPERATIONS.receipt,
+    });
+  }
+  return suggestedArgs;
+}
+
+function publicSourceDocuments(args: Record<string, unknown>): string[] {
+  return [args.file_path, args.folder_path]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .map(value => sandboxExternalText(value));
+}
+
+function publicQuestion(question: InboxQuestion): InboxQuestion {
+  return {
+    ...question,
+    question: sandboxExternalText(question.question),
+    recommendation: sandboxExternalText(question.recommendation),
+    candidates: question.candidates?.map(candidate => ({
+      ...candidate,
+      label: sandboxExternalText(candidate.label),
+      match_reason: sandboxExternalText(candidate.match_reason),
+    })),
+  };
+}
+
+const REVIEW_TYPED_DATE_KEY = /(?:^|_)(?:date|datetime|timestamp|at|date_from|date_to)$/;
+const REVIEW_TYPED_DATE_VALUE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)?$/;
+function isCanonicalReviewOpaqueValue(key: string, value: string): boolean {
+  if (key === "sha256") return /^[0-9a-f]{64}$/.test(value);
+  if (key !== "file_ref" && key !== "plan_handle") return false;
+  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
+  try {
+    const decoded = Buffer.from(value, "base64url");
+    return decoded.byteLength === 32 && decoded.toString("base64url") === value;
+  } catch {
+    return false;
+  }
+}
+
+function isReviewMachineEnum(key: string, value: string): boolean {
+  switch (key) {
+    case "review_type":
+      return value === "receipt_review" || value === "classification_group" ||
+        value === "camt_possible_duplicate" || value === "unknown";
+    case "source_tool":
+      return value === "receipt_batch" || value === "process_receipt_batch" ||
+        value === "classify_bank_transactions" || value === "classify_unmatched_transactions" ||
+        value === "import_camt053";
+    case "source":
+      return value === "local_rules" || value === "supplier_history" ||
+        value === "keyword_match" || value === "fallback" || value === "category_default" ||
+        value === "receipt_batch" || value === "process_receipt_batch" ||
+        value === "classify_bank_transactions" || value === "classify_unmatched_transactions" ||
+        value === "import_camt053";
+    case "status":
+      return value === "PROJECT" || value === "CONFIRMED" || value === "VOID" ||
+        value === "UNKNOWN" || value === "ready_for_action" || value === "needs_answers" ||
+        value === "unsupported_review_type" || value === "ready_for_approval" ||
+        value === "no_direct_action";
+    case "type":
+      return value === "C" || value === "D" || value === "tool_call" || value === "rule_save";
+    case "apply_mode":
+      return value === "purchase_invoice" || value === "review_only";
+    case "category":
+      return (AUTO_BOOKING_CATEGORIES as readonly string[]).includes(value);
+    case "currency":
+      return /^[A-Z]{3}$/.test(value);
+    case "file_type":
+      return value === "pdf" || value === "jpg" || value === "png";
+    case "extension":
+      return value === ".pdf" || value === ".jpg" || value === ".jpeg" || value === ".png";
+    default:
+      return false;
+  }
+}
+
+function sandboxReviewFields(value: unknown, key?: string): unknown {
+  if (typeof value === "string") {
+    // Review payloads originate with a caller/import. Treat every string as
+    // external text, not a perpetually incomplete field-name allowlist. The
+    // only exceptions are opaque server references/digests and structurally
+    // typed ISO date values; numeric IDs and amounts are non-strings already.
+    if (key && isCanonicalReviewOpaqueValue(key, value)) return value;
+    if (key && isReviewMachineEnum(key, value)) return value;
+    if (key && REVIEW_TYPED_DATE_KEY.test(key) && REVIEW_TYPED_DATE_VALUE.test(value)) return value;
+    return sandboxExternalText(value);
+  }
+  if (Array.isArray(value)) return value.map(item => sandboxReviewFields(item, key));
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [
+    childKey,
+    sandboxReviewFields(child, childKey),
+  ]));
+}
+
+// Exported for focused trust-boundary tests; public MCP responses call the
+// same projector below.
+export const sandboxReviewFieldsForOutput = sandboxReviewFields;
+
+function projectResolverInput(
+  resolverInput: Record<string, unknown>,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): { resolver_input: Record<string, unknown>; source_documents: string[] } {
+  const projected = sandboxReviewFields(resolverInput) as Record<string, unknown>;
+  const item = recordAt(resolverInput, "item");
+  const file = item ? recordAt(item, "file") : undefined;
+  const rawPath = file ? stringAt(file, "path") : undefined;
+  const rawName = file ? stringAt(file, "name") : undefined;
+  const sourceDocuments = rawPath ? [sandboxExternalText(rawPath)] : [];
+  if (file && rawPath) {
+    const projectedItem = recordAt(projected, "item") ?? {};
+    const projectedFile = recordAt(projectedItem, "file") ?? {};
+    const { path: _rawPath, name: _rawName, ...fileMetadata } = projectedFile;
+    projectedItem.file = {
+      ...fileMetadata,
+      display_path: sandboxExternalText(rawPath),
+      ...(rawName !== undefined ? { display_name: sandboxExternalText(rawName) } : {}),
+      file_ref: runtimeSafetyContext.fileReferenceStore.issue({
+        canonicalPath: rawPath,
+        kind: "file",
+        operation: FILE_REFERENCE_OPERATIONS.receipt,
+      }),
+    };
+    projected.item = projectedItem;
+  }
+  return { resolver_input: projected, source_documents: sourceDocuments };
+}
+
+function publicFollowUp<T extends {
+  summary: string;
+  recommendation?: string;
+  compliance_basis?: string[];
+  follow_up_questions?: string[];
+  policy_hint?: string;
+  resolver_input?: Record<string, unknown>;
+}>(item: T, runtimeSafetyContext: RuntimeSafetyContext): T & { source_documents?: string[] } {
+  const resolverProjection = item.resolver_input
+    ? projectResolverInput(item.resolver_input, runtimeSafetyContext)
+    : undefined;
+  return {
+    ...item,
+    summary: sandboxExternalText(item.summary),
+    ...(item.recommendation !== undefined ? { recommendation: sandboxExternalText(item.recommendation) } : {}),
+    ...(item.compliance_basis !== undefined
+      ? { compliance_basis: item.compliance_basis.map(value => sandboxExternalText(value)) }
+      : {}),
+    ...(item.follow_up_questions !== undefined
+      ? { follow_up_questions: item.follow_up_questions.map(value => sandboxExternalText(value)) }
+      : {}),
+    ...(item.policy_hint !== undefined ? { policy_hint: sandboxExternalText(item.policy_hint) } : {}),
+    ...(resolverProjection ?? {}),
+  };
+}
+
 function buildPreparedInboxPayload(
   prepared: PreparedInboxData,
+  runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): Record<string, unknown> {
   // Rewrite hidden granular tool names in the caller-facing step list to their
   // merged entry points unless the granular tools are exposed (see
   // remapRecommendedStepTool). next_recommended_action is picked from the same
   // rewritten list so the two stay consistent.
-  const steps = exposure.exposeGranularTools
+  const rawSteps = exposure.exposeGranularTools
     ? prepared.steps
     : prepared.steps.map(remapRecommendedStepTool);
+  const steps = rawSteps.map(step => publicRecommendedStep(step, runtimeSafetyContext));
+  const questions = prepared.questions.map(publicQuestion);
   return {
-    workspace_path: prepared.workspacePath,
+    workspace_path: sandboxExternalText(prepared.workspacePath),
     scan: prepared.scan,
     detected_inputs: {
-      camt_files: prepared.camtFiles,
-      wise_csv_files: prepared.wiseFiles,
-      receipt_folders: prepared.receiptFolders,
+      camt_files: prepared.camtFiles.map(file => publicInboxFile(file, runtimeSafetyContext, FILE_REFERENCE_OPERATIONS.camt)),
+      wise_csv_files: prepared.wiseFiles.map(file => publicInboxFile(file, runtimeSafetyContext, FILE_REFERENCE_OPERATIONS.wise)),
+      receipt_folders: prepared.receiptFolders.map(folder => publicReceiptFolder(folder, runtimeSafetyContext)),
     },
     defaults: {
       live_api_defaults_available: prepared.liveApiDefaultsAvailable,
@@ -753,8 +985,8 @@ function buildPreparedInboxPayload(
       bank_dimension_candidates: prepared.defaults.candidates,
     },
     recommended_steps: steps,
-    questions: prepared.questions,
-    next_question: prepared.questions[0],
+    questions,
+    next_question: questions[0],
     next_recommended_action: pickNextRecommendedAction(steps),
     assistant_guidance: [
       "Ask only the questions listed under questions, and always start with the recommendation.",
@@ -840,7 +1072,11 @@ async function prepareAccountingInbox(
   };
 }
 
-function captureInternalToolHandlers(api: ApiContext): Map<string, AutopilotInternalToolHandler> {
+function captureInternalToolHandlers(
+  api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Map<string, AutopilotInternalToolHandler> {
+  assertRuntimeSafetyContext(runtimeSafetyContext);
   const handlers = new Map<string, AutopilotInternalToolHandler>();
   const server = {
     registerTool(name: string, _config: unknown, handler: AutopilotInternalToolHandler) {
@@ -853,10 +1089,10 @@ function captureInternalToolHandlers(api: ApiContext): Map<string, AutopilotInte
   // exposes in tools/list via EARVELDAJA_EXPOSE_GRANULAR_TOOLS.
   const captureEverything: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
 
-  registerCamtImportTools(server, api, captureEverything);
-  registerWiseImportTools(server, api);
-  registerReceiptInboxTools(server, api, captureEverything);
-  registerBankReconciliationTools(server, api, captureEverything);
+  registerCamtImportTools(server, api, runtimeSafetyContext, captureEverything);
+  registerWiseImportTools(server, api, runtimeSafetyContext);
+  registerReceiptInboxTools(server, api, runtimeSafetyContext, captureEverything);
+  registerBankReconciliationTools(server, api, runtimeSafetyContext, captureEverything);
 
   return handlers;
 }
@@ -1085,7 +1321,11 @@ export function resolveReviewItemPlan(
     const guidance = reviewGuidanceFromRecord(item);
     const file = recordAt(item, "file");
     const classification = stringAt(item, "classification") ?? "needs_review";
-    const filePath = stringAt(file ?? {}, "path");
+    // Continuation accepts both the new opaque reference and legacy raw-path
+    // payloads, but never echoes either caller-supplied locator into prose.
+    const hasFileLocation = Boolean(
+      stringAt(file ?? {}, "file_ref") ?? stringAt(file ?? {}, "path"),
+    );
     const isOwnerExpense = classification === "owner_paid_expense_reimbursement";
     // create_owner_expense_reimbursement is part of the tax-tool group and is
     // unregistered when EARVELDAJA_DISABLE_TAX_TOOLS=1. Do not name a tool the
@@ -1112,7 +1352,7 @@ export function resolveReviewItemPlan(
         : ["receipt_batch"],
       next_step_summary: isOwnerExpense
         ? ownerExpenseSummary
-        : `Resolve the missing receipt facts first${filePath ? ` for ${filePath}` : ""}, then either book it via book-invoice for one document or rerun receipt_batch for the folder.`,
+        : `Resolve the missing receipt facts first${hasFileLocation ? " for the referenced receipt" : ""}, then either book it via book-invoice for one document or rerun receipt_batch for the folder.`,
     };
   }
 
@@ -1366,10 +1606,11 @@ type AccountingInboxToolParams = {
 async function buildAccountingInboxScanResponse(
   api: ApiContext,
   params: AccountingInboxToolParams,
+  runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   const prepared = await prepareAccountingInbox(api, params);
-  const payload = buildPreparedInboxPayload(prepared, exposure);
+  const payload = buildPreparedInboxPayload(prepared, runtimeSafetyContext, exposure);
 
   return {
     content: [{
@@ -1385,22 +1626,51 @@ async function buildAccountingInboxScanResponse(
 async function buildAccountingInboxDryRunResponse(
   api: ApiContext,
   params: AccountingInboxToolParams,
+  runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   const prepared = await prepareAccountingInbox(api, params);
-  const handlers = captureInternalToolHandlers(api);
+  const handlers = captureInternalToolHandlers(api, runtimeSafetyContext);
   const autopilot = await runAccountingInboxDryRunPipeline({ prepared, handlers });
-  const preparedPayload = buildPreparedInboxPayload(prepared, exposure);
-  preparedPayload.next_question = autopilot.next_question;
+  const publicAutopilot = {
+    ...autopilot,
+    executed_steps: autopilot.executed_steps.map(step => ({
+      ...step,
+      purpose: sandboxExternalText(step.purpose),
+      summary: sandboxExternalText(step.summary),
+      suggested_args: publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext),
+      source_documents: publicSourceDocuments(step.suggested_args),
+    })),
+    skipped_steps: autopilot.skipped_steps.map(step => ({
+      ...step,
+      purpose: sandboxExternalText(step.purpose),
+      summary: sandboxExternalText(step.summary),
+      suggested_args: publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext),
+      source_documents: publicSourceDocuments(step.suggested_args),
+    })),
+    needs_one_decision: autopilot.needs_one_decision.map(item => publicFollowUp(item, runtimeSafetyContext)),
+    needs_accountant_review: autopilot.needs_accountant_review.map(item => publicFollowUp(item, runtimeSafetyContext)),
+  };
+  const preparedPayload = buildPreparedInboxPayload(prepared, runtimeSafetyContext, exposure);
+  preparedPayload.next_question = autopilot.next_question
+    ? publicFollowUp(autopilot.next_question, runtimeSafetyContext)
+    : undefined;
   // Keep the caller-facing next step consistent with the scan payload: rewrite a
   // hidden granular tool to its merged entry point unless granular tools are exposed.
-  preparedPayload.next_recommended_action = autopilot.next_recommended_action && !exposure.exposeGranularTools
+  const nextRecommendedAction = autopilot.next_recommended_action && !exposure.exposeGranularTools
     ? remapRecommendedStepTool(autopilot.next_recommended_action)
     : autopilot.next_recommended_action;
+  preparedPayload.next_recommended_action = nextRecommendedAction
+    ? {
+        ...nextRecommendedAction,
+        purpose: sandboxExternalText(nextRecommendedAction.purpose),
+        suggested_args: publicSuggestedArgs(nextRecommendedAction.tool, nextRecommendedAction.suggested_args, runtimeSafetyContext),
+      }
+    : undefined;
 
   const payload = {
     prepared_inbox: preparedPayload,
-    autopilot,
+    autopilot: publicAutopilot,
   };
   const workflow = remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload));
 
@@ -1439,12 +1709,25 @@ function buildReviewResolutionResponse(
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): { content: Array<{ type: "text"; text: string }> } {
   const resolution = resolveReviewItemPlan(reviewItem, exposure);
+  const sandboxed = sandboxReviewFields(resolution) as ReviewResolutionResult;
+  const publicResolution: ReviewResolutionResult = {
+    ...sandboxed,
+    // These fields are selected from server-owned literals, never echoed from
+    // the caller. Keep the machine contract directly consumable.
+    review_type: resolution.review_type,
+    status: resolution.status,
+    suggested_workflow: resolution.suggested_workflow,
+    suggested_tools: resolution.suggested_tools,
+    next_step_summary: resolution.next_step_summary,
+    error: resolution.error,
+    supported_review_types: resolution.supported_review_types,
+  };
 
   return {
     content: [{
       type: "text",
       text: toMcpJson({
-        ...resolution,
+        ...publicResolution,
         assistant_guidance: reviewResolutionAssistantGuidance,
       }),
     }],
@@ -1460,12 +1743,30 @@ function buildReviewActionResponse(
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): { content: Array<{ type: "text"; text: string }> } {
   const prepared = prepareReviewAction(reviewItem, options, exposure);
+  const sandboxed = sandboxReviewFields(prepared) as ReviewActionPreparationResult;
+  const publicPrepared: ReviewActionPreparationResult = {
+    ...sandboxed,
+    status: prepared.status,
+    suggested_workflow: prepared.suggested_workflow,
+    suggested_tools: prepared.suggested_tools,
+    next_step_summary: prepared.next_step_summary,
+    ...(prepared.proposed_action && sandboxed.proposed_action
+      ? {
+          proposed_action: {
+            ...sandboxed.proposed_action,
+            type: prepared.proposed_action.type,
+            tool: prepared.proposed_action.tool,
+            approval_required: prepared.proposed_action.approval_required,
+          },
+        }
+      : {}),
+  };
 
   return {
     content: [{
       type: "text",
       text: toMcpJson({
-        ...prepared,
+        ...publicPrepared,
         assistant_guidance: reviewActionAssistantGuidance,
       }),
     }],
@@ -1475,8 +1776,10 @@ function buildReviewActionResponse(
 export function registerAccountingInboxTools(
   server: McpServer,
   api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): void {
+  assertRuntimeSafetyContext(runtimeSafetyContext);
   // accounting_inbox is the single inbox entry point: mode="scan" plans,
   // mode="dry_run" runs the safe dry-run pipeline. (The former
   // prepare_accounting_inbox / run_accounting_inbox_dry_runs tools were exact
@@ -1491,8 +1794,8 @@ export function registerAccountingInboxTools(
     { ...readOnly, openWorldHint: true, title: "Accounting Inbox" },
     async ({ mode, ...params }) => {
       return mode === "dry_run"
-        ? buildAccountingInboxDryRunResponse(api, params, exposure)
-        : buildAccountingInboxScanResponse(api, params, exposure);
+        ? buildAccountingInboxDryRunResponse(api, params, runtimeSafetyContext, exposure)
+        : buildAccountingInboxScanResponse(api, params, runtimeSafetyContext, exposure);
     },
   );
 

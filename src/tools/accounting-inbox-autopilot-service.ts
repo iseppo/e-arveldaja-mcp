@@ -230,13 +230,13 @@ function failedPrerequisiteForStep(
   const prereqTool = PREREQ_TOOL_BY_DOWNSTREAM[step.tool];
   if (!prereqTool) return undefined;
 
-  const filePath = step.suggested_args.file_path;
-  if (typeof filePath !== "string") return undefined;
+  const fileIdentity = step.suggested_args.file_ref ?? step.suggested_args.file_path;
+  if (typeof fileIdentity !== "string") return undefined;
 
   const failedPrereq = handledSteps.find(prior =>
     prior.tool === prereqTool &&
     prior.status === "failed" &&
-    prior.suggested_args.file_path === filePath
+    (prior.suggested_args.file_ref ?? prior.suggested_args.file_path) === fileIdentity
   );
   return failedPrereq ? prereqTool : undefined;
 }

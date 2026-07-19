@@ -1,6 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { readFile } from "fs/promises";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { registerTool } from "../mcp-compat.js";
 import {
@@ -11,7 +10,9 @@ import {
 } from "../mcp-json.js";
 import type { AccountDimension, BankAccount } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
-import { resolveFileInput } from "../file-validation.js";
+import { captureFileInputSnapshot } from "../file-input-snapshot.js";
+import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
+import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
@@ -1101,12 +1102,18 @@ function digestMismatch() {
   });
 }
 
-export function registerWiseImportTools(server: McpServer, api: ApiContext): void {
+export function registerWiseImportTools(
+  server: McpServer,
+  api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): void {
+  assertRuntimeSafetyContext(runtimeSafetyContext);
 
   registerTool(server, "import_wise_transactions",
     "Import Wise transaction-history CSV rows. Direct-call contract: DRY RUN by default; execute=true creates rows; preserve import direction as type D incoming / type C outgoing; fees use separate transactions; inter-account transfers avoid double-counting confirmed counterpart journals.",
     {
-      file_path: z.string().describe("Absolute path to the regular Wise transaction-history.csv export from Transactions."),
+      file_path: z.string().optional().describe("Absolute path/base64 Wise CSV input. Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Accounting Inbox Wise CSV reference. Provide exactly one of file_path or file_ref."),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID for the Wise account in e-arveldaja"),
       fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account."),
       fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),
@@ -1127,6 +1134,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
     { ...batch, openWorldHint: true, title: "Import Wise Transactions" },
     async ({
       file_path,
+      file_ref,
       accounts_dimensions_id,
       fee_account_dimensions_id,
       fee_account_relation_id,
@@ -1149,14 +1157,16 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       validateWiseDateRange(date_from, date_to);
 
       const skipJars = skip_jar_transfers !== false;
-      const { path: resolved, cleanup } = await resolveFileInput(file_path, [".csv"], 10 * 1024 * 1024);
-      let csvBytes: Buffer;
-      try {
-        const raw = await readFile(resolved);
-        csvBytes = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
-      } finally {
-        if (cleanup) await cleanup();
-      }
+      const inputSnapshot = await captureFileInputSnapshot({
+        ...(file_path !== undefined ? { file_path } : {}),
+        ...(file_ref !== undefined ? { file_ref } : {}),
+      }, {
+        runtimeSafetyContext,
+        operation: FILE_REFERENCE_OPERATIONS.wise,
+        allowedExtensions: [".csv"],
+        maxSize: 10 * 1024 * 1024,
+      });
+      const csvBytes = inputSnapshot.bytes();
       const csv = csvBytes.toString("utf8");
       const rawCsvSha256 = sha256(csvBytes);
       // Preflight before the cache clear, every API read, progress report,
@@ -2069,7 +2079,7 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       }
 
       const canonicalPlanningArgs = {
-        file_path,
+        source_identity: inputSnapshot.identity,
         accounts_dimensions_id,
         fee_account_dimensions_id,
         fee_account_relation_id,
@@ -2439,7 +2449,10 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
       const sanitizedExecutionSkipped = executionSkipped.map(sanitizeReason);
       const sanitizedExecutionErrors = executionErrors.map(sanitizeReason);
       const workflowArgs = {
-        file_path,
+        ...(file_ref !== undefined ? { file_ref } : {}),
+        ...(file_ref === undefined && file_path !== undefined && !file_path.toLowerCase().startsWith("base64:")
+          ? { file_path }
+          : {}),
         accounts_dimensions_id,
         ...(fee_account_dimensions_id !== undefined ? { fee_account_dimensions_id } : {}),
         ...(fee_account_relation_id !== undefined ? { fee_account_relation_id } : {}),
@@ -2476,7 +2489,11 @@ export function registerWiseImportTools(server: McpServer, api: ApiContext): voi
           type: "text",
           text: toMcpJson({
             mode,
-            source_file: wrapUntrustedOcr(file_path),
+            ...(file_ref !== undefined
+              ? { source_file_ref: file_ref }
+              : file_path !== undefined && !file_path.toLowerCase().startsWith("base64:")
+                ? { source_file: wrapUntrustedOcr(file_path) }
+                : { source_identity: inputSnapshot.identity, source_resubmission_required: true }),
             summary,
             workflow,
             total_csv_rows: summary.total_csv_rows,

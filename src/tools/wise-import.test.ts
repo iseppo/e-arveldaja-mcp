@@ -7,6 +7,7 @@ import { registerWiseImportTools } from "./wise-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { clearRuntimeCaches } from "../cache-control.js";
 import { reportProgress } from "../progress.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 
@@ -237,7 +238,7 @@ function setupWiseTool(
     },
   } as any;
 
-  registerWiseImportTools(server, api);
+  registerWiseImportTools(server, api, createTestRuntimeSafetyContext());
 
   const registration = server.registerTool.mock.calls.find(([name]) => name === "import_wise_transactions");
   if (!registration) throw new Error("Tool was not registered");
@@ -2896,7 +2897,9 @@ describe("wise import tool", () => {
     expect(wrapperNonce(changedProse.payload.execution.commands[0].create_payload.ref_number))
       .not.toBe(wrapperNonce(first.payload.execution.commands[0].create_payload.ref_number));
     expect(callerPathA.payload.execution.commands).toEqual(callerPathB.payload.execution.commands);
-    expect(callerPathA.payload.approved_command_digest).not.toBe(callerPathB.payload.approved_command_digest);
+    // Both caller aliases resolved to the same canonical exact source path and
+    // bytes, so the fixed-size source identity intentionally collapses them.
+    expect(callerPathA.payload.approved_command_digest).toBe(callerPathB.payload.approved_command_digest);
     expect(base64First.payload.execution.commands).toEqual(base64Second.payload.execution.commands);
     expect(base64First.payload.approved_command_digest).toBe(base64Second.payload.approved_command_digest);
 

@@ -673,7 +673,11 @@ export function approvalPreviewFromDryRunStep(step: unknown): ApprovalPreview | 
     execute_args: spec.executeArgs(args),
     accounting_impact: spec.buildImpact(counts, preview),
     duplicate_risk: spec.duplicateRisk(counts),
-    source_documents: sourceDocuments(args),
+    source_documents: (() => {
+      const explicit = arrayAt(step, "source_documents");
+      return (explicit.length > 0 ? explicit : sourceDocuments(args))
+        .filter((value): value is string => typeof value === "string" && value.length > 0);
+    })(),
   };
 }
 

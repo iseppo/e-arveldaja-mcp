@@ -2,10 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 import { win32 } from "path";
 import { parseMcpResponse } from "../mcp-json.js";
 import type { registerReceiptInboxTools as registerReceiptInboxToolsType } from "./receipt-inbox.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import { scanReceiptFolderInternal } from "./receipt-inbox-files.js";
 
 vi.mock("fs/promises", () => ({
-  realpath: vi.fn().mockResolvedValue("C:\\Allowed\\Receipts"),
-  stat: vi.fn().mockResolvedValue({ isDirectory: () => true }),
+  realpath: vi.fn().mockImplementation(async (path: unknown) => {
+    if (String(path).startsWith("/proc/") || String(path).startsWith("/dev/fd/")) {
+      throw Object.assign(new Error("descriptor namespace unavailable"), { code: "ENOENT" });
+    }
+    return "C:\\Allowed\\Receipts";
+  }),
+  stat: vi.fn().mockResolvedValue({ isDirectory: () => true, dev: 1, ino: 2 }),
+  open: vi.fn().mockResolvedValue({
+    fd: 42,
+    stat: vi.fn().mockResolvedValue({ isDirectory: () => true, dev: 1, ino: 2 }),
+    close: vi.fn().mockResolvedValue(undefined),
+  }),
   readdir: vi.fn().mockResolvedValue([]),
   readFile: vi.fn(),
 }));
@@ -29,7 +41,7 @@ describe("receipt inbox folder path validation", () => {
   it("accepts Windows-style child folders under an allowed root", async () => {
     const server = { registerTool: vi.fn() } as any;
     // scan_receipt_folder is granular-gated by default, so expose it here.
-    registerReceiptInboxTools(server, {} as any, { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
+    registerReceiptInboxTools(server, {} as any, createTestRuntimeSafetyContext(), { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "scan_receipt_folder");
     if (!registration) throw new Error("scan_receipt_folder was not registered");
@@ -40,5 +52,16 @@ describe("receipt inbox folder path validation", () => {
     expect(win32.relative("C:\\Allowed", payload.folder_path)).toBe("Receipts");
     expect(payload.files).toEqual([]);
     expect(payload.skipped).toEqual([]);
+  });
+
+  it("fails closed for an expected reference binding when descriptor namespaces are unavailable", async () => {
+    await expect(scanReceiptFolderInternal(
+      "C:\\Allowed\\Receipts",
+      undefined,
+      undefined,
+      undefined,
+      { expectedCanonicalPath: "C:\\Allowed\\Receipts" },
+    ))
+      .rejects.toThrow("The referenced filesystem location no longer resolves to the reviewed path.");
   });
 });

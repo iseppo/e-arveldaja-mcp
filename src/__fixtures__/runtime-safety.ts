@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ToolExposureConfig } from "../config.js";
 import { ExecutionPlanStore, type ExecutionPlanStoreOptions } from "../plan-store.js";
 import type { RuntimeSafetyContext, RuntimeSafetyScope } from "../runtime-safety-context.js";
+import { FileReferenceStore, type FileReferenceStoreOptions } from "../file-reference-store.js";
 
 const DEFAULT_FEATURES: ToolExposureConfig = Object.freeze({
   enableLightyear: true,
@@ -28,6 +29,7 @@ export interface TestRuntimeSafetyContextOptions {
     features?: Partial<ToolExposureConfig>;
   };
   readonly planStore?: Omit<ExecutionPlanStoreOptions, "getActiveScope" | "now">;
+  readonly fileReferenceStore?: Omit<FileReferenceStoreOptions, "getActiveScope" | "now">;
 }
 
 function frozenScope(
@@ -66,9 +68,19 @@ export function createTestRuntimeSafetyContext(
     now: () => now,
     getActiveScope,
   });
+  let referenceCounter = 0;
+  const fileReferenceStore = new FileReferenceStore({
+    referenceFactory: () => createHash("sha256")
+      .update(`test-file-reference:${referenceCounter++}`)
+      .digest(),
+    ...options.fileReferenceStore,
+    now: () => now,
+    getActiveScope,
+  });
   return Object.freeze({
-    get serverInstanceId() { return scope.serverInstanceId; },
+    serverInstanceId: scope.serverInstanceId,
     planStore,
+    fileReferenceStore,
     getActiveScope,
     setNow(value: number) { now = value; },
     advanceTime(milliseconds: number) { now += milliseconds; },

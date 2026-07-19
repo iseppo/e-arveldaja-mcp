@@ -5,6 +5,7 @@ import { getBaseUrlForServer, type NamedConfig, type ToolExposureConfig } from "
 import { buildConnectionFingerprint } from "./connection-fingerprint.js";
 import type { ConnectionSnapshot } from "./connection-safety.js";
 import { ExecutionPlanStore, type ExecutionPlanStoreOptions } from "./plan-store.js";
+import { FileReferenceStore, type FileReferenceStoreOptions } from "./file-reference-store.js";
 
 export type RuntimeEnvironmentKind = "live" | "demo" | "setup";
 
@@ -22,6 +23,7 @@ export interface RuntimeSafetyScope {
 export interface RuntimeSafetyContext {
   readonly serverInstanceId: string;
   readonly planStore: ExecutionPlanStore;
+  readonly fileReferenceStore: FileReferenceStore;
   getActiveScope(): RuntimeSafetyScope;
 }
 
@@ -31,6 +33,27 @@ export interface CreateRuntimeSafetyContextOptions {
   readonly toolExposure: ToolExposureConfig;
   readonly serverInstanceId?: string;
   readonly planStore?: Omit<ExecutionPlanStoreOptions, "getActiveScope">;
+  readonly fileReferenceStore?: Omit<FileReferenceStoreOptions, "getActiveScope">;
+}
+
+export function assertRuntimeSafetyContext(value: unknown): asserts value is RuntimeSafetyContext {
+  if (typeof value !== "object" || value === null || utilTypes.isProxy(value)) {
+    throw new Error("A valid runtime safety context is required.");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const required = ["serverInstanceId", "planStore", "fileReferenceStore", "getActiveScope"] as const;
+  if (required.some(key => {
+    const descriptor = descriptors[key];
+    return !descriptor || !("value" in descriptor) || !descriptor.enumerable;
+  })) {
+    throw new Error("A valid runtime safety context is required.");
+  }
+  if (typeof descriptors.serverInstanceId!.value !== "string" ||
+    !(descriptors.planStore!.value instanceof ExecutionPlanStore) ||
+    !(descriptors.fileReferenceStore!.value instanceof FileReferenceStore) ||
+    typeof descriptors.getActiveScope!.value !== "function") {
+    throw new Error("A valid runtime safety context is required.");
+  }
 }
 
 function freezeFeatures(features: ToolExposureConfig): Readonly<ToolExposureConfig> {
@@ -149,5 +172,9 @@ export function createRuntimeSafetyContext(
     ...options.planStore,
     getActiveScope,
   });
-  return Object.freeze({ serverInstanceId, planStore, getActiveScope });
+  const fileReferenceStore = new FileReferenceStore({
+    ...options.fileReferenceStore,
+    getActiveScope,
+  });
+  return Object.freeze({ serverInstanceId, planStore, fileReferenceStore, getActiveScope });
 }

@@ -5,6 +5,7 @@ import { logAudit } from "../audit-log.js";
 import { resolveFileInput } from "../file-validation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import * as lightyearInvestments from "./lightyear-investments.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance } = lightyearInvestments;
 
@@ -250,7 +251,7 @@ function setupLightyearTool(
     },
   } as any;
 
-  registerLightyearTools(server, api);
+  registerLightyearTools(server, api, createTestRuntimeSafetyContext());
 
   const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
   if (!registration) throw new Error(`Tool was not registered: ${toolName}`);

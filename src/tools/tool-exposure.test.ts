@@ -4,10 +4,13 @@ import { registerAccountingInboxTools } from "./accounting-inbox.js";
 import { registerBankReconciliationTools } from "./bank-reconciliation.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
+import { registerWiseImportTools } from "./wise-import.js";
+import { registerLightyearTools } from "./lightyear-investments.js";
 import { registerReferenceDataTools } from "./reference-data-tools.js";
 import { registerCrudTools } from "./crud-tools.js";
 import { registerAgingTools } from "./aging-analysis.js";
 import { registerPrompts } from "../prompts.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 const HIDDEN: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
 const EXPOSED: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
@@ -21,6 +24,15 @@ function registeredToolNames(
   return server.registerTool.mock.calls.map(([name]: [string]) => name);
 }
 
+function registeredScopedToolNames(
+  register: (server: any, api: any, runtimeSafetyContext: ReturnType<typeof createTestRuntimeSafetyContext>, exposure: ToolExposureConfig) => void,
+  exposure: ToolExposureConfig,
+): string[] {
+  const server = { registerTool: vi.fn() } as any;
+  register(server, {} as any, createTestRuntimeSafetyContext(), exposure);
+  return server.registerTool.mock.calls.map(([name]: [string]) => name);
+}
+
 function registeredPromptNames(toolExposure: ToolExposureConfig): string[] {
   const server = { registerPrompt: vi.fn() } as any;
   registerPrompts(server, { toolExposure });
@@ -28,6 +40,26 @@ function registeredPromptNames(toolExposure: ToolExposureConfig): string[] {
 }
 
 describe("getToolExposureConfig", () => {
+  it("fails every safety-sensitive registrar immediately without an explicit valid runtime context", () => {
+    const server = { registerTool: vi.fn() } as any;
+    const api = new Proxy({}, { get() { throw new Error("API must not be read"); } }) as any;
+    const invocations = [
+      () => registerAccountingInboxTools(server, api, undefined as never, EXPOSED),
+      () => registerBankReconciliationTools(server, api, undefined as never, EXPOSED),
+      () => registerCamtImportTools(server, api, undefined as never, EXPOSED),
+      () => registerReceiptInboxTools(server, api, undefined as never, EXPOSED),
+      () => registerWiseImportTools(server, api, undefined as never),
+      () => registerLightyearTools(server, api, undefined as never),
+    ];
+    for (const invoke of invocations) expect(invoke).toThrow("valid runtime safety context");
+    expect(server.registerTool).not.toHaveBeenCalled();
+
+    let traps = 0;
+    const hostile = new Proxy({}, { get() { traps += 1; throw new Error("secret"); } });
+    expect(() => registerWiseImportTools(server, api, hostile as never)).toThrow("valid runtime safety context");
+    expect(traps).toBe(0);
+  });
+
   it("enables Lightyear by default", () => {
     expect(getToolExposureConfig({} as NodeJS.ProcessEnv).enableLightyear).toBe(true);
   });
@@ -217,24 +249,24 @@ describe("aging tool surface", () => {
 
 describe("accounting inbox tool surface", () => {
   it("registers the merged accounting_inbox entry point", () => {
-    expect(registeredToolNames(registerAccountingInboxTools, HIDDEN)).toContain("accounting_inbox");
+    expect(registeredScopedToolNames(registerAccountingInboxTools, HIDDEN)).toContain("accounting_inbox");
   });
 
   it("no longer registers the removed prepare/run inbox aliases (folded into accounting_inbox modes)", () => {
-    const names = registeredToolNames(registerAccountingInboxTools, HIDDEN);
+    const names = registeredScopedToolNames(registerAccountingInboxTools, HIDDEN);
     expect(names).not.toContain("prepare_accounting_inbox");
     expect(names).not.toContain("run_accounting_inbox_dry_runs");
   });
 
   it("hides the review constituents behind continue_accounting_workflow by default", () => {
-    const names = registeredToolNames(registerAccountingInboxTools, HIDDEN);
+    const names = registeredScopedToolNames(registerAccountingInboxTools, HIDDEN);
     expect(names).toContain("continue_accounting_workflow");
     expect(names).not.toContain("resolve_accounting_review_item");
     expect(names).not.toContain("prepare_accounting_review_action");
   });
 
   it("registers the review constituents when granular tools are exposed", () => {
-    const names = registeredToolNames(registerAccountingInboxTools, EXPOSED);
+    const names = registeredScopedToolNames(registerAccountingInboxTools, EXPOSED);
     expect(names).toContain("resolve_accounting_review_item");
     expect(names).toContain("prepare_accounting_review_action");
   });
@@ -242,19 +274,19 @@ describe("accounting inbox tool surface", () => {
 
 describe("bank reconciliation tool surface", () => {
   it("hides constituents covered by reconcile_bank_transactions by default", () => {
-    const names = registeredToolNames(registerBankReconciliationTools, HIDDEN);
+    const names = registeredScopedToolNames(registerBankReconciliationTools, HIDDEN);
     expect(names).toContain("reconcile_bank_transactions");
     expect(names).not.toContain("reconcile_transactions");
     expect(names).not.toContain("auto_confirm_exact_matches");
   });
 
   it("always registers reconcile_inter_account_transfers (no merged execute mode)", () => {
-    expect(registeredToolNames(registerBankReconciliationTools, HIDDEN))
+    expect(registeredScopedToolNames(registerBankReconciliationTools, HIDDEN))
       .toContain("reconcile_inter_account_transfers");
   });
 
   it("registers the constituents when granular tools are exposed", () => {
-    const names = registeredToolNames(registerBankReconciliationTools, EXPOSED);
+    const names = registeredScopedToolNames(registerBankReconciliationTools, EXPOSED);
     expect(names).toContain("reconcile_transactions");
     expect(names).toContain("auto_confirm_exact_matches");
   });
@@ -262,14 +294,14 @@ describe("bank reconciliation tool surface", () => {
 
 describe("camt import tool surface", () => {
   it("hides parse_camt053/import_camt053 behind process_camt053 by default", () => {
-    const names = registeredToolNames(registerCamtImportTools, HIDDEN);
+    const names = registeredScopedToolNames(registerCamtImportTools, HIDDEN);
     expect(names).toContain("process_camt053");
     expect(names).not.toContain("parse_camt053");
     expect(names).not.toContain("import_camt053");
   });
 
   it("registers the constituents when granular tools are exposed", () => {
-    const names = registeredToolNames(registerCamtImportTools, EXPOSED);
+    const names = registeredScopedToolNames(registerCamtImportTools, EXPOSED);
     expect(names).toContain("parse_camt053");
     expect(names).toContain("import_camt053");
   });
@@ -277,7 +309,7 @@ describe("camt import tool surface", () => {
 
 describe("receipt inbox tool surface", () => {
   it("hides constituents behind receipt_batch / classify_bank_transactions by default", () => {
-    const names = registeredToolNames(registerReceiptInboxTools, HIDDEN);
+    const names = registeredScopedToolNames(registerReceiptInboxTools, HIDDEN);
     expect(names).toContain("receipt_batch");
     expect(names).toContain("classify_bank_transactions");
     expect(names).not.toContain("scan_receipt_folder");
@@ -287,7 +319,7 @@ describe("receipt inbox tool surface", () => {
   });
 
   it("registers the constituents when granular tools are exposed", () => {
-    const names = registeredToolNames(registerReceiptInboxTools, EXPOSED);
+    const names = registeredScopedToolNames(registerReceiptInboxTools, EXPOSED);
     expect(names).toContain("scan_receipt_folder");
     expect(names).toContain("process_receipt_batch");
     expect(names).toContain("classify_unmatched_transactions");

@@ -1,6 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { basename, dirname, join } from "node:path";
+import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
+import { FILE_REFERENCE_OPERATIONS, FileReferenceStoreError } from "../file-reference-store.js";
+import { sandboxExternalText } from "../external-text-renderer.js";
 import { registerTool } from "../mcp-compat.js";
 import { canonicalBusinessText, parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { toolError } from "../tool-error.js";
@@ -71,6 +75,7 @@ import { DEFAULT_LIABILITY_ACCOUNT, EMTA_PREPAYMENT_ACCOUNT } from "../accountin
 import {
   RECEIPT_BATCH_EXECUTION_MODES,
   type ReceiptApprovedManifestEntry,
+  type ReceiptBatchSnapshot,
   type ReceiptBatchExecutionMode,
   type ReceiptBatchFileResult,
   type ReceiptFileInfo,
@@ -79,7 +84,12 @@ import {
   type ReceiptInboxToolResult,
   type ReceiptProcessingContext,
 } from "./receipt-inbox-types.js";
-import { prepareReceiptBatchSnapshot, scanReceiptFolderInternal } from "./receipt-inbox-files.js";
+import {
+  prepareReceiptBatchSnapshot,
+  scanReceiptFolderInternal,
+  validateReceiptFolderPath,
+  type ReceiptDirectoryAccessOptions,
+} from "./receipt-inbox-files.js";
 import { findDuplicateInvoice } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import {
@@ -98,10 +108,21 @@ const POSSIBLE_MATCH_THRESHOLD = 70;
 // H15: the exact SHA-256 manifest a dry-run returned. Binding create/confirm to
 // it lets prepareReceiptBatchSnapshot reject a folder that changed since the
 // operator approved the preview, before any API mutation.
-const manifestSchema = z.array(z.object({
+const directManifestEntrySchema = z.object({
   relative_path: z.string().min(1).refine(value => !value.includes("/") && !value.includes("\\")),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
-}));
+});
+const referencedManifestEntrySchema = z.object({
+  file_ref: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  display_name: z.string().optional(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
+const manifestSchema = z.array(z.union([
+  directManifestEntrySchema,
+  referencedManifestEntrySchema,
+]));
+
+type ReceiptManifestInputEntry = z.infer<typeof manifestSchema>[number];
 
 export { buildDryRunCreatedInvoicePreview };
 
@@ -1542,8 +1563,11 @@ function extractClassificationGroups(payload: unknown): ClassifiedTransactionGro
 export function registerReceiptInboxTools(
   server: McpServer,
   api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
+  receiptDirectoryAccess: Omit<ReceiptDirectoryAccessOptions, "expectedCanonicalPath"> = {},
 ): void {
+  assertRuntimeSafetyContext(runtimeSafetyContext);
   const handlers = new Map<string, ReceiptInboxToolHandler>();
 
   // Constituents fully covered by merged entry points: receipt_batch
@@ -1558,6 +1582,140 @@ export function registerReceiptInboxTools(
     "classify_unmatched_transactions",
     "apply_transaction_classifications",
   ]);
+
+  async function resolveReceiptFolder(folderPath?: string, fileRef?: string): Promise<{
+    path: string;
+    expectedCanonicalPath?: string;
+    revalidateAtPointOfUse(): Promise<string>;
+  }> {
+    const hasPath = folderPath !== undefined;
+    const hasReference = fileRef !== undefined;
+    if (hasPath === hasReference) throw new FileReferenceStoreError("file_reference_data_invalid");
+    if (hasPath && (typeof folderPath !== "string" || folderPath.length === 0)) {
+      throw new FileReferenceStoreError("file_reference_data_invalid");
+    }
+    if (hasReference && (typeof fileRef !== "string" || fileRef.length === 0)) {
+      throw new FileReferenceStoreError("file_reference_data_invalid");
+    }
+    const selected = hasReference
+      ? runtimeSafetyContext.fileReferenceStore.resolve(fileRef!, {
+          kind: "directory",
+          operation: FILE_REFERENCE_OPERATIONS.receipt,
+        })
+      : folderPath!;
+    const validated = await validateReceiptFolderPath(selected);
+    if (hasReference && validated !== selected) {
+      throw new FileReferenceStoreError("file_reference_path_changed");
+    }
+    return {
+      path: validated,
+      ...(hasReference ? { expectedCanonicalPath: selected } : {}),
+      async revalidateAtPointOfUse() {
+        const current = hasReference
+          ? runtimeSafetyContext.fileReferenceStore.resolve(fileRef!, {
+              kind: "directory",
+              operation: FILE_REFERENCE_OPERATIONS.receipt,
+            })
+          : folderPath!;
+        const currentValidated = await validateReceiptFolderPath(current);
+        if (hasReference && (current !== selected || currentValidated !== selected)) {
+          throw new FileReferenceStoreError("file_reference_path_changed");
+        }
+        return currentValidated;
+      },
+    };
+  }
+
+  function directoryAccessOptions(expectedCanonicalPath?: string): ReceiptDirectoryAccessOptions {
+    return {
+      ...receiptDirectoryAccess,
+      ...(expectedCanonicalPath !== undefined ? { expectedCanonicalPath } : {}),
+    };
+  }
+
+  function publicReceiptScan(scan: Awaited<ReturnType<typeof scanReceiptFolderInternal>>, fileRef: string) {
+    return {
+      folder_path: sandboxExternalText(scan.folder_path),
+      file_ref: fileRef,
+      total_candidates: scan.total_candidates,
+      files: scan.files.map(({ name, path, ...metadata }) => ({
+        ...metadata,
+        display_name: sandboxExternalText(name),
+        display_path: sandboxExternalText(path),
+        file_ref: runtimeSafetyContext.fileReferenceStore.issue({
+          canonicalPath: path,
+          kind: "file",
+          operation: FILE_REFERENCE_OPERATIONS.receipt,
+        }),
+      })),
+      skipped: scan.skipped.map(({ name, reason }) => ({
+        display_name: sandboxExternalText(name),
+        display_reason: sandboxExternalText(reason),
+      })),
+    };
+  }
+
+  function publicReceiptResult(result: ReceiptBatchFileResult): Record<string, unknown> & { status: ReceiptBatchFileResult["status"] } {
+    const sanitized = sanitizeReceiptResultForOutput(result);
+    const { name, path, ...metadata } = sanitized.file;
+    return {
+      ...sanitized,
+      file: {
+        ...metadata,
+        display_name: sandboxExternalText(name),
+        display_path: sandboxExternalText(path),
+        file_ref: runtimeSafetyContext.fileReferenceStore.issue({
+          canonicalPath: path,
+          kind: "file",
+          operation: FILE_REFERENCE_OPERATIONS.receipt,
+        }),
+      },
+    };
+  }
+
+  function publicReceiptManifest(snapshot: ReceiptBatchSnapshot) {
+    return snapshot.files.map(({ file, sha256 }) => ({
+      file_ref: runtimeSafetyContext.fileReferenceStore.issue({
+        canonicalPath: file.path,
+        kind: "file",
+        operation: FILE_REFERENCE_OPERATIONS.receipt,
+      }),
+      display_name: sandboxExternalText(file.name),
+      sha256,
+    }));
+  }
+
+  function normalizeApprovedReceiptManifest(
+    entries: readonly ReceiptManifestInputEntry[],
+    folderPath: string,
+    usesFolderReference: boolean,
+  ): ReceiptApprovedManifestEntry[] {
+    if (!usesFolderReference) {
+      if (entries.some(entry => !("relative_path" in entry))) {
+        throw new FileReferenceStoreError("file_reference_data_invalid");
+      }
+      return entries.map(entry => ({
+        relative_path: (entry as z.infer<typeof directManifestEntrySchema>).relative_path,
+        sha256: entry.sha256,
+      }));
+    }
+
+    if (entries.some(entry => !("file_ref" in entry))) {
+      throw new FileReferenceStoreError("file_reference_data_invalid");
+    }
+    return entries.map(entry => {
+      const referenced = entry as z.infer<typeof referencedManifestEntrySchema>;
+      const filePath = runtimeSafetyContext.fileReferenceStore.resolve(referenced.file_ref, {
+        kind: "file",
+        operation: FILE_REFERENCE_OPERATIONS.receipt,
+      });
+      const relativePath = basename(filePath);
+      if (dirname(filePath) !== folderPath || join(folderPath, relativePath) !== filePath) {
+        throw new FileReferenceStoreError("file_reference_data_invalid");
+      }
+      return { relative_path: relativePath, sha256: referenced.sha256 };
+    });
+  }
 
   function registerCapturedTool<Args extends z.ZodRawShape>(
     name: string,
@@ -1577,18 +1735,29 @@ export function registerReceiptInboxTools(
     "scan_receipt_folder",
     "Scan a folder for supported receipt files (PDF, JPG, PNG) without recursing into subfolders. Returns valid file metadata and skipped entries.",
     {
-      folder_path: z.string().describe("Folder path to scan"),
+      folder_path: z.string().optional().describe("Folder path to scan. Provide exactly one of folder_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Accounting Inbox receipt-folder reference."),
       file_types: z.array(z.enum(["pdf", "jpg", "png"])).optional().describe("Optional file type filter"),
       date_from: z.string().optional().describe("Optional file modified-date lower bound (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("Optional file modified-date upper bound (YYYY-MM-DD)"),
     },
     { ...readOnly, openWorldHint: true, title: "Scan Receipt Folder" },
-    async ({ folder_path, file_types, date_from, date_to }) => {
-      const result = await scanReceiptFolderInternal(folder_path, file_types, date_from, date_to);
+    async ({ folder_path, file_ref, file_types, date_from, date_to }) => {
+      const receiptFolder = await resolveReceiptFolder(folder_path, file_ref);
+      const resolvedFolderPath = await receiptFolder.revalidateAtPointOfUse();
+      const result = await scanReceiptFolderInternal(
+        resolvedFolderPath,
+        file_types,
+        date_from,
+        date_to,
+        directoryAccessOptions(receiptFolder.expectedCanonicalPath),
+      );
       return {
         content: [{
           type: "text",
-          text: toMcpJson(result),
+          text: toMcpJson(file_ref !== undefined
+            ? publicReceiptScan(result, file_ref)
+            : result),
         }],
       };
     },
@@ -1598,7 +1767,8 @@ export function registerReceiptInboxTools(
     "process_receipt_batch",
     "Process receipt PDFs/images from a folder. DRY RUN by default. Returns OCR/extraction review data. Use execution_mode='create' to create/upload PROJECT invoices, or create_and_confirm only after explicit approval.",
     {
-      folder_path: z.string().describe("Folder path with receipts"),
+      folder_path: z.string().optional().describe("Folder path with receipts. Provide exactly one of folder_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Accounting Inbox receipt-folder reference."),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID used when matching bank transactions"),
       execution_mode: z.enum(RECEIPT_BATCH_EXECUTION_MODES).optional().describe("Execution phase: dry_run (default), create (create/upload PROJECT invoices only), or create_and_confirm (create, upload, confirm, and exact-match bank transactions after explicit approval)"),
       execute: z.boolean().optional().describe("Deprecated boolean alias for execution_mode."),
@@ -1609,7 +1779,9 @@ export function registerReceiptInboxTools(
       approved_manifest: manifestSchema.optional().describe("Exact manifest returned by dry_run; required for create/create_and_confirm."),
     },
     { ...batch, openWorldHint: true, title: "Process Receipt Batch" },
-    async ({ folder_path, accounts_dimensions_id, execution_mode, execute, date_from, date_to, transaction_date_from, transaction_date_to, approved_manifest }) => {
+    async ({ folder_path, file_ref, accounts_dimensions_id, execution_mode, execute, date_from, date_to, transaction_date_from, transaction_date_to, approved_manifest }) => {
+      const receiptFolder = await resolveReceiptFolder(folder_path, file_ref);
+      const resolvedFolderPath = receiptFolder.path;
       const { mode: executionMode, legacyExecuteCreate } = resolveReceiptBatchExecutionMode(
         execute,
         execution_mode as ReceiptBatchExecutionMode | undefined,
@@ -1637,12 +1809,21 @@ export function registerReceiptInboxTools(
       }
       // Snapshot every receipt's bytes ONCE and (for create/confirm) verify the
       // folder still matches the approved manifest before any API mutation.
+      const pointOfUseFolderPath = await receiptFolder.revalidateAtPointOfUse();
+      const normalizedApprovedManifest = dryRun || approved_manifest === undefined
+        ? undefined
+        : normalizeApprovedReceiptManifest(
+            approved_manifest as ReceiptManifestInputEntry[],
+            pointOfUseFolderPath,
+            file_ref !== undefined,
+          );
       const snapshot = await prepareReceiptBatchSnapshot(
-        folder_path,
+        pointOfUseFolderPath,
         undefined,
         date_from,
         date_to,
-        dryRun ? undefined : (approved_manifest as ReceiptApprovedManifestEntry[]),
+        normalizedApprovedManifest,
+        directoryAccessOptions(receiptFolder.expectedCanonicalPath),
       );
       try {
       const scan = snapshot.scan;
@@ -1692,16 +1873,21 @@ export function registerReceiptInboxTools(
         results,
       });
       const mode = dryRun ? "DRY_RUN" : "EXECUTED";
-      const sanitizedResults = results.map(sanitizeReceiptResultForOutput);
+      const sanitizedResults = file_ref !== undefined
+        ? results.map(result => publicReceiptResult(result))
+        : results.map(sanitizeReceiptResultForOutput);
+      const responseManifest = file_ref !== undefined
+        ? publicReceiptManifest(snapshot)
+        : snapshot.manifest;
       const workflowArgs = {
-        folder_path,
+        ...(file_ref !== undefined ? { file_ref } : { folder_path: resolvedFolderPath }),
         accounts_dimensions_id,
         ...(date_from ? { date_from } : {}),
         ...(date_to ? { date_to } : {}),
         ...(transaction_date_from ? { transaction_date_from } : {}),
         ...(transaction_date_to ? { transaction_date_to } : {}),
         execution_mode: "create",
-        approved_manifest: snapshot.manifest,
+        approved_manifest: responseManifest,
       };
       const workflowSummary = buildReceiptBatchWorkflowSummary(summary);
       const workflow = buildReceiptBatchWorkflow({
@@ -1717,7 +1903,8 @@ export function registerReceiptInboxTools(
           text: toMcpJson({
             mode,
             execution_mode: executionMode,
-            folder_path: scan.folder_path,
+            folder_path: file_ref !== undefined ? sandboxExternalText(scan.folder_path) : scan.folder_path,
+            ...(file_ref !== undefined ? { file_ref } : {}),
             accounts_dimensions_id,
             summary,
             workflow,
@@ -1725,8 +1912,10 @@ export function registerReceiptInboxTools(
             // against the approved manifest, so there is no execution-time
             // re-scan drift. Echo the manifest the operator approved / must
             // approve so the create call can bind to these exact bytes.
-            approved_manifest: snapshot.manifest,
-            skipped: scan.skipped,
+            approved_manifest: responseManifest,
+            skipped: file_ref !== undefined
+              ? publicReceiptScan(scan, file_ref).skipped
+              : scan.skipped,
             results: sanitizedResults,
             execution: buildReceiptBatchExecution({
               mode,
@@ -1747,7 +1936,8 @@ export function registerReceiptInboxTools(
     "Merged receipt batch. scan inspects files; dry_run previews; create/create_and_confirm require explicit approval.",
     {
       mode: z.enum(["scan", "dry_run", "create", "create_and_confirm"]).optional().describe("Workflow phase to run. Defaults to scan."),
-      folder_path: z.string().describe("Folder path with receipts"),
+      folder_path: z.string().optional().describe("Folder path with receipts. Provide exactly one of folder_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Accounting Inbox receipt-folder reference."),
       accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID used when matching bank transactions. Required except in scan mode."),
       date_from: z.string().optional().describe("Optional receipt file modified-date lower bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
       date_to: z.string().optional().describe("Optional receipt file modified-date upper bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions."),
@@ -1757,21 +1947,32 @@ export function registerReceiptInboxTools(
       approved_manifest: manifestSchema.optional().describe("Exact manifest returned by dry_run; required for create/create_and_confirm."),
     },
     { ...batch, openWorldHint: true, title: "Receipt Batch" },
-    async ({ mode, folder_path, accounts_dimensions_id, date_from, date_to, transaction_date_from, transaction_date_to, file_types, approved_manifest }) => {
+    async ({ mode, folder_path, file_ref, accounts_dimensions_id, date_from, date_to, transaction_date_from, transaction_date_to, file_types, approved_manifest }) => {
       const selectedMode = mode ?? "scan";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
       let result: unknown;
 
       if (selectedMode === "scan") {
+        const receiptFolder = await resolveReceiptFolder(folder_path, file_ref);
+        const resolvedFolderPath = await receiptFolder.revalidateAtPointOfUse();
         delegatedTool = "scan_receipt_folder";
         delegatedArgs = {
-          folder_path,
+          ...(file_ref !== undefined ? { file_ref } : { folder_path: resolvedFolderPath }),
           ...(file_types !== undefined ? { file_types } : {}),
           ...(date_from !== undefined ? { date_from } : {}),
           ...(date_to !== undefined ? { date_to } : {}),
         };
-        result = await scanReceiptFolderInternal(folder_path, file_types, date_from, date_to);
+        const scan = await scanReceiptFolderInternal(
+          resolvedFolderPath,
+          file_types,
+          date_from,
+          date_to,
+          directoryAccessOptions(receiptFolder.expectedCanonicalPath),
+        );
+        result = file_ref !== undefined
+          ? publicReceiptScan(scan, file_ref)
+          : scan;
       } else {
         if (accounts_dimensions_id === undefined) {
           throw new Error("accounts_dimensions_id is required when mode is dry_run, create, or create_and_confirm");
@@ -1783,7 +1984,7 @@ export function registerReceiptInboxTools(
         }
         delegatedTool = "process_receipt_batch";
         delegatedArgs = {
-          folder_path,
+          ...(file_ref !== undefined ? { file_ref } : { folder_path }),
           accounts_dimensions_id,
           execution_mode: selectedMode,
           ...(date_from !== undefined ? { date_from } : {}),
@@ -1795,6 +1996,17 @@ export function registerReceiptInboxTools(
         result = await invokeCapturedTool(delegatedTool, delegatedArgs);
       }
 
+      const publicDelegatedArgs = file_ref !== undefined && approved_manifest !== undefined
+        ? {
+            ...delegatedArgs,
+            approved_manifest: Array.isArray((result as Record<string, unknown>)?.approved_manifest)
+              ? (result as Record<string, unknown>).approved_manifest
+              : approved_manifest.map(entry => "file_ref" in entry
+                  ? { file_ref: entry.file_ref, sha256: entry.sha256 }
+                  : entry),
+          }
+        : delegatedArgs;
+
       return {
         content: [{
           type: "text",
@@ -1802,7 +2014,7 @@ export function registerReceiptInboxTools(
             recommended_entry_point: "receipt_batch",
             mode: selectedMode,
             delegated_tool: delegatedTool,
-            delegated_args: delegatedArgs,
+            delegated_args: publicDelegatedArgs,
             result: remapHiddenGranularWorkflowResult(result),
           }),
         }],

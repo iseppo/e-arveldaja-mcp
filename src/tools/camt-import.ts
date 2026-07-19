@@ -1,4 +1,3 @@
-import { readFile } from "fs/promises";
 import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { XMLParser } from "fast-xml-parser";
@@ -10,7 +9,9 @@ import { toolError } from "../tool-error.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Client, Transaction } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
-import { resolveFileInput } from "../file-validation.js";
+import { captureFileInputSnapshot, type FileInputSource } from "../file-input-snapshot.js";
+import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
+import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
@@ -1266,13 +1267,17 @@ export function parseCamt053Xml(xml: string): CamtParseResult {
   return value;
 }
 
-async function loadCamt053Preflight(filePath: string): Promise<CamtPreflightResult> {
-  const { path, cleanup } = await resolveFileInput(filePath, [".xml"], CAMT_MAX_FILE_SIZE);
-  try {
-    return preflightCamt053Xml(await readFile(path, "utf-8"));
-  } finally {
-    if (cleanup) await cleanup();
-  }
+async function loadCamt053Preflight(
+  source: FileInputSource,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Promise<CamtPreflightResult> {
+  const snapshot = await captureFileInputSnapshot(source, {
+    runtimeSafetyContext,
+    operation: FILE_REFERENCE_OPERATIONS.camt,
+    allowedExtensions: [".xml"],
+    maxSize: CAMT_MAX_FILE_SIZE,
+  });
+  return preflightCamt053Xml(snapshot.text());
 }
 
 async function enrichWithDuplicates(
@@ -1482,8 +1487,10 @@ type CamtToolHandler = (args: Record<string, unknown>) => Promise<CamtToolRespon
 export function registerCamtImportTools(
   server: McpServer,
   api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): void {
+  assertRuntimeSafetyContext(runtimeSafetyContext);
   const handlers = new Map<string, CamtToolHandler>();
 
   // Both constituents are fully covered by the merged process_camt053 modes
@@ -1529,13 +1536,17 @@ export function registerCamtImportTools(
     "parse_camt053",
     "Parse a CAMT.053 bank statement XML file and preview statement metadata, entries, and summary without querying existing transactions.",
     {
-      file_path: z.string().describe("Absolute path to the CAMT.053 XML file."),
+      file_path: z.string().optional().describe("Absolute path/base64 input. Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Accounting Inbox CAMT file reference. Provide exactly one of file_path or file_ref."),
     },
     { ...readOnly, openWorldHint: true, title: "Parse CAMT.053" },
-    async ({ file_path }) => {
+    async ({ file_path, file_ref }) => {
       // Resolve, read, preflight — and nothing else. No ledger or configuration
       // read happens until the file is known to be well-formed.
-      const preflight = await loadCamt053Preflight(file_path);
+      const preflight = await loadCamt053Preflight({
+        ...(file_path !== undefined ? { file_path } : {}),
+        ...(file_ref !== undefined ? { file_ref } : {}),
+      }, runtimeSafetyContext);
       if (!preflight.ok) return importPreflightFailure(preflight.source, preflight.rejected_fields);
       const parsed = preflight.value;
       return {
@@ -1570,21 +1581,25 @@ export function registerCamtImportTools(
     "import_camt053",
     "Import CAMT.053 bank-statement XML. DRY RUN by default; execute=true creates non-duplicate transactions.",
     {
-      file_path: z.string().describe("Absolute path to the CAMT.053 XML file."),
+      file_path: z.string().optional().describe("Absolute path/base64 input. Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Accounting Inbox CAMT file reference. Provide exactly one of file_path or file_ref."),
       accounts_dimensions_id: coerceId.describe("Bank account dimension ID in e-arveldaja."),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
     },
     { ...batch, openWorldHint: true, title: "Import CAMT.053" },
-    async ({ file_path, accounts_dimensions_id, execute, date_from, date_to }) => {
+    async ({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to }) => {
       if (date_from && date_to && date_from > date_to) {
         throw new Error(`date_from ${date_from} must be on or before date_to ${date_to}`);
       }
 
       // Preflight first: a malformed file is rejected before dimension
       // existence (M05), H08 statement binding, or H09 duplicate enrichment.
-      const preflight = await loadCamt053Preflight(file_path);
+      const preflight = await loadCamt053Preflight({
+        ...(file_path !== undefined ? { file_path } : {}),
+        ...(file_ref !== undefined ? { file_ref } : {}),
+      }, runtimeSafetyContext);
       if (!preflight.ok) return importPreflightFailure(preflight.source, preflight.rejected_fields);
       const loaded = preflight.value;
 
@@ -1845,7 +1860,10 @@ export function registerCamtImportTools(
         })),
       }));
       const workflowArgs = {
-        file_path,
+        ...(file_ref !== undefined ? { file_ref } : {}),
+        ...(file_ref === undefined && file_path !== undefined && !file_path.toLowerCase().startsWith("base64:")
+          ? { file_path }
+          : {}),
         accounts_dimensions_id,
         ...(date_from ? { date_from } : {}),
         ...(date_to ? { date_to } : {}),
@@ -1917,27 +1935,29 @@ export function registerCamtImportTools(
     "Merged CAMT.053 entry point. Use mode='parse' to inspect a bank statement, mode='dry_run' to preview transaction import, or mode='execute' to create transactions after approval.",
     {
       mode: z.enum(["parse", "dry_run", "execute"]).optional().describe("Workflow phase to run. Defaults to parse."),
-      file_path: z.string().describe("Absolute path to the CAMT.053 XML file."),
+      file_path: z.string().optional().describe("Absolute path/base64 input. Provide exactly one of file_path or file_ref."),
+      file_ref: z.string().optional().describe("Opaque Accounting Inbox CAMT file reference. Provide exactly one of file_path or file_ref."),
       accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID in e-arveldaja. Required for dry_run and execute modes."),
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
     },
     { ...batch, openWorldHint: true, title: "Process CAMT.053" },
-    async ({ mode, file_path, accounts_dimensions_id, date_from, date_to }) => {
+    async ({ mode, file_path, file_ref, accounts_dimensions_id, date_from, date_to }) => {
       const selectedMode = mode ?? "parse";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
 
       if (selectedMode === "parse") {
         delegatedTool = "parse_camt053";
-        delegatedArgs = { file_path };
+        delegatedArgs = { ...(file_path !== undefined ? { file_path } : {}), ...(file_ref !== undefined ? { file_ref } : {}) };
       } else {
         if (accounts_dimensions_id === undefined) {
           throw new Error("accounts_dimensions_id is required when mode is dry_run or execute");
         }
         delegatedTool = "import_camt053";
         delegatedArgs = {
-          file_path,
+          ...(file_path !== undefined ? { file_path } : {}),
+          ...(file_ref !== undefined ? { file_ref } : {}),
           accounts_dimensions_id,
           execute: selectedMode === "execute",
           ...(date_from !== undefined ? { date_from } : {}),

@@ -8,6 +8,7 @@ import type {
 } from "./receipt-inbox-types.js";
 
 type ResultWithStatus = Pick<ReceiptBatchFileResult, "status">;
+type WorkflowReceiptResult = Pick<ReceiptBatchFileResult, "status" | "llm_fallback"> & object;
 
 function countStatus(results: ResultWithStatus[], status: ReceiptBatchStatus): number {
   return results.filter(result => result.status === status).length;
@@ -45,7 +46,7 @@ export function buildReceiptBatchWorkflowSummary(summary: ReceiptBatchSummary): 
 export function buildReceiptBatchWorkflow(options: {
   summary: ReceiptBatchSummary;
   workflowSummary: string;
-  sanitizedResults: ReceiptBatchFileResult[];
+  sanitizedResults: WorkflowReceiptResult[];
   workflowArgs: Record<string, unknown>;
 }) {
   return buildWorkflowEnvelope({
@@ -77,7 +78,7 @@ export function buildReceiptBatchWorkflow(options: {
 export function buildReceiptBatchExecution(options: {
   mode: "DRY_RUN" | "EXECUTED";
   summary: ReceiptBatchSummary;
-  sanitizedResults: ReceiptBatchFileResult[];
+  sanitizedResults: WorkflowReceiptResult[];
 }) {
   return buildBatchExecutionContract({
     mode: options.mode,
