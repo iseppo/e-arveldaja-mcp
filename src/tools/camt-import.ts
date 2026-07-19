@@ -9,12 +9,24 @@ import { toolError } from "../tool-error.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Client, Transaction } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
-import { captureFileInputSnapshot, type FileInputSource } from "../file-input-snapshot.js";
+import { captureFileInputSnapshot, FileInputSnapshotError, type FileInputSnapshot, type FileInputSource } from "../file-input-snapshot.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
+import { PlanStoreError, type PlanData, type PlanRecord } from "../plan-store.js";
+import type { PlanExecutionReport } from "../plan-execution.js";
+import {
+  buildCamtExecutionPlanInput,
+  camtPlanCommandId,
+  canonicalPlanJson,
+  CAMT_CREATE_CATEGORY,
+  CAMT_PLAN_DOMAIN,
+  executeCamtCommands,
+  stripUndefinedDeep,
+  type CamtPlanReviewCommand,
+} from "./camt-plan.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
@@ -1496,6 +1508,387 @@ function legacyTransactionTypeForDirection(direction: ParsedCamtEntry["direction
   return direction === "CRDT" ? "D" : "C";
 }
 
+// --- Plan-bound import: projection, planner input, executor, rendering -------
+//
+// The dry run and the execute path share one deterministic projection of the
+// reviewed CAMT source. The dry run issues an immutable execution plan; the
+// execute path re-reads the source, re-derives the same projection, and refuses
+// to mutate unless it matches the plan the operator approved.
+
+interface CamtCreateDescriptor {
+  entry: ParsedCamtEntry;
+  payload: CreateTransactionPayload;
+  storedDescription?: string;
+  clientResolution: ClientResolution;
+  possibleDuplicateMatches: ReturnType<typeof findPossibleDuplicateMatches>;
+  batchDuplicateKey: string;
+}
+
+interface CamtSkippedRow {
+  date: string;
+  amount: number;
+  bank_reference?: string;
+  duplicate_transaction_ids: number[];
+  reason: string;
+}
+
+interface CamtImportProjection {
+  parsed: CamtParseResult;
+  statementMetadata: CamtStatementMetadata;
+  descriptors: CamtCreateDescriptor[];
+  skipped: CamtSkippedRow[];
+  repeatedBankReferences: Set<string>;
+  totalStatementEntries: number;
+  eligibleEntries: number;
+  filteredOut: number;
+}
+
+async function loadCamt053SnapshotAndPreflight(
+  source: FileInputSource,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Promise<{ snapshot: FileInputSnapshot; preflight: CamtPreflightResult }> {
+  const snapshot = await captureFileInputSnapshot(source, {
+    runtimeSafetyContext,
+    operation: FILE_REFERENCE_OPERATIONS.camt,
+    allowedExtensions: [".xml"],
+    maxSize: CAMT_MAX_FILE_SIZE,
+  });
+  return { snapshot, preflight: preflightCamt053Xml(snapshot.text()) };
+}
+
+async function computeCamtImportProjection(
+  api: ApiContext,
+  loaded: CamtParseResult,
+  accountsDimensionsId: number,
+  dateFrom: string | undefined,
+  dateTo: string | undefined,
+): Promise<CamtImportProjection> {
+  const parsed = await enrichWithDuplicates(loaded, api, accountsDimensionsId);
+  const existingTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
+  const filteredEntries = parsed.entries.filter(entry => {
+    if (dateFrom && entry.date < dateFrom) return false;
+    if (dateTo && entry.date > dateTo) return false;
+    return true;
+  });
+  const repeatedBankReferences = findRepeatedBankReferences(parsed.entries);
+  const seenBatchDuplicateKeys = new Set(
+    filteredEntries.filter(entry => entry.duplicate).map(entry => buildBatchDuplicateKey(entry)),
+  );
+  const clientCache: ClientResolutionCache = { byCode: new Map(), byName: new Map() };
+  const possibleDuplicateLookup = buildPossibleDuplicateLookup(existingTransactions, accountsDimensionsId);
+  const descriptors: CamtCreateDescriptor[] = [];
+  const skipped: CamtSkippedRow[] = [];
+
+  for (let index = 0; index < filteredEntries.length; index++) {
+    const entry = filteredEntries[index]!;
+    await reportProgress(index, filteredEntries.length);
+    const batchDuplicateKey = buildBatchDuplicateKey(entry);
+
+    if (entry.duplicate) {
+      skipped.push({
+        date: entry.date,
+        amount: entry.amount,
+        bank_reference: entry.bank_reference,
+        duplicate_transaction_ids: entry.duplicate_transaction_ids,
+        reason: "Existing transaction matched by bank reference",
+      });
+      continue;
+    }
+    if (seenBatchDuplicateKeys.has(batchDuplicateKey)) {
+      skipped.push({
+        date: entry.date,
+        amount: entry.amount,
+        bank_reference: entry.bank_reference,
+        duplicate_transaction_ids: [],
+        reason: "Duplicate CAMT entry inside current import batch",
+      });
+      continue;
+    }
+
+    const clientResolution = await resolveClientForEntry(api, entry, clientCache);
+    const storedDescription = buildCamtDescriptionWithMetadata(entry.description, entry);
+    const possibleDuplicateMatches = findPossibleDuplicateMatches(entry, possibleDuplicateLookup);
+    const payload: CreateTransactionPayload = {
+      accounts_dimensions_id: accountsDimensionsId,
+      type: "C",
+      amount: entry.amount,
+      cl_currencies_id: entry.currency || "EUR",
+      date: entry.date,
+      description: storedDescription,
+      bank_account_name: entry.counterparty_name,
+      bank_account_no: entry.counterparty_iban,
+      clients_id: clientResolution.clients_id,
+      ref_number: entry.reference_number,
+      bank_ref_number: entry.bank_reference,
+    };
+    descriptors.push({ entry, payload, storedDescription, clientResolution, possibleDuplicateMatches, batchDuplicateKey });
+    seenBatchDuplicateKeys.add(batchDuplicateKey);
+  }
+
+  return {
+    parsed,
+    statementMetadata: parsed.statement_metadata,
+    descriptors,
+    skipped,
+    repeatedBankReferences,
+    totalStatementEntries: parsed.entries.length,
+    eligibleEntries: filteredEntries.length,
+    filteredOut: parsed.entries.length - filteredEntries.length,
+  };
+}
+
+function camtNormalizedArgs(
+  accountsDimensionsId: number,
+  dateFrom: string | undefined,
+  dateTo: string | undefined,
+): PlanRecord {
+  return stripUndefinedDeep({
+    accounts_dimensions_id: accountsDimensionsId,
+    date_from: dateFrom,
+    date_to: dateTo,
+  }) as PlanRecord;
+}
+
+function camtPlanFingerprint(projection: CamtImportProjection, normalizedArgs: PlanRecord): string {
+  return canonicalPlanJson({
+    normalized_args: normalizedArgs,
+    statement_iban: projection.statementMetadata.iban,
+    commands: projection.descriptors.map((descriptor, index) => ({
+      id: camtPlanCommandId(index),
+      payload: descriptor.payload,
+    })),
+    skipped: projection.skipped.map(row => ({
+      bank_reference: row.bank_reference,
+      date: row.date,
+      amount: row.amount,
+      reason: row.reason,
+      duplicate_transaction_ids: row.duplicate_transaction_ids,
+    })),
+    possible_duplicates: projection.descriptors.map((descriptor, index) => ({
+      id: camtPlanCommandId(index),
+      existing_transaction_ids: descriptor.possibleDuplicateMatches.map(match => match.id),
+    })),
+  });
+}
+
+function camtReviewCommands(projection: CamtImportProjection): CamtPlanReviewCommand[] {
+  return projection.descriptors.map((descriptor, index) => ({
+    id: camtPlanCommandId(index),
+    category: CAMT_CREATE_CATEGORY,
+    reviewProjection: stripUndefinedDeep({
+      date: descriptor.entry.date,
+      amount: descriptor.entry.amount,
+      currency: descriptor.entry.currency,
+      direction: descriptor.entry.direction,
+      counterparty_name: descriptor.entry.counterparty_name,
+      bank_reference: descriptor.entry.bank_reference,
+      ref_number: descriptor.entry.reference_number,
+    }),
+  }));
+}
+
+function issueCamtPlan(
+  runtimeSafetyContext: RuntimeSafetyContext,
+  snapshot: FileInputSnapshot,
+  projection: CamtImportProjection,
+  normalizedArgs: PlanRecord,
+): string {
+  const possibleDuplicateCount = projection.descriptors.filter(d => d.possibleDuplicateMatches.length > 0).length;
+  const planInput = buildCamtExecutionPlanInput({
+    normalizedArgs,
+    sourceIdentity: stripUndefinedDeep({ ...snapshot.identity }) as PlanRecord,
+    statementIban: projection.statementMetadata.iban,
+    reviewCommands: camtReviewCommands(projection),
+    fingerprint: camtPlanFingerprint(projection, normalizedArgs),
+    counts: {
+      total_statement_entries: projection.totalStatementEntries,
+      eligible_entries: projection.eligibleEntries,
+      filtered_out: projection.filteredOut,
+      would_create: projection.descriptors.length,
+      skipped: projection.skipped.length,
+      possible_duplicates: possibleDuplicateCount,
+    },
+    totals: {
+      credit_total: projection.parsed.summary.credit_total,
+      debit_total: projection.parsed.summary.debit_total,
+    },
+    exclusions: projection.skipped.map(row => stripUndefinedDeep({
+      date: row.date,
+      amount: row.amount,
+      bank_reference: row.bank_reference,
+      reason: row.reason,
+      duplicate_transaction_ids: row.duplicate_transaction_ids,
+    })),
+    reviews: projection.descriptors
+      .filter(d => d.possibleDuplicateMatches.length > 0)
+      .map(d => stripUndefinedDeep({
+        date: d.entry.date,
+        amount: d.entry.amount,
+        existing_transaction_ids: d.possibleDuplicateMatches.map(match => match.id),
+      })),
+  });
+  return runtimeSafetyContext.planStore.issue(CAMT_PLAN_DOMAIN, planInput);
+}
+
+function planErrorResult(category: string, message: string): CamtToolResponse {
+  return toolError({ error: message, category, mutation_occurred: false }) as CamtToolResponse;
+}
+
+function camtResultRow(
+  descriptor: CamtCreateDescriptor,
+  status: "would_create" | "created",
+  apiId?: number,
+) {
+  return {
+    status,
+    date: descriptor.entry.date,
+    amount: descriptor.entry.amount,
+    currency: descriptor.entry.currency,
+    type: "C" as const,
+    source_direction: descriptor.entry.direction,
+    description: descriptor.entry.description,
+    counterparty: descriptor.entry.counterparty_name,
+    bank_reference: descriptor.entry.bank_reference,
+    ref_number: descriptor.entry.reference_number,
+    clients_id: descriptor.clientResolution.clients_id,
+    client_match: descriptor.clientResolution.match_type,
+    ...(apiId !== undefined ? { api_id: apiId } : {}),
+    ...(descriptor.storedDescription !== descriptor.entry.description
+      ? { stored_description: descriptor.storedDescription }
+      : {}),
+  };
+}
+
+function camtPossibleDuplicateRow(descriptor: CamtCreateDescriptor, newApiId?: number) {
+  const recommendedDefaultAction = determinePossibleDuplicateAction(descriptor.possibleDuplicateMatches);
+  return {
+    date: descriptor.entry.date,
+    amount: descriptor.entry.amount,
+    currency: descriptor.entry.currency,
+    type: "C" as const,
+    source_direction: descriptor.entry.direction,
+    counterparty: descriptor.entry.counterparty_name,
+    bank_reference: descriptor.entry.bank_reference,
+    ref_number: descriptor.entry.reference_number,
+    ...(newApiId !== undefined ? { new_transaction_api_id: newApiId } : {}),
+    existing_transactions: descriptor.possibleDuplicateMatches,
+    recommended_default_action: recommendedDefaultAction,
+    recommendation_note: buildPossibleDuplicateRecommendationNote(recommendedDefaultAction),
+  };
+}
+
+interface CamtImportRenderInput {
+  mode: "DRY_RUN" | "EXECUTED";
+  projection: CamtImportProjection;
+  results: ReturnType<typeof camtResultRow>[];
+  possibleDuplicates: ReturnType<typeof camtPossibleDuplicateRow>[];
+  createdCount: number;
+  errorCount: number;
+  workflowArgs: Record<string, unknown>;
+  executionReport?: PlanExecutionReport;
+  planHandle?: string;
+}
+
+function renderCamtImportPayload(input: CamtImportRenderInput): Record<string, unknown> {
+  const { projection, mode } = input;
+  const dryRun = mode === "DRY_RUN";
+  const summary = {
+    total_statement_entries: projection.totalStatementEntries,
+    eligible_entries: projection.eligibleEntries,
+    filtered_out: projection.filteredOut,
+    created_count: input.createdCount,
+    skipped_count: projection.skipped.length,
+    error_count: input.errorCount,
+    possible_duplicate_count: input.possibleDuplicates.length,
+  };
+
+  const sanitizedStatementMetadata = {
+    ...projection.statementMetadata,
+    statement_id: wrapUntrustedOcr(projection.statementMetadata.statement_id),
+    bank_name: wrapUntrustedOcr(projection.statementMetadata.bank_name),
+  };
+  const sanitizedResults = input.results.map(row => ({
+    ...row,
+    description: wrapUntrustedOcr(row.description),
+    stored_description: wrapUntrustedOcr(row.stored_description),
+    counterparty: wrapUntrustedOcr(row.counterparty),
+  }));
+  const sanitizedPossibleDuplicates = input.possibleDuplicates.map(duplicate => ({
+    ...duplicate,
+    counterparty: wrapUntrustedOcr(duplicate.counterparty),
+    existing_transactions: duplicate.existing_transactions.map(match => ({
+      ...match,
+      counterparty: wrapUntrustedOcr(match.counterparty ?? undefined),
+      description: wrapUntrustedOcr(match.description ?? undefined),
+      suggested_patch_missing_fields: {
+        ...match.suggested_patch_missing_fields,
+        ...(match.suggested_patch_missing_fields?.bank_account_name
+          ? { bank_account_name: wrapUntrustedOcr(match.suggested_patch_missing_fields.bank_account_name) }
+          : {}),
+        ...(match.suggested_patch_missing_fields?.description
+          ? { description: wrapUntrustedOcr(match.suggested_patch_missing_fields.description) }
+          : {}),
+      },
+    })),
+  }));
+
+  const workflowSummary = dryRun
+    ? `CAMT dry run would create ${summary.created_count} bank transaction(s), skip ${summary.skipped_count}, flag ${summary.possible_duplicate_count} possible duplicate(s), and report ${summary.error_count} error(s).`
+    : `CAMT import created ${summary.created_count} bank transaction(s), skipped ${summary.skipped_count}, flagged ${summary.possible_duplicate_count} possible duplicate(s), and reported ${summary.error_count} error(s).`;
+  const workflow = buildWorkflowEnvelope({
+    summary: workflowSummary,
+    needs_review: sanitizedPossibleDuplicates,
+    dry_run_steps: dryRun
+      ? [{
+          tool: "import_camt053",
+          summary: workflowSummary,
+          suggested_args: input.workflowArgs,
+          preview: summary,
+        }]
+      : [],
+  });
+
+  return {
+    mode,
+    summary,
+    workflow,
+    statement_metadata: sanitizedStatementMetadata,
+    total_statement_entries: summary.total_statement_entries,
+    eligible_entries: summary.eligible_entries,
+    filtered_out: summary.filtered_out,
+    created_count: summary.created_count,
+    skipped_count: summary.skipped_count,
+    error_count: summary.error_count,
+    sample: sanitizedResults.slice(0, 10),
+    execution: buildBatchExecutionContract({
+      mode,
+      summary,
+      results: sanitizedResults,
+      skipped: projection.skipped,
+      errors: [],
+      needs_review: sanitizedPossibleDuplicates,
+      ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
+    }),
+    ...(projection.skipped.length > 0 && {
+      skipped_summary: {
+        count: projection.skipped.length,
+        sample_refs: projection.skipped.slice(0, 10).map(row => row.bank_reference),
+      },
+    }),
+    ...(input.possibleDuplicates.length > 0 && {
+      possible_duplicate_summary: {
+        count: input.possibleDuplicates.length,
+        sample_existing_transaction_ids: input.possibleDuplicates
+          .slice(0, 10)
+          .flatMap(item => item.existing_transactions.map(match => match.id))
+          .slice(0, 10),
+        default_policy: "link_confirmed_transaction_else_review_status",
+      },
+    }),
+    ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
+  };
+}
+
 const isoDateString = (description: string) =>
   z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe(description);
 
@@ -1610,350 +2003,171 @@ export function registerCamtImportTools(
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
+      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for execute=true."),
     },
     { ...batch, openWorldHint: true, title: "Import CAMT.053" },
-    async ({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to }) => {
+    async ({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle }) => {
       if (date_from && date_to && date_from > date_to) {
         throw new Error(`date_from ${date_from} must be on or before date_to ${date_to}`);
       }
-
-      // Preflight first: a malformed file is rejected before dimension
-      // existence (M05), H08 statement binding, or H09 duplicate enrichment.
-      const preflight = await loadCamt053Preflight({
+      const source: FileInputSource = {
         ...(file_path !== undefined ? { file_path } : {}),
         ...(file_ref !== undefined ? { file_ref } : {}),
-      }, runtimeSafetyContext);
+      };
+      const normalizedArgs = camtNormalizedArgs(accounts_dimensions_id, date_from, date_to);
+
+      if (execute !== true) {
+        // DRY RUN: preflight, preserve the existing stop gates, project the
+        // import, and issue an immutable execution plan the operator reviews.
+        const { snapshot, preflight } = await loadCamt053SnapshotAndPreflight(source, runtimeSafetyContext);
+        if (!preflight.ok) return importPreflightFailure(preflight.source, preflight.rejected_fields);
+        const loaded = preflight.value;
+
+        await ensureAccountDimensionExists(api, accounts_dimensions_id);
+        await assertStatementAccountMatchesDimension(api, loaded.statement_metadata.iban, accounts_dimensions_id);
+
+        const projection = await computeCamtImportProjection(api, loaded, accounts_dimensions_id, date_from, date_to);
+        const planHandle = issueCamtPlan(runtimeSafetyContext, snapshot, projection, normalizedArgs);
+        const results = projection.descriptors.map(descriptor => camtResultRow(descriptor, "would_create"));
+        const possibleDuplicates = projection.descriptors
+          .filter(descriptor => descriptor.possibleDuplicateMatches.length > 0)
+          .map(descriptor => camtPossibleDuplicateRow(descriptor));
+        const workflowArgs = {
+          ...(file_ref !== undefined ? { file_ref } : {}),
+          ...(file_ref === undefined && file_path !== undefined && !file_path.toLowerCase().startsWith("base64:")
+            ? { file_path }
+            : {}),
+          accounts_dimensions_id,
+          ...(date_from ? { date_from } : {}),
+          ...(date_to ? { date_to } : {}),
+          execute: false,
+          plan_handle: planHandle,
+        };
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson(renderCamtImportPayload({
+              mode: "DRY_RUN",
+              projection,
+              results,
+              possibleDuplicates,
+              createdCount: projection.descriptors.length,
+              errorCount: 0,
+              workflowArgs,
+              planHandle,
+            })),
+          }],
+        };
+      }
+
+      // EXECUTE: consume the reviewed plan, re-read the source immutably, and
+      // re-validate every input before mutating through the shared tracker. A
+      // plan handle is NOT human approval; the stop gates below stay in force.
+      if (typeof plan_handle !== "string" || plan_handle.length === 0) {
+        return planErrorResult(
+          "plan_handle_required",
+          "A reviewed execution-plan handle from the CAMT dry run is required to import transactions.",
+        );
+      }
+      let storedPlan;
+      try {
+        storedPlan = runtimeSafetyContext.planStore.consume(plan_handle, CAMT_PLAN_DOMAIN);
+      } catch (error) {
+        if (error instanceof PlanStoreError) return planErrorResult(error.code, error.message);
+        throw error;
+      }
+
+      // One immutable read of the reviewed source, reused for the digest check
+      // and the re-parse.
+      let snapshot: FileInputSnapshot;
+      let preflight: CamtPreflightResult;
+      try {
+        ({ snapshot, preflight } = await loadCamt053SnapshotAndPreflight(source, runtimeSafetyContext));
+      } catch (error) {
+        if (error instanceof FileInputSnapshotError) {
+          return planErrorResult("plan_drift", "The CAMT source could not be re-read to match the reviewed plan.");
+        }
+        throw error;
+      }
       if (!preflight.ok) return importPreflightFailure(preflight.source, preflight.rejected_fields);
       const loaded = preflight.value;
+
+      const storedIdentity = storedPlan.sourceIdentities[0];
+      if (!storedIdentity || storedIdentity.digest_sha256 !== snapshot.identity.digest_sha256) {
+        return planErrorResult("plan_drift", "The CAMT source bytes changed since the plan was reviewed.");
+      }
+      if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
+        return planErrorResult("plan_drift", "The import arguments changed since the plan was reviewed.");
+      }
 
       await ensureAccountDimensionExists(api, accounts_dimensions_id);
       await assertStatementAccountMatchesDimension(api, loaded.statement_metadata.iban, accounts_dimensions_id);
 
-      const parsed = await enrichWithDuplicates(loaded, api, accounts_dimensions_id);
-      const existingTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
-      const filteredEntries = parsed.entries.filter(entry => {
-        if (date_from && entry.date < date_from) return false;
-        if (date_to && entry.date > date_to) return false;
-        return true;
-      });
-
-      const dryRun = execute !== true;
-      const seenBatchDuplicateKeys = new Set(
-        filteredEntries
-          .filter(entry => entry.duplicate)
-          .map(entry => buildBatchDuplicateKey(entry))
-      );
-      const clientCache: ClientResolutionCache = {
-        byCode: new Map<string, ClientResolution>(),
-        byName: new Map<string, ClientResolution>(),
-      };
-      const possibleDuplicateLookup = buildPossibleDuplicateLookup(existingTransactions, accounts_dimensions_id);
-
-      const results: Array<{
-        status: "would_create" | "created";
-        date: string;
-        amount: number;
-        currency: string;
-        type: "C" | "D";
-        source_direction: ParsedCamtEntry["direction"];
-        description?: string;
-        counterparty?: string;
-        bank_reference?: string;
-        ref_number?: string;
-        clients_id?: number;
-        client_match?: string;
-        api_id?: number;
-        stored_description?: string;
-      }> = [];
-      const skippedDuplicates: Array<{
-        date: string;
-        amount: number;
-        bank_reference?: string;
-        duplicate_transaction_ids: number[];
-        reason: string;
-      }> = [];
-      const errors: Array<{
-        date: string;
-        amount: number;
-        bank_reference?: string;
-        message: string;
-      }> = [];
-      const possibleDuplicates: Array<{
-        date: string;
-        amount: number;
-        currency: string;
-        type: "C" | "D";
-        source_direction: ParsedCamtEntry["direction"];
-        counterparty?: string;
-        bank_reference?: string;
-        ref_number?: string;
-        new_transaction_api_id?: number;
-        existing_transactions: Array<{
-          id: number;
-          status?: string;
-          counterparty?: string | null;
-          description?: string | null;
-          ref_number?: string | null;
-          match_reasons: string[];
-          suggested_patch_missing_fields: Partial<Transaction>;
-        }>;
-        recommended_default_action: PossibleDuplicateAction;
-        recommendation_note: string;
-      }> = [];
-
-      for (let index = 0; index < filteredEntries.length; index++) {
-        const entry = filteredEntries[index]!;
-        const batchDuplicateKey = buildBatchDuplicateKey(entry);
-        await reportProgress(index, filteredEntries.length);
-
-        if (entry.duplicate) {
-          skippedDuplicates.push({
-            date: entry.date,
-            amount: entry.amount,
-            bank_reference: entry.bank_reference,
-            duplicate_transaction_ids: entry.duplicate_transaction_ids,
-            reason: "Existing transaction matched by bank reference",
-          });
-          continue;
-        }
-
-        if (seenBatchDuplicateKeys.has(batchDuplicateKey)) {
-          skippedDuplicates.push({
-            date: entry.date,
-            amount: entry.amount,
-            bank_reference: entry.bank_reference,
-            duplicate_transaction_ids: [],
-            reason: "Duplicate CAMT entry inside current import batch",
-          });
-          continue;
-        }
-
-        const clientResolution = await resolveClientForEntry(api, entry, clientCache);
-        const transactionType = "C" as const;
-        const possibleDuplicateMatches = findPossibleDuplicateMatches(entry, possibleDuplicateLookup);
-        const storedDescription = buildCamtDescriptionWithMetadata(entry.description, entry);
-        const payload: CreateTransactionPayload = {
-          accounts_dimensions_id,
-          type: transactionType,
-          amount: entry.amount,
-          cl_currencies_id: entry.currency || "EUR",
-          date: entry.date,
-          description: storedDescription,
-          bank_account_name: entry.counterparty_name,
-          bank_account_no: entry.counterparty_iban,
-          clients_id: clientResolution.clients_id,
-          ref_number: entry.reference_number,
-          bank_ref_number: entry.bank_reference,
-        };
-
-        if (dryRun) {
-          results.push({
-            status: "would_create",
-            date: entry.date,
-            amount: entry.amount,
-            currency: entry.currency,
-            type: transactionType,
-            source_direction: entry.direction,
-            description: entry.description,
-            counterparty: entry.counterparty_name,
-            bank_reference: entry.bank_reference,
-            ref_number: entry.reference_number,
-            clients_id: clientResolution.clients_id,
-            client_match: clientResolution.match_type,
-            ...(storedDescription !== entry.description ? { stored_description: storedDescription } : {}),
-          });
-          if (possibleDuplicateMatches.length > 0) {
-            const recommendedDefaultAction = determinePossibleDuplicateAction(possibleDuplicateMatches);
-            possibleDuplicates.push({
-              date: entry.date,
-              amount: entry.amount,
-              currency: entry.currency,
-              type: transactionType,
-              source_direction: entry.direction,
-              counterparty: entry.counterparty_name,
-              bank_reference: entry.bank_reference,
-              ref_number: entry.reference_number,
-              existing_transactions: possibleDuplicateMatches,
-              recommended_default_action: recommendedDefaultAction,
-              recommendation_note: buildPossibleDuplicateRecommendationNote(recommendedDefaultAction),
-            });
-          }
-          seenBatchDuplicateKeys.add(batchDuplicateKey);
-          continue;
-        }
-
-        try {
-          const response = await createBankTransaction(api, payload);
-          logAudit({
-            tool: "import_camt053", action: "IMPORTED", entity_type: "transaction",
-            entity_id: response.created_object_id,
-            summary: `Imported CAMT transaction ${entry.amount} ${entry.currency} on ${entry.date}`,
-            details: { date: entry.date, amount: entry.amount, type: "C", source_direction: entry.direction, description: entry.description, counterparty: entry.counterparty_name, bank_reference: entry.bank_reference },
-          });
-          results.push({
-            status: "created",
-            date: entry.date,
-            amount: entry.amount,
-            currency: entry.currency,
-            type: transactionType,
-            source_direction: entry.direction,
-            description: entry.description,
-            counterparty: entry.counterparty_name,
-            bank_reference: entry.bank_reference,
-            ref_number: entry.reference_number,
-            clients_id: clientResolution.clients_id,
-            client_match: clientResolution.match_type,
-            api_id: response.created_object_id,
-            ...(storedDescription !== entry.description ? { stored_description: storedDescription } : {}),
-          });
-          if (possibleDuplicateMatches.length > 0) {
-            const recommendedDefaultAction = determinePossibleDuplicateAction(possibleDuplicateMatches);
-            possibleDuplicates.push({
-              date: entry.date,
-              amount: entry.amount,
-              currency: entry.currency,
-              type: transactionType,
-              source_direction: entry.direction,
-              counterparty: entry.counterparty_name,
-              bank_reference: entry.bank_reference,
-              ref_number: entry.reference_number,
-              new_transaction_api_id: response.created_object_id,
-              existing_transactions: possibleDuplicateMatches,
-              recommended_default_action: recommendedDefaultAction,
-              recommendation_note: buildPossibleDuplicateRecommendationNote(recommendedDefaultAction),
-            });
-          }
-          seenBatchDuplicateKeys.add(batchDuplicateKey);
-        } catch (error) {
-          errors.push({
-            date: entry.date,
-            amount: entry.amount,
-            bank_reference: entry.bank_reference,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
+      const projection = await computeCamtImportProjection(api, loaded, accounts_dimensions_id, date_from, date_to);
+      const storedFingerprint = isRecord(storedPlan.privatePayload)
+        ? storedPlan.privatePayload.fingerprint
+        : undefined;
+      if (typeof storedFingerprint !== "string" ||
+        storedFingerprint !== camtPlanFingerprint(projection, normalizedArgs)) {
+        return planErrorResult("plan_drift", "The reviewed CAMT plan no longer matches the current ledger and source.");
       }
 
-      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
-      const summary = {
-        total_statement_entries: parsed.entries.length,
-        eligible_entries: filteredEntries.length,
-        filtered_out: parsed.entries.length - filteredEntries.length,
-        created_count: results.length,
-        skipped_count: skippedDuplicates.length,
-        error_count: errors.length,
-        possible_duplicate_count: possibleDuplicates.length,
-      };
-
-      // CAMT free-form fields are attacker-controllable at MCP output; wrap
-      // them with per-call nonce delimiters. Audit log and in-memory state
-      // keep the plain strings — only the LLM-facing payload is sandboxed.
-      const sanitizedStatementMetadata = {
-        ...parsed.statement_metadata,
-        statement_id: wrapUntrustedOcr(parsed.statement_metadata.statement_id),
-        bank_name: wrapUntrustedOcr(parsed.statement_metadata.bank_name),
-      };
-      const sanitizedErrors = errors.map(e => ({
-        ...e,
-        // `message` can carry the upstream API's error text, which itself
-        // can echo CAMT-origin bytes we just sent as transaction fields.
-        message: wrapUntrustedOcr(e.message) ?? e.message,
-      }));
-      const sanitizedResults = results.map(r => ({
-        ...r,
-        description: wrapUntrustedOcr(r.description),
-        stored_description: wrapUntrustedOcr(r.stored_description),
-        counterparty: wrapUntrustedOcr(r.counterparty),
-      }));
-      const sanitizedPossibleDuplicates = possibleDuplicates.map(d => ({
-        ...d,
-        counterparty: wrapUntrustedOcr(d.counterparty),
-        existing_transactions: d.existing_transactions.map(m => ({
-          ...m,
-          counterparty: wrapUntrustedOcr(m.counterparty ?? undefined),
-          description: wrapUntrustedOcr(m.description ?? undefined),
-          // suggested_patch_missing_fields carries CAMT-origin bytes
-          // (entry.counterparty_name, entry.description) forwarded as
-          // proposed patches — wrap those too, otherwise the LLM sees
-          // the nested copy unsandboxed even though the top-level fields
-          // are wrapped.
-          suggested_patch_missing_fields: {
-            ...m.suggested_patch_missing_fields,
-            ...(m.suggested_patch_missing_fields?.bank_account_name
-              ? { bank_account_name: wrapUntrustedOcr(m.suggested_patch_missing_fields.bank_account_name) }
-              : {}),
-            ...(m.suggested_patch_missing_fields?.description
-              ? { description: wrapUntrustedOcr(m.suggested_patch_missing_fields.description) }
-              : {}),
-          },
-        })),
-      }));
-      const workflowArgs = {
-        ...(file_ref !== undefined ? { file_ref } : {}),
-        ...(file_ref === undefined && file_path !== undefined && !file_path.toLowerCase().startsWith("base64:")
-          ? { file_path }
-          : {}),
-        accounts_dimensions_id,
-        ...(date_from ? { date_from } : {}),
-        ...(date_to ? { date_to } : {}),
-        execute: false,
-      };
-      const workflowSummary = dryRun
-        ? `CAMT dry run would create ${summary.created_count} bank transaction(s), skip ${summary.skipped_count}, flag ${summary.possible_duplicate_count} possible duplicate(s), and report ${summary.error_count} error(s).`
-        : `CAMT import created ${summary.created_count} bank transaction(s), skipped ${summary.skipped_count}, flagged ${summary.possible_duplicate_count} possible duplicate(s), and reported ${summary.error_count} error(s).`;
-      const workflow = buildWorkflowEnvelope({
-        summary: workflowSummary,
-        needs_review: sanitizedPossibleDuplicates,
-        dry_run_steps: dryRun
-          ? [{
-              tool: "import_camt053",
-              summary: workflowSummary,
-              suggested_args: workflowArgs,
-              preview: summary,
-            }]
-          : [],
+      const createdApiIdByIndex = new Map<number, number>();
+      const completedIndices = new Set<number>();
+      const executionReport = await executeCamtCommands({
+        count: projection.descriptors.length,
+        prepareIndex: async index => {
+          // Recheck this command's duplicate precondition against a fresh ledger
+          // read immediately before its own mutate.
+          const descriptor = projection.descriptors[index]!;
+          const freshLedger = (await api.transactions.listAll()).filter(isNonVoidTransaction);
+          const lookup = buildDuplicateLookup(freshLedger, accounts_dimensions_id);
+          const duplicateIds = findDuplicateTransactionIds(
+            descriptor.entry, lookup, projection.repeatedBankReferences, accounts_dimensions_id,
+          );
+          return duplicateIds.length > 0
+            ? { outcome: "drift", error_code: "duplicate_appeared" }
+            : { outcome: "ready" };
+        },
+        mutateIndex: async index => {
+          const descriptor = projection.descriptors[index]!;
+          const response = await createBankTransaction(api, descriptor.payload);
+          const createdId = response.created_object_id;
+          logAudit({
+            tool: "import_camt053", action: "IMPORTED", entity_type: "transaction",
+            entity_id: createdId,
+            summary: `Imported CAMT transaction ${descriptor.entry.amount} ${descriptor.entry.currency} on ${descriptor.entry.date}`,
+            details: { date: descriptor.entry.date, amount: descriptor.entry.amount, type: "C", source_direction: descriptor.entry.direction, description: descriptor.entry.description, counterparty: descriptor.entry.counterparty_name, bank_reference: descriptor.entry.bank_reference },
+          });
+          completedIndices.add(index);
+          if (typeof createdId === "number" && Number.isSafeInteger(createdId) && createdId > 0) {
+            createdApiIdByIndex.set(index, createdId);
+            return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: createdId, outcome: "created" }] };
+          }
+          return { outcome: "completed" };
+        },
       });
+
+      const createdIndices = [...completedIndices].sort((left, right) => left - right);
+      const results = createdIndices.map(index =>
+        camtResultRow(projection.descriptors[index]!, "created", createdApiIdByIndex.get(index)));
+      const possibleDuplicates = createdIndices
+        .filter(index => projection.descriptors[index]!.possibleDuplicateMatches.length > 0)
+        .map(index => camtPossibleDuplicateRow(projection.descriptors[index]!, createdApiIdByIndex.get(index)));
+
       return {
         content: [{
           type: "text",
-          text: toMcpJson({
-            mode,
-            summary,
-            workflow,
-            statement_metadata: sanitizedStatementMetadata,
-            total_statement_entries: summary.total_statement_entries,
-            eligible_entries: summary.eligible_entries,
-            filtered_out: summary.filtered_out,
-            created_count: summary.created_count,
-            skipped_count: summary.skipped_count,
-            error_count: summary.error_count,
-            sample: sanitizedResults.slice(0, 10),
-            execution: buildBatchExecutionContract({
-              mode,
-              summary,
-              results: sanitizedResults,
-              skipped: skippedDuplicates,
-              errors: sanitizedErrors,
-              needs_review: sanitizedPossibleDuplicates,
-            }),
-            ...(errors.length > 0 && { errors: sanitizedErrors }),
-            ...(skippedDuplicates.length > 0 && {
-              skipped_summary: {
-                count: skippedDuplicates.length,
-                sample_refs: skippedDuplicates.slice(0, 10).map(s => s.bank_reference),
-              },
-            }),
-            ...(possibleDuplicates.length > 0 && {
-              possible_duplicate_summary: {
-                count: possibleDuplicates.length,
-                sample_existing_transaction_ids: possibleDuplicates
-                  .slice(0, 10)
-                  .flatMap(item => item.existing_transactions.map(match => match.id))
-                  .slice(0, 10),
-                default_policy: "link_confirmed_transaction_else_review_status",
-              },
-            }),
-          }),
+          text: toMcpJson(renderCamtImportPayload({
+            mode: "EXECUTED",
+            projection,
+            results,
+            possibleDuplicates,
+            createdCount: completedIndices.size,
+            errorCount: projection.descriptors.length - completedIndices.size,
+            workflowArgs: {},
+            executionReport,
+          })),
         }],
       };
     }
@@ -1969,9 +2183,10 @@ export function registerCamtImportTools(
       accounts_dimensions_id: coerceId.optional().describe("Bank account dimension ID in e-arveldaja. Required for dry_run and execute modes."),
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
+      plan_handle: z.string().optional().describe("Execution-plan handle returned by the reviewed dry run. Required for mode='execute'."),
     },
     { ...batch, openWorldHint: true, title: "Process CAMT.053" },
-    async ({ mode, file_path, file_ref, accounts_dimensions_id, date_from, date_to }) => {
+    async ({ mode, file_path, file_ref, accounts_dimensions_id, date_from, date_to, plan_handle }) => {
       const selectedMode = mode ?? "parse";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
@@ -1991,6 +2206,7 @@ export function registerCamtImportTools(
           execute: selectedMode === "execute",
           ...(date_from !== undefined ? { date_from } : {}),
           ...(date_to !== undefined ? { date_to } : {}),
+          ...(selectedMode === "execute" && plan_handle !== undefined ? { plan_handle } : {}),
         };
       }
 

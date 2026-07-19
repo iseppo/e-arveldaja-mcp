@@ -174,6 +174,27 @@ function setupCamtTool(options: {
   };
 }
 
+// The execute path now consumes a plan handle issued by the reviewed dry run.
+// These helpers run the dry run for that handle, then execute with it, so a
+// behaviour test can assert on the same mutation it always did.
+async function issueCamtPlanHandle(
+  handler: ReturnType<typeof setupCamtTool>["handler"],
+  baseArgs: Record<string, unknown>,
+): Promise<string> {
+  const dry = parseMcpResponse((await handler({ ...baseArgs, execute: false })).content[0]!.text);
+  const handle = typeof dry.plan_handle === "string" ? dry.plan_handle : dry.result?.plan_handle;
+  if (typeof handle !== "string") throw new Error("dry run did not return a plan_handle");
+  return handle;
+}
+
+async function executeGranularWithPlan(
+  handler: ReturnType<typeof setupCamtTool>["handler"],
+  baseArgs: Record<string, unknown>,
+) {
+  const plan_handle = await issueCamtPlanHandle(handler, baseArgs);
+  return handler({ ...baseArgs, execute: true, plan_handle });
+}
+
 function expectNoH08ImportSideEffects(api: ReturnType<typeof setupCamtTool>["api"]): void {
   expect(api.transactions.listAll).not.toHaveBeenCalled();
   expect(api.clients.findByCode).not.toHaveBeenCalled();
@@ -392,10 +413,9 @@ describe("camt import tool", () => {
         ],
       });
 
-      await expect(handler({
+      await expect(executeGranularWithPlan(handler, {
         file_path: "/tmp/camt.xml",
         accounts_dimensions_id: 7,
-        execute: true,
       })).rejects.toThrow(/statement account EE111111111111111111.*selected bank dimension 7.*EE222222222222222222.*bank dimension.*8/i);
       expectNoH08ImportSideEffects(api);
     });
@@ -497,7 +517,7 @@ describe("camt import tool", () => {
       mockedReadFile.mockResolvedValue(singleEntryXml.replace("<CdtDbtInd>DBIT</CdtDbtInd>", "<CdtDbtInd>CRDT</CdtDbtInd>"));
       const { api, handler } = setupCamtTool();
 
-      const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true });
+      const result = await executeGranularWithPlan(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
       const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -521,10 +541,9 @@ describe("camt import tool", () => {
         }],
       });
 
-      const result = await handler({
+      const result = await executeGranularWithPlan(handler, {
         file_path: "/tmp/camt.xml",
         accounts_dimensions_id: 7,
-        execute: true,
       });
       const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -572,10 +591,9 @@ describe("camt import tool", () => {
         }],
       });
 
-      const result = await handler({
+      const result = await executeGranularWithPlan(handler, {
         file_path: "/tmp/camt.xml",
         accounts_dimensions_id: 7,
-        execute: true,
       });
       const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -620,10 +638,9 @@ describe("camt import tool", () => {
           }],
         });
 
-        const result = await handler({
+        const result = await executeGranularWithPlan(handler, {
           file_path: "/tmp/camt.xml",
           accounts_dimensions_id: 7,
-          execute: true,
         });
         const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -666,10 +683,9 @@ describe("camt import tool", () => {
         }],
       });
 
-      const result = await handler({
+      const result = await executeGranularWithPlan(handler, {
         file_path: "/tmp/camt.xml",
         accounts_dimensions_id: 7,
-        execute: true,
       });
       const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -746,10 +762,9 @@ describe("camt import tool", () => {
           }],
         });
 
-        const result = await handler({
+        const result = await executeGranularWithPlan(handler, {
           file_path: "/tmp/camt.xml",
           accounts_dimensions_id: 7,
-          execute: true,
         });
         const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -809,10 +824,9 @@ describe("camt import tool", () => {
           }],
         });
 
-        const result = await handler({
+        const result = await executeGranularWithPlan(handler, {
           file_path: "/tmp/camt.xml",
           accounts_dimensions_id: 7,
-          execute: true,
         });
         const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1155,10 +1169,18 @@ describe("camt import tool", () => {
 
       const { api, handler } = setupCamtTool({ toolName: "process_camt053" });
 
+      const dry = parseMcpResponse((await handler({
+        mode: "dry_run",
+        file_path: "/tmp/camt.xml",
+        accounts_dimensions_id: 7,
+      })).content[0]!.text);
+      const plan_handle = dry.result.plan_handle;
+
       const result = await handler({
         mode: "execute",
         file_path: "/tmp/camt.xml",
         accounts_dimensions_id: 7,
+        plan_handle,
       });
       const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1170,6 +1192,7 @@ describe("camt import tool", () => {
           file_path: "/tmp/camt.xml",
           accounts_dimensions_id: 7,
           execute: true,
+          plan_handle,
         },
       });
       expect(api.transactions.create).toHaveBeenCalledTimes(1);
@@ -1195,10 +1218,9 @@ describe("camt import tool", () => {
       ],
     });
 
-    const result = await handler({
+    const result = await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1471,10 +1493,9 @@ describe("camt import tool", () => {
 
     const { api, handler } = setupCamtTool();
 
-    await handler({
+    await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
 
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -1520,10 +1541,9 @@ describe("camt import tool", () => {
 
     const { api, handler } = setupCamtTool();
 
-    await handler({
+    await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
@@ -1567,10 +1587,9 @@ describe("camt import tool", () => {
 
     const { api, handler } = setupCamtTool();
 
-    await handler({
+    await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
@@ -1587,10 +1606,9 @@ describe("camt import tool", () => {
 
     const { api, handler } = setupCamtTool();
 
-    await handler({
+    await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
@@ -1624,10 +1642,9 @@ describe("camt import tool", () => {
       ],
     });
 
-    const result = await handler({
+    const result = await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1667,10 +1684,9 @@ describe("camt import tool", () => {
       ],
     });
 
-    const result = await handler({
+    const result = await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1714,10 +1730,9 @@ describe("camt import tool", () => {
       ],
     });
 
-    const result = await handler({
+    const result = await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1735,10 +1750,9 @@ describe("camt import tool", () => {
 
     const { api, handler } = setupCamtTool();
 
-    await handler({
+    await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
@@ -1968,10 +1982,9 @@ describe("camt import tool", () => {
       ],
     });
 
-    const result = await handler({
+    const result = await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
-      execute: true,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -2446,21 +2459,31 @@ ${fillers}
         const payload = parseMcpResponse(result.content[0]!.text) as any;
 
         expect(result.isError, `execute=${execute}`).toBe(true);
-        expect(payload).toMatchObject({
-          error: "Import preflight failed",
-          category: "import_preflight_failed",
-          source: "camt",
-          mutation_occurred: false,
-          // Two issues, far below the 100 cap: nothing is withheld. Only the
-          // >100 case asserts the true direction, so without this the flag
-          // could be hard-coded true and every test would still pass.
-          rejected_fields_truncated: false,
-          rejected_field_count: 2,
-        });
-        expect(payload.rejected_fields).toEqual([
-          expect.objectContaining({ source_row_id: "camt:ntry:1", field: "amount" }),
-          expect.objectContaining({ source_row_id: "camt:ntry:1:tx:1", field: "original_amount" }),
-        ]);
+        if (execute) {
+          // Execute requires a reviewed plan handle; a malformed source can
+          // never yield one, so it is refused before any file/dimension/ledger
+          // read — an even stronger guarantee than the dry-run preflight gate.
+          expect(payload).toMatchObject({
+            category: "plan_handle_required",
+            mutation_occurred: false,
+          });
+        } else {
+          expect(payload).toMatchObject({
+            error: "Import preflight failed",
+            category: "import_preflight_failed",
+            source: "camt",
+            mutation_occurred: false,
+            // Two issues, far below the 100 cap: nothing is withheld. Only the
+            // >100 case asserts the true direction, so without this the flag
+            // could be hard-coded true and every test would still pass.
+            rejected_fields_truncated: false,
+            rejected_field_count: 2,
+          });
+          expect(payload.rejected_fields).toEqual([
+            expect.objectContaining({ source_row_id: "camt:ntry:1", field: "amount" }),
+            expect.objectContaining({ source_row_id: "camt:ntry:1:tx:1", field: "original_amount" }),
+          ]);
+        }
 
         // Preflight runs first: nothing downstream is touched.
         expect(api.readonly.getAccountDimensions).not.toHaveBeenCalled();
@@ -2487,16 +2510,347 @@ ${fillers}
 
         // A rejected import must not read as a completed one.
         expect(result.isError, `mode=${mode}`).toBe(true);
-        expect(payload.result).toMatchObject({
-          error: "Import preflight failed",
-          category: "import_preflight_failed",
-          source: "camt",
-          mutation_occurred: false,
-        });
+        if (mode === "execute") {
+          // Execute is refused for want of a reviewed plan handle before the
+          // malformed source is ever re-read.
+          expect(payload.result).toMatchObject({
+            category: "plan_handle_required",
+            mutation_occurred: false,
+          });
+        } else {
+          expect(payload.result).toMatchObject({
+            error: "Import preflight failed",
+            category: "import_preflight_failed",
+            source: "camt",
+            mutation_occurred: false,
+          });
+        }
 
         expect(api.readonly.getAccountDimensions).not.toHaveBeenCalled();
         expectNoH08ImportSideEffects(api);
       }
     });
+  });
+});
+
+// --- Wave 3: bind execution to immutable reviewed plans ---------------------
+//
+// The execute path must consume a server-issued execution plan handle produced
+// by the reviewed dry run, re-read the CAMT source immutably, and re-validate
+// every input against the stored plan before any mutation. A plan handle is not
+// human approval; the existing approval/stop gates stay in force.
+function twoDistinctRefXml(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-two</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">10.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <AcctSvcrRef>REF-A</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-A</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Vendor A OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Payment A</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+      <Ntry>
+        <Amt Ccy="EUR">20.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-02</Dt></BookgDt>
+        <AcctSvcrRef>REF-B</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-B</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">20.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Vendor B OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Payment B</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+}
+
+const HANDLE_RE = /^[A-Za-z0-9_-]{43}$/;
+
+describe("camt plan-bound execution", () => {
+  it("dry run issues a reusable plan handle and never mutates", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool();
+
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+
+    expect(payload.mode).toBe("DRY_RUN");
+    expect(payload.plan_handle).toMatch(HANDLE_RE);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    // The approval card must carry the handle so execute can consume it.
+    expect(payload.workflow.recommended_next_action.args.plan_handle).toBe(payload.plan_handle);
+  });
+
+  it("execute requires a plan handle and refuses to mutate without one", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool();
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_handle_required");
+    expect(payload.mutation_occurred).toBe(false);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("execute consumes the handle and drives creation through the plan tracker", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle,
+    })).content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(payload.mode).toBe("EXECUTED");
+    expect(payload.created_count).toBe(1);
+    expect(payload.execution.execution_report).toMatchObject({
+      contract: "plan_execution_report_v1",
+      status: "completed",
+      mutation_may_have_occurred: true,
+    });
+    expect(payload.execution.execution_report.command_partitions.completed).toHaveLength(1);
+    expect(payload).not.toHaveProperty("plan_handle");
+  });
+
+  it("rejects changed CAMT bytes with plan_drift and zero creates", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    // The reviewed source bytes are swapped for a different statement.
+    mockedReadFile.mockResolvedValue(singleEntryXml.replace("REF-VOID-1", "REF-SWAPPED-9").replace(/Test payment/g, "Swapped payment"));
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(payload.mutation_occurred).toBe(false);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects argument drift between the reviewed plan and execute", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const result = await handler({
+      file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle, date_from: "2026-02-01",
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a duplicate that appeared in the ledger after the reviewed dry run", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    // A matching transaction now exists (imported by another session).
+    api.transactions.listAll.mockResolvedValue([{
+      id: 555, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7,
+      bank_ref_number: "REF-VOID-1", date: "2026-02-01", type: "C", amount: 10, cl_currencies_id: "EUR",
+    }]);
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a second execute that replays the same handle", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_handle_consumed");
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the reviewed CAMT source exactly once on execute", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    mockedReadFile.mockClear();
+    await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+
+    expect(mockedReadFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after the first command when a later command's precondition drifts mid-execution", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(twoDistinctRefXml());
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+
+    // Creating the first command simulates a concurrent insert that makes the
+    // second command's bank reference a duplicate before its own mutate.
+    let ledger: unknown[] = [];
+    api.transactions.listAll.mockImplementation(async () => ledger);
+    api.transactions.create.mockImplementation(async () => {
+      ledger = [{
+        id: 777, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7,
+        bank_ref_number: "REF-B", date: "2026-02-02", type: "C", amount: 20, cl_currencies_id: "EUR",
+      }];
+      return { created_object_id: 9001 };
+    });
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(payload.mode).toBe("EXECUTED");
+    const report = payload.execution.execution_report;
+    expect(report.status).toBe("partial_execution");
+    expect(report.mutation_may_have_occurred).toBe(true);
+    expect(report.command_partitions.completed).toHaveLength(1);
+    expect(report.stop_reason).toMatchObject({ command_id: "camt-create-1", category: "plan_drift" });
+  });
+
+  it("reports an indeterminate stop when a mutation outcome is unknown", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    api.transactions.create.mockRejectedValue(new Error("network timeout of unknown outcome"));
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    const report = payload.execution.execution_report;
+    expect(report.status).toBe("partial_execution");
+    expect(report.mutation_may_have_occurred).toBe(true);
+    expect(report.command_partitions.indeterminate).toHaveLength(1);
+    expect(report.stop_reason.category).toBe("mutation_indeterminate");
+  });
+
+  it("rejects execute when the active runtime scope changed after issue", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({
+      accountDimensions: [fixtureAccountDimension({ id: 7 })],
+      bankAccounts: [fixtureBankAccount({ accounts_dimensions_id: 7 })],
+    });
+    const context = createTestRuntimeSafetyContext();
+    registerCamtImportTools(server, api, context, { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
+    const handler = getRegisteredToolHandler(server, "import_camt053");
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    context.setScope({ connectionName: "switched-company", connectionFingerprint: "other-fingerprint" });
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_scope_mismatch");
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("merged execute requires and forwards the plan handle", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool({ toolName: "process_camt053" });
+
+    const missing = await handler({ mode: "execute", file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    expect(missing.isError).toBe(true);
+    expect(parseMcpResponse(missing.content[0]!.text).result.category).toBe("plan_handle_required");
+    expect(api.transactions.create).not.toHaveBeenCalled();
+
+    const dry = parseMcpResponse((await handler({ mode: "dry_run", file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    const plan_handle = dry.result.plan_handle;
+    expect(plan_handle).toMatch(HANDLE_RE);
+
+    const done = parseMcpResponse((await handler({
+      mode: "execute", file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, plan_handle,
+    })).content[0]!.text);
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(done.result.mode).toBe("EXECUTED");
+    expect(done.result.execution.execution_report.status).toBe("completed");
+  });
+
+  it("consumes an Inbox-issued handle through the public merged executor and rejects cross-domain or cross-context consumers", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const context = createTestRuntimeSafetyContext();
+    const api = createAccountingWorkflowApi({
+      accountDimensions: [fixtureAccountDimension({ id: 7 })],
+      bankAccounts: [fixtureBankAccount({ accounts_dimensions_id: 7 })],
+    });
+    const captureAll = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
+
+    // Inbox-captured side: registers the granular import handler on the shared context.
+    const inboxServer = createMockToolServer();
+    registerCamtImportTools(inboxServer, api, context, captureAll);
+    const inboxImport = getRegisteredToolHandler(inboxServer, "import_camt053");
+
+    // Public side: the merged tool registered on the SAME context.
+    const publicServer = createMockToolServer();
+    registerCamtImportTools(publicServer, api, context, { ...captureAll, exposeGranularTools: false });
+    const publicProcess = getRegisteredToolHandler(publicServer, "process_camt053");
+
+    // A handle issued through the Inbox dry run is consumable by the public executor.
+    const handle1 = await issueCamtPlanHandle(inboxImport, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const done = parseMcpResponse((await publicProcess({
+      mode: "execute", file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, plan_handle: handle1,
+    })).content[0]!.text);
+    expect(done.result.mode).toBe("EXECUTED");
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+
+    // A CAMT handle consumed under a different domain (Wise/reconciliation) is rejected.
+    const handle2 = await issueCamtPlanHandle(inboxImport, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    expect(() => context.planStore.consume(handle2, "wise_import")).toThrowError(
+      expect.objectContaining({ code: "plan_domain_mismatch" }),
+    );
+
+    // A handle whose runtime scope changed is rejected from a second context view.
+    const handle3 = await issueCamtPlanHandle(inboxImport, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    context.setScope({ connectionName: "second-context", connectionFingerprint: "second-fingerprint" });
+    expect(() => context.planStore.consume(handle3, "camt_import")).toThrowError(
+      expect.objectContaining({ code: "plan_scope_mismatch" }),
+    );
   });
 });
