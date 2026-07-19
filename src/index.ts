@@ -41,6 +41,7 @@ import { registerRecurringInvoiceTools } from "./tools/recurring-invoices.js";
 import { registerEstonianTaxTools } from "./tools/estonian-tax.js";
 import { registerAnnualReportTools } from "./tools/annual-report.js";
 import { registerDocumentAuditTools } from "./tools/document-audit.js";
+import { registerOpeningBalanceTools } from "./tools/opening-balance-import.js";
 import { registerReceiptInboxTools } from "./tools/receipt-inbox.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
@@ -900,6 +901,7 @@ async function main() {
   if (toolExposure.enableTaxTools) registerEstonianTaxTools(scopedServer, api);
   if (toolExposure.enableAnnualReport) registerAnnualReportTools(scopedServer, api);
   registerDocumentAuditTools(scopedServer, api);
+  registerOpeningBalanceTools(scopedServer, api);
   registerReceiptInboxTools(scopedServer, api, runtimeSafetyContext, toolExposure);
   if (toolExposure.enableLightyear) registerLightyearTools(scopedServer, api, runtimeSafetyContext);
   registerWiseImportTools(scopedServer, api, runtimeSafetyContext);
