@@ -7,7 +7,8 @@ import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { DEFAULT_DEBT_CHECK_ACCOUNTS } from "../accounting-defaults.js";
-import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
+import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
+import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 
 interface BalanceDetail {
@@ -128,7 +129,10 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     { ...readOnly, title: "Compute Account Balance" },
     async ({ account_id, clients_id, date_from, date_to, include_entries, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
-      const result = await computeAccountBalance(api, account_id, clients_id, date_from, date_to);
+      const opening = await loadOpeningBalanceJournal(api);
+      const journalsFromApi = await api.journals.listAllWithPostings();
+      const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
+      const result = await computeAccountBalance(api, account_id, clients_id, date_from, date_to, allJournals);
 
       const summary = {
         account_id,
@@ -148,7 +152,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(include_entries && {
           entries: result.entries.map(e => ({ ...e, title: wrapUntrustedOcr(e.title) ?? e.title })),
         }),
-        warnings: withOpeningBalanceApiLimitation(),
+        warnings: withOpeningBalanceStatus([], {
+          captured: opening !== null,
+          openingDate: opening?.openingDate,
+          unmappedCodes: opening?.unmappedCodes,
+        }),
       };
 
       return { content: [{ type: "text", text: toMcpJson(summary) }] };
@@ -170,7 +178,9 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         : DEFAULT_DEBT_CHECK_ACCOUNTS;
 
       // Load journals once, share across all account balance computations
-      const allJournals = await api.journals.listAllWithPostings();
+      const opening = await loadOpeningBalanceJournal(api);
+      const journalsFromApi = await api.journals.listAllWithPostings();
+      const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
 
       const results = [];
       for (const accountId of ids) {
@@ -196,8 +206,12 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         .filter(r => r.balance_type === "D") // asset accounts
         .reduce((sum, r) => sum + r.balance, 0);
 
-      const openingBalanceWarnings = withOpeningBalanceApiLimitation();
-      const openingBalanceApiIncomplete = openingBalanceWarnings.length > 0;
+      const openingBalanceCaptured = opening !== null;
+      const openingBalanceWarnings = withOpeningBalanceStatus([], {
+        captured: openingBalanceCaptured,
+        openingDate: opening?.openingDate,
+        unmappedCodes: opening?.unmappedCodes,
+      });
 
       return {
         content: [{
@@ -210,12 +224,12 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
               total_receivable_from_client: roundMoney(totalReceivable),
               net_position: roundMoney(totalReceivable - totalDebt),
             },
-            opening_balance_status: openingBalanceApiIncomplete
-              ? "api_incomplete"
-              : "complete",
-            balance_scope: openingBalanceApiIncomplete
-              ? "journal_api_visible_entries_only"
-              : "complete_balance",
+            opening_balance_status: openingBalanceCaptured
+              ? "complete"
+              : "api_incomplete",
+            balance_scope: openingBalanceCaptured
+              ? "complete_balance"
+              : "journal_api_visible_entries_only",
             warnings: openingBalanceWarnings,
             ...cacheClearMetadata(cacheClear),
           }),

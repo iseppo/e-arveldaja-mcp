@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import type { Account, Journal, Posting, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { computeAllBalances, registerFinancialStatementTools } from "./financial-statements.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { clearRuntimeCaches } from "../cache-control.js";
+import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 import type { ToolExposureConfig } from "../config.js";
 
 vi.mock("../cache-control.js", () => ({
@@ -244,6 +248,130 @@ describe("computeAllBalances", () => {
     expect(balances[0]!.debit_total).toBe(300);
     expect(balances[0]!.credit_total).toBe(50);
     expect(balances[0]!.balance).toBe(250);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Opening balance folding — stored algbilanss prepended as a synthetic journal
+// ---------------------------------------------------------------------------
+
+describe("opening balance folding", () => {
+  const BANK_ACCOUNT_ID = 1020;
+  const CAPITAL_ACCOUNT_ID = 2900;
+
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ob-fin-stmt-"));
+    process.env.EARVELDAJA_RULES_DIR = dir;
+    resetOpeningBalanceCache();
+  });
+
+  afterEach(() => {
+    delete process.env.EARVELDAJA_RULES_DIR;
+    resetOpeningBalanceCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const CHART = [
+    makeAccount(BANK_ACCOUNT_ID, "D", "Varad", "Pank", "Bank"),
+    makeAccount(CAPITAL_ACCOUNT_ID, "C", "Omakapital", "Kapital", "Capital"),
+  ];
+
+  function storeOpeningBalances() {
+    writeOpeningBalances(
+      {
+        openingDate: "2024-12-12",
+        accounts: [
+          { code: String(BANK_ACCOUNT_ID), name: "Pank", debit: 1000, credit: 0 },
+          { code: String(CAPITAL_ACCOUNT_ID), name: "Kapital", debit: 0, credit: 1000 },
+        ],
+        totals: { debit: 1000, credit: 1000 },
+        rawText: "n/a",
+      },
+      "2024-12-12T00:00:00.000Z",
+    );
+  }
+
+  it("folds a stored opening balance into compute_trial_balance", async () => {
+    storeOpeningBalances();
+    const handler = setupTool("compute_trial_balance", {
+      accounts: CHART,
+      journals: [
+        makeJournal("2025-01-10", [
+          makePosting(BANK_ACCOUNT_ID, "D", 500),
+          makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
+        ]),
+      ],
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      accounts: Array<{ account_id: number; debit_total: number }>;
+      totals: { debit: number; credit: number };
+      warnings: string[];
+    };
+    const bankRow = payload.accounts.find(a => a.account_id === BANK_ACCOUNT_ID)!;
+
+    expect(bankRow.debit_total).toBe(1500); // 500 existing + 1000 opening
+    expect(payload.totals.debit).toBe(1500);
+    expect(payload.totals.credit).toBe(1500);
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
+    expect(payload.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+
+  it("leaves compute_trial_balance unchanged without a stored algbilanss", async () => {
+    const handler = setupTool("compute_trial_balance", {
+      accounts: CHART,
+      journals: [
+        makeJournal("2025-01-10", [
+          makePosting(BANK_ACCOUNT_ID, "D", 500),
+          makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
+        ]),
+      ],
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      accounts: Array<{ account_id: number; debit_total: number }>;
+      warnings: string[];
+    };
+    const bankRow = payload.accounts.find(a => a.account_id === BANK_ACCOUNT_ID)!;
+
+    expect(bankRow.debit_total).toBe(500);
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+
+  it("folds a stored opening balance into compute_balance_sheet", async () => {
+    storeOpeningBalances();
+    const handler = setupTool("compute_balance_sheet", {
+      accounts: CHART,
+      journals: [
+        makeJournal("2025-01-10", [
+          makePosting(BANK_ACCOUNT_ID, "D", 500),
+          makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
+        ]),
+      ],
+    });
+
+    const result = await handler({});
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      assets: { total: number };
+      equity: { total: number };
+      warnings: string[];
+    };
+
+    expect(payload.assets.total).toBe(1500); // 500 existing + 1000 opening
+    expect(payload.equity.total).toBe(1500);
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
   });
 });
 

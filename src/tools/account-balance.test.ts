@@ -1,8 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { parseMcpResponse } from "../mcp-json.js";
-import type { Journal } from "../types/api.js";
+import type { Journal, Account } from "../types/api.js";
 import { clearRuntimeCaches } from "../cache-control.js";
-import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
+import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
+import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
+import { makeAccount } from "../__fixtures__/accounting.js";
 
 // ---------------------------------------------------------------------------
 // The module registers MCP tools but also exports computeAccountBalance via
@@ -53,13 +58,18 @@ const clearRuntimeCachesMock = vi.mocked(clearRuntimeCaches);
 // Build a minimal ApiContext factory
 // ---------------------------------------------------------------------------
 
-function makeApi(journals: Journal[], account: { id: number; name_est: string; name_eng: string; balance_type: string } | null = null) {
+function makeApi(
+  journals: Journal[],
+  account: { id: number; name_est: string; name_eng: string; balance_type: string } | null = null,
+  accounts: Account[] = [],
+) {
   return {
     journals: {
       listAllWithPostings: vi.fn().mockResolvedValue(journals),
     },
     readonly: {
       getAccount: vi.fn().mockResolvedValue(account),
+      getAccounts: vi.fn().mockResolvedValue(accounts),
     },
   };
 }
@@ -308,6 +318,78 @@ describe("compute_account_balance tool", () => {
   });
 });
 
+describe("opening balance folding", () => {
+  const ACCOUNT_ID = 1020;
+  const CONTRA_ACCOUNT_ID = 2900;
+  const D_ACCOUNT = { id: ACCOUNT_ID, name_est: "Pank", name_eng: "Bank", balance_type: "D" };
+
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ob-account-balance-"));
+    process.env.EARVELDAJA_RULES_DIR = dir;
+    resetOpeningBalanceCache();
+  });
+
+  afterEach(() => {
+    delete process.env.EARVELDAJA_RULES_DIR;
+    resetOpeningBalanceCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function registerWithApi(journals: Journal[], accounts: Account[] = []) {
+    const api = makeApi(journals, D_ACCOUNT, accounts) as unknown as Parameters<typeof registerAccountBalanceTools>[1];
+    const server = {} as Parameters<typeof registerAccountBalanceTools>[0];
+    registerAccountBalanceTools(server, api);
+    return capturedHandlers["compute_account_balance"]!;
+  }
+
+  const CHART: Account[] = [
+    makeAccount(ACCOUNT_ID, "D", "Varad", "Pank", "Bank"),
+    makeAccount(CONTRA_ACCOUNT_ID, "C", "Omakapital", "Kapital", "Capital"),
+  ];
+
+  it("folds a stored opening balance into compute_account_balance", async () => {
+    writeOpeningBalances(
+      {
+        openingDate: "2024-12-12",
+        accounts: [
+          { code: String(ACCOUNT_ID), name: "Pank", debit: 1000, credit: 0 },
+          { code: String(CONTRA_ACCOUNT_ID), name: "Kapital", debit: 0, credit: 1000 },
+        ],
+        totals: { debit: 1000, credit: 1000 },
+        rawText: "n/a",
+      },
+      "2024-12-12T00:00:00.000Z",
+    );
+
+    const journals = [journal({ id: 1, postings: [posting(ACCOUNT_ID, "D", 500)] })];
+    const handler = registerWithApi(journals, CHART);
+    const result = await handler({ account_id: ACCOUNT_ID });
+    const data = parseMcpResponse((result.content[0] as { text: string }).text) as Record<string, unknown>;
+
+    expect(data.debit_total).toBe(1500); // 500 existing + 1000 opening
+    expect(data.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
+    expect(data.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+
+  it("leaves figures unchanged and shows the actionable warning without a stored algbilanss", async () => {
+    const journals = [journal({ id: 1, postings: [posting(ACCOUNT_ID, "D", 500)] })];
+    const handler = registerWithApi(journals, CHART);
+    const result = await handler({ account_id: ACCOUNT_ID });
+    const data = parseMcpResponse((result.content[0] as { text: string }).text) as Record<string, unknown>;
+
+    expect(data.debit_total).toBe(500);
+    expect(data.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+});
+
 describe("compute_client_debt tool", () => {
   const CLIENT_ID = 42;
   const ACCOUNT_ID = 2110;
@@ -388,6 +470,6 @@ describe("compute_client_debt tool", () => {
 
     expect(data.opening_balance_status).toBe("api_incomplete");
     expect(data.balance_scope).toBe("journal_api_visible_entries_only");
-    expect(data.warnings).toEqual(withOpeningBalanceApiLimitation());
+    expect(data.warnings).toEqual(withOpeningBalanceStatus([], { captured: false }));
   });
 });
