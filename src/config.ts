@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { createHash } from "node:crypto";
 import { resolve, win32 } from "path";
 import { readFileSync, existsSync, statSync, readdirSync, realpathSync, lstatSync, writeFileSync, mkdirSync, chmodSync, renameSync, unlinkSync } from "fs";
 import { homedir } from "os";
@@ -467,7 +468,10 @@ function parseEnvFile(envPath: string): Record<string, string> {
 function parseEnvMetadata(envPath: string): CredentialMetadataMap {
   if (!existsSync(envPath)) return {};
   if (!isSecureEnvFile(envPath)) return {};
+  return parseEnvMetadataFromText(readFileSync(envPath, "utf-8"));
+}
 
+function parseEnvMetadataFromText(text: string): CredentialMetadataMap {
   const metadataByTarget: CredentialMetadataMap = {};
   const pendingPrimary: CredentialBlockMetadata = {};
   let currentTarget: "primary" | `connection_${number}` | null = null;
@@ -499,7 +503,7 @@ function parseEnvMetadata(envPath: string): CredentialMetadataMap {
     delete pendingPrimary.sourceFile;
   };
 
-  const lines = readFileSync(envPath, "utf-8").split(/\r?\n/);
+  const lines = text.split(/\r?\n/);
   for (const line of lines) {
     const defaultMatch = line.match(/^# Default connection\s*$/);
     if (defaultMatch) {
@@ -979,101 +983,23 @@ export function findImportableApiKeyFiles(workingDir = CWD): string[] {
     .filter((filePath) => parseApiKeyFile(filePath) !== null);
 }
 
+/**
+ * Atomic all-in-one import kept for the direct-import characterization tests and
+ * any non-plan caller. It is now expressed as the same read/verify/project
+ * PREVIEW followed by the atomic private COMMIT the plan-gated tool uses, so the
+ * two paths cannot diverge. The preview writes nothing; only the commit writes.
+ */
 export async function importApiKeyCredentials(
   options: ImportApiKeyCredentialsOptions,
 ): Promise<ImportApiKeyCredentialsResult> {
-  const parsed = parseApiKeyFile(options.apiKeyFile);
-  if (!parsed) {
-    throw new Error(`Could not read a valid apikey file from ${options.apiKeyFile}`);
-  }
-
-  const server = options.server ?? (process.env.EARVELDAJA_SERVER === "demo" ? "demo" : "live");
-  const config: Config = {
-    apiKeyId: parsed.keyId,
-    apiPublicValue: parsed.publicValue,
-    apiPassword: parsed.password,
-    baseUrl: getBaseUrlForServer(server),
-  };
-  const verification = await options.verify(config);
-  const verifiedAt = verification.verifiedAt ?? new Date().toISOString();
-
-  const targetEnvFile = getTargetEnvFile(options.storageScope, options);
-
-  // Harden an insecure existing file to 0600 BEFORE reading it, so its bytes are
-  // not treated as empty and dropped by the merge/write below.
-  ensurePrivateEnvFile(targetEnvFile);
-  const existingEnv = parseEnvFile(targetEnvFile);
-  const existingMetadata = parseEnvMetadata(targetEnvFile);
-  const existingHasPrimaryCredentials = hasCompleteApiCredentialEnv(existingEnv);
-  const existingBlocks = readStoredCredentialBlocks(existingEnv, { includePrimary: true, extraNamePrefix: "env" });
-  const matchingTarget = findMatchingStoredCredentialTarget(existingBlocks, {
-    server,
-    apiKeyId: parsed.keyId,
-    apiPublicValue: parsed.publicValue,
-    apiPassword: parsed.password,
+  const preview = await previewApiKeyCredentialImport(options);
+  if (preview.unchanged) return preview.result;
+  return commitApiKeyCredentialImport({
+    snapshot: preview.snapshot,
+    projection: preview.projection,
+    workingDir: options.workingDir,
+    globalConfigDir: options.globalConfigDir,
   });
-
-  if (matchingTarget && !(options.overwrite === true && matchingTarget !== "primary")) {
-    return {
-      envFile: targetEnvFile,
-      storageScope: options.storageScope,
-      companyName: verification.companyName,
-      verifiedAt,
-      created: false,
-      action: "unchanged",
-      sourceFile: options.apiKeyFile,
-      target: matchingTarget,
-    };
-  }
-
-  let mergedEnv = { ...existingEnv };
-  const mergedMetadata: CredentialMetadataMap = { ...existingMetadata };
-  let action: "created" | "appended" | "replaced" | "unchanged";
-  let target: "primary" | `connection_${number}`;
-
-  if (options.overwrite === true || !existingHasPrimaryCredentials) {
-    target = "primary";
-    action = existingHasPrimaryCredentials ? "replaced" : "created";
-    mergedEnv = setStoredCredentialBlock(mergedEnv, target, {
-      server,
-      apiKeyId: parsed.keyId,
-      apiPublicValue: parsed.publicValue,
-      apiPassword: parsed.password,
-    });
-    if (matchingTarget) {
-      mergedEnv = removeStoredCredentialBlock(mergedEnv, matchingTarget);
-      delete mergedMetadata[matchingTarget];
-    }
-  } else {
-    const slot = findNextConnectionSlot(mergedEnv);
-    target = getEnvConnectionTarget(slot);
-    action = "appended";
-    mergedEnv = setStoredCredentialBlock(mergedEnv, target, {
-      server,
-      apiKeyId: parsed.keyId,
-      apiPublicValue: parsed.publicValue,
-      apiPassword: parsed.password,
-    });
-  }
-
-  mergedMetadata[target] = {
-    companyName: verification.companyName,
-    verifiedAt,
-    sourceFile: options.apiKeyFile,
-  };
-
-  writePrivateEnvFile(targetEnvFile, serializeEnvFile(mergedEnv, mergedMetadata));
-
-  return {
-    envFile: targetEnvFile,
-    storageScope: options.storageScope,
-    companyName: verification.companyName,
-    verifiedAt,
-    created: action === "created",
-    action,
-    sourceFile: options.apiKeyFile,
-    target,
-  };
 }
 
 /**
@@ -1272,26 +1198,345 @@ export function listStoredCredentials(
     .filter((inventory) => inventory.credentials.length > 0);
 }
 
+/**
+ * Atomic all-in-one removal kept for the direct-removal characterization tests
+ * and any non-plan caller. Expressed as the same read-only PREVIEW + atomic
+ * private COMMIT the plan-gated tool uses so the two paths cannot diverge.
+ */
 export function removeStoredCredential(
   options: RemoveStoredCredentialOptions,
 ): RemoveStoredCredentialResult {
+  const projection = previewRemoveStoredCredential(options);
+  return commitRemoveStoredCredential({
+    projection,
+    workingDir: options.workingDir,
+    globalConfigDir: options.globalConfigDir,
+  });
+}
+
+// --- P18: credential preview/commit split (preview writes NOTHING) ----------
+//
+// The preview reads the source apikey file, verifies it, and PROJECTS the target
+// destination without ever writing. It returns an immutable secret snapshot plus
+// a public-safe projection. The commit re-reads the destination, rechecks it has
+// not drifted since the review, and only then performs the SAME atomic private
+// 0600 write path the direct import always used. No new write path is added.
+
+export interface CredentialImportSecretSnapshot {
+  server: "live" | "demo";
+  apiKeyId: string;
+  apiPublicValue: string;
+  apiPassword: string;
+}
+
+export interface CredentialImportProjection {
+  operation: "import";
+  storageScope: CredentialStorageScope;
+  sourceFile: string;
+  envFile: string;
+  server: "live" | "demo";
+  overwrite: boolean;
+  target: "primary" | `connection_${number}`;
+  action: "created" | "appended" | "replaced" | "unchanged";
+  companyName: string | null;
+  verifiedAt: string;
+  /** Display-only masked identifier — never the raw key id. */
+  maskedApiKeyId: string;
+  destinationExists: boolean;
+  /** Read-only content fingerprint of the destination .env, for drift detection. */
+  destinationStateToken: string;
+}
+
+export interface PreviewApiKeyCredentialImportResult {
+  projection: CredentialImportProjection;
+  /** Raw secret — callers must keep this out of any public output. */
+  snapshot: CredentialImportSecretSnapshot;
+  /** True when the exact credential is already stored; nothing to persist. */
+  unchanged: boolean;
+  /** The result the equivalent atomic import would return (echoes company/target). */
+  result: ImportApiKeyCredentialsResult;
+}
+
+export interface CredentialRemoveProjection {
+  operation: "remove";
+  storageScope: CredentialStorageScope;
+  envFile: string;
+  target: "primary" | `connection_${number}`;
+  remainingAfter: number;
+  destinationExists: boolean;
+  destinationStateToken: string;
+}
+
+interface EnvProjectionState {
+  exists: boolean;
+  env: Record<string, string>;
+  metadata: CredentialMetadataMap;
+  token: string;
+}
+
+/**
+ * Stable, read-only fingerprint of the destination .env for drift detection.
+ * Hashes existence + raw bytes only; a permission-only repair (chmod) leaves the
+ * bytes untouched, so the preview token and the pre-write recheck token agree.
+ */
+function destinationStateToken(exists: boolean, rawBytes: string): string {
+  return createHash("sha256")
+    .update(exists ? `present\n${rawBytes}` : "absent")
+    .digest("hex");
+}
+
+/**
+ * Read the destination .env WITHOUT modifying it (no chmod, no write) for
+ * projection and drift detection. Refuses a symlink / non-regular target with the
+ * same message as the write-time guard, so an unsafe target fails fast in preview.
+ * Content is parsed from raw bytes regardless of mode: this only reads structure
+ * to project a target, it never loads secrets into process.env.
+ */
+function readEnvProjectionState(envFile: string): EnvProjectionState {
+  if (!existsSync(envFile)) {
+    return { exists: false, env: {}, metadata: {}, token: destinationStateToken(false, "") };
+  }
+  const info = lstatSync(envFile);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error(`Refusing unsafe .env target: ${envFile}`);
+  }
+  const raw = readFileSync(envFile, "utf-8");
+  return {
+    exists: true,
+    env: dotenv.parse(raw),
+    metadata: parseEnvMetadataFromText(raw),
+    token: destinationStateToken(true, raw),
+  };
+}
+
+/**
+ * PREVIEW: read the source, verify it, and project the destination target/action
+ * against the current .env — WITHOUT writing anything. Preserves the exact
+ * verify→destination-read order of the former atomic import.
+ */
+export async function previewApiKeyCredentialImport(
+  options: ImportApiKeyCredentialsOptions,
+): Promise<PreviewApiKeyCredentialImportResult> {
+  const parsed = parseApiKeyFile(options.apiKeyFile);
+  if (!parsed) {
+    throw new Error(`Could not read a valid apikey file from ${options.apiKeyFile}`);
+  }
+
+  const server = options.server ?? (process.env.EARVELDAJA_SERVER === "demo" ? "demo" : "live");
+  const config: Config = {
+    apiKeyId: parsed.keyId,
+    apiPublicValue: parsed.publicValue,
+    apiPassword: parsed.password,
+    baseUrl: getBaseUrlForServer(server),
+  };
+  const verification = await options.verify(config);
+  const verifiedAt = verification.verifiedAt ?? new Date().toISOString();
+
+  const targetEnvFile = getTargetEnvFile(options.storageScope, options);
+  const state = readEnvProjectionState(targetEnvFile);
+  const candidate = {
+    server,
+    apiKeyId: parsed.keyId,
+    apiPublicValue: parsed.publicValue,
+    apiPassword: parsed.password,
+  };
+  const existingBlocks = readStoredCredentialBlocks(state.env, { includePrimary: true, extraNamePrefix: "env" });
+  const matchingTarget = findMatchingStoredCredentialTarget(existingBlocks, candidate);
+  const existingHasPrimaryCredentials = hasCompleteApiCredentialEnv(state.env);
+  const overwrite = options.overwrite === true;
+
+  let target: "primary" | `connection_${number}`;
+  let action: "created" | "appended" | "replaced" | "unchanged";
+  if (matchingTarget && !(overwrite && matchingTarget !== "primary")) {
+    target = matchingTarget;
+    action = "unchanged";
+  } else if (overwrite || !existingHasPrimaryCredentials) {
+    target = "primary";
+    action = existingHasPrimaryCredentials ? "replaced" : "created";
+  } else {
+    target = getEnvConnectionTarget(findNextConnectionSlot(state.env));
+    action = "appended";
+  }
+
+  const projection: CredentialImportProjection = {
+    operation: "import",
+    storageScope: options.storageScope,
+    sourceFile: options.apiKeyFile,
+    envFile: targetEnvFile,
+    server,
+    overwrite,
+    target,
+    action,
+    companyName: verification.companyName,
+    verifiedAt,
+    maskedApiKeyId: maskApiKeyId(parsed.keyId),
+    destinationExists: state.exists,
+    destinationStateToken: state.token,
+  };
+  const snapshot: CredentialImportSecretSnapshot = {
+    server,
+    apiKeyId: parsed.keyId,
+    apiPublicValue: parsed.publicValue,
+    apiPassword: parsed.password,
+  };
+  const result: ImportApiKeyCredentialsResult = {
+    envFile: targetEnvFile,
+    storageScope: options.storageScope,
+    companyName: verification.companyName,
+    verifiedAt,
+    created: action === "created",
+    action,
+    sourceFile: options.apiKeyFile,
+    target,
+  };
+  return { projection, snapshot, unchanged: action === "unchanged", result };
+}
+
+/**
+ * COMMIT: recheck the destination immediately before the atomic private write and
+ * reject on any destination drift, then persist through the SAME
+ * ensurePrivateEnvFile → parseEnvFile → writePrivateEnvFile atomic 0600 path.
+ */
+export function commitApiKeyCredentialImport(args: {
+  snapshot: CredentialImportSecretSnapshot;
+  projection: CredentialImportProjection;
+  workingDir?: string;
+  globalConfigDir?: string;
+}): ImportApiKeyCredentialsResult {
+  const { snapshot, projection } = args;
+  const targetEnvFile = getTargetEnvFile(projection.storageScope, args);
+
+  // Recheck the destination bytes immediately before the atomic RMW. The read is
+  // byte-identical across the permission repair below (chmod only), so a matching
+  // token proves nothing about the .env changed since the review.
+  const preHarden = readEnvProjectionState(targetEnvFile);
+  if (preHarden.token !== projection.destinationStateToken) {
+    throw new Error("Credential destination changed since the reviewed preview; re-run the preview.");
+  }
+
+  // Harden an insecure existing file to 0600 BEFORE reading it, so its bytes are
+  // not treated as empty and dropped by the merge/write below.
+  ensurePrivateEnvFile(targetEnvFile);
+  const existingEnv = parseEnvFile(targetEnvFile);
+  const existingMetadata = parseEnvMetadata(targetEnvFile);
+  const values = {
+    server: snapshot.server,
+    apiKeyId: snapshot.apiKeyId,
+    apiPublicValue: snapshot.apiPublicValue,
+    apiPassword: snapshot.apiPassword,
+  };
+  const existingHasPrimaryCredentials = hasCompleteApiCredentialEnv(existingEnv);
+  const existingBlocks = readStoredCredentialBlocks(existingEnv, { includePrimary: true, extraNamePrefix: "env" });
+  const matchingTarget = findMatchingStoredCredentialTarget(existingBlocks, values);
+
+  if (matchingTarget && !(projection.overwrite && matchingTarget !== "primary")) {
+    throw new Error("Credential is already stored; re-run the preview.");
+  }
+
+  let mergedEnv = { ...existingEnv };
+  const mergedMetadata: CredentialMetadataMap = { ...existingMetadata };
+  let action: "created" | "appended" | "replaced";
+  let target: "primary" | `connection_${number}`;
+
+  if (projection.overwrite || !existingHasPrimaryCredentials) {
+    target = "primary";
+    action = existingHasPrimaryCredentials ? "replaced" : "created";
+    mergedEnv = setStoredCredentialBlock(mergedEnv, target, values);
+    if (matchingTarget) {
+      mergedEnv = removeStoredCredentialBlock(mergedEnv, matchingTarget);
+      delete mergedMetadata[matchingTarget];
+    }
+  } else {
+    const slot = findNextConnectionSlot(mergedEnv);
+    target = getEnvConnectionTarget(slot);
+    action = "appended";
+    mergedEnv = setStoredCredentialBlock(mergedEnv, target, values);
+  }
+
+  // The freshly re-derived destination must match the reviewed projection.
+  if (target !== projection.target || action !== projection.action) {
+    throw new Error("Credential destination changed since the reviewed preview; re-run the preview.");
+  }
+
+  mergedMetadata[target] = {
+    companyName: projection.companyName,
+    verifiedAt: projection.verifiedAt,
+    sourceFile: projection.sourceFile,
+  };
+
+  writePrivateEnvFile(targetEnvFile, serializeEnvFile(mergedEnv, mergedMetadata));
+
+  return {
+    envFile: targetEnvFile,
+    storageScope: projection.storageScope,
+    companyName: projection.companyName,
+    verifiedAt: projection.verifiedAt,
+    created: action === "created",
+    action,
+    sourceFile: projection.sourceFile,
+    target,
+  };
+}
+
+/**
+ * PREVIEW: project a stored-credential removal WITHOUT writing. Throws (as the
+ * atomic removal did) when the file/target is absent so the tool can surface a
+ * plain error rather than issue an unusable plan.
+ */
+export function previewRemoveStoredCredential(
+  options: RemoveStoredCredentialOptions,
+): CredentialRemoveProjection {
   const target = parseStoredCredentialTarget(options.target);
   const envFile = getTargetEnvFile(options.storageScope, options);
-  // Harden an insecure existing file to 0600 before reading it, so its blocks are
-  // visible (not treated as empty) and the write below preserves the other bytes.
+  const state = readEnvProjectionState(envFile);
+  const existingTargets = new Set(
+    readStoredCredentialBlocks(state.env, { includePrimary: true, extraNamePrefix: "env" }).map((block) => block.target),
+  );
+  if (!existingTargets.has(target)) {
+    throw new Error(`Stored credential target "${target}" was not found in ${envFile}.`);
+  }
+  const updatedEnv = removeStoredCredentialBlock(state.env, target);
+  const remainingAfter = readStoredCredentialBlocks(updatedEnv, { includePrimary: true, extraNamePrefix: "env" }).length;
+  return {
+    operation: "remove",
+    storageScope: options.storageScope,
+    envFile,
+    target,
+    remainingAfter,
+    destinationExists: state.exists,
+    destinationStateToken: state.token,
+  };
+}
+
+/**
+ * COMMIT: recheck the destination immediately before the atomic private write and
+ * reject on any drift, then remove the block through the same atomic 0600 path.
+ */
+export function commitRemoveStoredCredential(args: {
+  projection: CredentialRemoveProjection;
+  workingDir?: string;
+  globalConfigDir?: string;
+}): RemoveStoredCredentialResult {
+  const { projection } = args;
+  const envFile = getTargetEnvFile(projection.storageScope, args);
+
+  const preHarden = readEnvProjectionState(envFile);
+  if (preHarden.token !== projection.destinationStateToken) {
+    throw new Error("Credential destination changed since the reviewed preview; re-run the preview.");
+  }
+
   ensurePrivateEnvFile(envFile);
   const existingEnv = parseEnvFile(envFile);
   const existingMetadata = parseEnvMetadata(envFile);
   const existingTargets = new Set(
-    readStoredCredentialBlocks(existingEnv, { includePrimary: true, extraNamePrefix: "env" }).map((block) => block.target)
+    readStoredCredentialBlocks(existingEnv, { includePrimary: true, extraNamePrefix: "env" }).map((block) => block.target),
   );
-
-  if (!existingTargets.has(target)) {
-    throw new Error(`Stored credential target "${target}" was not found in ${envFile}.`);
+  if (!existingTargets.has(projection.target)) {
+    throw new Error(`Stored credential target "${projection.target}" was not found in ${envFile}.`);
   }
 
-  const updatedEnv = removeStoredCredentialBlock(existingEnv, target);
-  delete existingMetadata[target];
+  const updatedEnv = removeStoredCredentialBlock(existingEnv, projection.target);
+  delete existingMetadata[projection.target];
   writePrivateEnvFile(envFile, serializeEnvFile(updatedEnv, existingMetadata));
 
   const remainingCredentials = readStoredCredentialBlocks(updatedEnv, {
@@ -1301,8 +1546,8 @@ export function removeStoredCredential(
 
   return {
     envFile,
-    storageScope: options.storageScope,
-    removedTarget: target,
+    storageScope: projection.storageScope,
+    removedTarget: projection.target,
     remainingCredentials,
   };
 }

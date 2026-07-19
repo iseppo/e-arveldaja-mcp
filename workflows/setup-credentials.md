@@ -30,37 +30,46 @@ Explain the two storage scopes:
 - `local`: works only when the MCP server is started from this folder
 - `global`: works when the MCP server is started from any folder on this computer
 
-## Step 3: Import credentials
+## Step 3: Import credentials (preview first, then execute)
 
-### If `file_path` was provided
+`import_apikey_credentials` is preview-first. It never writes on the first call:
+the default call verifies the credential and PROJECTS where it would be stored,
+then returns a `plan_handle`. You persist by calling the tool a second time with
+`execute: true` and that exact `plan_handle`. The handle is single-use and is
+rejected if the source file or destination `.env` changed since the preview, so
+always call the preview immediately before the execute.
 
-Call `import_apikey_credentials` with:
-- `file_path`: the provided path
-- `storage_scope`: the provided scope when present; otherwise omit it so the client can choose interactively when supported
+### Preview
 
-By default, different credentials are appended as an additional stored connection when a default connection already exists.
+Call `import_apikey_credentials` to preview:
+- `file_path`: the provided path, if any. Omit it to use the only secure `apikey*.txt` in the working directory.
+- `storage_scope`: the provided scope when present; otherwise omit it so the client can choose interactively when supported.
 
-Set `overwrite: true` only if the user explicitly approves replacing the default stored connection.
-
-### If `file_path` was not provided
-
-Call `import_apikey_credentials` without `file_path`.
-- Include `storage_scope` if it was provided.
-- Otherwise omit `storage_scope` so the client can choose interactively when supported.
-
-Handle the outcomes:
-- If exactly one secure `apikey*.txt` is available in the working directory, the import should proceed.
+Handle the preview outcomes:
+- If exactly one secure `apikey*.txt` is available and it verifies, the tool returns a projection plus a `plan_handle`.
+- If `action` is `unchanged`, the exact credential is already stored — report that and stop; no `plan_handle` is issued and nothing needs to be persisted.
 - If the tool reports multiple candidate files, stop and ask the user which file should be imported.
 - If the tool reports no secure apikey file, explain the setup paths from `get_setup_instructions` and stop.
+
+By default, different credentials are projected as an additional stored connection when a default connection already exists. Set `overwrite: true` only if the user explicitly approves replacing the default stored connection — pass it on BOTH the preview and the execute so the projection matches.
+
+### Review and execute
+
+Show the user the previewed `company_name`, `env_file`, `storage_scope`, and `target`. After they approve, call `import_apikey_credentials` again with:
+- the same `file_path` / `storage_scope` / `overwrite`
+- `execute: true`
+- `plan_handle`: the handle from the preview (the preview's `suggested_execute_args` already contains these)
+
+If the execute is rejected with a `plan_drift`, `plan_handle_consumed`, or `plan_handle_expired` error, re-run the preview to get a fresh handle and try again — do not retry with the old handle.
 
 ## Step 4: Handle stored-credential removal explicitly
 
 If the user wants to remove stored credentials instead of importing:
 - call `list_stored_credentials`
 - explain that it only shows credentials stored in local/global `.env` files, not shell env vars, `EARVELDAJA_API_KEY_FILE`, or raw `apikey*.txt` files
-- if the user confirms a specific stored target should be removed, call `remove_stored_credentials` with:
-  - `storage_scope`
-  - `target`
+- `remove_stored_credentials` is preview-first, exactly like import. Call it with `storage_scope` and `target` to PREVIEW the removal — it writes nothing and returns a `plan_handle`. Show the user which `target` would be removed and how many blocks remain.
+- if the user confirms, call `remove_stored_credentials` again with the same `storage_scope` and `target`, plus `execute: true` and the `plan_handle` from the preview.
+- if the execute is rejected with a `plan_drift`/`plan_handle_consumed`/`plan_handle_expired` error, re-run the preview for a fresh handle rather than reusing the old one.
 - state clearly that removal is destructive and requires a restart
 
 ## Step 5: Handle clients without interactive prompting

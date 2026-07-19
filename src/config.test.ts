@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { maskApiKeyId, serializeEnvFile } from "./config.js";
@@ -1207,5 +1207,115 @@ describe("serializeEnvFile credential metadata (M27)", () => {
     expect(out.match(/^# Company:/gm) ?? []).toHaveLength(1);
     // Exactly one password line: metadata could not forge a second credential.
     expect(out.match(/^EARVELDAJA_API_PASSWORD=/gm) ?? []).toHaveLength(1);
+  });
+});
+
+describe("credential preview/commit split (P18)", () => {
+  const VERIFY = async () => ({ companyName: "Preview OÜ", verifiedAt: "2026-03-29T15:00:00.000Z" });
+
+  function makeWorkDir(): { tempDir: string; workDir: string; apiKeyFile: string; localEnvFile: string } {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-preview-commit-"));
+    const workDir = join(tempDir, "work");
+    mkdirSync(workDir, { recursive: true });
+    for (const key of CONFIG_ENV_KEYS) delete process.env[key];
+    const apiKeyFile = join(workDir, "apikey.txt");
+    writeFileSync(apiKeyFile, [
+      "ApiKey ID: preview-key-id",
+      "ApiKey public value: preview-public",
+      "Password: preview-secret",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    return { tempDir, workDir, apiKeyFile, localEnvFile: join(workDir, ".env") };
+  }
+
+  it("preview writes nothing and commit persists the reviewed projection", async () => {
+    const { tempDir, workDir, apiKeyFile, localEnvFile } = makeWorkDir();
+    process.chdir(workDir);
+    try {
+      const { previewApiKeyCredentialImport, commitApiKeyCredentialImport } = await importFreshConfig(workDir);
+
+      const preview = await previewApiKeyCredentialImport({
+        apiKeyFile, storageScope: "local", workingDir: workDir, verify: VERIFY,
+      });
+      expect(preview.unchanged).toBe(false);
+      expect(preview.projection.action).toBe("created");
+      expect(preview.projection.maskedApiKeyId).not.toContain("preview-key-id");
+      // PREVIEW WROTE NOTHING.
+      expect(existsSync(localEnvFile)).toBe(false);
+
+      const result = commitApiKeyCredentialImport({
+        snapshot: preview.snapshot, projection: preview.projection, workingDir: workDir,
+      });
+      expect(result.action).toBe("created");
+      expect(readFileSync(localEnvFile, "utf8")).toContain("EARVELDAJA_API_KEY_ID=preview-key-id");
+      expect(readFileSync(localEnvFile, "utf8")).toContain("# Company: Preview OÜ");
+      // The committed file is private.
+      expect(statSync(localEnvFile).mode & 0o077).toBe(0);
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("commit rejects and writes nothing when the destination drifts after preview", async () => {
+    const { tempDir, workDir, apiKeyFile, localEnvFile } = makeWorkDir();
+    process.chdir(workDir);
+    try {
+      const { previewApiKeyCredentialImport, commitApiKeyCredentialImport } = await importFreshConfig(workDir);
+      const preview = await previewApiKeyCredentialImport({
+        apiKeyFile, storageScope: "local", workingDir: workDir, verify: VERIFY,
+      });
+      // A concurrent writer changes the destination between preview and commit.
+      writeFileSync(localEnvFile, "# concurrent\n", { mode: 0o600 });
+
+      expect(() => commitApiKeyCredentialImport({
+        snapshot: preview.snapshot, projection: preview.projection, workingDir: workDir,
+      })).toThrow(/changed since the reviewed preview/);
+      expect(readFileSync(localEnvFile, "utf8")).toBe("# concurrent\n");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preview refuses a symlinked destination without writing", async () => {
+    const { tempDir, workDir, apiKeyFile, localEnvFile } = makeWorkDir();
+    const actualEnvFile = join(workDir, "actual.env");
+    writeFileSync(actualEnvFile, "# original\n", { mode: 0o600 });
+    symlinkSync(actualEnvFile, localEnvFile);
+    process.chdir(workDir);
+    try {
+      const { previewApiKeyCredentialImport } = await importFreshConfig(workDir);
+      await expect(previewApiKeyCredentialImport({
+        apiKeyFile, storageScope: "local", workingDir: workDir, verify: VERIFY,
+      })).rejects.toThrow(`Refusing unsafe .env target: ${localEnvFile}`);
+      expect(readFileSync(actualEnvFile, "utf8")).toBe("# original\n");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("remove preview writes nothing and commit deletes the reviewed target", async () => {
+    const { tempDir, workDir, apiKeyFile, localEnvFile } = makeWorkDir();
+    process.chdir(workDir);
+    try {
+      const {
+        importApiKeyCredentials, previewRemoveStoredCredential, commitRemoveStoredCredential,
+      } = await importFreshConfig(workDir);
+      await importApiKeyCredentials({ apiKeyFile, storageScope: "local", workingDir: workDir, verify: VERIFY });
+      const before = readFileSync(localEnvFile, "utf8");
+
+      const projection = previewRemoveStoredCredential({ storageScope: "local", target: "primary", workingDir: workDir });
+      expect(projection.target).toBe("primary");
+      expect(readFileSync(localEnvFile, "utf8")).toBe(before); // preview wrote nothing
+
+      const result = commitRemoveStoredCredential({ projection, workingDir: workDir });
+      expect(result.removedTarget).toBe("primary");
+      expect(readFileSync(localEnvFile, "utf8")).not.toContain("EARVELDAJA_API_KEY_ID=preview-key-id");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

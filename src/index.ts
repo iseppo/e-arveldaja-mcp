@@ -11,13 +11,10 @@ import { registerTool } from "./mcp-compat.js";
 import {
   loadDotenvFiles,
   loadAllConfigs,
-  listStoredCredentials,
-  removeStoredCredential,
   type NamedConfig,
   NO_API_CREDENTIALS_FOUND_MESSAGE,
   getCredentialSetupInfo,
   findImportableApiKeyFiles,
-  importApiKeyCredentials,
   getToolExposureConfig,
   type CredentialStorageScope,
   type Config,
@@ -48,6 +45,7 @@ import { registerReceiptInboxTools } from "./tools/receipt-inbox.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
 import { registerCamtImportTools } from "./tools/camt-import.js";
+import { registerCredentialTools, persistCredentialImportViaPlan } from "./tools/credential-tools.js";
 import { registerAccountingInboxTools } from "./tools/accounting-inbox.js";
 import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js";
 import { registerWorkflowRecommendationTools } from "./tools/workflow-recommendations.js";
@@ -539,143 +537,16 @@ async function main() {
   // Restore them in configured mode with EARVELDAJA_EXPOSE_SETUP_TOOLS=1.
   // get_setup_instructions stays registered above so the agent can always
   // explain how to add a connection (its payload documents these tools).
-  if (setupMode || toolExposure.exposeSetupTools) registerTool(server, "import_apikey_credentials",
-    "Verify apikey*.txt credentials and store them in local/global .env. overwrite=false appends different credentials as another connection.",
+  // Persistence is preview-first and gated behind one-attempt plan handles; see
+  // src/tools/credential-tools.ts.
+  registerCredentialTools(
+    server,
     {
-      file_path: z.string().optional().describe("Absolute path to apikey*.txt; defaults to the only secure apikey*.txt in cwd."),
-      storage_scope: z.enum(["local", "global"]).optional().describe("local = this folder; global = any folder. Omit for interactive choice when supported."),
-      overwrite: z.boolean().optional().describe("Replace the default stored connection instead of appending. Default false."),
+      verify: verifyImportedCredentials,
+      resolveStorageScope: () => resolveCredentialStorageScope(server),
     },
-    { ...mutate, openWorldHint: true, title: "Import API Key Credentials" },
-    async ({ file_path, storage_scope, overwrite = false }) => {
-      let apiKeyFile = file_path;
-      if (!apiKeyFile) {
-        const candidates = findImportableApiKeyFiles();
-        if (candidates.length === 0) {
-          return toolError({
-            error: "No secure apikey*.txt file found in the current folder.",
-            hint: "Place a valid apikey*.txt in this folder or pass file_path explicitly.",
-          });
-        }
-        if (candidates.length > 1) {
-          return toolError({
-            error: "Multiple apikey*.txt files found in the current folder.",
-            hint: "Pass file_path explicitly so the server knows which file to import.",
-            candidates,
-          });
-        }
-        apiKeyFile = candidates[0]!;
-      }
-
-      let resolvedScope: CredentialStorageScope | null | undefined = storage_scope as CredentialStorageScope | undefined;
-      if (!resolvedScope) {
-        try {
-          resolvedScope = await resolveCredentialStorageScope(server);
-        } catch (error) {
-          return toolError(error);
-        }
-        if (!resolvedScope) {
-          return {
-            content: [{
-              type: "text",
-              text: toMcpJson({
-                cancelled: true,
-                message: "Credential import cancelled before choosing whether the configuration should work only in this folder or from any folder.",
-              }),
-            }],
-          };
-        }
-      }
-
-      try {
-        const imported = await importApiKeyCredentials({
-          apiKeyFile,
-          storageScope: resolvedScope,
-          overwrite,
-          verify: verifyImportedCredentials,
-        });
-
-        return {
-          content: [{
-            type: "text",
-            text: toMcpJson({
-              message: `Verified credentials for ${imported.companyName ?? "the target company"}. ${describeCredentialImportAction(imported.action, imported.envFile, imported.target)} ${describeCredentialAvailability(imported.storageScope)} Restart the MCP server to use them.`,
-              action: imported.action,
-              company_name: imported.companyName,
-              env_file: imported.envFile,
-              storage_scope: imported.storageScope,
-              source_file: imported.sourceFile,
-              target: imported.target,
-              verified_at: imported.verifiedAt,
-              restart_required: true,
-            }),
-          }],
-        };
-      } catch (error) {
-        return toolError(error);
-      }
-    }
-  );
-
-  if (setupMode || toolExposure.exposeSetupTools) registerTool(server, "list_stored_credentials",
-    "Inspect credentials stored in local/global .env files.",
-    {
-      storage_scope: z.enum(["local", "global"]).optional().describe("Optional scope filter."),
-    },
-    { ...readOnly, openWorldHint: true, title: "List Stored Credentials" },
-    async ({ storage_scope }) => {
-      const scopes = listStoredCredentials();
-      const filtered = storage_scope
-        ? scopes.filter((scope) => scope.storageScope === storage_scope)
-        : scopes;
-
-      return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            scopes: filtered,
-            total_scopes: filtered.length,
-            total_credentials: filtered.reduce((sum, scope) => sum + scope.credentials.length, 0),
-            hint: filtered.length === 0
-              ? "No stored credentials found in local/global .env files."
-              : "Use remove_stored_credentials with storage_scope and target to delete one stored credential block. Restart the MCP server after removing credentials.",
-          }),
-        }],
-      };
-    }
-  );
-
-  if (setupMode || toolExposure.exposeSetupTools) registerTool(server, "remove_stored_credentials",
-    "Remove one stored credential block from a local/global .env file.",
-    {
-      storage_scope: z.enum(["local", "global"]).describe("Which .env file to modify."),
-      target: z.string().regex(/^(primary|connection_\d+)$/, "Must be 'primary' or 'connection_N'").describe("Stored target from list_stored_credentials, e.g. primary or connection_1."),
-    },
-    { ...destructive, openWorldHint: true, title: "Remove Stored Credentials" },
-    async ({ storage_scope, target }) => {
-      try {
-        const removed = removeStoredCredential({
-          storageScope: storage_scope as CredentialStorageScope,
-          target: target as "primary" | `connection_${number}`,
-        });
-
-        return {
-          content: [{
-            type: "text",
-            text: toMcpJson({
-              message: `Removed stored credential block ${removed.removedTarget} from ${removed.envFile}. Restart the MCP server for the change to take effect.`,
-              env_file: removed.envFile,
-              storage_scope: removed.storageScope,
-              removed_target: removed.removedTarget,
-              remaining_credentials: removed.remainingCredentials,
-              restart_required: true,
-            }),
-          }],
-        };
-      } catch (error) {
-        return toolError(error);
-      }
-    }
+    runtimeSafetyContext,
+    setupMode || toolExposure.exposeSetupTools,
   );
 
   registerTool(server, "list_connections",
@@ -1065,7 +936,10 @@ async function main() {
       env: process.env,
       candidateFiles: findImportableApiKeyFiles(),
       promptForScope: () => resolveCredentialStorageScope(server),
-      importCredentials: ({ apiKeyFile, storageScope }) => importApiKeyCredentials({
+      // Persist the sole startup candidate ONLY through a freshly-issued,
+      // single-use, drift-checked plan handle — uniform with the tool execute
+      // path — instead of writing directly after elicitation.
+      importCredentials: ({ apiKeyFile, storageScope }) => persistCredentialImportViaPlan(runtimeSafetyContext, {
         apiKeyFile,
         storageScope,
         verify: verifyImportedCredentials,
