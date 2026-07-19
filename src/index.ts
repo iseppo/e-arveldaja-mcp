@@ -81,6 +81,7 @@ import {
 import { buildAuditLogLabels } from "./audit-log-labels.js";
 import { serializeToolMutationError } from "./mutation-audit.js";
 import { initAccountingRulesConnection } from "./accounting-rules.js";
+import { createRuntimeSafetyContext } from "./runtime-safety-context.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
@@ -481,6 +482,12 @@ async function main() {
   // resolved here (before the server instructions) so both the setup-mode
   // instruction text and the setup-tool gating below can use it.
   const toolExposure = getToolExposureConfig();
+  const runtimeSafetyContext = createRuntimeSafetyContext({
+    invocationStorage,
+    configs: allConfigs,
+    toolExposure,
+  });
+  void runtimeSafetyContext; // Retained for mandatory registrar injection in the next runtime-safety tasks.
 
   const server = new McpServer({
     name: "e-arveldaja",
