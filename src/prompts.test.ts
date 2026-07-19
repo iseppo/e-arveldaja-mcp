@@ -1025,6 +1025,20 @@ describe("registerPrompts", () => {
     }
   });
 
+  it("keeps shipped reconcile-bank markdown prompts aligned with plan-handle execution binding", () => {
+    for (const relativePath of ["workflows/reconcile-bank.md", ".claude/commands/reconcile-bank.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("result.plan_handle");
+      expect(text).toContain("get_execution_plan_page");
+      expect(text).toContain("plan_drift");
+      expect(text).toContain("`plan_handle`: the `result.plan_handle` from the reviewed dry run");
+      expect(text).toContain("The plan handle is not approval");
+      expect(text).toContain("result.execution.execution_report");
+      // Inter-account execute also binds to the reviewed plan handle.
+      expect(text).toContain("`execute: true` REQUIRES that `plan_handle`");
+    }
+  });
+
   it("keeps shipped classify-unmatched markdown prompts aligned with filtered dry runs", () => {
     for (const relativePath of ["workflows/classify-unmatched.md", ".claude/commands/classify-unmatched.md"]) {
       const text = readPromptSurface(relativePath);

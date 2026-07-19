@@ -314,8 +314,10 @@ describe("reconcile_transactions", () => {
       const api = {
         transactions: {
           listAll: vi.fn().mockResolvedValue([
-            { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", bank_account_name: "Beta OU", ref_number: "RF456" },
+            { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", bank_account_name: "Beta OU", ref_number: "RF456", clients_id: 22 },
           ]),
+          get: vi.fn().mockResolvedValue({ id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", bank_account_name: "Beta OU", ref_number: "RF456", clients_id: 22 }),
+          update: vi.fn().mockResolvedValue({}),
           confirm: vi.fn().mockResolvedValue({}),
         },
         saleInvoices: {
@@ -335,15 +337,25 @@ describe("reconcile_transactions", () => {
       registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
       const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "reconcile_bank_transactions");
       if (!registration) throw new Error("Tool was not registered");
+      const merged = registration[2];
 
-      const result = await registration[2]({ mode: "execute_auto_confirm", min_confidence: 90 });
+      // Merged execute REQUIRES the reviewed plan handle from the dry run.
+      const missing = parseMcpResponse((await merged({ mode: "execute_auto_confirm", min_confidence: 90 })).content[0]!.text) as any;
+      expect(missing.result.category).toBe("plan_handle_required");
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+
+      const dry = parseMcpResponse((await merged({ mode: "dry_run_auto_confirm", min_confidence: 90 })).content[0]!.text) as any;
+      const plan_handle = dry.result.plan_handle;
+      expect(typeof plan_handle).toBe("string");
+
+      const result = await merged({ mode: "execute_auto_confirm", min_confidence: 90, plan_handle });
       const payload = parseMcpResponse(result.content[0]!.text) as any;
 
       expect(payload.mode).toBe("execute_auto_confirm");
       expect(payload.result.mode).toBe("EXECUTED");
       expect(api.transactions.confirm).toHaveBeenCalledWith(3, [
         { related_table: "sale_invoices", related_id: 12, amount: 200 },
-      ]);
+      ], { autoFixClientsId: false });
     });
 
     it("runs inter-account transfer detection in dry-run mode", async () => {
@@ -683,6 +695,11 @@ function setupAutoConfirmTool(options: {
   const api = {
     transactions: {
       listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
+      get: vi.fn().mockImplementation(async (id: number) => {
+        const tx = (options.transactions ?? []).find((t: any) => t.id === id) as any;
+        return tx ?? { id, status: "PROJECT", clients_id: null };
+      }),
+      update: vi.fn().mockResolvedValue({}),
       confirm: vi.fn().mockResolvedValue({}),
     },
     saleInvoices: {
@@ -711,6 +728,38 @@ function setupAutoConfirmTool(options: {
   };
 }
 
+// Dry-run to issue a bank_reconciliation plan handle, then execute exactly that
+// reviewed plan. Mirrors the plan-bound contract: execute REQUIRES the handle.
+async function issueAutoConfirmPlanHandle(
+  handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+  baseArgs: Record<string, unknown>,
+): Promise<string> {
+  const dry = parseMcpResponse((await handler({ ...baseArgs, execute: false })).content[0]!.text) as any;
+  const handle = dry.plan_handle;
+  if (typeof handle !== "string") throw new Error("dry run did not return a plan_handle");
+  return handle;
+}
+
+async function executeAutoConfirm(
+  handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+  baseArgs: Record<string, unknown>,
+): Promise<{ content: Array<{ text: string }> }> {
+  const plan_handle = await issueAutoConfirmPlanHandle(handler, baseArgs);
+  return handler({ ...baseArgs, execute: true, plan_handle });
+}
+
+// Inter-account: dry-run to issue the reviewed plan handle, then execute exactly
+// that reviewed set. Execute REQUIRES the handle.
+async function executeInterAccount(
+  handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+  baseArgs: Record<string, unknown> = {},
+): Promise<{ content: Array<{ text: string }> }> {
+  const dry = parseMcpResponse((await handler({ ...baseArgs, execute: false })).content[0]!.text) as any;
+  const plan_handle = dry.plan_handle;
+  if (typeof plan_handle !== "string") throw new Error("inter-account dry run did not return a plan_handle");
+  return handler({ ...baseArgs, execute: true, plan_handle });
+}
+
 describe("auto_confirm_exact_matches", () => {
   it("ignores VOID transactions", async () => {
     const { handler, api } = setupAutoConfirmTool({
@@ -722,7 +771,7 @@ describe("auto_confirm_exact_matches", () => {
       ],
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeAutoConfirm(handler, {});
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(0);
@@ -759,7 +808,7 @@ describe("auto_confirm_exact_matches", () => {
       ],
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeAutoConfirm(handler, {});
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
@@ -784,7 +833,7 @@ describe("auto_confirm_exact_matches", () => {
     });
     expect(api.transactions.confirm).toHaveBeenCalledWith(2, [
       { related_table: "sale_invoices", related_id: 11, amount: 200 },
-    ]);
+    ], { autoFixClientsId: false });
   });
 
   it("skips partially paid invoices", async () => {
@@ -830,7 +879,7 @@ describe("auto_confirm_exact_matches", () => {
       ],
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeAutoConfirm(handler, {});
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
@@ -838,7 +887,7 @@ describe("auto_confirm_exact_matches", () => {
     expect(payload.results[0]!.status).toBe("confirmed");
     expect(api.transactions.confirm).toHaveBeenCalledWith(7, [
       { related_table: "sale_invoices", related_id: 16, amount: 150 },
-    ]);
+    ], { autoFixClientsId: false });
   });
 
   it("does not auto-confirm explicit incoming transactions against purchase invoices", async () => {
@@ -851,7 +900,7 @@ describe("auto_confirm_exact_matches", () => {
       ],
     });
 
-    const result = await handler({ execute: true, min_confidence: 0 });
+    const result = await executeAutoConfirm(handler, { min_confidence: 0 });
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
@@ -915,13 +964,295 @@ describe("auto_confirm_exact_matches", () => {
       ],
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeAutoConfirm(handler, {});
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.auto_confirmed).toBe(0);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
     expect(payload.errors).toHaveLength(1);
     expect(payload.errors[0]!.reason).toMatch(/Cross-currency match/);
+  });
+});
+
+describe("bank_reconciliation plan binding", () => {
+  const HANDLE_RE = /^[A-Za-z0-9_-]{43}$/;
+  const iaBankAccounts = [
+    { id: 1, account_name_est: "LHV", account_no: "EE111", iban_code: "EE111", accounts_dimensions_id: 100 },
+    { id: 2, account_name_est: "Wise", account_no: "EE222", iban_code: "EE222", accounts_dimensions_id: 200 },
+  ];
+
+  // Minimal valid ExecutionPlanInput for issuing a foreign-domain handle.
+  function minimalPlanInput() {
+    return {
+      normalizedArgs: {}, sourceIdentities: [], liveSnapshot: {}, commands: [],
+      counts: {}, totals: {}, exclusions: [], reviews: [], privatePayload: {},
+    };
+  }
+
+  function autoConfirmWithContext(context: ReturnType<typeof createTestRuntimeSafetyContext>, options: {
+    transactions?: unknown[]; sales?: unknown[]; purchases?: unknown[];
+  } = {}) {
+    const server = { registerTool: vi.fn() } as any;
+    const api = {
+      transactions: {
+        listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          const tx = (options.transactions ?? []).find((t: any) => t.id === id) as any;
+          return tx ?? { id, status: "PROJECT", clients_id: null };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        confirm: vi.fn().mockResolvedValue({}),
+      },
+      saleInvoices: { listAll: vi.fn().mockResolvedValue(options.sales ?? []) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue(options.purchases ?? []) },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
+      },
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      clients: { findByName: vi.fn().mockResolvedValue([]) },
+    } as any;
+    registerBankReconciliationTools(server, api, context, EXPOSE_GRANULAR);
+    const handler = server.registerTool.mock.calls.find(([n]: [string]) => n === "auto_confirm_exact_matches")![2] as
+      (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    return { handler, api };
+  }
+
+  it("exact-match dry run issues a handle; execute requires it and confirms exactly the reviewed set", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
+      sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
+    });
+
+    const dry = parseMcpResponse((await handler({})).content[0]!.text) as any;
+    expect(dry.mode).toBe("DRY_RUN");
+    expect(dry.plan_handle).toMatch(HANDLE_RE);
+    expect(dry.execution.execution_report).toBeUndefined();
+
+    const missing = parseMcpResponse((await handler({ execute: true })).content[0]!.text) as any;
+    expect(missing.category).toBe("plan_handle_required");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+
+    const done = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    expect(done.mode).toBe("EXECUTED");
+    expect(done.execution.execution_report.status).toBe("completed");
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a replayed (already consumed) exact-match handle", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
+      sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
+    });
+    const handle = await issueAutoConfirmPlanHandle(handler, {});
+    await handler({ execute: true, plan_handle: handle });
+    api.transactions.confirm.mockClear();
+
+    const replay = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+    expect(replay.category).toBe("plan_handle_consumed");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("rejects a foreign-domain (CAMT) handle at the reconciliation executor", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const { handler, api } = autoConfirmWithContext(context, {
+      transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
+      sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
+    });
+    const camtHandle = context.planStore.issue("camt_import", minimalPlanInput());
+    const res = parseMcpResponse((await handler({ execute: true, plan_handle: camtHandle })).content[0]!.text) as any;
+    expect(res.category).toBe("plan_domain_mismatch");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("rejects an exact-match handle after the runtime scope changed", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const { handler, api } = autoConfirmWithContext(context, {
+      transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
+      sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
+    });
+    const handle = await issueAutoConfirmPlanHandle(handler, {});
+    context.setScope({ connectionName: "switched", connectionFingerprint: "other-fp" });
+    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+    expect(res.category).toBe("plan_scope_mismatch");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("refuses to confirm when the reviewed match set drifts before execute (no substitution)", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const { handler, api } = autoConfirmWithContext(context, {
+      transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
+    });
+    // Dry run sees the matching invoice; the invoice is gone by execute time.
+    api.saleInvoices.listAll
+      .mockResolvedValueOnce([{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }])
+      .mockResolvedValue([]);
+    const handle = await issueAutoConfirmPlanHandle(handler, {});
+    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+    expect(res.category).toBe("plan_drift");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("books the linked-invoice client fix as its own enumerated command", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: null, bank_account_name: "Acme OU", ref_number: "RF1" }],
+      sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 55, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF1" }],
+    });
+    const dry = parseMcpResponse((await handler({})).content[0]!.text) as any;
+    const res = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
+
+    expect(res.execution.execution_report.status).toBe("completed");
+    expect(api.transactions.update).toHaveBeenCalledWith(1, { clients_id: 55 });
+    expect(api.transactions.confirm).toHaveBeenCalledWith(1, [
+      { related_table: "sale_invoices", related_id: 10, amount: 100 },
+    ], { autoFixClientsId: false });
+    const completedIds = res.execution.execution_report.command_partitions.completed.map((c: any) => c.command_id);
+    expect(completedIds).toContain("recon-update-client-tx-1");
+    expect(completedIds).toContain("recon-confirm-invoice-tx-1");
+  });
+
+  it("stops with plan_drift in the execution report when a bound transaction is no longer PROJECT before its mutate", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const tx = { id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" };
+    const { handler, api } = autoConfirmWithContext(context, {
+      transactions: [tx],
+      sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
+    });
+    // The transaction is confirmed out from under the reviewed plan before its mutate.
+    api.transactions.get.mockResolvedValue({ ...tx, status: "CONFIRMED" });
+    const handle = await issueAutoConfirmPlanHandle(handler, {});
+    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+
+    expect(res.execution.execution_report.status).toBe("plan_drift");
+    expect(res.execution.execution_report.stop_reason.code).toBe("transaction_not_project");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("reports partial execution and stops at the first confirm failure", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const txs = [
+      { id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" },
+      { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", clients_id: 21, ref_number: "RF2" },
+    ];
+    const { handler, api } = autoConfirmWithContext(context, {
+      transactions: txs,
+      sales: [
+        { id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" },
+        { id: 11, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-11", clients_id: 21, gross_price: 200, bank_ref_number: "RF2" },
+      ],
+    });
+    api.transactions.confirm.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("register rejected"));
+    const handle = await issueAutoConfirmPlanHandle(handler, {});
+    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+
+    const report = res.execution.execution_report;
+    expect(report.status).toBe("partial_execution");
+    expect(report.command_partitions.completed).toHaveLength(1);
+    expect(report.command_partitions.failed).toHaveLength(1);
+    expect(report.mutation_may_have_occurred).toBe(true);
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("inter-account: execute requires the handle and books the company-client fix as its own command", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 40, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE222", clients_id: null },
+        { id: 41, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: null },
+      ],
+      bankAccounts: iaBankAccounts,
+    });
+
+    const missing = parseMcpResponse((await handler({ execute: true })).content[0]!.text) as any;
+    expect(missing.category).toBe("plan_handle_required");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+
+    const dry = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+    expect(dry.plan_handle).toMatch(HANDLE_RE);
+    expect(dry.pairs).toHaveLength(1);
+
+    const done = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    expect(done.mode).toBe("EXECUTED");
+    expect(done.execution.execution_report.status).toBe("completed");
+    const out = done.pairs[0].outgoing_transaction_id as number;
+    const inc = done.pairs[0].incoming_transaction_id as number;
+    expect(api.transactions.update).toHaveBeenCalledWith(out, { clients_id: 99 });
+    expect(api.transactions.confirm).toHaveBeenCalledWith(out, expect.any(Array), { autoFixClientsId: false });
+    expect(api.transactions.delete).toHaveBeenCalledWith(inc);
+    const completedIds = done.execution.execution_report.command_partitions.completed.map((c: any) => c.command_id);
+    expect(completedIds).toContain(`recon-update-client-tx-${out}`);
+    expect(completedIds).toContain(`recon-confirm-transfer-tx-${out}`);
+    expect(completedIds).toContain(`recon-delete-duplicate-tx-${inc}`);
+  });
+
+  it("inter-account: refuses on ledger drift after review", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 40, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE222", clients_id: 7 },
+        { id: 41, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: 7 },
+      ],
+      bankAccounts: iaBankAccounts,
+    });
+    const dry = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+    expect(dry.pairs).toHaveLength(1);
+    api.transactions.listAll.mockResolvedValue([]); // ledger emptied after review
+    const res = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    expect(res.category).toBe("plan_drift");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("shares one plan store across the Inbox-captured and public reconciliation handlers, rejecting foreign-domain and cross-context handles", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const txs = [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }];
+    const sales = [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }];
+    const api = {
+      transactions: {
+        listAll: vi.fn().mockResolvedValue(txs),
+        get: vi.fn().mockResolvedValue(txs[0]),
+        update: vi.fn().mockResolvedValue({}),
+        confirm: vi.fn().mockResolvedValue({}),
+      },
+      saleInvoices: { listAll: vi.fn().mockResolvedValue(sales) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([]),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
+      },
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      clients: { findByName: vi.fn().mockResolvedValue([]) },
+    } as any;
+
+    // Inbox-captured side: registerBankReconciliationTools on the shared context
+    // (exactly what captureInternalToolHandlers does for the Accounting Inbox).
+    const inboxServer = { registerTool: vi.fn() } as any;
+    registerBankReconciliationTools(inboxServer, api, context, EXPOSE_GRANULAR);
+    const inboxAutoConfirm = inboxServer.registerTool.mock.calls.find(([n]: [string]) => n === "auto_confirm_exact_matches")![2] as any;
+
+    // Public side: the merged tool on the SAME context, granular hidden.
+    const publicServer = { registerTool: vi.fn() } as any;
+    registerBankReconciliationTools(publicServer, api, context, { ...EXPOSE_GRANULAR, exposeGranularTools: false });
+    const publicMerged = publicServer.registerTool.mock.calls.find(([n]: [string]) => n === "reconcile_bank_transactions")![2] as any;
+
+    // A handle issued through the Inbox dry run is consumable by the public executor.
+    const dry = parseMcpResponse((await inboxAutoConfirm({})).content[0]!.text) as any;
+    expect(dry.plan_handle).toMatch(HANDLE_RE);
+    const done = parseMcpResponse((await publicMerged({ mode: "execute_auto_confirm", plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    expect(done.result.mode).toBe("EXECUTED");
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+
+    // A CAMT handle consumed under the reconciliation domain is rejected.
+    const camtHandle = context.planStore.issue("camt_import", minimalPlanInput());
+    expect(() => context.planStore.consume(camtHandle, "bank_reconciliation")).toThrowError(
+      expect.objectContaining({ code: "plan_domain_mismatch" }),
+    );
+
+    // A handle whose runtime scope changed is rejected from a second context view.
+    const dry2 = parseMcpResponse((await inboxAutoConfirm({})).content[0]!.text) as any;
+    context.setScope({ connectionName: "second-context", connectionFingerprint: "second-fingerprint" });
+    expect(() => context.planStore.consume(dry2.plan_handle, "bank_reconciliation")).toThrowError(
+      expect.objectContaining({ code: "plan_scope_mismatch" }),
+    );
   });
 });
 
@@ -1079,7 +1410,7 @@ describe("reconcile_inter_account_transfers", () => {
       bankAccounts,
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeInterAccount(handler);
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
@@ -1090,7 +1421,7 @@ describe("reconcile_inter_account_transfers", () => {
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm).toHaveBeenCalledWith(111, [
       { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 500 },
-    ]);
+    ], { autoFixClientsId: false });
     expect(api.transactions.delete).toHaveBeenCalledTimes(1);
     expect(api.transactions.delete).toHaveBeenCalledWith(112);
   });
@@ -1203,7 +1534,7 @@ describe("reconcile_inter_account_transfers", () => {
       bankAccounts,
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeInterAccount(handler);
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
@@ -1278,7 +1609,7 @@ describe("reconcile_inter_account_transfers", () => {
       bankAccounts,
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeInterAccount(handler);
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
@@ -1309,7 +1640,7 @@ describe("reconcile_inter_account_transfers", () => {
       bankAccounts,
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeInterAccount(handler);
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_one_sided).toBe(1);
@@ -1396,7 +1727,7 @@ describe("reconcile_inter_account_transfers", () => {
       ],
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeInterAccount(handler);
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
@@ -1425,7 +1756,7 @@ describe("reconcile_inter_account_transfers", () => {
       bankAccounts,
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeInterAccount(handler);
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
@@ -1447,7 +1778,7 @@ describe("reconcile_inter_account_transfers", () => {
       bankAccounts,
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeInterAccount(handler);
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
@@ -1481,7 +1812,7 @@ describe("reconcile_inter_account_transfers", () => {
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm).toHaveBeenCalledWith(11, [
       { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 750 },
-    ]);
+    ], { autoFixClientsId: false });
     // Incoming deleted (NOT confirmed) — exactly one delete call on the mirror.
     expect(api.transactions.delete).toHaveBeenCalledTimes(1);
     expect(api.transactions.delete).toHaveBeenCalledWith(12);
@@ -1497,7 +1828,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
     api.transactions.delete.mockRejectedValueOnce(new Error("Delete refused by API"));
 
-    const result = await handler({ execute: true });
+    const result = await executeInterAccount(handler);
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.pairs[0]!.status).toBe("confirmed");
@@ -1507,7 +1838,7 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.summary.error_count).toBe(1);
     // Outgoing stays confirmed — no rollback on delete failure; the journal is correct.
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
-    expect(api.transactions.confirm).toHaveBeenCalledWith(21, expect.any(Array));
+    expect(api.transactions.confirm).toHaveBeenCalledWith(21, expect.any(Array), { autoFixClientsId: false });
   });
 
   it("does not double-match a transaction", async () => {
@@ -1551,7 +1882,7 @@ describe("reconcile_inter_account_transfers", () => {
       bankAccounts,
     });
 
-    const result = await handler({ execute: true });
+    const result = await executeInterAccount(handler);
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(1);
@@ -1659,7 +1990,7 @@ describe("reconcile_inter_account_transfers", () => {
         companyName: "Test OÜ",
       });
 
-      const result = await handler({ execute: true });
+      const result = await executeInterAccount(handler);
       const payload = parseMcpResponse(result.content[0]!.text);
 
       expect(payload.mode).toBe("EXECUTED");
@@ -1668,7 +1999,7 @@ describe("reconcile_inter_account_transfers", () => {
 
       expect(api.transactions.confirm).toHaveBeenCalledWith(24, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 750 },
-      ]);
+      ], { autoFixClientsId: false });
     });
 
     it("skips one-sided transfer when already journalized from other side", async () => {
@@ -1730,7 +2061,7 @@ describe("reconcile_inter_account_transfers", () => {
         }],
       });
 
-      const result = await handler({ execute: true });
+      const result = await executeInterAccount(handler);
       const payload = parseMcpResponse(result.content[0]!.text);
 
       // The critical invariant: the pre-existing journal covers the transfer, so
@@ -1850,7 +2181,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(mockedLogAudit).not.toHaveBeenCalled();
 
       const execute = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
-      const executePayload = parseMcpResponse((await execute.handler({ execute: true })).content[0]!.text) as any;
+      const executePayload = parseMcpResponse((await executeInterAccount(execute.handler)).content[0]!.text) as any;
       expect(executePayload.one_sided[0]).toMatchObject({
         transaction_id: 8101, amount: 100, currency: "USD", amount_eur: 90,
         source_account: "Wise", source_dimension_id: 300,
@@ -1859,7 +2190,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(executePayload.execution.results[0]).toMatchObject(executePayload.one_sided[0]);
       expect(execute.api.transactions.confirm).toHaveBeenCalledWith(8101, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 90 },
-      ]);
+      ], { autoFixClientsId: false });
       expect(mockedLogAudit).toHaveBeenCalledWith(expect.objectContaining({
         summary: "Confirmed one-sided inter-account transfer 90 EUR (Wise -> LHV)",
         details: { amount: 100, currency: "USD", amount_eur: 90, date: "2026-07-10" },
@@ -1876,7 +2207,7 @@ describe("reconcile_inter_account_transfers", () => {
           ],
         }],
       });
-      const handledPayload = parseMcpResponse((await handled.handler({ execute: true })).content[0]!.text) as any;
+      const handledPayload = parseMcpResponse((await executeInterAccount(handled.handler)).content[0]!.text) as any;
       expect.soft(handledPayload.already_handled[0]).toMatchObject({
         transaction_id: 8101, amount: 100, currency: "USD", amount_eur: 90, existing_journal_id: 8190,
         source_account: "Wise", source_dimension_id: 300,
@@ -1928,7 +2259,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(dryPayload.execution.results[0]).toMatchObject(dryPayload.one_sided[0]);
 
       const execute = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
-      const executePayload = parseMcpResponse((await execute.handler({ execute: true })).content[0]!.text) as any;
+      const executePayload = parseMcpResponse((await executeInterAccount(execute.handler)).content[0]!.text) as any;
       expect(executePayload.one_sided[0]).toMatchObject({
         transaction_id: 8201, amount: 100, currency: "USD", amount_eur: 90,
         source_dimension_id: 100, target_dimension_id: 300, status: "confirmed",
@@ -1936,7 +2267,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(executePayload.execution.results[0]).toMatchObject(executePayload.one_sided[0]);
       expect(execute.api.transactions.confirm).toHaveBeenCalledWith(8201, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 300, amount: 90 },
-      ]);
+      ], { autoFixClientsId: false });
       expect(mockedLogAudit).toHaveBeenCalledWith(expect.objectContaining({
         summary: "Confirmed one-sided inter-account transfer 90 EUR (LHV -> Wise)",
         details: { amount: 100, currency: "USD", amount_eur: 90, date: "2026-07-11" },
@@ -1953,7 +2284,7 @@ describe("reconcile_inter_account_transfers", () => {
           ],
         }],
       });
-      const handledPayload = parseMcpResponse((await handled.handler({ execute: true })).content[0]!.text) as any;
+      const handledPayload = parseMcpResponse((await executeInterAccount(handled.handler)).content[0]!.text) as any;
       expect.soft(handledPayload.already_handled[0]).toMatchObject({
         transaction_id: 8201, amount: 100, currency: "USD", amount_eur: 90,
         source_account: "LHV", source_dimension_id: 100,
@@ -1997,7 +2328,7 @@ describe("reconcile_inter_account_transfers", () => {
 
         mockedLogAudit.mockClear();
         const execute = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
-        const executePayload = parseMcpResponse((await execute.handler({ execute: true })).content[0]!.text) as any;
+        const executePayload = parseMcpResponse((await executeInterAccount(execute.handler)).content[0]!.text) as any;
         expect(executePayload.one_sided[0]).toMatchObject({
           transaction_id: direction.id, amount: 100, currency: "USD", amount_eur: 90,
           source_dimension_id: direction.source, target_dimension_id: direction.target,
@@ -2005,7 +2336,7 @@ describe("reconcile_inter_account_transfers", () => {
         expect(executePayload.execution.results[0]).toMatchObject(executePayload.one_sided[0]);
         expect(execute.api.transactions.confirm).toHaveBeenCalledWith(direction.id, [
           { related_table: "accounts", related_id: 1020, related_sub_id: direction.target, amount: 90 },
-        ]);
+        ], { autoFixClientsId: false });
         expect(mockedLogAudit).toHaveBeenCalledWith(expect.objectContaining({
           summary: `Confirmed one-sided inter-account transfer 90 EUR (${direction.sourceTitle} -> ${direction.targetTitle})`,
           details: { amount: 100, currency: "USD", amount_eur: 90, date: "2026-07-12" },
@@ -2022,7 +2353,7 @@ describe("reconcile_inter_account_transfers", () => {
             ],
           }],
         });
-        const handledPayload = parseMcpResponse((await handled.handler({ execute: true })).content[0]!.text) as any;
+        const handledPayload = parseMcpResponse((await executeInterAccount(handled.handler)).content[0]!.text) as any;
         handledOutcomes.push({ direction, payload: handledPayload, api: handled.api });
       }
 
@@ -2049,12 +2380,12 @@ describe("reconcile_inter_account_transfers", () => {
         accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null,
       }));
       const run = setupInterAccountTool({ transactions, bankAccounts: twoAccounts });
-      const payload = parseMcpResponse((await run.handler({ execute: true })).content[0]!.text) as any;
+      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
 
       expect(run.api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(run.api.transactions.confirm).toHaveBeenCalledWith(8401, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 90 },
-      ]);
+      ], { autoFixClientsId: false });
       expect(payload.one_sided[0]).toMatchObject({
         transaction_id: 8401, amount: 100, currency: "USD", amount_eur: 90, status: "confirmed",
       });
@@ -2095,7 +2426,7 @@ describe("reconcile_inter_account_transfers", () => {
         bankAccounts: twoAccounts,
       });
       const smallOneCentPayload = parseMcpResponse(
-        (await smallOneCent.handler({ execute: true })).content[0]!.text,
+        (await executeInterAccount(smallOneCent.handler)).content[0]!.text,
       ) as any;
       const smallAuditCalls = [...mockedLogAudit.mock.calls];
 
@@ -2109,7 +2440,7 @@ describe("reconcile_inter_account_transfers", () => {
         bankAccounts: twoAccounts,
       });
       const smallTwoCentPayload = parseMcpResponse(
-        (await smallTwoCent.handler({ execute: true })).content[0]!.text,
+        (await executeInterAccount(smallTwoCent.handler)).content[0]!.text,
       ) as any;
 
       expect(smallOneCentPayload.errors).toEqual([]);
@@ -2130,14 +2461,16 @@ describe("reconcile_inter_account_transfers", () => {
       expect(smallOneCentPayload.execution.skipped[0]).toMatchObject(
         smallOneCentPayload.ambiguous_refless[0],
       );
-      expect(smallOneCent.api.transactions.get).toHaveBeenCalledTimes(1);
+      // Plan model: the client-update and the confirm each recheck the tx
+      // against a fresh read immediately before their own mutate.
+      expect(smallOneCent.api.transactions.get).toHaveBeenCalledTimes(2);
       expect(smallOneCent.api.transactions.get).toHaveBeenCalledWith(8404);
       expect(smallOneCent.api.transactions.update).toHaveBeenCalledTimes(1);
       expect(smallOneCent.api.transactions.update).toHaveBeenCalledWith(8404, { clients_id: 99 });
       expect(smallOneCent.api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(smallOneCent.api.transactions.confirm).toHaveBeenCalledWith(8404, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 0.07 },
-      ]);
+      ], { autoFixClientsId: false });
       expect(smallAuditCalls).toHaveLength(1);
       expect(smallAuditCalls[0]![0].summary).toBe(
         "Confirmed one-sided inter-account transfer 0.07 EUR (Wise -> LHV)",
@@ -2184,7 +2517,7 @@ describe("reconcile_inter_account_transfers", () => {
           ],
         }],
       });
-      const payload = parseMcpResponse((await run.handler({ execute: true })).content[0]!.text) as any;
+      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
 
       const hugeForeignRun = setupInterAccountTool({
         transactions: [{
@@ -2202,7 +2535,7 @@ describe("reconcile_inter_account_transfers", () => {
         }],
       });
       const hugeForeignPayload = parseMcpResponse(
-        (await hugeForeignRun.handler({ execute: true })).content[0]!.text,
+        (await executeInterAccount(hugeForeignRun.handler)).content[0]!.text,
       ) as any;
 
       const hugeEurRun = setupInterAccountTool({
@@ -2221,7 +2554,7 @@ describe("reconcile_inter_account_transfers", () => {
         }],
       });
       const hugeEurPayload = parseMcpResponse(
-        (await hugeEurRun.handler({ execute: true })).content[0]!.text,
+        (await executeInterAccount(hugeEurRun.handler)).content[0]!.text,
       ) as any;
 
       expect(payload.errors).toContainEqual({
@@ -2265,7 +2598,7 @@ describe("reconcile_inter_account_transfers", () => {
         }],
         bankAccounts: twoAccounts,
       });
-      const payload = parseMcpResponse((await run.handler({ execute: true })).content[0]!.text) as any;
+      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
 
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.errors).toEqual([{
@@ -2309,7 +2642,7 @@ describe("reconcile_inter_account_transfers", () => {
           bankAccounts: twoAccounts,
         });
         try {
-          const result = await run.handler({ execute: true });
+          const result = await executeInterAccount(run.handler);
           outcomes.push({ testCase, payload: parseMcpResponse(result.content[0]!.text) as any, api: run.api, auditCalls: mockedLogAudit.mock.calls.length });
         } catch (thrown) {
           outcomes.push({ testCase, thrown, api: run.api, auditCalls: mockedLogAudit.mock.calls.length });
@@ -2356,7 +2689,7 @@ describe("reconcile_inter_account_transfers", () => {
           }],
           bankAccounts: twoAccounts,
         });
-        const payload = parseMcpResponse((await run.handler({ execute: true })).content[0]!.text) as any;
+        const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
         expect(payload.matched_one_sided).toBe(0);
         expect(payload.errors).toEqual([{ transaction_ids: [testCase.id], code: testCase.code, reason: testCase.reason }]);
         expect(run.api.transactions.get).not.toHaveBeenCalled();
@@ -2422,14 +2755,14 @@ describe("reconcile_inter_account_transfers", () => {
           }],
           bankAccounts: twoAccounts,
         });
-        const payload = parseMcpResponse((await run.handler({ execute: true })).content[0]!.text) as any;
+        const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
         expect(payload.one_sided[0]).toMatchObject({
           transaction_id: direction.id, amount: 75,
           source_dimension_id: direction.source, target_dimension_id: direction.target,
         });
         expect(run.api.transactions.confirm).toHaveBeenCalledWith(direction.id, [
           { related_table: "accounts", related_id: 1020, related_sub_id: direction.target, amount: 75 },
-        ]);
+        ], { autoFixClientsId: false });
       }
     });
 
@@ -2441,7 +2774,7 @@ describe("reconcile_inter_account_transfers", () => {
         ],
         bankAccounts: twoAccounts,
       });
-      const payload = parseMcpResponse((await run.handler({ execute: true })).content[0]!.text) as any;
+      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
 
       expect(payload.matched_pairs).toBe(1);
       expect(payload.matched_one_sided).toBe(0);
@@ -2453,7 +2786,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(run.api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(run.api.transactions.confirm).toHaveBeenCalledWith(9101, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 300, amount: 75 },
-      ]);
+      ], { autoFixClientsId: false });
       expect(run.api.transactions.delete).toHaveBeenCalledTimes(1);
       expect(run.api.transactions.delete).toHaveBeenCalledWith(9102);
     });
@@ -2466,7 +2799,7 @@ describe("reconcile_inter_account_transfers", () => {
         ],
         bankAccounts: twoAccounts,
       });
-      const payload = parseMcpResponse((await run.handler({ execute: true })).content[0]!.text) as any;
+      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
 
       expect(payload.matched_pairs).toBe(0);
       expect(payload.matched_one_sided).toBe(0);

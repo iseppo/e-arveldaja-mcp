@@ -46,6 +46,21 @@ describe("TransactionsApi.confirm", () => {
     expect(patchCalls[0]!.path).toBe("/transactions/1/register");
   });
 
+  it("skips the clients_id auto-fix when autoFixClientsId is false, even with a null client", async () => {
+    const { client, patchCalls } = makeClient({
+      getById: (path: string) => (path === "/transactions/9" ? { id: 9, clients_id: null } : undefined),
+    });
+    const api = new TransactionsApi(client);
+
+    // The plan-bound reconciliation executor books the clients_id fix as its own
+    // enumerated command, so confirm() must NOT silently look up and set it here.
+    await api.confirm(9, [{ related_table: "purchase_invoices", related_id: 88, amount: 25 }], { autoFixClientsId: false });
+
+    expect(client.get).not.toHaveBeenCalledWith("/purchase_invoices/88");
+    expect(patchCalls).toHaveLength(1);
+    expect(patchCalls[0]!.path).toBe("/transactions/9/register");
+  });
+
   it("auto-fixes missing clients_id from a purchase_invoice distribution before registering", async () => {
     const { client, patchCalls } = makeClient({
       getById: (path) => {

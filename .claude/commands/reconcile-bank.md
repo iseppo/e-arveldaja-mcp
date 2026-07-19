@@ -77,6 +77,10 @@ Use `reconcile_bank_transactions` with `mode="dry_run_auto_confirm"` / `mode="ex
 
 Treat `result.execution` as the canonical batch payload when present. Prefer `result.execution.summary`, `result.execution.results`, `result.execution.errors`, and `result.execution.audit_reference`.
 
+The dry run also returns `result.plan_handle`, an opaque server-issued execution-plan handle bound to exactly the reviewed confirm set (the enumerated transactions, invoices, amounts, currency, clients, and open balances — plus an explicit client-update command for any card-payment transaction whose `clients_id` is null). Keep it: `mode: "execute_auto_confirm"` REQUIRES it and consumes it once. It is not an approval — it only lets the reviewed plan execute, and any drift in that reviewed set is refused with `plan_drift` and zero confirmations. Execute confirms EXACTLY the reviewed matches; it never re-matches or substitutes.
+
+For a large batch, page the reviewed confirm commands with `get_execution_plan_page` (pass `result.plan_handle` as `plan_handle`; it is read-only, does not consume the plan, and never implies approval).
+
 Show what would be confirmed. Ask user for approval.
 The approval card must include:
 - how many bank transactions would be confirmed
@@ -85,9 +89,13 @@ The approval card must include:
 - side effect: confirmed bank transaction distributions
 - audit reference when available
 
-If approved, call again with `mode: "execute_auto_confirm"`.
+If the user does not explicitly approve, stop. The plan handle is not approval — never treat holding a `result.plan_handle` as permission to execute.
 
-Report: how many confirmed, how many skipped, any errors.
+If approved, call again with `mode: "execute_auto_confirm"` and `plan_handle`: the `result.plan_handle` from the reviewed dry run (required; consumed once).
+
+If execute returns `plan_drift`, `plan_handle_required`, or another `plan_*` error, nothing was confirmed: re-run the dry run to review a fresh plan and get a new handle, then ask for approval again.
+
+Report: how many confirmed, how many skipped, any errors. Inspect `result.execution.execution_report` when present — its `status` (`completed` or `partial_execution`), `command_partitions`, and `stop_reason` show whether every reviewed confirm ran or the tracker stopped part-way; if it stopped, do not retry automatically, re-run the dry run for a fresh preview.
 
 ### Review mode
 
@@ -119,6 +127,8 @@ Call `reconcile_bank_transactions`:
 
 Note: `reconcile_bank_transactions` has no merged inter-account *execute* mode. Dry-run through it with `mode="inter_account_dry_run"`, but execution always goes through `reconcile_inter_account_transfers` with `execute: true` (a distinct, always-registered tool — not a hidden fallback).
 
+The inter-account dry run returns a `plan_handle` bound to exactly the reviewed transfer pairs, one-sided confirms, mirror-row deletes, and any explicit company-client update commands. `execute: true` REQUIRES that `plan_handle` and consumes it once; it confirms EXACTLY the reviewed set and never re-matches. It is not approval — any drift is refused with `plan_drift` and zero mutations. Page the reviewed commands read-only with `get_execution_plan_page`, and after execute inspect `execution.execution_report` (`status`, `command_partitions`, `stop_reason`) — on `partial_execution` do not retry automatically, re-run the dry run.
+
 Review the results:
 - Treat `result.execution.summary` as the canonical source for counts, and use `result.pairs`, `result.one_sided`, `result.already_handled`, and `result.ambiguous_pairs` for the detailed breakdown.
 - `already_handled`: transfers already journalized from the other side — safe to delete
@@ -127,8 +137,8 @@ Review the results:
 - `result.execution.errors`: any confirmation failures or other blocking issues
 - Never manually confirm both sides of a transfer pair; that duplicates the journal and breaks the single-journal invariant.
 
-Ask for approval. If approved, call `reconcile_inter_account_transfers` with `execute: true`.
-- If there are 3+ bank accounts and IBAN is missing, provide `target_accounts_dimensions_id`.
+Ask for approval. If the user does not explicitly approve, stop — the plan handle is not approval. If approved, call `reconcile_inter_account_transfers` with `execute: true` and `plan_handle` set to the `plan_handle` from the reviewed dry run (required; consumed once).
+- If there are 3+ bank accounts and IBAN is missing, provide `target_accounts_dimensions_id` — it must match the reviewed dry run exactly, or the plan is refused with `plan_drift`.
 - In `pairs`, `incoming_action: "deleted"` is normal; `incoming_action: "orphan"` means the duplicate incoming row could not be deleted and needs explicit follow-up.
 
 **WARNING:** Do not manually confirm Wise-side transfers that were already confirmed via LHV CAMT — this creates duplicate journal entries.

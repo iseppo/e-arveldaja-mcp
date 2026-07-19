@@ -17,6 +17,28 @@ import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { BookingGuard, type InterAccountResolution } from "../booking-guard.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
+import { toolError } from "../tool-error.js";
+import { isRecord } from "../record-utils.js";
+import { MutationIndeterminateError } from "../mutation-outcome.js";
+import { PlanStoreError, type PlanData, type PlanRecord } from "../plan-store.js";
+import type { PlanExecutionReport } from "../plan-execution.js";
+import {
+  BANK_RECONCILIATION_PLAN_DOMAIN,
+  buildReconciliationExecutionPlanInput,
+  canonicalPlanJson,
+  executeReconciliationCommands,
+  reconClientUpdateCommandId,
+  reconInvoiceConfirmCommandId,
+  reconTransferConfirmCommandId,
+  reconDeleteDuplicateCommandId,
+  RECON_CONFIRM_INVOICE_CATEGORY,
+  RECON_CONFIRM_TRANSFER_CATEGORY,
+  RECON_DELETE_DUPLICATE_CATEGORY,
+  RECON_UPDATE_CLIENT_CATEGORY,
+  stripUndefinedDeep,
+  type ReconciliationExecutionCommand,
+  type ReconciliationReviewCommand,
+} from "./bank-reconciliation-plan.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -367,6 +389,398 @@ export function getInvoiceMatchEligibility(
   };
 }
 
+function reconPlanError(category: string, message: string) {
+  return toolError({ error: message, category, mutation_occurred: false });
+}
+
+function transactionCurrency(tx: Transaction): string {
+  const raw = (tx as unknown as Record<string, unknown>).cl_currencies_id;
+  return typeof raw === "string" && raw.trim() ? raw.trim().toUpperCase() : "EUR";
+}
+
+// --- Plan-bound exact-match confirmation ------------------------------------
+//
+// The dry run and the execute path share one deterministic projection of the
+// eligible high-confidence single matches. The dry run issues an immutable
+// execution plan enumerating exactly those confirms (and the explicit
+// client-update command a card-payment null client needs); execute re-derives
+// the same projection, refuses to mutate on any drift, and drives the
+// enumerated commands through the shared plan-execution tracker.
+
+interface ExactConfirmDescriptor {
+  transactionId: number;
+  date?: string;
+  amount: number;
+  currency: string;
+  clientsId: number | null;
+  invoiceType: "sale_invoice" | "purchase_invoice";
+  invoiceTable: "sale_invoices" | "purchase_invoices";
+  invoiceId: number;
+  invoiceNumber: string;
+  invoiceClientsId: number | null;
+  confidence: number;
+  needsClientUpdate: boolean;
+}
+
+interface ExactMatchProjection {
+  totalUnconfirmed: number;
+  confirms: ExactConfirmDescriptor[];
+  skipped: Array<{ transaction_id?: number; reason: string }>;
+}
+
+function collectExactMatchCandidates(
+  tx: Transaction,
+  saleIndex: InvoiceIndex<SaleInvoice>,
+  purchaseIndex: InvoiceIndex<PurchaseInvoice>,
+  threshold: number,
+  consumedInvoiceKeys: Set<string>,
+): MatchCandidate[] {
+  const candidates: MatchCandidate[] = [];
+  const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
+
+  if (allowSaleInvoices) {
+    for (const inv of getIndexedCandidates(saleIndex, tx.ref_number, tx.amount, tx.base_amount)) {
+      if (inv.payment_status === "PARTIALLY_PAID") continue;
+      if (consumedInvoiceKeys.has(`sale:${inv.id!}`)) continue;
+      const { confidence, reasons } = matchScore(tx, inv, tx.amount);
+      if (confidence >= threshold) {
+        candidates.push({
+          type: "sale_invoice", id: inv.id!, number: inv.number ?? "",
+          client_name: inv.client_name ?? "", clients_id: inv.clients_id,
+          gross_price: inv.gross_price ?? 0, payment_status: inv.payment_status ?? "NOT_PAID",
+          partially_paid_warning: false, confidence, match_reasons: reasons,
+        });
+      }
+    }
+  }
+  if (allowPurchaseInvoices) {
+    for (const inv of getIndexedCandidates(purchaseIndex, tx.ref_number, tx.amount, tx.base_amount)) {
+      if (inv.payment_status === "PARTIALLY_PAID") continue;
+      if (consumedInvoiceKeys.has(`purchase:${inv.id!}`)) continue;
+      const { confidence, reasons } = matchScore(tx, inv, tx.amount);
+      if (confidence >= threshold) {
+        candidates.push({
+          type: "purchase_invoice", id: inv.id!, number: inv.number ?? "",
+          client_name: inv.client_name ?? "", clients_id: inv.clients_id,
+          gross_price: inv.gross_price ?? 0, payment_status: inv.payment_status ?? "NOT_PAID",
+          partially_paid_warning: false, confidence, match_reasons: reasons,
+        });
+      }
+    }
+  }
+  return candidates;
+}
+
+function computeExactMatchProjection(
+  unconfirmed: Transaction[],
+  openSales: SaleInvoice[],
+  openPurchases: PurchaseInvoice[],
+  threshold: number,
+): ExactMatchProjection {
+  const saleIndex = buildInvoiceIndex(openSales);
+  const purchaseIndex = buildInvoiceIndex(openPurchases);
+  const confirms: ExactConfirmDescriptor[] = [];
+  const skipped: Array<{ transaction_id?: number; reason: string }> = [];
+  const consumedInvoiceKeys = new Set<string>();
+
+  for (const tx of unconfirmed) {
+    const candidates = collectExactMatchCandidates(tx, saleIndex, purchaseIndex, threshold, consumedInvoiceKeys);
+    if (candidates.length !== 1) continue;
+    const match = candidates[0]!;
+
+    const crossCurrency =
+      (match.match_reasons.includes("exact_base_amount") ||
+        match.match_reasons.includes("cross_currency_conflict")) &&
+      !match.match_reasons.includes("exact_amount");
+    if (crossCurrency) {
+      skipped.push({
+        transaction_id: tx.id,
+        reason: `Cross-currency match (base-amount only) against ${match.type} #${match.id}; compute the correct distribution amount manually before confirming.`,
+      });
+      continue;
+    }
+
+    consumedInvoiceKeys.add(`${match.type.replace("_invoice", "")}:${match.id}`);
+    const clientsId = tx.clients_id ?? null;
+    const invoiceClientsId = match.clients_id ?? null;
+    confirms.push({
+      transactionId: tx.id!,
+      date: tx.date,
+      amount: tx.amount,
+      currency: transactionCurrency(tx),
+      clientsId,
+      invoiceType: match.type,
+      invoiceTable: match.type === "sale_invoice" ? "sale_invoices" : "purchase_invoices",
+      invoiceId: match.id,
+      invoiceNumber: match.number,
+      invoiceClientsId,
+      confidence: match.confidence,
+      needsClientUpdate: clientsId == null && invoiceClientsId != null,
+    });
+  }
+
+  return { totalUnconfirmed: unconfirmed.length, confirms, skipped };
+}
+
+function exactMatchFingerprint(projection: ExactMatchProjection, threshold: number): string {
+  return canonicalPlanJson({
+    kind: "exact_match_confirm",
+    min_confidence: threshold,
+    commands: projection.confirms.flatMap(descriptor => [
+      ...(descriptor.needsClientUpdate
+        ? [{
+            id: reconClientUpdateCommandId(descriptor.transactionId),
+            transaction_id: descriptor.transactionId,
+            set_clients_id: descriptor.invoiceClientsId,
+          }]
+        : []),
+      {
+        id: reconInvoiceConfirmCommandId(descriptor.transactionId),
+        transaction_id: descriptor.transactionId,
+        table: descriptor.invoiceTable,
+        invoice_id: descriptor.invoiceId,
+        amount: descriptor.amount,
+        currency: descriptor.currency,
+        expected_clients_id: descriptor.clientsId,
+      },
+    ]),
+    skipped: projection.skipped.map(row => ({ transaction_id: row.transaction_id, reason: row.reason })),
+  });
+}
+
+function exactMatchReviewCommands(projection: ExactMatchProjection): ReconciliationReviewCommand[] {
+  const commands: ReconciliationReviewCommand[] = [];
+  for (const descriptor of projection.confirms) {
+    if (descriptor.needsClientUpdate) {
+      commands.push({
+        id: reconClientUpdateCommandId(descriptor.transactionId),
+        category: RECON_UPDATE_CLIENT_CATEGORY,
+        reviewProjection: stripUndefinedDeep({
+          transaction_id: descriptor.transactionId,
+          set_clients_id: descriptor.invoiceClientsId,
+          from_invoice: descriptor.invoiceId,
+        }),
+      });
+    }
+    commands.push({
+      id: reconInvoiceConfirmCommandId(descriptor.transactionId),
+      category: RECON_CONFIRM_INVOICE_CATEGORY,
+      reviewProjection: stripUndefinedDeep({
+        transaction_id: descriptor.transactionId,
+        invoice_type: descriptor.invoiceType,
+        invoice_id: descriptor.invoiceId,
+        invoice_number: descriptor.invoiceNumber,
+        amount: descriptor.amount,
+        currency: descriptor.currency,
+        confidence: descriptor.confidence,
+      }),
+    });
+  }
+  return commands;
+}
+
+function issueExactMatchPlan(
+  runtimeSafetyContext: RuntimeSafetyContext,
+  projection: ExactMatchProjection,
+  threshold: number,
+): string {
+  const planInput = buildReconciliationExecutionPlanInput({
+    normalizedArgs: stripUndefinedDeep({ min_confidence: threshold }) as PlanRecord,
+    sourceIdentities: [],
+    liveSnapshot: { kind: "exact_match_confirm" },
+    reviewCommands: exactMatchReviewCommands(projection),
+    fingerprint: exactMatchFingerprint(projection, threshold),
+    counts: {
+      total_unconfirmed: projection.totalUnconfirmed,
+      would_confirm: projection.confirms.length,
+      skipped: projection.skipped.length,
+    },
+    totals: {},
+    exclusions: projection.skipped.map(row => stripUndefinedDeep({ transaction_id: row.transaction_id, reason: row.reason })),
+    reviews: [],
+  });
+  return runtimeSafetyContext.planStore.issue(BANK_RECONCILIATION_PLAN_DOMAIN, planInput);
+}
+
+function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjection): ReconciliationExecutionCommand[] {
+  const commands: ReconciliationExecutionCommand[] = [];
+  for (const descriptor of projection.confirms) {
+    if (descriptor.needsClientUpdate) {
+      commands.push({
+        id: reconClientUpdateCommandId(descriptor.transactionId),
+        category: RECON_UPDATE_CLIENT_CATEGORY,
+        prepare: async () => {
+          const fresh = await api.transactions.get(descriptor.transactionId);
+          if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
+          if (fresh.clients_id != null) return { outcome: "drift", error_code: "client_already_set" };
+          return { outcome: "ready" };
+        },
+        mutate: async () => {
+          try {
+            await api.transactions.update(descriptor.transactionId, { clients_id: descriptor.invoiceClientsId ?? undefined });
+            return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: descriptor.transactionId, outcome: "updated" }] };
+          } catch (err) {
+            if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
+            return { outcome: "failed", error_code: "client_update_failed", mutation_occurred: false };
+          }
+        },
+      });
+    }
+    commands.push({
+      id: reconInvoiceConfirmCommandId(descriptor.transactionId),
+      category: RECON_CONFIRM_INVOICE_CATEGORY,
+      prepare: async () => {
+        const fresh = await api.transactions.get(descriptor.transactionId);
+        if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
+        if (roundMoney(fresh.amount) !== roundMoney(descriptor.amount)) return { outcome: "drift", error_code: "amount_changed" };
+        if (transactionCurrency(fresh) !== descriptor.currency) return { outcome: "drift", error_code: "currency_changed" };
+        if (!descriptor.needsClientUpdate && (fresh.clients_id ?? null) !== descriptor.clientsId) {
+          return { outcome: "drift", error_code: "client_changed" };
+        }
+        return { outcome: "ready" };
+      },
+      mutate: async () => {
+        try {
+          await api.transactions.confirm(
+            descriptor.transactionId,
+            [{ related_table: descriptor.invoiceTable, related_id: descriptor.invoiceId, amount: descriptor.amount }],
+            { autoFixClientsId: false },
+          );
+          logAudit({
+            tool: "auto_confirm_exact_matches", action: "CONFIRMED", entity_type: "transaction",
+            entity_id: descriptor.transactionId,
+            summary: `Confirmed transaction ${descriptor.transactionId} against ${descriptor.invoiceType} #${descriptor.invoiceId} (${descriptor.invoiceNumber})`,
+            details: { amount: descriptor.amount, distributions: [{ related_table: descriptor.invoiceTable, related_id: descriptor.invoiceId, amount: descriptor.amount }] },
+          });
+          return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: descriptor.transactionId, outcome: "confirmed" }] };
+        } catch (err) {
+          if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
+          return { outcome: "failed", error_code: "confirm_failed", mutation_occurred: false };
+        }
+      },
+    });
+  }
+  return commands;
+}
+
+function renderExactMatchPayload(input: {
+  mode: "DRY_RUN" | "EXECUTED";
+  projection: ExactMatchProjection;
+  planHandle?: string;
+  executionReport?: PlanExecutionReport;
+}): Record<string, unknown> {
+  const { projection, mode } = input;
+  const dryRun = mode === "DRY_RUN";
+  const completedIds = new Set(input.executionReport?.command_partitions.completed.map(item => item.command_id) ?? []);
+
+  const results = projection.confirms.map(descriptor => {
+    const confirmed = completedIds.has(reconInvoiceConfirmCommandId(descriptor.transactionId));
+    return {
+      transaction_id: descriptor.transactionId,
+      amount: descriptor.amount,
+      date: descriptor.date,
+      match: { type: descriptor.invoiceType, id: descriptor.invoiceId, number: wrapUntrustedOcr(descriptor.invoiceNumber) ?? "", confidence: descriptor.confidence },
+      status: dryRun ? "would_confirm" : confirmed ? "confirmed" : "not_confirmed",
+    };
+  });
+
+  const errors: Array<{ transaction_id?: number; reason: string }> = projection.skipped.map(row => ({ ...row }));
+  if (!dryRun && input.executionReport) {
+    for (const descriptor of projection.confirms) {
+      if (!completedIds.has(reconInvoiceConfirmCommandId(descriptor.transactionId))) {
+        errors.push({ transaction_id: descriptor.transactionId, reason: `Confirmation not completed for transaction ${descriptor.transactionId}; see execution_report.` });
+      }
+    }
+  }
+
+  const autoConfirmed = dryRun ? projection.confirms.length : results.filter(row => row.status === "confirmed").length;
+  const summary = {
+    total_unconfirmed: projection.totalUnconfirmed,
+    auto_confirmed: autoConfirmed,
+    skipped: projection.skipped.length,
+    error_count: errors.length,
+  };
+
+  return {
+    mode,
+    summary,
+    total_unconfirmed: summary.total_unconfirmed,
+    auto_confirmed: summary.auto_confirmed,
+    skipped: summary.skipped,
+    results,
+    errors,
+    execution: buildBatchExecutionContract({
+      mode,
+      summary,
+      results,
+      errors,
+      ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
+    }),
+    ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
+  };
+}
+
+function buildInterAccountPayload(input: {
+  mode: "DRY_RUN" | "EXECUTED";
+  totalUnconfirmed: number;
+  invoiceInfo: { invoice_company_name?: string | null };
+  dimensionToIban: Map<number, string>;
+  dimensionToTitle: Map<number, string>;
+  matchedPairs: readonly unknown[];
+  matchedOneSided: readonly unknown[];
+  ambiguousPairs: readonly unknown[];
+  skippedAlreadyHandled: readonly unknown[];
+  ambiguousRefless: readonly unknown[];
+  crossCurrencyPairs: readonly unknown[];
+  errors: readonly unknown[];
+  planHandle?: string;
+  executionReport?: PlanExecutionReport;
+}): Record<string, unknown> {
+  const summary = {
+    total_unconfirmed: input.totalUnconfirmed,
+    matched_pairs: input.matchedPairs.length,
+    matched_one_sided: input.matchedOneSided.length,
+    skipped_ambiguous: input.ambiguousPairs.length,
+    skipped_already_handled: input.skippedAlreadyHandled.length,
+    needs_review_ambiguous_refless: input.ambiguousRefless.length,
+    needs_review_cross_currency: input.crossCurrencyPairs.length,
+    error_count: input.errors.length,
+  };
+  return {
+    mode: input.mode,
+    summary,
+    company_name: input.invoiceInfo.invoice_company_name,
+    total_unconfirmed: summary.total_unconfirmed,
+    matched_pairs: summary.matched_pairs,
+    matched_one_sided: summary.matched_one_sided,
+    skipped_ambiguous: summary.skipped_ambiguous,
+    skipped_already_handled: summary.skipped_already_handled,
+    needs_review_ambiguous_refless: summary.needs_review_ambiguous_refless,
+    needs_review_cross_currency: summary.needs_review_cross_currency,
+    own_bank_accounts: [...input.dimensionToIban.entries()].map(([dimId, iban]) => ({
+      accounts_dimensions_id: dimId,
+      iban,
+      title: input.dimensionToTitle.get(dimId),
+    })),
+    pairs: input.matchedPairs,
+    ambiguous_pairs: input.ambiguousPairs,
+    one_sided: input.matchedOneSided,
+    already_handled: input.skippedAlreadyHandled,
+    ambiguous_refless: input.ambiguousRefless,
+    cross_currency_review: input.crossCurrencyPairs,
+    errors: input.errors,
+    execution: buildBatchExecutionContract({
+      mode: input.mode,
+      summary,
+      results: [...input.matchedPairs, ...input.matchedOneSided],
+      skipped: [...input.ambiguousPairs, ...input.skippedAlreadyHandled, ...input.ambiguousRefless, ...input.crossCurrencyPairs],
+      errors: [...input.errors],
+      ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
+    }),
+    ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
+  };
+}
+
 export function registerBankReconciliationTools(
   server: McpServer,
   api: ApiContext,
@@ -374,6 +788,7 @@ export function registerBankReconciliationTools(
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): void {
   assertRuntimeSafetyContext(_runtimeSafetyContext);
+  const runtimeSafetyContext = _runtimeSafetyContext;
   const handlers = new Map<string, BankReconciliationToolHandler>();
 
   // Constituents fully covered by the merged reconcile_bank_transactions modes
@@ -545,181 +960,74 @@ export function registerBankReconciliationTools(
   );
 
   registerCapturedTool("auto_confirm_exact_matches",
-    "Batch-confirm bank transactions with a single high-confidence match (>=90). DRY RUN by default — set execute=true to confirm.",
+    "Batch-confirm bank transactions with a single high-confidence match (>=90). DRY RUN by default — the dry run returns a plan_handle enumerating the reviewed confirms; execute=true REQUIRES that handle and confirms exactly the reviewed set.",
     {
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),
       min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence (default 90)"),
+      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for execute=true."),
     },
     { ...batch, title: "Auto-Confirm Bank Matches" },
-    async ({ execute, min_confidence }) => {
+    async ({ execute, min_confidence, plan_handle }) => {
       const threshold = min_confidence ?? 90;
-      const dryRun = execute !== true;
 
-      // Get all unconfirmed transactions across pages
       const allTx = await api.transactions.listAll();
       const unconfirmed = allTx.filter(isProjectTransaction);
+      const total = unconfirmed.length;
+      for (let i = 0; i < total; i++) await reportProgress(i, total);
 
       const allSales = await api.saleInvoices.listAll();
       const openSales = allSales.filter((inv: SaleInvoice) =>
         inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
-
       const allPurchases = await api.purchaseInvoices.listAll();
       const openPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
         inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
       );
 
-      const saleIndex = buildInvoiceIndex(openSales);
-      const purchaseIndex = buildInvoiceIndex(openPurchases);
-      const confirmed = [];
-      const skipped = [];
-      // Track consumed invoices to avoid double-matching (keyed by type:id to prevent cross-table collisions)
-      const consumedInvoiceKeys = new Set<string>();
-      const total = unconfirmed.length;
+      const projection = computeExactMatchProjection(unconfirmed, openSales, openPurchases, threshold);
 
-      for (let i = 0; i < unconfirmed.length; i++) {
-        const tx = unconfirmed[i]!;
-        await reportProgress(i, total);
-        const candidates: MatchCandidate[] = [];
-        const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
-
-        if (allowSaleInvoices) {
-          for (const inv of getIndexedCandidates(saleIndex, tx.ref_number, tx.amount, tx.base_amount)) {
-            if (inv.payment_status === "PARTIALLY_PAID") continue;
-            const invKey = `sale:${inv.id!}`;
-            if (consumedInvoiceKeys.has(invKey)) continue;
-            const { confidence, reasons } = matchScore(tx, inv, tx.amount);
-            if (confidence >= threshold) {
-              candidates.push({
-                type: "sale_invoice",
-                id: inv.id!,
-                number: inv.number ?? "",
-                client_name: inv.client_name ?? "",
-                clients_id: inv.clients_id,
-                gross_price: inv.gross_price ?? 0,
-                payment_status: inv.payment_status ?? "NOT_PAID",
-                partially_paid_warning: false,
-                confidence,
-                match_reasons: reasons,
-              });
-            }
-          }
-        }
-
-        if (allowPurchaseInvoices) {
-          for (const inv of getIndexedCandidates(purchaseIndex, tx.ref_number, tx.amount, tx.base_amount)) {
-            if (inv.payment_status === "PARTIALLY_PAID") continue;
-            const invKey = `purchase:${inv.id!}`;
-            if (consumedInvoiceKeys.has(invKey)) continue;
-            const { confidence, reasons } = matchScore(tx, inv, tx.amount);
-            if (confidence >= threshold) {
-              candidates.push({
-                type: "purchase_invoice",
-                id: inv.id!,
-                number: inv.number ?? "",
-                client_name: inv.client_name ?? "",
-                clients_id: inv.clients_id,
-                gross_price: inv.gross_price ?? 0,
-                payment_status: inv.payment_status ?? "NOT_PAID",
-                partially_paid_warning: false,
-                confidence,
-                match_reasons: reasons,
-              });
-            }
-          }
-        }
-
-        // Only auto-confirm if exactly one high-confidence match
-        if (candidates.length === 1) {
-          const match = candidates[0]!;
-          // Cross-currency skip: if the match survived only on base-currency
-          // evidence, tx.amount is in a different currency than the invoice
-          // gross. Distributing tx.amount as-is books the wrong figure — same
-          // guard that reconcile_transactions applies. Surface for manual review.
-          const crossCurrency =
-            (match.match_reasons.includes("exact_base_amount") ||
-              match.match_reasons.includes("cross_currency_conflict")) &&
-            !match.match_reasons.includes("exact_amount");
-          if (crossCurrency) {
-            skipped.push({
-              transaction_id: tx.id,
-              reason: `Cross-currency match (base-amount only) against ${match.type} #${match.id}; compute the correct distribution amount manually before confirming.`,
-            });
-            continue;
-          }
-          const invoiceKey = `${match.type.replace("_invoice", "")}:${match.id}`;
-          const table = match.type === "sale_invoice" ? "sale_invoices" : "purchase_invoices";
-          // Always claim the invoice on attempt so dry-run preview matches execute
-          // behaviour and a single invoice is never auto-matched against more than
-          // one transaction within one call (even if confirm later fails).
-          consumedInvoiceKeys.add(invoiceKey);
-          if (dryRun) {
-            confirmed.push({
-              transaction_id: tx.id,
-              amount: tx.amount,
-              date: tx.date,
-              match: { type: match.type, id: match.id, number: match.number, confidence: match.confidence },
-              status: "would_confirm",
-            });
-          } else {
-            try {
-              await api.transactions.confirm(tx.id!, [{
-                related_table: table,
-                related_id: match.id,
-                amount: tx.amount,
-              }]);
-              logAudit({
-                tool: "auto_confirm_exact_matches", action: "CONFIRMED", entity_type: "transaction",
-                entity_id: tx.id!,
-                summary: `Confirmed transaction ${tx.id} against ${match.type} #${match.id} (${match.number})`,
-                details: { amount: tx.amount, distributions: [{ related_table: table, related_id: match.id, amount: tx.amount }] },
-              });
-              confirmed.push({
-                transaction_id: tx.id,
-                amount: tx.amount,
-                match: { type: match.type, id: match.id, number: match.number },
-                status: "confirmed",
-              });
-            } catch (err: unknown) {
-              skipped.push({ transaction_id: tx.id, reason: err instanceof Error ? err.message : String(err) });
-            }
-          }
-        }
+      if (execute !== true) {
+        // DRY RUN: issue an immutable execution plan the operator reviews and
+        // approves. The plan handle is NOT approval — it only lets the reviewed
+        // confirm set be executed once, unchanged.
+        const planHandle = issueExactMatchPlan(runtimeSafetyContext, projection, threshold);
+        return {
+          content: [{ type: "text", text: toMcpJson(renderExactMatchPayload({ mode: "DRY_RUN", projection, planHandle })) }],
+        };
       }
 
-      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
-      const summary = {
-        total_unconfirmed: unconfirmed.length,
-        auto_confirmed: confirmed.length,
-        skipped: skipped.length,
-        error_count: skipped.length,
-      };
+      // EXECUTE: consume the reviewed plan, re-derive the projection, refuse to
+      // mutate on any drift, and drive the enumerated confirms (and the explicit
+      // client-update commands) through the shared plan-execution tracker.
+      if (typeof plan_handle !== "string" || plan_handle.length === 0) {
+        return reconPlanError("plan_handle_required",
+          "A reviewed execution-plan handle from the reconciliation dry run is required to confirm matches.");
+      }
+      let storedPlan;
+      try {
+        storedPlan = runtimeSafetyContext.planStore.consume(plan_handle, BANK_RECONCILIATION_PLAN_DOMAIN);
+      } catch (error) {
+        if (error instanceof PlanStoreError) return reconPlanError(error.code, error.message);
+        throw error;
+      }
 
+      const storedFingerprint = isRecord(storedPlan.privatePayload) ? storedPlan.privatePayload.fingerprint : undefined;
+      if (typeof storedFingerprint !== "string" || storedFingerprint !== exactMatchFingerprint(projection, threshold)) {
+        return reconPlanError("plan_drift", "The reviewed reconciliation plan no longer matches the current ledger.");
+      }
+      if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(stripUndefinedDeep({ min_confidence: threshold }))) {
+        return reconPlanError("plan_drift", "The reconciliation arguments changed since the plan was reviewed.");
+      }
+
+      const executionReport = await executeReconciliationCommands(buildExactMatchCommands(api, projection));
       return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            mode,
-            summary,
-            total_unconfirmed: summary.total_unconfirmed,
-            auto_confirmed: summary.auto_confirmed,
-            skipped: summary.skipped,
-            results: confirmed,
-            errors: skipped,
-            execution: buildBatchExecutionContract({
-              mode,
-              summary,
-              results: confirmed,
-              errors: skipped,
-            }),
-          }),
-        }],
+        content: [{ type: "text", text: toMcpJson(renderExactMatchPayload({ mode: "EXECUTED", projection, executionReport })) }],
       };
     }
   );
 
   registerCapturedTool("reconcile_inter_account_transfers",
-    "Match own-account bank transfers. DUPLICATE-SAFE: skips transfers already journalized from the other side. DRY RUN by default; execute=true confirms. For one-sided transfers with 2+ possible targets, pass target_accounts_dimensions_id.",
+    "Match own-account bank transfers. DUPLICATE-SAFE: skips transfers already journalized from the other side. DRY RUN by default returns a plan_handle enumerating the reviewed confirms/deletes; execute=true REQUIRES that handle and runs exactly the reviewed set. For one-sided transfers with 2+ possible targets, pass target_accounts_dimensions_id.",
     {
       execute: z.boolean().optional().describe("Actually confirm matched pairs (default false = dry run)"),
       max_date_gap: z.number().int().min(0).max(MAX_INTER_ACCOUNT_DATE_GAP_DAYS).optional()
@@ -728,11 +1036,31 @@ export function registerBankReconciliationTools(
         "For one-sided transfers (no matching D/C pair), specify the target bank account dimension ID. " +
         "Required when there are 3+ bank accounts and counterparty IBAN is missing."
       ),
+      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for execute=true."),
     },
     { ...batch, title: "Reconcile Inter-Account Transfers" },
-    async ({ execute, max_date_gap, target_accounts_dimensions_id }) => {
+    async ({ execute, max_date_gap, target_accounts_dimensions_id, plan_handle }) => {
       const dryRun = execute !== true;
       const maxGap = validateInterAccountDateGap(max_date_gap);
+
+      // Intended confirm/delete/client-update actions collected during the
+      // read-only matching projection. The dry run enumerates these into an
+      // immutable plan; execute re-derives the same list, refuses on any drift,
+      // and drives them through the shared plan-execution tracker.
+      interface InterAccountConfirmAction {
+        confirmedTxId: number;
+        confirmedClientsId: number | null;
+        confirmedNominalAmount: number;
+        confirmedCurrency: string;
+        targetDimensionId: number;
+        distributionAmount: number;
+        deleteTxId?: number;
+        auditSummary: string;
+        auditDetails: Record<string, unknown>;
+        deleteAuditSummary?: string;
+        deleteAuditDetails?: Record<string, unknown>;
+      }
+      const confirmActions: InterAccountConfirmAction[] = [];
 
       const [allTx, bankAccounts, accountDimensions, invoiceInfo] = await Promise.all([
         api.transactions.listAll(),
@@ -895,21 +1223,22 @@ export function registerBankReconciliationTools(
         );
       }
 
-      // Helper: ensure clients_id is set (API requires it for confirmation)
-      let resolvedClientsId: number | undefined;
-      async function ensureClientsId(txId: number): Promise<void> {
-        const tx = await api.transactions.get(txId);
-        if (tx.clients_id) return;
-
-        if (!resolvedClientsId && companyName) {
+      // Resolve the company's own client record once (needed because the API
+      // requires clients_id on confirmation, and own-account transfers have the
+      // company as counterparty). The result binds the explicit client-update
+      // command; it is a read-only lookup, run identically in dry run and
+      // execute so the plan fingerprint is deterministic.
+      let companyClientsIdResolved = false;
+      let resolvedCompanyClientsId: number | null = null;
+      async function resolveCompanyClientsId(): Promise<number | null> {
+        if (companyClientsIdResolved) return resolvedCompanyClientsId;
+        companyClientsIdResolved = true;
+        if (companyName) {
           const clients = await api.clients.findByName(invoiceInfo.invoice_company_name ?? "");
           const exact = clients.find(c => normalizeCompanyName(c.name) === companyName);
-          resolvedClientsId = exact?.id;
+          resolvedCompanyClientsId = exact?.id ?? null;
         }
-
-        if (resolvedClientsId) {
-          await api.transactions.update(txId, { clients_id: resolvedClientsId });
-        }
+        return resolvedCompanyClientsId;
       }
 
       // Helper: build distribution with accounts_id + accounts_dimensions_id
@@ -1264,64 +1593,36 @@ export function registerBankReconciliationTools(
         // confirming it in this same loop was the bug that motivated this change.
         // Delete the mirror after the confirm succeeds; on delete failure the
         // outgoing journal is still correct, only the orphan PROJECT row remains.
-        if (dryRun) {
-          matchedPairs.push({
-            outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id!,
-            amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
-            from_account: fromTitle, to_account: toTitle,
-            from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
-            description_out: wrapUntrustedOcr(txOut.description ?? undefined), description_in: wrapUntrustedOcr(txIn.description ?? undefined),
-            confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons,
-            status: "would_confirm", incoming_action: "would_delete_duplicate",
-          });
-        } else {
-          try {
-            await ensureClientsId(txOut.id);
-            const confirmResult = await api.transactions.confirm(txOut.id, [buildAccountDistribution(txIn.accounts_dimensions_id, txOut.amount)]);
-            recordInterAccountJournal(
-              txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, comparableTransactionAmount(txOut), txOut.date,
-              confirmResult?.created_object_id, txOut.bank_ref_number ?? txOut.ref_number,
-            );
-            logAudit({
-              tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
-              entity_id: txOut.id,
-              summary: `Confirmed inter-account outgoing ${txOut.amount} EUR (${fromTitle} -> ${toTitle})`,
-              details: { amount: txOut.amount, date: txOut.date, paired_incoming_id: txIn.id },
-            });
-
-            let incomingAction: "deleted" | "orphan" = "deleted";
-            let incomingNote: string | undefined;
-            try {
-              await api.transactions.delete(txIn.id!);
-              logAudit({
-                tool: "reconcile_inter_account_transfers", action: "DELETED", entity_type: "transaction",
-                entity_id: txIn.id!,
-                summary: `Deleted duplicate incoming row ${txIn.id} after confirming outgoing ${txOut.id} (${fromTitle} -> ${toTitle})`,
-                details: { amount: txIn.amount, date: txIn.date, paired_outgoing_id: txOut.id },
-              });
-            } catch (delErr: unknown) {
-              incomingAction = "orphan";
-              incomingNote = `Outgoing ${txOut.id} was confirmed, but deleting the duplicate incoming PROJECT row ${txIn.id} failed: ${delErr instanceof Error ? delErr.message : String(delErr)}. Manually delete ${txIn.id} to avoid double-booking if it is later confirmed.`;
-              errors.push({ transaction_ids: [txOut.id, txIn.id!], reason: incomingNote });
-            }
-
-            matchedPairs.push({
-              outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id!,
-              amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
-              from_account: fromTitle, to_account: toTitle,
-              from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
-              description_out: wrapUntrustedOcr(txOut.description ?? undefined), description_in: wrapUntrustedOcr(txIn.description ?? undefined),
-              confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons,
-              status: "confirmed", incoming_action: incomingAction,
-              ...(incomingNote ? { incoming_note: incomingNote } : {}),
-            });
-          } catch (err: unknown) {
-            errors.push({
-              transaction_ids: [txOut.id, txIn.id!],
-              reason: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
+        // Projection: enumerate the confirm (+ mirror delete) this pair would
+        // run. The in-run journal is recorded now so a later leg of the same
+        // physical transfer is deduped identically in dry run and execute.
+        matchedPairs.push({
+          outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id!,
+          amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
+          from_account: fromTitle, to_account: toTitle,
+          from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
+          description_out: wrapUntrustedOcr(txOut.description ?? undefined), description_in: wrapUntrustedOcr(txIn.description ?? undefined),
+          confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons,
+          status: "would_confirm", incoming_action: "would_delete_duplicate",
+        });
+        confirmActions.push({
+          confirmedTxId: txOut.id,
+          confirmedClientsId: txOut.clients_id ?? null,
+          confirmedNominalAmount: txOut.amount,
+          confirmedCurrency: transactionCurrency(txOut),
+          targetDimensionId: txIn.accounts_dimensions_id,
+          distributionAmount: txOut.amount,
+          deleteTxId: txIn.id!,
+          auditSummary: `Confirmed inter-account outgoing ${txOut.amount} EUR (${fromTitle} -> ${toTitle})`,
+          auditDetails: { amount: txOut.amount, date: txOut.date, paired_incoming_id: txIn.id },
+          deleteAuditSummary: `Deleted duplicate incoming row ${txIn.id} after confirming outgoing ${txOut.id} (${fromTitle} -> ${toTitle})`,
+          deleteAuditDetails: { amount: txIn.amount, date: txIn.date, paired_outgoing_id: txOut.id },
+        });
+        recordInterAccountJournal(
+          txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, comparableTransactionAmount(txOut), txOut.date,
+          undefined, txOut.bank_ref_number ?? txOut.ref_number,
+        );
+        if (txOut.clients_id == null) await resolveCompanyClientsId();
       }
 
       // --- Phase 1b: reciprocal same-type pairs with strong mutual target evidence ---
@@ -1473,84 +1774,42 @@ export function registerBankReconciliationTools(
         // Same single-confirm policy as Phase 1: one journal per pair. The
         // reciprocal same-type counterpart is a duplicate record of the same
         // physical movement, so delete it after tx confirms successfully.
-        if (dryRun) {
-          matchedPairs.push({
-            outgoing_transaction_id: tx.id,
-            incoming_transaction_id: counterpart.id,
-            amount: tx.amount,
-            date_out: tx.date,
-            date_in: counterpart.date,
-            from_account: fromTitle,
-            to_account: toTitle,
-            from_dimension_id: tx.accounts_dimensions_id,
-            to_dimension_id: counterpart.accounts_dimensions_id,
-            description_out: wrapUntrustedOcr(tx.description ?? undefined),
-            description_in: wrapUntrustedOcr(counterpart.description ?? undefined),
-            confidence: bestCandidate.confidence,
-            match_reasons: bestCandidate.reasons,
-            status: "would_confirm",
-            incoming_action: "would_delete_duplicate",
-          });
-        } else {
-          try {
-            await ensureClientsId(tx.id);
-            const confirmResult = await api.transactions.confirm(tx.id, [buildAccountDistribution(counterpart.accounts_dimensions_id, tx.amount)]);
-            recordInterAccountJournal(
-              tx.accounts_dimensions_id, counterpart.accounts_dimensions_id, comparableTransactionAmount(tx), tx.date,
-              confirmResult?.created_object_id, tx.bank_ref_number ?? tx.ref_number,
-            );
-            logAudit({
-              tool: "reconcile_inter_account_transfers",
-              action: "CONFIRMED",
-              entity_type: "transaction",
-              entity_id: tx.id,
-              summary: `Confirmed reciprocal same-type inter-account transfer ${tx.amount} EUR (${fromTitle} -> ${toTitle})`,
-              details: { amount: tx.amount, date: tx.date, paired_counterpart_id: counterpart.id },
-            });
-
-            let incomingAction: "deleted" | "orphan" = "deleted";
-            let incomingNote: string | undefined;
-            try {
-              await api.transactions.delete(counterpart.id);
-              logAudit({
-                tool: "reconcile_inter_account_transfers",
-                action: "DELETED",
-                entity_type: "transaction",
-                entity_id: counterpart.id,
-                summary: `Deleted reciprocal same-type duplicate row ${counterpart.id} after confirming ${tx.id} (${fromTitle} -> ${toTitle})`,
-                details: { amount: counterpart.amount, date: counterpart.date, paired_confirmed_id: tx.id },
-              });
-            } catch (delErr: unknown) {
-              incomingAction = "orphan";
-              incomingNote = `Transaction ${tx.id} was confirmed, but deleting the duplicate counterpart PROJECT row ${counterpart.id} failed: ${delErr instanceof Error ? delErr.message : String(delErr)}. Manually delete ${counterpart.id} to avoid double-booking if it is later confirmed.`;
-              errors.push({ transaction_ids: [tx.id, counterpart.id], reason: incomingNote });
-            }
-
-            matchedPairs.push({
-              outgoing_transaction_id: tx.id,
-              incoming_transaction_id: counterpart.id,
-              amount: tx.amount,
-              date_out: tx.date,
-              date_in: counterpart.date,
-              from_account: fromTitle,
-              to_account: toTitle,
-              from_dimension_id: tx.accounts_dimensions_id,
-              to_dimension_id: counterpart.accounts_dimensions_id,
-              description_out: wrapUntrustedOcr(tx.description ?? undefined),
-              description_in: wrapUntrustedOcr(counterpart.description ?? undefined),
-              confidence: bestCandidate.confidence,
-              match_reasons: bestCandidate.reasons,
-              status: "confirmed",
-              incoming_action: incomingAction,
-              ...(incomingNote ? { incoming_note: incomingNote } : {}),
-            });
-          } catch (err: unknown) {
-            errors.push({
-              transaction_ids: [tx.id, counterpart.id],
-              reason: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
+        // Projection (same single-confirm policy as Phase 1).
+        matchedPairs.push({
+          outgoing_transaction_id: tx.id,
+          incoming_transaction_id: counterpart.id,
+          amount: tx.amount,
+          date_out: tx.date,
+          date_in: counterpart.date,
+          from_account: fromTitle,
+          to_account: toTitle,
+          from_dimension_id: tx.accounts_dimensions_id,
+          to_dimension_id: counterpart.accounts_dimensions_id,
+          description_out: wrapUntrustedOcr(tx.description ?? undefined),
+          description_in: wrapUntrustedOcr(counterpart.description ?? undefined),
+          confidence: bestCandidate.confidence,
+          match_reasons: bestCandidate.reasons,
+          status: "would_confirm",
+          incoming_action: "would_delete_duplicate",
+        });
+        confirmActions.push({
+          confirmedTxId: tx.id,
+          confirmedClientsId: tx.clients_id ?? null,
+          confirmedNominalAmount: tx.amount,
+          confirmedCurrency: transactionCurrency(tx),
+          targetDimensionId: counterpart.accounts_dimensions_id,
+          distributionAmount: tx.amount,
+          deleteTxId: counterpart.id,
+          auditSummary: `Confirmed reciprocal same-type inter-account transfer ${tx.amount} EUR (${fromTitle} -> ${toTitle})`,
+          auditDetails: { amount: tx.amount, date: tx.date, paired_counterpart_id: counterpart.id },
+          deleteAuditSummary: `Deleted reciprocal same-type duplicate row ${counterpart.id} after confirming ${tx.id} (${fromTitle} -> ${toTitle})`,
+          deleteAuditDetails: { amount: counterpart.amount, date: counterpart.date, paired_confirmed_id: tx.id },
+        });
+        recordInterAccountJournal(
+          tx.accounts_dimensions_id, counterpart.accounts_dimensions_id, comparableTransactionAmount(tx), tx.date,
+          undefined, tx.bank_ref_number ?? tx.ref_number,
+        );
+        if (tx.clients_id == null) await resolveCompanyClientsId();
       }
 
       // --- Phase 2: one-sided transfers (counterparty = company name or own IBAN) ---
@@ -1611,93 +1870,229 @@ export function registerBankReconciliationTools(
 
         consumedTxIds.add(tx.id);
 
-        if (dryRun) {
-          matchedOneSided.push({
-            transaction_id: tx.id, type: tx.type, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
-            source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
-            target_account: targetTitle, target_dimension_id: targetDimension,
-            description: wrapUntrustedOcr(tx.description ?? undefined), counterparty_name: wrapUntrustedOcr(tx.bank_account_name ?? undefined),
-            confidence: Math.min(confidence, 100), match_reasons: reasons, status: "would_confirm",
+        // Projection: enumerate the one-sided confirm and record the in-run
+        // journal so the opposite leg of the same transfer is deduped.
+        matchedOneSided.push({
+          transaction_id: tx.id, type: tx.type, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
+          source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
+          target_account: targetTitle, target_dimension_id: targetDimension,
+          description: wrapUntrustedOcr(tx.description ?? undefined), counterparty_name: wrapUntrustedOcr(tx.bank_account_name ?? undefined),
+          confidence: Math.min(confidence, 100), match_reasons: reasons, status: "would_confirm",
+        });
+        confirmActions.push({
+          confirmedTxId: tx.id,
+          confirmedClientsId: tx.clients_id ?? null,
+          confirmedNominalAmount: tx.amount,
+          confirmedCurrency: transactionCurrency(tx),
+          targetDimensionId: targetDimension,
+          distributionAmount: amountEur,
+          auditSummary: `Confirmed one-sided inter-account transfer ${amountEur} EUR (${sourceTitle} -> ${targetTitle})`,
+          auditDetails: { amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date },
+        });
+        recordInterAccountJournal(
+          tx.accounts_dimensions_id, targetDimension, amountEur, tx.date,
+          undefined, tx.bank_ref_number ?? tx.ref_number,
+        );
+        if (tx.clients_id == null) await resolveCompanyClientsId();
+      }
+
+      // --- Plan binding: issue on dry run, consume + execute on the real run ---
+      const companyClientsId = await resolveCompanyClientsId();
+      const planCommandProjections = confirmActions.flatMap(action => {
+        const needsClientUpdate = action.confirmedClientsId == null && companyClientsId != null;
+        return [
+          ...(needsClientUpdate
+            ? [{ id: reconClientUpdateCommandId(action.confirmedTxId), category: RECON_UPDATE_CLIENT_CATEGORY, transaction_id: action.confirmedTxId, set_clients_id: companyClientsId }]
+            : []),
+          { id: reconTransferConfirmCommandId(action.confirmedTxId), category: RECON_CONFIRM_TRANSFER_CATEGORY, transaction_id: action.confirmedTxId, target_dimension_id: action.targetDimensionId, amount: action.distributionAmount, currency: action.confirmedCurrency },
+          ...(action.deleteTxId !== undefined
+            ? [{ id: reconDeleteDuplicateCommandId(action.deleteTxId), category: RECON_DELETE_DUPLICATE_CATEGORY, transaction_id: action.deleteTxId }]
+            : []),
+        ];
+      });
+      const interAccountNormalizedArgs = stripUndefinedDeep({
+        max_date_gap: maxGap,
+        target_accounts_dimensions_id,
+      }) as PlanRecord;
+      const interAccountFingerprint = canonicalPlanJson({
+        kind: "inter_account",
+        normalized_args: interAccountNormalizedArgs,
+        commands: planCommandProjections.map(command => ({ ...command, category: undefined })),
+        already_handled: skippedAlreadyHandled.map(row => ({ transaction_id: row.transaction_id, journal: row.existing_journal_id })),
+        ambiguous_pairs: ambiguousPairs.map(row => ({ outgoing: row.outgoing_transaction_id, candidates: row.candidate_incoming_transaction_ids })),
+        ambiguous_refless: ambiguousRefless.map(row => ({ transaction_ids: row.transaction_ids })),
+        cross_currency: crossCurrencyPairs.map(row => ({ transaction_ids: row.transaction_ids })),
+      });
+
+      if (!dryRun) {
+        if (typeof plan_handle !== "string" || plan_handle.length === 0) {
+          return reconPlanError("plan_handle_required",
+            "A reviewed execution-plan handle from the inter-account dry run is required to confirm transfers.");
+        }
+        let storedPlan;
+        try {
+          storedPlan = runtimeSafetyContext.planStore.consume(plan_handle, BANK_RECONCILIATION_PLAN_DOMAIN);
+        } catch (error) {
+          if (error instanceof PlanStoreError) return reconPlanError(error.code, error.message);
+          throw error;
+        }
+        const storedFingerprint = isRecord(storedPlan.privatePayload) ? storedPlan.privatePayload.fingerprint : undefined;
+        if (typeof storedFingerprint !== "string" || storedFingerprint !== interAccountFingerprint) {
+          return reconPlanError("plan_drift", "The reviewed inter-account plan no longer matches the current ledger.");
+        }
+        if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(interAccountNormalizedArgs)) {
+          return reconPlanError("plan_drift", "The inter-account arguments changed since the plan was reviewed.");
+        }
+
+        const commands: ReconciliationExecutionCommand[] = [];
+        for (const action of confirmActions) {
+          const needsClientUpdate = action.confirmedClientsId == null && companyClientsId != null;
+          if (needsClientUpdate) {
+            commands.push({
+              id: reconClientUpdateCommandId(action.confirmedTxId),
+              category: RECON_UPDATE_CLIENT_CATEGORY,
+              prepare: async () => {
+                const fresh = await api.transactions.get(action.confirmedTxId);
+                if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
+                if (fresh.clients_id != null) return { outcome: "drift", error_code: "client_already_set" };
+                return { outcome: "ready" };
+              },
+              mutate: async () => {
+                try {
+                  await api.transactions.update(action.confirmedTxId, { clients_id: companyClientsId ?? undefined });
+                  return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: action.confirmedTxId, outcome: "updated" }] };
+                } catch (err) {
+                  if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
+                  return { outcome: "failed", error_code: "client_update_failed", mutation_occurred: false };
+                }
+              },
+            });
+          }
+          commands.push({
+            id: reconTransferConfirmCommandId(action.confirmedTxId),
+            category: RECON_CONFIRM_TRANSFER_CATEGORY,
+            prepare: async () => {
+              const fresh = await api.transactions.get(action.confirmedTxId);
+              if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
+              if (roundMoney(fresh.amount) !== roundMoney(action.confirmedNominalAmount)) return { outcome: "drift", error_code: "amount_changed" };
+              if (transactionCurrency(fresh) !== action.confirmedCurrency) return { outcome: "drift", error_code: "currency_changed" };
+              return { outcome: "ready" };
+            },
+            mutate: async () => {
+              let distribution;
+              try {
+                distribution = buildAccountDistribution(action.targetDimensionId, action.distributionAmount);
+              } catch {
+                return { outcome: "failed", error_code: "distribution_unresolvable", mutation_occurred: false };
+              }
+              try {
+                await api.transactions.confirm(action.confirmedTxId, [distribution], { autoFixClientsId: false });
+                logAudit({
+                  tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
+                  entity_id: action.confirmedTxId,
+                  summary: action.auditSummary,
+                  details: action.auditDetails,
+                });
+                return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: action.confirmedTxId, outcome: "confirmed" }] };
+              } catch (err) {
+                if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
+                return { outcome: "failed", error_code: "confirm_failed", mutation_occurred: false };
+              }
+            },
           });
-        } else {
-          try {
-            await ensureClientsId(tx.id);
-            const confirmResult = await api.transactions.confirm(tx.id, [buildAccountDistribution(targetDimension, amountEur)]);
-            // Record the new journal so the opposite leg of this same transfer,
-            // if still unconfirmed later in this run, is detected as already
-            // journalized instead of being confirmed into a duplicate.
-            recordInterAccountJournal(
-              tx.accounts_dimensions_id, targetDimension, amountEur, tx.date,
-              confirmResult?.created_object_id, tx.bank_ref_number ?? tx.ref_number,
-            );
-            logAudit({
-              tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
-              entity_id: tx.id,
-              summary: `Confirmed one-sided inter-account transfer ${amountEur} EUR (${sourceTitle} -> ${targetTitle})`,
-              details: { amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date },
-            });
-            matchedOneSided.push({
-              transaction_id: tx.id, type: tx.type, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
-              source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
-              target_account: targetTitle, target_dimension_id: targetDimension,
-              description: wrapUntrustedOcr(tx.description ?? undefined), counterparty_name: wrapUntrustedOcr(tx.bank_account_name ?? undefined),
-              confidence: Math.min(confidence, 100), match_reasons: reasons, status: "confirmed",
-            });
-          } catch (err: unknown) {
-            errors.push({
-              transaction_ids: [tx.id],
-              reason: err instanceof Error ? err.message : String(err),
+          if (action.deleteTxId !== undefined) {
+            const deleteTxId = action.deleteTxId;
+            commands.push({
+              id: reconDeleteDuplicateCommandId(deleteTxId),
+              category: RECON_DELETE_DUPLICATE_CATEGORY,
+              prepare: async () => {
+                const fresh = await api.transactions.get(deleteTxId);
+                if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "duplicate_not_project" };
+                return { outcome: "ready" };
+              },
+              mutate: async () => {
+                try {
+                  await api.transactions.delete(deleteTxId);
+                  logAudit({
+                    tool: "reconcile_inter_account_transfers", action: "DELETED", entity_type: "transaction",
+                    entity_id: deleteTxId,
+                    summary: action.deleteAuditSummary ?? `Deleted duplicate mirror row ${deleteTxId} after confirming ${action.confirmedTxId}`,
+                    details: action.deleteAuditDetails ?? { paired_confirmed_id: action.confirmedTxId },
+                  });
+                  return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: deleteTxId, outcome: "deleted" }] };
+                } catch (err) {
+                  if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
+                  return { outcome: "failed", error_code: "delete_failed", mutation_occurred: false };
+                }
+              },
             });
           }
         }
+
+        const executionReport = await executeReconciliationCommands(commands);
+        const completedIds = new Set(executionReport.command_partitions.completed.map(item => item.command_id));
+        for (const pair of matchedPairs) {
+          const confirmed = completedIds.has(reconTransferConfirmCommandId(pair.outgoing_transaction_id));
+          const deleted = completedIds.has(reconDeleteDuplicateCommandId(pair.incoming_transaction_id));
+          pair.status = confirmed ? "confirmed" : "not_confirmed";
+          if (deleted) {
+            pair.incoming_action = "deleted";
+          } else if (confirmed) {
+            // Confirm succeeded but the mirror delete did not complete — the
+            // outgoing journal is correct, only the duplicate PROJECT row remains.
+            pair.incoming_action = "orphan";
+            pair.incoming_note = `Transaction ${pair.outgoing_transaction_id} was confirmed, but deleting the duplicate PROJECT row ${pair.incoming_transaction_id} did not complete. Manually delete ${pair.incoming_transaction_id} to avoid double-booking if it is later confirmed. See execution_report for the stop reason.`;
+            errors.push({ transaction_ids: [pair.outgoing_transaction_id, pair.incoming_transaction_id], reason: pair.incoming_note });
+          } else {
+            pair.incoming_action = "would_delete_duplicate";
+          }
+        }
+        for (const single of matchedOneSided) {
+          single.status = completedIds.has(reconTransferConfirmCommandId(single.transaction_id)) ? "confirmed" : "not_confirmed";
+        }
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson(buildInterAccountPayload({
+              mode: "EXECUTED", totalUnconfirmed: unconfirmed.length, invoiceInfo, dimensionToIban, dimensionToTitle,
+              matchedPairs, matchedOneSided, ambiguousPairs, skippedAlreadyHandled,
+              ambiguousRefless, crossCurrencyPairs, errors, executionReport,
+            })),
+          }],
+        };
       }
 
-      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
-      const summary = {
-        total_unconfirmed: unconfirmed.length,
-        matched_pairs: matchedPairs.length,
-        matched_one_sided: matchedOneSided.length,
-        skipped_ambiguous: ambiguousPairs.length,
-        skipped_already_handled: skippedAlreadyHandled.length,
-        needs_review_ambiguous_refless: ambiguousRefless.length,
-        needs_review_cross_currency: crossCurrencyPairs.length,
-        error_count: errors.length,
-      };
+      const planHandle = runtimeSafetyContext.planStore.issue(
+        BANK_RECONCILIATION_PLAN_DOMAIN,
+        buildReconciliationExecutionPlanInput({
+          normalizedArgs: interAccountNormalizedArgs,
+          sourceIdentities: [],
+          liveSnapshot: { kind: "inter_account" },
+          reviewCommands: planCommandProjections.map(command => ({
+            id: command.id,
+            category: command.category,
+            reviewProjection: stripUndefinedDeep({ ...command, category: undefined, id: undefined }),
+          })),
+          fingerprint: interAccountFingerprint,
+          counts: {
+            total_unconfirmed: unconfirmed.length,
+            matched_pairs: matchedPairs.length,
+            matched_one_sided: matchedOneSided.length,
+          },
+          totals: {},
+          exclusions: [...skippedAlreadyHandled, ...ambiguousRefless, ...crossCurrencyPairs].map(row => stripUndefinedDeep(row as unknown as PlanData)),
+          reviews: ambiguousPairs.map(row => stripUndefinedDeep(row as unknown as PlanData)),
+        }),
+      );
 
       return {
         content: [{
           type: "text",
-          text: toMcpJson({
-            mode,
-            summary,
-            company_name: invoiceInfo.invoice_company_name,
-            total_unconfirmed: summary.total_unconfirmed,
-            matched_pairs: summary.matched_pairs,
-            matched_one_sided: summary.matched_one_sided,
-            skipped_ambiguous: summary.skipped_ambiguous,
-            skipped_already_handled: summary.skipped_already_handled,
-            needs_review_ambiguous_refless: summary.needs_review_ambiguous_refless,
-            needs_review_cross_currency: summary.needs_review_cross_currency,
-            own_bank_accounts: [...dimensionToIban.entries()].map(([dimId, iban]) => ({
-              accounts_dimensions_id: dimId,
-              iban,
-              title: dimensionToTitle.get(dimId),
-            })),
-            pairs: matchedPairs,
-            ambiguous_pairs: ambiguousPairs,
-            one_sided: matchedOneSided,
-            already_handled: skippedAlreadyHandled,
-            ambiguous_refless: ambiguousRefless,
-            cross_currency_review: crossCurrencyPairs,
-            errors,
-            execution: buildBatchExecutionContract({
-              mode,
-              summary,
-              results: [...matchedPairs, ...matchedOneSided],
-              skipped: [...ambiguousPairs, ...skippedAlreadyHandled, ...ambiguousRefless, ...crossCurrencyPairs],
-              errors,
-            }),
-          }),
+          text: toMcpJson(buildInterAccountPayload({
+            mode: "DRY_RUN", totalUnconfirmed: unconfirmed.length, invoiceInfo, dimensionToIban, dimensionToTitle,
+            matchedPairs, matchedOneSided, ambiguousPairs, skippedAlreadyHandled,
+            ambiguousRefless, crossCurrencyPairs, errors, planHandle,
+          })),
         }],
       };
     }
@@ -1736,9 +2131,12 @@ export function registerBankReconciliationTools(
       target_accounts_dimensions_id: z.number().optional().describe(
         "For inter_account_dry_run one-sided transfers, specify the target bank account dimension ID when it cannot be inferred."
       ),
+      plan_handle: z.string().optional().describe(
+        "Execution-plan handle from the reviewed dry run. Required for mode='execute_auto_confirm' and forwarded to the confirm executor."
+      ),
     },
     { ...batch, title: "Reconcile Bank Transactions" },
-    async ({ mode, min_confidence, max_date_gap, target_accounts_dimensions_id }) => {
+    async ({ mode, min_confidence, max_date_gap, target_accounts_dimensions_id, plan_handle }) => {
       const selectedMode = mode ?? "suggest";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
@@ -1762,6 +2160,7 @@ export function registerBankReconciliationTools(
           delegatedArgs = {
             execute: true,
             ...(min_confidence !== undefined ? { min_confidence } : {}),
+            ...(plan_handle !== undefined ? { plan_handle } : {}),
           };
           break;
         case "inter_account_dry_run":

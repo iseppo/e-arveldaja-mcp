@@ -45,13 +45,23 @@ export class TransactionsApi extends BaseResource<Transaction> {
    * sets it from the linked invoice before confirming. Without this, the API
    * rejects confirmation with "buyer or supplier is missing".
    * If confirmation fails after setting clients_id, the change is rolled back.
+   *
+   * Pass `{ autoFixClientsId: false }` to disable the implicit linked-invoice
+   * client fix. The plan-bound reconciliation executor uses this so the client
+   * update is booked as its own reviewed, enumerated command instead of a hidden
+   * side effect of confirmation.
    */
-  async confirm(id: number, distributions?: TransactionDistribution[]): Promise<ApiResponse> {
+  async confirm(
+    id: number,
+    distributions?: TransactionDistribution[],
+    options?: { autoFixClientsId?: boolean },
+  ): Promise<ApiResponse> {
     const body = distributions ?? [];
+    const autoFixClientsId = options?.autoFixClientsId !== false;
 
     // Auto-fix missing clients_id from linked invoice
     let clientsIdWasSet = false;
-    if (body.length > 0) {
+    if (autoFixClientsId && body.length > 0) {
       const tx = await this.get(id);
       if (!tx.clients_id) {
         let clientsId: number | undefined;
