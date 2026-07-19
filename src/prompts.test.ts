@@ -1039,6 +1039,21 @@ describe("registerPrompts", () => {
     }
   });
 
+  it("keeps shipped lightyear-booking markdown prompts aligned with plan-handle execution binding", () => {
+    for (const relativePath of ["workflows/lightyear-booking.md", ".claude/commands/lightyear-booking.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("plan_handle");
+      expect(text).toContain("get_execution_plan_page");
+      expect(text).toContain("plan_drift");
+      expect(text).toContain("The plan handle is not approval");
+      expect(text).toContain("execution_report");
+      // Both booking tools bind execute to the reviewed plan handle.
+      expect(text).toContain("`dry_run: false` REQUIRES the `plan_handle`");
+      // Trades bind BOTH the statement and the capital-gains sources.
+      expect(text).toContain("binds BOTH the statement CSV and the capital-gains CSV");
+    }
+  });
+
   it("keeps shipped classify-unmatched markdown prompts aligned with filtered dry runs", () => {
     for (const relativePath of ["workflows/classify-unmatched.md", ".claude/commands/classify-unmatched.md"]) {
       const text = readPromptSurface(relativePath);

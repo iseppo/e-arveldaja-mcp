@@ -3,9 +3,30 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
-import { captureFileInputSnapshot, type FileInputSource } from "../file-input-snapshot.js";
+import {
+  captureFileInputSnapshot,
+  FileInputSnapshotError,
+  type FileInputSnapshot,
+  type FileInputSource,
+} from "../file-input-snapshot.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
+import { PlanStoreError, type PlanData, type PlanRecord } from "../plan-store.js";
+import type { PlanExecutionReport } from "../plan-execution.js";
+import {
+  buildLightyearExecutionPlanInput,
+  canonicalPlanJson,
+  executeLightyearCommands,
+  LIGHTYEAR_DISTRIBUTION_CREATE_CATEGORY,
+  LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN,
+  LIGHTYEAR_TRADE_CREATE_CATEGORY,
+  LIGHTYEAR_TRADES_PLAN_DOMAIN,
+  lightyearDistributionCommandId,
+  lightyearTradeCommandId,
+  stripUndefinedDeep,
+  type LightyearExecutionCommand,
+  type LightyearPlanReviewCommand,
+} from "./lightyear-plan.js";
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
@@ -2009,6 +2030,610 @@ function matchSellsToCapitalGains(
   return result;
 }
 
+// --- Plan-bound booking: snapshots, projection, fingerprint, rendering -------
+//
+// The dry run and execute paths share one deterministic projection of the
+// reviewed Lightyear source(s). The dry run issues an immutable execution plan
+// (binding every source file it read) and returns its handle; execute re-reads
+// each bound source, re-derives the same projection, and refuses to mutate
+// unless it matches the plan the operator approved. External CSV text
+// (references, tickers, security names, FX provenance) is sandbox-wrapped at
+// MCP output on every render while the values used for matching, dedup, audit,
+// and the API stay clean.
+
+async function readCsvSnapshot(
+  source: FileInputSource,
+  operation: string,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Promise<FileInputSnapshot> {
+  return captureFileInputSnapshot(source, {
+    runtimeSafetyContext,
+    operation,
+    allowedExtensions: [".csv"],
+    maxSize: MAX_CSV_SIZE,
+  });
+}
+
+interface LyPosting {
+  accounts_id: number;
+  accounts_dimensions_id?: number;
+  type: "D" | "C";
+  amount: number;
+}
+
+function sourceIdentityRecord(snapshot: FileInputSnapshot): PlanRecord {
+  return stripUndefinedDeep({ ...snapshot.identity }) as PlanRecord;
+}
+
+function planErrorResult(category: string, message: string) {
+  return toolError({ error: message, category, mutation_occurred: false });
+}
+
+function readStoredFingerprint(privatePayload: PlanData): string | undefined {
+  if (privatePayload === null || typeof privatePayload !== "object" || Array.isArray(privatePayload)) return undefined;
+  const fingerprint = (privatePayload as { readonly [key: string]: PlanData }).fingerprint;
+  return typeof fingerprint === "string" ? fingerprint : undefined;
+}
+
+/**
+ * Sandbox-wrap the free-form CSV text fields of a rendered BOOKING result row.
+ *
+ * `reference`, `ticker`, `isin`, `currency`, and the FX-provenance
+ * `conversion_reference` are all attacker-influenced CSV columns (parseCSV
+ * honours quoted embedded newlines). On these booking result rows they are
+ * wrapped UNCONDITIONALLY: `SAFE_PORTFOLIO_TICKER_RE` admits lowercase,
+ * dotted, ≤32-char values (e.g. `ignoreallprior.instructions`), so the
+ * structural "wrap only when malformed" policy the portfolio summary renderers
+ * use would leave a directive-shaped ticker raw. The separate `renderPortfolio*`
+ * summary surface keeps its structural policy; only the booking result rows are
+ * hardened here. The clean values used for matching, dedup, audit, journal
+ * titles, and the API are never touched — this wraps the display copy only.
+ */
+function sandboxResultRow<T extends Record<string, unknown>>(row: T): T {
+  const wrapped: Record<string, unknown> = { ...row };
+  if (typeof row.reference === "string") wrapped.reference = wrapUntrustedOcr(row.reference);
+  if (typeof row.ticker === "string") wrapped.ticker = wrapUntrustedOcr(row.ticker) ?? row.ticker;
+  if (typeof row.isin === "string") wrapped.isin = wrapUntrustedOcr(row.isin) ?? row.isin;
+  if (typeof row.currency === "string") wrapped.currency = wrapUntrustedOcr(row.currency) ?? row.currency;
+  const provenance = row.fx_provenance;
+  if (provenance && typeof provenance === "object" && !Array.isArray(provenance)) {
+    const p = provenance as Record<string, unknown>;
+    if (typeof p.conversion_reference === "string") {
+      wrapped.fx_provenance = { ...p, conversion_reference: wrapUntrustedOcr(p.conversion_reference) };
+    }
+  }
+  return wrapped as T;
+}
+
+// ---- Trades projection ------------------------------------------------------
+
+interface TradeResultRow {
+  reference: string;
+  ticker: string;
+  type: string;
+  date: string;
+  eur_amount: number;
+  status: string;
+  journal_id?: number;
+  cost_basis?: number;
+  gain_loss?: number;
+  skip_reason?: string;
+}
+
+interface TradeCommand {
+  reference: string;
+  date: string;
+  ticker: string;
+  tradeType: "Buy" | "Sell";
+  title: string;
+  postings: LyPosting[];
+  resultRow: TradeResultRow;
+  auditSummary: string;
+  auditDetails: Record<string, unknown>;
+  reviewProjection: PlanData;
+}
+
+type PlannedTradeRow =
+  | { kind: "command"; command: TradeCommand }
+  | { kind: "result"; row: TradeResultRow };
+
+interface TradesProjection {
+  planned: PlannedTradeRow[];
+  commands: TradeCommand[];
+  duplicates: Array<{ reference: string; ticker: string; date: string }>;
+  warnings: string[];
+  accounts: { investment: number; broker: number; gain: number; loss: number; fee: number };
+  totalTrades: number;
+  newEntries: number;
+}
+
+interface TradesProjectionParams {
+  trades: InvestmentTrade[];
+  gainsMap: Map<string, CapitalGainsRow>;
+  existingRefs: Set<string>;
+  seedWarnings: string[];
+  hasCapitalGainsFile: boolean;
+  investment_account: number;
+  investment_dimension_id?: number;
+  broker_account: number;
+  broker_dimension_id?: number;
+  gainAccount: number;
+  lossAccount: number;
+  feeAccount: number;
+}
+
+function computeTradesProjection(params: TradesProjectionParams): TradesProjection {
+  const {
+    trades, gainsMap, existingRefs, investment_account, investment_dimension_id,
+    broker_account, broker_dimension_id, gainAccount, lossAccount, feeAccount,
+  } = params;
+
+  const seenRefs = new Set<string>();
+  const newTrades: InvestmentTrade[] = [];
+  const duplicates: Array<{ reference: string; ticker: string; date: string }> = [];
+  for (const t of trades) {
+    if (existingRefs.has(t.reference) || seenRefs.has(t.reference)) {
+      duplicates.push({ reference: t.reference, ticker: t.ticker, date: t.date });
+    } else {
+      seenRefs.add(t.reference);
+      newTrades.push(t);
+    }
+  }
+
+  const warnings: string[] = [...params.seedWarnings];
+  const planned: PlannedTradeRow[] = [];
+  const commands: TradeCommand[] = [];
+
+  const brokerDim = broker_dimension_id ? { accounts_dimensions_id: broker_dimension_id } : {};
+  const investmentDim = investment_dimension_id ? { accounts_dimensions_id: investment_dimension_id } : {};
+
+  for (const trade of newTrades) {
+    const readiness = classifyTradeIntrinsicReadiness(trade);
+    if (readiness.kind === "review_required") {
+      if (trade.fx_review_reason === null) {
+        warnings.push(fxReviewWarning(trade.reference, readiness.reason, trade.conversion_ref ?? undefined));
+      }
+      planned.push({ kind: "result", row: {
+        reference: trade.reference, ticker: trade.ticker, type: trade.type, date: trade.date,
+        eur_amount: 0, status: "skipped", skip_reason: readiness.reason.message,
+      } });
+      continue;
+    }
+
+    const tradeFeeEur = readiness.converted_trade_fee_eur;
+    const postings: LyPosting[] = [];
+
+    if (trade.type === "Buy") {
+      const totalFees = roundMoney(trade.fx_fee_eur + tradeFeeEur);
+      const investmentCostEur = roundMoney(trade.eur_amount + tradeFeeEur);
+      const totalCashOutEur = roundMoney(trade.eur_amount + totalFees);
+      if (totalFees > 0) {
+        postings.push({ accounts_id: investment_account, ...investmentDim, type: "D", amount: investmentCostEur });
+        if (trade.fx_fee_eur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: trade.fx_fee_eur });
+        postings.push({ accounts_id: broker_account, ...brokerDim, type: "C", amount: totalCashOutEur });
+      } else {
+        postings.push({ accounts_id: investment_account, ...investmentDim, type: "D", amount: investmentCostEur });
+        postings.push({ accounts_id: broker_account, ...brokerDim, type: "C", amount: investmentCostEur });
+      }
+      const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
+      const title = `Lightyear Buy: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo}`;
+      const resultRow: TradeResultRow = {
+        reference: trade.reference, ticker: trade.ticker, type: trade.type, date: trade.date,
+        eur_amount: trade.eur_amount, status: "would_create",
+      };
+      commands.push({
+        reference: trade.reference, date: trade.date, ticker: trade.ticker, tradeType: "Buy",
+        title, postings, resultRow,
+        auditSummary: `Lightyear Buy: ${trade.ticker} ${trade.quantity} @ ${trade.eur_amount} EUR`,
+        auditDetails: {
+          effective_date: trade.date, ticker: trade.ticker, type: "Buy", amount: trade.eur_amount,
+          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+        },
+        reviewProjection: stripUndefinedDeep({
+          reference: trade.reference, ticker: trade.ticker, type: "Buy", date: trade.date,
+          eur_amount: trade.eur_amount,
+          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+        }),
+      });
+      planned.push({ kind: "command", command: commands[commands.length - 1]! });
+      continue;
+    }
+
+    // Sell
+    const gainEntry = gainsMap.get(trade.reference);
+    if (!gainEntry && trade.cash_equivalent) {
+      if (trade.ccy !== "EUR") {
+        planned.push({ kind: "result", row: {
+          reference: trade.reference, ticker: trade.ticker, type: trade.type, date: trade.date,
+          eur_amount: trade.eur_amount, status: "skipped",
+          skip_reason: "Non-EUR cash-equivalent sell needs a cost-basis source to avoid FX drift. Provide a capital_gains_file entry for this trade's reference, or remove its ticker from skip_tickers only when cost basis is known. (See the wrapped reference/ticker fields on this row.)",
+        } });
+        continue;
+      }
+      const proceeds = roundMoney(trade.eur_amount);
+      postings.push({ accounts_id: broker_account, ...brokerDim, type: "D", amount: proceeds });
+      postings.push({ accounts_id: investment_account, ...investmentDim, type: "C", amount: proceeds });
+      const sellTradeFees = tradeFeeEur;
+      if (sellTradeFees > 0) {
+        postings.push({ accounts_id: feeAccount, type: "D", amount: sellTradeFees });
+        postings.push({ accounts_id: broker_account, ...brokerDim, type: "C", amount: sellTradeFees });
+      }
+      const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
+      const title = `Lightyear Cash-Equivalent Sell: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo}`;
+      const resultRow: TradeResultRow = {
+        reference: trade.reference, ticker: trade.ticker, type: trade.type, date: trade.date,
+        eur_amount: proceeds, status: "would_create", cost_basis: proceeds, gain_loss: 0,
+      };
+      commands.push({
+        reference: trade.reference, date: trade.date, ticker: trade.ticker, tradeType: "Sell",
+        title, postings, resultRow,
+        auditSummary: `Lightyear cash-equivalent sell: ${trade.ticker} ${trade.quantity} @ ${proceeds} EUR`,
+        auditDetails: {
+          effective_date: trade.date, ticker: trade.ticker, type: "Sell", amount: proceeds, gain_loss: 0,
+          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+        },
+        reviewProjection: stripUndefinedDeep({
+          reference: trade.reference, ticker: trade.ticker, type: "Sell", date: trade.date,
+          eur_amount: proceeds, cost_basis: proceeds, gain_loss: 0,
+          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+        }),
+      });
+      planned.push({ kind: "command", command: commands[commands.length - 1]! });
+      continue;
+    }
+
+    if (!gainEntry) {
+      planned.push({ kind: "result", row: {
+        reference: trade.reference, ticker: trade.ticker, type: trade.type, date: trade.date,
+        eur_amount: trade.eur_amount, status: "skipped",
+        skip_reason: "No capital gains data. Provide capital_gains_file to book sells with correct cost basis.",
+      } });
+      continue;
+    }
+
+    const costBasis = roundMoney(gainEntry.cost_basis_eur);
+    const proceeds = roundMoney(gainEntry.proceeds_eur);
+    const gainLoss = roundMoney(proceeds - costBasis);
+    postings.push({ accounts_id: broker_account, ...brokerDim, type: "D", amount: proceeds });
+    postings.push({ accounts_id: investment_account, ...investmentDim, type: "C", amount: costBasis });
+    if (gainLoss > 0) postings.push({ accounts_id: gainAccount, type: "C", amount: gainLoss });
+    else if (gainLoss < 0) postings.push({ accounts_id: lossAccount, type: "D", amount: Math.abs(gainLoss) });
+    const sellFees = roundMoney(tradeFeeEur + trade.fx_fee_eur);
+    if (sellFees > 0) {
+      if (trade.fx_fee_eur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: trade.fx_fee_eur });
+      if (tradeFeeEur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: tradeFeeEur });
+      postings.push({ accounts_id: broker_account, ...brokerDim, type: "C", amount: sellFees });
+    }
+    const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
+    const title = `Lightyear Sell: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo} kasum/kahjum ${gainLoss >= 0 ? "+" : ""}${gainLoss} EUR`;
+    const resultRow: TradeResultRow = {
+      reference: trade.reference, ticker: trade.ticker, type: trade.type, date: trade.date,
+      eur_amount: proceeds, status: "would_create", cost_basis: costBasis, gain_loss: gainLoss,
+    };
+    commands.push({
+      reference: trade.reference, date: trade.date, ticker: trade.ticker, tradeType: "Sell",
+      title, postings, resultRow,
+      auditSummary: `Lightyear Sell: ${trade.ticker} ${trade.quantity} @ ${proceeds} EUR, gain/loss ${gainLoss} EUR`,
+      auditDetails: {
+        effective_date: trade.date, ticker: trade.ticker, type: "Sell",
+        amount: proceeds, cost_basis: costBasis, gain_loss: gainLoss,
+        postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+      },
+      reviewProjection: stripUndefinedDeep({
+        reference: trade.reference, ticker: trade.ticker, type: "Sell", date: trade.date,
+        eur_amount: proceeds, cost_basis: costBasis, gain_loss: gainLoss,
+        postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+      }),
+    });
+    planned.push({ kind: "command", command: commands[commands.length - 1]! });
+  }
+
+  const skippedSells = planned.filter(p => p.kind === "result" && p.row.status === "skipped" && p.row.type === "Sell");
+  if (skippedSells.length > 0 && !params.hasCapitalGainsFile) {
+    warnings.push(
+      `${skippedSells.length} sell trade(s) skipped — provide capital_gains_file to book non-cash-equivalent sells with correct cost basis (the gain/loss accounts default to 8330/8335).`,
+    );
+  }
+
+  return {
+    planned, commands, duplicates, warnings,
+    accounts: { investment: investment_account, broker: broker_account, gain: gainAccount, loss: lossAccount, fee: feeAccount },
+    totalTrades: trades.length,
+    newEntries: newTrades.length,
+  };
+}
+
+function tradesFingerprint(projection: TradesProjection, normalizedArgs: PlanRecord): string {
+  return canonicalPlanJson({
+    normalized_args: normalizedArgs,
+    accounts: projection.accounts,
+    commands: projection.commands.map((command, index) => ({
+      id: lightyearTradeCommandId(index),
+      reference: command.reference,
+      type: command.tradeType,
+      title: command.title,
+      postings: command.postings,
+    })),
+    skipped: projection.planned
+      .filter((row): row is { kind: "result"; row: TradeResultRow } => row.kind === "result")
+      .map(row => ({ reference: row.row.reference, status: row.row.status, skip_reason: row.row.skip_reason })),
+    duplicates: projection.duplicates,
+  });
+}
+
+function tradesReviewCommands(projection: TradesProjection): LightyearPlanReviewCommand[] {
+  return projection.commands.map((command, index) => ({
+    id: lightyearTradeCommandId(index),
+    category: LIGHTYEAR_TRADE_CREATE_CATEGORY,
+    reviewProjection: command.reviewProjection,
+  }));
+}
+
+// ---- Distributions projection ----------------------------------------------
+
+interface DistributionCommand {
+  reference: string;
+  date: string;
+  title: string;
+  postings: LyPosting[];
+  sourceFields: Record<string, unknown>;
+  auditSummary: string;
+  reviewProjection: PlanData;
+}
+
+interface DistributionsProjection {
+  commands: DistributionCommand[];
+  manualResults: Array<Record<string, unknown>>;
+  reviewedInOrder: LightyearDistribution[];
+  distributionsInOrder: LightyearDistribution[];
+  newSet: Set<number>;
+  duplicates: LightyearDistribution[];
+  warnings: string[];
+  totalDistributions: number;
+  bookableCount: number;
+  reviewRequired: number;
+}
+
+interface DistributionsProjectionParams {
+  distributions: LightyearDistribution[];
+  existingRefs: Set<string>;
+  seedWarnings: string[];
+  broker_account: number;
+  broker_dimension_id?: number;
+  income_account: number;
+  reward_account: number;
+  tax_account?: number;
+  fee_account: number;
+}
+
+function distributionSourceFields(distribution: LightyearDistribution): Record<string, unknown> {
+  return {
+    reference: distribution.reference,
+    ticker: distribution.ticker,
+    date: distribution.date,
+    currency: distribution.currency,
+    gross_amount: distribution.gross_amount,
+    tax_amount: distribution.tax_amount,
+    fee: distribution.fee,
+    net_amount: distribution.net_amount,
+    gross_eur: distribution.gross_eur,
+    tax_eur: distribution.tax_eur,
+    fee_eur: distribution.fee_eur,
+    net_eur: distribution.net_eur,
+    fx_provenance: distribution.fx_provenance,
+  };
+}
+
+function computeDistributionsProjection(params: DistributionsProjectionParams): DistributionsProjection {
+  const { distributions, existingRefs, broker_account, broker_dimension_id, income_account, reward_account, tax_account, fee_account } = params;
+  const bookable = distributions.filter(isBookableDistribution);
+  const reviewed = distributions.filter(distribution => !isBookableDistribution(distribution));
+
+  const seenRefs = new Set<string>();
+  const newDist: LightyearDistribution[] = [];
+  const duplicates: LightyearDistribution[] = [];
+  for (const d of bookable) {
+    if (existingRefs.has(d.reference) || seenRefs.has(d.reference)) duplicates.push(d);
+    else { seenRefs.add(d.reference); newDist.push(d); }
+  }
+  const newSet = new Set(newDist.map(distribution => distribution.row_index));
+  const brokerDim = broker_dimension_id ? { accounts_dimensions_id: broker_dimension_id } : {};
+
+  const manualResult = (distribution: LightyearDistribution) => ({
+    ...distributionSourceFields(distribution),
+    status: "manual_review",
+    review_reason: distribution.fx_review_reason,
+  });
+
+  const commands: DistributionCommand[] = [];
+  const manualResults: Array<Record<string, unknown>> = [];
+  for (const dist of distributions) {
+    if (!isBookableDistribution(dist)) {
+      manualResults.push(manualResult(dist));
+      continue;
+    }
+    if (!newSet.has(dist.row_index)) continue;
+    const netEur = dist.net_eur;
+    const taxEur = dist.tax_eur;
+    const feeEur = dist.fee_eur;
+    const grossEur = dist.gross_eur;
+    if (netEur === null || taxEur === null || feeEur === null || grossEur === null) continue;
+    const postings: LyPosting[] = [];
+    if (netEur > 0) postings.push({ accounts_id: broker_account, ...brokerDim, type: "D", amount: netEur });
+    if (taxEur > 0 && tax_account) postings.push({ accounts_id: tax_account, type: "D", amount: taxEur });
+    if (feeEur > 0) postings.push({ accounts_id: fee_account, type: "D", amount: feeEur });
+    const isReward = dist.type === "Reward";
+    postings.push({ accounts_id: isReward ? reward_account : income_account, type: "C", amount: grossEur });
+    const title = dist.ticker
+      ? `Lightyear tulu: ${dist.ticker} (${dist.isin})`
+      : `Lightyear tulu: ${dist.type === "Reward" ? "boonus" : "intress"}`;
+    commands.push({
+      reference: dist.reference,
+      date: dist.date,
+      title,
+      postings,
+      sourceFields: distributionSourceFields(dist),
+      auditSummary: `Lightyear distribution: ${dist.ticker || "interest"} gross ${grossEur} EUR`,
+      reviewProjection: stripUndefinedDeep({
+        reference: dist.reference, ticker: dist.ticker, isin: dist.isin, date: dist.date,
+        currency: dist.currency, gross_eur: grossEur, net_eur: netEur, tax_eur: taxEur, fee_eur: feeEur,
+        postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+      }),
+    });
+  }
+
+  return {
+    commands, manualResults,
+    reviewedInOrder: reviewed,
+    distributionsInOrder: distributions,
+    newSet, duplicates,
+    warnings: [...params.seedWarnings],
+    totalDistributions: distributions.length,
+    bookableCount: bookable.length,
+    reviewRequired: reviewed.length,
+  };
+}
+
+function distributionsFingerprint(projection: DistributionsProjection, normalizedArgs: PlanRecord): string {
+  return canonicalPlanJson({
+    normalized_args: normalizedArgs,
+    commands: projection.commands.map((command, index) => ({
+      id: lightyearDistributionCommandId(index),
+      reference: command.reference,
+      title: command.title,
+      postings: command.postings,
+    })),
+    manual_review: projection.manualResults.map(row => ({
+      reference: row.reference,
+      review_reason: (row.review_reason as { code?: string } | null)?.code ?? null,
+    })),
+    duplicates: projection.duplicates.map(d => ({ reference: d.reference, date: d.date })),
+  });
+}
+
+function distributionsReviewCommands(projection: DistributionsProjection): LightyearPlanReviewCommand[] {
+  return projection.commands.map((command, index) => ({
+    id: lightyearDistributionCommandId(index),
+    category: LIGHTYEAR_DISTRIBUTION_CREATE_CATEGORY,
+    reviewProjection: command.reviewProjection,
+  }));
+}
+
+// ---- Rendering --------------------------------------------------------------
+
+interface TradesRenderInput {
+  mode: "DRY_RUN" | "EXECUTED";
+  projection: TradesProjection;
+  planHandle?: string;
+  executionReport?: PlanExecutionReport;
+  createdByIndex?: Map<number, { journal_id?: number; status: string }>;
+}
+
+function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> {
+  const { projection, mode } = input;
+  const dryRun = mode === "DRY_RUN";
+  let commandIndex = 0;
+  const results = projection.planned.map(row => {
+    if (row.kind === "result") return sandboxResultRow(row.row as unknown as Record<string, unknown>);
+    const index = commandIndex++;
+    if (dryRun) return sandboxResultRow({ ...row.command.resultRow });
+    const created = input.createdByIndex?.get(index);
+    const status = created?.status ?? "not_created";
+    return sandboxResultRow({
+      ...row.command.resultRow,
+      status,
+      ...(created?.journal_id !== undefined ? { journal_id: created.journal_id } : {}),
+    });
+  });
+  const createdCount = results.filter(r => r.status === "created" || r.status === "would_create").length;
+  const skippedCount = results.filter(r => r.status === "skipped").length;
+  return {
+    mode,
+    total_trades: projection.totalTrades,
+    new_entries: projection.newEntries,
+    created: createdCount,
+    skipped: skippedCount,
+    duplicates_skipped: projection.duplicates.length,
+    duplicate_refs: projection.duplicates.map(d => ({
+      reference: wrapUntrustedOcr(d.reference),
+      ticker: d.ticker.length > 0 ? renderPortfolioTicker(d.ticker) : d.ticker,
+      date: d.date,
+    })),
+    results,
+    accounts: {
+      investment: projection.accounts.investment,
+      broker: projection.accounts.broker,
+      gain: projection.accounts.gain,
+      loss: projection.accounts.loss,
+      fee: projection.accounts.fee,
+    },
+    ...(projection.warnings.length > 0 && { warnings: projection.warnings }),
+    ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
+    ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
+    note: dryRun
+      ? "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first."
+      : "Journal entries created. Review and register (confirm) them when ready.",
+  };
+}
+
+interface DistributionsRenderInput {
+  mode: "DRY_RUN" | "EXECUTED";
+  projection: DistributionsProjection;
+  planHandle?: string;
+  executionReport?: PlanExecutionReport;
+  createdByIndex?: Map<number, { journal_id?: number; status: string }>;
+}
+
+function renderDistributionsPayload(input: DistributionsRenderInput): Record<string, unknown> {
+  const { projection, mode } = input;
+  const dryRun = mode === "DRY_RUN";
+  const commandByRowIndex = new Map<number, number>();
+  projection.commands.forEach((command, index) => {
+    const dist = projection.distributionsInOrder.find(d => d.reference === command.reference && projection.newSet.has(d.row_index));
+    if (dist) commandByRowIndex.set(dist.row_index, index);
+  });
+
+  const results: Array<Record<string, unknown>> = [];
+  for (const dist of projection.distributionsInOrder) {
+    if (!isBookableDistribution(dist)) {
+      results.push(sandboxResultRow({
+        ...distributionSourceFields(dist),
+        status: "manual_review",
+        review_reason: dist.fx_review_reason,
+      }));
+      continue;
+    }
+    if (!projection.newSet.has(dist.row_index)) continue;
+    const index = commandByRowIndex.get(dist.row_index);
+    if (dryRun || index === undefined) {
+      results.push(sandboxResultRow({ ...distributionSourceFields(dist), status: dryRun ? "would_create" : "not_created" }));
+      continue;
+    }
+    const created = input.createdByIndex?.get(index);
+    results.push(sandboxResultRow({
+      ...distributionSourceFields(dist),
+      status: created?.status ?? "not_created",
+      ...(created?.journal_id !== undefined ? { journal_id: created.journal_id } : {}),
+    }));
+  }
+
+  return {
+    mode,
+    total_distributions: projection.totalDistributions,
+    bookable_distributions: projection.bookableCount,
+    review_required: projection.reviewRequired,
+    new_entries: projection.commands.length,
+    duplicates_skipped: projection.duplicates.length,
+    results,
+    ...(projection.warnings.length > 0 && { warnings: projection.warnings }),
+    ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
+    ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
+    note: dryRun
+      ? "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first."
+      : "Journal entries created. Review and register when ready.",
+  };
+}
+
 export function registerLightyearTools(
   server: McpServer,
   api: ApiContext,
@@ -2326,419 +2951,189 @@ export function registerLightyearTools(
       fee_account: z.number().optional().describe("Account for EXPENSED trade fees — all Sell fees and a Buy's FX-conversion fee (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335). A Buy's trade platform fee is capitalized into the investment cost to match FIFO cost basis and is NOT posted here."),
       skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP, ICSUSSDP). Pass \"none\" to disable; the empty string is treated as the default."),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
+      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for dry_run=false."),
     },
     { ...batch, openWorldHint: true, title: "Book Lightyear Trades" },
-    async ({ file_path, file_ref, capital_gains_file, capital_gains_file_ref, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run }) => {
+    async ({ file_path, file_ref, capital_gains_file, capital_gains_file_ref, investment_account, investment_dimension_id, broker_account, broker_dimension_id, gain_loss_account, loss_account, fee_account, skip_tickers, dry_run, plan_handle }) => {
       const isDryRun = dry_run !== false;
       const skipInput = skip_tickers?.trim() || [...KNOWN_CASH_EQUIVALENT_TICKERS].join(",");
       const skipSet = skipInput.toLowerCase() === "none"
         ? new Set<string>()
         : new Set(skipInput.split(",").map(t => t.trim()).filter(Boolean));
 
-      // Validate accounts exist and are active. Securities trading results route
-      // to the standard securities account PAIR (name-resolved against the actual
-      // chart, standard fallbacks 8330/8335): realized gain → 8330 "Tulu
-      // aktsiatelt ja osadelt"; realized loss and EXPENSED trade fees → 8335 "Kulu
-      // aktsiatelt ja osadelt". Expensed fees = all Sell fees and a Buy's
-      // FX-conversion fee; a Buy's trade platform fee is capitalized into the
-      // investment cost (to match FIFO cost basis), not posted to 8335. Dimension
-      // is left null on 8330/8335. A caller override still wins per account.
+      const statementSource = fileInputSource(file_path, file_ref);
+      const hasGainsFile = Boolean(capital_gains_file || capital_gains_file_ref);
+      const gainsSource = hasGainsFile ? fileInputSource(capital_gains_file, capital_gains_file_ref) : null;
+      const normalizedArgs = stripUndefinedDeep({
+        investment_account,
+        investment_dimension_id,
+        broker_account,
+        broker_dimension_id,
+        gain_loss_account,
+        loss_account,
+        fee_account,
+        skip_tickers: [...skipSet].sort().join(","),
+        has_capital_gains_file: hasGainsFile,
+      }) as PlanRecord;
+
+      // Resolve and validate accounts up front — the same gate on both paths.
       const accounts = await api.readonly.getAccounts();
       const gainAccount = resolveSecuritiesIncomeAccount(accounts, gain_loss_account);
       const lossAccount = resolveSecuritiesExpenseAccount(accounts, loss_account);
       const feeAccount = resolveSecuritiesExpenseAccount(accounts, fee_account);
-      const errors = validateAccounts(accounts, [
+      const accountErrors = validateAccounts(accounts, [
         { id: investment_account, label: "Investment account" },
         { id: broker_account, label: "Broker account" },
         { id: feeAccount, label: "Fee account" },
         { id: gainAccount, label: "Gain account" },
         { id: lossAccount, label: "Loss account" },
       ]);
-
-      if (errors.length > 0) {
+      if (accountErrors.length > 0) {
         return toolError({
           error: "Account validation failed",
-          details: errors,
+          details: accountErrors,
           hint: "Use list_accounts to find correct account numbers.",
         });
       }
 
-      const csv = await readCsvFile(fileInputSource(file_path, file_ref), FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
-      const rows = parseAccountStatement(csv);
-      const extraction = extractTrades(rows);
-      const trades = extraction.trades.filter(t => !skipSet.has(t.ticker));
+      const buildTradesProjection = async (): Promise<{
+        projection: TradesProjection;
+        sourceIdentities: PlanRecord[];
+      }> => {
+        const statementSnapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
+        const rows = parseAccountStatement(statementSnapshot.text());
+        const extraction = extractTrades(rows);
+        const trades = extraction.trades.filter(t => !skipSet.has(t.ticker));
+        const gainsWarnings: string[] = [];
+        let gainsMap = new Map<string, CapitalGainsRow>();
+        const sourceIdentities: PlanRecord[] = [sourceIdentityRecord(statementSnapshot)];
+        if (gainsSource) {
+          const gainsSnapshot = await readCsvSnapshot(gainsSource, FILE_REFERENCE_OPERATIONS.lightyearGains, runtimeSafetyContext);
+          const gainsRows = parseCapitalGains(gainsSnapshot.text());
+          const sells = trades.filter(t => t.type === "Sell");
+          gainsMap = matchSellsToCapitalGains(sells, gainsRows, gainsWarnings);
+          sourceIdentities.push(sourceIdentityRecord(gainsSnapshot));
+        }
+        const guard = await BookingGuard.load(api);
+        const existingRefs = findExistingJournalsByRef(guard.journals, trades.map(t => ({ reference: t.reference, date: t.date })));
+        const projection = computeTradesProjection({
+          trades, gainsMap, existingRefs,
+          seedWarnings: [...extraction.warnings, ...gainsWarnings],
+          hasCapitalGainsFile: Boolean(capital_gains_file),
+          investment_account, investment_dimension_id, broker_account, broker_dimension_id,
+          gainAccount, lossAccount, feeAccount,
+        });
+        return { projection, sourceIdentities };
+      };
 
-      // Parse capital gains if provided
-      let gainsMap = new Map<string, CapitalGainsRow>();
-      const gainsWarnings: string[] = [];
-      if (capital_gains_file || capital_gains_file_ref) {
-        const gainsCsv = await readCsvFile(
-          fileInputSource(capital_gains_file, capital_gains_file_ref),
-          FILE_REFERENCE_OPERATIONS.lightyearGains,
-          runtimeSafetyContext,
+      if (isDryRun) {
+        const { projection, sourceIdentities } = await buildTradesProjection();
+        const planHandleIssued = runtimeSafetyContext.planStore.issue(
+          LIGHTYEAR_TRADES_PLAN_DOMAIN,
+          buildLightyearExecutionPlanInput({
+            normalizedArgs,
+            sourceIdentities,
+            liveSnapshot: { accounts: projection.accounts },
+            reviewCommands: tradesReviewCommands(projection),
+            fingerprint: tradesFingerprint(projection, normalizedArgs),
+            counts: {
+              total_trades: projection.totalTrades,
+              new_entries: projection.newEntries,
+              would_create: projection.commands.length,
+              duplicates_skipped: projection.duplicates.length,
+            },
+            totals: { command_count: projection.commands.length },
+            exclusions: projection.duplicates.map(d => stripUndefinedDeep({ reference: d.reference, ticker: d.ticker, date: d.date })),
+            reviews: projection.planned
+              .filter((row): row is { kind: "result"; row: TradeResultRow } => row.kind === "result")
+              .map(row => stripUndefinedDeep({ reference: row.row.reference, ticker: row.row.ticker, status: row.row.status, skip_reason: row.row.skip_reason })),
+          }),
         );
-        const gainsRows = parseCapitalGains(gainsCsv);
-        const sells = trades.filter(t => t.type === "Sell");
-        gainsMap = matchSellsToCapitalGains(sells, gainsRows, gainsWarnings);
+        return {
+          content: [{ type: "text", text: toMcpJson(renderTradesPayload({ mode: "DRY_RUN", projection, planHandle: planHandleIssued })) }],
+        };
       }
 
-      // Check for duplicates. Load one BookingGuard snapshot for the whole run:
-      // findExistingJournalsByRef reads it for legacy raw-ref detection, and the
-      // create sites below use guard.createJournalOnce for LY:-prefix idempotency
-      // (incl. in-run dedup of duplicate references within a single CSV).
+      // EXECUTE: consume the reviewed plan, re-read every bound source immutably,
+      // re-validate against the stored plan, then drive creation through the
+      // shared plan tracker. A plan handle is NOT approval; gates stay in force.
+      if (typeof plan_handle !== "string" || plan_handle.length === 0) {
+        return planErrorResult(
+          "plan_handle_required",
+          "A reviewed execution-plan handle from the Lightyear trades dry run is required to create journal entries.",
+        );
+      }
+      let storedPlan;
+      try {
+        storedPlan = runtimeSafetyContext.planStore.consume(plan_handle, LIGHTYEAR_TRADES_PLAN_DOMAIN);
+      } catch (error) {
+        if (error instanceof PlanStoreError) return planErrorResult(error.code, error.message);
+        throw error;
+      }
+
+      let projection: TradesProjection;
+      let sourceIdentities: PlanRecord[];
+      try {
+        ({ projection, sourceIdentities } = await buildTradesProjection());
+      } catch (error) {
+        if (error instanceof FileInputSnapshotError) {
+          return planErrorResult("plan_drift", "A reviewed Lightyear source could not be re-read to match the plan.");
+        }
+        throw error;
+      }
+
+      if (sourceIdentities.length !== storedPlan.sourceIdentities.length) {
+        return planErrorResult("plan_drift", "The set of Lightyear source files changed since the plan was reviewed.");
+      }
+      for (let i = 0; i < sourceIdentities.length; i++) {
+        const stored = storedPlan.sourceIdentities[i];
+        if (!stored || stored.digest_sha256 !== sourceIdentities[i]!.digest_sha256) {
+          return planErrorResult("plan_drift", "A reviewed Lightyear source changed since the plan was reviewed.");
+        }
+      }
+      if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
+        return planErrorResult("plan_drift", "The booking arguments changed since the plan was reviewed.");
+      }
+      const storedFingerprint = readStoredFingerprint(storedPlan.privatePayload);
+      if (typeof storedFingerprint !== "string" || storedFingerprint !== tradesFingerprint(projection, normalizedArgs)) {
+        return planErrorResult("plan_drift", "The reviewed Lightyear trade plan no longer matches the current ledger and source.");
+      }
+
       const guard = await BookingGuard.load(api);
-      const allRefs = trades.map(t => ({ reference: t.reference, date: t.date }));
-      const existingRefs = findExistingJournalsByRef(guard.journals, allRefs);
-
-      // Dedupe against existing journals AND within this CSV. Two rows sharing a
-      // reference must resolve to ONE journal, so the first occurrence books and
-      // any later same-ref row is a duplicate — mirroring the existing-journal
-      // dedup. Doing it here keeps the dry-run preview counts matching what
-      // execution actually creates (the loop only ever sees the first occurrence).
-      const seenRefs = new Set<string>();
-      const newTrades: typeof trades = [];
-      const duplicates: typeof trades = [];
-      for (const t of trades) {
-        if (existingRefs.has(t.reference) || seenRefs.has(t.reference)) {
-          duplicates.push(t);
-        } else {
-          seenRefs.add(t.reference);
-          newTrades.push(t);
-        }
-      }
-
-      const results: Array<{
-        reference: string;
-        ticker: string;
-        type: string;
-        date: string;
-        eur_amount: number;
-        status: string;
-        journal_id?: number;
-        cost_basis?: number;
-        gain_loss?: number;
-        skip_reason?: string;
-      }> = [];
-
-      const warnings: string[] = [...extraction.warnings, ...gainsWarnings];
-      const totalNewTrades = newTrades.length;
-
-      for (let tradeIdx = 0; tradeIdx < newTrades.length; tradeIdx++) {
-        const trade = newTrades[tradeIdx]!;
-        await reportProgress(tradeIdx, totalNewTrades);
-        const readiness = classifyTradeIntrinsicReadiness(trade);
-        if (readiness.kind === "review_required") {
-          if (trade.fx_review_reason === null) {
-            warnings.push(fxReviewWarning(
-              trade.reference,
-              readiness.reason,
-              trade.conversion_ref ?? undefined,
-            ));
-          }
-          results.push({
-            reference: trade.reference,
-            ticker: trade.ticker,
-            type: trade.type,
-            date: trade.date,
-            eur_amount: 0,
-            status: "skipped",
-            skip_reason: readiness.reason.message,
-          });
-          continue;
-        }
-
-        // eur_amount is the EUR conversion net (after FX fee deduction).
-        // fx_fee_eur is the FX conversion fee. trade.fee_eur is the trade platform fee.
-        const tradeFeeEur = readiness.converted_trade_fee_eur;
-        const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
-
-        if (trade.type === "Buy") {
-          // Investment cost = eur_amount (conversion net) + trade fee. FX fee is always
-          // expensed separately — Lightyear's capital gains report does NOT include FX fees
-          // in cost basis, so including them in the investment account would leave a residual
-          // balance on every sell.
-          const feeAcct = feeAccount;
-          const totalFees = roundMoney(trade.fx_fee_eur + tradeFeeEur);
-          const investmentCostEur = roundMoney(trade.eur_amount + tradeFeeEur);
-          const totalCashOutEur = roundMoney(trade.eur_amount + totalFees);
-
-          if (totalFees > 0) {
-            // Capitalize the trade platform fee into the investment cost so the
-            // investment account matches the FIFO cost basis relieved on sell
-            // (the capital-gains report bakes the trade fee into cost basis).
-            // Only the FX conversion fee is expensed — the report excludes it,
-            // so capitalizing it would strand a residual on every sell.
-            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: investmentCostEur });
-            if (trade.fx_fee_eur > 0) {
-              postings.push({ accounts_id: feeAcct, type: "D", amount: trade.fx_fee_eur });
-            }
-            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: totalCashOutEur });
-          } else {
-            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "D", amount: investmentCostEur });
-            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: investmentCostEur });
-          }
-        } else {
-          // Sell: need cost basis from capital gains file
-          const gainEntry = gainsMap.get(trade.reference);
-
-          if (!gainEntry && trade.cash_equivalent) {
-            // Capital gains CSV does not cover cash-equivalent sweeps. For EUR-denominated
-            // sweeps (e.g. BRICEKSP) proceeds equal cost basis 1:1 so we can book them
-            // directly as break-even. For non-EUR sweeps (e.g. ICSUSSDP in USD) the FX
-            // rate on buy vs sell differs, so booking proceeds as the investment credit
-            // would leave permanent FX drift on the investment account. Skip those.
-            if (trade.ccy !== "EUR") {
-              results.push({
-                reference: trade.reference,
-                ticker: trade.ticker,
-                type: trade.type,
-                date: trade.date,
-                eur_amount: trade.eur_amount,
-                status: "skipped",
-                skip_reason: `Non-EUR cash-equivalent sell (${trade.ccy}) needs a cost-basis source to avoid FX drift. Provide capital_gains_file entry for ${trade.reference} or remove ${trade.ticker} from skip_tickers only when cost basis is known.`,
-              });
-              continue;
-            }
-
-            const proceeds = roundMoney(trade.eur_amount);
-
-            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "D", amount: proceeds });
-            postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "C", amount: proceeds });
-
-            const sellTradeFees = tradeFeeEur;
-            if (sellTradeFees > 0) {
-              const feeAcct = feeAccount;
-              postings.push({ accounts_id: feeAcct, type: "D", amount: sellTradeFees });
-              postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: sellTradeFees });
-            }
-
-            const resultEntry: typeof results[number] = {
-              reference: trade.reference,
-              ticker: trade.ticker,
-              type: trade.type,
-              date: trade.date,
-              eur_amount: proceeds,
-              status: isDryRun ? "would_create" : "created",
-              cost_basis: proceeds,
-              gain_loss: 0,
-            };
-
-            if (isDryRun) {
-              results.push(resultEntry);
-              continue;
-            }
-
-            const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
-            const title = `Lightyear Cash-Equivalent Sell: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo}`;
-
-            const outcome = await guard.createJournalOnce(
-              { ns: "LY", id: trade.reference },
-              { title, effective_date: trade.date, cl_currencies_id: "EUR", postings },
-              { confirm: false }, // Lightyear journals stay in PROJECT for review
-            );
-            resultEntry.journal_id = outcome.journal_id;
-            if (outcome.status === "duplicate") {
-              // The guard found an existing journal for this key (already booked
-              // this run or a prior run) — do NOT log a second CREATED audit event
-              // or report a fresh creation. Report it as a duplicate instead.
-              resultEntry.status = "duplicate";
-              results.push(resultEntry);
-              continue;
-            }
-            logAudit({
-              tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
-              entity_id: outcome.journal_id,
-              summary: `Lightyear cash-equivalent sell: ${trade.ticker} ${trade.quantity} @ ${proceeds} EUR`,
-              details: {
-                effective_date: trade.date, ticker: trade.ticker, type: "Sell",
-                amount: proceeds, gain_loss: 0,
-                postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-              },
-            });
-
-            results.push(resultEntry);
-            continue;
-          }
-
-          if (!gainEntry) {
-            // No capital gains data — skip this sell
-            results.push({
-              reference: trade.reference,
-              ticker: trade.ticker,
-              type: trade.type,
-              date: trade.date,
-              eur_amount: trade.eur_amount,
-              status: "skipped",
-              skip_reason: "No capital gains data. Provide capital_gains_file to book sells with correct cost basis.",
-            });
-            continue;
-          }
-
-          const costBasis = roundMoney(gainEntry.cost_basis_eur);
-          const proceeds = roundMoney(gainEntry.proceeds_eur);
-          // Derive gain/loss so the journal balances by construction (CSV columns are independently rounded)
-          const gainLoss = roundMoney(proceeds - costBasis);
-
-          // Dr broker_account: proceeds (what we receive)
-          // Cr investment_account: cost_basis (what we originally paid)
-          // Cr securities-income (gainAccount, 8330) on a gain / Dr securities-
-          // expense (lossAccount, 8335) on a loss — both resolved above.
-          postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "D", amount: proceeds });
-          postings.push({ accounts_id: investment_account, ...(investment_dimension_id && { accounts_dimensions_id: investment_dimension_id }), type: "C", amount: costBasis });
-
-          if (gainLoss > 0) {
-            postings.push({ accounts_id: gainAccount, type: "C", amount: gainLoss });
-          } else if (gainLoss < 0) {
-            postings.push({ accounts_id: lossAccount, type: "D", amount: Math.abs(gainLoss) });
-          }
-
-          const sellFees = roundMoney(tradeFeeEur + trade.fx_fee_eur);
-          if (sellFees > 0) {
-            const feeAcct = feeAccount;
-            if (trade.fx_fee_eur > 0) {
-              postings.push({ accounts_id: feeAcct, type: "D", amount: trade.fx_fee_eur });
-            }
-            if (tradeFeeEur > 0) {
-              postings.push({ accounts_id: feeAcct, type: "D", amount: tradeFeeEur });
-            }
-            postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "C", amount: sellFees });
-          }
-
-          // Store cost basis info in result
-          const resultEntry: typeof results[number] = {
-            reference: trade.reference,
-            ticker: trade.ticker,
-            type: trade.type,
-            date: trade.date,
-            eur_amount: proceeds,
-            status: isDryRun ? "would_create" : "created",
-            cost_basis: costBasis,
-            gain_loss: gainLoss,
-          };
-
-          if (isDryRun) {
-            results.push(resultEntry);
-            continue;
-          }
-
-          const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
-          const title = `Lightyear Sell: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo} kasum/kahjum ${gainLoss >= 0 ? "+" : ""}${gainLoss} EUR`;
-
+      const createdByIndex = new Map<number, { journal_id?: number; status: string }>();
+      const executionReport = await executeLightyearCommands(projection.commands.map((command, index): LightyearExecutionCommand => ({
+        id: lightyearTradeCommandId(index),
+        category: LIGHTYEAR_TRADE_CREATE_CATEGORY,
+        known_object_limit: 1,
+        prepare: async () => {
+          const fresh = findExistingJournalsByRef(await api.journals.listAll(), [{ reference: command.reference, date: command.date }]);
+          return fresh.has(command.reference)
+            ? { outcome: "drift", error_code: "duplicate_appeared" }
+            : { outcome: "ready" };
+        },
+        mutate: async () => {
           const outcome = await guard.createJournalOnce(
-            { ns: "LY", id: trade.reference },
-            { title, effective_date: trade.date, cl_currencies_id: "EUR", postings },
-            { confirm: false }, // Lightyear journals stay in PROJECT for review
+            { ns: "LY", id: command.reference },
+            { title: command.title, effective_date: command.date, cl_currencies_id: "EUR", postings: command.postings },
+            { confirm: false },
           );
-          resultEntry.journal_id = outcome.journal_id;
           if (outcome.status === "duplicate") {
-            // Existing journal for this key — skip the CREATED audit and report a duplicate.
-            resultEntry.status = "duplicate";
-            results.push(resultEntry);
-            continue;
+            createdByIndex.set(index, { journal_id: outcome.journal_id, status: "duplicate" });
+            return { outcome: "completed" };
           }
           logAudit({
             tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
             entity_id: outcome.journal_id,
-            summary: `Lightyear Sell: ${trade.ticker} ${trade.quantity} @ ${proceeds} EUR, gain/loss ${gainLoss} EUR`,
-            details: {
-              effective_date: trade.date, ticker: trade.ticker, type: "Sell",
-              amount: proceeds, cost_basis: costBasis, gain_loss: gainLoss,
-              postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-            },
+            summary: command.auditSummary,
+            details: command.auditDetails,
           });
-
-          results.push(resultEntry);
-          continue;
-        }
-
-        // Buy entry creation
-        const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
-        const title = `Lightyear Buy: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo}`;
-
-        if (isDryRun) {
-          results.push({
-            reference: trade.reference,
-            ticker: trade.ticker,
-            type: trade.type,
-            date: trade.date,
-            eur_amount: trade.eur_amount,
-            status: "would_create",
-          });
-        } else {
-          const outcome = await guard.createJournalOnce(
-            { ns: "LY", id: trade.reference },
-            { title, effective_date: trade.date, cl_currencies_id: "EUR", postings },
-            { confirm: false }, // Lightyear journals stay in PROJECT for review
-          );
-          if (outcome.status === "duplicate") {
-            // Existing journal for this key — skip the CREATED audit and report a duplicate.
-            results.push({
-              reference: trade.reference,
-              ticker: trade.ticker,
-              type: trade.type,
-              date: trade.date,
-              eur_amount: trade.eur_amount,
-              status: "duplicate",
-              journal_id: outcome.journal_id,
-            });
-          } else {
-            logAudit({
-              tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
-              entity_id: outcome.journal_id,
-              summary: `Lightyear Buy: ${trade.ticker} ${trade.quantity} @ ${trade.eur_amount} EUR`,
-              details: {
-                effective_date: trade.date, ticker: trade.ticker, type: "Buy",
-                amount: trade.eur_amount,
-                postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-              },
-            });
-
-            results.push({
-              reference: trade.reference,
-              ticker: trade.ticker,
-              type: trade.type,
-              date: trade.date,
-              eur_amount: trade.eur_amount,
-              status: "created",
-              journal_id: outcome.journal_id,
-            });
-          }
-        }
-      }
-
-      const skippedSells = results.filter(r => r.status === "skipped" && r.type === "Sell");
-      if (skippedSells.length > 0 && !capital_gains_file) {
-        warnings.push(
-          `${skippedSells.length} sell trade(s) skipped — provide capital_gains_file to book non-cash-equivalent sells with correct cost basis (the gain/loss accounts default to 8330/8335).`
-        );
-      }
-
+          createdByIndex.set(index, { journal_id: outcome.journal_id, status: "created" });
+          return { outcome: "completed", known_objects: [{ entity_type: "journal", entity_id: outcome.journal_id, outcome: "created" }] };
+        },
+      })));
 
       return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            mode: isDryRun ? "DRY_RUN" : "EXECUTED",
-            total_trades: trades.length,
-            new_entries: newTrades.length,
-            created: results.filter(r => r.status === "created" || r.status === "would_create").length,
-            skipped: results.filter(r => r.status === "skipped").length,
-            duplicates_skipped: duplicates.length,
-            duplicate_refs: duplicates.map(d => ({ reference: d.reference, ticker: d.ticker, date: d.date })),
-            results,
-            accounts: {
-              investment: investment_account,
-              broker: broker_account,
-              gain: gainAccount,
-              loss: lossAccount,
-              fee: feeAccount,
-            },
-            ...(warnings.length > 0 && { warnings }),
-            note: isDryRun
-              ? "Set dry_run=false to create journal entries."
-              : "Journal entries created. Review and register (confirm) them when ready.",
-          }),
-        }],
+        content: [{ type: "text", text: toMcpJson(renderTradesPayload({ mode: "EXECUTED", projection, executionReport, createdByIndex })) }],
       };
     }
   );
@@ -2755,84 +3150,175 @@ export function registerLightyearTools(
       tax_account: z.number().optional().describe("Withheld tax receivable/expense account (for tax_amount from CSV)"),
       fee_account: z.number().optional().describe(`Platform fee expense account (default ${DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT} Muud finantskulud)`),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
+      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for dry_run=false."),
     },
     { ...batch, openWorldHint: true, title: "Book Lightyear Distributions" },
-    async ({ file_path, file_ref, broker_account, broker_dimension_id, income_account, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run }) => {
+    async ({ file_path, file_ref, broker_account, broker_dimension_id, income_account, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run, plan_handle }) => {
       const isDryRun = dry_run !== false;
       const fee_account = fee_account_param ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
+      const statementSource = fileInputSource(file_path, file_ref);
 
-      const csv = await readCsvFile(fileInputSource(file_path, file_ref), FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
-      const rows = parseAccountStatement(csv);
-      const extraction = extractDistributions(rows, collectTradeReservedConversionRefs(rows));
-      const distributions = extraction.distributions;
-      const bookable = distributions.filter(isBookableDistribution);
-      const reviewed = distributions.filter(distribution => !isBookableDistribution(distribution));
-      const sourceFields = (distribution: LightyearDistribution) => ({
-        reference: distribution.reference,
-        ticker: distribution.ticker,
-        date: distribution.date,
-        currency: distribution.currency,
-        gross_amount: distribution.gross_amount,
-        tax_amount: distribution.tax_amount,
-        fee: distribution.fee,
-        net_amount: distribution.net_amount,
-        gross_eur: distribution.gross_eur,
-        tax_eur: distribution.tax_eur,
-        fee_eur: distribution.fee_eur,
-        net_eur: distribution.net_eur,
-        fx_provenance: distribution.fx_provenance,
-      });
-      const manualResult = (distribution: LightyearDistribution) => ({
-        ...sourceFields(distribution),
-        status: "manual_review",
-        review_reason: distribution.fx_review_reason,
-      });
-      const baseResponse = {
-        mode: isDryRun ? "DRY_RUN" : "EXECUTED",
-        total_distributions: distributions.length,
-        bookable_distributions: bookable.length,
-        review_required: reviewed.length,
-        ...(extraction.warnings.length > 0 && { warnings: extraction.warnings }),
-        note: isDryRun
-          ? "Set dry_run=false to create journal entries."
-          : "Journal entries created. Review and register when ready.",
+      const normalizedArgs = stripUndefinedDeep({
+        broker_account,
+        broker_dimension_id,
+        income_account,
+        reward_account: reward_account_param,
+        tax_account,
+        fee_account,
+      }) as PlanRecord;
+
+      // Load the statement once per run to derive the deterministic distribution
+      // set and its source identity; execute re-reads and re-validates it.
+      const readDistributions = async (): Promise<{
+        snapshot: FileInputSnapshot;
+        distributions: LightyearDistribution[];
+        warnings: string[];
+      }> => {
+        const snapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
+        const rows = parseAccountStatement(snapshot.text());
+        const extraction = extractDistributions(rows, collectTradeReservedConversionRefs(rows));
+        return { snapshot, distributions: extraction.distributions, warnings: extraction.warnings };
       };
-      if (bookable.length === 0) {
+
+      // For zero-bookable statements there is nothing to create on either path,
+      // so no plan is issued and no account gate runs — mirrors the historical
+      // manual-review-only response, and needs no handle to "execute".
+      const zeroBookableResponse = (
+        mode: "DRY_RUN" | "EXECUTED",
+        distributions: LightyearDistribution[],
+        warnings: string[],
+      ) => ({
+        content: [{ type: "text", text: toMcpJson({
+          mode,
+          total_distributions: distributions.length,
+          bookable_distributions: 0,
+          review_required: distributions.filter(d => !isBookableDistribution(d)).length,
+          new_entries: 0,
+          duplicates_skipped: 0,
+          results: distributions
+            .filter(d => !isBookableDistribution(d))
+            .map(d => sandboxResultRow({ ...distributionSourceFields(d), status: "manual_review", review_reason: d.fx_review_reason })),
+          ...(warnings.length > 0 && { warnings }),
+          note: mode === "DRY_RUN"
+            ? "No bookable distributions. Nothing to create."
+            : "No bookable distributions. Nothing created.",
+        }) }],
+      });
+
+      const resolveAndValidateAccounts = (distributions: LightyearDistribution[], accounts: Awaited<ReturnType<typeof api.readonly.getAccounts>>) => {
+        const bookable = distributions.filter(isBookableDistribution);
+        const hasReward = bookable.some(distribution => distribution.type === "Reward");
+        const needsTax = bookable.some(distribution => (distribution.tax_eur ?? 0) > 0);
+        const needsFee = bookable.some(distribution => (distribution.fee_eur ?? 0) > 0);
+        const reward_account = resolveOtherFinancialIncomeAccount(accounts, reward_account_param);
+        const errors = validateAccounts(accounts, [
+          { id: broker_account, label: "Broker account" },
+          { id: income_account, label: "Income account" },
+          ...((hasReward || reward_account_param !== undefined) ? [{ id: reward_account, label: "Reward account" }] : []),
+          ...(tax_account !== undefined ? [{ id: tax_account, label: "Tax account" }] : []),
+          ...((needsFee || fee_account_param !== undefined) ? [{ id: fee_account, label: "Fee account" }] : []),
+        ]);
+        return { reward_account, needsTax, errors };
+      };
+
+      if (isDryRun) {
+        const { snapshot, distributions, warnings } = await readDistributions();
+        if (distributions.filter(isBookableDistribution).length === 0) {
+          return zeroBookableResponse("DRY_RUN", distributions, warnings);
+        }
+        const accounts = await api.readonly.getAccounts();
+        const { reward_account, needsTax, errors } = resolveAndValidateAccounts(distributions, accounts);
+        if (errors.length > 0) return toolError({ error: "Account validation failed", details: errors });
+        if (!tax_account && needsTax) {
+          return toolError({
+            error: "tax_account is required when distributions include withheld tax",
+            hint: "Provide tax_account so tax_amount can be booked separately for Lightyear distributions.",
+          });
+        }
+        const guard = await BookingGuard.load(api);
+        const existingRefs = findExistingJournalsByRef(guard.journals, distributions.filter(isBookableDistribution).map(d => ({ reference: d.reference, date: d.date })));
+        const projection = computeDistributionsProjection({
+          distributions, existingRefs, seedWarnings: warnings,
+          broker_account, broker_dimension_id, income_account, reward_account, tax_account, fee_account,
+        });
+        const planHandleIssued = runtimeSafetyContext.planStore.issue(
+          LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN,
+          buildLightyearExecutionPlanInput({
+            normalizedArgs,
+            sourceIdentities: [sourceIdentityRecord(snapshot)],
+            liveSnapshot: { income_account, reward_account, ...(tax_account !== undefined ? { tax_account } : {}) },
+            reviewCommands: distributionsReviewCommands(projection),
+            fingerprint: distributionsFingerprint(projection, normalizedArgs),
+            counts: {
+              total_distributions: projection.totalDistributions,
+              bookable_distributions: projection.bookableCount,
+              review_required: projection.reviewRequired,
+              new_entries: projection.commands.length,
+              duplicates_skipped: projection.duplicates.length,
+            },
+            totals: { command_count: projection.commands.length },
+            exclusions: projection.duplicates.map(d => stripUndefinedDeep({ reference: d.reference, ticker: d.ticker, date: d.date })),
+            reviews: projection.manualResults.map(row => stripUndefinedDeep({
+              reference: row.reference as PlanData,
+              review_reason: ((row.review_reason as { code?: string } | null)?.code ?? null) as PlanData,
+            })),
+          }),
+        );
         return {
-          content: [{ type: "text", text: toMcpJson({
-            ...baseResponse,
-            new_entries: 0,
-            duplicates_skipped: 0,
-            results: reviewed.map(manualResult),
-          }) }],
+          content: [{ type: "text", text: toMcpJson(renderDistributionsPayload({ mode: "DRY_RUN", projection, planHandle: planHandleIssued })) }],
         };
       }
 
-      const hasReward = bookable.some(distribution => distribution.type === "Reward");
-      const needsTax = bookable.some(distribution => (distribution.tax_eur ?? 0) > 0);
-      const needsFee = bookable.some(distribution => (distribution.fee_eur ?? 0) > 0);
-      const accounts = await api.readonly.getAccounts();
-      // Broker rewards/bonuses are broker fee/campaign income, not securities
-      // income — default to "Muud finantstulud" (standard 8600, name-resolved),
-      // NOT the 8330 securities-income account used for dividends/sell gains.
-      const reward_account = resolveOtherFinancialIncomeAccount(accounts, reward_account_param);
-      const errors = validateAccounts(accounts, [
-        { id: broker_account, label: "Broker account" },
-        { id: income_account, label: "Income account" },
-        ...((hasReward || reward_account_param !== undefined)
-          ? [{ id: reward_account, label: "Reward account" }]
-          : []),
-        ...(tax_account !== undefined ? [{ id: tax_account, label: "Tax account" }] : []),
-        ...((needsFee || fee_account_param !== undefined) ? [{ id: fee_account, label: "Fee account" }] : []),
-      ]);
-
-      if (errors.length > 0) {
-        return toolError({
-          error: "Account validation failed",
-          details: errors,
-        });
+      // EXECUTE
+      if (typeof plan_handle !== "string" || plan_handle.length === 0) {
+        // Nothing to book (zero bookable) requires no handle; otherwise a handle is mandatory.
+        let peek;
+        try {
+          peek = await readDistributions();
+        } catch (error) {
+          if (error instanceof FileInputSnapshotError) {
+            return planErrorResult("plan_handle_required", "A reviewed execution-plan handle from the Lightyear distributions dry run is required to create journal entries.");
+          }
+          throw error;
+        }
+        if (peek.distributions.filter(isBookableDistribution).length === 0) {
+          return zeroBookableResponse("EXECUTED", peek.distributions, peek.warnings);
+        }
+        return planErrorResult(
+          "plan_handle_required",
+          "A reviewed execution-plan handle from the Lightyear distributions dry run is required to create journal entries.",
+        );
+      }
+      let storedPlan;
+      try {
+        storedPlan = runtimeSafetyContext.planStore.consume(plan_handle, LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN);
+      } catch (error) {
+        if (error instanceof PlanStoreError) return planErrorResult(error.code, error.message);
+        throw error;
       }
 
+      let snapshot: FileInputSnapshot;
+      let distributions: LightyearDistribution[];
+      let warnings: string[];
+      try {
+        ({ snapshot, distributions, warnings } = await readDistributions());
+      } catch (error) {
+        if (error instanceof FileInputSnapshotError) {
+          return planErrorResult("plan_drift", "The reviewed Lightyear statement could not be re-read to match the plan.");
+        }
+        throw error;
+      }
+      const storedIdentity = storedPlan.sourceIdentities[0];
+      if (!storedIdentity || storedIdentity.digest_sha256 !== snapshot.identity.digest_sha256) {
+        return planErrorResult("plan_drift", "The Lightyear statement bytes changed since the plan was reviewed.");
+      }
+      if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
+        return planErrorResult("plan_drift", "The booking arguments changed since the plan was reviewed.");
+      }
+
+      const accounts = await api.readonly.getAccounts();
+      const { reward_account, needsTax, errors } = resolveAndValidateAccounts(distributions, accounts);
+      if (errors.length > 0) return toolError({ error: "Account validation failed", details: errors });
       if (!tax_account && needsTax) {
         return toolError({
           error: "tax_account is required when distributions include withheld tax",
@@ -2840,106 +3326,51 @@ export function registerLightyearTools(
         });
       }
 
-      // Check duplicates — one snapshot for the run (see book_lightyear_trades).
       const guard = await BookingGuard.load(api);
-      const allRefs = bookable.map(d => ({ reference: d.reference, date: d.date }));
-      const existingRefs = findExistingJournalsByRef(guard.journals, allRefs);
-
-      // Dedupe against existing journals AND within this CSV (see book_lightyear_trades):
-      // the first occurrence of a reference books, later same-ref rows are duplicates,
-      // so dry-run counts match what execution creates.
-      const seenRefs = new Set<string>();
-      const newDist: LightyearDistribution[] = [];
-      const duplicates: LightyearDistribution[] = [];
-      for (const d of bookable) {
-        if (existingRefs.has(d.reference) || seenRefs.has(d.reference)) {
-          duplicates.push(d);
-        } else {
-          seenRefs.add(d.reference);
-          newDist.push(d);
-        }
+      const existingRefs = findExistingJournalsByRef(guard.journals, distributions.filter(isBookableDistribution).map(d => ({ reference: d.reference, date: d.date })));
+      const projection = computeDistributionsProjection({
+        distributions, existingRefs, seedWarnings: warnings,
+        broker_account, broker_dimension_id, income_account, reward_account, tax_account, fee_account,
+      });
+      const storedFingerprint = readStoredFingerprint(storedPlan.privatePayload);
+      if (typeof storedFingerprint !== "string" || storedFingerprint !== distributionsFingerprint(projection, normalizedArgs)) {
+        return planErrorResult("plan_drift", "The reviewed Lightyear distribution plan no longer matches the current ledger and source.");
       }
 
-      const newSet = new Set(newDist.map(distribution => distribution.row_index));
-      const results: Array<Record<string, unknown>> = [];
-      for (const dist of distributions) {
-        if (!isBookableDistribution(dist)) {
-          results.push(manualResult(dist));
-          continue;
-        }
-        if (!newSet.has(dist.row_index)) continue;
-        const netEur = dist.net_eur;
-        const taxEur = dist.tax_eur;
-        const feeEur = dist.fee_eur;
-        const grossEur = dist.gross_eur;
-        if (netEur === null || taxEur === null || feeEur === null || grossEur === null) continue;
-        const postings: Array<{ accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number }> = [];
-
-        if (netEur > 0) {
-          postings.push({ accounts_id: broker_account, ...(broker_dimension_id && { accounts_dimensions_id: broker_dimension_id }), type: "D", amount: netEur });
-        }
-        if (taxEur > 0 && tax_account) {
-          postings.push({ accounts_id: tax_account, type: "D", amount: taxEur });
-        }
-        if (feeEur > 0) {
-          postings.push({ accounts_id: fee_account, type: "D", amount: feeEur });
-        }
-        const isReward = dist.type === "Reward";
-        postings.push({ accounts_id: isReward ? reward_account : income_account, type: "C", amount: grossEur });
-
-        const title = dist.ticker
-          ? `Lightyear tulu: ${dist.ticker} (${dist.isin})`
-          : `Lightyear tulu: ${dist.type === "Reward" ? "boonus" : "intress"}`;
-
-        if (isDryRun) {
-          results.push({
-            ...sourceFields(dist),
-            status: "would_create",
-          });
-        } else {
+      const createdByIndex = new Map<number, { journal_id?: number; status: string }>();
+      const executionReport = await executeLightyearCommands(projection.commands.map((command, index): LightyearExecutionCommand => ({
+        id: lightyearDistributionCommandId(index),
+        category: LIGHTYEAR_DISTRIBUTION_CREATE_CATEGORY,
+        known_object_limit: 1,
+        prepare: async () => {
+          const fresh = findExistingJournalsByRef(await api.journals.listAll(), [{ reference: command.reference, date: command.date }]);
+          return fresh.has(command.reference)
+            ? { outcome: "drift", error_code: "duplicate_appeared" }
+            : { outcome: "ready" };
+        },
+        mutate: async () => {
           const outcome = await guard.createJournalOnce(
-            { ns: "LY", id: dist.reference },
-            { title, effective_date: dist.date, cl_currencies_id: "EUR", postings },
-            { confirm: false }, // Lightyear journals stay in PROJECT for review
+            { ns: "LY", id: command.reference },
+            { title: command.title, effective_date: command.date, cl_currencies_id: "EUR", postings: command.postings },
+            { confirm: false },
           );
           if (outcome.status === "duplicate") {
-            // Existing journal for this key — skip the CREATED audit and report a duplicate.
-            results.push({
-              ...sourceFields(dist),
-              status: "duplicate",
-              journal_id: outcome.journal_id,
-            });
-          } else {
-            logAudit({
-              tool: "book_lightyear_distributions", action: "CREATED", entity_type: "journal",
-              entity_id: outcome.journal_id,
-              summary: `Lightyear distribution: ${dist.ticker || "interest"} gross ${grossEur} EUR`,
-              details: {
-                effective_date: dist.date,
-                ...sourceFields(dist),
-                postings: postings.map(posting => ({ ...posting })),
-              },
-            });
-
-            results.push({
-              ...sourceFields(dist),
-              status: "created",
-              journal_id: outcome.journal_id,
-            });
+            createdByIndex.set(index, { journal_id: outcome.journal_id, status: "duplicate" });
+            return { outcome: "completed" };
           }
-        }
-      }
+          logAudit({
+            tool: "book_lightyear_distributions", action: "CREATED", entity_type: "journal",
+            entity_id: outcome.journal_id,
+            summary: command.auditSummary,
+            details: { effective_date: command.date, ...command.sourceFields, postings: command.postings.map(posting => ({ ...posting })) },
+          });
+          createdByIndex.set(index, { journal_id: outcome.journal_id, status: "created" });
+          return { outcome: "completed", known_objects: [{ entity_type: "journal", entity_id: outcome.journal_id, outcome: "created" }] };
+        },
+      })));
 
       return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            ...baseResponse,
-            new_entries: newDist.length,
-            duplicates_skipped: duplicates.length,
-            results,
-          }),
-        }],
+        content: [{ type: "text", text: toMcpJson(renderDistributionsPayload({ mode: "EXECUTED", projection, executionReport, createdByIndex })) }],
       };
     }
   );

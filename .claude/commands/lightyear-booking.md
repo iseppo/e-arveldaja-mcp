@@ -68,7 +68,9 @@ Call `book_lightyear_trades` with `dry_run: true`.
 - Include `capital_gains_file`, `gain_loss_account`, `loss_account`, `investment_dimension_id`, and `broker_dimension_id` when available.
 - `book_lightyear_trades` takes a single `fee_account` argument. If a `trade_fee_account` value was supplied, pass it as the tool's `fee_account` (i.e. call the tool with `"fee_account": <trade_fee_account>`); otherwise omit `fee_account` and let it default to 8335. Never pass the tool an argument literally named `trade_fee_account`, and never send `distribution_fee_account` to this tool.
 - Present trades that would be booked, skipped entries, duplicate-detection basis, and warnings.
-- Ask for explicit approval before re-running with `dry_run: false`.
+- The reviewed dry run issues an immutable execution plan and returns a `plan_handle` (top-level in the response). It binds BOTH the statement CSV and the capital-gains CSV, the normalized arguments, the enumerated journals, and the duplicate/skip decisions.
+- Use `get_execution_plan_page` with that `plan_handle` to page the enumerated journals, exclusions, and reviews without consuming the plan.
+- The plan handle is not approval. Ask for explicit human approval before re-running with `dry_run: false`.
 - The trade approval card must include source CSV, journals that would be created, skipped duplicates, gain/loss account choices, dimensions, and side effects.
 
 ### Step 5: Preview distributions only after required accounts are known
@@ -82,12 +84,15 @@ When the required accounts are known, call `book_lightyear_distributions` with `
 - `book_lightyear_distributions` takes a single `fee_account` argument. If a `distribution_fee_account` value was supplied, pass it as the tool's `fee_account` (i.e. call the tool with `"fee_account": <distribution_fee_account>`); otherwise omit it and let it default to 8610 "Muud finantskulud" — NOT the 8335 trade-fee account. Never pass the tool an argument literally named `distribution_fee_account`, and never send `trade_fee_account` to this tool.
 - The tool defaults `reward_account` to 8600 ("Muud finantstulud", other financial income, name-resolved) for platform rewards/bonuses — a broker fee/campaign income, NOT securities income (8330) and NOT a financial cost. Only pass `reward_account` explicitly to override.
 - Present dividends, interest, platform rewards, withheld tax, skipped entries, duplicate-detection basis, and warnings.
-- Ask for explicit approval before re-running with `dry_run: false`.
+- The reviewed dry run issues an immutable execution plan and returns a `plan_handle` (top-level in the response) binding the statement CSV, the normalized arguments, and the enumerated distribution journals. Page it with `get_execution_plan_page` if needed.
+- The plan handle is not approval. Ask for explicit human approval before re-running with `dry_run: false`.
 - The distribution approval card must include source CSV, income/tax/reward accounts, journals that would be created, skipped duplicates, and side effects.
 
 ### Step 6: Execute after approval
 
-After approval, re-run only the approved booking tools with `dry_run: false`.
+After approval, re-run only the approved booking tools with `dry_run: false`. For each approved tool, `dry_run: false` REQUIRES the `plan_handle` from that tool's own reviewed dry run, and you must reuse the SAME reviewed optional arguments alongside it — the same statement path, capital-gains file, accounts, dimensions, and skip list. Pass `plan_handle`: the `plan_handle` from the reviewed dry run.
+
+Execute re-reads every bound source file, re-derives the plan, and refuses to create anything if the sources or arguments changed since review — it returns `plan_drift` with zero journals. On success, review `execution_report` (the plan-execution tracker) to confirm every journal completed; if it reports a partial execution, run a fresh dry run before retrying (never blindly re-execute).
 
 Report:
 - Trades booked
