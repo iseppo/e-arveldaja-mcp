@@ -1,13 +1,14 @@
 import { readFile } from "fs/promises";
-import { createHash } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { resolveFileInput } from "../file-validation.js";
-import { registerWiseImportTools } from "./wise-import.js";
+import { registerWiseImportTools, WISE_PLAN_DOMAIN } from "./wise-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { clearRuntimeCaches } from "../cache-control.js";
 import { reportProgress } from "../progress.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import { createExecutionPlanPageHandler } from "../plan-tools.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 
@@ -188,6 +189,7 @@ function setupWiseTool(
     purchaseInvoices?: unknown[];
     purchaseInvoiceUpdate?: ReturnType<typeof vi.fn>;
     connectionFingerprint?: string;
+    runtimeSafetyContext?: ReturnType<typeof createTestRuntimeSafetyContext>;
   } = {},
 ) {
   const server = { registerTool: vi.fn() } as any;
@@ -238,7 +240,8 @@ function setupWiseTool(
     },
   } as any;
 
-  registerWiseImportTools(server, api, createTestRuntimeSafetyContext());
+  const runtimeSafetyContext = options.runtimeSafetyContext ?? createTestRuntimeSafetyContext();
+  registerWiseImportTools(server, api, runtimeSafetyContext);
 
   const registration = server.registerTool.mock.calls.find(([name]) => name === "import_wise_transactions");
   if (!registration) throw new Error("Tool was not registered");
@@ -253,9 +256,13 @@ function setupWiseTool(
       return preview;
     }
     clearWiseCallHistory(api);
+    // The execute path now consumes a server plan handle issued by the reviewed
+    // dry run in addition to the M04 digest. Thread both through so existing
+    // behaviour tests exercise the same mutation they always did.
     return rawHandler({
       ...args,
       approved_command_digest: payload.approved_command_digest,
+      ...(typeof payload.plan_handle === "string" ? { plan_handle: payload.plan_handle } : {}),
     });
   };
 
@@ -264,6 +271,7 @@ function setupWiseTool(
     options: registration[1] as { description?: string; inputSchema?: Record<string, unknown> },
     handler,
     rawHandler,
+    runtimeSafetyContext,
   };
 }
 
@@ -307,11 +315,15 @@ async function runApprovedWiseImport(
   if (!/^[0-9a-f]{64}$/.test(dry.approved_command_digest ?? "")) {
     throw new Error("Wise dry run did not return a valid approved_command_digest");
   }
+  if (typeof dry.plan_handle !== "string") {
+    throw new Error("Wise dry run did not return a plan_handle");
+  }
   clearWiseCallHistory(setup.api);
   const executed = parseWiseResponse(await setup.handler({
     ...args,
     execute: true,
     approved_command_digest: dry.approved_command_digest,
+    plan_handle: dry.plan_handle,
   }));
   return { dry, executed };
 }
@@ -2782,6 +2794,11 @@ describe("wise import tool", () => {
     const liveState = await run();
     liveState.setup.api.transactions.listAll.mockResolvedValue([{ status: "CONFIRMED", is_deleted: false, description: "WISE:M04-BIND-FX OpenAI" }]);
     clearWiseCallHistory(liveState.setup.api);
+    // The reviewed dry run issued a plan handle bound to the original ledger.
+    // Live-ledger drift between review and execute is now caught by the server
+    // plan gate as plan_drift (the re-derived command digest no longer matches
+    // the digest the handle bound), before the M04 operator-digest gate. Zero
+    // mutations either way.
     const liveStateResult = await liveState.setup.handler({
       file_path: "/tmp/wise.csv",
       accounts_dimensions_id: 5,
@@ -2790,10 +2807,11 @@ describe("wise import tool", () => {
       date_from: "2026-01-01",
       execute: true,
       approved_command_digest: liveState.payload.approved_command_digest ?? "0".repeat(64),
+      plan_handle: liveState.payload.plan_handle,
     }) as any;
     expect(liveStateResult.isError).toBe(true);
     expect(parseWiseResponse(liveStateResult)).toEqual(expect.objectContaining({
-      code: "approval_digest_mismatch",
+      code: "plan_drift",
       mutation_occurred: false,
     }));
     expect(liveState.setup.api.transactions.listAll).toHaveBeenCalledTimes(1);
@@ -2990,6 +3008,7 @@ describe("wise import tool", () => {
       progressCalls: number;
       auditCalls: number;
       malformed: boolean;
+      noHandle: boolean;
     };
     const outcomes: RejectedOutcome[] = [];
     const invoke = async ({
@@ -3000,13 +3019,33 @@ describe("wise import tool", () => {
         connectionFingerprint: "m04-approved-connection",
       }),
       malformed = false,
+      noHandle = false,
     }: {
       digest?: unknown;
       csv?: string;
       args?: Record<string, unknown>;
       setup?: ReturnType<typeof setupWiseTool>;
       malformed?: boolean;
+      noHandle?: boolean;
     }) => {
+      mockedReadFile.mockClear();
+      mockedReadFile.mockResolvedValue(csv);
+      // Issue a plan handle from a MATCHING dry run on this exact setup/csv/args,
+      // so the only thing wrong at execute is the operator-supplied digest — the
+      // M04 digest gate is what must reject it. Malformed-digest cases (rejected
+      // by the format gate before any work) and no-plannable-command cases (an
+      // all-duplicate or fully-filtered file yields no commands, hence no handle)
+      // deliberately carry no handle.
+      let planHandle: string | undefined;
+      if (!malformed && !noHandle) {
+        const dry = parseWiseResponse(await setup.rawHandler({
+          file_path: "/tmp/wise.csv",
+          accounts_dimensions_id: 5,
+          ...args,
+          execute: false,
+        }));
+        planHandle = typeof dry.plan_handle === "string" ? dry.plan_handle : undefined;
+      }
       mockedReadFile.mockClear();
       mockedReadFile.mockResolvedValue(csv);
       const flushBefore = mockedClearRuntimeCaches.mock.calls.length;
@@ -3017,6 +3056,7 @@ describe("wise import tool", () => {
         accounts_dimensions_id: 5,
         execute: true,
         ...args,
+        ...(planHandle !== undefined ? { plan_handle: planHandle } : {}),
         ...(digest === undefined ? {} : { approved_command_digest: digest }),
       }) as any;
       outcomes.push({
@@ -3028,6 +3068,7 @@ describe("wise import tool", () => {
         progressCalls: mockedReportProgress.mock.calls.length - progressBefore,
         auditCalls: mockedLogAudit.mock.calls.length - auditBefore,
         malformed,
+        noHandle,
       });
     };
 
@@ -3040,8 +3081,12 @@ describe("wise import tool", () => {
     });
     await invoke({ digest: approvedDigest, csv: buildCsvRows([buildM04Values({ id: "M04-REJECT-OTHER-FILE", sourceAmount: "101" })]) });
     await invoke({ digest: approvedDigest, args: { date_from: "2026-06-01" } });
+    // Live-ledger duplicate: the base row is already imported, so a fresh dry
+    // run plans no commands and issues no handle. Without a handle the digest
+    // alone cannot execute — blocked at the plan-handle gate before any mutation.
     await invoke({
       digest: approvedDigest,
+      noHandle: true,
       setup: setupWiseTool([{
         status: "CONFIRMED",
         is_deleted: false,
@@ -3051,8 +3096,11 @@ describe("wise import tool", () => {
         description: "WISE:M04-REJECT-BASE Ordinary Vendor",
       }], undefined, { connectionFingerprint: "m04-approved-connection" }),
     });
+    // Fully-filtered file (only a CANCELLED row): no eligible commands, hence no
+    // handle — the digest alone cannot execute.
     await invoke({
       digest: approvedDigest,
+      noHandle: true,
       csv: buildCsvRows([buildM04Values({ id: "M04-REJECT-EMPTY", status: "CANCELLED" })]),
     });
     await invoke({
@@ -3064,17 +3112,27 @@ describe("wise import tool", () => {
     });
 
     expect(outcomes).toHaveLength(11);
-    for (const { result, payload, api, fileCalls, cacheFlushes, progressCalls, auditCalls, malformed } of outcomes) {
+    for (const { result, payload, api, fileCalls, cacheFlushes, progressCalls, auditCalls, malformed, noHandle } of outcomes) {
       expect(result.isError).toBe(true);
-      expect(payload).toEqual({
-        error: expect.any(String),
-        category: "digest_mismatch",
-        code: "approval_digest_mismatch",
-        mutation_occurred: false,
-        known_object_ids: [],
-        affected_cache_names: [],
-        next_action: "Run a new Wise dry run, review its complete command plan, and approve that exact digest.",
-      });
+      if (noHandle) {
+        // A digest with no plan handle (because the file plans no commands)
+        // cannot execute: the layered plan gate blocks it before mutation.
+        expect(payload).toEqual(expect.objectContaining({
+          category: "plan_handle_required",
+          code: "plan_handle_required",
+          mutation_occurred: false,
+        }));
+      } else {
+        expect(payload).toEqual({
+          error: expect.any(String),
+          category: "digest_mismatch",
+          code: "approval_digest_mismatch",
+          mutation_occurred: false,
+          known_object_ids: [],
+          affected_cache_names: [],
+          next_action: "Run a new Wise dry run, review its complete command plan, and approve that exact digest.",
+        });
+      }
       expect(payload).not.toHaveProperty("expected_digest");
       expect(payload).not.toHaveProperty("supplied_digest");
       expect(payload).not.toHaveProperty("approved_command_digest");
@@ -4930,6 +4988,261 @@ describe("wise import tool", () => {
       }
       expect(payload.error).not.toContain("BBBB");
       expectNoWiseReadsOrMutations(api);
+    });
+  });
+});
+
+// P19 (server plan handle layered on the M04 digest) + P12 (ownership
+// re-preview). These pin the NEW contract: without them the layered gate does
+// not exist — before the source change every one of these executes mutated (or
+// executed with digest only), so each assertion below is red against the base.
+describe("wise import server plan handle (P12/P19)", () => {
+  const HANDLE_RE = /^[A-Za-z0-9_-]{43}$/;
+  const DIGEST_RE = /^[0-9a-f]{64}$/;
+  const paymentCsv = () => buildCsvRows([buildM04Values({ id: "P19-A" })]);
+
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  const baseArgs = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5 } as const;
+
+  it("issues a plan handle on dry run and refuses execute without it (a digest alone cannot execute)", async () => {
+    mockedReadFile.mockResolvedValue(paymentCsv());
+    const setup = setupWiseTool([]);
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+    expect(dry.plan_handle).toMatch(HANDLE_RE);
+    expect(dry.approved_command_digest).toMatch(DIGEST_RE);
+    // Dry-run suggested execute args carry the handle for the approval step.
+    expect(dry.workflow.approval_previews[0].execute_args).toEqual(expect.objectContaining({
+      plan_handle: dry.plan_handle,
+      approved_command_digest: dry.approved_command_digest,
+      execute: true,
+    }));
+
+    // execute with the digest but NO handle → blocked before any mutation.
+    clearWiseCallHistory(setup.api);
+    const blocked = await setup.rawHandler({ ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest });
+    expect(blocked.isError).toBe(true);
+    expect(parseWiseResponse(blocked)).toEqual(expect.objectContaining({
+      code: "plan_handle_required",
+      mutation_occurred: false,
+    }));
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+
+    // handle + digest → executes.
+    clearWiseCallHistory(setup.api);
+    const done = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expect(done.mode).toBe("EXECUTED");
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a malformed/invalid handle and preserves the plan-store code", async () => {
+    mockedReadFile.mockResolvedValue(paymentCsv());
+    const setup = setupWiseTool([]);
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+    clearWiseCallHistory(setup.api);
+    const bad = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: "not-a-real-handle",
+    }));
+    expect(bad).toEqual(expect.objectContaining({ code: "plan_handle_invalid", mutation_occurred: false }));
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("burns the handle before validation, so a drifted attempt cannot be retried", async () => {
+    mockedReadFile.mockResolvedValue(paymentCsv());
+    const setup = setupWiseTool([]);
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+
+    // Attempt 1: correct handle, WRONG (well-formed) digest → digest_mismatch,
+    // but the handle is consumed regardless (burn-before-validate).
+    clearWiseCallHistory(setup.api);
+    const attempt1 = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: "0".repeat(64), plan_handle: dry.plan_handle,
+    }));
+    expect(attempt1.code).toBe("approval_digest_mismatch");
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+
+    // Attempt 2: same handle, now the CORRECT digest → still rejected because the
+    // handle was already burned; the replay never mutates.
+    clearWiseCallHistory(setup.api);
+    const attempt2 = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expect(attempt2.code).toBe("plan_handle_consumed");
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("stops with plan_drift when the source bytes changed since review", async () => {
+    mockedReadFile.mockResolvedValue(paymentCsv());
+    const setup = setupWiseTool([]);
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+
+    // The reviewed source is replaced with different bytes before execute.
+    mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({ id: "P19-A", sourceAmount: "999", targetAmount: "999" })]));
+    clearWiseCallHistory(setup.api);
+    const drifted = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("stops with plan_drift when the normalized arguments changed since review", async () => {
+    mockedReadFile.mockResolvedValue(paymentCsv());
+    const setup = setupWiseTool([]);
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+
+    // A date filter that still keeps the row, so the drift is purely in the args.
+    clearWiseCallHistory(setup.api);
+    const drifted = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, date_from: "2026-01-01",
+      approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("an Inbox-captured dry-run handle executes only in the public Wise handler on the shared context, and is rejected cross-domain and cross-context", async () => {
+    const context = createTestRuntimeSafetyContext();
+    mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({ id: "XCTX-A" })]));
+    // Inbox-captured side and public side register the Wise tool on the SAME
+    // RuntimeSafetyContext (as accounting-inbox's captureInternalToolHandlers does).
+    const inbox = setupWiseTool([], undefined, { runtimeSafetyContext: context });
+    const publicSide = setupWiseTool([], undefined, { runtimeSafetyContext: context });
+
+    const dry = parseWiseResponse(await inbox.rawHandler({ ...baseArgs, execute: false }));
+    expect(dry.plan_handle).toMatch(HANDLE_RE);
+
+    // A handle issued through the Inbox dry run is consumable by the public handler.
+    const done = parseWiseResponse(await publicSide.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expect(done.mode).toBe("EXECUTED");
+    expect(publicSide.api.transactions.create).toHaveBeenCalledTimes(1);
+
+    // A Wise handle consumed under a different domain → plan_domain_mismatch.
+    const dry2 = parseWiseResponse(await inbox.rawHandler({ ...baseArgs, execute: false }));
+    expect(() => context.planStore.consume(dry2.plan_handle, "camt_import")).toThrowError(
+      expect.objectContaining({ code: "plan_domain_mismatch" }),
+    );
+
+    // A handle whose runtime scope changed is rejected from a second context.
+    const dry3 = parseWiseResponse(await inbox.rawHandler({ ...baseArgs, execute: false }));
+    context.setScope({ connectionName: "second-context", connectionFingerprint: "second-fingerprint" });
+    expect(() => context.planStore.consume(dry3.plan_handle, WISE_PLAN_DOMAIN)).toThrowError(
+      expect.objectContaining({ code: "plan_scope_mismatch" }),
+    );
+  });
+
+  it("exposes the reviewed plan for paged review via get_execution_plan_page without consuming it", async () => {
+    const context = createTestRuntimeSafetyContext();
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({ id: "PAGE-A" }),
+      buildM04Values({ id: "PAGE-B", date: "2026-06-11" }),
+    ]));
+    const setup = setupWiseTool([], undefined, { runtimeSafetyContext: context });
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+
+    const pageHandler = createExecutionPlanPageHandler(context, { cursorSecret: randomBytes(32) });
+    const page = parseMcpResponse((await pageHandler({ plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    expect(page.contract).toBe("execution_plan_page_v1");
+    expect(page.operation).toBe(WISE_PLAN_DOMAIN);
+    expect(page.total_commands).toBe(2);
+    expect(page.commands).toHaveLength(2);
+    expect(page.commands[0].category).toBe("wise_main_create");
+
+    // Paging is read-only: the handle still executes afterwards.
+    clearWiseCallHistory(setup.api);
+    const done = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expect(done.mode).toBe("EXECUTED");
+  });
+
+  describe("P12 ownership re-preview", () => {
+    const transferRow = (id: string, sourceName: string, amount: string) => buildM04Values({
+      id, direction: "IN", sourceName, targetName: "Wise Own Account",
+      sourceAmount: amount, targetAmount: amount, sourceCurrency: "EUR", targetCurrency: "EUR",
+    });
+    const transferCsv = () => buildCsvRows([
+      transferRow("TRANSFER-X", "Claimed A", "50"),
+      transferRow("TRANSFER-Y", "Claimed B", "60"),
+    ]);
+    const transferOptions = () => ({
+      accountDimensions: configuredTransferDimensions(),
+      bankAccounts: configuredTransferBankAccounts(),
+      invoiceInfo: { invoice_company_name: "Company Legal Name" },
+    });
+    const transferBase = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, inter_account_dimension_id: 20 } as const;
+
+    const previewWith = (setup: ReturnType<typeof setupWiseTool>, confirm?: string[]) =>
+      setup.rawHandler({ ...transferBase, execute: false, ...(confirm ? { confirm_own_transfer_ids: confirm } : {}) })
+        .then(parseWiseResponse);
+    const executeWith = (setup: ReturnType<typeof setupWiseTool>, confirm: string[], handle: string, digest: string) =>
+      setup.rawHandler({
+        ...transferBase, execute: true, confirm_own_transfer_ids: confirm, plan_handle: handle, approved_command_digest: digest,
+      }).then(parseWiseResponse);
+
+    it("enumerates the exact unverified transfer IDs and only their approval produces a new executable plan", async () => {
+      mockedReadFile.mockResolvedValue(transferCsv());
+      const setup = setupWiseTool([], undefined, transferOptions());
+
+      // Preview A: no approvals — both transfers are enumerated as unverified.
+      const previewA = await previewWith(setup);
+      expect(previewA.ownership_reviews.map((r: any) => r.wise_id)).toEqual(["TRANSFER-X", "TRANSFER-Y"]);
+      expect(previewA.plan_handle).toMatch(HANDLE_RE);
+
+      // Preview B: approving exactly the enumerated IDs bakes the confirmations
+      // in and produces a NEW handle + NEW digest, distinct from preview A.
+      const previewB = await previewWith(setup, ["TRANSFER-X", "TRANSFER-Y"]);
+      expect(previewB.ownership_reviews ?? []).toEqual([]);
+      expect(previewB.plan_handle).not.toBe(previewA.plan_handle);
+      expect(previewB.approved_command_digest).not.toBe(previewA.approved_command_digest);
+
+      // The OLD preview-A handle (baked with no approvals) is rejected for an
+      // approved execute; the OLD digest is likewise not accepted.
+      clearWiseCallHistory(setup.api);
+      const oldHandle = await executeWith(setup, ["TRANSFER-X", "TRANSFER-Y"], previewA.plan_handle, previewB.approved_command_digest);
+      expect(oldHandle.code).toBe("wise_transfer_ownership_reapproval_required");
+      expect(setup.api.transactions.create).not.toHaveBeenCalled();
+
+      // Fresh approved preview → execute succeeds with the matching handle+digest.
+      const previewC = await previewWith(setup, ["TRANSFER-X", "TRANSFER-Y"]);
+      clearWiseCallHistory(setup.api);
+      const done = await executeWith(setup, ["TRANSFER-X", "TRANSFER-Y"], previewC.plan_handle, previewC.approved_command_digest);
+      expect(done.mode).toBe("EXECUTED");
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(2);
+    });
+
+    it("invalidates extra, missing, or reordered ownership approvals at execute (no mutation)", async () => {
+      mockedReadFile.mockResolvedValue(transferCsv());
+      const setup = setupWiseTool([], undefined, transferOptions());
+
+      // MISSING and REORDERED are checked against a plan baked with [X, Y].
+      const missing = await previewWith(setup, ["TRANSFER-X", "TRANSFER-Y"]);
+      clearWiseCallHistory(setup.api);
+      const missingResult = await executeWith(setup, ["TRANSFER-X"], missing.plan_handle, missing.approved_command_digest);
+      expect(missingResult.code).toBe("wise_transfer_ownership_reapproval_required");
+      expect(setup.api.transactions.create).not.toHaveBeenCalled();
+
+      const reordered = await previewWith(setup, ["TRANSFER-X", "TRANSFER-Y"]);
+      clearWiseCallHistory(setup.api);
+      const reorderedResult = await executeWith(setup, ["TRANSFER-Y", "TRANSFER-X"], reordered.plan_handle, reordered.approved_command_digest);
+      expect(reorderedResult.code).toBe("wise_transfer_ownership_reapproval_required");
+      expect(setup.api.transactions.create).not.toHaveBeenCalled();
+
+      // EXTRA is checked against a plan baked with only [X].
+      const extra = await previewWith(setup, ["TRANSFER-X"]);
+      clearWiseCallHistory(setup.api);
+      const extraResult = await executeWith(setup, ["TRANSFER-X", "TRANSFER-Y"], extra.plan_handle, extra.approved_command_digest);
+      expect(extraResult.code).toBe("wise_transfer_ownership_reapproval_required");
+      expect(setup.api.transactions.create).not.toHaveBeenCalled();
     });
   });
 });

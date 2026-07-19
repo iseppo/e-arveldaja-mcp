@@ -43,13 +43,15 @@ If the dry run fails because fee rows require a fee account:
 
 ### Step 2: Review the preview
 
+The dry run returns a server-issued `plan_handle` alongside the `approved_command_digest`. Both are required to execute: a digest without a handle cannot execute, and a plan handle is NOT approval — it only binds the reviewed plan to one execute attempt.
+
 Review:
 - Treat `execution` as the canonical batch payload when present.
 - Prefer `execution.summary`, `execution.results`, `execution.skipped`, `execution.errors`, and `execution.audit_reference`.
 - Use top-level `skipped_details` only as a grouped convenience summary for `execution.skipped` + `execution.errors`.
 - Check top-level `invoice_currency_fixes` when present; each candidate is a dry-run invoice FX update that execution may apply.
-- Review the complete `execution.commands` command plan, including every planned mutation and the top-level `command_count`.
-- Record the `approved_command_digest` returned for that complete command plan; approval and execution must use that exact digest.
+- Review the complete command plan. For a large plan, page the immutable server plan with `get_execution_plan_page` (`plan_handle`, optional `section` = `commands` | `exclusions` | `reviews`, optional `cursor`) instead of relying on a whole-plan dump; it is read-only and neither consumes the handle nor implies approval. Also read the top-level grouped totals (`summary`, `command_count`) and exceptions (`ownership_reviews`, `skipped_details`, `invoice_currency_fixes`).
+- Record BOTH the `plan_handle` and the `approved_command_digest` returned for that complete command plan; approval and execution must use that exact pair.
 - Fall back to top-level `total_csv_rows`, `eligible`, `filtered_out`, `created`, `skipped`, and `results` only if `execution` is absent.
 
 Show:
@@ -64,6 +66,8 @@ Show:
 
 Do not disable Jar skipping unless the user explicitly wants those internal Wise movements imported.
 
+**Ownership re-preview (unverified transfers).** When the preview lists `ownership_reviews` (code `wise_transfer_ownership_unverified`), those are the EXACT unverified transfer IDs. If the user wants any of them treated as own-account transfers, approve them by re-running the dry run with `confirm_own_transfer_ids` set to those exact IDs, in the order the preview presented them. That approval is a NEW dry run: it returns a NEW `plan_handle` and NEW `approved_command_digest` with the confirmations baked in, and the previous handle and digest are both rejected. Execution requires the approvals to match, in order, the plan that was reviewed — extra, missing, or reordered ownership decisions invalidate the plan (`wise_transfer_ownership_reapproval_required`) and nothing is created. Transfers you do not approve stay in review; their main bank rows are still created. A plan handle is NOT approval — always review before executing.
+
 Ask for approval before running with `execute: true`.
 The approval card must include:
 - source Wise CSV
@@ -75,10 +79,10 @@ The approval card must include:
 - selected fee account dimension, if any
 - source bank transactions that execution confirms or links while applying fee and inter-account handling
 - side effects: PROJECT bank rows, fee confirmations, inter-account confirmations/skips, and invoice FX updates
-- the complete `execution.commands` plan and its `approved_command_digest`
+- the complete command plan (reviewed inline or paged via `get_execution_plan_page`) and its `plan_handle` + `approved_command_digest` pair
 - audit reference when available
 
-State that approval authorizes all listed categories. These mutation categories are PROJECT bank-row creation, fee creation and confirmation, inter-account handling, and invoice FX updates. The `approved_command_digest` is required for every one of these categories. If the user does not approve every listed mutation category, stop and ask which category should be excluded or reviewed; do not run `execute: true`.
+State that approval authorizes all listed categories. These mutation categories are PROJECT bank-row creation, fee creation and confirmation, inter-account handling, and invoice FX updates. Both the `plan_handle` and the `approved_command_digest` are required for every one of these categories. If the user does not approve every listed mutation category, stop and ask which category should be excluded or reviewed; do not run `execute: true`.
 
 If the user does not explicitly approve, stop.
 
@@ -86,10 +90,11 @@ If the user does not explicitly approve, stop.
 
 Call `import_wise_transactions` again:
 - use the reviewed dry-run inputs
+- `plan_handle`: the exact handle returned by the reviewed dry run
 - `approved_command_digest`: the exact digest returned by the reviewed dry run
 - execute: true
 
-If execution reports a missing or mismatched digest, do not retry execution with a guessed or older value. Rerun the dry run, review the new complete `execution.commands` plan, and request approval for its newly returned digest.
+Every execute attempt consumes the plan handle exactly once. If execution reports a missing handle (`plan_handle_required`), a consumed/expired/invalid handle (`plan_handle_consumed` / `plan_handle_expired` / `plan_handle_invalid`), scope/domain rejection (`plan_scope_mismatch` / `plan_domain_mismatch`), drift (`plan_drift`), an ownership re-approval requirement (`wise_transfer_ownership_reapproval_required`), or a mismatched digest (`approval_digest_mismatch`), do not retry with a guessed, older, or reused handle/digest. Rerun the dry run, review the new complete plan, and request approval for its newly returned `plan_handle` + `approved_command_digest` pair.
 
 Report:
 - `execution.summary.created`

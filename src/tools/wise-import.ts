@@ -10,9 +10,18 @@ import {
 } from "../mcp-json.js";
 import type { AccountDimension, BankAccount } from "../types/api.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
-import { captureFileInputSnapshot } from "../file-input-snapshot.js";
+import { captureFileInputSnapshot, FileInputSnapshotError } from "../file-input-snapshot.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
+import {
+  PlanStoreError,
+  type ExecutionPlanInput,
+  type PlanData,
+  type PlanRecord,
+  type StoredExecutionPlan,
+} from "../plan-store.js";
+import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
+import { isRecord } from "../record-utils.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
@@ -1114,6 +1123,99 @@ function digestMismatch() {
   });
 }
 
+// The server-plan domain that binds a reviewed Wise dry run to its execute. It
+// is layered ON TOP of the M04 command digest: execute requires BOTH a live
+// plan handle (one-attempt, scope/domain/TTL server binding) AND the operator's
+// approved_command_digest (command-integrity check). Distinct from the
+// file-reference operation discriminator "wise_input".
+export const WISE_PLAN_DOMAIN = "wise_import";
+
+// Plan-store command categories per action (lowercase, DOMAIN_PATTERN-safe).
+const WISE_PLAN_COMMAND_CATEGORY: Readonly<Record<WiseImportCommand["action"], string>> = Object.freeze({
+  main_create: "wise_main_create",
+  fee_create_and_confirm: "wise_fee_create_and_confirm",
+  inter_account: "wise_inter_account",
+  purchase_invoice_update: "wise_purchase_invoice_update",
+});
+
+/** Stable, position-derived plan-command id. Deterministic across dry run and
+ * execute because the command list enumerates in a fixed order. */
+function wisePlanCommandId(index: number): string {
+  return `wise-cmd-${index}`;
+}
+
+/** Safe, review-only projection of a compiled Wise command for the paged plan
+ * review surface. Untrusted text (the Wise ID) is sandbox-wrapped; every other
+ * field is server-derived or numeric. Executable payloads never enter here. */
+function wisePlanReviewProjection(command: WiseImportCommand): PlanData {
+  return stripUndefinedDeep({
+    action: command.action,
+    date: command.date,
+    booked_amount: command.booked_amount,
+    booked_currency: command.booked_currency,
+    source_direction: command.source_direction,
+    wise_id: projectUntrustedCommandText(command, "wise_id", command.wise_id),
+  });
+}
+
+/** A PlanStoreError (invalid/consumed/expired/domain/scope) surfaced as a
+ * structured, non-mutating tool error carrying the exact store code. */
+function planStoreErrorResult(error: PlanStoreError) {
+  return toolError({
+    error: error.message,
+    category: error.code,
+    code: error.code,
+    mutation_occurred: false,
+    known_object_ids: [],
+    affected_cache_names: [],
+  });
+}
+
+/** A required-but-missing plan handle blocks execute before any work. */
+function planHandleRequiredResult() {
+  return toolError({
+    error: "A reviewed execution-plan handle from the Wise dry run is required to execute. The digest alone cannot execute; re-run the dry run and pass its plan_handle.",
+    category: "plan_handle_required",
+    code: "plan_handle_required",
+    mutation_occurred: false,
+    known_object_ids: [],
+    affected_cache_names: [],
+  });
+}
+
+/** Any source/argument/live/command drift between the reviewed plan and the
+ * re-derived plan stops execution with zero mutations. */
+function planDriftResult(detail: string) {
+  return toolError({
+    error: `The reviewed Wise plan no longer matches the re-read source and current ledger: ${detail}`,
+    category: "plan_drift",
+    code: "plan_drift",
+    mutation_occurred: false,
+    known_object_ids: [],
+    affected_cache_names: [],
+    next_action: "Run a new Wise dry run, review the fresh plan, and execute with its new plan handle and digest.",
+  });
+}
+
+/** The operator's ownership approvals must equal the previewed unverified
+ * transfer IDs exactly, in the presented order (extra/missing/reordered all
+ * invalidate). This is a distinct, clearer signal than a digest mismatch. */
+function ownershipReapprovalRequiredResult() {
+  return toolError({
+    error: "Wise ownership approvals must match the previewed unverified transfer IDs exactly, in the order presented. Extra, missing, or reordered approvals invalidate the plan — re-run the dry run, approve the enumerated IDs only, and use the new plan handle and digest.",
+    category: "wise_transfer_ownership_reapproval_required",
+    code: "wise_transfer_ownership_reapproval_required",
+    mutation_occurred: false,
+    known_object_ids: [],
+    affected_cache_names: [],
+  });
+}
+
+/** Ordered-sequence equality over two Wise-ID lists. */
+function orderedIdsEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 export function registerWiseImportTools(
   server: McpServer,
   api: ApiContext,
@@ -1138,6 +1240,9 @@ export function registerWiseImportTools(
       approved_command_digest: z.string().regex(SHA256_HEX).optional().describe(
         "Exact lowercase SHA-256 command digest returned by the reviewed dry run. Required for execute=true when mutations are planned."
       ),
+      plan_handle: z.string().optional().describe(
+        "Execution-plan handle returned by the reviewed dry run. Required for execute=true in addition to approved_command_digest; the digest alone cannot execute."
+      ),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
       date_from: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
       date_to: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
@@ -1153,6 +1258,7 @@ export function registerWiseImportTools(
       inter_account_dimension_id,
       confirm_own_transfer_ids,
       approved_command_digest,
+      plan_handle,
       execute,
       date_from,
       date_to,
@@ -1166,18 +1272,45 @@ export function registerWiseImportTools(
       if (execute === true && !SHA256_HEX.test(approved_command_digest ?? "")) {
         return digestMismatch();
       }
+      // Layered execute gate: BOTH a live server plan handle AND the M04 digest
+      // are required. A digest without a handle cannot execute — this is checked
+      // before any file read, ledger read, cache flush, or mutation. The handle
+      // is CONSUMED on every execute attempt (burn-before-validate): a replayed
+      // or drifted execute burns it, forcing a fresh reviewed dry run.
+      let storedWisePlan: StoredExecutionPlan | undefined;
+      if (execute === true) {
+        if (typeof plan_handle !== "string" || plan_handle.length === 0) {
+          return planHandleRequiredResult();
+        }
+        try {
+          storedWisePlan = runtimeSafetyContext.planStore.consume(plan_handle, WISE_PLAN_DOMAIN);
+        } catch (error) {
+          if (error instanceof PlanStoreError) return planStoreErrorResult(error);
+          throw error;
+        }
+      }
       validateWiseDateRange(date_from, date_to);
 
       const skipJars = skip_jar_transfers !== false;
-      const inputSnapshot = await captureFileInputSnapshot({
-        ...(file_path !== undefined ? { file_path } : {}),
-        ...(file_ref !== undefined ? { file_ref } : {}),
-      }, {
-        runtimeSafetyContext,
-        operation: FILE_REFERENCE_OPERATIONS.wise,
-        allowedExtensions: [".csv"],
-        maxSize: 10 * 1024 * 1024,
-      });
+      let inputSnapshot;
+      try {
+        inputSnapshot = await captureFileInputSnapshot({
+          ...(file_path !== undefined ? { file_path } : {}),
+          ...(file_ref !== undefined ? { file_ref } : {}),
+        }, {
+          runtimeSafetyContext,
+          operation: FILE_REFERENCE_OPERATIONS.wise,
+          allowedExtensions: [".csv"],
+          maxSize: 10 * 1024 * 1024,
+        });
+      } catch (error) {
+        // On execute the handle is already burned; a source that cannot be
+        // re-read to match the reviewed plan is drift, not a fresh failure.
+        if (execute === true && error instanceof FileInputSnapshotError) {
+          return planDriftResult("the Wise source could not be re-read to match the reviewed plan");
+        }
+        throw error;
+      }
       const csvBytes = inputSnapshot.bytes();
       const csv = csvBytes.toString("utf8");
       const rawCsvSha256 = sha256(csvBytes);
@@ -2134,6 +2267,99 @@ export function registerWiseImportTools(
           })
         : undefined;
 
+      // The enumerated set of ownership-transfer rows that REQUIRE explicit
+      // operator approval, in the exact order the preview presents them
+      // (eligible/hinted order). A row is in the set whether or not it was
+      // approved this run: an approved transfer carries ownershipBasis
+      // "operator_approved"; an unapproved one carries the ownership review.
+      // Verified-endpoint transfers and structurally-invalid ones are excluded.
+      const unverifiedOwnershipIds = hintedRows
+        .filter(row => {
+          const decision = transferDecisions.get(row);
+          return decision !== undefined &&
+            (decision.ownershipBasis === "operator_approved" ||
+              decision.review?.code === "wise_transfer_ownership_unverified");
+        })
+        .map(row => row.id);
+
+      // DRY RUN: issue an immutable server plan the operator reviews (paged via
+      // get_execution_plan_page). It binds the reviewed source identity, the
+      // normalized planning args, the M04 digest, and the enumerated unverified
+      // ownership set, so execute can re-validate each against the plan.
+      let planHandle: string | undefined;
+      if (!executeRequested && commands.length > 0 && approvedCommandDigest !== undefined) {
+        const planInput: ExecutionPlanInput = {
+          normalizedArgs: stripUndefinedDeep(canonicalPlanningArgs) as PlanRecord,
+          sourceIdentities: [stripUndefinedDeep({ ...inputSnapshot.identity }) as PlanRecord],
+          liveSnapshot: stripUndefinedDeep({ connection_fingerprint: api.transactions.connectionFingerprint }),
+          commands: commands.map((command, index) => ({
+            id: wisePlanCommandId(index),
+            category: WISE_PLAN_COMMAND_CATEGORY[command.action],
+            reviewProjection: wisePlanReviewProjection(command),
+          })),
+          counts: {
+            total_csv_rows: rows.length,
+            eligible: eligible.length,
+            filtered_out: rows.length - eligible.length,
+            would_create: created.length,
+            command_count: commands.length,
+            needs_review: ownershipReviews.length,
+            invoice_currency_fixes: invoiceFixCandidates.length,
+          },
+          totals: {
+            command_count: commands.length,
+            inter_account_commands: commands.filter(command => command.action === "inter_account").length,
+            fee_commands: commands.filter(command => command.action === "fee_create_and_confirm").length,
+            purchase_invoice_updates: commands.filter(command => command.action === "purchase_invoice_update").length,
+          },
+          exclusions: skipped.map(entry => stripUndefinedDeep({ wise_id: entry.wise_id, reason: entry.reason })),
+          reviews: ownershipReviews.map(review => stripUndefinedDeep({ ...review })),
+          privatePayload: {
+            digest: approvedCommandDigest,
+            // The ORDERED ownership approvals this plan was reviewed with. Execute
+            // must present the same approvals in the same order: extra, missing,
+            // or reordered decisions invalidate the plan (approving different IDs
+            // is a different plan — a new handle + digest supersede the old ones).
+            approved_transfer_ids: [...approvedTransferIds],
+            // The enumerated unverified-ownership set, bound as defense-in-depth
+            // so a ledger-driven change in verification status surfaces as drift.
+            unverified_ownership_ids: [...unverifiedOwnershipIds],
+            normalized_args: canonicalPlanJson(canonicalPlanningArgs),
+          },
+        };
+        planHandle = runtimeSafetyContext.planStore.issue(WISE_PLAN_DOMAIN, planInput);
+      }
+
+      // EXECUTE gates (zero mutations on any failure), before the mutation loop.
+      // Ownership re-preview is checked first so a mismatched approval yields a
+      // clear ownership signal rather than a generic digest mismatch.
+      if (executeRequested && storedWisePlan) {
+        const storedPrivate = isRecord(storedWisePlan.privatePayload) ? storedWisePlan.privatePayload : undefined;
+        // Ownership re-preview binding (checked first for a clear ownership
+        // signal): the approvals presented at execute must equal, in order, the
+        // approvals the reviewed plan was built with.
+        const storedApprovedIds = Array.isArray(storedPrivate?.approved_transfer_ids)
+          ? (storedPrivate!.approved_transfer_ids as PlanData[]).filter((value): value is string => typeof value === "string")
+          : undefined;
+        if (!storedApprovedIds || !orderedIdsEqual(approvedTransferIds, storedApprovedIds)) {
+          return ownershipReapprovalRequiredResult();
+        }
+        const storedIdentity = storedWisePlan.sourceIdentities[0];
+        if (!storedIdentity || storedIdentity.digest_sha256 !== inputSnapshot.identity.digest_sha256) {
+          return planDriftResult("the Wise source bytes changed since the plan was reviewed");
+        }
+        if (canonicalPlanJson(storedWisePlan.normalizedArgs) !== canonicalPlanJson(canonicalPlanningArgs)) {
+          return planDriftResult("the import arguments changed since the plan was reviewed");
+        }
+        const storedDigest = storedPrivate?.digest;
+        if (typeof storedDigest !== "string" || storedDigest !== approvedCommandDigest) {
+          return planDriftResult("the reviewed command plan no longer matches the current ledger and source");
+        }
+        if (canonicalPlanJson(storedPrivate?.unverified_ownership_ids ?? null) !== canonicalPlanJson([...unverifiedOwnershipIds])) {
+          return planDriftResult("the set of unverified ownership transfers changed since the plan was reviewed");
+        }
+      }
+
       if (executeRequested && (
         approvedCommandDigest === undefined || approved_command_digest !== approvedCommandDigest
       )) {
@@ -2489,6 +2715,7 @@ export function registerWiseImportTools(
         ...(date_to ? { date_to } : {}),
         ...(skip_jar_transfers !== undefined ? { skip_jar_transfers } : {}),
         ...(approvedCommandDigest ? { approved_command_digest: approvedCommandDigest } : {}),
+        ...(planHandle ? { plan_handle: planHandle } : {}),
         execute: false,
       };
       const workflowSummary = !executeRequested
@@ -2533,6 +2760,7 @@ export function registerWiseImportTools(
             created: summary.created,
             skipped: skipped.length,
             ...(approvedCommandDigest ? { approved_command_digest: approvedCommandDigest } : {}),
+            ...(planHandle ? { plan_handle: planHandle } : {}),
             command_version: WISE_COMMAND_VERSION,
             command_count: commands.length,
             ...(autoDetectedInterAccountDimId && hintedRows.length > 0 && dryRun ? {
