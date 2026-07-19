@@ -9,7 +9,8 @@ import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { HttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
-import { withOpeningBalanceApiLimitation } from "../../opening-balance-limitations.js";
+import { withOpeningBalanceStatus } from "../../opening-balance-limitations.js";
+import { readOpeningBalances } from "../../opening-balance-store.js";
 import { validatePostingDimensions } from "../../account-validation.js";
 import type { ApiContext } from "./shared.js";
 import {
@@ -66,7 +67,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
           items: renderExternalEntity("journal", applyListView("journal", stripped, params.view)),
           filtered_client_side: false,
           out_of_range: false,
-          warnings: withOpeningBalanceApiLimitation(),
+          warnings: withOpeningBalanceStatus([], { captured: readOpeningBalances() !== null }),
         };
         return { content: [{ type: "text", text: toMcpJson(compact) }] };
       }
@@ -116,7 +117,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
             filtered_client_side: true,
             out_of_range: outOfRange,
             items,
-            warnings: withOpeningBalanceApiLimitation(),
+            warnings: withOpeningBalanceStatus([], { captured: readOpeningBalances() !== null }),
           }),
         }],
       };

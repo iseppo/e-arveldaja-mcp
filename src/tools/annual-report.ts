@@ -13,7 +13,8 @@ import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { CURRENT_YEAR_PROFIT_ACCOUNT } from "../accounting-defaults.js";
 import { getCashFlowCategoryRule, getCurrentYearProfitAccountRule, getLiabilityClassificationRule } from "../accounting-rules.js";
-import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
+import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
+import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
 
 type PostingType = "D" | "C";
 type CashFlowClass = "operating" | "investing" | "financing" | "unclassified";
@@ -508,13 +509,15 @@ function buildAccrualReview(
 async function analyzeYearEndClose(api: ApiContext, year: number): Promise<YearEndCloseAnalysis | { error: string; details: string[] }> {
   const { from, to } = getYearBounds(year);
 
-  const [accounts, allJournals, allTransactions, allSales, allPurchases] = await Promise.all([
+  const [accounts, opening, journalsFromApi, allTransactions, allSales, allPurchases] = await Promise.all([
     api.readonly.getAccounts(),
+    loadOpeningBalanceJournal(api),
     api.journals.listAllWithPostings(),
     api.transactions.listAll(),
     api.saleInvoices.listAll(),
     api.purchaseInvoices.listAll(),
   ]);
+  const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
   const [yearEndBalances, yearProfitAndLossBalances] = await Promise.all([
     computeAllBalances(api, undefined, to, { preloadedAccounts: accounts, preloadedJournals: allJournals }),
     computeAllBalances(api, from, to, { preloadedAccounts: accounts, preloadedJournals: allJournals }),
@@ -703,8 +706,9 @@ function computeCashFlowClassification(
 export async function buildAnnualReportData(api: ApiContext, year: number): Promise<Record<string, unknown>> {
   const { from, to, priorTo } = getYearBounds(year);
 
-  const [accounts, invoiceInfo, vatInfo, allClients, allSales, allPurchases, allJournals] = await Promise.all([
+  const [accounts, opening, invoiceInfo, vatInfo, allClients, allSales, allPurchases, journalsFromApi] = await Promise.all([
     api.readonly.getAccounts(),
+    loadOpeningBalanceJournal(api),
     api.readonly.getInvoiceInfo(),
     api.readonly.getVatInfo(),
     api.clients.listAll(),
@@ -712,6 +716,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     api.purchaseInvoices.listAll(),
     api.journals.listAllWithPostings(),
   ]);
+  const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
 
   const preloaded = { preloadedAccounts: accounts, preloadedJournals: allJournals };
   const [yearEndBalances, priorYearEndBalances, yearProfitAndLossBalances] = await Promise.all([
@@ -1018,9 +1023,12 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   );
   const closingEquity = totalEquity;
   const averageEquity = roundMoney((openingEquity + closingEquity) / 2);
-  const openingBalanceWarnings = withOpeningBalanceApiLimitation();
-  const openingBalanceApiIncomplete = openingBalanceWarnings.length > 0;
-  const finalWarnings = withOpeningBalanceApiLimitation(warnings);
+  const openingBalanceApiIncomplete = opening === null;
+  const finalWarnings = withOpeningBalanceStatus(warnings, {
+    captured: opening !== null,
+    openingDate: opening?.openingDate,
+    unmappedCodes: opening?.unmappedCodes,
+  });
 
   return {
     year,

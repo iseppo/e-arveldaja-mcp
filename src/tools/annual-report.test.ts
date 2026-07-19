@@ -1,23 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Account, Journal } from "../types/api.js";
-
-const openingBalanceHelperState = vi.hoisted(() => ({
-  helper: vi.fn(),
-  realHelper: undefined as undefined | typeof import("../opening-balance-limitations.js").withOpeningBalanceApiLimitation,
-}));
-
-vi.mock("../opening-balance-limitations.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../opening-balance-limitations.js")>();
-  openingBalanceHelperState.realHelper = actual.withOpeningBalanceApiLimitation;
-  openingBalanceHelperState.helper.mockImplementation(openingBalanceHelperState.realHelper);
-  return {
-    ...actual,
-    withOpeningBalanceApiLimitation: openingBalanceHelperState.helper,
-  };
-});
 
 import type { ApiContext } from "./crud-tools.js";
 import { buildAnnualReportData, registerAnnualReportTools } from "./annual-report.js";
@@ -25,7 +10,8 @@ import * as annualReport from "./annual-report.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
-import { OPENING_BALANCE_API_LIMITATION_WARNING } from "../opening-balance-limitations.js";
+import { OPENING_BALANCE_ACTIONABLE_WARNING } from "../opening-balance-limitations.js";
+import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
 
@@ -36,8 +22,6 @@ afterEach(() => {
     process.env.EARVELDAJA_RULES_FILE = ORIGINAL_RULES_FILE;
   }
   resetAccountingRulesCache();
-  openingBalanceHelperState.helper.mockReset();
-  openingBalanceHelperState.helper.mockImplementation(openingBalanceHelperState.realHelper!);
 });
 
 function makeAccount(overrides: Partial<Account> & Pick<Account,
@@ -298,33 +282,61 @@ describe("buildAnnualReportData", () => {
     expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
   });
 
-  it("adds annual opening-balance disclosure after the account 999 warning", async () => {
-    const report = await buildAccount999Report();
+  describe("opening-balance disclosure", () => {
+    let dir: string;
 
-    expect(report.opening_balance_status).toBe("api_incomplete");
-    expect(report.balance_scope).toBe("journal_api_visible_entries_only");
-    expect(report.warnings).toEqual([
-      ACCOUNT_999_WARNING,
-      OPENING_BALANCE_API_LIMITATION_WARNING,
-    ]);
-    expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
-    expect((report.warnings as string[]).filter(
-      (warning) => warning === OPENING_BALANCE_API_LIMITATION_WARNING,
-    )).toHaveLength(1);
-  });
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "ob-annual-report-"));
+      process.env.EARVELDAJA_RULES_DIR = dir;
+      resetOpeningBalanceCache();
+    });
 
-  it("reports a complete annual opening-balance scope when the helper has no limitation", async () => {
-    openingBalanceHelperState.helper.mockImplementation((warnings: string[] = []) =>
-      warnings.length === 0 ? [] : warnings,
-    );
+    afterEach(() => {
+      delete process.env.EARVELDAJA_RULES_DIR;
+      resetOpeningBalanceCache();
+      rmSync(dir, { recursive: true, force: true });
+    });
 
-    const report = await buildAccount999Report();
+    it("adds annual opening-balance disclosure after the account 999 warning (actionable, nothing captured)", async () => {
+      const report = await buildAccount999Report();
 
-    expect(report.opening_balance_status).toBe("complete");
-    expect(report.balance_scope).toBe("complete_balance");
-    expect(report.warnings).toEqual([ACCOUNT_999_WARNING]);
-    expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
-    expect(report.warnings).not.toContain(OPENING_BALANCE_API_LIMITATION_WARNING);
+      expect(report.opening_balance_status).toBe("api_incomplete");
+      expect(report.balance_scope).toBe("journal_api_visible_entries_only");
+      expect(report.warnings).toEqual([
+        ACCOUNT_999_WARNING,
+        OPENING_BALANCE_ACTIONABLE_WARNING,
+      ]);
+      expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
+      expect((report.warnings as string[]).filter(
+        (warning) => warning === OPENING_BALANCE_ACTIONABLE_WARNING,
+      )).toHaveLength(1);
+    });
+
+    it("reports a complete annual opening-balance scope with the applied-note when a stored algbilanss is captured", async () => {
+      writeOpeningBalances(
+        {
+          openingDate: "2024-12-01",
+          accounts: [
+            { code: "1000", name: "Pangakonto", debit: 200, credit: 0 },
+            { code: "3000", name: "Osakapital", debit: 0, credit: 200 },
+          ],
+          totals: { debit: 200, credit: 200 },
+          rawText: "n/a",
+        },
+        "2024-12-01T00:00:00.000Z",
+      );
+
+      const report = await buildAccount999Report();
+
+      expect(report.opening_balance_status).toBe("complete");
+      expect(report.balance_scope).toBe("complete_balance");
+      expect(report.warnings).toEqual([
+        ACCOUNT_999_WARNING,
+        expect.stringContaining("Opening balances applied from the stored algbilanss"),
+      ]);
+      expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
+      expect(report.warnings).not.toContain(OPENING_BALANCE_ACTIONABLE_WARNING);
+    });
   });
 
   it("includes all equity accounts dynamically before closing while keeping current-year profit separate", async () => {

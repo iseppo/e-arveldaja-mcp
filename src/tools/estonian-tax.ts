@@ -24,7 +24,8 @@ import { desandboxText } from "../external-text-renderer.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { computeAccountBalance } from "./account-balance.js";
-import { OPENING_BALANCE_API_LIMITATION_WARNING } from "../opening-balance-limitations.js";
+import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
+import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
 import { BookingGuard, formatDocNumber, type DocKey } from "../booking-guard.js";
 import { INCOME_TAX_EXPENSE_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
 import {
@@ -222,8 +223,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const cit = roundMoney(net_dividend * taxRate);
       const grossDividend = roundMoney(net_dividend + cit);
 
-      // Preload journals once for both retained earnings and balance sheet checks
-      const allJournals = await api.journals.listAllWithPostings();
+      // Preload journals once for both retained earnings and balance sheet checks.
+      // Prepend the synthetic opening-balance journal (clients_id: null) exactly
+      // once here — both downstream checks compute account-level equity with no
+      // client filter, so the opening balance correctly feeds the lg1 retained-
+      // earnings ceiling and the lg2 net-assets floor.
+      const opening = await loadOpeningBalanceJournal(api);
+      const allJournals = [...(opening ? [opening.journal] : []), ...(await api.journals.listAllWithPostings())];
 
       // Evaluate both legality checks up front as pure data so composition
       // is explicit: the caller sees BOTH violations in a single error when
@@ -346,15 +352,17 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         `TuMS § 50: dividendi tulumaks (${citRate.formatted}) deklareeritakse TSD lisal 7 ja tasutakse väljamakse kuule järgneva kuu 10. kuupäevaks.`,
       ];
 
-      // Opening-balance caveat: share capital and retained earnings are commonly
-      // entered as "Algbilansi kanded" (opening-balance entries), which the
-      // /journals API may omit (see opening-balance-limitations). A zero balance
-      // on either is implausible for a company actually distributing a dividend
-      // and means the § 157 / retained-earnings checks are computed from
-      // incomplete data — surface the limitation so the operator verifies in the UI.
-      if (roundedShareCapital <= 0 || retainedBalance === 0) {
-        warnings.push(OPENING_BALANCE_API_LIMITATION_WARNING);
-      }
+      // Opening-balance status: share capital and retained earnings are commonly
+      // entered as "Algbilansi kanded" (opening-balance entries). When a stored
+      // algbilanss is captured, it was folded into allJournals above and this
+      // reports what was applied; otherwise it's the actionable "paste it"
+      // warning, since the § 157 / retained-earnings checks would otherwise run
+      // on incomplete data.
+      warnings.push(...withOpeningBalanceStatus([], {
+        captured: opening !== null,
+        openingDate: opening?.openingDate,
+        unmappedCodes: opening?.unmappedCodes,
+      }));
 
       // Transparency: when reservkapital was auto-detected (no explicit override)
       // and carries a balance, tell the operator the floor was raised above bare

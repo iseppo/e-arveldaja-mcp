@@ -1,4 +1,7 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { z } from "zod";
 import type { Account, Journal, Posting, SaleInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
@@ -7,6 +10,7 @@ import { roundMoney } from "../money.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
+import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -1390,6 +1394,176 @@ describe("prepare_dividend_package", () => {
     const credits = roundMoney(booked.postings.filter(p => p.type === "C").reduce((s, p) => s + p.amount, 0));
     expect(debits).toBe(credits);
     expect(calc.gross_dividend).toBe(debits);
+  });
+
+  // -------------------------------------------------------------------------
+  // Opening-balance folding — a captured algbilanss feeds both § 157 checks
+  // -------------------------------------------------------------------------
+
+  describe("opening-balance folding", () => {
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "ob-estonian-tax-"));
+      process.env.EARVELDAJA_RULES_DIR = dir;
+      resetOpeningBalanceCache();
+    });
+
+    afterEach(() => {
+      delete process.env.EARVELDAJA_RULES_DIR;
+      resetOpeningBalanceCache();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("raising retained earnings via a captured opening balance flips a § 157 lg1 FAIL to PASS", async () => {
+      const accounts = [
+        ...makeStandardAccounts(),
+        makeAccount(4000, "C", "Tulud", "Müügitulu", "Sales revenue"),
+      ];
+      // Ledger-only: retained earnings 1 000, share capital 2 500, plus a
+      // 20 000 revenue cushion so net assets is never the binding constraint
+      // — isolates the lg1 (retained-earnings) check for this flip.
+      const journals = [
+        makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)]),
+        makeJournal("2024-01-01", [makePosting(1000, "D", 1000), makePosting(2960, "C", 1000)]),
+        makeJournal("2026-02-01", [makePosting(1000, "D", 20000), makePosting(4000, "C", 20000)]),
+      ];
+
+      // 1) Without a stored algbilanss: net dividend 3 000 exceeds the 1 000
+      //    ledger-only retained earnings — blocked (lg1).
+      const apiBefore = makeApi(journals, accounts);
+      const before = makeMockServer();
+      registerEstonianTaxTools(before.server, apiBefore);
+      const resultBefore = await before.tools.get("prepare_dividend_package")!({
+        net_dividend: 3000,
+        shareholder_client_id: 1,
+        effective_date: "2026-06-01",
+      });
+      expect(isError(resultBefore)).toBe(true);
+      const dataBefore = parseResult(resultBefore);
+      expect((resultBefore as { content: Array<{ text: string }> }).content[0].text)
+        .toContain("Insufficient retained earnings");
+      const checkBefore = dataBefore.retained_earnings_check as { balance: number; shortfall: number };
+      expect(checkBefore.balance).toBe(1000);
+      expect(checkBefore.shortfall).toBe(2000);
+      const warningsBefore = (dataBefore.warnings ?? []) as string[];
+      expect(warningsBefore).toEqual(
+        expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+      );
+
+      // 2) A stored algbilanss (dated before the ledger) adds 5 000 credit to
+      //    retained earnings — 1 000 + 5 000 = 6 000 ≥ 3 000, now sufficient.
+      writeOpeningBalances(
+        {
+          openingDate: "2022-01-01",
+          accounts: [
+            { code: "1000", name: "Pangakonto", debit: 5000, credit: 0 },
+            { code: "2960", name: "Retained earnings", debit: 0, credit: 5000 },
+          ],
+          totals: { debit: 5000, credit: 5000 },
+          rawText: "n/a",
+        },
+        "2022-01-01T00:00:00.000Z",
+      );
+
+      const apiAfter = makeApi(journals, accounts);
+      const after = makeMockServer();
+      registerEstonianTaxTools(after.server, apiAfter);
+      const resultAfter = await after.tools.get("prepare_dividend_package")!({
+        net_dividend: 3000,
+        shareholder_client_id: 1,
+        effective_date: "2026-06-01",
+      });
+
+      expect(isError(resultAfter)).toBe(false);
+      const dataAfter = parseResult(resultAfter);
+      const checkAfter = dataAfter.retained_earnings_check as { balance_before: number; sufficient: boolean };
+      expect(checkAfter.balance_before).toBe(6000);
+      expect(checkAfter.sufficient).toBe(true);
+      const warningsAfter = (dataAfter.warnings ?? []) as string[];
+      expect(warningsAfter).toEqual(
+        expect.arrayContaining([expect.stringContaining("Opening balances applied from the stored algbilanss")]),
+      );
+    });
+
+    it("lowering net assets via a captured opening balance flips a § 157 lg2 PASS to BLOCK", async () => {
+      const accounts = [
+        ...makeStandardAccounts(),
+        makeAccount(2500, "C", "Kohustused", "Muu kohustus", "Other liability"),
+      ];
+      // Ledger-only: share capital 5 000, retained earnings 5 000 — a 3 000
+      // net dividend clears both § 157 clauses comfortably.
+      const journals = [
+        makeJournal("2023-01-01", [makePosting(1000, "D", 5000), makePosting(2900, "C", 5000)]),
+        makeJournal("2024-01-01", [makePosting(1000, "D", 5000), makePosting(2960, "C", 5000)]),
+      ];
+
+      // 1) Without a stored algbilanss: passes both clauses.
+      const apiBefore = makeApi(journals, accounts);
+      const before = makeMockServer();
+      registerEstonianTaxTools(before.server, apiBefore);
+      const resultBefore = await before.tools.get("prepare_dividend_package")!({
+        net_dividend: 3000,
+        shareholder_client_id: 1,
+        effective_date: "2026-06-01",
+      });
+      expect(isError(resultBefore)).toBe(false);
+      const dataBefore = parseResult(resultBefore);
+      const netCheckBefore = dataBefore.net_assets_check as { sufficient: boolean };
+      expect(netCheckBefore.sufficient).toBe(true);
+
+      // 2) A stored algbilanss (dated before the ledger) reveals a 2 000
+      //    expense/liability pair that wasn't previously booked — net assets
+      //    drop by 2 000 (10 000 → 8 000), pushing the post-distribution
+      //    figure (8 000 − 3 846.15 = 4 153.85) below the 5 000 share-capital
+      //    floor. Retained earnings (2 000) is untouched, so lg1 stays clear —
+      //    isolating the lg2 (net-assets) flip.
+      writeOpeningBalances(
+        {
+          openingDate: "2022-01-01",
+          accounts: [
+            { code: "5000", name: "Kulud", debit: 2000, credit: 0 },
+            { code: "2500", name: "Muu kohustus", debit: 0, credit: 2000 },
+          ],
+          totals: { debit: 2000, credit: 2000 },
+          rawText: "n/a",
+        },
+        "2022-01-01T00:00:00.000Z",
+      );
+
+      const apiAfter = makeApi(journals, accounts);
+      const after = makeMockServer();
+      registerEstonianTaxTools(after.server, apiAfter);
+      const resultAfter = await after.tools.get("prepare_dividend_package")!({
+        net_dividend: 3000,
+        shareholder_client_id: 1,
+        effective_date: "2026-06-01",
+      });
+
+      expect(isError(resultAfter)).toBe(true);
+      expect((resultAfter as { content: Array<{ text: string }> }).content[0].text)
+        .toContain("ÄS § 157 net assets breach");
+      const dataAfter = parseResult(resultAfter);
+      const netCheckAfter = dataAfter.net_assets_check as {
+        net_assets_before_distribution: number;
+        net_assets_after_distribution: number;
+        minimum_net_assets: number;
+        shortfall: number;
+      };
+      expect(netCheckAfter.net_assets_before_distribution).toBe(8000);
+      expect(netCheckAfter.minimum_net_assets).toBe(5000);
+      expect(netCheckAfter.net_assets_after_distribution).toBeLessThan(netCheckAfter.minimum_net_assets);
+      // lg1 stays clear — this is a pure lg2 flip. toolError only echoes
+      // retained_earnings_check when the lg1 shortfall itself is a violation,
+      // so its absence plus the exact single-clause violation message is the
+      // isolation proof here.
+      expect(dataAfter.retained_earnings_check).toBeUndefined();
+      expect(dataAfter.error).toBe("ÄS § 157 net assets breach");
+      const warningsAfter = (dataAfter.warnings ?? []) as string[];
+      expect(warningsAfter).toEqual(
+        expect.arrayContaining([expect.stringContaining("Opening balances applied from the stored algbilanss")]),
+      );
+    });
   });
 });
 

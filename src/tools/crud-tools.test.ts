@@ -1,5 +1,7 @@
-import { beforeEach, describe, it, expect, vi } from "vitest";
-import { readFileSync, readdirSync } from "fs";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { z } from "zod";
 import {
   safeJsonParse,
@@ -28,6 +30,7 @@ import {
   PurchaseInvoiceTotalsCorrectionError,
   type PurchaseInvoiceTotalsCorrectionCode,
 } from "../api/purchase-invoices.api.js";
+import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -726,6 +729,79 @@ describe("list_journals", () => {
     });
     expect(payload).toHaveProperty("total_items");
     expect(payload).toHaveProperty("per_page");
+  });
+
+  describe("opening-balance warning swap", () => {
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "ob-crud-journals-"));
+      process.env.EARVELDAJA_RULES_DIR = dir;
+      resetOpeningBalanceCache();
+    });
+
+    afterEach(() => {
+      delete process.env.EARVELDAJA_RULES_DIR;
+      resetOpeningBalanceCache();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("reports the applied-note (not the actionable warning) once a stored algbilanss is captured, unfiltered path", async () => {
+      writeOpeningBalances(
+        {
+          openingDate: "2024-12-01",
+          accounts: [{ code: "1000", name: "Pangakonto", debit: 200, credit: 0 }],
+          totals: { debit: 200, credit: 0 },
+          rawText: "n/a",
+        },
+        "2024-12-01T00:00:00.000Z",
+      );
+
+      const { handler } = getCrudToolHarness("list_journals", {
+        journals: {
+          list: vi.fn().mockResolvedValue({
+            current_page: 1,
+            total_pages: 1,
+            items: [],
+          }),
+        },
+      });
+
+      const result = await handler({}) as { content: Array<{ text: string }> };
+      const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+      expect(payload.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining("Opening balances applied from the stored algbilanss")]),
+      );
+      expect(payload.warnings).not.toEqual(
+        expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+      );
+    });
+
+    it("reports the applied-note on the client-side-filtered path too", async () => {
+      writeOpeningBalances(
+        {
+          openingDate: "2024-12-01",
+          accounts: [{ code: "1000", name: "Pangakonto", debit: 200, credit: 0 }],
+          totals: { debit: 200, credit: 0 },
+          rawText: "n/a",
+        },
+        "2024-12-01T00:00:00.000Z",
+      );
+
+      const { handler } = getCrudToolHarness("list_journals", {
+        journals: {
+          listAll: vi.fn().mockResolvedValue([]),
+        },
+      });
+
+      const result = await handler({ date_from: "2025-01-01" }) as { content: Array<{ text: string }> };
+      const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+      expect(payload.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining("Opening balances applied from the stored algbilanss")]),
+      );
+    });
   });
 });
 
