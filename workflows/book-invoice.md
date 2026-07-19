@@ -100,7 +100,9 @@ Inspect the result:
 
 ## Step 7: Reuse the best booking setup
 
-Call `suggest_booking`:
+Branch on the supplier resolution from step 4 — the booking basis is different for an existing supplier than for a new one.
+
+**Existing supplier (step 4 returned `found=true`):** call `suggest_booking`. It draws on this supplier's own confirmed booking history, so it is meaningful only for an already-resolved supplier.
 - `clients_id`: supplier_client_id
 - `description`: first line item description
 
@@ -110,7 +112,16 @@ Review `past_invoices` and reuse the most relevant:
 - `purchase_accounts_dimensions_id` (required when the account has sub-accounts, alamkontod)
 - VAT fields such as `vat_rate_dropdown`, `vat_accounts_id`, `vat_accounts_dimensions_id`, `cl_vat_articles_id`, `reversed_vat_id`
 
-If there is no suitable history, call `list_purchase_articles` or ask the user instead of inventing IDs.
+`suggest_booking` returns the historical `vat_accounts_dimensions_id` last used for this supplier's VAT account (and `purchase_accounts_dimensions_id` for the expense account). Reuse it — but do NOT guess a dimension you do not have:
+- If the account carries dimensions (alamkontod) but the returned history has no dimension id for it (the dimension is missing), call `list_account_dimensions` for that account and confirm the correct dimension with the operator.
+- If `suggest_booking` returns `dimension_notes` flagging an account as ambiguous (the supplier's history used more than one dimension for the same account), call `list_account_dimensions` and confirm with the operator rather than copying an arbitrary one forward.
+
+**New supplier (step 4 did NOT return `found=true`):** do NOT call `suggest_booking` — there is no supplier client ID yet and no supplier-specific history to draw on. Use supplier-independent booking defaults instead:
+- Call `list_purchase_articles` to choose the purchase article, expense account, and VAT article from the reference data (the generic purchase VAT defaults), matching the invoice's goods/services.
+- For any dimensioned account, call `list_account_dimensions` and confirm the dimension with the operator — do NOT guess.
+- The supplier record itself is created only after approval (step 11), under the legal-entity identity gate in step 6.
+
+If there is no suitable basis either way, call `list_purchase_articles` or ask the user instead of inventing IDs.
 
 `suggest_booking` may also return `tax_notes`: server-detected Estonian tax restrictions for this supplier or description. Each note has `code`, `severity`, `title`, `detail`, and `basis`. Treat them as advisory checks, not auto-applied settings:
 - For a `KMS § 30` entertainment/representation note, do not mark input VAT deductible — book the cost gross — and flag the `TuMS § 49 lg 4` representation-limit aspect to the user.
@@ -148,7 +159,14 @@ Before creating anything, present one approval card:
 - Currency, `currency_rate`, and any `base_gross_price` / other `base_*` EUR totals for non-EUR invoices
 - The exact item-level booking you intend to send, including article IDs, account IDs, `purchase_accounts_dimensions_id`, VAT fields, `vat_accounts_dimensions_id`, and any `reversed_vat_id`
 - Any `tax_notes` returned by `suggest_booking` (title + statutory basis), with how you applied each one
-- The booking basis used and any assumptions
+- The booking basis used and any assumptions, including whether it came from this supplier's history (`suggest_booking`) or supplier-independent reference-data defaults for a new supplier
+- Validation evidence, so the operator can judge extraction quality before any mutation:
+  - any truncation/length flags from `extract_pdf_invoice` (`raw_text_truncated`, `raw_text_length`)
+  - OCR extraction failures and confidence (`partial_ocr_failure`, `min_ocr_confidence`, and `llm_fallback.confidence_signals` such as `low_ocr_confidence`)
+  - the provenance of each material field (`extracted.field_provenance`: source, page, bbox, confidence)
+  - any extraction fallback or notes used (`llm_fallback` guidance and `extraction_notes`)
+  - every warning surfaced by `extract_pdf_invoice` (`extracted.warnings`) and every `error`/`warning` from `validate_invoice_data`
+- Explicit resolution or acknowledgement of every MATERIAL warning before booking. A warning is material when it can change the booking, the amounts, or the counterparty identity — for example an OCR partial failure or low confidence, a truncated `raw_text`, a registry-code or VAT checksum warning, a foreign-currency invoice missing `currency_rate`/`base_gross_price`, an out-of-range invoice date, a self-supplier or unconfirmed-echo identifier signal, or a VAT-rate/period mismatch. For each material warning, state how you resolved it or record the operator's explicit acknowledgement; do not book while any material warning is unresolved.
 - Duplicate-check result
 - Source document path
 - Side effects after approval: create the supplier record if needed, create the purchase invoice, upload the source document, and confirm the invoice

@@ -661,6 +661,11 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
               total_net_price: item.total_net_price,
               vat_rate_dropdown: item.vat_rate_dropdown,
               vat_accounts_id: item.vat_accounts_id,
+              // P10: carry the dimension last used for this supplier's VAT
+              // account so the booking can reuse it instead of guessing (the
+              // expense-account dimension already flows via
+              // purchase_accounts_dimensions_id above).
+              vat_accounts_dimensions_id: item.vat_accounts_dimensions_id,
               cl_vat_articles_id: item.cl_vat_articles_id,
               reversed_vat_id: item.reversed_vat_id,
             })),
@@ -698,6 +703,45 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       // Trim to requested limit
       detailed.splice(maxResults);
 
+      // P10: reuse the historical dimension, but NEVER guess when the supplier's
+      // confirmed history is inconsistent. If the same account was booked to more
+      // than one distinct dimension across the returned invoices, the correct
+      // dimension is ambiguous — surface it so the caller runs
+      // list_account_dimensions and confirms with the operator instead of copying
+      // an arbitrary one forward. (A MISSING dimension for a dimensioned account
+      // is handled by the book-invoice workflow, which knows — from
+      // list_account_dimensions — whether the account carries dimensions at all;
+      // a null here is legitimate for a plain account, so we do not flag it.)
+      const dimensionConflicts = (
+        accountKey: "purchase_accounts_id" | "vat_accounts_id",
+        dimKey: "purchase_accounts_dimensions_id" | "vat_accounts_dimensions_id",
+      ): string[] => {
+        const byAccount = new Map<number, Set<number>>();
+        for (const inv of detailed) {
+          for (const item of inv.items ?? []) {
+            const acct = item[accountKey];
+            const dim = item[dimKey];
+            if (typeof acct === "number" && typeof dim === "number") {
+              if (!byAccount.has(acct)) byAccount.set(acct, new Set());
+              byAccount.get(acct)!.add(dim);
+            }
+          }
+        }
+        const notes: string[] = [];
+        for (const [acct, dims] of byAccount) {
+          if (dims.size > 1) {
+            notes.push(
+              `ambiguous_dimension: account ${acct} was booked to multiple historical dimensions (${[...dims].sort((left, right) => left - right).join(", ")}) for this supplier — do not guess; call list_account_dimensions and confirm the dimension with the operator.`,
+            );
+          }
+        }
+        return notes;
+      };
+      const dimension_notes = [
+        ...dimensionConflicts("purchase_accounts_id", "purchase_accounts_dimensions_id"),
+        ...dimensionConflicts("vat_accounts_id", "vat_accounts_dimensions_id"),
+      ];
+
       // Past-invoice custom_title is often the OCR description copied forward
       // from the original receipt booking, so wrap at MCP output. Internal
       // match-against-description logic above already ran on plain strings.
@@ -729,6 +773,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
             supplier_id: clients_id,
             past_invoices: sanitizedDetailed,
             tax_notes,
+            ...(dimension_notes.length > 0 ? { dimension_notes } : {}),
             ...(historyNotes.length > 0 ? { notes: historyNotes } : {}),
             suggestion: detailed.length > 0
               ? "Use the purchase article, account, and VAT settings from the most recent similar invoice."

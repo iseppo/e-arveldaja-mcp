@@ -791,6 +791,63 @@ describe("registerPrompts", () => {
     }
   });
 
+  it("branches the book-invoice booking basis by existing vs new supplier and looks up ambiguous dimensions (P08/P10)", () => {
+    for (const relativePath of ["workflows/book-invoice.md", ".claude/commands/book-invoice.md"]) {
+      const text = readPromptSurface(relativePath);
+      // P08: suggest_booking draws on supplier history, so it is only called for
+      // an already-resolved (existing) supplier.
+      expect(text).toContain("meaningful only for an already-resolved supplier");
+      expect(text).toContain("do NOT call `suggest_booking`");
+      // New supplier → supplier-independent reference-data defaults, created only
+      // after approval under the identity gate.
+      expect(text).toContain("supplier-independent booking defaults");
+      expect(text).toContain("list_purchase_articles");
+      // P10: reuse the historical VAT dimension; never guess a missing/ambiguous one.
+      expect(text).toContain("historical `vat_accounts_dimensions_id`");
+      expect(text).toContain("dimension_notes");
+      expect(text).toContain("list_account_dimensions");
+      expect(text).toContain("do NOT guess");
+
+      // The suggest_booking call and its branch note must sit before the approval
+      // stop gate; auto_create still happens only after approval.
+      const suggestBranch = text.indexOf("meaningful only for an already-resolved supplier");
+      const approvalStop = text.indexOf("If the user has not explicitly approved the preview, stop here and wait.");
+      const creationCall = text.indexOf("auto_create: true");
+      expect(suggestBranch).toBeGreaterThan(-1);
+      expect(approvalStop).toBeGreaterThan(suggestBranch);
+      expect(creationCall).toBeGreaterThan(approvalStop);
+    }
+  });
+
+  it("puts validation evidence and material-warning acknowledgement on the book-invoice approval card (P09)", () => {
+    for (const relativePath of ["workflows/book-invoice.md", ".claude/commands/book-invoice.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("Validation evidence");
+      // Truncation / length flags.
+      expect(text).toContain("raw_text_truncated");
+      expect(text).toContain("raw_text_length");
+      // OCR failures + confidence.
+      expect(text).toContain("partial_ocr_failure");
+      expect(text).toContain("min_ocr_confidence");
+      expect(text).toContain("low_ocr_confidence");
+      // Provenance + fallback + notes.
+      expect(text).toContain("field_provenance");
+      expect(text).toContain("extraction_notes");
+      // Warnings from both tools.
+      expect(text).toContain("extracted.warnings");
+      // Material-warning acknowledgement gate.
+      expect(text).toContain("MATERIAL warning");
+      expect(text).toContain("explicit acknowledgement");
+      expect(text).toContain("do not book while any material warning is unresolved");
+
+      // The evidence must be presented before the approval stop gate.
+      const evidence = text.indexOf("Validation evidence");
+      const approvalStop = text.indexOf("If the user has not explicitly approved the preview, stop here and wait.");
+      expect(evidence).toBeGreaterThan(-1);
+      expect(approvalStop).toBeGreaterThan(evidence);
+    }
+  });
+
   it("keeps shipped reconcile-bank markdown prompts aligned with distribution key handling", () => {
     for (const relativePath of ["workflows/reconcile-bank.md", ".claude/commands/reconcile-bank.md"]) {
       const text = readPromptSurface(relativePath);

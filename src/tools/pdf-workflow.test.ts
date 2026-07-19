@@ -466,6 +466,88 @@ describe("pdf workflow tools", () => {
     ]);
   });
 
+  it("returns the historical vat_accounts_dimensions_id for reuse (P10)", async () => {
+    const { handler } = setupPdfWorkflowTool("suggest_booking", {
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([
+          { id: 1, clients_id: 7, status: "CONFIRMED", create_date: "2026-02-15" },
+        ]),
+        get: vi.fn().mockResolvedValue({
+          id: 1,
+          number: "PI-1",
+          create_date: "2026-02-15",
+          gross_price: 124,
+          liability_accounts_id: 2310,
+          items: [{
+            custom_title: "Fuel",
+            cl_purchase_articles_id: 45,
+            purchase_accounts_id: 5230,
+            purchase_accounts_dimensions_id: 111,
+            total_net_price: 100,
+            vat_rate_dropdown: "24",
+            vat_accounts_id: 1510,
+            vat_accounts_dimensions_id: 222,
+            cl_vat_articles_id: 1,
+          }],
+        }),
+      },
+    });
+
+    const result = await handler({ clients_id: 7, description: "fuel" });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    // P10: the dimension last used for this supplier's expense AND VAT accounts
+    // must flow through so the booking can reuse it instead of guessing.
+    expect(payload.past_invoices[0]!.items[0]).toEqual(
+      expect.objectContaining({
+        purchase_accounts_dimensions_id: 111,
+        vat_accounts_dimensions_id: 222,
+      }),
+    );
+    // A single, consistent history is not ambiguous.
+    expect(payload.dimension_notes).toBeUndefined();
+  });
+
+  it("flags an ambiguous historical dimension instead of guessing (P10)", async () => {
+    const { handler } = setupPdfWorkflowTool("suggest_booking", {
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([
+          { id: 1, clients_id: 7, status: "CONFIRMED", create_date: "2026-02-15" },
+          { id: 2, clients_id: 7, status: "CONFIRMED", create_date: "2026-01-15" },
+        ]),
+        get: vi.fn().mockImplementation((id: number) =>
+          Promise.resolve({
+            id,
+            number: `PI-${id}`,
+            create_date: id === 1 ? "2026-02-15" : "2026-01-15",
+            gross_price: 124,
+            liability_accounts_id: 2310,
+            items: [{
+              custom_title: "Fuel",
+              cl_purchase_articles_id: 45,
+              purchase_accounts_id: 5230,
+              total_net_price: 100,
+              vat_rate_dropdown: "24",
+              vat_accounts_id: 1510,
+              // Same VAT account, two different historical dimensions → ambiguous.
+              vat_accounts_dimensions_id: id === 1 ? 222 : 333,
+              cl_vat_articles_id: 1,
+            }],
+          }),
+        ),
+      },
+    });
+
+    const result = await handler({ clients_id: 7, description: "fuel" });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.dimension_notes).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/ambiguous_dimension: account 1510 .*list_account_dimensions/),
+      ]),
+    );
+  });
+
   it("warns when a standard VAT rate does not match the invoice date", async () => {
     const { handler } = setupPdfWorkflowTool("validate_invoice_data");
 
