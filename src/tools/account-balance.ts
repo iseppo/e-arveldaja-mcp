@@ -7,7 +7,7 @@ import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { DEFAULT_DEBT_CHECK_ACCOUNTS } from "../accounting-defaults.js";
-import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
+import { withOpeningBalanceStatus, withOpeningBalanceStatusInRange } from "../opening-balance-limitations.js";
 import { loadOpeningBalanceJournal, type OpeningBalanceJournal } from "../opening-balance-journal.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 
@@ -180,10 +180,12 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
           entries: result.entries.map(e => ({ ...e, title: wrapUntrustedOcr(e.title) ?? e.title })),
         }),
         warnings: clients_id === undefined
-          ? withOpeningBalanceStatus([], {
+          ? withOpeningBalanceStatusInRange([], {
               captured: opening !== null,
               openingDate: opening?.openingDate,
               unmappedCodes: opening?.unmappedCodes,
+              dateFrom: date_from,
+              dateTo: date_to,
             })
           : clientScopedOpeningBalanceWarnings([], opening),
       };

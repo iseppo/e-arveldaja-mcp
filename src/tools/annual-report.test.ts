@@ -339,6 +339,70 @@ describe("buildAnnualReportData", () => {
     });
   });
 
+  describe("opening-balance exclusion from cash-flow classification", () => {
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "ob-annual-report-cashflow-"));
+      process.env.EARVELDAJA_RULES_DIR = dir;
+      resetOpeningBalanceCache();
+    });
+
+    afterEach(() => {
+      delete process.env.EARVELDAJA_RULES_DIR;
+      resetOpeningBalanceCache();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    // A single in-year cash journal — the report year (2025) also contains
+    // the opening date used below, so without the FIX 2 exclusion the
+    // synthetic opening journal's cash posting would be mis-classified as a
+    // current-year financing inflow.
+    const journalsForYear: Journal[] = [
+      makeJournal("2025-06-01", [
+        makePosting(1000, "D", 60),
+        makePosting(3001, "C", 60),
+      ]),
+    ];
+
+    it("does not include the opening journal's postings in the cash-flow statement", async () => {
+      const reportWithoutOpening = await buildAnnualReportData(createApi(journalsForYear), 2025);
+
+      writeOpeningBalances(
+        {
+          openingDate: "2025-01-01", // inside the report year (2025-01-01..2025-12-31)
+          accounts: [
+            { code: "1000", name: "Pangakonto", debit: 200, credit: 0 },
+            { code: "3000", name: "Osakapital", debit: 0, credit: 200 },
+          ],
+          totals: { debit: 200, credit: 200 },
+          rawText: "n/a",
+        },
+        "2025-01-01T00:00:00.000Z",
+      );
+
+      const reportWithOpening = await buildAnnualReportData(createApi(journalsForYear), 2025);
+
+      const cashFlowWithout = reportWithoutOpening.cash_flow_statement as {
+        cash_journal_classification: Record<string, number>;
+        financing_activities: { net_cash_from_financing_activities: number };
+        investing_activities: { net_cash_from_investing_activities: number };
+      };
+      const cashFlowWith = reportWithOpening.cash_flow_statement as typeof cashFlowWithout;
+
+      // The opening journal posts a 200 EUR debit to the 1000 (cash) account
+      // paired with a 200 EUR credit to 3000 (Omakapital, classified
+      // "financing"). If it leaked into the classification, financing would
+      // jump to 200 with the opening balance stored — it must not, since an
+      // opening position is not a period cash flow.
+      expect(cashFlowWith.cash_journal_classification).toEqual(cashFlowWithout.cash_journal_classification);
+      expect(cashFlowWith.financing_activities.net_cash_from_financing_activities).toBe(
+        cashFlowWithout.financing_activities.net_cash_from_financing_activities,
+      );
+      expect(cashFlowWith.financing_activities.net_cash_from_financing_activities).toBe(0);
+    });
+  });
+
   it("includes all equity accounts dynamically before closing while keeping current-year profit separate", async () => {
     const report = await buildAnnualReportData(createApi(baseJournals), 2025);
     const equity = extractEquity(report);

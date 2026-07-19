@@ -389,6 +389,40 @@ describe("opening balance folding", () => {
     );
   });
 
+  it("shows the out-of-window note (not 'applied', not 'paste it') when date_to excludes the stored opening balance", async () => {
+    writeOpeningBalances(
+      {
+        openingDate: "2024-12-12",
+        accounts: [
+          { code: String(ACCOUNT_ID), name: "Pank", debit: 1000, credit: 0 },
+          { code: String(CONTRA_ACCOUNT_ID), name: "Kapital", debit: 0, credit: 1000 },
+        ],
+        totals: { debit: 1000, credit: 1000 },
+        rawText: "n/a",
+      },
+      "2024-12-12T00:00:00.000Z",
+    );
+
+    const journals = [journal({ id: 1, effective_date: "2024-01-15", postings: [posting(ACCOUNT_ID, "D", 500)] })];
+    const handler = registerWithApi(journals, CHART);
+    const result = await handler({ account_id: ACCOUNT_ID, date_to: "2024-06-01" });
+    const data = parseMcpResponse((result.content[0] as { text: string }).text) as Record<string, unknown>;
+
+    // date_to (2024-06-01) is before the opening date (2024-12-12), so the
+    // opening journal is excluded from the figure — only the in-window
+    // regular journal (500) is counted, not 500 + 1000.
+    expect(data.debit_total).toBe(500);
+    expect(data.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("fall outside this date range")]),
+    );
+    expect(data.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
+    expect(data.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+
   it("excludes the stored opening balance and does NOT claim 'applied' when clients_id is passed", async () => {
     writeOpeningBalances(
       {

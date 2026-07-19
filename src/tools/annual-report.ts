@@ -970,7 +970,13 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     accruedLiabilitiesAdjustment,
   );
 
-  const cashFlowClassification = computeCashFlowClassification(allJournals, accountsById, from, to);
+  // Opening balances are a starting position captured as of the opening
+  // date, not a current-period cash flow — exclude the synthetic opening
+  // journal (sentinel id -1) from cash-flow classification specifically.
+  // Balance-sheet / P&L / §157 sections above still see it via `allJournals`;
+  // only the cash-flow statement, which is period-movement based, must not.
+  const cashFlowJournals = allJournals.filter((journal) => journal.id !== -1);
+  const cashFlowClassification = computeCashFlowClassification(cashFlowJournals, accountsById, from, to);
   const netCashFromInvestingActivities = roundMoney(cashFlowClassification.investing);
   const netCashFromFinancingActivities = roundMoney(cashFlowClassification.financing);
   const statementCashChange = roundMoney(

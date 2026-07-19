@@ -7,7 +7,7 @@ import type { Account, Journal, SaleInvoice, PurchaseInvoice } from "../types/ap
 import { roundMoney, effectiveGross } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
+import { withOpeningBalanceStatusInRange } from "../opening-balance-limitations.js";
 import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 import type { ToolExposureConfig } from "../config.js";
@@ -190,10 +190,12 @@ export function registerFinancialStatementTools(
             },
             account_count: balances.length,
             ...cacheClearMetadata(cacheClear),
-            warnings: withOpeningBalanceStatus([], {
+            warnings: withOpeningBalanceStatusInRange([], {
               captured: opening !== null,
               openingDate: opening?.openingDate,
               unmappedCodes: opening?.unmappedCodes,
+              dateFrom: date_from,
+              dateTo: date_to,
             }),
           }),
         }],
@@ -271,10 +273,11 @@ export function registerFinancialStatementTools(
               balanced: Math.abs(totalAssets - totalLiabilities - totalEquityWithCurrentYearPL) < 0.01,
             },
             ...cacheClearMetadata(cacheClear),
-            warnings: withOpeningBalanceStatus(warnings, {
+            warnings: withOpeningBalanceStatusInRange(warnings, {
               captured: opening !== null,
               openingDate: opening?.openingDate,
               unmappedCodes: opening?.unmappedCodes,
+              dateTo: date_to,
             }),
           }),
         }],
@@ -321,10 +324,12 @@ export function registerFinancialStatementTools(
             },
             net_profit: roundMoney(totalRevenue - totalExpenses),
             ...cacheClearMetadata(cacheClear),
-            warnings: withOpeningBalanceStatus([], {
+            warnings: withOpeningBalanceStatusInRange([], {
               captured: opening !== null,
               openingDate: opening?.openingDate,
               unmappedCodes: opening?.unmappedCodes,
+              dateFrom: date_from,
+              dateTo: date_to,
             }),
           }),
         }],

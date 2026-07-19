@@ -324,6 +324,39 @@ describe("opening balance folding", () => {
     );
   });
 
+  it("shows the out-of-window note for compute_trial_balance when date_from excludes the stored algbilanss", async () => {
+    storeOpeningBalances();
+    const handler = setupTool("compute_trial_balance", {
+      accounts: CHART,
+      journals: [
+        makeJournal("2025-01-10", [
+          makePosting(BANK_ACCOUNT_ID, "D", 500),
+          makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
+        ]),
+      ],
+    });
+
+    const result = await handler({ date_from: "2025-01-01" });
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      accounts: Array<{ account_id: number; debit_total: number }>;
+      warnings: string[];
+    };
+    const bankRow = payload.accounts.find(a => a.account_id === BANK_ACCOUNT_ID)!;
+
+    // date_from (2025-01-01) is after the opening date (2024-12-12), so the
+    // opening journal is excluded — only the in-window 500 is counted.
+    expect(bankRow.debit_total).toBe(500);
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("fall outside this date range")]),
+    );
+    expect(payload.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
+    expect(payload.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+
   it("leaves compute_trial_balance unchanged without a stored algbilanss", async () => {
     const handler = setupTool("compute_trial_balance", {
       accounts: CHART,
@@ -374,6 +407,39 @@ describe("opening balance folding", () => {
     );
   });
 
+  it("shows the out-of-window note for compute_balance_sheet when date_to is before the stored algbilanss date", async () => {
+    storeOpeningBalances();
+    const handler = setupTool("compute_balance_sheet", {
+      accounts: CHART,
+      journals: [
+        makeJournal("2025-01-10", [
+          makePosting(BANK_ACCOUNT_ID, "D", 500),
+          makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
+        ]),
+      ],
+    });
+
+    const result = await handler({ date_to: "2024-06-01" });
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      assets: { total: number };
+      warnings: string[];
+    };
+
+    // date_to (2024-06-01) is before the opening date (2024-12-12) and before
+    // the regular journal (2025-01-10) too, so both are excluded — this test
+    // is about the warning, not the (zero) figure.
+    expect(payload.assets.total).toBe(0);
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("fall outside this date range")]),
+    );
+    expect(payload.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
+    expect(payload.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+
   it("leaves compute_balance_sheet unchanged without a stored algbilanss", async () => {
     const handler = setupTool("compute_balance_sheet", {
       accounts: CHART,
@@ -399,7 +465,7 @@ describe("opening balance folding", () => {
     );
   });
 
-  it("folds a stored opening balance into compute_profit_and_loss", async () => {
+  it("shows the out-of-window note for compute_profit_and_loss when the opening date is outside the period", async () => {
     storeOpeningBalances();
     const handler = setupTool("compute_profit_and_loss", {
       accounts: CHART,
@@ -416,16 +482,50 @@ describe("opening balance folding", () => {
       warnings: string[];
     };
 
-    // Opening balance is dated 2024-12-12, outside the P&L period, but the
-    // status/warning must still reflect that it was captured (it applies to
-    // the trial-balance/balance-sheet computations that share the same
-    // merged journal set; P&L itself is Tulud/Kulud-only so BANK/CAPITAL
-    // opening entries don't move revenue/expense totals).
+    // Opening balance is dated 2024-12-12, outside this P&L period
+    // (2025-01-01..2025-01-31) — the stored algbilanss is excluded from
+    // these figures, so the note must reflect out-of-window, not "applied",
+    // and it must NOT show the actionable "paste it" warning either (it IS
+    // captured, just not in this window).
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("fall outside this date range")]),
+    );
+    expect(payload.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
+    );
+    expect(payload.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+  });
+
+  it("folds a stored opening balance into compute_profit_and_loss when the period includes the opening date", async () => {
+    storeOpeningBalances();
+    const handler = setupTool("compute_profit_and_loss", {
+      accounts: CHART,
+      journals: [
+        makeJournal("2025-01-10", [
+          makePosting(BANK_ACCOUNT_ID, "D", 500),
+          makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
+        ]),
+      ],
+    });
+
+    const result = await handler({ date_from: "2024-12-01", date_to: "2025-01-31" });
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      warnings: string[];
+    };
+
+    // Opening date (2024-12-12) is within this period, so it counts as
+    // "applied" — BANK/CAPITAL opening entries are Varad/Omakapital so they
+    // don't move the Tulud/Kulud totals here, but the note must say applied.
     expect(payload.warnings).toEqual(
       expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
     );
     expect(payload.warnings).not.toEqual(
       expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
+    );
+    expect(payload.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("fall outside this date range")]),
     );
   });
 
