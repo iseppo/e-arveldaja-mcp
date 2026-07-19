@@ -823,6 +823,12 @@ export function getAccountingRulesPath(): string {
   return storage.dir;
 }
 
+export function resolveOpeningBalanceStorePath(): string | null {
+  const storage = resolveStorage();
+  if (storage.mode === "file") return null;           // single-file legacy mode has no bundle dir
+  return resolve(storage.dir, "opening-balances.json");
+}
+
 function sanitizeMarkdownCell(value: string | number | undefined): string {
   if (value === undefined) return "";
   return String(value).replace(/[|\r\n]+/g, " ").trim();
