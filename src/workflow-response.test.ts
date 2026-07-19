@@ -405,6 +405,41 @@ describe("hidden-granular → merged entry-point remap", () => {
     });
   });
 
+  it("preserves plan review scope through every hidden-tool remapping surface", () => {
+    const reviewScope = {
+      plan_handle: "A".repeat(43),
+      command_count: 3,
+      category_counts: { create: 2, confirm: 1 },
+      monetary_totals: { EUR: 42 },
+      exclusions: [{ reason: "duplicate" }],
+      plan_page: { tool: "get_execution_plan_page", args: { plan_handle: "A".repeat(43) } },
+      execute: true,
+      execution_mode: "create",
+    };
+    const envelope = {
+      recommended_next_action: { tool: "process_receipt_batch", args: reviewScope },
+      available_actions: [{ tool: "process_receipt_batch", args: reviewScope }],
+      approval_previews: [{ source_tool: "process_receipt_batch", execute_tool: "process_receipt_batch", execute_args: reviewScope }],
+    };
+    const remapped = remapHiddenGranularWorkflowEnvelope(envelope) as Record<string, any>;
+    for (const args of [
+      remapped.recommended_next_action.args,
+      remapped.available_actions[0].args,
+      remapped.approval_previews[0].execute_args,
+    ]) {
+      expect(args).toMatchObject({
+        plan_handle: reviewScope.plan_handle,
+        command_count: 3,
+        category_counts: reviewScope.category_counts,
+        monetary_totals: reviewScope.monetary_totals,
+        exclusions: reviewScope.exclusions,
+        plan_page: reviewScope.plan_page,
+      });
+      expect(args).not.toHaveProperty("execute");
+      expect(args).not.toHaveProperty("execution_mode");
+    }
+  });
+
   it("returns non-envelope values unchanged", () => {
     expect(remapHiddenGranularWorkflowEnvelope(undefined)).toBeUndefined();
     expect(remapHiddenGranularWorkflowEnvelope("not an envelope")).toBe("not an envelope");

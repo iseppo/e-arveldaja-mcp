@@ -1,3 +1,5 @@
+import type { PlanExecutionReport } from "./plan-execution.js";
+
 export type BatchExecutionMode = "DRY_RUN" | "EXECUTED";
 
 export interface BatchAuditReference {
@@ -22,6 +24,7 @@ export interface BatchExecutionContract<
   errors: TError[];
   needs_review: TNeedsReview[];
   audit_reference: BatchAuditReference;
+  execution_report?: PlanExecutionReport;
 }
 
 const DEFAULT_AUDIT_REFERENCE: BatchAuditReference = {
@@ -44,7 +47,11 @@ export function buildBatchExecutionContract<
   skipped?: TSkipped[];
   errors?: TError[];
   needs_review?: TNeedsReview[];
+  execution_report?: PlanExecutionReport;
 }): BatchExecutionContract<TResult, TSkipped, TError, TNeedsReview> {
+  if (args.execution_report !== undefined && args.mode !== "EXECUTED") {
+    throw new Error("Execution reports are only valid for executed batches.");
+  }
   return {
     contract: "batch_execution_v1",
     mode: args.mode,
@@ -54,5 +61,6 @@ export function buildBatchExecutionContract<
     errors: args.errors ?? [],
     needs_review: args.needs_review ?? [],
     audit_reference: DEFAULT_AUDIT_REFERENCE,
+    ...(args.execution_report !== undefined ? { execution_report: args.execution_report } : {}),
   };
 }

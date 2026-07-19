@@ -51,6 +51,7 @@ import { registerCamtImportTools } from "./tools/camt-import.js";
 import { registerAccountingInboxTools } from "./tools/accounting-inbox.js";
 import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js";
 import { registerWorkflowRecommendationTools } from "./tools/workflow-recommendations.js";
+import { registerPlanTools } from "./plan-tools.js";
 import { clearConnectionCaches, registerCacheControlTool } from "./cache-control.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
@@ -487,7 +488,6 @@ async function main() {
     configs: allConfigs,
     toolExposure,
   });
-  void runtimeSafetyContext; // Retained for mandatory registrar injection in the next runtime-safety tasks.
 
   const server = new McpServer({
     name: "e-arveldaja",
@@ -1036,6 +1036,7 @@ async function main() {
   registerAccountingInboxTools(scopedServer, api, toolExposure);
   registerAnalyzeUnconfirmedTools(scopedServer, api);
   registerWorkflowRecommendationTools(scopedServer, toolExposure);
+  registerPlanTools(scopedServer, runtimeSafetyContext);
 
   // Register resources via scopedServer so reads stay pinned to the selected connection
   registerResources(scopedServer, api);

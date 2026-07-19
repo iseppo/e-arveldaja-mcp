@@ -102,7 +102,7 @@ function failData(): never {
   throw new PlanStoreError("plan_data_invalid");
 }
 
-function cloneAndFreezePlanData(value: unknown): PlanData {
+export function cloneAndFreezePlanData(value: unknown): PlanData {
   let nodes = 0;
   let stringChars = 0;
   const active = new Set<object>();
