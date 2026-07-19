@@ -611,10 +611,10 @@ describe("reconcile_transactions", () => {
         id: 31,
         status: "PROJECT",
         is_deleted: false,
-        type: "D",
+        type: "C",
         amount: 200,
         date: "2026-03-21",
-        description: "Incoming transfer",
+        description: "WISE:incoming Supplier [source_direction=IN]",
         bank_account_name: "Supplier OU",
         ref_number: "RF-200",
       }],
@@ -935,7 +935,7 @@ describe("reconcile_inter_account_transfers", () => {
     const { handler } = setupInterAccountTool({
       transactions: [
         { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", description: "Ülekanne SEB kontole" },
-        { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", description: "Ülekanne LHV kontolt" },
+        { id: 2, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", description: "WISE:transfer LHV own account [source_direction=IN]" },
       ],
       bankAccounts,
     });

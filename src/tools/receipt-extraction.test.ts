@@ -24,8 +24,26 @@ import {
   extractAmountsFromLayout,
   mergeLayoutAmounts,
   suggestBookingInternal,
+  categorizeTransactionGroup,
 } from "./receipt-extraction.js";
 import type { ExtractedAmountsWithMetadata } from "./receipt-extraction.js";
+
+describe("bank transaction source direction classification", () => {
+  it("classifies API type C with signed incoming metadata as revenue, not an expense", () => {
+    const classification = categorizeTransactionGroup({
+      normalized_counterparty: "customer ou",
+      transactions: [{
+        type: "C",
+        amount: 100,
+        date: "2026-07-19",
+        description: "WISE:incoming Customer [source_direction=IN]",
+        bank_subtype: null,
+      }],
+    });
+
+    expect(classification.category).toBe("revenue_without_invoice");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // normalizeDate

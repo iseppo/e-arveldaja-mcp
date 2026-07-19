@@ -513,7 +513,7 @@ async function main() {
   - For purchase invoices, check get_vat_info before VAT decisions, pass original vat_price and gross_price exactly when known, and use workflow prompts for sequencing.
   - Do not infer reverse charge from country alone; use explicit invoice wording or confirmed same-kind supplier history, otherwise ask.
   - For bank reconciliation, use reconcile_bank_transactions as the normal entry point and reconcile_inter_account_transfers for own-account transfers. Never manually confirm both sides of the same transfer.
-  - Preserve tool-provided transaction type values for import/creation, but never infer accounting treatment from an existing transaction's type.
+  - Every newly created bank transaction MUST use API type C, regardless of incoming/outgoing flow. Preserve flow separately as signed source_direction metadata and use that metadata for accounting decisions; legacy D/C is only a fallback for older rows.
   - Reporting is only accurate after relevant journals, invoices, and transactions are confirmed.
   - Use list_connections / switch_connection for multi-company work; switching clears caches and blocks further API requests from interrupted in-flight tools.
   - Amounts are EUR unless cl_currencies_id or the tool-specific currency fields specify otherwise.`,

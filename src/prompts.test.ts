@@ -807,7 +807,8 @@ describe("registerPrompts", () => {
       expect(text).toContain('mode: "inter_account_dry_run"');
       expect(text).toContain("already_handled");
       expect(text).toContain("Wise-side transfers");
-      expect(text).toContain("never infer accounting treatment from an existing transaction's `type`");
+      expect(text).toContain('Every newly created bank transaction must use API `type: "C"`');
+      expect(text).toContain("signed `source_direction` metadata");
       expect(text).toContain('incoming_action: "would_delete_duplicate"');
       expect(text).toContain("Never manually confirm both sides");
       // Confidence guidance must match the auto-confirm bar (>= 90 + approval),

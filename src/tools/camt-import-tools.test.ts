@@ -492,6 +492,21 @@ describe("camt import tool", () => {
   });
 
   describe("H09 bank-dimension-scoped duplicate detection", () => {
+    it("creates CAMT CRDT rows as API type C with signed source direction", async () => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(singleEntryXml.replace("<CdtDbtInd>DBIT</CdtDbtInd>", "<CdtDbtInd>CRDT</CdtDbtInd>"));
+      const { api, handler } = setupCamtTool();
+
+      const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true });
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
+        type: "C",
+        description: expect.stringMatching(/dir=CRDT .*sig=[a-f0-9]{16}/),
+      }));
+      expect(payload.sample[0]).toMatchObject({ type: "C", source_direction: "CRDT" });
+    });
+
     it("H09 keeps a direct same reference on another bank dimension eligible and creates it on the selected dimension", async () => {
       mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
       mockedReadFile.mockResolvedValue(singleEntryXml);
@@ -1465,7 +1480,8 @@ describe("camt import tool", () => {
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
       bank_ref_number: "REF-WORKAROUND-1",
       bank_account_no: "EE471000001020145685",
-      description: expect.stringMatching(/Test payment\n\[e-arveldaja-mcp:camt br=REF-WORKAROUND-1 iban=EE471000001020145685 sig=[a-f0-9]{16}\]$/),
+      type: "C",
+      description: expect.stringMatching(/Test payment\n\[e-arveldaja-mcp:camt br=REF-WORKAROUND-1 iban=EE471000001020145685 dir=DBIT sig=[a-f0-9]{16}\]$/),
     }));
   });
 
@@ -1512,7 +1528,7 @@ describe("camt import tool", () => {
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
     expect(payload.description?.length).toBeLessThanOrEqual(150);
-    expect(payload.description).toMatch(/\[e-arveldaja-mcp:camt br=REF-LONG-DESC-1 iban=EE471000001020145685 sig=[a-f0-9]{16}\]/);
+    expect(payload.description).toMatch(/\[e-arveldaja-mcp:camt br=REF-LONG-DESC-1 iban=EE471000001020145685 dir=DBIT sig=[a-f0-9]{16}\]/);
     expect(payload.description).toContain("Long CAMT description");
   });
 
@@ -1559,8 +1575,8 @@ describe("camt import tool", () => {
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
     expect(payload.description?.length).toBeLessThanOrEqual(150);
-    expect(payload.description).toContain(`brh=${bankReferenceHash(longBankReference)} iban=EE471000001020145685`);
-    expect(payload.description).toMatch(/sig=[a-f0-9]{16}\]/);
+    expect(payload.description).toContain(`h=${bankReferenceHash(longBankReference).replace("sha256:", "")} i=EE471000001020145685 d=DBIT`);
+    expect(payload.description).toMatch(/s=[a-f0-9]{16}\]/);
     expect(payload.description).not.toMatch(/\[e-arveldaja-mcp:camt[^\]]*$/);
   });
 
@@ -1579,8 +1595,8 @@ describe("camt import tool", () => {
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
     expect(payload.description?.length).toBeLessThanOrEqual(150);
-    expect(payload.description).toContain(`brh=${bankReferenceHash(mediumBankReference)} iban=${counterpartyIban}`);
-    expect(payload.description).toMatch(/sig=[a-f0-9]{16}\]/);
+    expect(payload.description).toContain(`h=${bankReferenceHash(mediumBankReference).replace("sha256:", "")} i=${counterpartyIban} d=DBIT`);
+    expect(payload.description).toMatch(/s=[a-f0-9]{16}\]/);
     expect(payload.description).not.toContain("bank_ref_number=");
   });
 
@@ -1727,7 +1743,7 @@ describe("camt import tool", () => {
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
     expect(payload.description).toContain("\\[e-arveldaja-mcp:camt bank_ref_number=ATTACK-REF]");
-    expect(payload.description).toMatch(/\[e-arveldaja-mcp:camt br=REF-VOID-1 sig=[a-f0-9]{16}\]/);
+    expect(payload.description).toMatch(/\[e-arveldaja-mcp:camt br=REF-VOID-1 dir=DBIT sig=[a-f0-9]{16}\]/);
   });
 
   it("does not use marker-only bank account metadata as a possible-duplicate match reason", async () => {
@@ -2170,7 +2186,7 @@ describe("camt import tool", () => {
     ]));
   });
 
-  it("H09 only skips the already imported repeated-reference row on the selected bank dimension", async () => {
+  it("H09 matches repeated CRDT references against historical type D rows", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
@@ -2183,7 +2199,7 @@ describe("camt import tool", () => {
       </Acct>
       <Ntry>
         <Amt Ccy="EUR">300.00</Amt>
-        <CdtDbtInd>DBIT</CdtDbtInd>
+        <CdtDbtInd>CRDT</CdtDbtInd>
         <BookgDt><Dt>2026-02-03</Dt></BookgDt>
         <AcctSvcrRef>REF-SPLIT-1</AcctSvcrRef>
         <NtryDtls>
@@ -2195,7 +2211,7 @@ describe("camt import tool", () => {
               <TxAmt><Amt Ccy="EUR">100.00</Amt></TxAmt>
             </AmtDtls>
             <RltdPties>
-              <Cdtr><Nm>Vendor A OÜ</Nm></Cdtr>
+              <Dbtr><Nm>Vendor A OÜ</Nm></Dbtr>
             </RltdPties>
             <RmtInf>
               <Ustrd>Split payment A</Ustrd>
@@ -2209,7 +2225,7 @@ describe("camt import tool", () => {
               <TxAmt><Amt Ccy="EUR">200.00</Amt></TxAmt>
             </AmtDtls>
             <RltdPties>
-              <Cdtr><Nm>Vendor B OÜ</Nm></Cdtr>
+              <Dbtr><Nm>Vendor B OÜ</Nm></Dbtr>
             </RltdPties>
             <RmtInf>
               <Ustrd>Split payment B</Ustrd>
@@ -2230,7 +2246,7 @@ describe("camt import tool", () => {
           accounts_dimensions_id: 7,
           bank_ref_number: "REF-SPLIT-1",
           date: "2026-02-03",
-          type: "C",
+          type: "D",
           amount: 100,
           cl_currencies_id: "EUR",
           ref_number: "E2E-1",

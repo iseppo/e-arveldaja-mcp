@@ -334,8 +334,8 @@ describe("wise import tool", () => {
     const metadata = toolMetadataText(setupWiseTool([]).options);
 
     expect(metadata).toContain("DRY RUN");
-    expect(metadata).toContain("type D");
-    expect(metadata).toContain("type C");
+    expect(metadata).toContain("API type C");
+    expect(metadata).toContain("source_direction");
     expect(metadata).toContain("fee_account_dimensions_id");
     expect(metadata).toContain("inter_account_dimension_id");
     expect(metadata).not.toContain("Does not support the special statement/report CSV exports");
@@ -473,7 +473,7 @@ describe("wise import tool", () => {
       { related_table: "accounts", related_id: 8610, related_sub_id: 9, amount: 1.5 },
     ]);
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
-      description: "WISE:FEE:abc-3 Wise teenustasu",
+      description: "WISE:FEE:abc-3 Wise teenustasu [source_direction=OUT]",
     }));
     expect(payload.skipped_details).toContainEqual(
       expect.objectContaining({ reason: expect.stringMatching(wrapped("Already imported (date/amount/counterparty/reference match)")), sample_ids: expect.arrayContaining(["abc-3"]) }),
@@ -645,10 +645,10 @@ describe("wise import tool", () => {
     });
 
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
-      type: "D",
+      type: "C",
       amount: 125,
       bank_account_name: "Customer OU",
-      description: "WISE:abc-5 Customer OU",
+      description: "WISE:abc-5 Customer OU [source_direction=IN]",
       ref_number: "PAY-5",
     }));
   });
@@ -677,12 +677,12 @@ describe("wise import tool", () => {
     expect(api.transactions.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
       amount: 100,
       cl_currencies_id: "USD",
-      description: "WISE:fx-1 Acme Ltd",
+      description: "WISE:fx-1 Acme Ltd [source_direction=OUT]",
     }));
     expect(api.transactions.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
       amount: 1.5,
       cl_currencies_id: "USD",
-      description: "WISE:FEE:fx-1 Wise teenustasu",
+      description: "WISE:FEE:fx-1 Wise teenustasu [source_direction=OUT]",
     }));
   });
 
@@ -708,18 +708,18 @@ describe("wise import tool", () => {
     });
 
     expect(api.transactions.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      type: "D",
+      type: "C",
       amount: 92,
       cl_currencies_id: "EUR",
       bank_account_name: "Customer Inc",
-      description: "WISE:fx-in-1 Customer Inc [100 USD @ 0.92]",
+      description: "WISE:fx-in-1 Customer Inc [100 USD @ 0.92] [source_direction=IN]",
       ref_number: "PAY-FX-IN",
     }));
     expect(api.transactions.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
       type: "C",
       amount: 2,
       cl_currencies_id: "EUR",
-      description: "WISE:FEE:fx-in-1 Wise teenustasu",
+      description: "WISE:FEE:fx-in-1 Wise teenustasu [source_direction=OUT]",
     }));
   });
 
@@ -909,7 +909,7 @@ describe("wise import tool", () => {
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
       amount: 100,
       cl_currencies_id: "USD",
-      description: "WISE:fx-dup-1 Acme Ltd",
+      description: "WISE:fx-dup-1 Acme Ltd [source_direction=OUT]",
     }));
     expect(payload.skipped_details).toEqual([]);
   });
@@ -2133,9 +2133,9 @@ describe("wise import tool", () => {
 
   it("M04 previews exact IN and OUT inter-account actions", async () => {
     const cases = [
-      { id: "TRANSFER-M04-IN", direction: "IN" as const, type: "D", flowSource: 20, flowTarget: 5, sourceAmount: 125, sourceCurrency: "USD", targetAmount: 100, targetCurrency: "EUR", rate: 0.8 },
+      { id: "TRANSFER-M04-IN", direction: "IN" as const, type: "C", flowSource: 20, flowTarget: 5, sourceAmount: 125, sourceCurrency: "USD", targetAmount: 100, targetCurrency: "EUR", rate: 0.8 },
       { id: "TRANSFER-M04-OUT", direction: "OUT" as const, type: "C", flowSource: 5, flowTarget: 20, sourceAmount: 100, sourceCurrency: "EUR", targetAmount: 125, targetCurrency: "USD", rate: 1.25 },
-      { id: "BANK_DETAILS_PAYMENT_RETURN-M04-IN", direction: "IN" as const, type: "D", flowSource: 20, flowTarget: 5, sourceAmount: 125, sourceCurrency: "USD", targetAmount: 100, targetCurrency: "EUR", rate: 0.8 },
+      { id: "BANK_DETAILS_PAYMENT_RETURN-M04-IN", direction: "IN" as const, type: "C", flowSource: 20, flowTarget: 5, sourceAmount: 125, sourceCurrency: "USD", targetAmount: 100, targetCurrency: "EUR", rate: 0.8 },
       { id: "BANK_DETAILS_PAYMENT_RETURN-M04-OUT", direction: "OUT" as const, type: "C", flowSource: 5, flowTarget: 20, sourceAmount: 100, sourceCurrency: "EUR", targetAmount: 125, targetCurrency: "USD", rate: 1.25 },
     ];
     const outcomes: Array<{ item: typeof cases[number]; payload: any; api: any }> = [];
@@ -2165,6 +2165,7 @@ describe("wise import tool", () => {
         execute: false,
       }));
       outcomes.push({ item, payload, api: setup.api });
+      expect(payload.command_version).toBe("wise_import_command_v2");
     }
 
     mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({
@@ -2208,6 +2209,7 @@ describe("wise import tool", () => {
           action: "main_create",
           row_key: "row:0:main",
           transaction_type: item.type,
+          source_direction: item.direction,
           booked_amount: 100,
           booked_currency: "EUR",
         }),
@@ -2217,6 +2219,7 @@ describe("wise import tool", () => {
           depends_on: "row:0:main",
           mutation_mode: "create_then_confirm",
           transaction_type: item.type,
+          source_direction: item.direction,
           wise_dimension_id: 5,
           counterpart_dimension_id: 20,
           flow_source_dimension_id: item.flowSource,
@@ -3155,17 +3158,17 @@ describe("wise import tool", () => {
       .mockResolvedValueOnce({ created_object_id: 9812 });
     const mainFx = {
       id: 9710, accounts_dimensions_id: 5, type: "C", amount: 90, cl_currencies_id: "EUR",
-      date: "2026-06-10", description: "WISE:M04-EXECUTE-FX OpenAI [100 USD @ 1.111111]",
+      date: "2026-06-10", description: "WISE:M04-EXECUTE-FX OpenAI [100 USD @ 1.111111] [source_direction=OUT]",
       bank_account_name: "OpenAI", status: "PROJECT", is_deleted: false,
     };
     const feeFx = {
       id: 9711, accounts_dimensions_id: 5, type: "C", amount: 2, cl_currencies_id: "EUR",
-      date: "2026-06-10", description: "WISE:FEE:M04-EXECUTE-FX Wise teenustasu",
+      date: "2026-06-10", description: "WISE:FEE:M04-EXECUTE-FX Wise teenustasu [source_direction=OUT]",
       bank_account_name: "Wise", clients_id: 77, status: "PROJECT", is_deleted: false,
     };
     const mainTransfer = {
-      id: 9712, accounts_dimensions_id: 5, type: "D", amount: 50, cl_currencies_id: "EUR",
-      date: "2026-06-10", description: "WISE:TRANSFER-M04-EXECUTE LHV Own Account",
+      id: 9712, accounts_dimensions_id: 5, type: "C", amount: 50, cl_currencies_id: "EUR",
+      date: "2026-06-10", description: "WISE:TRANSFER-M04-EXECUTE LHV Own Account [source_direction=IN]",
       bank_account_name: "LHV Own Account", status: "PROJECT", is_deleted: false,
     };
     setup.api.transactions.listAll
@@ -3203,7 +3206,7 @@ describe("wise import tool", () => {
     }));
     expect(setup.api.transactions.create).toHaveBeenNthCalledWith(3, expect.objectContaining({
       accounts_dimensions_id: 5,
-      type: "D",
+      type: "C",
       amount: 50,
       cl_currencies_id: "EUR",
     }));
@@ -3315,8 +3318,8 @@ describe("wise import tool", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{
-        id: 9720, accounts_dimensions_id: 5, type: "D", amount: 88, cl_currencies_id: "EUR",
-        date: "2026-06-10", description: "WISE:TRANSFER-M04-ORPHAN LHV Own Account",
+        id: 9720, accounts_dimensions_id: 5, type: "C", amount: 88, cl_currencies_id: "EUR",
+        date: "2026-06-10", description: "WISE:TRANSFER-M04-ORPHAN LHV Own Account [source_direction=IN]",
         bank_account_name: "LHV Own Account", status: "PROJECT", is_deleted: false,
       }]);
 
@@ -3344,7 +3347,7 @@ describe("wise import tool", () => {
     feeSetup.api.transactions.confirm.mockRejectedValue(new Error("fee confirm unavailable"));
     const feeMain = {
       id: 9730, accounts_dimensions_id: 5, type: "C", amount: 100, cl_currencies_id: "EUR",
-      date: "2026-06-10", description: "WISE:M04-FEE-CONFIRM-FAILS Ordinary Vendor",
+      date: "2026-06-10", description: "WISE:M04-FEE-CONFIRM-FAILS Ordinary Vendor [source_direction=OUT]",
       bank_account_name: "Ordinary Vendor", status: "PROJECT", is_deleted: false,
     };
     feeSetup.api.transactions.listAll
@@ -3355,7 +3358,7 @@ describe("wise import tool", () => {
       .mockResolvedValueOnce([feeMain])
       .mockResolvedValueOnce([feeMain, {
         id: 9731, accounts_dimensions_id: 5, type: "C", amount: 3, cl_currencies_id: "EUR",
-        date: "2026-06-10", description: "WISE:FEE:M04-FEE-CONFIRM-FAILS Wise teenustasu",
+        date: "2026-06-10", description: "WISE:FEE:M04-FEE-CONFIRM-FAILS Wise teenustasu [source_direction=OUT]",
         bank_account_name: "Wise", clients_id: 77, status: "PROJECT", is_deleted: false,
       }]);
     const feeFailureRun = await runApprovedWiseImport(feeSetup, {
@@ -3552,8 +3555,8 @@ describe("wise import tool", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{
-        id: 8830, accounts_dimensions_id: 5, type: "D", amount: 75, cl_currencies_id: "EUR",
-        date: "2026-06-10", description: "WISE:TRANSFER-M04-STALE-JOURNAL LHV Own Account",
+        id: 8830, accounts_dimensions_id: 5, type: "C", amount: 75, cl_currencies_id: "EUR",
+        date: "2026-06-10", description: "WISE:TRANSFER-M04-STALE-JOURNAL LHV Own Account [source_direction=IN]",
         bank_account_name: "LHV Own Account", status: "PROJECT", is_deleted: false,
       }]);
     const interRun = await runApprovedWiseImport(interSetup, {
@@ -3727,11 +3730,11 @@ describe("wise import tool", () => {
       const interTransaction = finalTransaction === undefined ? undefined : {
         id: 8860,
         accounts_dimensions_id: 5,
-        type: "D",
+        type: "C",
         amount: 50,
         cl_currencies_id: "EUR",
         date: "2026-06-10",
-        description: `WISE:${interId} LHV Own Account`,
+        description: `WISE:${interId} LHV Own Account [source_direction=IN]`,
         bank_account_name: "LHV Own Account",
         status: "PROJECT",
         is_deleted: false,
@@ -4839,7 +4842,7 @@ describe("wise import tool", () => {
       });
 
       expect(api.transactions.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
-        description: "WISE:FEE:fee-blank-1 Wise teenustasu",
+      description: "WISE:FEE:fee-blank-1 Wise teenustasu [source_direction=OUT]",
         amount: 2,
         cl_currencies_id: "USD",
       }));
@@ -4869,7 +4872,7 @@ describe("wise import tool", () => {
       });
 
       expect(outbound.api.transactions.create).toHaveBeenNthCalledWith(2, expect.objectContaining({
-        description: "WISE:FEE:fee-blank-2 Wise teenustasu",
+        description: "WISE:FEE:fee-blank-2 Wise teenustasu [source_direction=OUT]",
         amount: 2,
         cl_currencies_id: "SEK",
       }));

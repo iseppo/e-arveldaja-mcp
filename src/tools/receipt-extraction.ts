@@ -17,6 +17,7 @@ import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { normalizeVatRate } from "./purchase-vat-defaults.js";
+import { bankTransactionDirection } from "../bank-transaction-direction.js";
 
 // ---------------------------------------------------------------------------
 // Regex constants
@@ -2409,7 +2410,7 @@ export function categorizeTransactionGroup(input: TransactionGroupClassification
     .map(transaction => `${transaction.description ?? ""} ${transaction.bank_subtype ?? ""}`.toLowerCase())
     .join(" ");
   if (
-    sample.type !== "D" &&
+    bankTransactionDirection(sample) !== "incoming" &&
     /(lhv|swedbank|seb|luminor|coop)/i.test(counterparty) &&
     (/(fee|teenustasu|service charge|commission|monthly fee|haldustasu)/i.test(feeText) ||
       Math.max(...amounts) <= 20)
@@ -2446,7 +2447,7 @@ export function categorizeTransactionGroup(input: TransactionGroupClassification
     };
   }
 
-  if (sample.type === "D") {
+  if (bankTransactionDirection(sample) === "incoming") {
     reasons.push("incoming_without_sale_invoice");
     return {
       category: "revenue_without_invoice",

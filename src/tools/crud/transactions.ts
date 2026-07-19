@@ -12,6 +12,7 @@ import { MutationIndeterminateError, isMutationIndeterminate } from "../../mutat
 import { getNormalizedNetworkCause } from "../../api/transactions.api.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
+import { createBankTransaction } from "../../bank-transaction-create.js";
 import type { Transaction } from "../../types/api.js";
 import type { ApiContext } from "./shared.js";
 import {
@@ -147,7 +148,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
 
   registerTool(server, "create_transaction", "Create a bank transaction", {
     accounts_dimensions_id: coerceId.describe("Bank account dimension ID"),
-    type: z.string().describe("D = incoming, C = outgoing (import-provided). Preserve tool-provided values; do not infer accounting treatment from a transaction's type."),
+    type: z.string().optional().describe("Deprecated and ignored. Newly created bank transactions always use API type C; preserve statement direction separately as source metadata."),
     amount: z.number().describe("Transaction amount"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
     date: isoDateString("Transaction date (YYYY-MM-DD)"),
@@ -157,7 +158,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     ref_number: z.string().optional().describe("Reference number"),
   }, { ...create, title: "Create Transaction" }, async (rawParams) => {
     const params = desandboxAllStrings(rawParams);
-    const result = await api.transactions.create({
+    const result = await createBankTransaction(api, {
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
     });
@@ -165,7 +166,14 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       tool: "create_transaction", action: "CREATED", entity_type: "transaction",
       entity_id: result.created_object_id,
       summary: `Created transaction ${params.amount} ${params.cl_currencies_id ?? "EUR"} on ${params.date}`,
-      details: { date: params.date, amount: params.amount, type: params.type, description: params.description, accounts_dimensions_id: params.accounts_dimensions_id },
+      details: {
+        date: params.date,
+        amount: params.amount,
+        type: "C",
+        ...(params.type !== undefined ? { ignored_deprecated_type: params.type } : {}),
+        description: params.description,
+        accounts_dimensions_id: params.accounts_dimensions_id,
+      },
     });
     return toolResponse({
       action: "created",

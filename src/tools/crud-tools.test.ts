@@ -2234,10 +2234,11 @@ describe("D01 external-text stripping at CRUD write boundaries", () => {
   it("strips sandbox markers from create_transaction description and bank_account_name", async () => {
     const create = vi.fn().mockResolvedValue({ created_object_id: 9 });
     const { handler } = getCrudToolHarness("create_transaction", { transactions: { create } });
-    await handler({ accounts_dimensions_id: 1, type: "C", amount: 10, date: "2026-07-17", description: marker("PAYMENT"), bank_account_name: marker("Bob") });
-    const arg = create.mock.calls[0]![0] as { description: string; bank_account_name: string };
+    await handler({ accounts_dimensions_id: 1, type: "D", amount: 10, date: "2026-07-17", description: marker("PAYMENT"), bank_account_name: marker("Bob") });
+    const arg = create.mock.calls[0]![0] as { description: string; bank_account_name: string; type: string };
     expect(arg.description).toBe("PAYMENT");
     expect(arg.bank_account_name).toBe("Bob");
+    expect(arg.type).toBe("C");
   });
 
   it("strips sandbox markers from update_transaction data fields before API", async () => {

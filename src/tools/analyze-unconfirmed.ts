@@ -10,6 +10,7 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { getInvoiceMatchEligibility, matchScore, buildInvoiceIndex, getIndexedCandidates } from "./bank-reconciliation.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { buildBankAccountLookups } from "./inter-account-utils.js";
+import { bankTransactionDirection } from "../bank-transaction-direction.js";
 
 /** Known fee/charge patterns for expense detection */
 const EXPENSE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -371,7 +372,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         const desc = (tx.description ?? "").toLowerCase();
         const absAmount = Math.abs(tx.amount);
         // Only outgoing bank transactions should be suggested as expenses.
-        if (tx.type === "C" && absAmount <= MAX_EXPENSE_AMOUNT) {
+        if (bankTransactionDirection(tx) === "outgoing" && absAmount <= MAX_EXPENSE_AMOUNT) {
           const matchedPattern = EXPENSE_PATTERNS.find(ep => ep.pattern.test(desc));
           if (matchedPattern) {
             suggestions.push({

@@ -33,7 +33,7 @@ Show a summary grouped by confidence level from `result.matches`:
 **HIGH (>=80):** Strong matches. In auto mode only confidence >= 90 is eligible for confirmation (Step 3, "Auto mode"), and even then only with user approval — never auto-confirm an 80-89 match without asking.
 - Transaction: date, amount, description, and raw `type` if helpful
 - Matched invoice: number, client, gross amount, confidence, match reasons
-- Keep the tool-provided `type` when importing or creating a transaction, but never infer accounting treatment from an existing transaction's `type`; bank transactions are commonly stored as `C` regardless of direction in e-arveldaja.
+- Every newly created bank transaction must use API `type: "C"`, regardless of direction. Preserve and use signed `source_direction` metadata (`CRDT`/`DBIT` or `IN`/`OUT`) for flow decisions; use legacy `D`/`C` only as a fallback for older rows without source metadata.
 - For cross-currency matches, prefer `match_reasons` such as `exact_base_amount`, and do NOT derive `distribution.amount` from `tx.amount` when base and source currencies differ; use the invoice open balance and the tool-provided distribution.
 
 **MEDIUM (50-79):** Review recommended.

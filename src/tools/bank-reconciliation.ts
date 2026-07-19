@@ -16,6 +16,7 @@ import { roundMoney } from "../money.js";
 import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { BookingGuard, type InterAccountResolution } from "../booking-guard.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
+import { bankTransactionDirection } from "../bank-transaction-direction.js";
 
 const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -351,12 +352,9 @@ export function matchScore(
 }
 
 export function getInvoiceMatchEligibility(
-  tx: Pick<Transaction, "type">,
+  tx: Pick<Transaction, "type" | "description">,
 ): { allowSaleInvoices: boolean; allowPurchaseInvoices: boolean } {
-  // Treat explicit D as authoritative incoming direction. Do not treat C as
-  // authoritative outgoing direction because upstream bank transaction APIs and
-  // imports still surface some incoming payments as type C.
-  if (tx.type === "D") {
+  if (bankTransactionDirection(tx) === "incoming") {
     return {
       allowSaleInvoices: true,
       allowPurchaseInvoices: false,
@@ -749,9 +747,10 @@ export function registerBankReconciliationTools(
       const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds } =
         buildBankAccountLookups(bankAccounts, accountDimensions);
 
-      // Split by type
-      const outgoing = unconfirmed.filter(tx => tx.type === "C");
-      const incoming = unconfirmed.filter(tx => tx.type === "D");
+      // API type is always C for newly created rows; source metadata carries
+      // the statement flow and legacy C/D remains the fallback.
+      const outgoing = unconfirmed.filter(tx => bankTransactionDirection(tx) === "outgoing");
+      const incoming = unconfirmed.filter(tx => bankTransactionDirection(tx) === "incoming");
 
       interface PairResult {
         outgoing_transaction_id: number;
