@@ -56,4 +56,49 @@ describe("parseOpeningBalances", () => {
   it("rejects a paste with no data rows", () => {
     expect(() => parseOpeningBalances("just some text\nnothing here")).toThrow(OpeningBalanceParseError);
   });
+
+  it("rounds per-account debit/credit sums to 2 decimals, avoiding float noise", () => {
+    const fractional = [
+      "Nr\tKuupäev\tKonto\tDeebet\tKreedit",
+      "1.\t01.01.2025\t1020 Pank\t0.10 €\t",
+      "2.\t01.01.2025\t1020 Pank\t0.20 €\t",
+      "\t\t2900 Kapital\t\t0.30 €",
+    ].join("\n");
+    const r = parseOpeningBalances(fractional);
+    const acc1020 = r.accounts.find(a => a.code === "1020");
+    expect(acc1020?.debit).toBe(0.3);
+    expect(acc1020?.credit).toBe(0);
+  });
+
+  it("drops a phantom row that resolves to debit==0 and credit==0", () => {
+    const withStray = [
+      "Nr\tKuupäev\tKonto\tDeebet\tKreedit",
+      "1.\t01.01.2025\t1020 Pank\t1 000.00 €\t",
+      "\t\t2900 Kapital\t\t1 000.00 €",
+      "\t\t3000 Extra",
+    ].join("\n");
+    const r = parseOpeningBalances(withStray);
+    expect(r.accounts.map(a => a.code)).not.toContain("3000");
+  });
+
+  it("returns an empty openingDate when no dd.mm.yyyy token appears on any data row", () => {
+    const noDate = [
+      "Nr\tKuupäev\tKonto\tDeebet\tKreedit",
+      "1.\t\t1020 Pank\t1 000.00 €\t",
+      "\t\t2900 Kapital\t\t1 000.00 €",
+    ].join("\n");
+    const r = parseOpeningBalances(noDate);
+    expect(r.openingDate).toBe("");
+  });
+
+  it("parses positionally (debit, credit) when a space-run line carries both amounts", () => {
+    const mixed = [
+      "Nr\tKuupäev\tKonto\tDeebet\tKreedit",
+      "1.    01.01.2025    4000 Konto A    300.00 €    100.00 €",
+      "\t\t5000 Konto B\t\t200.00 €",
+    ].join("\n");
+    const r = parseOpeningBalances(mixed);
+    expect(r.accounts.find(a => a.code === "4000")).toMatchObject({ debit: 300, credit: 100 });
+    expect(r.totals).toEqual({ debit: 300, credit: 300 });
+  });
 });

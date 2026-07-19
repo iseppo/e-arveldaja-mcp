@@ -24,8 +24,8 @@ function parseAmount(cell: string): number {
 }
 
 /** Split a row on tabs, or on runs of 2+ spaces when no tab is present. */
-function splitCells(line: string): string[] {
-  if (line.includes("\t")) return line.split("\t").map(c => c.trim());
+function splitCells(line: string, hasTab: boolean): string[] {
+  if (hasTab) return line.split("\t").map(c => c.trim());
   return line.split(/ {2,}/).map(c => c.trim());
 }
 
@@ -37,7 +37,7 @@ export function parseOpeningBalances(rawText: string): ParsedOpeningBalances {
     const line = rawLine.replace(/\s+$/, "");
     if (line.trim() === "") continue;
     const hasTab = line.includes("\t");
-    const cells = splitCells(line);
+    const cells = splitCells(line, hasTab);
 
     // Locate the Konto cell: the first cell starting with an account code.
     const kontoIdx = cells.findIndex(c => CODE_RE.test(c));
@@ -65,6 +65,11 @@ export function parseOpeningBalances(rawText: string): ParsedOpeningBalances {
       credit = parseAmount(remainder[1] ?? "");
     }
 
+    // A real opening-balance entry always has an amount on one side; a 0/0
+    // row is a misdetected Konto-lookalike (e.g. a stray "Nr Name" token
+    // with no trailing amount) and should be dropped, not booked.
+    if (debit === 0 && credit === 0) continue;
+
     // Opening date: first parseable dd.mm.yyyy seen anywhere on a data row.
     if (!openingDate) {
       for (const c of cells) {
@@ -80,7 +85,11 @@ export function parseOpeningBalances(rawText: string): ParsedOpeningBalances {
     byCode.set(code, entry);
   }
 
-  const accounts = [...byCode.values()];
+  const accounts = [...byCode.values()].map(a => ({
+    ...a,
+    debit: Math.round(a.debit * 100) / 100,
+    credit: Math.round(a.credit * 100) / 100,
+  }));
   if (accounts.length === 0) {
     throw new OpeningBalanceParseError(
       "No opening-balance rows found. Paste the 'Algbilansi kanded' register (Nr / Kuupäev / Konto / Deebet / Kreedit columns).",
