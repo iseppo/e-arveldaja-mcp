@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { sandboxExternalText } from "../external-text-renderer.js";
 import type { ApiContext } from "./crud-tools.js";
 import {
   captureFileInputSnapshot,
@@ -2091,15 +2092,18 @@ function readStoredFingerprint(privatePayload: PlanData): string | undefined {
  */
 function sandboxResultRow<T extends Record<string, unknown>>(row: T): T {
   const wrapped: Record<string, unknown> = { ...row };
-  if (typeof row.reference === "string") wrapped.reference = wrapUntrustedOcr(row.reference);
-  if (typeof row.ticker === "string") wrapped.ticker = wrapUntrustedOcr(row.ticker) ?? row.ticker;
-  if (typeof row.isin === "string") wrapped.isin = wrapUntrustedOcr(row.isin) ?? row.isin;
-  if (typeof row.currency === "string") wrapped.currency = wrapUntrustedOcr(row.currency) ?? row.currency;
+  // Route through the shared display renderer so these fields also inherit the
+  // oversized-text cap (external_text_too_large) on top of the fresh-nonce wrap;
+  // for normal-length CSV tokens this is identical to wrapUntrustedOcr.
+  if (typeof row.reference === "string") wrapped.reference = sandboxExternalText(row.reference);
+  if (typeof row.ticker === "string") wrapped.ticker = sandboxExternalText(row.ticker) ?? row.ticker;
+  if (typeof row.isin === "string") wrapped.isin = sandboxExternalText(row.isin) ?? row.isin;
+  if (typeof row.currency === "string") wrapped.currency = sandboxExternalText(row.currency) ?? row.currency;
   const provenance = row.fx_provenance;
   if (provenance && typeof provenance === "object" && !Array.isArray(provenance)) {
     const p = provenance as Record<string, unknown>;
     if (typeof p.conversion_reference === "string") {
-      wrapped.fx_provenance = { ...p, conversion_reference: wrapUntrustedOcr(p.conversion_reference) };
+      wrapped.fx_provenance = { ...p, conversion_reference: sandboxExternalText(p.conversion_reference) };
     }
   }
   return wrapped as T;
@@ -2913,7 +2917,7 @@ export function registerLightyearTools(
               // Security `name` is the main free-text CSV field; ticker/isin/
               // country are structurally bounded tokens and do not meaningfully
               // expand prompt-injection surface.
-              name: wrapUntrustedOcr(g.name),
+              name: sandboxExternalText(g.name),
               isin: g.isin,
               country: g.country,
               quantity: g.quantity,

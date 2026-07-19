@@ -6,7 +6,7 @@ import { join } from "path";
 import { registerTool } from "../mcp-compat.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
-import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
+import { desandboxAllStrings, desandboxText, renderExternalEntity, sandboxExternalText } from "../external-text-renderer.js";
 import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
@@ -511,6 +511,22 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       };
     }
   );
+  // registry_data comes from the RIK/ariregister registry API (fetchRegistryData)
+  // — external free text that reaches the LLM as DISPLAY. Its `name` and
+  // `address` get a fresh outer sandbox boundary on every render; `reg_code` is a
+  // structural identifier that stays typed. The CLEAN persisted copies
+  // (previewClient.name / address_text) are stripped with desandboxText inside
+  // resolveSupplierInternal and are never sourced from this display copy.
+  const renderRegistryDataForDisplay = (
+    registryData: Record<string, string> | null | undefined,
+  ): Record<string, string | null | undefined> | null | undefined => {
+    if (registryData === null || registryData === undefined) return registryData;
+    const out: Record<string, string | null | undefined> = { ...registryData };
+    if (typeof registryData.name === "string") out.name = sandboxExternalText(registryData.name);
+    if (typeof registryData.address === "string") out.address = sandboxExternalText(registryData.address);
+    return out;
+  };
+
   registerTool(server, "resolve_supplier",
     "Resolve supplier by registry code, VAT number, IBAN, or name; optionally create a client.",
     {
@@ -588,7 +604,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         return {
           content: [{
             type: "text",
-            text: toMcpJson({ found: true, match_type: resolution.match_type, client: resolution.client }),
+            text: toMcpJson({ found: true, match_type: resolution.match_type, client: renderExternalEntity("client", resolution.client) }),
           }],
         };
       }
@@ -601,7 +617,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
               found: false,
               created: true,
               api_response: resolution.client ? { created_object_id: resolution.client.id } : {},
-              registry_data: resolution.registry_data,
+              registry_data: renderRegistryDataForDisplay(resolution.registry_data),
             }),
           }],
         };
@@ -613,7 +629,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           text: toMcpJson({
             found: false,
             created: false,
-            registry_data: resolution.registry_data,
+            registry_data: renderRegistryDataForDisplay(resolution.registry_data),
             suggestion: "Client not found. Set auto_create=true to create, or provide more details.",
           }),
         }],

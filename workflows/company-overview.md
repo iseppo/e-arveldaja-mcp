@@ -14,13 +14,15 @@ This workflow is read-only. It should feel like a dashboard, not a ledger export
 
 If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` before reading reports.
 
+Use the SAME operator-selected reporting date as the single cutoff for every figure: pass it as `date_to` to the statement calls and as `as_of_date` to both aging calls, so the whole overview shares one consistent cutoff instead of the aging reports silently defaulting to today.
+
 Follow these steps:
 
 1. Call `compute_balance_sheet` with date_to: the selected reporting date.
 2. Call `compute_profit_and_loss` with date_from: the selected period start and date_to: the selected reporting date.
-3. Call `compute_payables_aging`.
+3. Call `compute_payables_aging` with as_of_date: the selected reporting date.
 <!-- E_ARVELDAJA_FEATURE_START:sales -->
-4. Call `compute_receivables_aging`.
+4. Call `compute_receivables_aging` with as_of_date: the selected reporting date.
 <!-- E_ARVELDAJA_FEATURE_END:sales -->
 Then summarize the company state using the returned figures:
    - balance-sheet health and whether the check balances

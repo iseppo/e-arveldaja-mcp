@@ -1,8 +1,24 @@
-import { unwrapUntrustedOcr, wrapUntrustedOcr } from "./mcp-json.js";
+import { MAX_UNTRUSTED_TEXT_CHARS, unwrapUntrustedOcr, wrapUntrustedOcr } from "./mcp-json.js";
 
 // A single sandbox delimiter token (start or end) with its nonce. Never occurs
 // in genuine business text, so it is safe to strip wholesale on the write side.
 const SANDBOX_MARKER_RE = /<<UNTRUSTED_OCR_(?:START|END):[0-9a-f]*>>/g;
+
+/**
+ * Hard character cap for a single sandbox-wrapped DISPLAY value. Genuine display
+ * text — a supplier/registry name, a bank reference, a dimension label — is far
+ * below this; only a pathological or maliciously oversized external string
+ * (crafted to flood the consuming LLM's context through the display boundary)
+ * reaches it. Reuses the same budget as the OCR raw-text cap so there is one
+ * consistent limit across every untrusted-text surface.
+ */
+export const MAX_EXTERNAL_TEXT_CHARS = MAX_UNTRUSTED_TEXT_CHARS;
+
+/**
+ * Sentinel substituted for an over-cap display value. It is a server-authored,
+ * fixed token (never attacker-controlled), so wrapping it stays inert.
+ */
+export const EXTERNAL_TEXT_TOO_LARGE_MARKER = "external_text_too_large";
 
 /**
  * Sandbox a single external-origin string for a READ response so a downstream
@@ -18,6 +34,16 @@ export function sandboxExternalText(text: string): string;
 export function sandboxExternalText(text: string | null | undefined): string | null | undefined;
 export function sandboxExternalText(text: string | null | undefined): string | null | undefined {
   if (text === undefined || text === null || text === "") return text;
+  if (text.length > MAX_EXTERNAL_TEXT_CHARS) {
+    // Oversized external display text is never inlined: emit a bounded, inert
+    // sentinel (still freshly wrapped) reporting the original length so the
+    // reader opens the source instead of the boundary being used to bury a
+    // giant payload. The CLEAN value used for matching/audit/rules/API is a
+    // separate copy and is never capped here — only the display copy is.
+    return wrapUntrustedOcr(
+      `${EXTERNAL_TEXT_TOO_LARGE_MARKER}: ${text.length} characters exceed the ${MAX_EXTERNAL_TEXT_CHARS}-character display cap; open the source document to view the full value`,
+    );
+  }
   return wrapUntrustedOcr(text) ?? text;
 }
 

@@ -194,7 +194,7 @@ The assistant will extract invoice data from the PDF, reuse booking treatment fr
 
 > "Process all the invoices in the arved/ folder and book them into e-arveldaja"
 
-The assistant will scan the folder, OCR-parse each PDF/JPG/PNG, extract invoice data, resolve suppliers, detect duplicates, create purchase invoices, upload source documents, confirm, and match to bank transactions — all in one pass. Purchase booking defaults come from confirmed supplier history first, then from `accounting-rules.md` if present. Dry run by default so you can review before committing.
+The assistant will scan the folder, OCR-parse each PDF/JPG/PNG, extract invoice data, resolve suppliers, and detect duplicates, then preview what can be auto-booked. The flow is staged, not one pass: creating and uploading PROJECT (draft) purchase invoices happens only after you approve the preview, and confirming those invoices and matching them to bank transactions are separate follow-up approvals. Purchase booking defaults come from confirmed supplier history first, then from `accounting-rules.md` if present. Dry run by default so you can review before committing.
 If invoice creation succeeds but a later step like document upload or confirmation fails, the tool now auto-invalidates the created purchase invoice and reports that file as failed instead of leaving a stray draft behind.
 
 ### Book Lightyear investment trades and income
