@@ -93,4 +93,42 @@ describe("import_opening_balances", () => {
     expect(res).toMatch(/does not balance/i);
     expect(existsSync(join(dir, "opening-balances.json"))).toBe(false);
   });
+
+  it("explicit dry_run:true previews and does not write", async () => {
+    const res = await callTool(tools, "import_opening_balances", { pasted_text: SAMPLE, dry_run: true });
+    const parsed = parseMcpResponse(res) as Record<string, unknown>;
+    expect(parsed.persisted).toBe(false);
+    expect(existsSync(join(dir, "opening-balances.json"))).toBe(false);
+  });
+
+  it("does not sandbox account code/debit/credit in the dry-run preview (only name is wrapped)", async () => {
+    const res = await callTool(tools, "import_opening_balances", { pasted_text: SAMPLE });
+    const parsed = parseMcpResponse(res) as {
+      accounts: Array<{ code: string; name: string; debit: number; credit: number }>;
+    };
+    const acc = parsed.accounts[0]!;
+    expect(acc.name).toMatch(/UNTRUSTED_OCR_START/);
+    expect(acc.code).toBe("1020");
+    expect(String(acc.code)).not.toMatch(/UNTRUSTED_OCR/);
+    expect(String(acc.debit)).not.toMatch(/UNTRUSTED_OCR/);
+    expect(String(acc.credit)).not.toMatch(/UNTRUSTED_OCR/);
+  });
+
+  it("returns ok:false without throwing when persisting fails in single-file EARVELDAJA_RULES_FILE mode", async () => {
+    const fileDir = mkdtempSync(join(tmpdir(), "ob-tool-file-"));
+    delete process.env.EARVELDAJA_RULES_DIR;
+    process.env.EARVELDAJA_RULES_FILE = join(fileDir, "accounting-rules.md");
+    resetOpeningBalanceCache();
+    try {
+      const res = await callTool(tools, "import_opening_balances", { pasted_text: SAMPLE, dry_run: false });
+      const parsed = parseMcpResponse(res) as Record<string, unknown>;
+      expect(parsed.ok).toBe(false);
+      expect(String(parsed.error)).toMatch(/bundle storage|EARVELDAJA_RULES_DIR/i);
+    } finally {
+      delete process.env.EARVELDAJA_RULES_FILE;
+      process.env.EARVELDAJA_RULES_DIR = dir;
+      resetOpeningBalanceCache();
+      rmSync(fileDir, { recursive: true, force: true });
+    }
+  });
 });

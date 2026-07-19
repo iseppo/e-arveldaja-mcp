@@ -43,3 +43,22 @@ describe("opening-balance store", () => {
     expect(() => readOpeningBalances()).toThrow(/opening-balances\.json/i);
   });
 });
+
+describe("opening-balance store — single-file EARVELDAJA_RULES_FILE mode", () => {
+  let fileDir: string;
+  beforeEach(() => {
+    fileDir = mkdtempSync(join(tmpdir(), "ob-store-file-"));
+    delete process.env.EARVELDAJA_RULES_DIR;
+    process.env.EARVELDAJA_RULES_FILE = join(fileDir, "accounting-rules.md");
+    resetOpeningBalanceCache();
+  });
+  afterEach(() => {
+    delete process.env.EARVELDAJA_RULES_FILE;
+    rmSync(fileDir, { recursive: true, force: true });
+  });
+
+  it("readOpeningBalances returns null and writeOpeningBalances throws (bundle storage required)", () => {
+    expect(readOpeningBalances()).toBeNull();
+    expect(() => writeOpeningBalances(PARSED, "2026-07-19T00:00:00.000Z")).toThrow(/bundle storage/i);
+  });
+});

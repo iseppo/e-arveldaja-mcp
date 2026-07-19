@@ -49,7 +49,7 @@ export function buildOpeningBalanceJournal(
 
 export async function loadOpeningBalanceJournal(api: ApiContext): Promise<OpeningBalanceJournal | null> {
   const stored = readOpeningBalances();
-  if (!stored) return null;
+  if (!stored || stored.accounts.length === 0) return null;
   const accounts = await api.readonly.getAccounts();
   return buildOpeningBalanceJournal(accounts, stored);
 }

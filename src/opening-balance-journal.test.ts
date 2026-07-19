@@ -37,4 +37,12 @@ describe("buildOpeningBalanceJournal", () => {
     expect(r.unmappedCodes).toEqual(["9999"]);
     expect(r.journal.postings.some(p => p.accounts_id === 9999)).toBe(false);
   });
+  it("emits both a D and a C posting for an account with nonzero debit and credit", () => {
+    const stored = { ...STORED, accounts: [{ code: "1020", name: "Pank", debit: 400, credit: 150 }] };
+    const r = buildOpeningBalanceJournal(ACCOUNTS, stored)!;
+    expect(r.journal.postings).toEqual([
+      expect.objectContaining({ accounts_id: 1020, type: "D", amount: 400, base_amount: 400 }),
+      expect.objectContaining({ accounts_id: 1020, type: "C", amount: 150, base_amount: 150 }),
+    ]);
+  });
 });

@@ -25,6 +25,10 @@ export function registerOpeningBalanceTools(server: McpServer, _api: ApiContext)
         return { content: [{ type: "text", text: toMcpJson({ ok: false, error: msg }) }] };
       }
 
+      // Structural post-parse invariant: parseOpeningBalances() already throws on any
+      // imbalance > 0.01 (see the parse-error path above), so `balanced` is always true
+      // by the time we get here. Imbalance is reported via that parse-error path, not
+      // this field — kept for informativeness to callers, not as a live branch.
       const balanced = Math.abs(parsed.totals.debit - parsed.totals.credit) <= 0.01;
       const preview = {
         ok: true,
@@ -48,8 +52,12 @@ export function registerOpeningBalanceTools(server: McpServer, _api: ApiContext)
       }
 
       // Use a caller-supplied-free timestamp source consistent with the codebase.
-      const stored = writeOpeningBalances(parsed, new Date().toISOString());
-      return { content: [{ type: "text", text: toMcpJson({ ...preview, persisted: true, parsed_at: stored.parsedAt }) }] };
+      try {
+        const stored = writeOpeningBalances(parsed, new Date().toISOString());
+        return { content: [{ type: "text", text: toMcpJson({ ...preview, persisted: true, parsed_at: stored.parsedAt }) }] };
+      } catch (error) {
+        return { content: [{ type: "text", text: toMcpJson({ ok: false, error: (error as Error).message }) }] };
+      }
     },
   );
 }
