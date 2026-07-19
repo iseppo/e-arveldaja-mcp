@@ -30,7 +30,6 @@ import { isNonVoidTransaction, isProjectTransaction } from "../transaction-statu
 import { parseCSV } from "../csv.js";
 import { roundMoney } from "../money.js";
 import { normalizeCompanyName } from "../company-name.js";
-import { BookingGuard } from "../booking-guard.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { roundTo } from "../money.js";
 import type { PurchaseInvoice } from "../types/api.js";
@@ -1321,9 +1320,9 @@ export function registerWiseImportTools(
       if (!preflight.ok) return wisePreflightFailure(preflight.rejected_fields);
       const rows = preflight.rows;
       const executeRequested = execute === true;
-      // Planning is always side-effect free. Approved execution consumes the
-      // compiled command payloads after the digest gate below.
-      const dryRun = true;
+      // Planning is always side-effect free: this branch only compiles command
+      // payloads. Approved execution consumes them after the digest gate below
+      // (see runPlanCommands), so there is no inline-mutation path here.
       clearRuntimeCaches();
 
       // Filter rows
@@ -1528,94 +1527,55 @@ export function registerWiseImportTools(
           });
           mainAvailableForFee = true;
         } else {
-          if (dryRun) {
-            const createPayload: TransactionCreatePayload = {
-              accounts_dimensions_id,
-              type,
-              amount,
-              cl_currencies_id: transactionCurrency,
-              date,
-              description: desc,
-              bank_account_name: counterpartyName,
-              ref_number: row.reference || undefined,
-            };
-            commands.push({
-              version: WISE_COMMAND_VERSION,
-              action: "main_create",
-              mutation_mode: "create",
-              row_index: row.rowIndex,
-              row_key: `row:${row.rowIndex}:main`,
-              identity_hash: commandIdentity(row, "main"),
-              wise_id: row.id,
-              date,
-              transaction_type: type,
-              source_direction: sourceDirection,
-              booked_amount: amount,
-              booked_currency: transactionCurrency,
-              source_amount: row.sourceAmount,
-              source_currency: normalizeWiseCurrency(row.sourceCurrency),
-              target_amount: row.targetAmount,
-              target_currency: normalizeWiseCurrency(row.targetCurrency),
-              exchange_rate: row.exchangeRate,
-              exchange_rate_orientation: "source_to_target",
-              wise_dimension_id: accounts_dimensions_id,
-              depends_on: null,
-              create_payload: createPayload,
-            });
-            mainCommandKeysByRow.set(row.rowIndex, `row:${row.rowIndex}:main`);
-            created.push({
-              wise_id: row.id,
-              date,
-              type,
-              source_direction: sourceDirection,
-              amount,
-              description: desc,
-              status: "would_create",
-              source_row: row,
-            });
-            seenWiseIds.add(wiseIdTag);
-            for (const signature of mainSignatureCandidates) {
-              existingSignatures.add(signature);
-            }
-            mainAvailableForFee = true;
-          } else {
-            try {
-              const result = await createBankTransaction(api, {
-                accounts_dimensions_id,
-                type,
-                amount,
-                cl_currencies_id: transactionCurrency,
-                date,
-                description: desc,
-                bank_account_name: counterpartyName,
-                ref_number: row.reference || undefined,
-              });
-              logAudit({
-                tool: "import_wise_transactions", action: "IMPORTED", entity_type: "transaction",
-                entity_id: result.created_object_id,
-                summary: `Imported Wise transaction ${amount} ${transactionCurrency} on ${date}`,
-                details: { date, amount, description: desc, counterparty: counterpartyName, wise_id: row.id },
-              });
-              created.push({
-                wise_id: row.id,
-                date,
-                type,
-                source_direction: sourceDirection,
-                amount,
-                description: desc,
-                status: "created",
-                api_id: result.created_object_id,
-                source_row: row,
-              });
-              seenWiseIds.add(wiseIdTag);
-              for (const signature of mainSignatureCandidates) {
-                existingSignatures.add(signature);
-              }
-              mainAvailableForFee = true;
-            } catch (err: unknown) {
-              skipped.push({ wise_id: row.id, reason: err instanceof Error ? err.message : String(err) });
-            }
+          const createPayload: TransactionCreatePayload = {
+            accounts_dimensions_id,
+            type,
+            amount,
+            cl_currencies_id: transactionCurrency,
+            date,
+            description: desc,
+            bank_account_name: counterpartyName,
+            ref_number: row.reference || undefined,
+          };
+          commands.push({
+            version: WISE_COMMAND_VERSION,
+            action: "main_create",
+            mutation_mode: "create",
+            row_index: row.rowIndex,
+            row_key: `row:${row.rowIndex}:main`,
+            identity_hash: commandIdentity(row, "main"),
+            wise_id: row.id,
+            date,
+            transaction_type: type,
+            source_direction: sourceDirection,
+            booked_amount: amount,
+            booked_currency: transactionCurrency,
+            source_amount: row.sourceAmount,
+            source_currency: normalizeWiseCurrency(row.sourceCurrency),
+            target_amount: row.targetAmount,
+            target_currency: normalizeWiseCurrency(row.targetCurrency),
+            exchange_rate: row.exchangeRate,
+            exchange_rate_orientation: "source_to_target",
+            wise_dimension_id: accounts_dimensions_id,
+            depends_on: null,
+            create_payload: createPayload,
+          });
+          mainCommandKeysByRow.set(row.rowIndex, `row:${row.rowIndex}:main`);
+          created.push({
+            wise_id: row.id,
+            date,
+            type,
+            source_direction: sourceDirection,
+            amount,
+            description: desc,
+            status: "would_create",
+            source_row: row,
+          });
+          seenWiseIds.add(wiseIdTag);
+          for (const signature of mainSignatureCandidates) {
+            existingSignatures.add(signature);
           }
+          mainAvailableForFee = true;
         }
 
         if (fee > 0) {
@@ -1650,125 +1610,59 @@ export function registerWiseImportTools(
 
           const feeType = "C" as const; // Fees are always outgoing regardless of main transaction direction
 
-          if (dryRun) {
-            if (!feeAccountDimensionsId || !wiseClientId) {
-              throw new Error("Wise fee planning requires resolved fee dimension and Wise client IDs");
-            }
-            const confirmationDistribution = [
-              buildAccountDistributionFromDimension(accountDimensions, feeAccountDimensionsId, fee),
-            ];
-            commands.push({
-              version: WISE_COMMAND_VERSION,
-              action: "fee_create_and_confirm",
-              mutation_mode: "create_then_confirm",
-              row_index: row.rowIndex,
-              row_key: `row:${row.rowIndex}:fee`,
-              identity_hash: commandIdentity(row, "fee"),
-              wise_id: `FEE:${row.id}`,
-              date,
-              transaction_type: feeType,
-              source_direction: "OUT",
-              booked_amount: fee,
-              booked_currency: feeCurrency,
-              source_amount: row.sourceAmount,
-              source_currency: normalizeWiseCurrency(row.sourceCurrency),
-              target_amount: row.targetAmount,
-              target_currency: normalizeWiseCurrency(row.targetCurrency),
-              exchange_rate: row.exchangeRate,
-              exchange_rate_orientation: "source_to_target",
-              wise_dimension_id: accounts_dimensions_id,
-              depends_on: mainCommandKeysByRow.get(row.rowIndex) ?? null,
-              posting_account_id: confirmationDistribution[0]!.related_id,
-              posting_dimension_id: confirmationDistribution[0]!.related_sub_id!,
-              create_payload: {
-                accounts_dimensions_id,
-                type: feeType,
-                amount: fee,
-                cl_currencies_id: feeCurrency,
-                date,
-                description: feeDesc,
-                bank_account_name: "Wise",
-                clients_id: wiseClientId,
-              },
-              confirmation_distribution: confirmationDistribution,
-              wise_client_id: wiseClientId,
-            });
-            created.push({
-              wise_id: `FEE:${row.id}`,
-              date,
-              type: feeType,
-              source_direction: "OUT",
-              amount: fee,
-              description: feeDesc,
-              status: "would_create",
-            });
-            seenWiseIds.add(feeWiseIdTag);
-            existingSignatures.add(feeSignature);
-          } else {
-            try {
-              const feeResult = await createBankTransaction(api, {
-                accounts_dimensions_id,
-                type: feeType,
-                amount: fee,
-                cl_currencies_id: feeCurrency,
-                date,
-                description: feeDesc,
-                bank_account_name: "Wise",
-                clients_id: wiseClientId,
-              });
-              logAudit({
-                tool: "import_wise_transactions", action: "IMPORTED", entity_type: "transaction",
-                entity_id: feeResult.created_object_id,
-                summary: `Imported Wise fee ${fee} ${feeCurrency} on ${date}`,
-                details: { date, amount: fee, description: feeDesc, wise_id: `FEE:${row.id}` },
-              });
-              const feeId = feeResult.created_object_id;
-
-              // Auto-confirm fee to expense account
-              if (feeId && wiseClientId) {
-                try {
-                  if (!feeAccountDimensionsId) throw new Error("Fee account dimension ID is undefined — should not happen when hasFeeRows is true");
-                  await api.transactions.confirm(feeId, [
-                    buildAccountDistributionFromDimension(accountDimensions, feeAccountDimensionsId, fee),
-                  ]);
-                  logAudit({
-                    tool: "import_wise_transactions", action: "CONFIRMED", entity_type: "transaction",
-                    entity_id: feeId,
-                    summary: `Auto-confirmed Wise fee transaction ${feeId}: ${fee} ${feeCurrency} on ${date}`,
-                    details: { amount: fee, currency: feeCurrency, date, description: feeDesc },
-                  });
-                  created.push({
-                    wise_id: `FEE:${row.id}`,
-                    date, type: feeType, source_direction: "OUT", amount: fee, description: feeDesc,
-                    status: "created_and_confirmed",
-                    api_id: feeId,
-                  });
-                  seenWiseIds.add(feeWiseIdTag);
-                  existingSignatures.add(feeSignature);
-                } catch (confErr: unknown) {
-                  created.push({
-                    wise_id: `FEE:${row.id}`,
-                    date, type: feeType, source_direction: "OUT", amount: fee, description: feeDesc,
-                    status: "created (confirm failed: " + (confErr instanceof Error ? confErr.message : String(confErr)) + ")",
-                    api_id: feeId,
-                  });
-                  seenWiseIds.add(feeWiseIdTag);
-                  existingSignatures.add(feeSignature);
-                }
-              } else {
-                created.push({
-                  wise_id: `FEE:${row.id}`,
-                  date, type: feeType, source_direction: "OUT", amount: fee, description: feeDesc,
-                  status: "created (needs manual confirm)",
-                  api_id: feeId,
-                });
-                seenWiseIds.add(feeWiseIdTag);
-                existingSignatures.add(feeSignature);
-              }
-            } catch (err: unknown) {
-              skipped.push({ wise_id: `FEE:${row.id}`, reason: err instanceof Error ? err.message : String(err) });
-            }
+          if (!feeAccountDimensionsId || !wiseClientId) {
+            throw new Error("Wise fee planning requires resolved fee dimension and Wise client IDs");
           }
+          const confirmationDistribution = [
+            buildAccountDistributionFromDimension(accountDimensions, feeAccountDimensionsId, fee),
+          ];
+          commands.push({
+            version: WISE_COMMAND_VERSION,
+            action: "fee_create_and_confirm",
+            mutation_mode: "create_then_confirm",
+            row_index: row.rowIndex,
+            row_key: `row:${row.rowIndex}:fee`,
+            identity_hash: commandIdentity(row, "fee"),
+            wise_id: `FEE:${row.id}`,
+            date,
+            transaction_type: feeType,
+            source_direction: "OUT",
+            booked_amount: fee,
+            booked_currency: feeCurrency,
+            source_amount: row.sourceAmount,
+            source_currency: normalizeWiseCurrency(row.sourceCurrency),
+            target_amount: row.targetAmount,
+            target_currency: normalizeWiseCurrency(row.targetCurrency),
+            exchange_rate: row.exchangeRate,
+            exchange_rate_orientation: "source_to_target",
+            wise_dimension_id: accounts_dimensions_id,
+            depends_on: mainCommandKeysByRow.get(row.rowIndex) ?? null,
+            posting_account_id: confirmationDistribution[0]!.related_id,
+            posting_dimension_id: confirmationDistribution[0]!.related_sub_id!,
+            create_payload: {
+              accounts_dimensions_id,
+              type: feeType,
+              amount: fee,
+              cl_currencies_id: feeCurrency,
+              date,
+              description: feeDesc,
+              bank_account_name: "Wise",
+              clients_id: wiseClientId,
+            },
+            confirmation_distribution: confirmationDistribution,
+            wise_client_id: wiseClientId,
+          });
+          created.push({
+            wise_id: `FEE:${row.id}`,
+            date,
+            type: feeType,
+            source_direction: "OUT",
+            amount: fee,
+            description: feeDesc,
+            status: "would_create",
+          });
+          seenWiseIds.add(feeWiseIdTag);
+          existingSignatures.add(feeSignature);
         }
       }
 
@@ -1898,125 +1792,6 @@ export function registerWiseImportTools(
         orphan_project_transaction_id?: number;
         orphan_action_hint?: string;
       }> = [];
-
-      // A prefix only marks a candidate. Only a row-keyed preflight decision
-      // with verified dimensions and ownership may enter reconciliation.
-      const transferEntries = created.filter(entry => {
-        if (!entry.api_id || entry.status !== "created" || !entry.source_row) return false;
-        return transferDecisions.get(entry.source_row)?.ownershipBasis !== undefined;
-      });
-
-      if (transferEntries.length > 0 && !dryRun) {
-        const firstDecision = transferDecisions.get(transferEntries[0]!.source_row!);
-        const targetDimensionId = firstDecision?.targetDimensionId;
-        const targetDim = targetDimensionId === undefined
-          ? undefined
-          : postingDimensionsSnapshot.get(targetDimensionId);
-
-        // The bank snapshot proved this dimension is configured; the account
-        // dimension supplies the posting account needed by confirm.
-        if (targetDimensionId !== undefined && targetDim) {
-          const ownDimensionIds = new Set([accounts_dimensions_id, targetDimensionId]);
-          const guard = await BookingGuard.load(api, { ownDimensionIds });
-
-          let companyClientId: number | undefined;
-          const companyName = invoiceInfoSnapshot?.invoice_company_name;
-          if (companyName) {
-            const clients = await api.clients.findByName(companyName);
-            companyClientId = resolveOwnCompanyClientId(companyName, clients);
-          }
-
-          for (const entry of transferEntries) {
-            const decision = transferDecisions.get(entry.source_row!);
-            const ownershipBasis = decision?.ownershipBasis;
-            if (!ownershipBasis) continue;
-            const roundedAmount = roundMoney(entry.amount);
-            // Check both directions for an existing journal. The Wise ID acts
-            // as a per-transfer reference — the guard only suppresses the
-            // confirmation when an existing journal's document_number carries
-            // the same reference (or no reference at all, preserving
-            // pre-disambiguation behaviour).
-            const existingJournal = guard.findInterAccount({
-              sourceDim: accounts_dimensions_id,
-              targetDim: targetDimensionId,
-              amount: roundedAmount,
-              date: entry.date,
-              reference: entry.wise_id,
-            });
-
-            if (existingJournal) {
-              interAccountResults.push({
-                api_id: entry.api_id!,
-                wise_id: entry.wise_id,
-                amount: entry.amount,
-                status: "already_journalized",
-                ownership_basis: ownershipBasis,
-                journal_id: existingJournal,
-              });
-            } else {
-              // Confirm against the target bank account
-              try {
-                if (companyClientId) {
-                  await api.transactions.update(entry.api_id!, { clients_id: companyClientId });
-                }
-                const confirmResult = await api.transactions.confirm(entry.api_id!, [{
-                  related_table: "accounts",
-                  related_id: targetDim.accounts_id,
-                  related_sub_id: targetDim.id!,
-                  amount: entry.amount,
-                }]);
-                // Record the new journal into the in-run index so the opposite
-                // leg of this same transfer, if also queued in this batch, is
-                // detected as already journalized instead of double-confirmed.
-                guard.recordInterAccount({
-                  sourceDim: accounts_dimensions_id,
-                  targetDim: targetDimensionId,
-                  amount: roundedAmount,
-                  date: entry.date,
-                  reference: entry.wise_id,
-                }, confirmResult?.created_object_id);
-                logAudit({
-                  tool: "import_wise_transactions", action: "CONFIRMED", entity_type: "transaction",
-                  entity_id: entry.api_id!,
-                  summary: `Confirmed Wise inter-account transfer ${entry.amount} EUR`,
-                  details: {
-                    amount: entry.amount,
-                    wise_id: entry.wise_id,
-                    target_dimension_id: targetDim.id,
-                    ownership_basis: ownershipBasis,
-                  },
-                });
-                interAccountResults.push({
-                  api_id: entry.api_id!,
-                  wise_id: entry.wise_id,
-                  amount: entry.amount,
-                  status: "confirmed_inter_account",
-                  ownership_basis: ownershipBasis,
-                });
-                // Update the created entry status
-                entry.status = "created_and_confirmed_inter_account";
-              } catch (err: unknown) {
-                // Orphan-PROJECT warning: the transaction was created in the
-                // API (api_id assigned) but confirmation failed. A retry
-                // would hit the wise-ID dedup and skip, leaving the row
-                // permanently in PROJECT status. Surface api_id explicitly
-                // as `orphan_project_transaction_id` so the user can
-                // invalidate/retry manually.
-                const errorMessage = err instanceof Error ? err.message : String(err);
-                interAccountResults.push({
-                  api_id: entry.api_id!,
-                  wise_id: entry.wise_id,
-                  amount: entry.amount,
-                  status: "confirm_failed: " + errorMessage,
-                  ownership_basis: ownershipBasis,
-                  orphan_project_transaction_id: entry.api_id!,
-                  orphan_action_hint: `Transaction ${entry.api_id} was created but left in PROJECT status. Rerunning the import will skip it via wise_id dedup. To retry confirmation: invalidate_transaction(${entry.api_id}), then delete_transaction(${entry.api_id}) and rerun — or confirm_transaction(${entry.api_id}) manually against the target bank account.`,
-                });
-              }
-            }
-          }
-        }
-      }
 
       // --- Post-import: scan eligible payment rows for unpaid purchase
       // invoices that should be repriced to Wise's actual EUR conversion.
@@ -2194,43 +1969,8 @@ export function registerWiseImportTools(
         });
       }
 
-      if (!dryRun && invoiceFixCandidates.length > 0 && purchaseInvoicesApi) {
-        for (const fix of invoiceFixCandidates) {
-          if (fix.result === "ambiguous_skipped") continue;
-          try {
-            if (fix.category === "foreign_currency_lock") {
-              await purchaseInvoicesApi.update(fix.invoice_id, {
-                currency_rate: fix.wise_currency_rate,
-                base_gross_price: roundMoney(fix.source_amount_eur),
-              } as Partial<PurchaseInvoice>);
-              fix.result = "updated";
-              logAudit({
-                tool: "import_wise_transactions", action: "UPDATED", entity_type: "purchase_invoice",
-                entity_id: fix.invoice_id,
-                summary: `Locked Wise rate for ${fix.invoice_number}: ${fix.target_amount} ${fix.target_currency} → ${fix.source_amount_eur} EUR @ ${fix.wise_currency_rate}`,
-                details: { wise_id: fix.wise_id, currency_rate: fix.wise_currency_rate, base_gross_price: fix.source_amount_eur },
-              });
-            } else if (fix.category === "eur_legacy_autofix") {
-              await purchaseInvoicesApi.update(fix.invoice_id, {
-                gross_price: roundMoney(fix.source_amount_eur),
-              } as Partial<PurchaseInvoice>);
-              fix.result = "updated";
-              logAudit({
-                tool: "import_wise_transactions", action: "UPDATED", entity_type: "purchase_invoice",
-                entity_id: fix.invoice_id,
-                summary: `Auto-fixed EUR rounding for ${fix.invoice_number}: ${fix.invoice_gross} → ${fix.source_amount_eur} EUR`,
-                details: { wise_id: fix.wise_id, old_gross: fix.invoice_gross, new_gross: fix.source_amount_eur },
-              });
-            }
-          } catch (err) {
-            fix.result = "error";
-            fix.error = err instanceof Error ? err.message : String(err);
-          }
-        }
-      } else if (dryRun) {
-        for (const fix of invoiceFixCandidates) {
-          if (fix.result !== "ambiguous_skipped") fix.result = "would_update";
-        }
+      for (const fix of invoiceFixCandidates) {
+        if (fix.result !== "ambiguous_skipped") fix.result = "would_update";
       }
 
       const canonicalPlanningArgs = {
@@ -2763,7 +2503,7 @@ export function registerWiseImportTools(
             ...(planHandle ? { plan_handle: planHandle } : {}),
             command_version: WISE_COMMAND_VERSION,
             command_count: commands.length,
-            ...(autoDetectedInterAccountDimId && hintedRows.length > 0 && dryRun ? {
+            ...(autoDetectedInterAccountDimId && hintedRows.length > 0 ? {
               inter_account_auto_detected_dimension_id: autoDetectedInterAccountDimId,
             } : {}),
             ...(interAccountResults.length > 0 || (executeRequested && commands.some(command => command.action === "inter_account")) ? {
