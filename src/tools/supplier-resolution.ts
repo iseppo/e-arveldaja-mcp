@@ -4,6 +4,7 @@ import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { normalizeVatValue } from "../document-identifiers.js";
+import { validateLegalEntityIdentity } from "../legal-entity-identity.js";
 import { desandboxText } from "../external-text-renderer.js";
 import {
   type ExtractedReceiptFields,
@@ -41,8 +42,15 @@ export interface SupplierResolution {
    * is a silent miscoding; the caller must route to manual review instead.
    */
   requires_manual_review?: boolean;
-  /** Human-readable explanation for requires_manual_review. */
+  /** Human-readable explanation for requires_manual_review or the identity gate. */
   reason?: string;
+  /**
+   * Set (P17) when the legal-entity identity gate refused an auto-create: no
+   * verified Estonian registry code, no explicit natural person, and no
+   * operator attestation for a foreign registration. When present the caller
+   * must create NEITHER the supplier NOR the invoice.
+   */
+  code?: "legal_entity_identity_required";
 }
 
 export interface SupplierResolutionOptions {
@@ -63,6 +71,15 @@ export interface SupplierResolutionOptions {
   _resolveSupplierOverrides?: {
     country?: string;
     is_physical_entity?: boolean;
+    /**
+     * Operator accountant-attestation that a FOREIGN (country != EST) legal
+     * entity's identity is verified. Passed through to the P17 identity gate;
+     * required to auto-create a foreign legal entity. Must be an explicit
+     * operator input — never sourced from the extracted/OCR fields. Typed as
+     * boolean at the call boundary; the gate additionally rejects any value
+     * bearing OCR sandbox markers.
+     */
+    foreign_identity_attested?: boolean;
   };
 }
 
@@ -387,6 +404,32 @@ export async function resolveSupplierInternal(
       preview_client: previewClient,
       registry_data: registryData,
       self_match_blocked: true,
+    };
+  }
+
+  // P17: gate auto-creation on a VERIFIED legal-entity identity BEFORE the
+  // api.clients.create call and its audit-log write. The natural-person flag
+  // here is the EXPLICIT operator override only (`overrides?.is_physical_entity`)
+  // — never the document-inferred `isPhysicalEntity`, since a legal identity
+  // must not be inferred from OCR. Self-attributed reg-code/VAT are already
+  // stripped (previewRegCode/previewVatNo). On failure, create NOTHING and
+  // return the stripped preview so the operator can review.
+  const identity = validateLegalEntityIdentity({
+    reg_code: previewRegCode,
+    vat_no: previewVatNo,
+    country: supplierCountry,
+    is_physical_entity: overrides?.is_physical_entity,
+    foreign_identity_attested: overrides?.foreign_identity_attested,
+  });
+  if (!identity.ok) {
+    return {
+      found: false,
+      created: false,
+      code: identity.code,
+      reason: identity.reason,
+      preview_client: previewClient,
+      registry_data: registryData,
+      ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
     };
   }
 

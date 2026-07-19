@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
@@ -561,6 +561,8 @@ describe("resolveSupplierInternal — sandbox-marker canonicalization (write/mat
   it("persists a marker-free client name when auto-creating from a wrapped supplier_name", async () => {
     // execute=true with a non-EE supplier (no registry lookup) reaches
     // api.clients.create. The created client name must carry no marker.
+    // P17: a foreign legal entity now requires operator attestation to be
+    // created, so this create-boundary test supplies foreign_identity_attested.
     const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
     const get = vi.fn().mockResolvedValue({ id: 900, name: "Nonprofit Foreign LLC" });
     const api = {
@@ -572,7 +574,7 @@ describe("resolveSupplierInternal — sandbox-marker canonicalization (write/mat
       [],
       { supplier_name: wrap("Nonprofit Foreign LLC") },
       true,
-      { _resolveSupplierOverrides: { country: wrap("USA"), is_physical_entity: false } },
+      { _resolveSupplierOverrides: { country: wrap("USA"), is_physical_entity: false, foreign_identity_attested: true } },
     );
 
     expect(create).toHaveBeenCalledTimes(1);
@@ -581,5 +583,132 @@ describe("resolveSupplierInternal — sandbox-marker canonicalization (write/mat
     expect(created.name).toContain("Nonprofit Foreign LLC");
     // The wrapped country override is stripped before reaching api.clients.create.
     expect(created.cl_code_country).toBe("USA");
+  });
+});
+
+describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
+  const nonce = "deadbeef";
+  const wrap = (s: string) => `<<UNTRUSTED_OCR_START:${nonce}>>\n${s}\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+
+  // An EST reg_code triggers fetchRegistryData() (a network call) BEFORE the
+  // gate, so stub fetch to a fast non-ok response — the registry lookup returns
+  // null and the gate decision is exercised without hitting the network.
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") }));
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function makeCreateApi() {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const get = vi.fn().mockResolvedValue({ id: 900, name: "Created" });
+    const api = {
+      clients: { listAll: () => Promise.resolve([]), create, get },
+    } as unknown as ApiContext;
+    return { api, create };
+  }
+
+  it("creates an Estonian supplier with a checksum-valid reg code", async () => {
+    const { api, create } = makeCreateApi();
+    const result = await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: "Valid Co OÜ", supplier_reg_code: "17133416" },
+      true,
+      { _resolveSupplierOverrides: { country: "EST" } },
+    );
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(result.created).toBe(true);
+  });
+
+  it("refuses to create an Estonian supplier with no reg code (name only), creating nothing", async () => {
+    const { api, create } = makeCreateApi();
+    const result = await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: "Nameonly OÜ" },
+      true,
+      { _resolveSupplierOverrides: { country: "EST" } },
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(result.created).toBe(false);
+    expect(result.code).toBe("legal_entity_identity_required");
+  });
+
+  it("refuses to create an Estonian supplier with a checksum-invalid reg code", async () => {
+    const { api, create } = makeCreateApi();
+    const result = await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: "Bad Checksum OÜ", supplier_reg_code: "12345679" },
+      true,
+      { _resolveSupplierOverrides: { country: "EST" } },
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(result.code).toBe("legal_entity_identity_required");
+  });
+
+  it("refuses to create a VAT-only Estonian supplier", async () => {
+    const { api, create } = makeCreateApi();
+    const result = await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: "Vatonly OÜ", supplier_vat_no: "EE100731910" },
+      true,
+      { _resolveSupplierOverrides: { country: "EST" } },
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(result.code).toBe("legal_entity_identity_required");
+  });
+
+  it("creates an explicit natural person with no reg code", async () => {
+    const { api, create } = makeCreateApi();
+    await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: "Jaan Tamm" },
+      true,
+      { _resolveSupplierOverrides: { country: "EST", is_physical_entity: true } },
+    );
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to create a foreign supplier without operator attestation", async () => {
+    const { api, create } = makeCreateApi();
+    const result = await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: "Foreign Co LLC" },
+      true,
+      { _resolveSupplierOverrides: { country: "USA", is_physical_entity: false } },
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(result.code).toBe("legal_entity_identity_required");
+  });
+
+  it("creates a foreign supplier with explicit operator attestation", async () => {
+    const { api, create } = makeCreateApi();
+    await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: "Foreign Co LLC" },
+      true,
+      { _resolveSupplierOverrides: { country: "USA", is_physical_entity: false, foreign_identity_attested: true } },
+    );
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a forwarded attestation that carries OCR sandbox markers", async () => {
+    const { api, create } = makeCreateApi();
+    const result = await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: "Foreign Co LLC" },
+      true,
+      { _resolveSupplierOverrides: { country: "USA", is_physical_entity: false, foreign_identity_attested: wrap("true") as unknown as boolean } },
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(result.code).toBe("legal_entity_identity_required");
   });
 });

@@ -521,9 +521,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       auto_create: z.boolean().optional().describe("Create client if not found (default false)"),
       country: z.string().optional().describe("Country code for auto-create (default EST)"),
       is_physical_entity: z.boolean().optional().describe("Natural person (default false = legal entity)"),
+      foreign_identity_attested: z.boolean().optional().describe("Operator accountant-attestation that a FOREIGN (country != EST) legal entity's identity has been verified. Required to auto-create a foreign legal entity. Must be an explicit operator input — never set it from the extracted/OCR invoice fields."),
     },
     { ...create, title: "Find or Create Supplier" },
-    async ({ name, reg_code, vat_no, iban, auto_create, country, is_physical_entity }) => {
+    async ({ name, reg_code, vat_no, iban, auto_create, country, is_physical_entity, foreign_identity_attested }) => {
       const allClients = await api.clients.listAll();
       // Activate resolveSupplierInternal's self-match guards: without the
       // active company's own VAT/registry code, a header identifier the OCR
@@ -544,9 +545,29 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         {
           ownCompanyVat,
           ownCompanyRegistryCode,
-          _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity },
+          _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity, foreign_identity_attested },
         },
       );
+
+      if (resolution.code === "legal_entity_identity_required") {
+        // P17: the identity gate refused auto-creation — created NEITHER a
+        // supplier NOR an invoice. Surface the requirement so the operator can
+        // supply a verified identity (registry code / natural person / foreign
+        // attestation) before retrying.
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson({
+              found: false,
+              created: false,
+              code: "legal_entity_identity_required",
+              reason: resolution.reason,
+              suggestion:
+                "Refusing to auto-create a supplier without a verified legal-entity identity. Supply a checksum-valid Estonian registry code (reg_code), set is_physical_entity=true for a natural person, or set foreign_identity_attested=true for an operator-verified foreign registration.",
+            }),
+          }],
+        };
+      }
 
       if (resolution.self_match_blocked) {
         return {

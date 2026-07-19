@@ -89,6 +89,14 @@ Inspect the result:
 - If step 4 returned `found=true`, use `client.id` as `supplier_client_id`.
 - If no existing supplier was found, do NOT create the supplier yet. Treat the new supplier as part of the approval card and keep the extracted name, registry code, VAT number, IBAN, country, and registry data ready for the post-approval call.
 - For a new supplier, say clearly in the approval card that the new supplier record will be created after approval, before the invoice is created.
+- **Legal-entity identity gate:** a new supplier is auto-created only with a
+  VERIFIED legal-entity identity — a checksum-valid 8-digit Estonian registry
+  code, OR `is_physical_entity: true` (explicit natural person), OR, for a
+  foreign registration (`country` != `EST`), the operator attestation
+  `foreign_identity_attested: true`. A VAT number alone does NOT qualify, and the
+  foreign attestation must be your explicit input, never taken from the extracted
+  invoice fields. If none can be satisfied, the invoice cannot be booked to a new
+  auto-created supplier — resolve the supplier manually and stop.
 
 ## Step 7: Reuse the best booking setup
 
@@ -150,7 +158,15 @@ If the user has not explicitly approved the preview, stop here and wait.
 ## Step 11: Create the supplier if needed, then the purchase invoice
 
 If step 4 did not return `found=true`, call `resolve_supplier` with the same identifiers and `auto_create: true` only after the approval above.
+- For a foreign registration (`country` != `EST`), also pass
+  `foreign_identity_attested: true` — but only when the operator has verified the
+  foreign entity's identity; never derive it from the extracted invoice fields.
 - Use `api_response.created_object_id` as `supplier_client_id`. If no client ID is returned, stop and report the failure.
+- If `resolve_supplier` returns `legal_entity_identity_required`, NOTHING was
+  created — neither the supplier nor the invoice. Do not create the purchase
+  invoice: report that a verified legal-entity identity (checksum-valid Estonian
+  registry code, explicit natural person, or attested foreign registration) is
+  required, and resolve the supplier manually instead.
 
 Call `create_purchase_invoice_from_pdf`:
 - `supplier_client_id`

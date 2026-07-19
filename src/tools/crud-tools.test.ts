@@ -2353,3 +2353,62 @@ describe("D01 external-text stripping at CRUD write boundaries", () => {
     expect(arg.items[0]!.custom_title).toBe("Widget");
   });
 });
+
+describe("P17 create_client legal-entity identity gate", () => {
+  beforeEach(() => vi.mocked(logAudit).mockClear());
+
+  it("creates a legal entity with a checksum-valid Estonian registry code", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 5 });
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    await handler({ name: "Acme OÜ", is_client: false, is_supplier: true, is_physical_entity: false, code: "17133416" });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates an explicit natural person with no registry code", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 6 });
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    await handler({ name: "Jaan Tamm", is_client: false, is_supplier: true, is_physical_entity: true });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a legal entity with a missing registry code, creating nothing", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 7 });
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    const result = await handler({ name: "Acme OÜ", is_client: false, is_supplier: true, is_physical_entity: false }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ error: "legal_entity_identity_required" });
+    expect(create).not.toHaveBeenCalled();
+    expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it("refuses a legal entity with a checksum-invalid registry code", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 8 });
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    const result = await handler({ name: "Acme OÜ", is_client: false, is_supplier: true, is_physical_entity: false, code: "12345679" }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("refuses a VAT-only legal entity (VAT is not a legal-entity identity)", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 9 });
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    const result = await handler({ name: "Acme OÜ", is_client: false, is_supplier: true, is_physical_entity: false, invoice_vat_no: "EE100731910" }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("refuses a foreign legal entity without operator attestation", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 10 });
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    const result = await handler({ name: "Nonprofit Foreign LLC", is_client: false, is_supplier: true, is_physical_entity: false, cl_code_country: "USA" }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("creates a foreign legal entity with explicit operator attestation", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 11 });
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    await handler({ name: "Nonprofit Foreign LLC", is_client: false, is_supplier: true, is_physical_entity: false, cl_code_country: "USA", foreign_identity_attested: true });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+});

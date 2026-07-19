@@ -25,6 +25,25 @@ Create a new supplier (client) in e-arveldaja with proper fields and optional bu
 
 **Input:** Supplier name or Estonian registry code (8 digits).
 
+## Legal-entity identity requirement (mandatory)
+
+No supplier is created without a VERIFIED legal-entity identity. `create_client`
+and `resolve_supplier` (with `auto_create`) refuse to create anything and return
+`legal_entity_identity_required` unless ONE of these holds:
+
+- **Estonian company:** a checksum-valid 8-digit Estonian registry code
+  (registrikood) in `code` / `reg_code`.
+- **Natural person:** `is_physical_entity: true` set EXPLICITLY by you — never
+  inferred from the document.
+- **Foreign registration** (`cl_code_country` / `country` != `EST`): an explicit
+  operator accountant-attestation `foreign_identity_attested: true`. A foreign
+  registry code or a VAT number is NOT sufficient on its own, and the attestation
+  must be your explicit input — never copied from the extracted/OCR invoice
+  fields.
+
+A VAT number alone is never a legal-entity identity. If none of the above can be
+satisfied, do not force creation — resolve the supplier manually instead.
+
 ## Step 1: Determine input type
 
 - 8-digit number → treat as registry code
@@ -84,11 +103,20 @@ Call `create_client`:
 - `is_supplier`: `true`
 - `cl_code_country`: `"EST"` (or as specified)
 - `is_physical_entity`: `false` (REQUIRED — `false` = legal entity/company, the default case; `true` for natural persons)
+- `foreign_identity_attested`: `true` ONLY when creating a foreign legal entity
+  (`cl_code_country` != `EST`) whose identity you have verified — this is the
+  operator attestation the identity gate requires; omit it for Estonian companies
+  and natural persons
 - `bank_account_no`: IBAN (if provided)
 - `invoice_vat_no`: VAT number (if provided)
 - `email`: (if provided)
 - `telephone`: (if provided)
 - `address_text`: from registry or user input
+
+If `create_client` returns `legal_entity_identity_required`, nothing was created:
+supply a checksum-valid Estonian registry code, set `is_physical_entity: true` for
+a natural person, or set `foreign_identity_attested: true` for a verified foreign
+registration, then retry — do not work around the gate.
 
 ## Step 7: Report
 

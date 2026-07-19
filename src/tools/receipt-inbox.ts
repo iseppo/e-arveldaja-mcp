@@ -1399,6 +1399,21 @@ async function processSingleReceipt(
       });
     }
 
+    // P17: the legal-entity identity gate refused to auto-create the supplier
+    // (no verified Estonian registry code, no explicit natural person, and no
+    // operator attestation for a foreign registration). Create NEITHER the
+    // supplier NOR the invoice — route to manual review.
+    if (materializedSupplierResolution.code === "legal_entity_identity_required" && !materializedSupplierResolution.found) {
+      notes.push(
+        `Supplier auto-create refused: ${materializedSupplierResolution.reason ?? "a verified legal-entity identity is required"} Manual review required before booking.`,
+      );
+      const fallback = summarize();
+      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
+        supplier_resolution: materializedSupplierResolution,
+        booking_suggestion: bookingSuggestion,
+      });
+    }
+
     const created = await createAndMaybeMatchPurchaseInvoice(
       api,
       context,

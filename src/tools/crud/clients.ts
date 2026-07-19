@@ -5,6 +5,7 @@ import { toMcpJson } from "../../mcp-json.js";
 import { desandboxAllStrings, desandboxText, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
+import { validateLegalEntityIdentity } from "../../legal-entity-identity.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { applyListView, viewParam } from "../../list-views.js";
@@ -43,7 +44,8 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     is_client: z.boolean().describe("Is a buyer"),
     is_supplier: z.boolean().describe("Is a supplier"),
     cl_code_country: z.string().optional().describe("Country code (default EST)"),
-    is_physical_entity: z.boolean().describe("REQUIRED: true = natural person, false = legal entity/company (registry `code` then also required). The API rejects creation without this."),
+    is_physical_entity: z.boolean().describe("REQUIRED: true = natural person, false = legal entity/company (a checksum-valid Estonian registry `code` is then also required, or a foreign registration with foreign_identity_attested). The API rejects creation without this."),
+    foreign_identity_attested: z.boolean().optional().describe("Operator accountant-attestation that a FOREIGN (cl_code_country != EST) legal entity's identity has been verified. Required to create a foreign legal entity. Must be an explicit operator input — never set it from extracted/OCR document fields."),
     email: z.string().optional().describe("Contact email"),
     telephone: z.string().optional().describe("Phone"),
     address_text: z.string().optional().describe("Address"),
@@ -55,6 +57,26 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     // EVERY field (not only the scoped ones), so no marker is ever persisted to
     // the accounting record or the audit log regardless of which field it lands in.
     const params = desandboxAllStrings(rawParams);
+    // P17: gate creation on a VERIFIED legal-entity identity BEFORE any API call
+    // or audit-log write. A legal entity needs a checksum-valid Estonian registry
+    // code (or, if foreign, an explicit operator attestation); an explicit natural
+    // person needs neither. VAT-only / missing / invalid-checksum reg codes are
+    // refused — nothing is created.
+    const identity = validateLegalEntityIdentity({
+      reg_code: params.code,
+      vat_no: params.invoice_vat_no,
+      country: params.cl_code_country,
+      is_physical_entity: params.is_physical_entity,
+      foreign_identity_attested: params.foreign_identity_attested,
+    });
+    if (!identity.ok) {
+      return toolError({
+        error: identity.code,
+        category: "manual_review_required",
+        reason: identity.reason,
+        next_action: "Supply a checksum-valid Estonian registry code, set is_physical_entity=true for a natural person, or set foreign_identity_attested=true for an operator-verified foreign registration. No client was created.",
+      });
+    }
     const result = await api.clients.create({
       ...params,
       cl_code_country: params.cl_code_country ?? "EST",
