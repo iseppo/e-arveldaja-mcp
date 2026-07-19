@@ -6,6 +6,68 @@
 
 This release also lands a full code-review remediation pass (49 findings across the H- and M-series, plus dependency/release findings D01–D02). Each finding was reproduced with a red-green regression, independently reviewed, and committed atomically. Entries below lead with the finding ID for traceability.
 
+### Safe prompt pipeline (P01–P25)
+
+A 25-task remediation reworked how the 16 workflow prompts are defined,
+argued, rendered, and guarded. Each task shipped with a red-green regression
+and an independent review.
+
+- **Strict string prompt arguments (P01).** Every MCP workflow-prompt argument
+  is now a **string** parsed into a typed value by `src/prompt-arguments.ts`,
+  never a numeric or boolean MCP argument. A client always passes wire strings;
+  an invalid boolean/number/ID/date/month/path/identifier/JSON string returns a
+  safe, bounded `-32602` error instead of being coerced.
+- **Canonical prompt pipeline (P02/P03/P04).** Prompt text no longer lives in
+  `src/prompts.ts`. A canonical registry (`src/prompt-registry.ts`) → workflow
+  Markdown sources (`workflows/*.md` via `src/workflow-prompt-source.ts`) →
+  one shared renderer (`src/prompt-surface.ts`) → MCP prompts and the generated
+  `.claude/commands/*.md` slash commands. The renderer injects a single shared
+  safety wrapper, sandboxes external text in a fresh per-call
+  `E_ARVELDAJA_RUN_DATA` boundary, and enforces a 64,000-character budget;
+  `npm run validate:release` enforces set-equality across registry, workflow
+  sources, command mirrors, and the README workflow table.
+- **Sales-aware variants (P05).** `E_ARVELDAJA_FEATURE_*` sections in the
+  workflow sources are kept or dropped per deployment, so a sales-disabled
+  server renders purchase-only prompts without receivables/sale-invoice steps.
+- **Dated VAT/tax metadata (P06).** VAT threshold, rates, and effective/verified
+  dates render from one canonical versioned metadata object in
+  `src/estonian-tax-rules.ts`, so every prompt and command shows the same dated
+  facts rather than a hardcoded rate.
+- **One-attempt server plan handles with drift gates (P03/P04/P05/P12/P15/P18/P19).**
+  The mutating import/reconciliation workflows (CAMT, bank reconciliation,
+  Lightyear, Wise, credential setup) issue a single-use, scope-bound server
+  plan handle on preview. **A plan handle is not user approval** — the handle is
+  consumed once (burn-before-validate ⇒ replay rejected), re-reads its immutable
+  source, and re-checks digest/args/scope/fingerprint before the first mutation;
+  any drift rejects the plan with zero writes. Explicit user approval is
+  recorded separately from the handle.
+- **Opaque file references and immutable snapshots (P09).** File inputs are
+  exchanged as opaque `file_ref` handles bound to the runtime safety context
+  instead of raw filesystem paths, and receipt approval is bound to a once-read
+  SHA-256 digest/manifest so a file swap fails closed before any mutation.
+- **Bank transaction type-C invariant (P10).** Every production bank-transaction
+  create crosses one shared boundary that stamps API `type: "C"`; direction is
+  derived from signed source metadata downstream.
+- **Legal-entity identity gate (P17).** Supplier/client auto-creation requires a
+  verified Estonian registry code, natural-person, or operator-attested foreign
+  identity before any create, and never trusts a document-inferred value.
+- **Invoice supplier branch and validation evidence (P08/P09/P10).** The
+  book-invoice workflow branches existing vs new suppliers and carries
+  truncation/OCR/provenance/warning evidence onto the approval card.
+- **Output/workflow alignment and external-text sandboxing (P07/P11/P13).**
+  Staged receipts keep **create/upload** and **confirm**/link as separate
+  approvals; display fields from supplier/registry/Lightyear/Inbox surfaces are
+  wrapped in a fresh outer sandbox with a `>20k` sentinel, while matching,
+  audit, `document_number`, and API paths use separate clean copies.
+- **Workflow-trace invariant harness (P22).** A pure trace model and checker
+  prove, for every mutating workflow, that no mutation precedes its covering
+  user approval, no unavailable tool is called, mutation stays in approved
+  scope, and any scope change forces a fresh preview.
+- **Documentation and doc contract (P25).** README, `ARCHITECTURE.md`,
+  `AGENTS.md`, and `CLAUDE.md` now describe the shipped pipeline, and
+  `src/documentation-contract.test.ts` pins these claims so a doc regression
+  fails.
+
 ### Added
 - **D02 — packed-release smoke on Node 18.** A new publish-payload smoke builds the project, `npm pack`s it, validates the packed file list against the source-of-truth workflow-slug set, installs the tarball into a throwaway tree, and runs the installed **bin shim itself** (not `node <file>`) under a hermetic environment — inherited `EARVELDAJA_*` stripped case-insensitively, config discovery pointed at an empty dir, torn down via stdin EOF so the stdio server shuts down cleanly. Wired into a Node 18 CI job and `prepublishOnly`, so a broken packaged entrypoint or a missing shipped file is caught before publish.
 - **M24 — workflow dimension prompt arguments now accepted.** Several workflow prompts documented optional bank-account dimension override arguments that the prompt `argsSchema` did not actually accept, so a client passing them had the call rejected by MCP schema validation. The missing optional args are now exposed: `accounting-inbox` (`bank_account_dimension_id`, `receipt_matching_dimension_id`, `wise_account_dimension_id`), `import-wise` (`inter_account_dimension_id`), and `reconcile-bank` (`target_accounts_dimensions_id`). `book-invoice`'s per-item dimension fields are intentionally still not exposed as scalar prompt args.

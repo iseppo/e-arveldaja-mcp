@@ -63,7 +63,7 @@ Do not claim completion, commit, tag, publish, or push until the relevant verifi
 - `src/auth.ts` implements HMAC-SHA-384 signing.
 - `src/api/` contains API resource wrappers.
 - `src/tools/` contains most MCP tools and workflow logic.
-- `src/prompts.ts` contains workflow prompt text.
+- Workflow prompt text is **not** hand-written in `src/prompts.ts`. It flows through one pipeline: the canonical registry `src/prompt-registry.ts` (names, string-only argument schemas, sales-aware variants) → the Markdown bodies under `workflows/*.md` loaded by `src/workflow-prompt-source.ts` → the shared renderer `src/prompt-surface.ts` (safety wrapper, external-text sandbox, 64k budget) → MCP prompts registered in `src/prompts.ts` and the `.claude/commands/*.md` slash-command mirrors. Edit `workflows/*.md` (never a `.claude/commands` mirror), then run `npm run sync:workflow-prompts`; `npm run validate:release` pins registry/workflow/command/README set-equality. See `ARCHITECTURE.md` → Workflow prompt pipeline.
 - `src/resources/` contains MCP resources.
 - `src/mcp-json.ts` and `src/tool-response.ts` shape MCP-safe output.
 - Tests are colocated as `*.test.ts`; integration tests live under `src/__integration__/`.
