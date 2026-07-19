@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-121 tools by default (116 with Lightyear disabled; up to 134 with the optional granular and setup tools exposed — see Tool exposure below), 16 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
+122 tools by default (117 with Lightyear disabled; up to 135 with the optional granular and setup tools exposed — see Tool exposure below), 16 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -66,6 +66,26 @@ Set `EARVELDAJA_RULES_DIR` explicitly for a stable per-company path
 (e.g. `~/.config/e-arveldaja-mcp/<firma>/accounting-rules`) when running several
 companies. Concurrent writes from multiple MCP clients sharing one bundle dir are
 serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
+
+### Opening balances (algbilanss)
+
+e-arveldaja's REST API omits the "Algbilansi kanded" (opening-balance entries)
+section, so the MCP server is otherwise blind to opening balances. The operator
+can paste that register once via the `import_opening_balances` tool
+(`src/tools/opening-balance-import.ts`): it parses the pasted text
+(`src/opening-balance-parse.ts`), checks that debit equals credit, previews
+the result under `dry_run` (default `true`), and on `dry_run=false` persists
+it as `opening-balances.json` in the same accounting-rules bundle described
+above (`src/opening-balance-store.ts`; requires bundle mode — not available
+under `EARVELDAJA_RULES_FILE` single-file mode). At compute time the stored
+balances are folded in as one synthetic journal dated at the opening date
+(`src/opening-balance-journal.ts`), so `compute_account_balance`,
+`compute_trial_balance`, `compute_balance_sheet`, `compute_profit_and_loss`,
+`generate_annual_report_data`, and the ÄS §157 dividend legality checks in
+`prepare_dividend_package` all include it automatically. The feature is
+**optional**: with nothing stored, everything behaves exactly as before,
+except the old blind "verify in the UI" warning becomes an actionable prompt
+pointing at `import_opening_balances` (`src/opening-balance-limitations.ts`).
 
 ### Tool exposure (per-session token cost)
 
@@ -133,9 +153,9 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The default surface is 121 tools; `DISABLE_LIGHTYEAR` drops it to 116.
+The default surface is 122 tools; `DISABLE_LIGHTYEAR` drops it to 117.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both raises it to the full 134. The five opt-out
+credential tools; enabling both raises it to the full 135. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−3),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
@@ -415,5 +435,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 121 tools (default exposure)
+const { tools } = await client.listTools(); // 122 tools (default exposure)
 ```

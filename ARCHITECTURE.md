@@ -9,7 +9,7 @@ graph TB
     subgraph Server["MCP Server (Node.js + TypeScript)"]
         Entry["index.ts\nMCP entry point"]
 
-        subgraph Tools["tools/ — 121 tools across 16 modules"]
+        subgraph Tools["tools/ — 122 tools across 16 modules"]
             CRUD["crud-tools.ts\nBasic CRUD"]
             PDF["pdf-workflow.ts\nInvoice PDF"]
             OCR["receipt-extraction.ts\nReceipt OCR"]
@@ -94,6 +94,35 @@ graph TB
 | **HTTP client** | Rate-limited, timeout-guarded outbound calls |
 | **Config** | Multi-company credential loading & switching |
 | **Audit log** | Append-only markdown log of all mutations |
+
+## Opening-balance folding
+
+e-arveldaja's `/journals` API does not expose the "Algbilansi kanded"
+(opening-balance entries) section, so account balances, statements, and the
+dividend legality checks would otherwise silently run on incomplete data. The
+operator can close that gap once by pasting the register through the
+`import_opening_balances` tool, which flows through three stages:
+
+1. **Parse — `src/opening-balance-parse.ts`.** Parses the pasted register text
+   into per-account debit/credit lines plus an opening date, and validates
+   that total debit equals total credit.
+2. **Store — `src/opening-balance-store.ts`.** Persists the parsed result as
+   `opening-balances.json` inside the same accounting-rules OKF bundle used
+   for booking rules (see `src/accounting-rules.ts`), guarded by the bundle's
+   existing lock file. Only available in bundle mode; not supported under
+   `EARVELDAJA_RULES_FILE` single-file mode.
+3. **Synthetic-journal injection — `src/opening-balance-journal.ts`.** At
+   compute time, `loadOpeningBalanceJournal()` reads the stored balances and
+   builds one synthetic `Journal` dated at the opening date, which is
+   prepended to the journal list each consumer already reads. Account
+   balances, trial balance, balance sheet, P&L, the annual report, and the
+   ÄS §157 dividend checks all consume this same synthetic journal, so they
+   fold in opening balances without any consumer-specific logic.
+
+With nothing imported, all consumers behave exactly as before this feature,
+and surface an actionable warning pointing at `import_opening_balances`
+(`src/opening-balance-limitations.ts`) instead of a blind "verify in the UI"
+warning.
 
 ## Workflow prompt pipeline
 

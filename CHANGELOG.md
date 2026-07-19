@@ -68,6 +68,27 @@ and an independent review.
   `src/documentation-contract.test.ts` pins these claims so a doc regression
   fails.
 
+### Opening balances (algbilanss)
+
+- **New tool — `import_opening_balances`.** e-arveldaja's REST API omits the
+  "Algbilansi kanded" (opening-balance entries) section, so the server was
+  previously blind to opening balances. This tool lets the operator paste
+  that register once: it parses the text, validates that total debit equals
+  total credit, previews the parsed per-account balances (`dry_run=true`
+  default), and on `dry_run=false` persists them as `opening-balances.json`
+  in the same accounting-rules bundle used for booking rules.
+- **Folded into six computations.** At compute time the stored opening
+  balances are injected as one synthetic journal dated at the opening date
+  (`src/opening-balance-journal.ts`), so `compute_account_balance`,
+  `compute_trial_balance`, `compute_balance_sheet`, `compute_profit_and_loss`,
+  `generate_annual_report_data`, and the ÄS §157 dividend legality checks in
+  `prepare_dividend_package` all fold it in automatically — no per-consumer
+  wiring needed.
+- **Optional by default.** With nothing imported, every consumer behaves
+  exactly as before; the previous blind "verify opening balances in the UI"
+  warning is now an actionable one pointing directly at
+  `import_opening_balances` (also surfaced in `list_journals`/`get_journal`).
+
 ### Added
 - **D02 — packed-release smoke on Node 18.** A new publish-payload smoke builds the project, `npm pack`s it, validates the packed file list against the source-of-truth workflow-slug set, installs the tarball into a throwaway tree, and runs the installed **bin shim itself** (not `node <file>`) under a hermetic environment — inherited `EARVELDAJA_*` stripped case-insensitively, config discovery pointed at an empty dir, torn down via stdin EOF so the stdio server shuts down cleanly. Wired into a Node 18 CI job and `prepublishOnly`, so a broken packaged entrypoint or a missing shipped file is caught before publish.
 - **M24 — workflow dimension prompt arguments now accepted.** Several workflow prompts documented optional bank-account dimension override arguments that the prompt `argsSchema` did not actually accept, so a client passing them had the call rejected by MCP schema validation. The missing optional args are now exposed: `accounting-inbox` (`bank_account_dimension_id`, `receipt_matching_dimension_id`, `wise_account_dimension_id`), `import-wise` (`inter_account_dimension_id`), and `reconcile-bank` (`target_accounts_dimensions_id`). `book-invoice`'s per-item dimension fields are intentionally still not exposed as scalar prompt args.
