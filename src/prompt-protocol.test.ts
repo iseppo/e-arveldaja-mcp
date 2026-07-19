@@ -2,7 +2,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { registerPrompts } from "./prompts.js";
+import {
+  CURRENT_VAT_RATES_DISPLAY,
+  ESTONIAN_VAT_METADATA,
+  VAT_REGISTRATION_THRESHOLD_DISPLAY,
+} from "./estonian-tax-rules.js";
 
 const EXPECTED_PROTOCOL_ARGUMENTS: Record<string, Record<string, boolean>> = {
   "vat-registration-threshold": {
@@ -117,6 +123,30 @@ afterEach(async () => {
 });
 
 describe("MCP prompt protocol", () => {
+  it("keeps linked VAT prompt metadata and the generated command on the canonical dated facts", async () => {
+    const client = await linkedPromptClient();
+    const listed = (await client.listPrompts()).prompts.find(prompt => prompt.name === "vat-registration-threshold");
+    const result = await client.getPrompt({
+      name: "vat-registration-threshold",
+      arguments: { year: "2026" },
+    });
+    const runtime = result.messages[0]?.content.type === "text" ? result.messages[0].content.text : "";
+    const command = readFileSync(".claude/commands/vat-registration-threshold.md", "utf8");
+    const surfaces = [listed?.description ?? "", runtime, command];
+
+    expect(listed?.description).toContain(VAT_REGISTRATION_THRESHOLD_DISPLAY);
+    for (const surface of surfaces.slice(1)) {
+      expect(surface).toContain(VAT_REGISTRATION_THRESHOLD_DISPLAY);
+      expect(surface).toContain(ESTONIAN_VAT_METADATA.registration.scope_effective_from);
+      expect(surface).toContain(CURRENT_VAT_RATES_DISPLAY);
+      expect(surface).toContain(`${ESTONIAN_VAT_METADATA.rates.standard.rate}%`);
+      expect(surface).toContain(ESTONIAN_VAT_METADATA.rates.standard.effective_from);
+      expect(surface).toContain(ESTONIAN_VAT_METADATA.verified_at);
+      for (const source of ESTONIAN_VAT_METADATA.sources) expect(surface).toContain(source.url);
+    }
+    for (const surface of surfaces) expect(surface).not.toContain("E_ARVELDAJA_VAT");
+  });
+
   it("renders purchase-only MCP prompts when sales are disabled", async () => {
     const disabledClient = await linkedPromptClient({ enableSales: false });
     const enabledClient = await linkedPromptClient({ enableSales: true });

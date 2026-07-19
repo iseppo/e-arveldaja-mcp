@@ -23,11 +23,11 @@ Canonical workflow source: workflows/vat-registration-threshold.md
 
 Check whether a non-VAT-registered Estonian company may need to register as a VAT payer after crossing the 40 000 EUR calendar-year threshold.
 
-This workflow is read-only. It is an advisory compliance check, not a hard legal decision.
+This workflow is read-only. It presents dated informational facts and an advisory compliance check, not a hard legal decision or a substitute for fact-specific professional advice. The VAT facts below were verified on 2026-07-19.
 
 ## Legal scope
 
-From 2025, the 40 000 EUR threshold includes:
+Under the scope effective 2025-01-01, the 40 000 EUR threshold includes:
 
 - taxable turnover, including 0% turnover, except fixed-asset disposals
 - non-incidental real-estate turnover covered by KMS §16(2) points 2, 3, and 6
@@ -40,6 +40,14 @@ The threshold does not include:
 - fixed-asset disposals
 - incidental real-estate, insurance, or financial transactions
 - turnover whose place of supply is not Estonia
+
+Current Estonian VAT rates in this dated metadata are 24%, 13%, 9%, 0%. The standard rate is 24%, effective from 2025-07-01. Do not infer the correct rate or input-VAT deductibility for a fact-specific transaction without reviewing its date, supply, and restrictions.
+
+Official EMTA sources:
+
+- Registration threshold and scope: https://www.emta.ee/en/business-client/taxes-and-payment/value-added-tax/registration-vat-payer/threshold-calculation-1-january-2025
+- VAT rates: https://www.emta.ee/en/business-client/taxes-and-payment/value-added-tax/vat-rates-and-supply-exempt-tax/value-added-tax-rates
+- Input-VAT deduction restrictions: https://www.emta.ee/en/business-client/taxes-and-payment/value-added-tax/calculation-and-refund-vat/restrictions-deduction-input-vat
 
 ## Workflow
 

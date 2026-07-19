@@ -6,6 +6,7 @@ import { registerEstonianTaxTools } from "./estonian-tax.js";
 import { roundMoney } from "../money.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
+import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -698,7 +699,10 @@ describe("prepare_dividend_package", () => {
     expect(limitsMeta).toContain("22/78");
 
     const vatMeta = toolMetadataText(configs.get("check_vat_registration_threshold")!);
-    expect(vatMeta).toContain("40000 EUR");
+    expect(vatMeta).toContain("40 000 EUR");
+    expect(vatMeta).toContain(ESTONIAN_VAT_METADATA.registration.scope_effective_from);
+    expect(vatMeta).toContain(ESTONIAN_VAT_METADATA.verified_at);
+    expect(vatMeta).toContain(vatSourceById("registration-threshold").url);
   });
 
   // -------------------------------------------------------------------------
@@ -1915,6 +1919,7 @@ describe("check_vat_registration_threshold", () => {
     });
     expect(payload.vat_registered).toBe(false);
     expect(payload.threshold_eur).toBe(40000);
+    expect(payload.vat_metadata).toEqual(ESTONIAN_VAT_METADATA);
     expect(payload.sale_invoice_confirmed_turnover).toBe(27000);
     expect(payload.manual_bucket_source).toBe("outside_sale_invoices");
     expect(payload.sale_invoice_turnover_reclassified_to_manual_buckets).toBe(0);
@@ -1939,6 +1944,9 @@ describe("check_vat_registration_threshold", () => {
     ]));
     expect(String(payload.note)).toContain("not a hard legal decision");
     expect(String(payload.legal_basis)).toContain("EMTA");
+    expect(String(payload.legal_basis)).toContain(ESTONIAN_VAT_METADATA.registration.scope_effective_from);
+    expect(String(payload.legal_basis)).toContain(ESTONIAN_VAT_METADATA.registration.threshold.basis);
+    expect(String(payload.legal_basis)).toContain(vatSourceById("registration-threshold").url);
   });
 
   it("does not double-count manual buckets that are already included in confirmed sale invoices", async () => {
@@ -1981,6 +1989,21 @@ describe("check_vat_registration_threshold", () => {
     expect(payload.status).toBe("exceeded");
     expect(payload.excess_if_all_non_incidental).toBe(2000);
     expect(payload.suggested_action).toContain("registreerimiskohustus");
+  });
+
+  it("does not report exceeded at the exact threshold because registration requires turnover above it", async () => {
+    const handler = getHandler({
+      vatRegistered: false,
+      saleInvoices: [
+        makeSaleInvoice({ id: 1, journal_date: "2026-01-15", base_gross_price: 40_000, gross_price: 40_000 }),
+      ],
+    });
+
+    const payload = parseResult(await handler({ year: 2026 }));
+
+    expect(payload.taxable_or_zero_rated_turnover).toBe(ESTONIAN_VAT_METADATA.registration.threshold.amount);
+    expect(payload.status).toBe("approaching");
+    expect(payload.excess_if_all_non_incidental).toBe(0);
   });
 
   it("stays ok for already VAT-registered companies while still returning the turnover breakdown", async () => {

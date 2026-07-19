@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import { registerWorkflowRecommendationTools } from "./workflow-recommendations.js";
 import type { ToolExposureConfig } from "../config.js";
+import { ESTONIAN_VAT_METADATA, VAT_REGISTRATION_THRESHOLD_DISPLAY } from "../estonian-tax-rules.js";
 
 const ALL_ENABLED: ToolExposureConfig = {
   enableLightyear: true,
@@ -150,6 +151,17 @@ describe("recommend_workflow", () => {
       id: expectedWorkflowId,
     });
     expect(payload.workflow.recommended_next_action.label).not.toMatch(/^Run /);
+  });
+
+  it("derives current VAT recommendation guidance from canonical metadata", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+    const payload = parseMcpResponse(
+      (await handler({ goal: "check KMKR threshold with finantskäive" })).content[0]!.text,
+    ) as Record<string, any>;
+
+    expect(payload.recommended_workflow.summary).toContain(VAT_REGISTRATION_THRESHOLD_DISPLAY);
+    expect(payload.recommended_workflow.summary).toContain(ESTONIAN_VAT_METADATA.registration.scope_effective_from);
+    expect(payload.recommended_workflow.summary).toContain(ESTONIAN_VAT_METADATA.verified_at);
   });
 
   it("uses file_path for the Lightyear statement next action (M25)", async () => {

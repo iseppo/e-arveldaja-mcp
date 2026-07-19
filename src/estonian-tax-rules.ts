@@ -21,16 +21,128 @@ export interface VatRatePeriod {
   rate: number;
 }
 
+export interface ReducedVatRate {
+  rate: number;
+  /** What the rate applies to. */
+  applies: string;
+  /** Effective from (YYYY-MM-DD), or null if long-standing. */
+  from: string | null;
+  basis: string;
+}
+
+type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer Item)[]
+    ? readonly DeepReadonly<Item>[]
+    : T extends object
+      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+      : T;
+
+/** Recursively freeze trusted rule literals so nested metadata cannot drift at runtime. */
+function deepFreeze<T>(value: T): DeepReadonly<T> {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) {
+      deepFreeze(child);
+    }
+    Object.freeze(value);
+  }
+  return value as DeepReadonly<T>;
+}
+
+const VAT_STANDARD_RATE_TIMELINE_SOURCE: VatRatePeriod[] = [
+  { from: "2009-07-01", to: "2023-12-31", rate: 20 },
+  { from: "2024-01-01", to: "2025-06-30", rate: 22 },
+  { from: "2025-07-01", to: null, rate: 24 },
+];
+
+const VAT_REDUCED_RATE_SOURCE: ReducedVatRate[] = [
+  { rate: 13, applies: "majutus / majutus hommikusöögiga (accommodation)", from: "2025-01-01", basis: "KMS § 15" },
+  { rate: 9, applies: "raamatud, perioodika/ajakirjandus, ravimid, meditsiiniseadmed", from: "2025-01-01", basis: "KMS § 15" },
+  { rate: 0, applies: "eksport, ühendusesisene käive jms", from: null, basis: "KMS § 15 lg 3–4" },
+];
+
+export type VatSourceId = "registration-threshold" | "vat-rates" | "input-vat-restrictions";
+interface VatSource {
+  id: VatSourceId;
+  authority: string;
+  title: string;
+  url: string;
+}
+
+/**
+ * Canonical, dated VAT rule metadata for every current prompt/tool surface.
+ * Historical timeline entries remain available for invoice-date validation;
+ * `rates.current` is the deliberately small current-rate presentation set.
+ */
+export const ESTONIAN_VAT_METADATA = deepFreeze({
+  schema_version: "1.0.0",
+  rules_version: "ee-vat-2026-07-19",
+  jurisdiction: "EE",
+  currency: "EUR",
+  verified_at: "2026-07-19",
+  sources: [
+    {
+      id: "registration-threshold",
+      authority: "Estonian Tax and Customs Board (EMTA)",
+      title: "VAT registration threshold calculation from 1 January 2025",
+      url: "https://www.emta.ee/en/business-client/taxes-and-payment/value-added-tax/registration-vat-payer/threshold-calculation-1-january-2025",
+    },
+    {
+      id: "vat-rates",
+      authority: "Estonian Tax and Customs Board (EMTA)",
+      title: "Value-added tax rates",
+      url: "https://www.emta.ee/en/business-client/taxes-and-payment/value-added-tax/vat-rates-and-supply-exempt-tax/value-added-tax-rates",
+    },
+    {
+      id: "input-vat-restrictions",
+      authority: "Estonian Tax and Customs Board (EMTA)",
+      title: "Restrictions on deduction of input VAT",
+      url: "https://www.emta.ee/en/business-client/taxes-and-payment/value-added-tax/calculation-and-refund-vat/restrictions-deduction-input-vat",
+    },
+  ] satisfies VatSource[],
+  registration: {
+    threshold: {
+      amount: 40_000,
+      currency: "EUR",
+      basis: "KMS § 19 lg 1",
+      summary: "Registration duty is assessed after qualifying Estonian calendar-year turnover exceeds the threshold.",
+      source_ids: ["registration-threshold"] satisfies VatSourceId[],
+    },
+    scope_effective_from: "2025-01-01",
+    scope_summary: "Taxable and zero-rated turnover counts; non-incidental real-estate, insurance, and financial turnover can count; social-type exempt services such as healthcare and education remain excluded; only turnover whose place of supply is Estonia counts; other fact-specific exclusions require review.",
+    source_ids: ["registration-threshold"] satisfies VatSourceId[],
+  },
+  rates: {
+    current: [
+      VAT_STANDARD_RATE_TIMELINE_SOURCE.at(-1)!.rate,
+      ...VAT_REDUCED_RATE_SOURCE.map(rate => rate.rate),
+    ],
+    standard: {
+      rate: VAT_STANDARD_RATE_TIMELINE_SOURCE.at(-1)!.rate,
+      effective_from: VAT_STANDARD_RATE_TIMELINE_SOURCE.at(-1)!.from,
+      basis: "KMS § 15 lg 1",
+      summary: `The standard Estonian VAT rate is ${VAT_STANDARD_RATE_TIMELINE_SOURCE.at(-1)!.rate}% from ${VAT_STANDARD_RATE_TIMELINE_SOURCE.at(-1)!.from}.`,
+      source_ids: ["vat-rates"] satisfies VatSourceId[],
+      timeline: VAT_STANDARD_RATE_TIMELINE_SOURCE,
+    },
+    reduced: VAT_REDUCED_RATE_SOURCE,
+    basis: "KMS § 15",
+    source_ids: ["vat-rates"] satisfies VatSourceId[],
+  },
+  input_vat_restrictions: {
+    basis: "KMS § 29–30",
+    summary: "Input VAT deductibility depends on business use and statutory restrictions, including entertainment and passenger-car limits.",
+    source_ids: ["input-vat-restrictions"] satisfies VatSourceId[],
+  },
+});
+
 /**
  * Standard VAT rate timeline (KMS § 15 lg 1). 20% → 22% (1.01.2024) →
  * 24% (1.07.2025). Used to book historical/future invoices at the rate that was
  * actually in force on the invoice date.
  */
-export const STANDARD_VAT_RATE_TIMELINE: readonly VatRatePeriod[] = [
-  { from: "2009-07-01", to: "2023-12-31", rate: 20 },
-  { from: "2024-01-01", to: "2025-06-30", rate: 22 },
-  { from: "2025-07-01", to: null, rate: 24 },
-];
+export const STANDARD_VAT_RATE_TIMELINE: readonly VatRatePeriod[] =
+  ESTONIAN_VAT_METADATA.rates.standard.timeline;
 
 /** True for a strict, real calendar date in YYYY-MM-DD (rejects 2025-13-99, 2025-02-31). */
 function isStrictIsoDate(d: string): boolean {
@@ -47,24 +159,12 @@ export function standardVatRateOn(dateISO: string | undefined | null): number | 
   return period ? period.rate : null;
 }
 
-export interface ReducedVatRate {
-  rate: number;
-  /** What the rate applies to. */
-  applies: string;
-  /** Effective from (YYYY-MM-DD), or null if long-standing. */
-  from: string | null;
-  basis: string;
-}
-
 /**
  * Reduced VAT rates currently in force (KMS § 15). Accommodation rose 9% → 13%
  * and press 5% → 9% on 1.01.2025.
  */
-export const REDUCED_VAT_RATES: readonly ReducedVatRate[] = [
-  { rate: 13, applies: "majutus / majutus hommikusöögiga (accommodation)", from: "2025-01-01", basis: "KMS § 15" },
-  { rate: 9, applies: "raamatud, perioodika/ajakirjandus, ravimid, meditsiiniseadmed", from: "2025-01-01", basis: "KMS § 15" },
-  { rate: 0, applies: "eksport, ühendusesisene käive jms", from: null, basis: "KMS § 15 lg 3–4" },
-];
+export const REDUCED_VAT_RATES: readonly ReducedVatRate[] =
+  ESTONIAN_VAT_METADATA.rates.reduced;
 
 export interface RepresentationMonthlyLimitPeriod {
   /** Inclusive start date (YYYY-MM-DD). */
@@ -163,7 +263,55 @@ export function currentRepresentationMonthlyLimit(): number {
  * financial turnover under the 2025 composition rules) exceeds this within a
  * calendar year.
  */
-export const VAT_REGISTRATION_THRESHOLD_EUR = 40000;
+export const VAT_REGISTRATION_THRESHOLD_EUR = ESTONIAN_VAT_METADATA.registration.threshold.amount;
+/** VAT-only verification date; intentionally independent from unrelated tax-rule verification. */
+export const VAT_RULES_VERIFIED_AT = ESTONIAN_VAT_METADATA.verified_at;
+export const VAT_REGISTRATION_THRESHOLD_DISPLAY = `${VAT_REGISTRATION_THRESHOLD_EUR.toLocaleString("en-US").replace(/,/g, " ")} ${ESTONIAN_VAT_METADATA.registration.threshold.currency}`;
+export const CURRENT_VAT_RATES_DISPLAY = ESTONIAN_VAT_METADATA.rates.current
+  .map(rate => `${rate}%`)
+  .join(", ");
+
+export function vatSourceById(id: VatSourceId): typeof ESTONIAN_VAT_METADATA.sources[number] {
+  const source = ESTONIAN_VAT_METADATA.sources.find(candidate => candidate.id === id);
+  if (!source) throw new Error("Canonical VAT metadata source is missing");
+  return source;
+}
+
+const VAT_TEMPLATE_VALUES = Object.freeze({
+  THRESHOLD_DISPLAY: VAT_REGISTRATION_THRESHOLD_DISPLAY,
+  THRESHOLD_RAW: String(ESTONIAN_VAT_METADATA.registration.threshold.amount),
+  SCOPE_EFFECTIVE_DATE: ESTONIAN_VAT_METADATA.registration.scope_effective_from,
+  CURRENT_RATES: CURRENT_VAT_RATES_DISPLAY,
+  STANDARD_RATE: `${ESTONIAN_VAT_METADATA.rates.standard.rate}%`,
+  STANDARD_RATE_RAW: String(ESTONIAN_VAT_METADATA.rates.standard.rate),
+  STANDARD_RATE_EFFECTIVE_DATE: ESTONIAN_VAT_METADATA.rates.standard.effective_from,
+  VERIFIED_DATE: ESTONIAN_VAT_METADATA.verified_at,
+  THRESHOLD_SOURCE_URL: vatSourceById("registration-threshold").url,
+  RATES_SOURCE_URL: vatSourceById("vat-rates").url,
+  INPUT_VAT_RESTRICTIONS_SOURCE_URL: vatSourceById("input-vat-restrictions").url,
+} as const);
+
+const VAT_TEMPLATE_TOKEN = /\{\{E_ARVELDAJA_VAT:([A-Z][A-Z0-9_]*)\}\}/g;
+const VAT_TEMPLATE_NAMESPACE = /E_ARVELDAJA_VAT/i;
+const VAT_TEMPLATE_ERROR = "Invalid canonical VAT template token";
+
+/**
+ * Expand canonical VAT facts in a trusted repository-owned template. Unknown,
+ * malformed, or unclosed VAT namespace tokens fail closed without echoing the
+ * template into the error message.
+ */
+export function renderVatMetadataTokens(template: string): string {
+  const rendered = template.replace(VAT_TEMPLATE_TOKEN, (_token, key: string) => {
+    if (!Object.prototype.hasOwnProperty.call(VAT_TEMPLATE_VALUES, key)) {
+      throw new Error(VAT_TEMPLATE_ERROR);
+    }
+    return VAT_TEMPLATE_VALUES[key as keyof typeof VAT_TEMPLATE_VALUES];
+  });
+  if (VAT_TEMPLATE_NAMESPACE.test(rendered)) {
+    throw new Error(VAT_TEMPLATE_ERROR);
+  }
+  return rendered;
+}
 
 export interface TaxRuleReference {
   /** Statutory code, e.g. "TuMS § 49 lg 4". */
@@ -295,6 +443,7 @@ export interface TaxRulesReference {
   reduced_vat_rates: readonly ReducedVatRate[];
   cit_rate_timeline: readonly CitRatePeriod[];
   vat_registration_threshold_eur: number;
+  vat_metadata: typeof ESTONIAN_VAT_METADATA;
   deduction_and_limit_rules: readonly TaxRuleReference[];
   profit_distribution_rules: readonly TaxRuleReference[];
   accounting_process_rules: readonly TaxRuleReference[];
@@ -311,6 +460,7 @@ export function buildTaxRulesReference(): TaxRulesReference {
     reduced_vat_rates: REDUCED_VAT_RATES,
     cit_rate_timeline: CIT_RATE_TIMELINE,
     vat_registration_threshold_eur: VAT_REGISTRATION_THRESHOLD_EUR,
+    vat_metadata: ESTONIAN_VAT_METADATA,
     deduction_and_limit_rules: DEDUCTION_AND_LIMIT_RULES,
     profit_distribution_rules: PROFIT_DISTRIBUTION_RULES,
     accounting_process_rules: ACCOUNTING_PROCESS_RULES,
@@ -444,6 +594,12 @@ export interface EstonianTaxNote {
   detail: string;
   /** Statutory / EMTA basis for the rule. */
   basis: string;
+  /** Canonical VAT ruleset version used to produce the note. */
+  rules_version: string;
+  /** Date the applicable VAT guidance was last verified. */
+  verified_at: string;
+  /** Official source for the input-VAT restriction. */
+  source_url: string;
 }
 
 // Single source of truth for the keyword classification of an expense as a
@@ -493,6 +649,11 @@ export function detectVatDeductionNotes(input: {
 
   const { isPassengerCar, isEntertainmentOrHospitality } = classifyExpenseForVat(haystack);
   const notes: EstonianTaxNote[] = [];
+  const restrictionMetadata = {
+    rules_version: ESTONIAN_VAT_METADATA.rules_version,
+    verified_at: VAT_RULES_VERIFIED_AT,
+    source_url: vatSourceById("input-vat-restrictions").url,
+  } as const;
 
   if (isEntertainmentOrHospitality) {
     notes.push({
@@ -505,6 +666,7 @@ export function detectVatDeductionNotes(input: {
         "Erand: töötaja töölähetuse majutuse sisendkäibemaks on mahaarvatav (KMS § 30). " +
         "Kui kulu on tegelikult oma töötajate jaoks (toitlustus/majutus), võib tegu olla erisoodustusega (TuMS § 48). Küsi kasutajalt kulu eesmärki, kui see pole selge.",
       basis: "KMS § 30; TuMS § 49 lg 4",
+      ...restrictionMetadata,
     });
   }
 
@@ -518,6 +680,7 @@ export function detectVatDeductionNotes(input: {
         "100% mahaarvamine eeldab erandit (nt tõendatud 100% ärikasutus koos EMTA teavitusega, takso, õppesõit, edasimüük või rent). " +
         "Kahtluse korral kasuta konservatiivset 50% mahaarvamist ja küsi kasutajalt kinnitust.",
       basis: "KMS § 30 lg 4; KMS § 29 lg 1",
+      ...restrictionMetadata,
     });
   }
 

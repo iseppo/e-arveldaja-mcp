@@ -14,7 +14,13 @@ import {
   CIT_RATE_TIMELINE,
   VAT_REGISTRATION_THRESHOLD_EUR,
   TAX_RULES_VERIFIED_AT,
+  ESTONIAN_VAT_METADATA,
+  VAT_RULES_VERIFIED_AT,
+  renderVatMetadataTokens,
+  vatSourceById,
 } from "./estonian-tax-rules.js";
+
+const VAT_TEMPLATE_ERROR_RE = /Invalid canonical VAT template token/;
 
 describe("standardVatRateOn", () => {
   it("returns the rate in force on the given date", () => {
@@ -71,6 +77,11 @@ describe("detectVatDeductionNotes", () => {
     expect(notes[0].severity).toBe("warning");
     expect(notes[0].basis).toContain("KMS § 30");
     expect(notes[0].basis).toContain("TuMS § 49 lg 4");
+    expect(notes[0]).toMatchObject({
+      rules_version: ESTONIAN_VAT_METADATA.rules_version,
+      verified_at: ESTONIAN_VAT_METADATA.verified_at,
+      source_url: vatSourceById("input-vat-restrictions").url,
+    });
   });
 
   it("flags passenger-car costs with the 50% restriction (KMS § 30 lg 4)", () => {
@@ -131,6 +142,96 @@ describe("classifyExpenseForVat (shared single-source detector)", () => {
 });
 
 describe("buildTaxRulesReference", () => {
+  it("renders identical dated VAT facts from one metadata object", () => {
+    const ref = buildTaxRulesReference();
+
+    expect(ref.vat_metadata).toMatchObject({
+      registration: {
+        threshold: { amount: 40_000, currency: "EUR" },
+        scope_effective_from: "2025-01-01",
+      },
+      rates: {
+        current: [24, 13, 9, 0],
+        standard: { rate: 24, effective_from: "2025-07-01" },
+      },
+      verified_at: "2026-07-19",
+    });
+    expect(ref.vat_metadata.sources.map(source => source.url)).toEqual([
+      "https://www.emta.ee/en/business-client/taxes-and-payment/value-added-tax/registration-vat-payer/threshold-calculation-1-january-2025",
+      "https://www.emta.ee/en/business-client/taxes-and-payment/value-added-tax/vat-rates-and-supply-exempt-tax/value-added-tax-rates",
+      "https://www.emta.ee/en/business-client/taxes-and-payment/value-added-tax/calculation-and-refund-vat/restrictions-deduction-input-vat",
+    ]);
+    const sourceIds = ref.vat_metadata.sources.map(source => source.id);
+    expect(new Set(sourceIds).size).toBe(3);
+    expect(ref.vat_metadata.sources.every(source => source.url.startsWith("https://www.emta.ee/"))).toBe(true);
+    for (const linkedId of [
+      ...ref.vat_metadata.registration.source_ids,
+      ...ref.vat_metadata.registration.threshold.source_ids,
+      ...ref.vat_metadata.rates.source_ids,
+      ...ref.vat_metadata.rates.standard.source_ids,
+      ...ref.vat_metadata.input_vat_restrictions.source_ids,
+    ]) {
+      expect(sourceIds).toContain(linkedId);
+    }
+  });
+
+  it("derives legacy projections and current rates from deeply immutable metadata", () => {
+    expect(STANDARD_VAT_RATE_TIMELINE).toBe(ESTONIAN_VAT_METADATA.rates.standard.timeline);
+    expect(REDUCED_VAT_RATES).toBe(ESTONIAN_VAT_METADATA.rates.reduced);
+    expect(VAT_REGISTRATION_THRESHOLD_EUR).toBe(ESTONIAN_VAT_METADATA.registration.threshold.amount);
+    expect(VAT_RULES_VERIFIED_AT).toBe(ESTONIAN_VAT_METADATA.verified_at);
+    expect(ESTONIAN_VAT_METADATA.rates.current).toEqual([
+      STANDARD_VAT_RATE_TIMELINE.at(-1)?.rate,
+      ...REDUCED_VAT_RATES.map(rate => rate.rate),
+    ]);
+
+    expect(Object.isFrozen(ESTONIAN_VAT_METADATA)).toBe(true);
+    expect(Object.isFrozen(ESTONIAN_VAT_METADATA.registration.threshold)).toBe(true);
+    expect(Object.isFrozen(ESTONIAN_VAT_METADATA.rates.standard.timeline)).toBe(true);
+    const thresholdSource = vatSourceById("registration-threshold");
+    expect(Object.isFrozen(thresholdSource)).toBe(true);
+    expect(() => {
+      (thresholdSource as unknown as { url: string }).url = "https://example.test";
+    }).toThrow(TypeError);
+  });
+
+  it("renders trusted canonical VAT tokens and rejects namespace residue", () => {
+    const template = [
+      "{{E_ARVELDAJA_VAT:THRESHOLD_DISPLAY}}",
+      "{{E_ARVELDAJA_VAT:THRESHOLD_RAW}}",
+      "{{E_ARVELDAJA_VAT:SCOPE_EFFECTIVE_DATE}}",
+      "{{E_ARVELDAJA_VAT:CURRENT_RATES}}",
+      "{{E_ARVELDAJA_VAT:STANDARD_RATE}}",
+      "{{E_ARVELDAJA_VAT:STANDARD_RATE_RAW}}",
+      "{{E_ARVELDAJA_VAT:STANDARD_RATE_EFFECTIVE_DATE}}",
+      "{{E_ARVELDAJA_VAT:VERIFIED_DATE}}",
+      "{{E_ARVELDAJA_VAT:THRESHOLD_SOURCE_URL}}",
+      "{{E_ARVELDAJA_VAT:RATES_SOURCE_URL}}",
+      "{{E_ARVELDAJA_VAT:INPUT_VAT_RESTRICTIONS_SOURCE_URL}}",
+    ].join("\n");
+    const rendered = renderVatMetadataTokens(template);
+
+    expect(rendered).toContain("40 000 EUR\n40000\n2025-01-01\n24%, 13%, 9%, 0%");
+    expect(rendered).toContain("24%\n24\n2025-07-01\n2026-07-19");
+    for (const source of ESTONIAN_VAT_METADATA.sources) expect(rendered).toContain(source.url);
+    expect(rendered).not.toContain("E_ARVELDAJA_VAT");
+
+    for (const invalid of [
+      "{{E_ARVELDAJA_VAT:THRESHOD_RAW}}",
+      "{{E_ARVELDAJA_VAT:threshold_raw}}",
+      "{{E_ARVELDAJA_VAT:THRESHOLD_RAW}",
+      "{E_ARVELDAJA_VAT:THRESHOLD_RAW}}",
+      "E_ARVELDAJA_VAT:THRESHOLD_RAW",
+    ]) {
+      expect(() => renderVatMetadataTokens(`secret template ${invalid}`)).toThrow(VAT_TEMPLATE_ERROR_RE);
+      try {
+        renderVatMetadataTokens(`secret template ${invalid}`);
+      } catch (error) {
+        expect(String(error)).not.toContain("secret template");
+      }
+    }
+  });
+
   it("bundles the VAT timeline, reduced rates, and the limit rules", () => {
     const ref = buildTaxRulesReference();
     expect(ref.standard_vat_rate_timeline).toBe(STANDARD_VAT_RATE_TIMELINE);

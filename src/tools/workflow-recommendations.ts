@@ -5,6 +5,11 @@ import { registerTool } from "../mcp-compat.js";
 import { toolResponse } from "../tool-response.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
+import {
+  ESTONIAN_VAT_METADATA,
+  VAT_REGISTRATION_THRESHOLD_DISPLAY,
+  VAT_REGISTRATION_THRESHOLD_EUR,
+} from "../estonian-tax-rules.js";
 
 type RiskMode = "automatic" | "confirm_once" | "dry_run" | "accountant_review";
 
@@ -33,8 +38,8 @@ const WORKFLOWS: WorkflowGuide[] = [
     id: "vat-registration-threshold",
     prompt: "vat-registration-threshold",
     title: "Check VAT Registration Threshold",
-    summary: "Check the 40 000 EUR VAT registration threshold for non-VAT companies, with separate financial, insurance, and real-estate turnover buckets for manual incidental/non-incidental judgment.",
-    when_to_use: ["VAT registration threshold", "KMKR threshold", "40 000 EUR turnover", "non-VAT company turnover", "financial turnover"],
+    summary: `Check the ${VAT_REGISTRATION_THRESHOLD_DISPLAY} VAT registration threshold for non-VAT companies under the scope effective ${ESTONIAN_VAT_METADATA.registration.scope_effective_from}, with separate financial, insurance, and real-estate turnover buckets for manual incidental/non-incidental judgment. Facts verified ${ESTONIAN_VAT_METADATA.verified_at}.`,
+    when_to_use: ["VAT registration threshold", "KMKR threshold", `${VAT_REGISTRATION_THRESHOLD_DISPLAY} turnover`, "non-VAT company turnover", "financial turnover"],
     required_inputs: ["calendar year", "optional financial/insurance/real-estate turnover buckets"],
     primary_tools: ["check_vat_registration_threshold"],
     risk_policy: {
@@ -46,7 +51,7 @@ const WORKFLOWS: WorkflowGuide[] = [
       args: { year: "<YYYY>" },
       why: "Start with confirmed sale invoices, then add financial, insurance, real-estate, social-exempt, or incidental turnover buckets for review.",
     }],
-    keywords: ["vat registration threshold", "VAT registration", "KMKR", "käibemaksukohustus", "käibemaksukohustuslane", "40 000", "40000", "financial turnover", "finantskäive", "maksuvaba käive"],
+    keywords: ["vat registration threshold", "VAT registration", "KMKR", "käibemaksukohustus", "käibemaksukohustuslane", VAT_REGISTRATION_THRESHOLD_DISPLAY.replace(/ EUR$/, ""), String(VAT_REGISTRATION_THRESHOLD_EUR), "financial turnover", "finantskäive", "maksuvaba käive"],
   },
   {
     id: "setup-credentials",

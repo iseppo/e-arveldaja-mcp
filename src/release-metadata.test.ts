@@ -140,6 +140,37 @@ describe("validateReleaseMetadata", () => {
       .toThrow("maximum length");
   });
 
+  it("rejects unresolved canonical VAT tokens during generation and validation", async () => {
+    for (const invalid of [
+      "{{E_ARVELDAJA_VAT:THRESHOD_RAW}}",
+      "{{E_ARVELDAJA_VAT:THRESHOLD_RAW}",
+    ]) {
+      expect(() => generatedClaudeCommandText("receipt-batch", `# Fixture\n\n${invalid}\n`))
+        .toThrow("Invalid canonical VAT template token");
+    }
+
+    const root = mkdtempSync(join(tmpdir(), "prompt-surface-vat-token-"));
+    try {
+      mkdirSync(join(root, "workflows"), { recursive: true });
+      mkdirSync(join(root, ".claude", "commands"), { recursive: true });
+      writeReceiptBatchReadme(root);
+      writeFileSync(
+        join(root, "workflows", "receipt-batch.md"),
+        "# Receipt Batch\n\n{{E_ARVELDAJA_VAT:THRESHOD_RAW}}\n",
+        "utf8",
+      );
+      writeFileSync(join(root, ".claude", "commands", "receipt-batch.md"), "stale\n", "utf8");
+
+      const errors = await validateWorkflowPromptSurfaces(root, receiptBatchRegistry);
+      expect(errors).toEqual([
+        "cannot render generated command receipt-batch: Invalid canonical VAT template token",
+      ]);
+      expect(errors[0]).not.toContain("exceeds");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects orphan commands workflows registry rows and README count drift", async () => {
     const root = mkdtempSync(join(tmpdir(), "prompt-surface-set-drift-"));
     try {

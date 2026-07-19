@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ToolExposureConfig } from "./config.js";
+import { renderVatMetadataTokens } from "./estonian-tax-rules.js";
 import {
   parseAbsolutePath,
   parseExactBoolean,
@@ -119,7 +120,7 @@ const PROMPT_DEFINITIONS = [
   {
     name: "vat-registration-threshold",
     slug: "vat-registration-threshold",
-    description: "Check whether a non-VAT-registered company is approaching or exceeding the 40 000 EUR VAT registration threshold, with financial/insurance/real-estate turnover separated for review.",
+    description: renderVatMetadataTokens("Check whether a non-VAT-registered company is approaching or exceeding the {{E_ARVELDAJA_VAT:THRESHOLD_DISPLAY}} VAT registration threshold (scope effective {{E_ARVELDAJA_VAT:SCOPE_EFFECTIVE_DATE}}, facts verified {{E_ARVELDAJA_VAT:VERIFIED_DATE}}), with financial/insurance/real-estate turnover separated for review."),
     argsSchema: {
       year: parsedString(
         value => parsePositiveInteger(value, { min: 2000, max: 2100 }),

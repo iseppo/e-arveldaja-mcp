@@ -8,6 +8,7 @@ import {
   type WorkflowPromptSlug,
 } from "./prompt-registry.js";
 import type { ToolExposureConfig } from "./config.js";
+import { renderVatMetadataTokens } from "./estonian-tax-rules.js";
 
 export function workflowPromptSourcePath(slug: WorkflowPromptSlug): string {
   return `workflows/${slug}.md`;
@@ -106,7 +107,7 @@ export function buildWorkflowPromptSourceText(
     ?? PROMPT_REGISTRY.find(definition => definition.slug === slug)?.variants
     ?? [];
   const workflowBody = renderRuntimeFeatureSections(
-    readWorkflowPromptSource(slug),
+    renderVatMetadataTokens(readWorkflowPromptSource(slug)),
     promptVariants.map(variant => ({
       name: variant.name,
       advertisedTools: variant.advertisedTools,

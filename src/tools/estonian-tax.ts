@@ -15,6 +15,9 @@ import {
   currentRepresentationMonthlyLimit,
   CIT_RATE_TIMELINE,
   VAT_REGISTRATION_THRESHOLD_EUR,
+  ESTONIAN_VAT_METADATA,
+  VAT_REGISTRATION_THRESHOLD_DISPLAY,
+  vatSourceById,
 } from "../estonian-tax-rules.js";
 import { logAudit } from "../audit-log.js";
 import { desandboxText } from "../external-text-renderer.js";
@@ -46,6 +49,7 @@ function requiresOwnerExpenseVatReview(accountName: string | undefined, descript
 }
 
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const VAT_THRESHOLD_SOURCE = vatSourceById("registration-threshold");
 
 // Strict YYYY-MM-DD + calendar validity (rejects 2025-02-31, 01.01.2025, etc.).
 // Round-trips through Date to catch month/day overflow that regex alone allows.
@@ -860,14 +864,14 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
   );
 
   registerTool(server, "check_vat_registration_threshold",
-    `Check whether a non-VAT-registered Estonian company may be approaching or exceeding the ${VAT_REGISTRATION_THRESHOLD_EUR} EUR VAT registration threshold under the 2025 rules. Read-only advisory: confirmed sale invoices provide the taxable/0% turnover base, while real-estate, insurance, and financial turnover are supplied separately so the operator can decide whether they are non-incidental and count toward the threshold.`,
+    `Check whether a non-VAT-registered Estonian company may be approaching or exceeding the ${VAT_REGISTRATION_THRESHOLD_DISPLAY} VAT registration threshold under the scope effective ${ESTONIAN_VAT_METADATA.registration.scope_effective_from}. Facts verified ${ESTONIAN_VAT_METADATA.verified_at}; source: ${VAT_THRESHOLD_SOURCE.url}. Read-only advisory: confirmed sale invoices provide the taxable/0% turnover base, while real-estate, insurance, and financial turnover are supplied separately so the operator can decide whether they are non-incidental and count toward the threshold.`,
     {
       year: z.number().int().min(2000).max(2100).optional().describe("Calendar year to check. Defaults to the current year."),
       taxable_turnover_adjustment: z.number().finite().optional().describe("Manual EUR adjustment to confirmed sale-invoice turnover. Use negative values to exclude fixed-asset disposals, non-Estonian-place turnover, or other amounts that should not count; use positive values for taxable/0% turnover not represented by sale invoices."),
       real_estate_turnover: z.number().finite().min(0).optional().describe("EUR turnover from KMS §16(2) p 2, 3, 6 real-estate transactions/rent. Counts toward the threshold only when not fixed-asset disposal and not incidental."),
       insurance_turnover: z.number().finite().min(0).optional().describe("EUR turnover from insurance/reinsurance/intermediation services. Counts toward the threshold only when not incidental."),
       financial_turnover: z.number().finite().min(0).optional().describe("EUR turnover from financial services, e.g. non-incidental lending interest, securities/FX activity, leasing or payment services. Counts toward the threshold only when it is business turnover and not incidental; bank deposit interest, received dividends, and incidental investment disposals are normally excluded."),
-      exempt_social_turnover: z.number().finite().min(0).optional().describe("EUR social-type exempt turnover such as healthcare or education. Reported separately and not counted toward the 40 000 EUR threshold."),
+      exempt_social_turnover: z.number().finite().min(0).optional().describe(`EUR social-type exempt turnover such as healthcare or education. Reported separately and not counted toward the ${VAT_REGISTRATION_THRESHOLD_DISPLAY} threshold.`),
       incidental_excluded_turnover: z.number().finite().min(0).optional().describe("EUR real-estate/financial/insurance turnover the operator has judged incidental. Reported separately and not counted toward the threshold."),
       manual_bucket_source: z.enum(["outside_sale_invoices", "included_in_sale_invoices"]).optional().describe("Whether the manually entered real_estate/insurance/financial/exempt/incidental buckets are already included in confirmed sale invoices. Defaults to outside_sale_invoices; use included_in_sale_invoices to reclassify parts of sale-invoice turnover and avoid double counting."),
     },
@@ -934,9 +938,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       const suggestedAction = status === "already_registered"
         ? "Company already has a VAT number; use this breakdown as a reasonableness check only."
         : status === "exceeded"
-          ? "Tavalise maksustatava/0% käibe põhjal on 40 000 EUR piirmäär ületatud; kontrolli kuupäeva, millal registreerimiskohustus tekkis, ja valmista KMKR avaldus."
+          ? `Tavalise maksustatava/0% käibe põhjal on ${VAT_REGISTRATION_THRESHOLD_DISPLAY} piirmäär ületatud; kontrolli kuupäeva, millal registreerimiskohustus tekkis, ja valmista KMKR avaldus.`
           : status === "needs_manual_review"
-            ? "40 000 EUR piirmäära ületamine sõltub finants-, kindlustus- või kinnisasjakäibe mitte-juhuslikuks lugemisest. Märgi juhuslik osa incidental_excluded_turnover alla või lisa mitte-juhuslik osa vastavasse käibeliiki."
+            ? `${VAT_REGISTRATION_THRESHOLD_DISPLAY} piirmäära ületamine sõltub finants-, kindlustus- või kinnisasjakäibe mitte-juhuslikuks lugemisest. Märgi juhuslik osa incidental_excluded_turnover alla või lisa mitte-juhuslik osa vastavasse käibeliiki.`
             : status === "approaching"
               ? "Piirmäärale lähenetakse; jälgi järgmisi müügiarveid ja hinda eraldi finants-, kindlustus- ning kinnisasjakäibe juhuslikkust."
               : "Piirmäär ei ole sisestatud andmete põhjal lähedal.";
@@ -949,6 +953,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             period: { from, to },
             vat_registered: vatRegistered,
             threshold_eur: VAT_REGISTRATION_THRESHOLD_EUR,
+            vat_metadata: ESTONIAN_VAT_METADATA,
             status,
             sale_invoice_confirmed_turnover: saleInvoiceConfirmedTurnover,
             confirmed_sale_invoice_count: confirmedSales.length,
@@ -973,7 +978,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             input_warnings: inputWarnings,
             manual_review_questions: manualReviewQuestions,
             suggested_action: suggestedAction,
-            legal_basis: "EMTA guidance for VAT registration threshold calculation from 2025-01-01: taxable/0% turnover counts; non-incidental real-estate, insurance, and financial services can count; social-type exempt services such as healthcare/education remain excluded; only turnover whose place of supply is Estonia counts.",
+            legal_basis: `${ESTONIAN_VAT_METADATA.registration.scope_summary} Scope effective ${ESTONIAN_VAT_METADATA.registration.scope_effective_from}; ${ESTONIAN_VAT_METADATA.registration.threshold.basis}. Official ${VAT_THRESHOLD_SOURCE.authority} source: ${VAT_THRESHOLD_SOURCE.url}`,
             note: "Advisory calculation, not a hard legal decision. e-arveldaja sale invoices do not reliably identify fixed-asset disposals, incidental financial/investment transactions, all exempt categories, or place-of-supply exceptions, so review the separate turnover buckets before deciding registration duty.",
           }),
         }],

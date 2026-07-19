@@ -26,7 +26,11 @@ import type { ExtractionConfidenceSignals } from "../invoice-extraction-fallback
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
 import { detectSelfVatOnly, detectSelfRegCodeOnly } from "./receipt-inbox.js";
-import { detectVatDeductionNotes, standardVatRateOn } from "../estonian-tax-rules.js";
+import {
+  detectVatDeductionNotes,
+  ESTONIAN_VAT_METADATA,
+  standardVatRateOn,
+} from "../estonian-tax-rules.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];
@@ -335,11 +339,21 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       }
 
       // Check VAT rate consistency. Reduced/zero rates are date-independent;
-      // the standard rate changed over time (20→22%→24%), so a line carrying a
+      // the canonical standard-rate timeline changes over time, so a line carrying a
       // *standard-looking* rate that does not match the rate in force on the
       // invoice date is flagged as a likely period/OCR mismatch.
-      const KNOWN_REDUCED_RATES = [0, 5, 9, 13];
-      const KNOWN_STANDARD_RATES = [20, 22, 24];
+      // Keep historical 5% recognition for older press invoices; current
+      // reduced/zero rates and every standard timeline rate come from metadata.
+      const KNOWN_REDUCED_RATES = [
+        5,
+        ...ESTONIAN_VAT_METADATA.rates.reduced.map(entry => entry.rate),
+      ];
+      const KNOWN_STANDARD_RATES = ESTONIAN_VAT_METADATA.rates.standard.timeline
+        .map(period => period.rate);
+      const CURRENT_REDUCED_RATES_DISPLAY = ESTONIAN_VAT_METADATA.rates.reduced
+        .map(entry => entry.rate)
+        .sort((left, right) => left - right)
+        .join("/");
       const expectedStandardRate = standardVatRateOn(invoice_date);
       for (let idx = 0; idx < parsedItems.length; idx++) {
         const item = parsedItems[idx]!;
@@ -361,7 +375,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
               // returned non-null) is echoed — never the raw arg, which could
               // carry an injected suffix after a valid date.
               `Item ${idx + 1}: ${rate}% does not match the standard VAT rate in force on ${invoice_date?.slice(0, 10) ?? ""} (${expectedStandardRate}%). ` +
-              `A reduced rate (0/9/13%) would be fine; confirm this is not an OCR misread or a wrong booking period.`
+              `A current reduced/zero rate (${CURRENT_REDUCED_RATES_DISPLAY}%) may be valid; confirm this is not an OCR misread or a wrong booking period.`
             );
           }
         }

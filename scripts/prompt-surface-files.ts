@@ -22,6 +22,7 @@ import {
   renderStaticFeatureSections,
   renderStaticPromptSurface,
 } from "../src/prompt-surface.js";
+import { renderVatMetadataTokens } from "../src/estonian-tax-rules.js";
 
 export type PromptSurfaceRegistryEntry = Pick<PromptDefinition, "name" | "slug"> &
   Partial<Pick<PromptDefinition, "argsSchema" | "variants">>;
@@ -127,7 +128,10 @@ export function generatedClaudeCommandText(
   workflowText: string,
   variants = PROMPT_REGISTRY.find(definition => definition.slug === slug)?.variants ?? [],
 ): string {
-  const renderedWorkflow = renderStaticFeatureSections(workflowText.trimEnd(), variants);
+  const renderedWorkflow = renderStaticFeatureSections(
+    renderVatMetadataTokens(workflowText.trimEnd()),
+    variants,
+  );
   const trustedBody = `Canonical workflow source: workflows/${slug}.md\n\n${renderedWorkflow}\n`;
   const commandText = `<!-- Generated from workflows/${slug}.md. Edit that source file, then run npm run sync:workflow-prompts. -->\n\n${renderStaticPromptSurface(trustedBody).trimEnd()}\n`;
   if (commandText.length > PROMPT_SURFACE_LIMIT) {
@@ -280,7 +284,7 @@ export async function validateWorkflowPromptSurfaces(
       const definition = safeRegistry.find(entry => entry.slug === slug)!;
       expected = generatedClaudeCommandText(slug, workflowText, definition.variants ?? []);
     } catch (error) {
-      errors.push(`generated command ${slug} exceeds ${PROMPT_SURFACE_LIMIT} characters: ${(error as Error).message}`);
+      errors.push(`cannot render generated command ${slug}: ${(error as Error).message}`);
       continue;
     }
     if (commandText !== expected) {

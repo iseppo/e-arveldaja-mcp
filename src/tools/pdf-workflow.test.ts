@@ -9,6 +9,7 @@ import { registerPdfWorkflowTools } from "./pdf-workflow.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
 import { z } from "zod";
+import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 
 vi.mock("../file-validation.js", () => ({
   resolveFileInput: vi.fn(),
@@ -410,6 +411,9 @@ describe("pdf workflow tools", () => {
         code: "KMS § 30",
         severity: "warning",
         basis: expect.stringContaining("TuMS § 49 lg 4"),
+        rules_version: ESTONIAN_VAT_METADATA.rules_version,
+        verified_at: ESTONIAN_VAT_METADATA.verified_at,
+        source_url: vatSourceById("input-vat-restrictions").url,
       }),
     ]);
   });
@@ -476,7 +480,20 @@ describe("pdf workflow tools", () => {
 
     expect(payload.valid).toBe(true);
     expect(payload.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("does not match the standard VAT rate in force on 2025-08-01 (24%)")]),
+      expect.arrayContaining([
+        expect.stringContaining(
+          `does not match the standard VAT rate in force on 2025-08-01 (${ESTONIAN_VAT_METADATA.rates.standard.rate}%)`,
+        ),
+      ]),
+    );
+    const currentReducedRates = ESTONIAN_VAT_METADATA.rates.reduced
+      .map(entry => entry.rate)
+      .sort((left, right) => left - right)
+      .join("/");
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(`A current reduced/zero rate (${currentReducedRates}%) may be valid`),
+      ]),
     );
   });
 
