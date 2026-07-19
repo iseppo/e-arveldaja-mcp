@@ -53,7 +53,9 @@ export function buildPackedSmokePlan(packageRoot, packageJson, nodeExecutable) {
         "--input-type=module",
         "--eval",
         `import { getProjectRoot } from ${JSON.stringify(pathToFileURL(resolve(packageRoot, "dist/paths.js")).href)}; ` +
-        `const root=getProjectRoot(); if(root!==${JSON.stringify(packageRoot)}) throw new Error(root);`,
+        `import { PROMPT_REGISTRY } from ${JSON.stringify(pathToFileURL(resolve(packageRoot, "dist/prompt-registry.js")).href)}; ` +
+        `const root=getProjectRoot(); if(root!==${JSON.stringify(packageRoot)}) throw new Error(root); ` +
+        `if(!Array.isArray(PROMPT_REGISTRY)||PROMPT_REGISTRY.length===0) throw new Error("empty prompt registry");`,
       ],
     },
     binCheck: { command: shim, args: [], shell: onWindows, binTarget: binRelative },
@@ -219,6 +221,7 @@ async function assertReadable(path) {
 // resolves at startup (entry, workflows, command mirrors).
 export async function assertInstalledPackagePaths(packageRoot, packageJson) {
   await assertReadable(resolve(packageRoot, packageJson.main));
+  await assertReadable(resolve(packageRoot, "dist", "prompt-registry.js"));
   await assertReadable(resolve(packageRoot, "workflows"));
   await assertReadable(resolve(packageRoot, ".claude", "commands"));
 }

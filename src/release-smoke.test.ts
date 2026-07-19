@@ -85,6 +85,7 @@ describe("buildPackedSmokePlan", () => {
     const packageRoot = "/tmp/install/node_modules/e-arveldaja-mcp";
     const plan = buildPackedSmokePlan(packageRoot, validPackage, "/opt/node18/bin/node");
     expect(plan.importCheck.command).toBe("/opt/node18/bin/node");
+    expect(plan.importCheck.args.at(-1)).toContain("dist/prompt-registry.js");
     const shimName = process.platform === "win32" ? "e-arveldaja-mcp.cmd" : "e-arveldaja-mcp";
     expect(plan.binCheck).toEqual(expect.objectContaining({
       command: resolve(packageRoot, "..", ".bin", shimName),
@@ -248,7 +249,7 @@ describe("assertPackedBinIsExecutable", () => {
 
 describe("release smoke CLI wiring", () => {
   it("imports the validator and smoke CLI without recursive main execution, and the CLI delegates to the injected smoke", async () => {
-    const validator = await import(resolve(process.cwd(), "scripts/validate-release-metadata.mjs"));
+    const validator = await import(resolve(process.cwd(), "scripts/validate-release-metadata.ts"));
     const cli = await import(resolve(process.cwd(), "scripts/smoke-packed-runtime.mjs"));
     expect(typeof validator.main).toBe("function");
     expect(typeof cli.main).toBe("function");
