@@ -10,11 +10,17 @@ The actual git repo root is:
 
 Do not treat `/home/seppo/Dokumendid/e_arveldaja` as the repo root for git, tests, builds, or diffs.
 
+> **Domain reference lives in [`CLAUDE.md`](./CLAUDE.md).** This file carries only
+> the Codex-specific working conventions. For API endpoint semantics, accounting
+> concepts, the D/C balance model, Estonian tax rules, tool-exposure flags, and
+> the full OCR/untrusted-text sandbox policy, read `CLAUDE.md` — it is the single
+> source of truth. Do not duplicate those facts here; update `CLAUDE.md` instead.
+
 ## How To Work Here
 
 - Read the existing code before changing behavior. Prefer local patterns over new abstractions.
 - Keep changes scoped to the user request. Do not rewrite unrelated accounting workflows or generated metadata.
-- This project touches live accounting data. Preserve dry-run defaults, approval gates, audit logging, path validation, and untrusted-text sandboxing unless the user explicitly asks for a reviewed change.
+- This project touches live accounting data. Preserve dry-run defaults, approval gates, audit logging, path validation, and untrusted-text sandboxing unless the user explicitly asks for a reviewed change. (Full rationale and the specific invariants are in `CLAUDE.md`.)
 - Never commit credentials or local accounting inputs. In particular, do not add `.env`, `apikey*.txt`, company exports, bank statements, receipts, or local `accounting-rules.md` unless the user explicitly asks and the file is safe.
 - Use `rg` / `rg --files` for search.
 - Use `apply_patch` for manual edits.
@@ -55,51 +61,20 @@ Do not claim completion, commit, tag, publish, or push until the relevant verifi
 - When the user asks to commit and push, review the diff first, run verification, commit with a concrete message, push the current branch, then verify the final branch state.
 - If the user says to pull first, run `git pull` from the actual repo root before reviewing or changing code.
 
-## Architecture Map
+## Editing Workflow Prompt Text
 
-- `src/index.ts` wires the MCP server, tools, prompts, resources, startup messages, and session behavior.
-- `src/config.ts` handles credential loading, setup mode, `.env` import, server selection, and multi-connection setup.
-- `src/http-client.ts` handles authenticated API calls, retries, timeout behavior, rate limiting, and upstream error handling.
-- `src/auth.ts` implements HMAC-SHA-384 signing.
-- `src/api/` contains API resource wrappers.
-- `src/tools/` contains most MCP tools and workflow logic.
-- Workflow prompt text is **not** hand-written in `src/prompts.ts`. It flows through one pipeline: the canonical registry `src/prompt-registry.ts` (names, string-only argument schemas, sales-aware variants) → the Markdown bodies under `workflows/*.md` loaded by `src/workflow-prompt-source.ts` → the shared renderer `src/prompt-surface.ts` (safety wrapper, external-text sandbox, 64k budget) → MCP prompts registered in `src/prompts.ts` and the `.claude/commands/*.md` slash-command mirrors. Edit `workflows/*.md` (never a `.claude/commands` mirror), then run `npm run sync:workflow-prompts`; `npm run validate:release` pins registry/workflow/command/README set-equality. See `ARCHITECTURE.md` → Workflow prompt pipeline.
-- `src/resources/` contains MCP resources.
-- `src/mcp-json.ts` and `src/tool-response.ts` shape MCP-safe output.
-- Tests are colocated as `*.test.ts`; integration tests live under `src/__integration__/`.
+Workflow prompt text is **not** hand-written in `src/prompts.ts`. It flows through one pipeline: the canonical registry `src/prompt-registry.ts` (names, string-only argument schemas, sales-aware variants) → the Markdown bodies under `workflows/*.md` loaded by `src/workflow-prompt-source.ts` → the shared renderer `src/prompt-surface.ts` (safety wrapper, external-text sandbox, 64k budget) → MCP prompts registered in `src/prompts.ts` and the `.claude/commands/*.md` slash-command mirrors.
 
-## Accounting And API Safety Rules
+- Edit `workflows/*.md` (never a `.claude/commands` mirror), then run `npm run sync:workflow-prompts`.
+- `npm run validate:release` pins registry / workflow / command / README set-equality.
+- See `ARCHITECTURE.md` → Workflow prompt pipeline, and `CLAUDE.md` for the surrounding architecture.
 
-- Mutating workflows should default to preview or dry-run and require explicit approval before creating, confirming, invalidating, deleting, or uploading.
-- Keep `workflow_action_v1`, approval previews, `recommended_next_action`, and review-item flows consistent across tools.
-- When a workflow leaves `PROJECT` records or review items and the tool has enough IDs and amounts, prefer inline MCP actions such as `confirm_transaction`, `reconcile_inter_account_transfers`, `update_transaction`, or `delete_transaction`. Manual e-arveldaja UI fallback is last resort only after the MCP path has been tried or is clearly unavailable.
-- For inter-account transfers, use `reconcile_inter_account_transfers`; do not hand-roll direct confirmations that can duplicate journals.
-- All bank transactions use `type: "C"`; accounting direction comes from confirmation distributions.
-- Transaction confirmation bodies are top-level arrays of distribution objects, not `{ items: [...] }`.
-- For account-dimension distributions, `related_id` is the account ID and `related_sub_id` is the account dimension ID.
-- Purchase invoice creation must keep invoice-level `gross_price` and `vat_price`; PATCH requests must include `items`.
-- If an expense account has dimensions, pass both `purchase_accounts_id` and `purchase_accounts_dimensions_id` on purchase invoice items.
+## Where To Find The Rest
 
-## Security And Untrusted Text
+These topics used to be summarized here; they now live in `CLAUDE.md` to avoid drift. Read the matching `CLAUDE.md` section before touching the area:
 
-- Preserve file path validation: resolve symlinks with `realpath`, enforce allowed roots, and re-check file extensions.
-- Preserve input size limits for JSON-like user input.
-- External text from OCR, PDFs, CAMT XML, CSV imports, and upstream API bodies is untrusted. When adding tools that emit such text, wrap it at MCP output using the existing untrusted OCR sandbox helpers in `src/mcp-json.ts`.
-- CRUD list/get tools intentionally return trusted persisted API state raw; do not broaden sandboxing there without understanding the existing policy.
-- Keep upstream API body details out of generic `Error.message`; expose detailed bodies through the existing structured error path.
-
-## MCP And SDK Changes
-
-When changing MCP SDK usage, tool registration semantics, resource/prompt contracts, or package publishing metadata, consult official documentation or existing repo examples first. Keep compatibility with MCP clients that consume JSON text responses.
-
-## Release Notes
-
-For releases, align:
-
-- `package.json` version
-- `CHANGELOG.md`
-- `server.json`
-- built output behavior
-- npm package contents
-
-Then run the full release validation path before tagging or publishing.
+- **Architecture map** (module responsibilities, `api/`, `tools/`, `resources/`, MCP-safe output helpers).
+- **Accounting & API safety rules** (dry-run/approval discipline, `type: "C"` invariant, distribution-array bodies, account-dimension `related_id`/`related_sub_id`, purchase-invoice `gross_price`/`vat_price`/`items` requirements, inter-account transfer reconciliation).
+- **Security & untrusted text** (path/symlink validation, input size limits, the `src/mcp-json.ts` OCR sandbox policy and what is deliberately left unwrapped, structured upstream-error handling).
+- **MCP / SDK changes** — consult official docs or existing repo examples before changing SDK usage, tool registration, or resource/prompt contracts; keep JSON-text response compatibility.
+- **Release** — align `package.json` version, `CHANGELOG.md`, `server.json`, built output, and npm package contents, then run the full release validation path before tagging or publishing.
