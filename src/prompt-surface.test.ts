@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   PROMPT_SURFACE_LIMIT,
   renderPromptSurface,
+  renderRuntimeFeatureSections,
+  renderStaticFeatureSections,
 } from "./prompt-surface.js";
 import {
   parseJsonObject,
@@ -14,6 +16,103 @@ const EXPECTED_SURFACE_DATA_LIMITS = {
   nodes: 4_096,
   keysPerObject: PROMPT_ARGUMENT_LIMITS.jsonKeysPerObject,
 } as const;
+
+const SALES_FEATURE = [{
+  name: "sales",
+  advertisedTools: ["compute_receivables_aging"],
+}] as const;
+
+describe("prompt feature sections", () => {
+  const renderRuntime = (body: string, enabled = true): string =>
+    renderRuntimeFeatureSections(body, SALES_FEATURE.map(feature => ({ ...feature, enabled })));
+
+  it.each([
+    ["uppercase name", "<!-- E_ARVELDAJA_FEATURE_START:Sales -->\ncontent\n<!-- E_ARVELDAJA_FEATURE_END:Sales -->"],
+    ["whitespace in marker", "<!-- E_ARVELDAJA_FEATURE_START: sales -->\ncontent\n<!-- E_ARVELDAJA_FEATURE_END: sales -->"],
+    ["invalid name character", "<!-- E_ARVELDAJA_FEATURE_START:sales! -->\ncontent\n<!-- E_ARVELDAJA_FEATURE_END:sales! -->"],
+    ["misspelled marker prefix", "<!-- E_ARVELDAJA_FEATURE_BEGIN:sales -->\ncontent\n<!-- E_ARVELDAJA_FEATURE_END:sales -->"],
+    ["missing comment wrapper", "E_ARVELDAJA_FEATURE_START:sales\ncontent\nE_ARVELDAJA_FEATURE_END:sales"],
+    ["unknown marker verb", "<!-- E_ARVELDAJA_FEATURE_PAUSE:sales -->\ncontent"],
+    ["newline-split marker", "<!-- E_ARVELDAJA_\nFEATURE_START:sales -->\ncontent"],
+    ["reserved marker prefix", "E_ARVELDAJA_UNKNOWN:sales"],
+  ])("fails closed on malformed %s", (_label, body) => {
+    expect(() => renderRuntime(body)).toThrow("Malformed prompt feature marker");
+    expect(() => renderStaticFeatureSections(body, SALES_FEATURE)).toThrow("Malformed prompt feature marker");
+  });
+
+  it("rejects undeclared, mismatched, unclosed, and nested sections", () => {
+    const malformed = [
+      "<!-- E_ARVELDAJA_FEATURE_START:tax -->\ncontent\n<!-- E_ARVELDAJA_FEATURE_END:tax -->",
+      "<!-- E_ARVELDAJA_FEATURE_START:sales -->\ncontent\n<!-- E_ARVELDAJA_FEATURE_END:tax -->",
+      "<!-- E_ARVELDAJA_FEATURE_START:sales -->\ncontent",
+      [
+        "<!-- E_ARVELDAJA_FEATURE_START:sales -->",
+        "<!-- E_ARVELDAJA_FEATURE_START:sales -->",
+        "content",
+        "<!-- E_ARVELDAJA_FEATURE_END:sales -->",
+        "<!-- E_ARVELDAJA_FEATURE_END:sales -->",
+      ].join("\n"),
+    ];
+
+    for (const body of malformed) {
+      expect(() => renderRuntime(body)).toThrow();
+      expect(() => renderStaticFeatureSections(body, SALES_FEATURE)).toThrow();
+    }
+  });
+
+  it("renders repeated non-nested sections and leaves no canonical markers", () => {
+    const body = [
+      "before",
+      "<!-- E_ARVELDAJA_FEATURE_START:sales -->",
+      "first sales block",
+      "<!-- E_ARVELDAJA_FEATURE_END:sales -->",
+      "middle",
+      "<!-- E_ARVELDAJA_FEATURE_START:sales -->",
+      "second sales block",
+      "<!-- E_ARVELDAJA_FEATURE_END:sales -->",
+      "after",
+    ].join("\n");
+
+    const enabled = renderRuntime(body);
+    const disabled = renderRuntime(body, false);
+    const staticCommand = renderStaticFeatureSections(body, SALES_FEATURE);
+
+    expect(enabled).toContain("first sales block");
+    expect(enabled).toContain("second sales block");
+    expect(disabled).not.toContain("sales block");
+    expect(staticCommand.match(/E_ARVELDAJA_CAPABILITY_CONDITION_START:sales/g)).toHaveLength(2);
+    for (const rendered of [enabled, disabled, staticCommand]) {
+      expect(rendered).not.toContain("E_ARVELDAJA_FEATURE_START");
+      expect(rendered).not.toContain("E_ARVELDAJA_FEATURE_END");
+    }
+  });
+
+  it("rejects repeated rendering after declared feature markers are consumed", () => {
+    const source = "<!-- E_ARVELDAJA_FEATURE_START:sales -->\ncontent\n<!-- E_ARVELDAJA_FEATURE_END:sales -->";
+    const runtime = renderRuntime(source);
+    const staticCommand = renderStaticFeatureSections(source, SALES_FEATURE);
+
+    expect(() => renderRuntime(runtime)).toThrow("has no source section");
+    expect(() => renderRuntime(staticCommand)).toThrow("Malformed prompt feature marker");
+    expect(() => renderStaticFeatureSections(staticCommand, SALES_FEATURE))
+      .toThrow("Malformed prompt feature marker");
+  });
+
+  it("rejects unmarked content when a feature is declared", () => {
+    const unmarked = "sales content accidentally left unconditional";
+
+    expect(() => renderRuntime(unmarked)).toThrow("has no source section");
+    expect(() => renderStaticFeatureSections(unmarked, SALES_FEATURE))
+      .toThrow("has no source section");
+  });
+
+  it("accepts marker-free content only when no features are declared", () => {
+    const unmarked = "ordinary marker-free workflow content";
+
+    expect(renderRuntimeFeatureSections(unmarked, [])).toBe(unmarked);
+    expect(renderStaticFeatureSections(unmarked, [])).toBe(unmarked);
+  });
+});
 
 describe("renderPromptSurface", () => {
   it("uses compact recursively sorted JSON inside a fresh matching nonce pair", () => {

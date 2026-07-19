@@ -5,6 +5,7 @@ import { computeAllBalances, registerFinancialStatementTools } from "./financial
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { clearRuntimeCaches } from "../cache-control.js";
+import type { ToolExposureConfig } from "../config.js";
 
 vi.mock("../cache-control.js", () => ({
   clearRuntimeCaches: vi.fn(() => ({
@@ -87,10 +88,11 @@ function createApi(options: {
 function setupTool(
   toolName: string,
   options: Parameters<typeof createApi>[0],
+  exposure?: Pick<ToolExposureConfig, "enableSales">,
 ): (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> {
   const server = { registerTool: vi.fn() } as any;
   const api = createApi(options);
-  registerFinancialStatementTools(server, api);
+  registerFinancialStatementTools(server, api, exposure);
 
   const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === toolName);
   if (!registration) throw new Error(`Tool '${toolName}' was not registered`);
@@ -575,6 +577,55 @@ describe("getMonthLastDay (via month_end_close_checklist)", () => {
 // ---------------------------------------------------------------------------
 
 describe("month_end_close_checklist", () => {
+  it("does not fetch or return sales data when sales are disabled", async () => {
+    const server = { registerTool: vi.fn() } as any;
+    const api = createApi({
+      saleInvoices: [makeSaleInvoice({
+        id: 900,
+        number: "ARV-900",
+        create_date: "2024-03-01",
+        journal_date: "2024-03-01",
+        term_days: 1,
+        status: "PROJECT",
+      })],
+    });
+    registerFinancialStatementTools(server, api, { enableSales: false });
+    const registration = server.registerTool.mock.calls.find(
+      ([name]: [string]) => name === "month_end_close_checklist",
+    );
+    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{
+      content: Array<{ text: string }>;
+    }>;
+
+    const result = await handler({ month: "2024-03" });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.saleInvoices.listAll).not.toHaveBeenCalled();
+    expect(payload).not.toHaveProperty("unconfirmed_sale_invoices");
+    expect(payload).not.toHaveProperty("overdue_receivables");
+    expect(payload).toHaveProperty("unconfirmed_purchase_invoices");
+    expect(payload).toHaveProperty("overdue_payables");
+  });
+
+  it("fetches and returns sales data by default", async () => {
+    const server = { registerTool: vi.fn() } as any;
+    const api = createApi({});
+    registerFinancialStatementTools(server, api);
+    const registration = server.registerTool.mock.calls.find(
+      ([name]: [string]) => name === "month_end_close_checklist",
+    );
+    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{
+      content: Array<{ text: string }>;
+    }>;
+
+    const result = await handler({ month: "2024-03" });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.saleInvoices.listAll).toHaveBeenCalledOnce();
+    expect(payload).toHaveProperty("unconfirmed_sale_invoices");
+    expect(payload).toHaveProperty("overdue_receivables");
+  });
+
   it("detects unconfirmed journals within the month", async () => {
     const handler = setupTool("month_end_close_checklist", {
       journals: [

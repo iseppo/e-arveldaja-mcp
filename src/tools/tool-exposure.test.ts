@@ -296,6 +296,22 @@ describe("receipt inbox tool surface", () => {
 });
 
 describe("prompt surface", () => {
+  it("keeps purchase-side reporting prompts advertised when sales are disabled", () => {
+    const names = registeredPromptNames({
+      enableLightyear: true,
+      exposeGranularTools: false,
+      exposeSetupTools: false,
+      enableTaxTools: true,
+      enableReferenceAdmin: true,
+      enableAnnualReport: true,
+      enableSales: false,
+      enableProducts: true,
+    });
+
+    expect(names).toContain("company-overview");
+    expect(names).toContain("month-end-close");
+  });
+
   it("registers the vat-registration-threshold prompt only when tax tools are enabled", () => {
     const enabledNames = registeredPromptNames({ enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
     const disabledNames = registeredPromptNames({ enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: false, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });

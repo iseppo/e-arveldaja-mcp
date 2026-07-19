@@ -69,6 +69,7 @@ function renderRegisteredPrompt(
   definition: RegisteredPromptDefinition,
   setupInfo: CredentialSetupInfo | undefined,
   args: unknown,
+  toolExposure: ToolExposureConfig | undefined,
 ): PromptResult {
   if (setupInfo && definition.setupOptions) {
     return promptText(buildSetupModePromptText(
@@ -78,7 +79,12 @@ function renderRegisteredPrompt(
       definition.setupOptions,
     ));
   }
-  return promptText(buildWorkflowPromptSourceText(definition.slug, args));
+  return promptText(buildWorkflowPromptSourceText(
+    definition.slug,
+    args,
+    definition.variants,
+    toolExposure,
+  ));
 }
 
 export function registerPrompts(
@@ -92,14 +98,14 @@ export function registerPrompts(
         definition.name,
         definition.description,
         definition.argsSchema,
-        async args => renderRegisteredPrompt(definition, options.setupInfo, args),
+        async args => renderRegisteredPrompt(definition, options.setupInfo, args, options.toolExposure),
       );
     } else {
       registerMcpPrompt(
         server,
         definition.name,
         definition.description,
-        async () => renderRegisteredPrompt(definition, options.setupInfo, {}),
+        async () => renderRegisteredPrompt(definition, options.setupInfo, {}, options.toolExposure),
       );
     }
   }

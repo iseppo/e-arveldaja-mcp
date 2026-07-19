@@ -19,11 +19,12 @@ import {
 } from "../src/prompt-registry.js";
 import {
   PROMPT_SURFACE_LIMIT,
+  renderStaticFeatureSections,
   renderStaticPromptSurface,
 } from "../src/prompt-surface.js";
 
 export type PromptSurfaceRegistryEntry = Pick<PromptDefinition, "name" | "slug"> &
-  Partial<Pick<PromptDefinition, "argsSchema">>;
+  Partial<Pick<PromptDefinition, "argsSchema" | "variants">>;
 
 export interface SyncWorkflowPromptOptions {
   /** Test seam for proving rollback after the existing command set is moved aside. */
@@ -121,8 +122,13 @@ export const MAXIMUM_VALID_PROMPT_ARGUMENTS: Readonly<Record<WorkflowPromptName,
   }),
 });
 
-export function generatedClaudeCommandText(slug: string, workflowText: string): string {
-  const trustedBody = `Canonical workflow source: workflows/${slug}.md\n\n${workflowText.trimEnd()}\n`;
+export function generatedClaudeCommandText(
+  slug: string,
+  workflowText: string,
+  variants = PROMPT_REGISTRY.find(definition => definition.slug === slug)?.variants ?? [],
+): string {
+  const renderedWorkflow = renderStaticFeatureSections(workflowText.trimEnd(), variants);
+  const trustedBody = `Canonical workflow source: workflows/${slug}.md\n\n${renderedWorkflow}\n`;
   const commandText = `<!-- Generated from workflows/${slug}.md. Edit that source file, then run npm run sync:workflow-prompts. -->\n\n${renderStaticPromptSurface(trustedBody).trimEnd()}\n`;
   if (commandText.length > PROMPT_SURFACE_LIMIT) {
     throw new Error("Generated prompt surface exceeds the maximum length");
@@ -271,7 +277,8 @@ export async function validateWorkflowPromptSurfaces(
     const commandText = await readFile(resolve(commandsDir, `${slug}.md`), "utf8");
     let expected: string;
     try {
-      expected = generatedClaudeCommandText(slug, workflowText);
+      const definition = safeRegistry.find(entry => entry.slug === slug)!;
+      expected = generatedClaudeCommandText(slug, workflowText, definition.variants ?? []);
     } catch (error) {
       errors.push(`generated command ${slug} exceeds ${PROMPT_SURFACE_LIMIT} characters: ${(error as Error).message}`);
       continue;
@@ -415,7 +422,7 @@ export async function syncWorkflowPromptSurfaces(
     const workflowText = await readFile(containedMarkdownPath(workflowsDir, definition.slug), "utf8");
     plannedWrites.push({
       fileName: `${definition.slug}.md`,
-      text: generatedClaudeCommandText(definition.slug, workflowText),
+      text: generatedClaudeCommandText(definition.slug, workflowText, definition.variants ?? []),
     });
   }
 

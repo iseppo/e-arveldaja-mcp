@@ -9,6 +9,7 @@ import { readOnly } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { withOpeningBalanceApiLimitation } from "../opening-balance-limitations.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
+import type { ToolExposureConfig } from "../config.js";
 
 export interface AccountBalance {
   account_id: number;
@@ -143,7 +144,12 @@ function getMonthLastDay(month: string): number {
 
 const monthRegex = /^\d{4}-\d{2}$/;
 
-export function registerFinancialStatementTools(server: McpServer, api: ApiContext): void {
+export function registerFinancialStatementTools(
+  server: McpServer,
+  api: ApiContext,
+  toolExposure?: Pick<ToolExposureConfig, "enableSales">,
+): void {
+  const enableSales = toolExposure?.enableSales !== false;
 
   registerTool(server, "compute_trial_balance",
     "Compute trial balance (käibeandmik/proovibilanss) from journal postings. " +
@@ -299,7 +305,9 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
   );
 
   registerTool(server, "month_end_close_checklist",
-    "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables.",
+    enableSales
+      ? "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables."
+      : "Generate a purchase-side month-end checklist: unconfirmed journals/purchase invoices, unreconciled bank transactions, and overdue payables.",
     {
       month: z.string().regex(monthRegex, "Expected YYYY-MM").describe("Month to check (YYYY-MM, e.g. 2026-02)"),
       fresh: z.boolean().optional().describe("Clear cached API/reference data before running the checklist (use after web UI changes)."),
@@ -314,7 +322,7 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
       const [allJournals, allTx, allSales, allPurchases] = await Promise.all([
         api.journals.listAll(),
         api.transactions.listAll(),
-        api.saleInvoices.listAll(),
+        enableSales ? api.saleInvoices.listAll() : Promise.resolve([]),
         api.purchaseInvoices.listAll(),
       ]);
 
@@ -394,16 +402,18 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
               count: unconfirmedTx.length,
               items: unconfirmedTx.map(tx => ({ id: tx.id, date: tx.date, amount: tx.amount, description: wrapUntrustedOcr(tx.description ?? undefined) })),
             },
-            unconfirmed_sale_invoices: {
-              count: unconfirmedSales.length,
-              items: unconfirmedSales.map((inv: SaleInvoice) => ({
-                id: inv.id,
-                number: inv.number,
-                client: wrapUntrustedOcr(inv.client_name ?? undefined),
-                gross: effectiveGross(inv),
-                payment_status: inv.payment_status ?? "NOT_PAID",
-              })),
-            },
+            ...(enableSales && {
+              unconfirmed_sale_invoices: {
+                count: unconfirmedSales.length,
+                items: unconfirmedSales.map((inv: SaleInvoice) => ({
+                  id: inv.id,
+                  number: inv.number,
+                  client: wrapUntrustedOcr(inv.client_name ?? undefined),
+                  gross: effectiveGross(inv),
+                  payment_status: inv.payment_status ?? "NOT_PAID",
+                })),
+              },
+            }),
             unconfirmed_purchase_invoices: {
               count: unconfirmedPurchases.length,
               items: unconfirmedPurchases.map((inv: PurchaseInvoice) => ({
@@ -414,17 +424,19 @@ export function registerFinancialStatementTools(server: McpServer, api: ApiConte
                 payment_status: inv.payment_status ?? "NOT_PAID",
               })),
             },
-            overdue_receivables: {
-              count: overdueReceivables.length,
-              total: roundMoney(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + effectiveGross(inv), 0)),
-              items: overdueReceivables.slice(0, 10).map((inv: SaleInvoice) => ({
-                id: inv.id,
-                number: inv.number,
-                client: wrapUntrustedOcr(inv.client_name ?? undefined),
-                gross: effectiveGross(inv),
-                payment_status: inv.payment_status ?? "NOT_PAID",
-              })),
-            },
+            ...(enableSales && {
+              overdue_receivables: {
+                count: overdueReceivables.length,
+                total: roundMoney(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + effectiveGross(inv), 0)),
+                items: overdueReceivables.slice(0, 10).map((inv: SaleInvoice) => ({
+                  id: inv.id,
+                  number: inv.number,
+                  client: wrapUntrustedOcr(inv.client_name ?? undefined),
+                  gross: effectiveGross(inv),
+                  payment_status: inv.payment_status ?? "NOT_PAID",
+                })),
+              },
+            }),
             overdue_payables: {
               count: overduePayables.length,
               total: roundMoney(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + effectiveGross(inv), 0)),

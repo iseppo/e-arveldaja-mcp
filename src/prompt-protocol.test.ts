@@ -83,7 +83,7 @@ const EXPECTED_PROTOCOL_ARGUMENTS: Record<string, Record<string, boolean>> = {
 const clients: Client[] = [];
 const servers: McpServer[] = [];
 
-async function linkedPromptClient(): Promise<Client> {
+async function linkedPromptClient(options: { enableSales?: boolean } = {}): Promise<Client> {
   const server = new McpServer({ name: "prompt-protocol-test", version: "1.0.0" });
   registerPrompts(server, {
     toolExposure: {
@@ -93,7 +93,7 @@ async function linkedPromptClient(): Promise<Client> {
       enableTaxTools: true,
       enableReferenceAdmin: true,
       enableAnnualReport: true,
-      enableSales: true,
+      enableSales: options.enableSales ?? true,
       enableProducts: true,
     },
   });
@@ -117,6 +117,50 @@ afterEach(async () => {
 });
 
 describe("MCP prompt protocol", () => {
+  it("renders purchase-only MCP prompts when sales are disabled", async () => {
+    const disabledClient = await linkedPromptClient({ enableSales: false });
+    const enabledClient = await linkedPromptClient({ enableSales: true });
+
+    const disabledOverview = await disabledClient.getPrompt({ name: "company-overview" });
+    const disabledMonthEnd = await disabledClient.getPrompt({
+      name: "month-end-close",
+      arguments: { month: "2026-05" },
+    });
+    const enabledOverview = await enabledClient.getPrompt({ name: "company-overview" });
+    const enabledMonthEnd = await enabledClient.getPrompt({
+      name: "month-end-close",
+      arguments: { month: "2026-05" },
+    });
+
+    const text = (result: typeof disabledOverview): string => {
+      const content = result.messages[0]?.content;
+      return content?.type === "text" ? content.text : "";
+    };
+    const disabledOverviewText = text(disabledOverview);
+    const disabledMonthEndText = text(disabledMonthEnd);
+    const enabledOverviewText = text(enabledOverview);
+    const enabledMonthEndText = text(enabledMonthEnd);
+
+    expect(disabledOverviewText).not.toContain("compute_receivables_aging");
+    expect(disabledOverviewText).not.toContain("Receivables needing attention");
+    expect(disabledOverviewText).toContain("compute_payables_aging");
+    expect(disabledOverviewText).toContain("compute_balance_sheet");
+    expect(disabledOverviewText).toContain("purchase-side financial overview");
+
+    expect(disabledMonthEndText).not.toContain("confirm_sale_invoice");
+    expect(disabledMonthEndText).not.toContain("Unconfirmed sale invoices");
+    expect(disabledMonthEndText).not.toContain("Overdue receivables");
+    expect(disabledMonthEndText).toContain("Unconfirmed purchase invoices");
+    expect(disabledMonthEndText).toContain("Overdue payables");
+    expect(disabledMonthEndText).toContain("compute_trial_balance");
+
+    expect(enabledOverviewText).toContain("compute_receivables_aging");
+    expect(enabledOverviewText).toContain("Receivables needing attention");
+    expect(enabledMonthEndText).toContain("confirm_sale_invoice");
+    expect(enabledMonthEndText).toContain("Unconfirmed sale invoices");
+    expect(enabledMonthEndText).toContain("Overdue receivables");
+  });
+
   it("advertises every prompt argument description and required flag through Client.listPrompts", async () => {
     const client = await linkedPromptClient();
     const { prompts } = await client.listPrompts();

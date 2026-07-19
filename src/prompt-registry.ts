@@ -18,6 +18,7 @@ export interface SetupPromptOptions {
 
 export interface PromptVariant {
   name: string;
+  advertisedTools: readonly string[];
   featurePredicate: (toolExposure: ToolExposureConfig | undefined) => boolean;
 }
 
@@ -100,7 +101,19 @@ const taxEnabled = (toolExposure: ToolExposureConfig | undefined): boolean =>
   toolExposure?.enableTaxTools !== false;
 const lightyearEnabled = (toolExposure: ToolExposureConfig | undefined): boolean =>
   toolExposure?.enableLightyear !== false;
+const salesEnabled = (toolExposure: ToolExposureConfig | undefined): boolean =>
+  toolExposure?.enableSales !== false;
 const NO_VARIANTS: readonly PromptVariant[] = Object.freeze([]);
+const COMPANY_OVERVIEW_VARIANTS: readonly PromptVariant[] = [{
+  name: "sales",
+  advertisedTools: ["compute_receivables_aging"],
+  featurePredicate: salesEnabled,
+}];
+const MONTH_END_VARIANTS: readonly PromptVariant[] = [{
+  name: "sales",
+  advertisedTools: ["confirm_sale_invoice"],
+  featurePredicate: salesEnabled,
+}];
 
 const PROMPT_DEFINITIONS = [
   {
@@ -299,7 +312,7 @@ const PROMPT_DEFINITIONS = [
       note: "Month-end checks rely on live e-arveldaja invoices, transactions, journals, and reports, so this workflow stays blocked until credentials are configured.",
     },
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    variants: MONTH_END_VARIANTS,
   },
   {
     name: "new-supplier",
@@ -324,7 +337,7 @@ const PROMPT_DEFINITIONS = [
       note: "This dashboard depends on live company settings and financial reports from e-arveldaja, so it cannot run before credentials are configured.",
     },
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    variants: COMPANY_OVERVIEW_VARIANTS,
   },
   {
     name: "lightyear-booking",
@@ -358,6 +371,10 @@ for (const definition of PROMPT_DEFINITIONS) {
       Object.freeze(definition.setupOptions.offlineTools);
     }
     Object.freeze(definition.setupOptions);
+  }
+  for (const variant of definition.variants) {
+    Object.freeze(variant.advertisedTools);
+    Object.freeze(variant);
   }
   Object.freeze(definition.variants);
   Object.freeze(definition);

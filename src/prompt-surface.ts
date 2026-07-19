@@ -8,6 +8,24 @@ export const PROMPT_SURFACE_DATA_LIMITS = Object.freeze({
   keysPerObject: PROMPT_ARGUMENT_LIMITS.jsonKeysPerObject,
 } as const);
 
+export interface PromptFeatureSection {
+  name: string;
+  advertisedTools: readonly string[];
+}
+
+const FEATURE_TOKEN_PATTERN = String.raw`<!-- E_ARVELDAJA_FEATURE_(START|END):([a-z][a-z0-9-]*) -->`;
+const FEATURE_BLOCK_PATTERN = String.raw`<!-- E_ARVELDAJA_FEATURE_START:([a-z][a-z0-9-]*) -->\n?([\s\S]*?)\n?<!-- E_ARVELDAJA_FEATURE_END:\1 -->`;
+const FEATURE_SOURCE_MARKER = /<!-- E_ARVELDAJA_FEATURE_(?:START|END):/;
+const RESERVED_MARKER_NAMESPACE = /E_ARVELDAJA_/i;
+
+function featureTokenRegex(): RegExp {
+  return new RegExp(FEATURE_TOKEN_PATTERN, "g");
+}
+
+function featureBlockRegex(): RegExp {
+  return new RegExp(FEATURE_BLOCK_PATTERN, "g");
+}
+
 type CanonicalJson = null | boolean | number | string | CanonicalJson[] | {
   [key: string]: CanonicalJson;
 };
@@ -150,6 +168,86 @@ function canonicalJson(value: Record<string, unknown>): string {
   } catch {
     throw malformedData();
   }
+}
+
+function validateFeatureSections(
+  trustedBody: string,
+  sections: readonly PromptFeatureSection[],
+): ReadonlyMap<string, PromptFeatureSection> {
+  const byName = new Map<string, PromptFeatureSection>();
+  for (const section of sections) {
+    if (!/^[a-z][a-z0-9-]*$/.test(section.name) || byName.has(section.name)) {
+      throw new Error(`Invalid prompt feature definition: ${section.name}`);
+    }
+    if (section.advertisedTools.length === 0
+      || section.advertisedTools.some(tool => !/^[a-z][a-z0-9_]*$/.test(tool))) {
+      throw new Error(`Invalid advertised tools for prompt feature: ${section.name}`);
+    }
+    byName.set(section.name, section);
+  }
+
+  // Only exact canonical source markers are accepted. Remove those tokens and
+  // reject any marker-like residue before interpreting section structure, so a
+  // typo cannot silently turn a conditional section into unconditional prose.
+  const withoutCanonicalMarkers = trustedBody.replace(featureTokenRegex(), "");
+  if (RESERVED_MARKER_NAMESPACE.test(withoutCanonicalMarkers)) {
+    throw new Error("Malformed prompt feature marker");
+  }
+
+  let active: string | undefined;
+  const completedSections = new Map<string, number>();
+  for (const match of trustedBody.matchAll(featureTokenRegex())) {
+    const [, kind, name] = match;
+    if (!byName.has(name!)) {
+      throw new Error(`Workflow uses undeclared prompt feature: ${name}`);
+    }
+    if (kind === "START") {
+      if (active) throw new Error(`Prompt feature sections cannot nest: ${name}`);
+      active = name;
+    } else if (active !== name) {
+      throw new Error(`Mismatched prompt feature section: ${name}`);
+    } else {
+      completedSections.set(name!, (completedSections.get(name!) ?? 0) + 1);
+      active = undefined;
+    }
+  }
+  if (active) throw new Error(`Unclosed prompt feature section: ${active}`);
+  for (const name of byName.keys()) {
+    if ((completedSections.get(name) ?? 0) === 0) {
+      throw new Error(`Declared prompt feature has no source section: ${name}`);
+    }
+  }
+  return byName;
+}
+
+/** Render canonical feature sections for a configured MCP runtime. */
+export function renderRuntimeFeatureSections(
+  trustedBody: string,
+  sections: readonly (PromptFeatureSection & { enabled: boolean })[],
+): string {
+  const byName = validateFeatureSections(trustedBody, sections);
+  const rendered = trustedBody.replace(featureBlockRegex(), (_block, name: string, content: string) =>
+    (byName.get(name) as PromptFeatureSection & { enabled: boolean }).enabled ? content : "");
+  if (FEATURE_SOURCE_MARKER.test(rendered)) throw new Error("Unconsumed prompt feature marker");
+  return rendered;
+}
+
+/** Render canonical feature sections as safe advertised-tool branches in static commands. */
+export function renderStaticFeatureSections(
+  trustedBody: string,
+  sections: readonly PromptFeatureSection[],
+): string {
+  const byName = validateFeatureSections(trustedBody, sections);
+  const rendered = trustedBody.replace(featureBlockRegex(), (_block, name: string, content: string) => {
+    const tools = byName.get(name)!.advertisedTools.map(tool => `\`${tool}\``).join(", ");
+    return `<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:${name} -->
+Capability condition for \`${name}\`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: ${tools}. If any named tool is absent, skip this section and continue with the surrounding purchase-side workflow. Never call a missing tool to probe capability.
+
+${content}
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:${name} -->`;
+  });
+  if (FEATURE_SOURCE_MARKER.test(rendered)) throw new Error("Unconsumed prompt feature marker");
+  return rendered;
 }
 
 /**

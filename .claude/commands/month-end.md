@@ -45,21 +45,27 @@ Present in priority order:
 
 **BLOCKERS (must fix before closing):**
 1. Unconfirmed purchase invoices — not registered in the ledger
-2. Unconfirmed sale invoices — revenue not recorded
-3. Unconfirmed journal entries — adjustments not posted
-4. Unconfirmed bank transactions — cash not reconciled
+2. Unconfirmed journal entries — adjustments not posted
+3. Unconfirmed bank transactions — cash not reconciled
 
 For blockers, show ID, date, amount/title, then offer concrete inline actions. If there are many blockers of the same low-risk type, show the first 10 plus counts and ask for one batch approval with exceptions instead of one yes/no question per item. Do NOT close the workflow with "go fix these in the e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
 
 Inline actions per blocker type:
 - Purchase invoices: offer `confirm_purchase_invoice`, or `delete_purchase_invoice` if the user confirms it is a duplicate
-- Sale invoices: offer `confirm_sale_invoice`
 - Journals: offer `confirm_journal`
 - Transactions: prefer the **Reconcile Bank** workflow for unmatched rows; for already-matched single rows offer `confirm_transaction` directly
 
 **WARNINGS (review but may not block close):**
-- Overdue receivables — may need follow-up or doubtful debt provision
 - Overdue payables — check if payment was made but not yet recorded
+
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:sales -->
+Capability condition for `sales`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_sale_invoice`. If any named tool is absent, skip this section and continue with the surrounding purchase-side workflow. Never call a missing tool to probe capability.
+
+**Sales-side extension (only when sales tools are available):**
+- Treat **Unconfirmed sale invoices** as blockers because revenue is not recorded.
+- Show each sale-invoice ID, date, and amount, and offer `confirm_sale_invoice` as the inline action.
+- Report **Overdue receivables** as a warning that may need follow-up or a doubtful-debt provision.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:sales -->
 
 ## Step 3: Check for missing documents
 

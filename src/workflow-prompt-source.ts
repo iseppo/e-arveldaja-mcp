@@ -1,8 +1,13 @@
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import { getProjectRoot } from "./paths.js";
-import { renderPromptSurface } from "./prompt-surface.js";
-import type { WorkflowPromptSlug } from "./prompt-registry.js";
+import { renderPromptSurface, renderRuntimeFeatureSections } from "./prompt-surface.js";
+import {
+  PROMPT_REGISTRY,
+  type PromptVariant,
+  type WorkflowPromptSlug,
+} from "./prompt-registry.js";
+import type { ToolExposureConfig } from "./config.js";
 
 export function workflowPromptSourcePath(slug: WorkflowPromptSlug): string {
   return `workflows/${slug}.md`;
@@ -91,10 +96,26 @@ export function buildWorkflowRunData(args: unknown): {
   };
 }
 
-export function buildWorkflowPromptSourceText(slug: WorkflowPromptSlug, args: unknown): string {
+export function buildWorkflowPromptSourceText(
+  slug: WorkflowPromptSlug,
+  args: unknown,
+  variants?: readonly PromptVariant[],
+  toolExposure?: ToolExposureConfig,
+): string {
+  const promptVariants = variants
+    ?? PROMPT_REGISTRY.find(definition => definition.slug === slug)?.variants
+    ?? [];
+  const workflowBody = renderRuntimeFeatureSections(
+    readWorkflowPromptSource(slug),
+    promptVariants.map(variant => ({
+      name: variant.name,
+      advertisedTools: variant.advertisedTools,
+      enabled: variant.featurePredicate(toolExposure),
+    })),
+  );
   const trustedBody = `Canonical workflow source: ${workflowPromptSourcePath(slug)}
 
-${readWorkflowPromptSource(slug)}
+${workflowBody}
 `;
   return renderPromptSurface(trustedBody, buildWorkflowRunData(args));
 }
