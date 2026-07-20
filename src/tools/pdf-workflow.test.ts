@@ -47,10 +47,15 @@ function setupPdfWorkflowTool(
     purchaseInvoices?: Record<string, unknown>;
     clients?: Record<string, unknown>;
     readonly?: Record<string, unknown>;
+    journals?: Record<string, unknown>;
   } = {},
 ) {
   const server = { registerTool: vi.fn() } as any;
   const api = {
+    journals: {
+      listAllWithPostings: vi.fn().mockResolvedValue([]),
+      ...options.journals,
+    },
     purchaseInvoices: {
       listAll: vi.fn().mockResolvedValue([
         {
@@ -124,6 +129,7 @@ function setupPdfWorkflowTool(
       ]),
       getAccountDimensions: vi.fn().mockResolvedValue([]),
       getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+      getBankAccounts: vi.fn().mockResolvedValue([]),
       ...options.readonly,
     },
   } as any;
@@ -849,6 +855,134 @@ describe("pdf workflow tools", () => {
       expect(warning).toBeDefined();
       expect(warning).toMatch(testCase.valuePattern);
     }
+  });
+
+  describe("create_purchase_invoice_from_pdf intake duplicate guard (Task 6)", () => {
+    const DUP_JOURNAL_ID = 555;
+    const bankAccounts = [{ account_name_est: "LHV", account_no: "1", accounts_dimensions_id: 5001 }];
+    const accountDimensions = [{ id: 5001, accounts_id: 1020, title_est: "LHV EUR" }];
+    const duplicateJournal = {
+      id: DUP_JOURNAL_ID,
+      title: "Manual booking",
+      effective_date: "2026-03-20",
+      registered: true,
+      is_deleted: false,
+      postings: [
+        { accounts_id: 1020, type: "C", amount: 124, accounts_dimensions_id: 5001, is_deleted: false },
+      ],
+    };
+
+    function baseArgs(filePath: string, overrides: Record<string, unknown> = {}) {
+      return {
+        supplier_client_id: 7,
+        invoice_number: "PI-DUP",
+        invoice_date: "2026-03-20",
+        journal_date: "2026-03-20",
+        term_days: 14,
+        items: JSON.stringify([{
+          cl_purchase_articles_id: 45,
+          custom_title: "Internet subscription",
+          purchase_accounts_id: 5230,
+          total_net_price: 100,
+          vat_rate_dropdown: "24",
+          vat_accounts_id: 1510,
+          cl_vat_articles_id: 1,
+        }]),
+        vat_price: 24,
+        gross_price: 124,
+        file_path: filePath,
+        source_sha256: sha256Hex(Buffer.from("pdf-bytes")),
+        ...overrides,
+      };
+    }
+
+    it("matching pre-existing journal: invoice still created, warnings name the journal (title wrapped)", async () => {
+      const filePath = createTempInvoiceFile("dup.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        readonly: {
+          getBankAccounts: vi.fn().mockResolvedValue(bankAccounts),
+          getAccountDimensions: vi.fn().mockResolvedValue(accountDimensions),
+        },
+        journals: { listAllWithPostings: vi.fn().mockResolvedValue([duplicateJournal]) },
+      });
+
+      const response = await handler(baseArgs(filePath));
+      const payload = parseMcpResponse(response.content[0]!.text);
+
+      expect(response.isError).not.toBe(true);
+      expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+      expect(payload.warnings?.some((w: string) =>
+        w.includes("POSSIBLE duplicate") && w.includes(String(DUP_JOURNAL_ID)) && w.includes(UNTRUSTED_OCR_START_PREFIX),
+      )).toBe(true);
+      expect(payload.possible_duplicate_postings?.[0]).toMatchObject({ journal_id: DUP_JOURNAL_ID });
+    });
+
+    it("USD invoice without base_gross_price: skipped note, no false duplicate warning", async () => {
+      const filePath = createTempInvoiceFile("usd.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        readonly: {
+          getBankAccounts: vi.fn().mockResolvedValue(bankAccounts),
+          getAccountDimensions: vi.fn().mockResolvedValue(accountDimensions),
+        },
+        journals: { listAllWithPostings: vi.fn().mockResolvedValue([duplicateJournal]) },
+      });
+
+      const response = await handler(baseArgs(filePath, {
+        currency: "USD",
+        currency_rate: 1.1,
+        gross_price: 124,
+        // no base_gross_price — no EUR figure available.
+      }));
+      const payload = parseMcpResponse(response.content[0]!.text);
+
+      expect(response.isError).not.toBe(true);
+      expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+      expect(payload.warnings?.some((w: string) => w.includes("no EUR-equivalent gross amount"))).toBe(true);
+      expect(payload.warnings?.some((w: string) => w.includes("POSSIBLE duplicate"))).toBe(false);
+      expect(payload.possible_duplicate_postings).toBeUndefined();
+      // The journals lister was never consulted — the scan was skipped, not run.
+      expect(api.journals.listAllWithPostings).not.toHaveBeenCalled();
+    });
+
+    it("block path: block_on_duplicate=true refuses creation with a toolError naming the journal, before any mutation", async () => {
+      const filePath = createTempInvoiceFile("blocked.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        readonly: {
+          getBankAccounts: vi.fn().mockResolvedValue(bankAccounts),
+          getAccountDimensions: vi.fn().mockResolvedValue(accountDimensions),
+        },
+        journals: { listAllWithPostings: vi.fn().mockResolvedValue([duplicateJournal]) },
+      });
+
+      const response = await handler(baseArgs(filePath, { block_on_duplicate: true }));
+      const payload = parseMcpResponse(response.content[0]!.text);
+
+      expect(response.isError).toBe(true);
+      expect(payload.category).toBe("possible_duplicate_posting");
+      expect(payload.conflicting_journal_ids).toEqual([DUP_JOURNAL_ID]);
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
+    });
+
+    it("scan throws + block_on_duplicate=true: creation proceeds with a scan-unavailable note (no refusal without evidence)", async () => {
+      const filePath = createTempInvoiceFile("scanfail.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        readonly: {
+          getBankAccounts: vi.fn().mockRejectedValue(new Error("readonly unavailable")),
+        },
+      });
+
+      const response = await handler(baseArgs(filePath, { block_on_duplicate: true }));
+      const payload = parseMcpResponse(response.content[0]!.text);
+
+      expect(response.isError).not.toBe(true);
+      expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+      expect(payload.warnings?.some((w: string) => w.includes("Duplicate scan unavailable"))).toBe(true);
+    });
   });
 
   it("uploads the source document when creating a purchase invoice from a file", async () => {

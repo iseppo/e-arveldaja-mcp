@@ -181,6 +181,90 @@ export async function findDuplicateBankPostings(
 }
 
 /**
+ * Intake-time scan (Task 6): catches the incident at the EARLIEST moment — a
+ * receipt/PDF about to become a fresh invoice+transaction pair — before any
+ * mutation exists to clean up. Unlike `findDuplicateBankPostings` (one known
+ * bank dimension), this scans ALL bank dimensions across ALL bank accounts,
+ * since the intake flow does not yet know which bank account will settle the
+ * invoice.
+ *
+ * `grossAmountEur` must be a real EUR figure (actual settled EUR gross, or the
+ * nominal gross for an EUR-native invoice) — never a guessed conversion. When
+ * the caller has no such figure (e.g. a foreign-currency invoice without
+ * `base_gross_price`), pass `undefined` and this returns `skipped_no_eur_amount:
+ * true` with `scan_available: true` (the scan wasn't attempted, not that it
+ * failed) and an explanatory `scan_note`.
+ *
+ * Defensively wraps the ENTIRE lookup (including `resolveBankDimensions`) in
+ * one try/catch — stricter than `findDuplicateBankPostings`, which only
+ * guards the journals fetch — because this is the earliest-moment guard and
+ * must never be the reason a legitimate intake booking fails, regardless of
+ * which reference-data call is unavailable.
+ */
+export async function checkIntakeCashDuplicates(
+  api: {
+    journals: { listAllWithPostings(): Promise<Journal[]> };
+    readonly: { getBankAccounts(): Promise<BankAccount[]>; getAccountDimensions(): Promise<AccountDimension[]> };
+  },
+  input: { grossAmountEur: number | undefined; invoiceDate: string },
+  opts?: { windowDays?: number },
+): Promise<DuplicatePostingScanResult & { skipped_no_eur_amount?: boolean }> {
+  const windowDays = opts?.windowDays ?? DUPLICATE_SCAN_WINDOW_DAYS;
+
+  if (input.grossAmountEur === undefined) {
+    return {
+      scan_available: true,
+      window_days: windowDays,
+      suspects: [],
+      skipped_no_eur_amount: true,
+      scan_note:
+        "Duplicate scan skipped: no EUR-equivalent gross amount available for this invoice " +
+        "(foreign-currency invoice without base_gross_price) — never guessing a conversion rate to compare " +
+        "against EUR-denominated bank postings.",
+    };
+  }
+
+  try {
+    const bankDims = await resolveBankDimensions(api);
+    const accountIds = [...new Set(bankDims.map(d => d.accountId))];
+    if (accountIds.length === 0) {
+      return { scan_available: true, window_days: windowDays, suspects: [] };
+    }
+
+    // Load journals ONCE, then run the pure in-memory matcher per account —
+    // avoids refetching the full journals list per bank account.
+    const journals = await api.journals.listAllWithPostings();
+    const seenJournalIds = new Set<number>();
+    const suspects: DuplicatePostingSuspect[] = [];
+    for (const accountId of accountIds) {
+      const candidate: DuplicatePostingCandidate = {
+        accountId,
+        dimensionId: null, // any dimension — intake doesn't yet know which bank account settles this
+        amount: input.grossAmountEur,
+        direction: "C", // outflow: paying a purchase invoice
+        date: input.invoiceDate,
+      };
+      for (const suspect of findDuplicatePostingsInJournals(journals, candidate, { windowDays })) {
+        if (seenJournalIds.has(suspect.journal_id)) continue;
+        seenJournalIds.add(suspect.journal_id);
+        suspects.push(suspect);
+      }
+    }
+    suspects.sort((a, b) => a.day_distance - b.day_distance || a.journal_id - b.journal_id);
+
+    return { scan_available: true, window_days: windowDays, suspects };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      scan_available: false,
+      scan_note: `Duplicate scan unavailable: ${message} — cross-mechanism duplicate coverage is incomplete for this call.`,
+      window_days: windowDays,
+      suspects: [],
+    };
+  }
+}
+
+/**
  * Render one warning line per suspect plus (when the scan degraded) one
  * line carrying `scan_note`. `wrapTitle` sandboxes untrusted journal titles
  * at the call site (`wrapUntrustedOcr`) — this module stays MCP-free.

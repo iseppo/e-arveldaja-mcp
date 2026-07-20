@@ -31,6 +31,11 @@ import {
   ESTONIAN_VAT_METADATA,
   standardVatRateOn,
 } from "../estonian-tax-rules.js";
+import {
+  checkIntakeCashDuplicates,
+  formatDuplicatePostingWarnings,
+  type DuplicatePostingCandidate,
+} from "../bank-posting-duplicate-guard.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];
@@ -824,6 +829,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       base_gross_price: z.number().optional().describe("Actual settled EUR gross total; auto-derived from currency_rate when omitted."),
       file_path: z.string().describe("Absolute path to the source invoice document (PDF/JPG/PNG); uploaded during creation."),
       source_sha256: z.string().regex(/^[0-9a-f]{64}$/).describe("SHA-256 of the document returned by extract_pdf_invoice; binds this booking to the exact reviewed bytes."),
+      block_on_duplicate: z.boolean().optional().describe("Refuse creation when this receipt's cash outflow looks like an already-booked duplicate (default false: warn only)."),
     },
     { ...create, openWorldHint: true, title: "Create Purchase Invoice from PDF" },
     async (rawParams) => {
@@ -867,6 +873,38 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       if (currencyCode !== "EUR" && (params.currency_rate === undefined || params.currency_rate === null)) {
         return toolError({
           error: `currency_rate is required when currency="${currencyCode}". Pass EUR per 1 ${currencyCode} (Wise: Source amount / Target amount).`,
+        });
+      }
+
+      // Task 6: cross-mechanism intake duplicate guard — catches the incident at
+      // the EARLIEST moment (before this receipt becomes a fresh invoice), so no
+      // cleanup is ever needed. Runs BEFORE any invoice/document mutation.
+      // EUR figure: the actual settled EUR gross when known, else the nominal
+      // gross only for an EUR-native invoice — never a guessed conversion.
+      const grossAmountEur = params.base_gross_price ?? (currencyCode === "EUR" ? params.gross_price : undefined);
+      const duplicateScan = await checkIntakeCashDuplicates(api, {
+        grossAmountEur,
+        invoiceDate: params.invoice_date,
+      });
+
+      if (
+        params.block_on_duplicate === true
+        && duplicateScan.scan_available === true
+        && !duplicateScan.skipped_no_eur_amount
+        && duplicateScan.suspects.length > 0
+      ) {
+        const journalIds = duplicateScan.suspects.map(s => s.journal_id);
+        return toolError({
+          error: "Possible duplicate bank posting",
+          category: "possible_duplicate_posting",
+          conflicting_journal_ids: journalIds,
+          details: duplicateScan.suspects.map(s => ({
+            journal_id: s.journal_id,
+            journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
+            date: s.date,
+            amount: s.amount,
+          })),
+          next_action: `Verify journal(s) ${journalIds.join(", ")} before creating this purchase invoice, or retry without block_on_duplicate to proceed with an advisory warning.`,
         });
       }
 
@@ -951,6 +989,21 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         details: { file_name: documentUpload.fileName },
       });
 
+      // Advisory-by-default: the invoice was already created above (or blocked
+      // earlier). skipped_no_eur_amount gets its own note rather than going
+      // through formatDuplicatePostingWarnings, since scan_available stays
+      // true there (the scan wasn't attempted, not that it failed).
+      const duplicateCandidate: DuplicatePostingCandidate = {
+        accountId: -1,
+        dimensionId: null,
+        amount: grossAmountEur ?? 0,
+        direction: "C",
+        date: params.invoice_date,
+      };
+      const duplicateWarnings = duplicateScan.skipped_no_eur_amount
+        ? [duplicateScan.scan_note ?? "Duplicate scan skipped: no EUR-equivalent gross amount available."]
+        : formatDuplicatePostingWarnings(duplicateScan, duplicateCandidate, t => wrapUntrustedOcr(t) ?? "");
+
       return {
         content: [{
           type: "text",
@@ -958,6 +1011,19 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
             result,
             document_uploaded: true,
             note: "Purchase invoice created as DRAFT. Review and use confirm_purchase_invoice to confirm.",
+            ...(duplicateWarnings.length > 0
+              ? {
+                  warnings: duplicateWarnings,
+                  ...(duplicateScan.suspects.length > 0
+                    ? {
+                        possible_duplicate_postings: duplicateScan.suspects.map(s => ({
+                          ...s,
+                          journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
+                        })),
+                      }
+                    : {}),
+                }
+              : {}),
           }),
         }],
       };

@@ -7,6 +7,7 @@ import {
   findDuplicatePostingsInJournals,
   findDuplicateBankPostings,
   formatDuplicatePostingWarnings,
+  checkIntakeCashDuplicates,
   type DuplicatePostingCandidate,
   type DuplicatePostingScanResult,
 } from "./bank-posting-duplicate-guard.js";
@@ -200,6 +201,116 @@ describe("resolveBankDimensions", () => {
     };
     const result = await resolveBankDimensions(api);
     expect(result).toEqual([{ dimensionId: 5001, accountId: 1020, title: "LHV EUR" }]);
+  });
+});
+
+describe("checkIntakeCashDuplicates", () => {
+  const bankAccounts: BankAccount[] = [
+    { account_name_est: "LHV", account_no: "1", accounts_dimensions_id: 5001 } as BankAccount,
+    { account_name_est: "Wise", account_no: "2", accounts_dimensions_id: 5002 } as BankAccount,
+  ];
+  const accountDimensions: AccountDimension[] = [
+    { id: 5001, accounts_id: 1020, title_est: "LHV EUR" },
+    { id: 5002, accounts_id: 1030, title_est: "Wise EUR" },
+  ];
+
+  function makeApi(overrides: {
+    listAllWithPostings?: ReturnType<typeof vi.fn>;
+    getBankAccounts?: ReturnType<typeof vi.fn>;
+    getAccountDimensions?: ReturnType<typeof vi.fn>;
+  } = {}) {
+    return {
+      journals: {
+        listAllWithPostings: overrides.listAllWithPostings ?? vi.fn().mockResolvedValue([]),
+      },
+      readonly: {
+        getBankAccounts: overrides.getBankAccounts ?? vi.fn().mockResolvedValue(bankAccounts),
+        getAccountDimensions: overrides.getAccountDimensions ?? vi.fn().mockResolvedValue(accountDimensions),
+      },
+    };
+  }
+
+  it("matches a candidate against a manual journal's C posting on ANY bank dimension (dimensionId: null, merged across accounts)", async () => {
+    const journals = [
+      // Bank dimension 5002 (Wise), account 1030 — not the first-listed account.
+      journal({
+        id: 42,
+        title: "Manual Wise payment",
+        effective_date: "2026-03-20",
+        postings: [
+          posting(1030, "C", 250, 5002),
+          posting(5100, "D", 250, null),
+        ],
+      }),
+    ];
+    const api = makeApi({ listAllWithPostings: vi.fn().mockResolvedValue(journals) });
+
+    const result = await checkIntakeCashDuplicates(api, {
+      grossAmountEur: 250,
+      invoiceDate: "2026-03-20",
+    });
+
+    expect(result.scan_available).toBe(true);
+    expect(result.skipped_no_eur_amount).toBeUndefined();
+    expect(result.suspects).toHaveLength(1);
+    expect(result.suspects[0]).toMatchObject({ journal_id: 42, journal_title: "Manual Wise payment" });
+  });
+
+  it("does not merge-duplicate a suspect that matches under more than one bank account's scan", async () => {
+    const journals = [
+      journal({
+        id: 7,
+        effective_date: "2026-03-20",
+        postings: [posting(1020, "C", 90, 5001)],
+      }),
+    ];
+    const listAllWithPostings = vi.fn().mockResolvedValue(journals);
+    const api = makeApi({ listAllWithPostings });
+
+    const result = await checkIntakeCashDuplicates(api, { grossAmountEur: 90, invoiceDate: "2026-03-20" });
+
+    expect(result.suspects).toHaveLength(1);
+    // Journals were loaded once, not once per bank account.
+    expect(listAllWithPostings).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns skipped_no_eur_amount: true (never scan_available: false) when grossAmountEur is undefined — never guesses a rate", async () => {
+    const listAllWithPostings = vi.fn();
+    const api = makeApi({ listAllWithPostings });
+
+    const result = await checkIntakeCashDuplicates(api, { grossAmountEur: undefined, invoiceDate: "2026-03-20" });
+
+    expect(result).toMatchObject({
+      scan_available: true,
+      window_days: DUPLICATE_SCAN_WINDOW_DAYS,
+      suspects: [],
+      skipped_no_eur_amount: true,
+    });
+    expect(result.scan_note).toContain("no EUR-equivalent gross amount");
+    expect(listAllWithPostings).not.toHaveBeenCalled();
+  });
+
+  it("degrades gracefully to scan_available: false when resolveBankDimensions itself throws (e.g. a partial api mock)", async () => {
+    const api = {
+      journals: { listAllWithPostings: vi.fn() },
+      // readonly missing entirely — resolveBankDimensions() throws synchronously.
+    } as any;
+
+    const result = await checkIntakeCashDuplicates(api, { grossAmountEur: 100, invoiceDate: "2026-03-20" });
+
+    expect(result.scan_available).toBe(false);
+    expect(result.suspects).toEqual([]);
+    expect(result.scan_note).toContain("Duplicate scan unavailable");
+  });
+
+  it("degrades gracefully to scan_available: false when listAllWithPostings rejects (page-cap)", async () => {
+    const api = makeApi({ listAllWithPostings: vi.fn().mockRejectedValue(new Error("Data exceeds 200 pages of results")) });
+
+    const result = await checkIntakeCashDuplicates(api, { grossAmountEur: 100, invoiceDate: "2026-03-20" });
+
+    expect(result.scan_available).toBe(false);
+    expect(result.suspects).toEqual([]);
+    expect(result.scan_note).toContain("Data exceeds 200 pages of results");
   });
 });
 

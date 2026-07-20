@@ -389,6 +389,48 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     expect(second.bank_match).toBeUndefined();
   });
 
+  it("dry-run preview: notes an already-booked cash outflow found by the intake duplicate guard (Task 6)", async () => {
+    const bankAccounts = [{ account_name_est: "LHV", account_no: "1", accounts_dimensions_id: 5001 }];
+    const accountDimensions = [{ id: 5001, accounts_id: 1020, title_est: "LHV EUR" }];
+    const duplicateJournal = {
+      id: 321,
+      title: "Manual booking",
+      effective_date: "2026-03-22",
+      registered: true,
+      is_deleted: false,
+      postings: [{ accounts_id: 1020, type: "C", amount: 100, accounts_dimensions_id: 5001, is_deleted: false }],
+    };
+    const api = {
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([duplicateJournal]) },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue(bankAccounts),
+        getAccountDimensions: vi.fn().mockResolvedValue(accountDimensions),
+      },
+    } as any;
+    const context = { clients: [], purchaseInvoices: [], purchaseArticlesWithVat: [], accounts: [], isVatRegistered: true } as any;
+    const supplierResolution = {
+      found: true, created: false, match_type: "exact_name",
+      client: { id: 7, name: "Supplier OÜ", is_supplier: true, is_client: false, cl_code_country: "EE", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false },
+    } as any;
+    const bookingSuggestion = { source: "supplier_history", item: { custom_title: "Subscription", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230, vat_rate_dropdown: "-" } } as any;
+    const extracted = {
+      supplier_name: "Supplier OÜ", invoice_number: "INV-DUP", invoice_date: "2026-03-22",
+      total_net: 100, total_vat: 0, total_gross: 100, currency: "EUR", description: "Subscription",
+    } as any;
+    const file = { name: "dup.pdf", path: "/tmp/dup.pdf", extension: ".pdf", file_type: "pdf", size_bytes: 123, modified_at: "2026-03-22T00:00:00.000Z" } as any;
+
+    const result = await createAndMaybeMatchPurchaseInvoice(
+      api, context, toSnapshot(file), extracted, supplierResolution, bookingSuggestion,
+      [], "dry_run", false, new Set(),
+    );
+
+    expect(result.status).toBe("dry_run_preview");
+    expect(result.notes).toEqual(expect.arrayContaining([
+      expect.stringContaining("POSSIBLE duplicate"),
+    ]));
+    expect(result.notes.join(" ")).toContain("321");
+  });
+
   function buildCreateConfirmArgs(bankTransactions: any[]) {
     const createdInvoice = {
       id: 900,

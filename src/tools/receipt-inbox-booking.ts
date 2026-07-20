@@ -1,5 +1,6 @@
 import { logAudit } from "../audit-log.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { checkIntakeCashDuplicates, formatDuplicatePostingWarnings } from "../bank-posting-duplicate-guard.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { roundMoney } from "../money.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -163,6 +164,28 @@ export async function createAndMaybeMatchPurchaseInvoice(
       notes.push(`Dry run: ${dryRunMatch.tiedCount} bank transactions tied at confidence ${dryRunMatch.topConfidence}; no candidate auto-selected.`);
     }
     notes.push("Dry run: purchase invoice document was not uploaded and the invoice was not confirmed.");
+
+    // Task 6: cross-mechanism intake duplicate guard — catches the incident at
+    // the EARLIEST moment (the dry-run preview, before any invoice exists).
+    // Currency is guaranteed EUR here (a non-EUR receipt already returned
+    // needs_review above), so the extracted gross total IS the EUR figure —
+    // no conversion, never a guessed rate. Advisory-only: folded into `notes`
+    // (this preview result carries no separate warnings field), never blocks
+    // the dry-run preview itself.
+    const duplicateScan = await checkIntakeCashDuplicates(api, {
+      grossAmountEur: extracted.total_gross,
+      invoiceDate: extracted.invoice_date,
+    });
+    if (duplicateScan.suspects.length > 0) {
+      notes.push(...formatDuplicatePostingWarnings(
+        duplicateScan,
+        { accountId: -1, dimensionId: null, amount: extracted.total_gross, direction: "C", date: extracted.invoice_date },
+        t => wrapUntrustedOcr(t) ?? "",
+      ));
+    } else if (!duplicateScan.scan_available && duplicateScan.scan_note) {
+      notes.push(duplicateScan.scan_note);
+    }
+
     return {
       notes,
       status: "dry_run_preview",
