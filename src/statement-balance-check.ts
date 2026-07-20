@@ -107,6 +107,12 @@ export async function checkStatementClosingBalance(
   // really belongs to this dimension. Comparing it would trip the tolerance on
   // a figure we already know is partial, so surface it as a note and suppress
   // the mismatch warning — same treatment as the FX / indeterminate cases.
+  // Scoped to the ACCOUNT, not `input.dimensionId`, ON PURPOSE: an unmapped
+  // opening carries no resolved dimension (that is why it is unmapped), so we
+  // cannot tell whether it belongs to the dimension under review. Suppressing
+  // account-wide is the safe choice — it may over-suppress a sibling
+  // dimension's genuine breach, but the note guides the operator to re-import
+  // with matching labels, which re-activates the exact check.
   const openingDimensionUnmapped =
     opening?.unmappedDimensions.some(u => u.startsWith(`${input.accountId}:`)) ?? false;
 

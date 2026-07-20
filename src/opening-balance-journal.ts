@@ -89,9 +89,10 @@ export async function loadOpeningBalanceJournal(api: ApiContext): Promise<Openin
   // Accounts are fundamental — a failure there should still surface. A
   // dimensions-fetch failure only degrades per-dimension attribution, so
   // fall back to an empty dimensions array: the journal is still built at
-  // ACCOUNT level (every posting under a null dimension, multi-dim accounts
-  // fall into unmappedDimensions) so account totals stay correct rather than
-  // dropping opening balances entirely.
+  // ACCOUNT level (with no dimensions known, every posting lands under a null
+  // dimension — the multi-dim branch never runs, so nothing is added to
+  // unmappedDimensions) so account totals stay correct rather than dropping
+  // opening balances entirely.
   const accounts = await api.readonly.getAccounts();
   let dimensions: AccountDimension[] = [];
   try {
