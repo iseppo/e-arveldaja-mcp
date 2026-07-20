@@ -2755,6 +2755,104 @@ describe("create_journal duplicate-posting guard", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Task 9: create_journal document_number source-ref idempotency advisory
+// ---------------------------------------------------------------------------
+
+describe("create_journal document_number source-ref advisory", () => {
+  const accounts = [
+    { id: 4000, account_code: "4000", is_valid: true, allows_dimensions: false },
+  ];
+
+  // A plain non-bank journal so the Task 5 bank-posting guard fast-paths out and
+  // only the document_number source-ref scan is exercised.
+  const journalParams = {
+    effective_date: "2026-07-20",
+    title: "Wise settlement",
+    document_number: "WISE:98765",
+    postings: [
+      { accounts_id: 4000, type: "D" as const, amount: 50 },
+      { accounts_id: 4000, type: "C" as const, amount: 50 },
+    ],
+  };
+
+  function setup(options: { existingJournals?: unknown[] } = {}) {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 555 });
+    const listAll = vi.fn().mockResolvedValue(options.existingJournals ?? []);
+    const { api, handler } = getCrudToolHarness("create_journal", {
+      journals: { create, listAll },
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue(accounts),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+    });
+    return { api, handler, create, listAll };
+  }
+
+  it("warns when a LIVE journal already carries the same document_number, still creating", async () => {
+    const { handler, create } = setup({
+      existingJournals: [
+        { id: 321, effective_date: "2026-07-01", document_number: "WISE:98765", is_deleted: false, registered: true },
+      ],
+    });
+
+    const result = await handler(journalParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as { warnings?: string[] };
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.warnings).toEqual(
+      expect.arrayContaining(["source reference already used by journal 321"]),
+    );
+  });
+
+  it("does NOT warn when the only journal with that document_number is deleted", async () => {
+    const { handler, create } = setup({
+      existingJournals: [
+        { id: 321, effective_date: "2026-07-01", document_number: "WISE:98765", is_deleted: true, registered: true },
+      ],
+    });
+
+    const result = await handler(journalParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload).not.toHaveProperty("warnings");
+  });
+
+  it("does NOT warn when no journal shares the document_number", async () => {
+    const { handler, create } = setup({
+      existingJournals: [
+        { id: 321, effective_date: "2026-07-01", document_number: "WISE:00000", is_deleted: false, registered: true },
+      ],
+    });
+
+    const result = await handler(journalParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload).not.toHaveProperty("warnings");
+  });
+
+  it("does NOT scan when no document_number is provided", async () => {
+    const { handler, create, listAll } = setup();
+    const { document_number: _omit, ...noDocParams } = journalParams;
+
+    const result = await handler(noDocParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(listAll).not.toHaveBeenCalled();
+    expect(payload).not.toHaveProperty("warnings");
+  });
+
+  it("documents the source-reference intent in the document_number param description", () => {
+    const { options } = getCrudToolHarness("create_journal");
+    const schema = (options.inputSchema ?? {}) as Record<string, { description?: string }>;
+    expect(schema.document_number?.description).toContain("stable source reference");
+    expect(schema.document_number?.description).toContain("duplicate detection");
+  });
+});
+
 describe("P17 create_client legal-entity identity gate", () => {
   beforeEach(() => vi.mocked(logAudit).mockClear());
 

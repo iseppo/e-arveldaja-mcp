@@ -421,6 +421,46 @@ describe("wise import tool", () => {
     ]);
   });
 
+  it("dedupes an over-cap reference row against its previously-stored truncated transaction (Task 9)", async () => {
+    // A Wise row whose reference exceeds the 20-char ref_number cap. The prior
+    // import stored the transaction with the *truncated* ref_number (what the
+    // write boundary persists), so the candidate signature must canonicalize its
+    // reference too — otherwise the full ref would never match and the row would
+    // be re-imported as a duplicate.
+    const fullReference = "REF-1234567890-ABCDEFGHIJ"; // 25 chars, over the 20 cap
+    const truncatedReference = fullReference.slice(0, 20); // what the boundary stored
+
+    mockedReadFile.mockResolvedValue(buildCsvRow([
+      "cap-1", "COMPLETED", "OUT", "2026-01-13 09:00:00", "2026-01-13 09:00:00",
+      "0", "EUR", "0", "EUR",
+      "Seppo OU", "12.5", "EUR",
+      "Acme Ltd", "12.5", "EUR",
+      "1", fullReference, "", "", "General", "",
+    ]));
+
+    const { api, handler } = setupWiseTool([{
+      date: "2026-01-13",
+      amount: 12.5,
+      bank_account_name: "Acme Ltd",
+      ref_number: truncatedReference,
+      description: "Acme Ltd",
+    }]);
+
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+      execute: true,
+    });
+
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.skipped_details).toEqual([
+      { reason: expect.stringMatching(wrapped("Already imported (date/amount/counterparty/reference match)")), count: 1, sample_ids: ["cap-1"] },
+    ]);
+  });
+
   it("skips duplicate fee rows independently from the main transaction", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "abc-2", "COMPLETED", "OUT", "2026-01-11 09:00:00", "2026-01-11 09:00:00",

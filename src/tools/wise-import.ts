@@ -29,6 +29,7 @@ import { reportProgress } from "../progress.js";
 import { isNonVoidTransaction, isProjectTransaction } from "../transaction-status.js";
 import { parseCSV } from "../csv.js";
 import { roundMoney } from "../money.js";
+import { canonicalRefNumber } from "../ref-number.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { roundTo } from "../money.js";
@@ -759,12 +760,16 @@ function buildWiseTransactionSignature(
   refNumber?: string | null,
   description?: string | null,
 ): string {
+  // Canonicalize the reference to the stored ref_number cap so a candidate row
+  // whose full reference exceeds the cap still hashes identically to its
+  // previously-stored (truncated) transaction — both sides feed through the same
+  // canonicalization, keeping dedup stable across the truncation boundary.
   return [
     date,
     formatWiseAmount(amount),
     normalizeWiseCurrency(currency),
     normalizeWiseText(bankAccountName),
-    normalizeWiseText(refNumber),
+    normalizeWiseText(canonicalRefNumber(refNumber).value),
     normalizeWiseText(description),
   ].join("|");
 }

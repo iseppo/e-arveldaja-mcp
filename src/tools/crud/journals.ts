@@ -141,7 +141,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     title: z.string().optional().describe("Journal entry title"),
     effective_date: isoDateString("Entry date (YYYY-MM-DD)"),
     clients_id: z.number().optional().describe("Related client ID"),
-    document_number: z.string().optional().describe("Document number"),
+    document_number: z.string().optional().describe("Document number. Recommended for imported or mechanism-crossing entries: a stable source reference (e.g. WISE:{id}, LY:{ref}, BANK:{stmt-ref}) — used for duplicate detection."),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
     postings: jsonObjectArrayInput.describe(
       "Postings [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, base_amount?, projects_project_id?, projects_location_id?, projects_person_id?}]. " +
@@ -299,6 +299,27 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
           direction: ps.candidate.direction,
           suspects: newSuspects.map(s => ({ ...s, journal_title: wrapUntrustedOcr(s.journal_title) ?? "" })),
         });
+      }
+    }
+
+    // Source-ref idempotency advisory (Task 9): when the caller stamps a stable
+    // document_number (WISE:{id}, LY:{ref}, BANK:{stmt-ref}), surface an advisory
+    // if a LIVE (non-deleted) journal already carries the same source reference.
+    // Creation still proceeds — this is a soft signal, not a block. Cheap fields
+    // only (listAll, no postings); a scan failure never blocks creation.
+    if (params.document_number) {
+      try {
+        const existingJournals = await api.journals.listAll();
+        const priorLive = existingJournals.find(j =>
+          j.is_deleted !== true &&
+          j.id !== result.created_object_id &&
+          j.document_number === params.document_number,
+        );
+        if (priorLive?.id != null) {
+          warnings.push(`source reference already used by journal ${priorLive.id}`);
+        }
+      } catch {
+        // Advisory only: an unavailable journals scan must never fail creation.
       }
     }
 
