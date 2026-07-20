@@ -868,7 +868,7 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 const WISE_COMMAND_PROJECTION_SECRET = randomBytes(32);
 const wiseExecutionLocks = new Map<string, Promise<void>>();
 
-type TransactionCreatePayload = Parameters<ApiContext["transactions"]["create"]>[0];
+export type TransactionCreatePayload = Parameters<ApiContext["transactions"]["create"]>[0];
 type TransactionConfirmPayload = Parameters<ApiContext["transactions"]["confirm"]>[1];
 
 interface WiseCommandBase {
@@ -1000,7 +1000,7 @@ function transactionCommandExists(
   );
 }
 
-function createdTransactionMatchesApprovedPayload(
+export function createdTransactionMatchesApprovedPayload(
   transaction: Awaited<ReturnType<ApiContext["transactions"]["listAll"]>>[number] | undefined,
   apiId: number,
   payload: TransactionCreatePayload,
@@ -1012,14 +1012,24 @@ function createdTransactionMatchesApprovedPayload(
     expected === undefined || expected === null
       ? actual === undefined || actual === null
       : actual === expected;
+  // The write boundary (createBankTransaction) canonicalizes the reference to
+  // the cap and, when truncated, weaves the full ref into the description. Mirror
+  // that exactly so the stored transaction still matches the approved payload for
+  // an over-cap ref — otherwise a legitimate inter-account/fee confirm aborts
+  // with a false "Stale created transaction precondition".
+  const canonicalRef = canonicalRefNumber(payload.ref_number);
+  const expectedRefNumber = canonicalRef.value;
+  const expectedDescription = canonicalRef.truncated && canonicalRef.full
+    ? weaveFullRefIntoDescription(payload.description ?? undefined, canonicalRef.full)
+    : payload.description;
   return transaction.accounts_dimensions_id === payload.accounts_dimensions_id &&
     transaction.type === payload.type &&
     transaction.amount === payload.amount &&
     transaction.cl_currencies_id === payload.cl_currencies_id &&
     transaction.date === payload.date &&
     sameOptional(transaction.bank_account_name, payload.bank_account_name) &&
-    sameOptional(transaction.ref_number, payload.ref_number) &&
-    sameOptional(transaction.description, payload.description) &&
+    sameOptional(transaction.ref_number, expectedRefNumber) &&
+    sameOptional(transaction.description, expectedDescription) &&
     sameOptional(transaction.clients_id, payload.clients_id);
 }
 

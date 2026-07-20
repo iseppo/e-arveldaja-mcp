@@ -3,8 +3,9 @@ import { createHash, randomBytes } from "crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { resolveFileInput } from "../file-validation.js";
-import { registerWiseImportTools, WISE_PLAN_DOMAIN, buildWiseTransactionSignature } from "./wise-import.js";
+import { registerWiseImportTools, WISE_PLAN_DOMAIN, buildWiseTransactionSignature, createdTransactionMatchesApprovedPayload, type TransactionCreatePayload } from "./wise-import.js";
 import { weaveFullRefIntoDescription } from "../bank-transaction-create.js";
+import { canonicalRefNumber } from "../ref-number.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { clearRuntimeCaches } from "../cache-control.js";
 import { reportProgress } from "../progress.js";
@@ -5328,5 +5329,60 @@ describe("buildWiseTransactionSignature — over-cap ref symmetry (FIX 3)", () =
     // The short ref is NOT woven into the description: a description that already
     // carries the ref hashes differently, proving no implicit weave occurred.
     expect(sig).not.toBe(buildWiseTransactionSignature(DATE, AMT, CUR, NAME, SHORT_REF, "narrative RF-SHORT"));
+  });
+});
+
+describe("createdTransactionMatchesApprovedPayload — over-cap ref precondition (FIX C)", () => {
+  const FULL_REF = "INV-2026-000123456789-XYZ"; // 25 chars, over the 20 cap
+  const canonical = canonicalRefNumber(FULL_REF);
+
+  const payload = {
+    accounts_dimensions_id: 5,
+    type: "C",
+    amount: 50,
+    cl_currencies_id: "EUR",
+    date: "2026-06-10",
+    bank_account_name: "LHV Own Account",
+    description: "WISE:TRANSFER-1 LHV Own Account [source_direction=IN]",
+    ref_number: FULL_REF,
+    clients_id: 55,
+  } as unknown as TransactionCreatePayload;
+
+  // The transaction the write boundary actually persisted: the ref is truncated
+  // to the cap and the full ref is woven into the description before the trailing
+  // direction marker — exactly what createBankTransaction stores.
+  const boundaryStored = {
+    id: 8860,
+    status: "PROJECT",
+    is_deleted: false,
+    accounts_dimensions_id: 5,
+    type: "C",
+    amount: 50,
+    cl_currencies_id: "EUR",
+    date: "2026-06-10",
+    bank_account_name: "LHV Own Account",
+    ref_number: canonical.value,
+    description: canonical.truncated && canonical.full
+      ? weaveFullRefIntoDescription("WISE:TRANSFER-1 LHV Own Account [source_direction=IN]", canonical.full)
+      : "WISE:TRANSFER-1 LHV Own Account [source_direction=IN]",
+    clients_id: 55,
+  } as unknown as Parameters<typeof createdTransactionMatchesApprovedPayload>[0];
+
+  it("matches the boundary-canonicalized transaction for an over-cap ref (no stale-precondition throw)", () => {
+    // RED before FIX C: the precondition compared the stored (truncated ref +
+    // woven description) against the raw approved payload (full ref + pre-weave
+    // description) → mismatch → false → legitimate inter-account confirm aborted.
+    expect(createdTransactionMatchesApprovedPayload(boundaryStored, 8860, payload)).toBe(true);
+  });
+
+  it("still returns false when the stored transaction genuinely diverges (precondition intact)", () => {
+    const tampered = { ...boundaryStored, amount: 999 } as typeof boundaryStored;
+    expect(createdTransactionMatchesApprovedPayload(tampered, 8860, payload)).toBe(false);
+  });
+
+  it("still matches a short (non-truncated) ref with an untouched description", () => {
+    const shortPayload = { ...payload, ref_number: "RF-SHORT", description: "narrative" } as unknown as TransactionCreatePayload;
+    const shortStored = { ...boundaryStored, ref_number: "RF-SHORT", description: "narrative" } as typeof boundaryStored;
+    expect(createdTransactionMatchesApprovedPayload(shortStored, 8860, shortPayload)).toBe(true);
   });
 });
