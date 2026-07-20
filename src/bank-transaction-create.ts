@@ -16,7 +16,7 @@ const TRAILING_DIRECTION_MARKER =
  * BEFORE any trailing direction marker so the end-anchored regexes in
  * `bankTransactionDirection` still resolve the statement direction.
  */
-function weaveFullRefIntoDescription(description: string | null | undefined, fullRef: string): string {
+export function weaveFullRefIntoDescription(description: string | null | undefined, fullRef: string): string {
   const current = description ?? "";
   if (current.includes(fullRef)) return current;
   const markerMatch = current.match(TRAILING_DIRECTION_MARKER);

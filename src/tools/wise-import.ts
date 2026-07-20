@@ -30,6 +30,7 @@ import { isNonVoidTransaction, isProjectTransaction } from "../transaction-statu
 import { parseCSV } from "../csv.js";
 import { roundMoney } from "../money.js";
 import { canonicalRefNumber } from "../ref-number.js";
+import { weaveFullRefIntoDescription } from "../bank-transaction-create.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { roundTo } from "../money.js";
@@ -752,7 +753,7 @@ function formatWiseAmount(amount: number): string {
   return amount.toFixed(2);
 }
 
-function buildWiseTransactionSignature(
+export function buildWiseTransactionSignature(
   date: string,
   amount: number,
   currency: string,
@@ -764,13 +765,23 @@ function buildWiseTransactionSignature(
   // whose full reference exceeds the cap still hashes identically to its
   // previously-stored (truncated) transaction — both sides feed through the same
   // canonicalization, keeping dedup stable across the truncation boundary.
+  const canonical = canonicalRefNumber(refNumber);
+  // When the ref exceeds the cap, createBankTransaction weaves the FULL ref into
+  // the STORED description. The stored side re-enters here with the already-
+  // truncated ref (not truncated → description used as-is = the woven desc); the
+  // candidate side re-enters with the full ref (truncated → weave its full value
+  // into the pre-weave desc), so both descriptions converge and dedup stays
+  // symmetric across the truncation boundary.
+  const descriptionForHash = canonical.truncated && canonical.full
+    ? weaveFullRefIntoDescription(description, canonical.full)
+    : (description ?? "");
   return [
     date,
     formatWiseAmount(amount),
     normalizeWiseCurrency(currency),
     normalizeWiseText(bankAccountName),
-    normalizeWiseText(canonicalRefNumber(refNumber).value),
-    normalizeWiseText(description),
+    normalizeWiseText(canonical.value),
+    normalizeWiseText(descriptionForHash),
   ].join("|");
 }
 
