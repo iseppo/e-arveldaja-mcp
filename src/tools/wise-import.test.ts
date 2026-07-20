@@ -657,7 +657,7 @@ describe("wise import tool", () => {
     });
 
     expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
-      type: "C",
+      type: "D",
       amount: 125,
       bank_account_name: "Customer OU",
       description: "WISE:abc-5 Customer OU [source_direction=IN]",
@@ -720,7 +720,7 @@ describe("wise import tool", () => {
     });
 
     expect(api.transactions.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      type: "C",
+      type: "D",
       amount: 92,
       cl_currencies_id: "EUR",
       bank_account_name: "Customer Inc",
@@ -2145,9 +2145,9 @@ describe("wise import tool", () => {
 
   it("M04 previews exact IN and OUT inter-account actions", async () => {
     const cases = [
-      { id: "TRANSFER-M04-IN", direction: "IN" as const, type: "C", flowSource: 20, flowTarget: 5, sourceAmount: 125, sourceCurrency: "USD", targetAmount: 100, targetCurrency: "EUR", rate: 0.8 },
+      { id: "TRANSFER-M04-IN", direction: "IN" as const, type: "D", flowSource: 20, flowTarget: 5, sourceAmount: 125, sourceCurrency: "USD", targetAmount: 100, targetCurrency: "EUR", rate: 0.8 },
       { id: "TRANSFER-M04-OUT", direction: "OUT" as const, type: "C", flowSource: 5, flowTarget: 20, sourceAmount: 100, sourceCurrency: "EUR", targetAmount: 125, targetCurrency: "USD", rate: 1.25 },
-      { id: "BANK_DETAILS_PAYMENT_RETURN-M04-IN", direction: "IN" as const, type: "C", flowSource: 20, flowTarget: 5, sourceAmount: 125, sourceCurrency: "USD", targetAmount: 100, targetCurrency: "EUR", rate: 0.8 },
+      { id: "BANK_DETAILS_PAYMENT_RETURN-M04-IN", direction: "IN" as const, type: "D", flowSource: 20, flowTarget: 5, sourceAmount: 125, sourceCurrency: "USD", targetAmount: 100, targetCurrency: "EUR", rate: 0.8 },
       { id: "BANK_DETAILS_PAYMENT_RETURN-M04-OUT", direction: "OUT" as const, type: "C", flowSource: 5, flowTarget: 20, sourceAmount: 100, sourceCurrency: "EUR", targetAmount: 125, targetCurrency: "USD", rate: 1.25 },
     ];
     const outcomes: Array<{ item: typeof cases[number]; payload: any; api: any }> = [];
@@ -3225,7 +3225,7 @@ describe("wise import tool", () => {
       bank_account_name: "Wise", clients_id: 77, status: "PROJECT", is_deleted: false,
     };
     const mainTransfer = {
-      id: 9712, accounts_dimensions_id: 5, type: "C", amount: 50, cl_currencies_id: "EUR",
+      id: 9712, accounts_dimensions_id: 5, type: "D", amount: 50, cl_currencies_id: "EUR",
       date: "2026-06-10", description: "WISE:TRANSFER-M04-EXECUTE LHV Own Account [source_direction=IN]",
       bank_account_name: "LHV Own Account", status: "PROJECT", is_deleted: false,
     };
@@ -3264,7 +3264,7 @@ describe("wise import tool", () => {
     }));
     expect(setup.api.transactions.create).toHaveBeenNthCalledWith(3, expect.objectContaining({
       accounts_dimensions_id: 5,
-      type: "C",
+      type: "D",
       amount: 50,
       cl_currencies_id: "EUR",
     }));
@@ -3376,7 +3376,7 @@ describe("wise import tool", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{
-        id: 9720, accounts_dimensions_id: 5, type: "C", amount: 88, cl_currencies_id: "EUR",
+        id: 9720, accounts_dimensions_id: 5, type: "D", amount: 88, cl_currencies_id: "EUR",
         date: "2026-06-10", description: "WISE:TRANSFER-M04-ORPHAN LHV Own Account [source_direction=IN]",
         bank_account_name: "LHV Own Account", status: "PROJECT", is_deleted: false,
       }]);
@@ -3613,7 +3613,7 @@ describe("wise import tool", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{
-        id: 8830, accounts_dimensions_id: 5, type: "C", amount: 75, cl_currencies_id: "EUR",
+        id: 8830, accounts_dimensions_id: 5, type: "D", amount: 75, cl_currencies_id: "EUR",
         date: "2026-06-10", description: "WISE:TRANSFER-M04-STALE-JOURNAL LHV Own Account [source_direction=IN]",
         bank_account_name: "LHV Own Account", status: "PROJECT", is_deleted: false,
       }]);

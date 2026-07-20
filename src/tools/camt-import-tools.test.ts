@@ -512,7 +512,7 @@ describe("camt import tool", () => {
   });
 
   describe("H09 bank-dimension-scoped duplicate detection", () => {
-    it("creates CAMT CRDT rows as API type C with signed source direction", async () => {
+    it("creates CAMT CRDT (incoming) rows as API type D with signed source direction", async () => {
       mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
       mockedReadFile.mockResolvedValue(singleEntryXml.replace("<CdtDbtInd>DBIT</CdtDbtInd>", "<CdtDbtInd>CRDT</CdtDbtInd>"));
       const { api, handler } = setupCamtTool();
@@ -520,11 +520,13 @@ describe("camt import tool", () => {
       const result = await executeGranularWithPlan(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
       const payload = parseMcpResponse(result.content[0]!.text);
 
+      // Incoming money must be booked type "D" so the backend debits cash
+      // ("Laekumine"); forcing "C" here booked incoming rows backwards.
       expect(api.transactions.create).toHaveBeenCalledWith(expect.objectContaining({
-        type: "C",
+        type: "D",
         description: expect.stringMatching(/dir=CRDT .*sig=[a-f0-9]{16}/),
       }));
-      expect(payload.sample[0]).toMatchObject({ type: "C", source_direction: "CRDT" });
+      expect(payload.sample[0]).toMatchObject({ type: "D", source_direction: "CRDT" });
     });
 
     it("H09 keeps a direct same reference on another bank dimension eligible and creates it on the selected dimension", async () => {

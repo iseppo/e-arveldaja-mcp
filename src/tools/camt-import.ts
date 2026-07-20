@@ -1610,7 +1610,9 @@ async function computeCamtImportProjection(
     const possibleDuplicateMatches = findPossibleDuplicateMatches(entry, possibleDuplicateLookup);
     const payload: CreateTransactionPayload = {
       accounts_dimensions_id: accountsDimensionsId,
-      type: "C",
+      // API type drives the cash-account leg at confirmation: incoming (CRDT) →
+      // "D" (cash debited, "Laekumine"), outgoing (DBIT) → "C" ("Tasumine").
+      type: entry.direction === "CRDT" ? "D" : "C",
       amount: entry.amount,
       cl_currencies_id: entry.currency || "EUR",
       date: entry.date,
@@ -1744,7 +1746,7 @@ function camtResultRow(
     date: descriptor.entry.date,
     amount: descriptor.entry.amount,
     currency: descriptor.entry.currency,
-    type: "C" as const,
+    type: (descriptor.entry.direction === "CRDT" ? "D" : "C") as "C" | "D",
     source_direction: descriptor.entry.direction,
     description: descriptor.entry.description,
     counterparty: descriptor.entry.counterparty_name,
@@ -1765,7 +1767,7 @@ function camtPossibleDuplicateRow(descriptor: CamtCreateDescriptor, newApiId?: n
     date: descriptor.entry.date,
     amount: descriptor.entry.amount,
     currency: descriptor.entry.currency,
-    type: "C" as const,
+    type: (descriptor.entry.direction === "CRDT" ? "D" : "C") as "C" | "D",
     source_direction: descriptor.entry.direction,
     counterparty: descriptor.entry.counterparty_name,
     bank_reference: descriptor.entry.bank_reference,
@@ -2131,13 +2133,14 @@ export function registerCamtImportTools(
         },
         mutateIndex: async index => {
           const descriptor = projection.descriptors[index]!;
-          const response = await createBankTransaction(api, descriptor.payload);
+          const direction = descriptor.entry.direction === "CRDT" ? "incoming" : "outgoing";
+          const response = await createBankTransaction(api, descriptor.payload, direction);
           const createdId = response.created_object_id;
           logAudit({
             tool: "import_camt053", action: "IMPORTED", entity_type: "transaction",
             entity_id: createdId,
             summary: `Imported CAMT transaction ${descriptor.entry.amount} ${descriptor.entry.currency} on ${descriptor.entry.date}`,
-            details: { date: descriptor.entry.date, amount: descriptor.entry.amount, type: "C", source_direction: descriptor.entry.direction, description: descriptor.entry.description, counterparty: descriptor.entry.counterparty_name, bank_reference: descriptor.entry.bank_reference },
+            details: { date: descriptor.entry.date, amount: descriptor.entry.amount, type: direction === "incoming" ? "D" : "C", source_direction: descriptor.entry.direction, description: descriptor.entry.description, counterparty: descriptor.entry.counterparty_name, bank_reference: descriptor.entry.bank_reference },
           });
           completedIndices.add(index);
           if (typeof createdId === "number" && Number.isSafeInteger(createdId) && createdId > 0) {

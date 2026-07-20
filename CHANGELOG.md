@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Incoming bank transactions were booked backwards (High severity).** Since
+  0.22.0 every newly created bank transaction was forced to API `type: "C"`
+  regardless of direction. The e-arveldaja backend derives the cash-account leg
+  from that `type` at confirmation, so **incoming** rows (owner deposits,
+  customer receipts, refunds, incoming transfers) were booked as money *out* —
+  cash credited instead of debited, the counter-account reversed, and the cash
+  balance moved by 2× the amount in the wrong direction. The ledger still
+  balanced (debits = credits), so nothing errored — only the direction was
+  wrong. `createBankTransaction` (`src/bank-transaction-create.ts`) now sets
+  `type` from the true statement direction (incoming → `"D"`, outgoing → `"C"`),
+  taken from the explicit direction the CAMT/Wise importers pass or derived from
+  the payload's signed `source_direction` marker. The CAMT/Wise projections and
+  `create_transaction` (whose `type` argument is honored again) now show the real
+  directional type, so a review card can no longer display `type: "C"` next to
+  `source_direction: "IN"`. Read-side classification continues to prefer signed
+  `source_direction` metadata. Existing reversed journals created under 0.22.0
+  must be re-booked (see the bug report's data-remediation section).
+
 ## [0.22.0] - 2026-07-19
 
 > **Significant behaviour-changing release — the default/recommended account numbers were rewritten.** The hardcoded chart-of-accounts defaults were originally written for a non-standard template and were wrong for the real e-arveldaja RTJ standard chart (verified byte-identical across two real company charts). Every default was audited and corrected, and — more importantly — the tools now resolve each account **by its Estonian name** against the company's *actual* chart, using the standard number only as a last-resort fallback. If you previously relied on a specific default account number, re-check your postings: several defaults now point at different accounts (see below). This also corrects the default accounts used when booking Lightyear investment activity.

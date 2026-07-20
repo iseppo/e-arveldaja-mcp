@@ -54,7 +54,7 @@ Show a summary grouped by confidence level from `result.matches`:
 **HIGH (>=80):** Strong matches. In auto mode only confidence >= 90 is eligible for confirmation (Step 3, "Auto mode"), and even then only with user approval — never auto-confirm an 80-89 match without asking.
 - Transaction: date, amount, description, and raw `type` if helpful
 - Matched invoice: number, client, gross amount, confidence, match reasons
-- Every newly created bank transaction must use API `type: "C"`, regardless of direction. Preserve and use signed `source_direction` metadata (`CRDT`/`DBIT` or `IN`/`OUT`) for flow decisions; use legacy `D`/`C` only as a fallback for older rows without source metadata.
+- Newly created bank transactions set API `type` from the true statement direction: `type: "D"` for incoming (money in — the backend debits cash, "Laekumine"), `type: "C"` for outgoing (money out — credits cash, "Tasumine"). The backend derives the cash-account leg from this field at confirmation, so it must match the real flow. For read-side flow decisions still prefer signed `source_direction` metadata (`CRDT`/`DBIT` or `IN`/`OUT`), using legacy `D`/`C` only as a fallback for older rows without source metadata.
 - For cross-currency matches, prefer `match_reasons` such as `exact_base_amount`, and do NOT derive `distribution.amount` from `tx.amount` when base and source currencies differ; use the invoice open balance and the tool-provided distribution.
 
 **MEDIUM (50-79):** Review recommended.

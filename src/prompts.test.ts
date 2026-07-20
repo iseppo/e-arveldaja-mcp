@@ -889,7 +889,8 @@ describe("registerPrompts", () => {
       expect(text).toContain('mode: "inter_account_dry_run"');
       expect(text).toContain("already_handled");
       expect(text).toContain("Wise-side transfers");
-      expect(text).toContain('Every newly created bank transaction must use API `type: "C"`');
+      expect(text).toContain('Newly created bank transactions set API `type` from the true statement direction');
+      expect(text).toContain('`type: "D"` for incoming');
       expect(text).toContain("signed `source_direction` metadata");
       expect(text).toContain('incoming_action: "would_delete_duplicate"');
       expect(text).toContain("Never manually confirm both sides");

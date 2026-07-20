@@ -212,13 +212,28 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - **Never** close a workflow with "these need your manual confirmation in e-arveldaja" / "tee see e-arveldaja UI-s käsitsi" as the default. That is a last-resort fallback only when (a) no MCP tool can perform the action, AND (b) the exact API error has already been shown to the user with what was tried.
 - If the API rejects an inline attempt, show the raw API error and the exact body that was sent before suggesting manual UI fallback.
 
-### Transaction type field
-- **All bank transactions are `type: "C"`** regardless of direction (both CAMT-imported and API-created)
-- The `type` field is cosmetic — it does **not** affect accounting
-- **Journal entry direction is determined by the distribution** at confirmation time:
-  - Confirming against another bank account → "Laekumine" (receipt): debit target, credit source
-  - Confirming against expense/purchase invoice → "Tasumine" (payment): credit bank, debit expense
-- The API auto-detects incoming vs outgoing from the account relationship in the distribution
+### Transaction type field — SEMANTIC on the write path, not cosmetic
+- **The API `type` field drives the cash-account (e.g. 1020) leg at confirmation.** The
+  backend books the cash side OPPOSITE the stored `type`: `type: "D"` → cash **debited**
+  ("Laekumine" / money in), `type: "C"` → cash **credited** ("Tasumine" / money out). So
+  every newly created bank transaction MUST carry the true statement direction:
+  incoming → `"D"`, outgoing → `"C"`. This is enforced in one place —
+  `createBankTransaction` (`src/bank-transaction-create.ts`) — which sets `type` from the
+  explicit direction the CAMT/Wise importers pass, or derives it from the payload's signed
+  `source_direction` marker / legacy `type` via `bankTransactionDirection`. (Forcing
+  `type: "C"` unconditionally in 0.22.0 booked every incoming row backwards — cash on the
+  wrong side; the regression fix restored the directional mapping.)
+- **Read-side classification** (is this row an expense? a receipt? an inter-account
+  transfer?) must still prefer signed `source_direction` metadata (`CRDT`/`DBIT` or
+  `IN`/`OUT`) via `bankTransactionDirection`, with legacy `D`/`C` only as a fallback for
+  older rows — never re-derive accounting treatment from a raw stored `type` alone, since
+  historically-imported rows may all be `C`.
+- **Distribution + direction together** determine the journal at confirmation:
+  - Confirming against another bank account → "Laekumine"/"Tasumine" per the account
+    relationship (inter-account transfers use the source/target dimensions).
+  - Confirming against an expense/purchase-invoice or a plain GL account (e.g. 2110) → the
+    backend uses the transaction's `type` to place the cash leg, because a GL account has
+    no inherent direction. This is why the create-time `type` must be correct.
 
 ### Transaction status
 - **`status: "CONFIRMED"`** — registered/confirmed (not an `is_confirmed` boolean)

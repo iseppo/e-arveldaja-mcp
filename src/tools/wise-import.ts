@@ -627,8 +627,11 @@ function sourceDirectionForWiseDirection(direction: string): "IN" | "OUT" | unde
   return normalized === "IN" || normalized === "OUT" ? normalized : undefined;
 }
 
-function transactionTypeForWiseDirection(direction: string): "C" | undefined {
-  return sourceDirectionForWiseDirection(direction) ? "C" : undefined;
+function transactionTypeForWiseDirection(direction: string): "C" | "D" | undefined {
+  // API type drives the cash-account leg at confirmation: incoming (IN) → "D"
+  // (cash debited, "Laekumine"), outgoing (OUT) → "C" (cash credited, "Tasumine").
+  const sourceDirection = sourceDirectionForWiseDirection(direction);
+  return sourceDirection === "IN" ? "D" : sourceDirection === "OUT" ? "C" : undefined;
 }
 
 function counterpartyNameForWiseRow(row: WiseRow): string | undefined {
@@ -859,7 +862,7 @@ interface WiseCommandBase {
   identity_hash: string;
   wise_id: string;
   date: string;
-  transaction_type: "C";
+  transaction_type: "C" | "D";
   source_direction: "IN" | "OUT";
   booked_amount: number;
   booked_currency: string;
@@ -1719,6 +1722,7 @@ export function registerWiseImportTools(
           }
 
           const direction = sourceDirectionForWiseDirection(row.direction)!;
+          const interAccountType = direction === "IN" ? "D" : "C";
           const confirmationDistribution = existingJournalId === undefined
             ? [{
                 related_table: "accounts" as const,
@@ -1738,7 +1742,7 @@ export function registerWiseImportTools(
             identity_hash: commandIdentity(row, "inter_account"),
             wise_id: row.id,
             date: entry.date,
-            transaction_type: "C",
+            transaction_type: interAccountType,
             source_direction: direction,
             booked_amount: entry.amount,
             booked_currency: bookedCurrencyForWiseRow(row),
@@ -2134,7 +2138,7 @@ export function registerWiseImportTools(
               if (transactionCommandExists(command, freshTransactions)) {
                 throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
               }
-              const result = await createBankTransaction(api, command.create_payload);
+              const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
               const apiId = result.created_object_id;
               if (apiId === undefined) throw new Error("Wise transaction creation returned no object ID");
               runtimeIds.set(command.row_key, apiId);
@@ -2146,7 +2150,7 @@ export function registerWiseImportTools(
                 details: {
                   date: command.date,
                   amount: command.booked_amount,
-                  type: "C",
+                  type: command.source_direction === "IN" ? "D" : "C",
                   source_direction: command.source_direction,
                   wise_id: command.wise_id,
                   approved_command_digest: approvedCommandDigest,
@@ -2174,7 +2178,7 @@ export function registerWiseImportTools(
               if (transactionCommandExists(command, freshTransactions)) {
                 throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
               }
-              const result = await createBankTransaction(api, command.create_payload);
+              const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
               const apiId = result.created_object_id;
               if (apiId === undefined) throw new Error("Wise fee creation returned no object ID");
               runtimeIds.set(command.row_key, apiId);

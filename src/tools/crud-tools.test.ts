@@ -2314,7 +2314,8 @@ describe("D01 external-text stripping at CRUD write boundaries", () => {
     const arg = create.mock.calls[0]![0] as { description: string; bank_account_name: string; type: string };
     expect(arg.description).toBe("PAYMENT");
     expect(arg.bank_account_name).toBe("Bob");
-    expect(arg.type).toBe("C");
+    // type "D" (incoming) is honored so the backend debits cash at confirmation.
+    expect(arg.type).toBe("D");
   });
 
   it("strips sandbox markers from update_transaction data fields before API", async () => {

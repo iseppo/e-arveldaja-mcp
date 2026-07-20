@@ -148,7 +148,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
 
   registerTool(server, "create_transaction", "Create a bank transaction", {
     accounts_dimensions_id: coerceId.describe("Bank account dimension ID"),
-    type: z.string().optional().describe("Deprecated and ignored. Newly created bank transactions always use API type C; preserve statement direction separately as source metadata."),
+    type: z.enum(["C", "D"]).optional().describe("Statement direction, which decides the cash-account leg at confirmation: 'D' = incoming (money in, cash debited, 'Laekumine'), 'C' = outgoing (money out, cash credited, 'Tasumine'). Defaults to 'C' (outgoing) when omitted. Set 'D' for owner deposits, customer receipts, refunds, and other incoming rows."),
     amount: z.number().describe("Transaction amount"),
     cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
     date: isoDateString("Transaction date (YYYY-MM-DD)"),
@@ -158,10 +158,11 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     ref_number: z.string().optional().describe("Reference number"),
   }, { ...create, title: "Create Transaction" }, async (rawParams) => {
     const params = desandboxAllStrings(rawParams);
+    const direction = params.type === "D" ? "incoming" : "outgoing";
     const result = await createBankTransaction(api, {
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
-    });
+    }, direction);
     logAudit({
       tool: "create_transaction", action: "CREATED", entity_type: "transaction",
       entity_id: result.created_object_id,
@@ -169,8 +170,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       details: {
         date: params.date,
         amount: params.amount,
-        type: "C",
-        ...(params.type !== undefined ? { ignored_deprecated_type: params.type } : {}),
+        type: params.type === "D" ? "D" : "C",
         description: params.description,
         accounts_dimensions_id: params.accounts_dimensions_id,
       },
