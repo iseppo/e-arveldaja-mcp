@@ -2,25 +2,31 @@
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-07-20
+
 ### Fixed
 
-- **Incoming bank transactions were booked backwards (High severity).** Since
-  0.22.0 every newly created bank transaction was forced to API `type: "C"`
-  regardless of direction. The e-arveldaja backend derives the cash-account leg
-  from that `type` at confirmation, so **incoming** rows (owner deposits,
-  customer receipts, refunds, incoming transfers) were booked as money *out* —
-  cash credited instead of debited, the counter-account reversed, and the cash
-  balance moved by 2× the amount in the wrong direction. The ledger still
-  balanced (debits = credits), so nothing errored — only the direction was
-  wrong. `createBankTransaction` (`src/bank-transaction-create.ts`) now sets
-  `type` from the true statement direction (incoming → `"D"`, outgoing → `"C"`),
-  taken from the explicit direction the CAMT/Wise importers pass or derived from
-  the payload's signed `source_direction` marker. The CAMT/Wise projections and
+- **Incoming bank transactions were booked backwards — High-severity regression
+  introduced in 0.22.0, now fixed.** 0.22.0 forced every newly created bank
+  transaction to API `type: "C"` regardless of direction. The e-arveldaja backend
+  derives the cash-account leg from that `type` at confirmation, so **incoming**
+  rows (owner deposits, customer receipts, refunds, incoming transfers — including
+  incoming inter-account transfers) were booked as money *out*: cash credited
+  instead of debited, the counter-account reversed, and the cash balance moved by
+  2× the amount in the wrong direction. The ledger still balanced
+  (debits = credits), so nothing errored — only the direction was wrong.
+  `createBankTransaction` (`src/bank-transaction-create.ts`) now sets `type` from
+  the true statement direction (incoming → `"D"`, outgoing → `"C"`), taken from the
+  explicit direction the CAMT/Wise importers pass or derived from the payload's
+  signed `source_direction` marker. The CAMT/Wise projections and
   `create_transaction` (whose `type` argument is honored again) now show the real
   directional type, so a review card can no longer display `type: "C"` next to
   `source_direction: "IN"`. Read-side classification continues to prefer signed
-  `source_direction` metadata. Existing reversed journals created under 0.22.0
-  must be re-booked (see the bug report's data-remediation section).
+  `source_direction` metadata. Live-ledger evidence confirmed the backend uses
+  `type` to place the cash leg on the inter-account path too, so the directional
+  mapping is required there as well. **Anyone who ran 0.22.0 must re-book the
+  reversed journals it created** (incoming rows with a "Tasumine" journal / cash on
+  the credit side).
 
 ## [0.22.0] - 2026-07-19
 
