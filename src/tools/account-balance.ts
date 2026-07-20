@@ -184,6 +184,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
               captured: opening !== null,
               openingDate: opening?.openingDate,
               unmappedCodes: opening?.unmappedCodes,
+              unmappedDimensions: opening?.unmappedDimensions,
               dateFrom: date_from,
               dateTo: date_to,
             })
@@ -251,6 +252,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         }))
         .sort((a, b) => (a.dimension_id ?? -1) - (b.dimension_id ?? -1));
 
+      // `total` MUST come from the raw unrounded rawDebit/rawCredit accumulators
+      // with roundMoney applied once here — never by summing the per-dimension
+      // rounded `balance` rows, or per-row rounding drift breaks the
+      // reconciliation invariant with compute_account_balance (same single-round
+      // rationale as computeAccountBalance above).
       const total = roundMoney(balanceType === "D" ? rawDebit - rawCredit : rawCredit - rawDebit);
 
       const summary = {
@@ -266,6 +272,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
           captured: opening !== null,
           openingDate: opening?.openingDate,
           unmappedCodes: opening?.unmappedCodes,
+          unmappedDimensions: opening?.unmappedDimensions,
           dateFrom: date_from,
           dateTo: date_to,
         }),

@@ -75,6 +75,15 @@ describe("buildOpeningBalanceJournal", () => {
     expect(r.unmappedDimensions).toHaveLength(1);
   });
 
+  it("does not silently first-pick when two active dims share an identical title (exact-match ambiguity)", () => {
+    const dims = [dim(12637392, 1020, "Arvelduskonto"), dim(13172505, 1020, "Arvelduskonto")];
+    const r = buildOpeningBalanceJournal([acc(1020)], dims,
+      stored([{ code: "1020", name: "Arvelduskonto", debit: 1000, credit: 0, dimension: ["Arvelduskonto"] }]))!;
+    const d = r.journal.postings!.find(p => p.type === "D")!;
+    expect(d.accounts_dimensions_id ?? null).toBeNull();
+    expect(r.unmappedDimensions).toHaveLength(1);
+  });
+
   it("loads legacy stored data without a dimension field (single-dim resolves, multi-dim warns)", () => {
     const dims = [dim(12637392, 1020, "AS LHV Pank EE637700771011212909"), dim(13172505, 1020, "WISE BE08905767222113")];
     const r = buildOpeningBalanceJournal([acc(1020)], dims,

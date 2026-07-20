@@ -11,9 +11,8 @@ export interface OpeningBalanceJournal {
 
 function resolveDimensionId(dims: AccountDimension[], candidates: string[] | undefined): number | undefined {
   if (!candidates || candidates.length === 0) return undefined;
-  for (const d of dims) {                              // exact cell == title
-    if (d.id !== undefined && candidates.includes(d.title_est)) return d.id;
-  }
+  const exact = dims.filter(d => d.id !== undefined && candidates.includes(d.title_est));
+  if (exact.length > 0) return exact.length === 1 ? exact[0]!.id : undefined; // ambiguous exact → caller warns
   const joined = candidates.join(" ");                 // distinctive title as substring
   const hits = dims.filter(d => d.id !== undefined && d.title_est && joined.includes(d.title_est));
   return hits.length === 1 ? hits[0]!.id : undefined;  // zero or ambiguous → caller warns

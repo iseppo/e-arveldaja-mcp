@@ -1,3 +1,14 @@
+import { wrapUntrustedOcr } from "./mcp-json.js";
+
+// Each `unmappedDimensions` entry embeds raw pasted operator content
+// (the algbilanss dimension label), so wrap every label individually in the
+// untrusted-text sandbox before emitting it into a warning. The codes in
+// `unmappedCodes` are numeric/trusted and are emitted unwrapped.
+function unmappedDimensionsWarning(unmappedDimensions: string[]): string {
+  const wrapped = unmappedDimensions.map(d => wrapUntrustedOcr(d) ?? d).join(", ");
+  return `Opening-balance accounts whose dimension label could not be resolved were booked without a dimension id: ${wrapped}. Re-check these dimension labels.`;
+}
+
 export const OPENING_BALANCE_API_LIMITATION_WARNING =
   "Known API coverage limitation: e-arveldaja's separate \"Algbilansi kanded\" (opening balance entries) section may not be included in the /journals API data available to this MCP server. Balances, trial balances, P&L, and journal lists can therefore miss opening-balance amounts; verify opening balances in the e-arveldaja UI before relying on audit totals.";
 
@@ -6,7 +17,7 @@ export const OPENING_BALANCE_ACTIONABLE_WARNING =
 
 export function withOpeningBalanceStatus(
   warnings: string[],
-  opts: { captured: boolean; openingDate?: string; unmappedCodes?: string[] },
+  opts: { captured: boolean; openingDate?: string; unmappedCodes?: string[]; unmappedDimensions?: string[] },
 ): string[] {
   const out = [...warnings];
   if (!opts.captured) {
@@ -17,6 +28,9 @@ export function withOpeningBalanceStatus(
   out.push(`Opening balances applied from the stored algbilanss${date}.`);
   if (opts.unmappedCodes && opts.unmappedCodes.length > 0) {
     out.push(`Opening-balance accounts not in the chart were skipped: ${opts.unmappedCodes.join(", ")}. Re-check these account codes.`);
+  }
+  if (opts.unmappedDimensions && opts.unmappedDimensions.length > 0) {
+    out.push(unmappedDimensionsWarning(opts.unmappedDimensions));
   }
   return out;
 }
@@ -34,7 +48,7 @@ export function withOpeningBalanceStatus(
 // (other consumers depend on it staying captured/not-captured only).
 export function withOpeningBalanceStatusInRange(
   warnings: string[],
-  opts: { captured: boolean; openingDate?: string; unmappedCodes?: string[]; dateFrom?: string; dateTo?: string },
+  opts: { captured: boolean; openingDate?: string; unmappedCodes?: string[]; unmappedDimensions?: string[]; dateFrom?: string; dateTo?: string },
 ): string[] {
   if (!opts.captured) {
     return withOpeningBalanceStatus(warnings, { captured: false });
@@ -52,6 +66,9 @@ export function withOpeningBalanceStatusInRange(
   );
   if (opts.unmappedCodes && opts.unmappedCodes.length > 0) {
     out.push(`Opening-balance accounts not in the chart were skipped: ${opts.unmappedCodes.join(", ")}. Re-check these account codes.`);
+  }
+  if (opts.unmappedDimensions && opts.unmappedDimensions.length > 0) {
+    out.push(unmappedDimensionsWarning(opts.unmappedDimensions));
   }
   return out;
 }
