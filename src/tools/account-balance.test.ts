@@ -70,6 +70,7 @@ function makeApi(
     readonly: {
       getAccount: vi.fn().mockResolvedValue(account),
       getAccounts: vi.fn().mockResolvedValue(accounts),
+      getAccountDimensions: vi.fn().mockResolvedValue([]),
     },
   };
 }

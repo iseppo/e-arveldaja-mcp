@@ -72,6 +72,7 @@ function createApi(options: {
   return {
     readonly: {
       getAccounts: vi.fn().mockResolvedValue(options.accounts ?? []),
+      getAccountDimensions: vi.fn().mockResolvedValue([]),
     },
     journals: {
       listAllWithPostings: vi.fn().mockResolvedValue(options.journals ?? []),

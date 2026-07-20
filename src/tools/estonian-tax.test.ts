@@ -89,6 +89,7 @@ function makeApi(
   return {
     readonly: {
       getAccounts: vi.fn(async () => accounts),
+      getAccountDimensions: vi.fn(async () => []),
       getAccount: vi.fn(async (id: number) => {
         const acct = accounts.find(a => a.id === id);
         return acct ?? { id, name_est: "", name_eng: "", balance_type: "C" };

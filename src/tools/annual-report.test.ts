@@ -117,6 +117,7 @@ function createApi(
   return {
     readonly: {
       getAccounts: async () => accounts,
+      getAccountDimensions: async () => [],
       getInvoiceInfo: async () => ({
         invoice_company_name: "Test Co",
         address: null,

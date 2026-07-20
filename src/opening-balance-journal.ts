@@ -1,15 +1,27 @@
 import type { ApiContext } from "./tools/crud-tools.js";
-import type { Account, Journal, Posting } from "./types/api.js";
+import type { Account, AccountDimension, Journal, Posting } from "./types/api.js";
 import { readOpeningBalances, type StoredOpeningBalances } from "./opening-balance-store.js";
 
 export interface OpeningBalanceJournal {
   journal: Journal;
   openingDate: string;
   unmappedCodes: string[];
+  unmappedDimensions: string[];
+}
+
+function resolveDimensionId(dims: AccountDimension[], candidates: string[] | undefined): number | undefined {
+  if (!candidates || candidates.length === 0) return undefined;
+  for (const d of dims) {                              // exact cell == title
+    if (d.id !== undefined && candidates.includes(d.title_est)) return d.id;
+  }
+  const joined = candidates.join(" ");                 // distinctive title as substring
+  const hits = dims.filter(d => d.id !== undefined && d.title_est && joined.includes(d.title_est));
+  return hits.length === 1 ? hits[0]!.id : undefined;  // zero or ambiguous → caller warns
 }
 
 export function buildOpeningBalanceJournal(
   accounts: Account[],
+  dimensions: AccountDimension[],
   stored: StoredOpeningBalances | null,
 ): OpeningBalanceJournal | null {
   if (!stored || !Array.isArray(stored.accounts) || stored.accounts.length === 0) return null;
@@ -21,16 +33,37 @@ export function buildOpeningBalanceJournal(
   const idByCode = new Map<string, number>();
   for (const a of accounts) idByCode.set(String(a.id), a.id);
 
+  const dimsByAccount = new Map<number, AccountDimension[]>();
+  for (const d of dimensions) {
+    if (d.is_deleted || d.id === undefined) continue;
+    const arr = dimsByAccount.get(d.accounts_id) ?? [];
+    arr.push(d);
+    dimsByAccount.set(d.accounts_id, arr);
+  }
+
   const postings: Posting[] = [];
   const unmappedCodes: string[] = [];
+  const unmappedDimensions: string[] = [];
   for (const acc of stored.accounts) {
     const accountsId = idByCode.get(acc.code);
     if (accountsId === undefined) { unmappedCodes.push(acc.code); continue; }
+
+    const dims = dimsByAccount.get(accountsId) ?? [];
+    let dimensionId: number | undefined;
+    if (dims.length === 1) {
+      dimensionId = dims[0]!.id;
+    } else if (dims.length > 1) {
+      dimensionId = resolveDimensionId(dims, acc.dimension);
+      if (dimensionId === undefined) {
+        unmappedDimensions.push(`${acc.code}: ${(acc.dimension ?? []).join(" | ") || "(no label)"}`);
+      }
+    }
+
     if (acc.debit !== 0) {
-      postings.push({ accounts_id: accountsId, type: "D", amount: acc.debit, base_amount: acc.debit, is_deleted: false });
+      postings.push({ accounts_id: accountsId, accounts_dimensions_id: dimensionId ?? null, type: "D", amount: acc.debit, base_amount: acc.debit, is_deleted: false });
     }
     if (acc.credit !== 0) {
-      postings.push({ accounts_id: accountsId, type: "C", amount: acc.credit, base_amount: acc.credit, is_deleted: false });
+      postings.push({ accounts_id: accountsId, accounts_dimensions_id: dimensionId ?? null, type: "C", amount: acc.credit, base_amount: acc.credit, is_deleted: false });
     }
   }
 
@@ -44,12 +77,15 @@ export function buildOpeningBalanceJournal(
     postings,
   };
 
-  return { journal, openingDate: stored.openingDate, unmappedCodes };
+  return { journal, openingDate: stored.openingDate, unmappedCodes, unmappedDimensions };
 }
 
 export async function loadOpeningBalanceJournal(api: ApiContext): Promise<OpeningBalanceJournal | null> {
   const stored = readOpeningBalances();
   if (!stored || stored.accounts.length === 0) return null;
-  const accounts = await api.readonly.getAccounts();
-  return buildOpeningBalanceJournal(accounts, stored);
+  const [accounts, dimensions] = await Promise.all([
+    api.readonly.getAccounts(),
+    api.readonly.getAccountDimensions(),
+  ]);
+  return buildOpeningBalanceJournal(accounts, dimensions, stored);
 }
