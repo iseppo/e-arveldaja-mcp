@@ -204,7 +204,22 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
           direction: params.type === "D" ? "D" : "C",
           date: params.date,
         };
-        duplicateScan = await findDuplicateBankPostings(api, candidate);
+        // create_transaction takes no base_amount input, so for a non-EUR row
+        // the nominal `amount` is NOT the EUR-equivalent the scan compares
+        // against (journal postings' base_amount is EUR). Comparing nominal-vs-
+        // base would flag unrelated postings / miss real ones, so skip the scan
+        // and surface an advisory note instead. Never block.
+        const isEur = (params.cl_currencies_id ?? "EUR") === "EUR";
+        if (isEur) {
+          duplicateScan = await findDuplicateBankPostings(api, candidate);
+        } else {
+          duplicateScan = {
+            scan_available: false,
+            scan_note: "Cross-mechanism duplicate scan skipped: non-EUR transaction (no EUR-equivalent available to compare).",
+            window_days: DUPLICATE_SCAN_WINDOW_DAYS,
+            suspects: [],
+          };
+        }
       }
     }
 

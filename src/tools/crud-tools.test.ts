@@ -2509,6 +2509,38 @@ describe("create_transaction duplicate-posting guard", () => {
     ]);
   });
 
+  // FIX 2: create_transaction has no base_amount input, so a non-EUR row's
+  // nominal `amount` is not the EUR-equivalent the scan compares against
+  // (journal postings' base_amount is EUR). A non-EUR row whose NOMINAL equals a
+  // journal's nominal used to falsely match; now the scan is skipped with a note.
+  it("non-EUR: nominal matches a journal but scan is skipped with an advisory note, not flagged", async () => {
+    const { handler, create } = setupCreateTransaction({ journals: [duplicateJournal] });
+
+    const result = await handler({ ...createParams, cl_currencies_id: "USD" }) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      warnings?: string[];
+      possible_duplicate_postings?: unknown;
+    };
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload).not.toHaveProperty("possible_duplicate_postings");
+    expect(payload.warnings?.some(w => /non-EUR transaction/.test(w))).toBe(true);
+  });
+
+  it("EUR: a real duplicate is still flagged (regression guard for the non-EUR gate)", async () => {
+    const { handler, create } = setupCreateTransaction({ journals: [duplicateJournal] });
+
+    const result = await handler({ ...createParams, cl_currencies_id: "EUR" }) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      possible_duplicate_postings?: Array<{ journal_id: number }>;
+    };
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
+    ]);
+  });
+
   it("no match: creates normally with no warnings key", async () => {
     const { handler, create } = setupCreateTransaction({ journals: [] });
 

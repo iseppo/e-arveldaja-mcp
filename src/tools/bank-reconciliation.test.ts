@@ -2964,19 +2964,23 @@ describe("exact-match confirm duplicate-posting guard", () => {
     journalsThrows?: boolean;
     bankDimsThrows?: boolean;
     toolName?: string;
+    tx?: Record<string, unknown>;
+    sale?: Record<string, unknown>;
   } = {}) {
     const server = { registerTool: vi.fn() } as any;
+    const tx = options.tx ?? matchingTx;
+    const sale = options.sale ?? matchingSale;
     const listAllWithPostings = options.journalsThrows
       ? vi.fn().mockRejectedValue(new Error("page cap exceeded"))
       : vi.fn().mockResolvedValue(options.journals ?? []);
     const api = {
       transactions: {
-        listAll: vi.fn().mockResolvedValue([matchingTx]),
-        get: vi.fn().mockResolvedValue({ ...matchingTx }),
+        listAll: vi.fn().mockResolvedValue([tx]),
+        get: vi.fn().mockResolvedValue({ ...tx }),
         update: vi.fn().mockResolvedValue({}),
         confirm: vi.fn().mockResolvedValue({}),
       },
-      saleInvoices: { listAll: vi.fn().mockResolvedValue([matchingSale]) },
+      saleInvoices: { listAll: vi.fn().mockResolvedValue([sale]) },
       purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
       readonly: {
         getBankAccounts: options.bankDimsThrows
@@ -3080,6 +3084,38 @@ describe("exact-match confirm duplicate-posting guard", () => {
 
     expect(payload.results[0]!.status).toBe("would_confirm");
     expect(payload.duplicate_scan_note).toMatch(/Duplicate scan unavailable/);
+  });
+
+  // FIX 2: the cross-mechanism scan compares against journal postings' EUR
+  // base_amount, so a non-EUR confirm descriptor must scan on its EUR-equivalent
+  // (tx.base_amount), not its nominal amount.
+  const nonEurTx = { ...matchingTx, cl_currencies_id: "USD", base_amount: 92 };
+  // Matching non-EUR invoice: nominal 100 USD, EUR base 92 — the tx confirms
+  // cleanly (exact_amount + exact base), so the flow reaches the dup guard.
+  const nonEurSale = { ...matchingSale, base_gross_price: 92 };
+  const duplicateJournal92 = {
+    ...duplicateJournal,
+    id: 556,
+    postings: [
+      { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "D", amount: 92, is_deleted: false },
+      { accounts_id: 5120, accounts_dimensions_id: null, type: "C", amount: 92, is_deleted: false },
+    ],
+  };
+
+  it("flags a non-EUR reconcile tx whose EUR base_amount matches a journal base_amount", async () => {
+    const { handler } = setupGuardAutoConfirm({ journals: [duplicateJournal92], tx: nonEurTx, sale: nonEurSale });
+    const result = await handler({ execute: false, min_confidence: 50 });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(payload.results[0]!.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: 556 }),
+    ]);
+  });
+
+  it("does NOT flag a non-EUR reconcile tx whose nominal matches but EUR base differs", async () => {
+    const { handler } = setupGuardAutoConfirm({ journals: [duplicateJournal], tx: nonEurTx, sale: nonEurSale });
+    const result = await handler({ execute: false, min_confidence: 50 });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(payload.results[0]!.possible_duplicate_postings).toBeUndefined();
   });
 
   it("suggest mode echoes possible_duplicate_postings on the match row; merged tool forwards the flag", async () => {

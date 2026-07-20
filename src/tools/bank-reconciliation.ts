@@ -433,6 +433,11 @@ interface ExactConfirmDescriptor {
   // mirrors createBankTransaction (incoming -> D, else C).
   accountsDimensionsId: number | undefined;
   direction: "D" | "C";
+  // EUR-equivalent of `amount` (base_amount ?? amount). The cross-mechanism
+  // duplicate scan compares against journal postings' EUR base_amount, so the
+  // scan candidate must use this, not the nominal `amount` (which stays nominal
+  // for the actual confirm distribution).
+  baseAmount: number;
   possibleDuplicatePostings?: DuplicatePostingSuspect[];
 }
 
@@ -532,6 +537,7 @@ function computeExactMatchProjection(
       transactionId: tx.id!,
       date: tx.date,
       amount: tx.amount,
+      baseAmount: tx.base_amount ?? tx.amount,
       currency: transactionCurrency(tx),
       clientsId,
       invoiceType: match.type,
@@ -594,7 +600,8 @@ async function enrichExactMatchProjectionWithDuplicateGuard(
     const candidate: DuplicatePostingCandidate = {
       accountId: dim.accountId,
       dimensionId: dim.dimensionId,
-      amount: descriptor.amount,
+      // Scan on the EUR-equivalent — journal postings are compared in EUR base.
+      amount: descriptor.baseAmount,
       direction: descriptor.direction,
       date: descriptor.date,
     };
@@ -1055,7 +1062,8 @@ export function registerBankReconciliationTools(
             const scan = await findDuplicateBankPostings(api, {
               accountId: suggestDim.accountId,
               dimensionId: suggestDim.dimensionId,
-              amount: tx.amount,
+              // Scan on the EUR-equivalent — journal postings are compared in EUR base.
+              amount: tx.base_amount ?? tx.amount,
               direction: bankTransactionDirection(tx) === "incoming" ? "D" : "C",
               date: tx.date,
             });
