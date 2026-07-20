@@ -10,6 +10,7 @@ import { DEFAULT_DEBT_CHECK_ACCOUNTS } from "../accounting-defaults.js";
 import { withOpeningBalanceStatus, withOpeningBalanceStatusInRange } from "../opening-balance-limitations.js";
 import { loadOpeningBalanceJournal, type OpeningBalanceJournal } from "../opening-balance-journal.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
+import { listAccountDimensionPostings } from "../account-postings.js";
 
 interface BalanceDetail {
   journal_id: number;
@@ -218,22 +219,13 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       const groups = new Map<number | null, { debit: number; credit: number; count: number }>();
       let rawDebit = 0;
       let rawCredit = 0;
-      for (const journal of allJournals) {
-        if (journal.is_deleted || !journal.registered) continue;
-        if (date_from && journal.effective_date < date_from) continue;
-        if (date_to && journal.effective_date > date_to) continue;
-        if (!journal.postings) continue;
-        for (const p of journal.postings) {
-          if (p.accounts_id !== account_id || p.is_deleted) continue;
-          if (p.type !== "D" && p.type !== "C") continue;
-          const key = p.accounts_dimensions_id ?? null;
-          const g = groups.get(key) ?? { debit: 0, credit: 0, count: 0 };
-          const amount = p.base_amount ?? p.amount;
-          if (p.type === "D") { g.debit += amount; rawDebit += amount; }
-          else { g.credit += amount; rawCredit += amount; }
-          g.count++;
-          groups.set(key, g);
-        }
+      for (const row of listAccountDimensionPostings(allJournals, account_id, { dateFrom: date_from, dateTo: date_to })) {
+        const key = row.accounts_dimensions_id;
+        const g = groups.get(key) ?? { debit: 0, credit: 0, count: 0 };
+        if (row.type === "D") { g.debit += row.amount; rawDebit += row.amount; }
+        else { g.credit += row.amount; rawCredit += row.amount; }
+        g.count++;
+        groups.set(key, g);
       }
 
       const titleById = new Map<number, string>();
