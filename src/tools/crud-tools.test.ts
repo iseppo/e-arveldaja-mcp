@@ -52,8 +52,9 @@ function getCrudToolHarness(toolName: string, overrides?: {
     },
     readonly: {
       getAccounts: vi.fn(),
-      getAccountDimensions: vi.fn(),
+      getAccountDimensions: vi.fn().mockResolvedValue([]),
       getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+      getBankAccounts: vi.fn().mockResolvedValue([]),
       ...overrides?.readonly,
     },
     clients: {
@@ -67,6 +68,7 @@ function getCrudToolHarness(toolName: string, overrides?: {
     journals: {
       update: vi.fn(),
       get: vi.fn().mockResolvedValue({ id: 7, registered: false }),
+      listAllWithPostings: vi.fn().mockResolvedValue([]),
       ...overrides?.journals,
     },
     saleInvoices: {
@@ -2428,6 +2430,135 @@ describe("D01 external-text stripping at CRUD write boundaries", () => {
     });
     const arg = createAndSetTotals.mock.calls[0]![0] as { items: Array<{ custom_title: string }> };
     expect(arg.items[0]!.custom_title).toBe("Widget");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 4: cross-mechanism duplicate-posting guard on create_transaction
+// ---------------------------------------------------------------------------
+
+describe("create_transaction duplicate-posting guard", () => {
+  const BANK_DIMENSION_ID = 100;
+  const BANK_ACCOUNT_ID = 1020;
+  const DUP_JOURNAL_ID = 555;
+
+  // A registered manual journal that already books a same-dimension, same-amount,
+  // same-direction bank posting a couple of days away — the cross-mechanism
+  // SUSPECT create_transaction currently cannot see.
+  const duplicateJournal = {
+    id: DUP_JOURNAL_ID,
+    registered: true,
+    is_deleted: false,
+    effective_date: "2026-07-19",
+    title: "Manual bank booking",
+    document_number: "DOC-DUP-1",
+    operation_type: "MANUAL",
+    clients_id: null,
+    postings: [
+      { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "D", amount: 100, is_deleted: false },
+      { accounts_id: 5120, accounts_dimensions_id: null, type: "C", amount: 100, is_deleted: false },
+    ],
+  };
+
+  const createParams = {
+    accounts_dimensions_id: BANK_DIMENSION_ID,
+    type: "D" as const,
+    amount: 100,
+    date: "2026-07-20",
+    description: "Owner deposit",
+  };
+
+  function setupCreateTransaction(options: {
+    journals?: unknown[];
+    journalsThrows?: boolean;
+    create?: ReturnType<typeof vi.fn>;
+  } = {}) {
+    const create = options.create ?? vi.fn().mockResolvedValue({ created_object_id: 42 });
+    const listAllWithPostings = options.journalsThrows
+      ? vi.fn().mockRejectedValue(new Error("page cap exceeded"))
+      : vi.fn().mockResolvedValue(options.journals ?? []);
+    const { api, handler } = getCrudToolHarness("create_transaction", {
+      transactions: { create },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          { id: BANK_DIMENSION_ID, accounts_id: BANK_ACCOUNT_ID, is_deleted: false, title_est: "LHV" },
+        ]),
+      },
+      journals: { listAllWithPostings },
+    });
+    return { api, handler, create };
+  }
+
+  it("matching suspect: create still happens and the response carries a POSSIBLE-duplicate warning naming the journal", async () => {
+    const { handler, create } = setupCreateTransaction({ journals: [duplicateJournal] });
+
+    const result = await handler(createParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      warnings?: string[];
+      possible_duplicate_postings?: Array<{ journal_id: number }>;
+    };
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.warnings?.some(w => /POSSIBLE duplicate/.test(w) && w.includes(String(DUP_JOURNAL_ID)))).toBe(true);
+    expect(payload.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
+    ]);
+  });
+
+  it("no match: creates normally with no warnings key", async () => {
+    const { handler, create } = setupCreateTransaction({ journals: [] });
+
+    const result = await handler(createParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload).not.toHaveProperty("warnings");
+    expect(payload).not.toHaveProperty("possible_duplicate_postings");
+  });
+
+  it("scan throws: creation still succeeds with a scan-unavailable note", async () => {
+    const { handler, create } = setupCreateTransaction({ journalsThrows: true });
+
+    const result = await handler(createParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as { warnings?: string[] };
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.warnings?.some(w => /Duplicate scan unavailable/.test(w))).toBe(true);
+    expect(payload).not.toHaveProperty("possible_duplicate_postings");
+  });
+
+  it("block path: block_on_duplicate=true refuses creation with a toolError naming the conflicting journal", async () => {
+    const { handler, create } = setupCreateTransaction({ journals: [duplicateJournal] });
+
+    const result = await handler({ ...createParams, block_on_duplicate: true }) as {
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    };
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      category?: string;
+      error?: string;
+      conflicting_journal_ids?: number[];
+    };
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("possible_duplicate_posting");
+    expect(payload.conflicting_journal_ids).toEqual([DUP_JOURNAL_ID]);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("block_on_duplicate=true but scan throws: creation proceeds (no refusal without evidence)", async () => {
+    const { handler, create } = setupCreateTransaction({ journalsThrows: true });
+
+    const result = await handler({ ...createParams, block_on_duplicate: true }) as {
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    };
+    const payload = parseMcpResponse(result.content[0]!.text) as { warnings?: string[] };
+
+    expect(result.isError).toBeFalsy();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.warnings?.some(w => /Duplicate scan unavailable/.test(w))).toBe(true);
   });
 });
 

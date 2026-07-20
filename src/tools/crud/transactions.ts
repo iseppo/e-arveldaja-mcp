@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
-import { toMcpJson } from "../../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../../mcp-json.js";
 import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
@@ -13,6 +13,13 @@ import { getNormalizedNetworkCause } from "../../api/transactions.api.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
 import { createBankTransaction } from "../../bank-transaction-create.js";
+import {
+  findDuplicateBankPostings,
+  resolveBankDimensions,
+  formatDuplicatePostingWarnings,
+  type DuplicatePostingCandidate,
+  type DuplicatePostingScanResult,
+} from "../../bank-posting-duplicate-guard.js";
 import type { Transaction } from "../../types/api.js";
 import type { ApiContext } from "./shared.js";
 import {
@@ -156,9 +163,50 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     clients_id: z.number().optional().describe("Related client ID"),
     bank_account_name: z.string().optional().describe("Remitter/beneficiary name"),
     ref_number: z.string().optional().describe("Reference number"),
+    block_on_duplicate: z.boolean().optional().describe("Refuse creation when a possible duplicate bank posting is found (default false: warn only)."),
   }, { ...create, title: "Create Transaction" }, async (rawParams) => {
     const params = desandboxAllStrings(rawParams);
     const direction = params.type === "D" ? "incoming" : "outgoing";
+
+    // Cross-mechanism duplicate guard (Task 4): scan ALL journal postings for an
+    // already-booked same-key cash movement before creating this transaction.
+    // Advisory by default — only refuses when block_on_duplicate=true AND the
+    // scan is available AND it actually found a suspect.
+    const bankDims = await resolveBankDimensions(api);
+    const dim = bankDims.find(d => d.dimensionId === params.accounts_dimensions_id);
+    let duplicateScan: DuplicatePostingScanResult | undefined;
+    let candidate: DuplicatePostingCandidate | undefined;
+    if (dim) {
+      candidate = {
+        accountId: dim.accountId,
+        dimensionId: dim.dimensionId,
+        amount: params.amount,
+        direction: params.type === "D" ? "D" : "C",
+        date: params.date,
+      };
+      duplicateScan = await findDuplicateBankPostings(api, candidate);
+    }
+
+    if (
+      params.block_on_duplicate === true
+      && duplicateScan?.scan_available === true
+      && duplicateScan.suspects.length > 0
+    ) {
+      const journalIds = duplicateScan.suspects.map(s => s.journal_id);
+      return toolError({
+        error: "Possible duplicate bank posting",
+        category: "possible_duplicate_posting",
+        conflicting_journal_ids: journalIds,
+        details: duplicateScan.suspects.map(s => ({
+          journal_id: s.journal_id,
+          journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
+          date: s.date,
+          amount: s.amount,
+        })),
+        next_action: `Verify journal(s) ${journalIds.join(", ")} before creating this transaction, or retry without block_on_duplicate to proceed with an advisory warning.`,
+      });
+    }
+
     const result = await createBankTransaction(api, {
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
@@ -181,6 +229,21 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       id: result.created_object_id,
       message: `Created transaction ${params.amount} ${params.cl_currencies_id ?? "EUR"} on ${params.date}.`,
       raw: result,
+      ...(duplicateScan && candidate && (duplicateScan.suspects.length > 0 || !duplicateScan.scan_available)
+        ? {
+            warnings: formatDuplicatePostingWarnings(duplicateScan, candidate, t => wrapUntrustedOcr(t) ?? ""),
+            ...(duplicateScan.suspects.length > 0
+              ? {
+                  extra: {
+                    possible_duplicate_postings: duplicateScan.suspects.map(s => ({
+                      ...s,
+                      journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
+                    })),
+                  },
+                }
+              : {}),
+          }
+        : {}),
     });
   });
 
