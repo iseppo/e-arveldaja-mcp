@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createBankTransaction } from "./bank-transaction-create.js";
+import { createBankTransaction, weaveFullRefIntoDescription } from "./bank-transaction-create.js";
 import { bankTransactionDirection } from "./bank-transaction-direction.js";
 import { REF_NUMBER_MAX_LENGTH } from "./ref-number.js";
 import { extractCamtDescriptionMetadata } from "./tools/camt-import.js";
@@ -279,5 +279,50 @@ describe("bank transaction create — ref_number canonicalization (Task 9)", () 
     expect(payload.description).toContain(overCapRef);
     expect(payload.type).toBe("D");
     expect(bankTransactionDirection({ description: payload.description })).toBe("incoming");
+  });
+});
+
+describe("bank transaction create — weave length budget (FIX B)", () => {
+  // A 32-char over-cap ref woven into a near-max description would push the
+  // stored description past the backend TRANSACTION_DESCRIPTION_MAX_LENGTH (150),
+  // risking an upstream rejection or an evicted/overflowed metadata marker.
+  const overCapRef = "RF" + "9".repeat(30); // 32 chars
+
+  it("does not weave when the woven result would exceed the length budget (returns original)", () => {
+    const description = "X".repeat(140); // 140 + 1 sep + 32 ref = 173 > 150
+    const result = weaveFullRefIntoDescription(description, overCapRef, 150);
+    expect(result.length).toBeLessThanOrEqual(150);
+    expect(result).toBe(description);
+  });
+
+  it("still weaves when the woven result fits within the budget", () => {
+    const description = "Short note";
+    const result = weaveFullRefIntoDescription(description, overCapRef, 150);
+    expect(result).toContain(overCapRef);
+    expect(result.length).toBeLessThanOrEqual(150);
+  });
+
+  it("defaults the budget to 150 when no maxLength is passed", () => {
+    const description = "Y".repeat(140);
+    const result = weaveFullRefIntoDescription(description, overCapRef);
+    expect(result.length).toBeLessThanOrEqual(150);
+    expect(result).toBe(description);
+  });
+
+  it("keeps the boundary-stored description within 150 chars for a near-max description + over-cap ref", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 107 });
+    const api = { transactions: { create } };
+
+    await createBankTransaction(api, {
+      accounts_dimensions_id: 7,
+      amount: 10,
+      cl_currencies_id: "EUR",
+      date: "2026-07-19",
+      description: "Z".repeat(140),
+      ref_number: overCapRef,
+    });
+
+    const payload = create.mock.calls[0]![0] as { description?: string };
+    expect(payload.description!.length).toBeLessThanOrEqual(150);
   });
 });
