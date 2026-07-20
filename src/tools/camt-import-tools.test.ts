@@ -2936,7 +2936,11 @@ describe("camt import — statement closing-balance tripwire", () => {
     expect(check.difference).toBe(-12.00);
     expect(check.within_tolerance).toBe(false);
     expect(check.tolerance).toBe(0.10);
-    expect(check.warnings[0]).toContain("12.00");
+    // Dry run: the statement's own entries are not booked yet, so the
+    // out-of-tolerance tripwire is a false alarm. The tolerance warning is
+    // suppressed and replaced with a deferral note; the figures stay.
+    expect(check.warnings ?? []).toHaveLength(0);
+    expect((check.notes as string[]).join(" ")).toContain("deferred until execute");
     expect(check.persisted).toBe(false);
 
     // Dry run must not write the statement-balance history.
@@ -2959,6 +2963,9 @@ describe("camt import — statement closing-balance tripwire", () => {
     expect(check).toBeDefined();
     expect(check.statement_closing_balance).toBe(12.00);
     expect(check.persisted).toBe(true);
+    // Execute runs the check AFTER the entries are booked, so a genuine
+    // out-of-tolerance divergence still fires the warning (not deferred).
+    expect(check.warnings.length).toBeGreaterThan(0);
 
     // The closing balance is recorded to the statement-balance history.
     resetStatementBalanceCache();

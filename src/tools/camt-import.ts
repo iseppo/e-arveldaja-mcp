@@ -1807,6 +1807,7 @@ async function runStatementBalanceCheck(
   fallbackDate: string | undefined,
   accountsDimensionsId: number,
   persist: boolean,
+  isExecute: boolean,
 ): Promise<StatementBalanceCheckResult | undefined> {
   const balanceDate = closing.date ?? fallbackDate;
   if (!balanceDate) return undefined;   // no anchor date → cannot reconcile
@@ -1837,6 +1838,21 @@ async function runStatementBalanceCheck(
   }
 
   const notes: string[] = [];
+
+  // Dry-run suppression: the dry run reconciles BEFORE the statement's own
+  // entries are booked (execute reconciles AFTER), so the expected balance
+  // excludes those rows and an out-of-tolerance comparison is expected — not a
+  // real discrepancy. Suppress the tolerance warning on dry-run and replace it
+  // with an explicit deferral note; all numeric figures are retained. On
+  // execute the warning fires as-is when genuinely out of tolerance.
+  if (!isExecute && check.warnings.length > 0) {
+    check.warnings = [];
+    notes.push(
+      "Closing-balance reconciliation is deferred until execute: the statement's own entries " +
+      "are not yet booked, so a dry-run comparison is expected to differ.",
+    );
+  }
+
   let persisted = false;
   if (persist) {
     try {
@@ -2133,6 +2149,7 @@ export function registerCamtImportTools(
               loaded.statement_metadata.period.to,
               accounts_dimensions_id,
               false,   // dry run: compute + report, never persist
+              false,   // dry run: defer the tolerance warning (rows not booked yet)
             )
           : undefined;
         const planHandle = issueCamtPlan(runtimeSafetyContext, snapshot, projection, normalizedArgs);
@@ -2274,6 +2291,7 @@ export function registerCamtImportTools(
             loaded.statement_metadata.period.to,
             accounts_dimensions_id,
             true,   // execute: persist the closing-balance record
+            true,   // execute: rows are booked, so the tolerance warning is real
           )
         : undefined;
 
