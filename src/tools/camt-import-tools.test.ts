@@ -1,4 +1,7 @@
 import { readFile } from "fs/promises";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -16,6 +19,8 @@ import {
   getRegisteredToolHandler,
 } from "../__fixtures__/accounting-workflow.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import { readStatementBalances, resetStatementBalanceCache } from "../statement-balance-store.js";
+import { beforeEach, afterEach } from "vitest";
 
 // CAMT free-form text is wrapped with a per-call OCR-sandbox nonce when
 // returned to MCP. These helpers check the plain value inside the wrap.
@@ -2854,5 +2859,117 @@ describe("camt plan-bound execution", () => {
     expect(() => context.planStore.consume(handle3, "camt_import")).toThrowError(
       expect.objectContaining({ code: "plan_scope_mismatch" }),
     );
+  });
+});
+
+describe("camt import — statement closing-balance tripwire", () => {
+  let bundleDir: string;
+  beforeEach(() => {
+    bundleDir = mkdtempSync(join(tmpdir(), "camt-sb-"));
+    process.env.EARVELDAJA_RULES_DIR = bundleDir;
+    resetStatementBalanceCache();
+  });
+  afterEach(() => {
+    delete process.env.EARVELDAJA_RULES_DIR;
+    rmSync(bundleDir, { recursive: true, force: true });
+    rmSync(`${bundleDir}.lock`, { recursive: true, force: true });
+    resetStatementBalanceCache();
+  });
+
+  // Single DBIT entry plus a CLBD closing balance that does not reconcile to the
+  // (empty) ledger, so the advisory warning path is exercised.
+  function camtXmlWithClosingBalance(): string {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-clbd</Id>
+      <FrToDt>
+        <FrDtTm>2026-02-01T00:00:00+02:00</FrDtTm>
+        <ToDtTm>2026-02-28T23:59:59+02:00</ToDtTm>
+      </FrToDt>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Bal>
+        <Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp>
+        <Amt Ccy="EUR">12.00</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+        <Dt><Dt>2026-02-28</Dt></Dt>
+      </Bal>
+      <Ntry>
+        <Amt Ccy="EUR">10.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-01</Dt></BookgDt>
+        <AcctSvcrRef>REF-CLBD-1</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><AcctSvcrRef>REF-CLBD-1</AcctSvcrRef></Refs>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">10.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Vendor OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Test payment</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+  }
+
+  it("surfaces the closing-balance check on the dry run without persisting it", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(camtXmlWithClosingBalance());
+    const { handler } = setupCamtTool();
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.mode).toBe("DRY_RUN");
+    const check = payload.statement_balance_check;
+    expect(check).toBeDefined();
+    expect(check.dimension_id).toBe(7);
+    expect(check.statement_closing_balance).toBe(12.00);
+    expect(check.balance_date).toBe("2026-02-28");
+    expect(check.booked_balance).toBe(0);
+    expect(check.expected_balance).toBe(0);
+    expect(check.difference).toBe(-12.00);
+    expect(check.within_tolerance).toBe(false);
+    expect(check.tolerance).toBe(0.10);
+    expect(check.warnings[0]).toContain("12.00");
+    expect(check.persisted).toBe(false);
+
+    // Dry run must not write the statement-balance history.
+    resetStatementBalanceCache();
+    expect(readStatementBalances()).toEqual([]);
+  });
+
+  it("surfaces and persists the closing-balance check on execute", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(camtXmlWithClosingBalance());
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(payload.mode).toBe("EXECUTED");
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    const check = payload.statement_balance_check;
+    expect(check).toBeDefined();
+    expect(check.statement_closing_balance).toBe(12.00);
+    expect(check.persisted).toBe(true);
+
+    // The closing balance is recorded to the statement-balance history.
+    resetStatementBalanceCache();
+    const stored = readStatementBalances();
+    expect(stored).toHaveLength(1);
+    expect(stored?.[0]).toMatchObject({
+      dimensionId: 7,
+      date: "2026-02-28",
+      closingBalance: 12.00,
+      currency: "EUR",
+      source: "camt",
+    });
   });
 });

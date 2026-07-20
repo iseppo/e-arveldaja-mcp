@@ -34,6 +34,8 @@ import { normalizeCompanyName } from "../company-name.js";
 import { buildWorkflowEnvelope, remapHiddenGranularWorkflowResult } from "../workflow-response.js";
 import { arrayAt, isRecord, recordAt } from "../record-utils.js";
 import { createBankTransaction } from "../bank-transaction-create.js";
+import { checkStatementClosingBalance, type StatementBalanceCheck } from "../statement-balance-check.js";
+import { appendStatementBalance, readStatementBalances } from "../statement-balance-store.js";
 
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -1779,6 +1781,74 @@ function camtPossibleDuplicateRow(descriptor: CamtCreateDescriptor, newApiId?: n
   };
 }
 
+interface StatementBalanceCheckResult {
+  check: StatementBalanceCheck;
+  persisted: boolean;
+  notes: string[];
+}
+
+/**
+ * Run the advisory closing-balance tripwire for a CAMT statement bound to a
+ * bank dimension. Reconciles the statement's CLBD against the ledger and, when
+ * `persist` is set (execute mode only), records the closing balance to the
+ * statement-balance history. In single-file rules mode the store is
+ * unavailable, so the comparison still runs but persistence is skipped with a
+ * note. Returns undefined when no usable balance/date anchor is available.
+ */
+async function runStatementBalanceCheck(
+  api: ApiContext,
+  closing: CamtBalance,
+  fallbackDate: string | undefined,
+  accountsDimensionsId: number,
+  persist: boolean,
+): Promise<StatementBalanceCheckResult | undefined> {
+  const balanceDate = closing.date ?? fallbackDate;
+  if (!balanceDate) return undefined;   // no anchor date → cannot reconcile
+
+  // The bank GL account backing this dimension (e.g. 1020). The dimension
+  // binding was validated upstream; this is a defensive re-read.
+  const dimensions = await api.readonly.getAccountDimensions();
+  const dimension = dimensions.find(entry => entry.id === accountsDimensionsId && !entry.is_deleted);
+  if (!dimension) return undefined;
+  const accountId = dimension.accounts_id;
+
+  const direction = closing.direction === "DBIT" ? "DBIT" : closing.direction === "CRDT" ? "CRDT" : undefined;
+  const check = await checkStatementClosingBalance(api, {
+    dimensionId: accountsDimensionsId,
+    accountId,
+    closing: {
+      amount: closing.amount,
+      ...(direction ? { direction } : {}),
+      ...(closing.date ? { date: closing.date } : {}),
+      ...(closing.currency ? { currency: closing.currency } : {}),
+    },
+    fallbackDate: balanceDate,
+  });
+
+  const notes: string[] = [];
+  let persisted = false;
+  if (persist) {
+    if (readStatementBalances() === null) {
+      notes.push(
+        "Statement-balance history is not persisted in single-file rules mode (EARVELDAJA_RULES_FILE); " +
+        "the closing-balance comparison ran but was not stored.",
+      );
+    } else {
+      appendStatementBalance({
+        dimensionId: accountsDimensionsId,
+        date: check.balance_date,
+        closingBalance: check.statement_closing_balance,
+        currency: closing.currency ?? "EUR",
+        source: "camt",
+        recordedAt: new Date().toISOString(),
+      });
+      persisted = true;
+    }
+  }
+
+  return { check, persisted, notes };
+}
+
 interface CamtImportRenderInput {
   mode: "DRY_RUN" | "EXECUTED";
   projection: CamtImportProjection;
@@ -1789,6 +1859,7 @@ interface CamtImportRenderInput {
   workflowArgs: Record<string, unknown>;
   executionReport?: PlanExecutionReport;
   planHandle?: string;
+  statementBalanceCheck?: StatementBalanceCheckResult;
 }
 
 function renderCamtImportPayload(input: CamtImportRenderInput): Record<string, unknown> {
@@ -1888,6 +1959,15 @@ function renderCamtImportPayload(input: CamtImportRenderInput): Record<string, u
       },
     }),
     ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
+    ...(input.statementBalanceCheck !== undefined ? {
+      statement_balance_check: {
+        ...input.statementBalanceCheck.check,
+        persisted: input.statementBalanceCheck.persisted,
+        ...(input.statementBalanceCheck.notes.length > 0
+          ? { notes: input.statementBalanceCheck.notes }
+          : {}),
+      },
+    } : {}),
   };
 }
 
@@ -2029,6 +2109,15 @@ export function registerCamtImportTools(
         await assertStatementAccountMatchesDimension(api, loaded.statement_metadata.iban, accounts_dimensions_id);
 
         const projection = await computeCamtImportProjection(api, loaded, accounts_dimensions_id, date_from, date_to);
+        const statementBalanceCheck = loaded.statement_metadata.closing_balance
+          ? await runStatementBalanceCheck(
+              api,
+              loaded.statement_metadata.closing_balance,
+              loaded.statement_metadata.period.to,
+              accounts_dimensions_id,
+              false,   // dry run: compute + report, never persist
+            )
+          : undefined;
         const planHandle = issueCamtPlan(runtimeSafetyContext, snapshot, projection, normalizedArgs);
         const results = projection.descriptors.map(descriptor => camtResultRow(descriptor, "would_create"));
         const possibleDuplicates = projection.descriptors
@@ -2057,6 +2146,7 @@ export function registerCamtImportTools(
               errorCount: 0,
               workflowArgs,
               planHandle,
+              ...(statementBalanceCheck ? { statementBalanceCheck } : {}),
             })),
           }],
         };
@@ -2158,6 +2248,18 @@ export function registerCamtImportTools(
         .filter(index => projection.descriptors[index]!.possibleDuplicateMatches.length > 0)
         .map(index => camtPossibleDuplicateRow(projection.descriptors[index]!, createdApiIdByIndex.get(index)));
 
+      // Run after the mutations so the freshly-imported (still PROJECT) rows are
+      // reflected in the expected balance, and persist the closing balance.
+      const statementBalanceCheck = loaded.statement_metadata.closing_balance
+        ? await runStatementBalanceCheck(
+            api,
+            loaded.statement_metadata.closing_balance,
+            loaded.statement_metadata.period.to,
+            accounts_dimensions_id,
+            true,   // execute: persist the closing-balance record
+          )
+        : undefined;
+
       return {
         content: [{
           type: "text",
@@ -2170,6 +2272,7 @@ export function registerCamtImportTools(
             errorCount: projection.descriptors.length - completedIndices.size,
             workflowArgs: {},
             executionReport,
+            ...(statementBalanceCheck ? { statementBalanceCheck } : {}),
           })),
         }],
       };
