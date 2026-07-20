@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 122 tools, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 123 tools, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 > **Correct standard-chart accounts (behaviour change).** Every hardcoded default account was audited against the e-arveldaja RTJ standard chart and corrected — several earlier defaults pointed at the wrong account (e.g. the dividend income-tax liability at 2540 "Kogumispensioni maksed", an FX loss at an income account). More importantly, the tools now resolve each equity/liability/financial account **by its Estonian name** against your company's actual chart, using the standard number only as a fallback, so dividend, share-capital, reserve, FX, and Lightyear postings land on the right account even on a custom or renumbered chart. If you booked with an earlier version this year, the read-only `npm run audit:legacy-accounts` script flags any entries still sitting on an old default account. See the [changelog](CHANGELOG.md) for full details.
 >
@@ -130,7 +130,7 @@ The tool list is sent into the model's context on every session, so it is a fixe
 - `EARVELDAJA_DISABLE_SALES=1` — drops the sales-invoicing side: the 11 sale-invoice tools, `create_recurring_sale_invoices`, and receivables aging (`compute_receivables_aging`). Payables aging and all purchase-invoice tools stay. Use it for purchase-side-only bookkeeping.
 - `EARVELDAJA_DISABLE_PRODUCTS=1` — drops the product-catalog tools (`list/get/create/update/deactivate/reactivate/delete_product`). Products are chiefly the sale-invoice line-item catalog (purchase items key on `cl_purchase_articles_id`, though they can also carry an optional `products_id`), so a `DISABLE_SALES` deployment usually sets this too. It only removes catalog management — creating either invoice type still works — so the flags stay independent.
 
-A lean purchase-side-only deployment with every disable flag set (incl. Lightyear) lands near 80 tools instead of the default 122. Conversely, `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` and `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` register the hidden granular and credential-management tools when you need them.
+A lean purchase-side-only deployment with every disable flag set (incl. Lightyear) lands near 80 tools instead of the default 123. Conversely, `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` and `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` register the hidden granular and credential-management tools when you need them.
 
 Confirmed supplier history still wins over local rules for purchase booking defaults.
 

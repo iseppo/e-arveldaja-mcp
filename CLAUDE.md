@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-122 tools by default (117 with Lightyear disabled; up to 135 with the optional granular and setup tools exposed — see Tool exposure below), 16 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
+123 tools by default (118 with Lightyear disabled; up to 136 with the optional granular and setup tools exposed — see Tool exposure below), 16 workflow prompts, 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -86,6 +86,10 @@ balances are folded in as one synthetic journal dated at the opening date
 **optional**: with nothing stored, everything behaves exactly as before,
 except the old blind "verify in the UI" warning becomes an actionable prompt
 pointing at `import_opening_balances` (`src/opening-balance-limitations.ts`).
+The `compute_account_dimension_balances` tool (`src/tools/account-balance.ts`)
+returns a per-dimension balance breakdown for one account (e.g. the LHV/Wise/
+Lightyear dimensions of account 1020), with the folded opening balances
+attributed per dimension; its `total` reconciles to `compute_account_balance`.
 
 ### Tool exposure (per-session token cost)
 
@@ -153,9 +157,9 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The default surface is 122 tools; `DISABLE_LIGHTYEAR` drops it to 117.
+The default surface is 123 tools; `DISABLE_LIGHTYEAR` drops it to 118.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both raises it to the full 135. The five opt-out
+credential tools; enabling both raises it to the full 136. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−3),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
@@ -450,5 +454,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 122 tools (default exposure)
+const { tools } = await client.listTools(); // 123 tools (default exposure)
 ```

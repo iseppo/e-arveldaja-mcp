@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `compute_account_dimension_balances` — read-only per-dimension balance breakdown for one account (e.g. the LHV/Wise/Lightyear dimensions of account 1020); the total reconciles to `compute_account_balance`. The algbilanss opening-balance import now captures and attributes opening balances per dimension.
+
 ## [0.22.1] - 2026-07-20
 
 ### Fixed
