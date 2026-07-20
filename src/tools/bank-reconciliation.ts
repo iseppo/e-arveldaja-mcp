@@ -17,6 +17,14 @@ import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { BookingGuard, type InterAccountResolution } from "../booking-guard.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
+import {
+  findDuplicateBankPostings,
+  resolveBankDimensions,
+  formatDuplicatePostingWarnings,
+  type DuplicatePostingCandidate,
+  type DuplicatePostingSuspect,
+} from "../bank-posting-duplicate-guard.js";
+import type { Journal } from "../types/api.js";
 import { toolError } from "../tool-error.js";
 import { isRecord } from "../record-utils.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
@@ -420,12 +428,29 @@ interface ExactConfirmDescriptor {
   invoiceClientsId: number | null;
   confidence: number;
   needsClientUpdate: boolean;
+  // Cash-leg identity for the cross-mechanism duplicate guard (Task 3). The
+  // dimension resolves to a bank account via resolveBankDimensions; direction
+  // mirrors createBankTransaction (incoming -> D, else C).
+  accountsDimensionsId: number | undefined;
+  direction: "D" | "C";
+  possibleDuplicatePostings?: DuplicatePostingSuspect[];
+}
+
+interface BlockedDuplicateSuspect {
+  transaction_id: number;
+  reason: string;
+  conflicting_journal_ids: number[];
+  suspects: DuplicatePostingSuspect[];
 }
 
 interface ExactMatchProjection {
   totalUnconfirmed: number;
   confirms: ExactConfirmDescriptor[];
   skipped: Array<{ transaction_id?: number; reason: string }>;
+  // Populated by enrichExactMatchProjectionWithDuplicateGuard (Task 3).
+  blockedDuplicateSuspects: BlockedDuplicateSuspect[];
+  duplicateScanNote?: string;
+  duplicateWarnings?: string[];
 }
 
 function collectExactMatchCandidates(
@@ -516,10 +541,84 @@ function computeExactMatchProjection(
       invoiceClientsId,
       confidence: match.confidence,
       needsClientUpdate: clientsId == null && invoiceClientsId != null,
+      accountsDimensionsId: tx.accounts_dimensions_id,
+      direction: bankTransactionDirection(tx) === "incoming" ? "D" : "C",
     });
   }
 
-  return { totalUnconfirmed: unconfirmed.length, confirms, skipped };
+  return { totalUnconfirmed: unconfirmed.length, confirms, skipped, blockedDuplicateSuspects: [] };
+}
+
+/**
+ * Cross-mechanism duplicate guard for the exact-match confirm flow (Task 3).
+ * For each confirm descriptor whose dimension is a known bank dimension, scans
+ * ALL journal postings for an already-booked same-key cash movement. Advisory
+ * by default: suspects are attached to the descriptor and surfaced as warnings.
+ * With blockOnDuplicate=true AND an available scan AND suspects, the descriptor
+ * is partitioned out of `confirms` into `blockedDuplicateSuspects` before plan
+ * issue, so neither review nor execute commands include it. An unavailable scan
+ * (page cap) NEVER blocks — it records the note and proceeds.
+ *
+ * Runs identically in the dry-run and execute paths so the re-derived execute
+ * projection matches the reviewed plan fingerprint.
+ */
+async function enrichExactMatchProjectionWithDuplicateGuard(
+  api: ApiContext,
+  projection: ExactMatchProjection,
+  blockOnDuplicate: boolean,
+): Promise<void> {
+  if (projection.confirms.length === 0) return;
+
+  const bankDims = await resolveBankDimensions(api);
+  const dimById = new Map(bankDims.map(d => [d.dimensionId, d]));
+  const wrapTitle = (t: string): string => wrapUntrustedOcr(t) ?? "";
+
+  const surviving: ExactConfirmDescriptor[] = [];
+  const blocked: BlockedDuplicateSuspect[] = [];
+  const warnings: string[] = [];
+
+  for (const descriptor of projection.confirms) {
+    const dim = descriptor.accountsDimensionsId != null ? dimById.get(descriptor.accountsDimensionsId) : undefined;
+    if (!dim || descriptor.date == null) {
+      surviving.push(descriptor);
+      continue;
+    }
+
+    const candidate: DuplicatePostingCandidate = {
+      accountId: dim.accountId,
+      dimensionId: dim.dimensionId,
+      amount: descriptor.amount,
+      direction: descriptor.direction,
+      date: descriptor.date,
+    };
+    const scan = await findDuplicateBankPostings(api, candidate);
+
+    if (!scan.scan_available) {
+      projection.duplicateScanNote ??= scan.scan_note;
+      warnings.push(...formatDuplicatePostingWarnings(scan, candidate, wrapTitle));
+      surviving.push(descriptor);
+      continue;
+    }
+
+    if (scan.suspects.length > 0) {
+      descriptor.possibleDuplicatePostings = scan.suspects;
+      warnings.push(...formatDuplicatePostingWarnings(scan, candidate, wrapTitle));
+      if (blockOnDuplicate) {
+        blocked.push({
+          transaction_id: descriptor.transactionId,
+          reason: `Possible cross-mechanism duplicate: an already-booked same-key cash movement exists (journal(s) ${scan.suspects.map(s => s.journal_id).join(", ")}). Blocked from auto-confirm; verify before booking.`,
+          conflicting_journal_ids: scan.suspects.map(s => s.journal_id),
+          suspects: scan.suspects,
+        });
+        continue;
+      }
+    }
+    surviving.push(descriptor);
+  }
+
+  projection.confirms = surviving;
+  projection.blockedDuplicateSuspects = blocked;
+  if (warnings.length > 0) projection.duplicateWarnings = warnings;
 }
 
 function exactMatchFingerprint(projection: ExactMatchProjection, threshold: number): string {
@@ -548,6 +647,11 @@ function exactMatchFingerprint(projection: ExactMatchProjection, threshold: numb
   });
 }
 
+// Wrap each suspect's untrusted journal_title at MCP output (Task 3).
+function renderSuspects(suspects: DuplicatePostingSuspect[]): Array<Record<string, unknown>> {
+  return suspects.map(s => ({ ...s, journal_title: wrapUntrustedOcr(s.journal_title) ?? "" }));
+}
+
 function exactMatchReviewCommands(projection: ExactMatchProjection): ReconciliationReviewCommand[] {
   const commands: ReconciliationReviewCommand[] = [];
   for (const descriptor of projection.confirms) {
@@ -573,6 +677,9 @@ function exactMatchReviewCommands(projection: ExactMatchProjection): Reconciliat
         amount: descriptor.amount,
         currency: descriptor.currency,
         confidence: descriptor.confidence,
+        ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
+          ? { possible_duplicate_postings: renderSuspects(descriptor.possibleDuplicatePostings) }
+          : {}),
       }),
     });
   }
@@ -673,7 +780,7 @@ function renderExactMatchPayload(input: {
   const dryRun = mode === "DRY_RUN";
   const completedIds = new Set(input.executionReport?.command_partitions.completed.map(item => item.command_id) ?? []);
 
-  const results = projection.confirms.map(descriptor => {
+  const results: Array<Record<string, unknown>> = projection.confirms.map(descriptor => {
     const confirmed = completedIds.has(reconInvoiceConfirmCommandId(descriptor.transactionId));
     return {
       transaction_id: descriptor.transactionId,
@@ -681,8 +788,23 @@ function renderExactMatchPayload(input: {
       date: descriptor.date,
       match: { type: descriptor.invoiceType, id: descriptor.invoiceId, number: wrapUntrustedOcr(descriptor.invoiceNumber) ?? "", confidence: descriptor.confidence },
       status: dryRun ? "would_confirm" : confirmed ? "confirmed" : "not_confirmed",
+      ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
+        ? { possible_duplicate_postings: renderSuspects(descriptor.possibleDuplicatePostings) }
+        : {}),
     };
   });
+
+  // Descriptors partitioned out by block_on_duplicate render like skipped rows,
+  // never would_confirm — the operator sees the conflict instead of an approval.
+  for (const blockedRow of projection.blockedDuplicateSuspects) {
+    results.push({
+      transaction_id: blockedRow.transaction_id,
+      status: "blocked_duplicate_suspect",
+      reason: blockedRow.reason,
+      conflicting_journal_ids: blockedRow.conflicting_journal_ids,
+      possible_duplicate_postings: renderSuspects(blockedRow.suspects),
+    });
+  }
 
   const errors: Array<{ transaction_id?: number; reason: string }> = projection.skipped.map(row => ({ ...row }));
   if (!dryRun && input.executionReport) {
@@ -716,6 +838,8 @@ function renderExactMatchPayload(input: {
       errors,
       ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
     }),
+    ...(projection.duplicateWarnings && projection.duplicateWarnings.length > 0 ? { warnings: projection.duplicateWarnings } : {}),
+    ...(projection.duplicateScanNote !== undefined ? { duplicate_scan_note: projection.duplicateScanNote } : {}),
     ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
   };
 }
@@ -816,9 +940,12 @@ export function registerBankReconciliationTools(
     "Returns suggested matches with confidence scores and ready-to-use distribution data.",
     {
       min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence threshold 0-100 (default 50)"),
+      block_on_duplicate: z.boolean().optional().describe(
+        "Read-only: annotate any match whose cash movement appears already booked by another journal with duplicate_blocked=true. Suggest mode never confirms, so this only labels the row."
+      ),
     },
     { ...readOnly, title: "Reconcile Transactions" },
-    async ({ min_confidence }) => {
+    async ({ min_confidence, block_on_duplicate }) => {
       const threshold = min_confidence ?? 50;
 
       // Get all unconfirmed transactions
@@ -838,6 +965,10 @@ export function registerBankReconciliationTools(
 
       const saleIndex = buildInvoiceIndex(openSales);
       const purchaseIndex = buildInvoiceIndex(openPurchases);
+      // Cross-mechanism duplicate guard (Task 3): resolve bank dimensions once so
+      // each matched row can be checked against already-booked cash movements.
+      const suggestBankDims = await resolveBankDimensions(api);
+      const suggestDimById = new Map(suggestBankDims.map(d => [d.dimensionId, d]));
       const results = [];
 
       for (const tx of unconfirmed) {
@@ -906,6 +1037,23 @@ export function registerBankReconciliationTools(
                 tx.amount,
                 bestMatch.partially_paid_warning,
               );
+          // Cross-mechanism duplicate guard (Task 3): read-only annotation of the
+          // matched row when the tx sits on a known bank dimension and the same
+          // cash movement already appears booked by another journal.
+          const suggestDim = suggestDimById.get(tx.accounts_dimensions_id);
+          let possibleDuplicatePostings: DuplicatePostingSuspect[] | undefined;
+          if (suggestDim && tx.date) {
+            const scan = await findDuplicateBankPostings(api, {
+              accountId: suggestDim.accountId,
+              dimensionId: suggestDim.dimensionId,
+              amount: tx.amount,
+              direction: bankTransactionDirection(tx) === "incoming" ? "D" : "C",
+              date: tx.date,
+            });
+            if (scan.scan_available && scan.suspects.length > 0) {
+              possibleDuplicatePostings = scan.suspects;
+            }
+          }
           // tx.description, tx.bank_account_name, and tx.ref_number originate
           // from bank-statement import (CAMT, Wise). Counterparties control
           // those bytes. bestMatch mirrors invoice fields — for purchase
@@ -935,6 +1083,12 @@ export function registerBankReconciliationTools(
             },
             other_candidate_count: candidates.length - 1,
             ...(distribution ? { distribution } : {}),
+            ...(possibleDuplicatePostings
+              ? { possible_duplicate_postings: renderSuspects(possibleDuplicatePostings) }
+              : {}),
+            ...(possibleDuplicatePostings && block_on_duplicate === true
+              ? { duplicate_blocked: true }
+              : {}),
             ...(bestMatch.partially_paid_warning
               ? { manual_review_required: "Invoice is PARTIALLY_PAID; verify the remaining open balance before confirming." }
               : {}),
@@ -964,10 +1118,13 @@ export function registerBankReconciliationTools(
     {
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),
       min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence (default 90)"),
+      block_on_duplicate: z.boolean().optional().describe(
+        "Refuse (partition out of the confirm set) any exact match whose cash movement appears already booked by another journal (an available cross-mechanism duplicate scan finds a suspect). Default false = advisory only."
+      ),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for execute=true."),
     },
     { ...batch, title: "Auto-Confirm Bank Matches" },
-    async ({ execute, min_confidence, plan_handle }) => {
+    async ({ execute, min_confidence, block_on_duplicate, plan_handle }) => {
       const threshold = min_confidence ?? 90;
 
       const allTx = await api.transactions.listAll();
@@ -985,6 +1142,9 @@ export function registerBankReconciliationTools(
       );
 
       const projection = computeExactMatchProjection(unconfirmed, openSales, openPurchases, threshold);
+      // Cross-mechanism duplicate guard (Task 3). Runs identically in dry-run and
+      // execute so the re-derived execute projection matches the reviewed plan.
+      await enrichExactMatchProjectionWithDuplicateGuard(api, projection, block_on_duplicate === true);
 
       if (execute !== true) {
         // DRY RUN: issue an immutable execution plan the operator reviews and
@@ -2131,12 +2291,15 @@ export function registerBankReconciliationTools(
       target_accounts_dimensions_id: z.number().optional().describe(
         "For inter_account_dry_run one-sided transfers, specify the target bank account dimension ID when it cannot be inferred."
       ),
+      block_on_duplicate: z.boolean().optional().describe(
+        "For the invoice-matching modes (suggest / dry_run_auto_confirm / execute_auto_confirm): refuse (or, in suggest, flag) an exact match whose cash movement appears already booked by another journal. Default false = advisory only."
+      ),
       plan_handle: z.string().optional().describe(
         "Execution-plan handle from the reviewed dry run. Required for mode='execute_auto_confirm' and forwarded to the confirm executor."
       ),
     },
     { ...batch, title: "Reconcile Bank Transactions" },
-    async ({ mode, min_confidence, max_date_gap, target_accounts_dimensions_id, plan_handle }) => {
+    async ({ mode, min_confidence, max_date_gap, target_accounts_dimensions_id, block_on_duplicate, plan_handle }) => {
       const selectedMode = mode ?? "suggest";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
@@ -2146,6 +2309,7 @@ export function registerBankReconciliationTools(
           delegatedTool = "reconcile_transactions";
           delegatedArgs = {
             ...(min_confidence !== undefined ? { min_confidence } : {}),
+            ...(block_on_duplicate !== undefined ? { block_on_duplicate } : {}),
           };
           break;
         case "dry_run_auto_confirm":
@@ -2153,6 +2317,7 @@ export function registerBankReconciliationTools(
           delegatedArgs = {
             execute: false,
             ...(min_confidence !== undefined ? { min_confidence } : {}),
+            ...(block_on_duplicate !== undefined ? { block_on_duplicate } : {}),
           };
           break;
         case "execute_auto_confirm":
@@ -2160,6 +2325,7 @@ export function registerBankReconciliationTools(
           delegatedArgs = {
             execute: true,
             ...(min_confidence !== undefined ? { min_confidence } : {}),
+            ...(block_on_duplicate !== undefined ? { block_on_duplicate } : {}),
             ...(plan_handle !== undefined ? { plan_handle } : {}),
           };
           break;

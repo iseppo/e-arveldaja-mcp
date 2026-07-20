@@ -2921,3 +2921,155 @@ describe("matchScore", () => {
     expect(result.confidence).toBeLessThanOrEqual(100);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 3: cross-mechanism duplicate-posting guard on exact-match confirms
+// ---------------------------------------------------------------------------
+
+describe("exact-match confirm duplicate-posting guard", () => {
+  const BANK_DIMENSION_ID = 100;
+  const BANK_ACCOUNT_ID = 1020;
+  const DUP_JOURNAL_ID = 555;
+
+  // A registered manual journal that already books a same-dimension, same-amount,
+  // same-direction bank posting two days away — the cross-mechanism SUSPECT the
+  // reconcile flow currently cannot see.
+  const duplicateJournal = {
+    id: DUP_JOURNAL_ID,
+    registered: true,
+    is_deleted: false,
+    effective_date: "2026-03-22",
+    title: "Manual bank booking",
+    document_number: "DOC-DUP-1",
+    operation_type: "MANUAL",
+    clients_id: null,
+    postings: [
+      { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "D", amount: 100, is_deleted: false },
+      { accounts_id: 5120, accounts_dimensions_id: null, type: "C", amount: 100, is_deleted: false },
+    ],
+  };
+
+  const matchingTx = {
+    id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20",
+    accounts_dimensions_id: BANK_DIMENSION_ID, cl_currencies_id: "EUR",
+    bank_account_name: "Acme OU", ref_number: "RF123",
+  };
+  const matchingSale = {
+    id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10",
+    clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF123",
+  };
+
+  function setupGuardAutoConfirm(options: {
+    journals?: unknown[];
+    journalsThrows?: boolean;
+    toolName?: string;
+  } = {}) {
+    const server = { registerTool: vi.fn() } as any;
+    const listAllWithPostings = options.journalsThrows
+      ? vi.fn().mockRejectedValue(new Error("page cap exceeded"))
+      : vi.fn().mockResolvedValue(options.journals ?? []);
+    const api = {
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([matchingTx]),
+        get: vi.fn().mockResolvedValue({ ...matchingTx }),
+        update: vi.fn().mockResolvedValue({}),
+        confirm: vi.fn().mockResolvedValue({}),
+      },
+      saleInvoices: { listAll: vi.fn().mockResolvedValue([matchingSale]) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          { id: BANK_DIMENSION_ID, accounts_id: BANK_ACCOUNT_ID, is_deleted: false, title_est: "LHV" },
+        ]),
+        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
+      },
+      journals: { listAllWithPostings },
+      clients: { findByName: vi.fn().mockResolvedValue([]) },
+    } as any;
+    registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
+    const registration = server.registerTool.mock.calls.find(
+      ([name]: [string]) => name === (options.toolName ?? "auto_confirm_exact_matches"),
+    );
+    if (!registration) throw new Error("Tool was not registered");
+    return {
+      handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+      api,
+    };
+  }
+
+  it("dry run keeps would_confirm and carries possible_duplicate_postings + a POSSIBLE-duplicate warning", async () => {
+    const { handler, api } = setupGuardAutoConfirm({ journals: [duplicateJournal] });
+
+    const result = await handler({ execute: false, min_confidence: 50 });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.results[0]!.status).toBe("would_confirm");
+    expect(payload.results[0]!.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
+    ]);
+    expect(payload.warnings.some((w: string) => /POSSIBLE duplicate/.test(w))).toBe(true);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("still succeeds and reports a scan-unavailable note when journals throw on page cap", async () => {
+    const { handler } = setupGuardAutoConfirm({ journalsThrows: true });
+
+    const result = await handler({ execute: false, min_confidence: 50 });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.results[0]!.status).toBe("would_confirm");
+    expect(payload.duplicate_scan_note).toMatch(/Duplicate scan unavailable/);
+    expect(payload.results[0]!.possible_duplicate_postings).toBeUndefined();
+  });
+
+  it("blocks the confirm with block_on_duplicate=true and executes nothing for that transaction", async () => {
+    const { handler, api } = setupGuardAutoConfirm({ journals: [duplicateJournal] });
+
+    const dry = parseMcpResponse(
+      (await handler({ execute: false, min_confidence: 50, block_on_duplicate: true })).content[0]!.text,
+    ) as any;
+    const blockedRow = dry.results.find((r: any) => r.transaction_id === 1);
+    expect(blockedRow.status).toBe("blocked_duplicate_suspect");
+    expect(blockedRow.status).not.toBe("would_confirm");
+    expect(blockedRow.conflicting_journal_ids).toContain(DUP_JOURNAL_ID);
+    expect(dry.auto_confirmed).toBe(0);
+
+    const executed = parseMcpResponse(
+      (await handler({ execute: true, min_confidence: 50, block_on_duplicate: true, plan_handle: dry.plan_handle })).content[0]!.text,
+    ) as any;
+    expect(executed.mode).toBe("EXECUTED");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("does NOT block on an unavailable scan even with block_on_duplicate=true", async () => {
+    const { handler } = setupGuardAutoConfirm({ journalsThrows: true });
+
+    const result = await handler({ execute: false, min_confidence: 50, block_on_duplicate: true });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.results[0]!.status).toBe("would_confirm");
+    expect(payload.duplicate_scan_note).toMatch(/Duplicate scan unavailable/);
+  });
+
+  it("suggest mode echoes possible_duplicate_postings on the match row; merged tool forwards the flag", async () => {
+    const { handler } = setupGuardAutoConfirm({ journals: [duplicateJournal], toolName: "reconcile_transactions" });
+    const suggest = parseMcpResponse((await handler({ min_confidence: 50 })).content[0]!.text) as any;
+    expect(suggest.matches[0]!.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
+    ]);
+
+    const { handler: blockingSuggest } = setupGuardAutoConfirm({ journals: [duplicateJournal], toolName: "reconcile_transactions" });
+    const blocked = parseMcpResponse((await blockingSuggest({ min_confidence: 50, block_on_duplicate: true })).content[0]!.text) as any;
+    expect(blocked.matches[0]!.duplicate_blocked).toBe(true);
+
+    const { handler: merged } = setupGuardAutoConfirm({ journals: [duplicateJournal], toolName: "reconcile_bank_transactions" });
+    const mergedResult = parseMcpResponse(
+      (await merged({ mode: "suggest", min_confidence: 50, block_on_duplicate: true })).content[0]!.text,
+    ) as any;
+    expect(mergedResult.delegated_args.block_on_duplicate).toBe(true);
+    expect(mergedResult.result.matches[0]!.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
+    ]);
+  });
+});
