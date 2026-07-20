@@ -194,6 +194,86 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     }
   );
 
+  registerTool(server, "compute_account_dimension_balances",
+    "Break an account's balance down per dimension (e.g. each bank sub-account of 1020 Arvelduskontod: LHV, Wise, Lightyear), including any stored opening balances. Returns one row per dimension plus a total that equals compute_account_balance for the same account.",
+    {
+      account_id: coerceId.describe("Account id (e.g. 1020). Required. In the RIK chart the id is the account number."),
+      date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
+      date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
+      fresh: z.boolean().optional().describe("Clear cached API/reference data first."),
+    },
+    { ...readOnly, title: "Compute Account Balances by Dimension" },
+    async ({ account_id, date_from, date_to, fresh }) => {
+      const cacheClear = fresh ? clearRuntimeCaches() : undefined;
+      const [opening, journalsFromApi, account, dimensions] = await Promise.all([
+        loadOpeningBalanceJournal(api),
+        api.journals.listAllWithPostings(),
+        api.readonly.getAccount(account_id),
+        api.readonly.getAccountDimensions(),
+      ]);
+      const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
+      const balanceType = account?.balance_type ?? "D";
+
+      const groups = new Map<number | null, { debit: number; credit: number; count: number }>();
+      let rawDebit = 0;
+      let rawCredit = 0;
+      for (const journal of allJournals) {
+        if (journal.is_deleted || !journal.registered) continue;
+        if (date_from && journal.effective_date < date_from) continue;
+        if (date_to && journal.effective_date > date_to) continue;
+        if (!journal.postings) continue;
+        for (const p of journal.postings) {
+          if (p.accounts_id !== account_id || p.is_deleted) continue;
+          if (p.type !== "D" && p.type !== "C") continue;
+          const key = p.accounts_dimensions_id ?? null;
+          const g = groups.get(key) ?? { debit: 0, credit: 0, count: 0 };
+          const amount = p.base_amount ?? p.amount;
+          if (p.type === "D") { g.debit += amount; rawDebit += amount; }
+          else { g.credit += amount; rawCredit += amount; }
+          g.count++;
+          groups.set(key, g);
+        }
+      }
+
+      const titleById = new Map<number, string>();
+      for (const d of dimensions) if (d.id !== undefined) titleById.set(d.id, d.title_est);
+
+      const rows = [...groups.entries()]
+        .map(([dimId, g]) => ({
+          dimension_id: dimId,
+          title: dimId === null
+            ? "(määramata)"
+            : (wrapUntrustedOcr(titleById.get(dimId) ?? `#${dimId}`) ?? `#${dimId}`),
+          balance: roundMoney(balanceType === "D" ? g.debit - g.credit : g.credit - g.debit),
+          debit_total: roundMoney(g.debit),
+          credit_total: roundMoney(g.credit),
+          entry_count: g.count,
+        }))
+        .sort((a, b) => (a.dimension_id ?? -1) - (b.dimension_id ?? -1));
+
+      const total = roundMoney(balanceType === "D" ? rawDebit - rawCredit : rawCredit - rawDebit);
+
+      const summary = {
+        account_id,
+        account_name: account ? `${account.name_est} / ${account.name_eng}` : "Unknown",
+        balance_type: account?.balance_type ?? "?",
+        dimensions: rows,
+        total,
+        ...(date_from && { date_from }),
+        ...(date_to && { date_to }),
+        ...cacheClearMetadata(cacheClear),
+        warnings: withOpeningBalanceStatusInRange([], {
+          captured: opening !== null,
+          openingDate: opening?.openingDate,
+          unmappedCodes: opening?.unmappedCodes,
+          dateFrom: date_from,
+          dateTo: date_to,
+        }),
+      };
+      return { content: [{ type: "text", text: toMcpJson(summary) }] };
+    }
+  );
+
   registerTool(server, "compute_client_debt",
     "Compute net position against a client across selected accounts.",
     {

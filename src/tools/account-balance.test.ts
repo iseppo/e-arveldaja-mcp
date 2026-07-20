@@ -319,6 +319,95 @@ describe("compute_account_balance tool", () => {
   });
 });
 
+describe("compute_account_dimension_balances tool", () => {
+  const ACCOUNT_ID = 1020;
+  const D_ACCOUNT = { id: ACCOUNT_ID, name_est: "Pank", name_eng: "Bank", balance_type: "D" };
+  const DIM_A = { id: 12637392, accounts_id: ACCOUNT_ID, title_est: "LHV" };
+  const DIM_B = { id: 13172505, accounts_id: ACCOUNT_ID, title_est: "Wise" };
+
+  function dimPosting(type: "D" | "C", amount: number, dimensionId: number | null) {
+    return { ...posting(ACCOUNT_ID, type, amount), accounts_dimensions_id: dimensionId };
+  }
+
+  function setup(
+    journals: Journal[],
+    account = D_ACCOUNT,
+    dimensions: Array<{ id?: number; accounts_id: number; title_est: string }> = [DIM_A, DIM_B],
+  ) {
+    const api = {
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue(journals) },
+      readonly: {
+        getAccount: vi.fn().mockResolvedValue(account),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getAccountDimensions: vi.fn().mockResolvedValue(dimensions),
+      },
+    } as unknown as Parameters<typeof registerAccountBalanceTools>[1];
+    const server = {} as Parameters<typeof registerAccountBalanceTools>[0];
+    registerAccountBalanceTools(server, api);
+    return capturedHandlers["compute_account_dimension_balances"]!;
+  }
+
+  function parse(text: string) {
+    return parseMcpResponse(text) as Record<string, unknown>;
+  }
+
+  it("splits account 1020 into per-dimension rows that sum to the account total", async () => {
+    const journals = [
+      journal({ id: 1, postings: [dimPosting("D", 1000, DIM_A.id)] }),
+      journal({ id: 2, postings: [dimPosting("C", 200, DIM_A.id)] }),
+      journal({ id: 3, postings: [dimPosting("D", 50, DIM_B.id)] }),
+    ];
+    const handler = setup(journals);
+    const result = await handler({ account_id: ACCOUNT_ID });
+    const data = parse((result.content[0] as { text: string }).text);
+
+    const dims = data.dimensions as Array<Record<string, unknown>>;
+    const dimA = dims.find(d => d.dimension_id === DIM_A.id);
+    const dimB = dims.find(d => d.dimension_id === DIM_B.id);
+    expect(dimA?.balance).toBe(800);
+    expect(dimB?.balance).toBe(50);
+    expect(data.total).toBe(850);
+  });
+
+  it("puts postings with no dimension in the (määramata) bucket", async () => {
+    const journals = [
+      journal({ id: 1, postings: [dimPosting("D", 300, null)] }),
+    ];
+    const handler = setup(journals);
+    const result = await handler({ account_id: ACCOUNT_ID });
+    const data = parse((result.content[0] as { text: string }).text);
+
+    const dims = data.dimensions as Array<Record<string, unknown>>;
+    const row = dims.find(d => d.dimension_id === null);
+    expect(row).toBeDefined();
+    expect(row?.title).toBe("(määramata)");
+    expect(row?.balance).toBe(300);
+  });
+
+  it("reconciles the per-dimension total to compute_account_balance for the same account", async () => {
+    const journals = [
+      journal({ id: 1, postings: [dimPosting("D", 1000, DIM_A.id)] }),
+      journal({ id: 2, postings: [dimPosting("C", 200, DIM_A.id)] }),
+      journal({ id: 3, postings: [dimPosting("D", 50, DIM_B.id)] }),
+      journal({ id: 4, postings: [dimPosting("D", 75, null)] }),
+    ];
+
+    const dimHandler = setup(journals);
+    const dimResult = await dimHandler({ account_id: ACCOUNT_ID });
+    const dimData = parse((dimResult.content[0] as { text: string }).text);
+
+    const balanceApi = makeApi(journals, D_ACCOUNT) as unknown as Parameters<typeof registerAccountBalanceTools>[1];
+    const balanceServer = {} as Parameters<typeof registerAccountBalanceTools>[0];
+    for (const key of Object.keys(capturedHandlers)) delete capturedHandlers[key];
+    registerAccountBalanceTools(balanceServer, balanceApi);
+    const balanceHandler = capturedHandlers["compute_account_balance"]!;
+    const balanceResult = await balanceHandler({ account_id: ACCOUNT_ID });
+    const balanceData = parse((balanceResult.content[0] as { text: string }).text);
+
+    expect(dimData.total).toBe(balanceData.balance);
+  });
+});
+
 describe("opening balance folding", () => {
   const ACCOUNT_ID = 1020;
   const CONTRA_ACCOUNT_ID = 2900;
