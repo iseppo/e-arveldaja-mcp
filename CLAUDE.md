@@ -261,8 +261,71 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - The Wise import tool (`import_wise_transactions`) has built-in duplicate detection for inter-account transfers
 - When manually confirming transactions against another bank account, first check for existing journals at that date/amount
 
+### Cross-mechanism bank-posting duplicate guard
+
+The same real-world cash movement can be booked twice through *different*
+mechanisms — a manual journal that credits a bank dimension directly, a
+`create_transaction` bank row, a reconcile exact-match confirm, and a
+receipt/PDF intake all land on the same bank account but each only detects
+duplicates *within its own* mechanism. `src/bank-posting-duplicate-guard.ts`
+closes that gap: it scans **all** registered journal postings on a bank
+account's dimension for a same-direction, same-amount, nearby-date posting and
+surfaces it as a **POSSIBLE duplicate** — a SUSPECT, never a certainty (two
+legitimate identical payments are possible).
+
+- **Advisory by default.** The guard is wired into `create_transaction`,
+  `create_journal` (fast-pathed — consulted only when a posting touches a known
+  bank dimension), the reconcile exact-match confirm + suggest flows, and the
+  receipt/PDF intake (`create_purchase_invoice_from_pdf`, the inbox dry-run).
+  It never auto-deletes or auto-merges. Each of the mutation tools takes an
+  opt-in `block_on_duplicate` (default `false`) that REFUSES creation **only**
+  when the scan is available AND actually found a suspect; an unavailable scan
+  never blocks.
+- **Match key:** account + dimension + amount (±0.01 EUR) + direction (`D`/`C`)
+  + effective date within ±7 days (`DUPLICATE_SCAN_WINDOW_DAYS`). Intake mode
+  scans every bank dimension (the invoice's settling account isn't known yet)
+  and compares against a real EUR gross only — never a guessed conversion.
+- **Fail-safe.** The guard's own reads degrade rather than fail the host tool:
+  a journals-fetch past the 200-page cap, or a `getBankAccounts` /
+  `getAccountDimensions` reference-read error (`resolveBankDimensionsSafe`),
+  both surface a "Duplicate scan unavailable" note and let the booking proceed.
+  An advisory sub-check must never be the reason a legitimate booking fails.
+- **Untrusted text:** suspect journal titles are `wrapUntrustedOcr`-wrapped at
+  every MCP output site; block-reason strings carry only numeric journal ids.
+
+### Source-reference idempotency (`ref_number` / `document_number`)
+
+- **`ref_number` is canonicalized at the single write boundary**
+  (`createBankTransaction` → `canonicalRefNumber`, `src/ref-number.ts`): trimmed
+  and capped at `REF_NUMBER_MAX_LENGTH = 20` (the maintainer-reported backend
+  limit — a fallback, not demo-probe-confirmed). When a reference exceeds the
+  cap, the FULL value is woven into `description` so it is never lost, inserted
+  **before** any trailing `[source_direction=…]` / `[e-arveldaja-mcp:camt …]`
+  marker so the end-anchored direction/metadata regexes still match (a
+  marker-only description gets the ref on its own line to preserve the camt
+  `(?:^|\n)` anchor). Wise dedup canonicalizes the ref *inside*
+  `buildWiseTransactionSignature`, so an over-cap Wise row still matches its
+  previously-stored truncated transaction (no double import).
+- **`create_journal` document_number advisory:** when `document_number` is set,
+  the tool scans existing live journals for the same reference and warns
+  "source reference already used by journal N" (creation still proceeds; a
+  deleted journal with the same number does not warn). Use a stable source
+  reference (`WISE:{id}`, `LY:{ref}`, `BANK:{stmt-ref}`) for imported or
+  mechanism-crossing entries so duplicate detection has a key.
+
 ### Known issues — Wise account
 - **Wise balance has ~0.03 EUR discrepancy** with the real account balance (8.71 vs 8.68 EUR as of 2026-03-22). Root cause not yet identified — likely a pre-existing duplicate or rounding issue from earlier imports. Does not affect LHV balance.
+- **Statement closing-balance tripwire (CAMT).** When a CAMT statement carries a
+  CLBD closing balance bound to a bank dimension, `import_camt053` compares it
+  against the expected balance (opening-balance fold + booked postings up to the
+  balance date + signed unconfirmed PROJECT rows) with a **0.10 EUR tolerance**
+  (chosen to clear the ~0.03 EUR Wise drift with headroom) and surfaces a
+  `statement_balance_check` with an advisory warning when they diverge. It is
+  advisory-only and fail-safe (never blocks or throws out of the import), the
+  comparison is EUR-base only (a non-EUR closing balance is reported but its
+  warning is suppressed as an FX mismatch), and on `execute` the per-dimension
+  closing balance is persisted to `statement-balances.json` in the accounting
+  bundle (bundle mode only; skipped with a note under single-file rules mode).
 
 ## Architecture
 
