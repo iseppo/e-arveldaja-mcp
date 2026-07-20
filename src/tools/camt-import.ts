@@ -455,7 +455,7 @@ function buildCamtEntrySignature(parts: {
   return shortStableHash(JSON.stringify(signatureParts));
 }
 
-function extractCamtDescriptionMetadata(description: string | null | undefined): {
+export function extractCamtDescriptionMetadata(description: string | null | undefined): {
   bank_ref_number?: string;
   bank_ref_hash?: string;
   bank_account_no?: string;

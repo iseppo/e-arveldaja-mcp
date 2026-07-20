@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createBankTransaction } from "./bank-transaction-create.js";
 import { bankTransactionDirection } from "./bank-transaction-direction.js";
 import { REF_NUMBER_MAX_LENGTH } from "./ref-number.js";
+import { extractCamtDescriptionMetadata } from "./tools/camt-import.js";
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory)
@@ -206,6 +207,57 @@ describe("bank transaction create — ref_number canonicalization (Task 9)", () 
     // ...but the direction marker stays trailing so end-anchored regexes still match.
     expect(payload.description!.trimEnd().endsWith("[source_direction=OUT]")).toBe(true);
     // The boundary booked it outgoing (type C) from the still-matching marker.
+    expect(payload.type).toBe("C");
+    expect(bankTransactionDirection({ description: payload.description })).toBe("outgoing");
+  });
+
+  it("preserves the camt anchor when weaving into a MARKER-ONLY (empty-narrative) description", async () => {
+    // Regression: a camt entry with an empty remittance narrative stores a
+    // marker-only description. Weaving the full ref directly in front of the
+    // marker (no newline) breaks the (?:^|\n) anchor of BOTH read-side regexes
+    // (bankTransactionDirection AND extractCamtDescriptionMetadata), making the
+    // stored entry_sig / bank_ref / source_direction invisible → the next camt
+    // import re-imports the row as a NEW transaction → double booking.
+    const create = vi.fn().mockResolvedValue({ created_object_id: 106 });
+    const api = { transactions: { create } };
+
+    await createBankTransaction(api, {
+      accounts_dimensions_id: 7,
+      amount: 10,
+      cl_currencies_id: "EUR",
+      date: "2026-07-19",
+      description: "[e-arveldaja-mcp:camt br=RF12 dir=CRDT sig=abc123abc123abcd]",
+      ref_number: overCapRef,
+    });
+
+    const payload = create.mock.calls[0]![0] as { description?: string; type?: string };
+    expect(payload.description).toContain(overCapRef);
+    // Direction still resolves from the still-anchored marker.
+    expect(payload.type).toBe("D");
+    expect(bankTransactionDirection({ description: payload.description })).toBe("incoming");
+    // The camt read-side metadata extractor still sees the marker's fields.
+    const metadata = extractCamtDescriptionMetadata(payload.description);
+    expect(metadata.source_direction).toBe("CRDT");
+    expect(metadata.bank_ref_number).toBe("RF12");
+    expect(metadata.entry_sig).toBeDefined();
+  });
+
+  it("preserves a marker-only Wise [source_direction=OUT] description when weaving", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 107 });
+    const api = { transactions: { create } };
+
+    // A Wise row whose entire description is the WISE tag + trailing marker.
+    await createBankTransaction(api, {
+      accounts_dimensions_id: 7,
+      amount: 10,
+      cl_currencies_id: "EUR",
+      date: "2026-07-19",
+      description: "WISE:123 [source_direction=OUT]",
+      ref_number: overCapRef,
+    });
+
+    const payload = create.mock.calls[0]![0] as { description?: string; type?: string };
+    expect(payload.description).toContain(overCapRef);
     expect(payload.type).toBe("C");
     expect(bankTransactionDirection({ description: payload.description })).toBe("outgoing");
   });

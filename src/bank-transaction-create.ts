@@ -23,7 +23,21 @@ function weaveFullRefIntoDescription(description: string | null | undefined, ful
   if (markerMatch) {
     const head = current.slice(0, markerMatch.index).trimEnd();
     const tail = markerMatch[0];
-    return head === "" ? `${fullRef}${tail}` : `${head} ${fullRef}${tail}`;
+    if (head === "") {
+      // A marker-only (empty-narrative) description. The camt read-side regexes
+      // anchor the marker to `(?:^|\n)`, so once the ref takes the start-of-string
+      // slot the marker MUST be pushed onto its own line or the anchor breaks and
+      // the entry's sig/bank_ref/source_direction become invisible (→ re-import /
+      // double booking). A leading `\n` restores the anchor. The Wise marker has
+      // no such preceding-char requirement (it needs a `WISE:` prefix a
+      // marker-only string never carries), so a plain concat stays correct there.
+      const isCamtMarker = /\[e-arveldaja-mcp:camt/i.test(tail);
+      if (isCamtMarker && !tail.includes("\n")) {
+        return `${fullRef}\n${tail.replace(/^\s+/, "")}`;
+      }
+      return `${fullRef}${tail}`;
+    }
+    return `${head} ${fullRef}${tail}`;
   }
   return current === "" ? fullRef : `${current} ${fullRef}`;
 }
