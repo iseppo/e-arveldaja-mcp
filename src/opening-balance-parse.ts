@@ -1,4 +1,4 @@
-export interface OpeningBalanceAccount { code: string; name: string; debit: number; credit: number; }
+export interface OpeningBalanceAccount { code: string; name: string; debit: number; credit: number; dimension: string[]; }
 export interface ParsedOpeningBalances {
   openingDate: string;
   accounts: OpeningBalanceAccount[];
@@ -11,6 +11,7 @@ export class OpeningBalanceParseError extends Error {
 
 const DATE_RE = /^(\d{2})\.(\d{2})\.(\d{4})\.?$/;   // dd.mm.yyyy (trailing dot tolerated)
 const CODE_RE = /^(\d{3,6})[ \t]+(\S.*)$/;          // leading account code + name remainder (requires a separating space, so a bare row-number cell like "10003." doesn't match)
+const BARE_CODE_RE = /^(\d{3,6})$/;                 // Konto cell holding only the code, with the label in its own column
 const ROW_NUMBER_RE = /^\d+\.$/;                    // "Nr" cell, e.g. "10003." or "1."
 
 /** "1 000.00 €" → 1000.00 ; "" → 0 */
@@ -29,8 +30,15 @@ function splitCells(line: string, hasTab: boolean): string[] {
   return line.split(/ {2,}/).map(c => c.trim());
 }
 
+/** True when the cell is purely a monetary amount ("1 000.00 €", "0", "50.00"). */
+function isAmountCell(cell: string): boolean {
+  const t = cell.replace(/€/g, "").replace(/\s/g, "").replace(",", ".");
+  if (t === "") return false;
+  return /^-?\d+(\.\d+)?$/.test(t);
+}
+
 export function parseOpeningBalances(rawText: string): ParsedOpeningBalances {
-  const byCode = new Map<string, OpeningBalanceAccount>();
+  const byKey = new Map<string, OpeningBalanceAccount>();
   let openingDate: string | undefined;
 
   for (const rawLine of rawText.split(/\r?\n/)) {
@@ -39,13 +47,32 @@ export function parseOpeningBalances(rawText: string): ParsedOpeningBalances {
     const hasTab = line.includes("\t");
     const cells = splitCells(line, hasTab);
 
-    // Locate the Konto cell: the first cell starting with an account code.
-    const kontoIdx = cells.findIndex(c => CODE_RE.test(c));
+    // Locate the Konto cell: the first cell starting with an account code
+    // (either code+name in one cell, or a bare code with the label elsewhere).
+    const kontoIdx = cells.findIndex(c => CODE_RE.test(c) || BARE_CODE_RE.test(c));
     if (kontoIdx === -1) continue;                     // header / title / noise
 
-    const codeMatch = CODE_RE.exec(cells[kontoIdx]!)!;
-    const code = codeMatch[1]!;
-    const name = codeMatch[2]!.trim();
+    const kontoCell = cells[kontoIdx]!;
+    const codeMatch = CODE_RE.exec(kontoCell);
+    const code = codeMatch ? codeMatch[1]! : kontoCell;
+    const name = codeMatch ? codeMatch[2]!.trim() : "";
+
+    // Tulemusüksus / dimension label candidates. The label may be in the Konto
+    // cell after the code (`name`) or in a trailing column — collect every
+    // non-code / non-date / non-amount / non-Nr text cell. The loader resolves
+    // which is a real dimension title; extra descriptive cells match nothing.
+    const dimension: string[] = [];
+    const pushCandidate = (c: string) => {
+      const t = c.trim();
+      if (t && !dimension.includes(t)) dimension.push(t);
+    };
+    if (name) pushCandidate(name);
+    for (let i = 0; i < cells.length; i++) {
+      if (i === kontoIdx) continue;
+      const cell = cells[i]!.trim();
+      if (cell === "" || ROW_NUMBER_RE.test(cell) || DATE_RE.test(cell) || isAmountCell(cell)) continue;
+      pushCandidate(cell);
+    }
 
     // Amount cells follow the Konto cell; first is Deebet, second is Kreedit.
     const remainder = cells.slice(kontoIdx + 1);
@@ -78,14 +105,15 @@ export function parseOpeningBalances(rawText: string): ParsedOpeningBalances {
       }
     }
 
-    const entry = byCode.get(code) ?? { code, name, debit: 0, credit: 0 };
+    const mapKey = `${code} ${dimension.join("")}`;
+    const entry = byKey.get(mapKey) ?? { code, name, debit: 0, credit: 0, dimension };
     entry.debit += debit;
     entry.credit += credit;
     if (!entry.name && name) entry.name = name;
-    byCode.set(code, entry);
+    byKey.set(mapKey, entry);
   }
 
-  const accounts = [...byCode.values()].map(a => ({
+  const accounts = [...byKey.values()].map(a => ({
     ...a,
     debit: Math.round(a.debit * 100) / 100,
     credit: Math.round(a.credit * 100) / 100,

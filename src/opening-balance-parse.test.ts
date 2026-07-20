@@ -13,8 +13,20 @@ describe("parseOpeningBalances", () => {
     const r = parseOpeningBalances(SAMPLE);
     expect(r.openingDate).toBe("2024-12-12");
     expect(r.accounts).toEqual([
-      { code: "1020", name: "AS LHV Pank EE637700771011212909", debit: 1000, credit: 0 },
-      { code: "2900", name: "Osakapital või aktsiakapital nimiväärtuses", debit: 0, credit: 1000 },
+      {
+        code: "1020",
+        name: "AS LHV Pank EE637700771011212909",
+        debit: 1000,
+        credit: 0,
+        dimension: ["AS LHV Pank EE637700771011212909", "Algbilansi seadistamine"],
+      },
+      {
+        code: "2900",
+        name: "Osakapital või aktsiakapital nimiväärtuses",
+        debit: 0,
+        credit: 1000,
+        dimension: ["Osakapital või aktsiakapital nimiväärtuses"],
+      },
     ]);
     expect(r.totals).toEqual({ debit: 1000, credit: 1000 });
     expect(r.rawText).toBe(SAMPLE);
@@ -100,5 +112,46 @@ describe("parseOpeningBalances", () => {
     const r = parseOpeningBalances(mixed);
     expect(r.accounts.find(a => a.code === "4000")).toMatchObject({ debit: 300, credit: 100 });
     expect(r.totals).toEqual({ debit: 300, credit: 300 });
+  });
+});
+
+describe("parseOpeningBalances — dimensions", () => {
+  it("keeps three 1020 bank rows separate and captures each label", () => {
+    const text = [
+      "Nr\tKuupäev\tKonto\tDeebet\tKreedit\tTulemusüksus",
+      "1.\t12.12.2024\t1020\t1000.00 €\t\tAS LHV Pank EE637700771011212909",
+      "2.\t12.12.2024\t1020\t50.00 €\t\tWISE BE08905767222113",
+      "3.\t12.12.2024\t1020\t20.00 €\t\tLightyear",
+      "4.\t12.12.2024\t2900\t\t1070.00 €\tOsakapital",
+    ].join("\n");
+    const parsed = parseOpeningBalances(text);
+    const rows1020 = parsed.accounts.filter(a => a.code === "1020");
+    expect(rows1020).toHaveLength(3);
+    expect(rows1020.map(a => a.debit).sort((x, y) => x - y)).toEqual([20, 50, 1000]);
+    expect(rows1020.some(a => a.dimension.includes("AS LHV Pank EE637700771011212909"))).toBe(true);
+    expect(rows1020.some(a => a.dimension.includes("WISE BE08905767222113"))).toBe(true);
+    expect(rows1020.some(a => a.dimension.includes("Lightyear"))).toBe(true);
+    expect(parsed.totals).toEqual({ debit: 1070, credit: 1070 });
+  });
+
+  it("captures a label that sits in the Konto cell right after the code", () => {
+    const text = [
+      "10003.\t12.12.2024\t1020 AS LHV Pank EE637700771011212909\t1000.00 €\t\tAlgbilansi seadistamine",
+      "10004.\t12.12.2024\t2900 Osakapital\t\t1000.00 €\tAlgbilansi seadistamine",
+    ].join("\n");
+    const parsed = parseOpeningBalances(text);
+    const lhv = parsed.accounts.find(a => a.code === "1020")!;
+    expect(lhv.debit).toBe(1000);
+    expect(lhv.dimension).toContain("AS LHV Pank EE637700771011212909");
+  });
+
+  it("does not treat an IBAN or account name as an amount", () => {
+    const text = [
+      "1.\t12.12.2024\t1020\t1000.00 €\t\tAS LHV Pank EE637700771011212909",
+      "2.\t12.12.2024\t2900\t\t1000.00 €\tOsakapital",
+    ].join("\n");
+    const parsed = parseOpeningBalances(text);
+    expect(parsed.accounts[0]!.debit).toBe(1000);
+    expect(parsed.accounts[0]!.credit).toBe(0);
   });
 });
