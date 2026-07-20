@@ -11,10 +11,14 @@ export interface OpeningBalanceJournal {
 
 function resolveDimensionId(dims: AccountDimension[], candidates: string[] | undefined): number | undefined {
   if (!candidates || candidates.length === 0) return undefined;
-  const exact = dims.filter(d => d.id !== undefined && candidates.includes(d.title_est));
+  // Compare case-insensitively: a pasted label differing only in case (e.g.
+  // "wise" vs the chart's "Wise") should still resolve. Ambiguity handling is
+  // unchanged — a case-insensitive tie stays unresolved.
+  const lowered = candidates.map(c => c.toLowerCase());
+  const exact = dims.filter(d => d.id !== undefined && lowered.includes(d.title_est?.toLowerCase() ?? ""));
   if (exact.length > 0) return exact.length === 1 ? exact[0]!.id : undefined; // ambiguous exact → caller warns
-  const joined = candidates.join(" ");                 // distinctive title as substring
-  const hits = dims.filter(d => d.id !== undefined && d.title_est && joined.includes(d.title_est));
+  const joined = candidates.join(" ").toLowerCase();   // distinctive title as substring
+  const hits = dims.filter(d => d.id !== undefined && d.title_est && joined.includes(d.title_est.toLowerCase()));
   return hits.length === 1 ? hits[0]!.id : undefined;  // zero or ambiguous → caller warns
 }
 
@@ -82,9 +86,18 @@ export function buildOpeningBalanceJournal(
 export async function loadOpeningBalanceJournal(api: ApiContext): Promise<OpeningBalanceJournal | null> {
   const stored = readOpeningBalances();
   if (!stored || stored.accounts.length === 0) return null;
-  const [accounts, dimensions] = await Promise.all([
-    api.readonly.getAccounts(),
-    api.readonly.getAccountDimensions(),
-  ]);
+  // Accounts are fundamental — a failure there should still surface. A
+  // dimensions-fetch failure only degrades per-dimension attribution, so
+  // fall back to an empty dimensions array: the journal is still built at
+  // ACCOUNT level (every posting under a null dimension, multi-dim accounts
+  // fall into unmappedDimensions) so account totals stay correct rather than
+  // dropping opening balances entirely.
+  const accounts = await api.readonly.getAccounts();
+  let dimensions: AccountDimension[] = [];
+  try {
+    dimensions = await api.readonly.getAccountDimensions();
+  } catch {
+    dimensions = [];
+  }
   return buildOpeningBalanceJournal(accounts, dimensions, stored);
 }

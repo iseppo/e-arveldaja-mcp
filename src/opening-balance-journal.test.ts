@@ -1,7 +1,11 @@
-import { describe, it, expect } from "vitest";
-import { buildOpeningBalanceJournal } from "./opening-balance-journal.js";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { buildOpeningBalanceJournal, loadOpeningBalanceJournal } from "./opening-balance-journal.js";
 import type { Account } from "./types/api.js";
-import type { StoredOpeningBalances } from "./opening-balance-store.js";
+import { writeOpeningBalances, resetOpeningBalanceCache, type StoredOpeningBalances } from "./opening-balance-store.js";
+import { createAccountingWorkflowApi } from "./__fixtures__/accounting-workflow.js";
 
 const ACCOUNTS = [
   { id: 1020, code: 1020, name_est: "Pank", balance_type: "D" },
@@ -90,5 +94,54 @@ describe("buildOpeningBalanceJournal", () => {
       stored([{ code: "1020", name: "", debit: 1000, credit: 0 } as any]))!;
     expect(r.journal.postings!.find(p => p.type === "D")!.accounts_dimensions_id ?? null).toBeNull();
     expect(r.unmappedDimensions).toHaveLength(1);
+  });
+
+  it("resolves a multi-dimension label case-insensitively (pasted 'wise' vs chart 'Wise')", () => {
+    const dims = [dim(200, 1020, "Wise"), dim(201, 1020, "AS LHV Pank")];
+    const r = buildOpeningBalanceJournal([acc(1020)], dims,
+      stored([{ code: "1020", name: "wise", debit: 1000, credit: 0, dimension: ["wise"] }]))!;
+    const d = r.journal.postings!.find(p => p.type === "D")!;
+    expect(d.accounts_dimensions_id).toBe(200);
+    expect(r.unmappedDimensions).toEqual([]);
+  });
+
+  it("keeps a genuinely case-insensitive-ambiguous label unresolved (control)", () => {
+    const dims = [dim(200, 1020, "Wise"), dim(201, 1020, "WISE")];
+    const r = buildOpeningBalanceJournal([acc(1020)], dims,
+      stored([{ code: "1020", name: "wise", debit: 1000, credit: 0, dimension: ["wise"] }]))!;
+    const d = r.journal.postings!.find(p => p.type === "D")!;
+    expect(d.accounts_dimensions_id ?? null).toBeNull();
+    expect(r.unmappedDimensions).toHaveLength(1);
+  });
+});
+
+describe("loadOpeningBalanceJournal fail-safe dimensions fetch", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ob-load-"));
+    process.env.EARVELDAJA_RULES_DIR = dir;
+    resetOpeningBalanceCache();
+  });
+  afterEach(() => { delete process.env.EARVELDAJA_RULES_DIR; rmSync(dir, { recursive: true, force: true }); });
+
+  it("degrades a dimensions-fetch failure to an account-level journal instead of rejecting", async () => {
+    writeOpeningBalances({
+      openingDate: "2024-12-31",
+      accounts: [{ code: "1020", name: "Pank", debit: 1000, credit: 0, dimension: [] }],
+      totals: { debit: 1000, credit: 0 },
+      rawText: "",
+    }, "2026-07-20T00:00:00Z");
+    const api = createAccountingWorkflowApi({
+      accounts: [{ id: 1020, balance_type: "D", name_est: "Pank" }],
+      readonly: {
+        getAccountDimensions: vi.fn().mockRejectedValue(new Error("dimensions unavailable")),
+      },
+    });
+    const r = await loadOpeningBalanceJournal(api);
+    expect(r).not.toBeNull();
+    const d = r!.journal.postings!.find(p => p.type === "D")!;
+    expect(d.accounts_id).toBe(1020);
+    expect(d.amount).toBe(1000);          // account total preserved
+    expect(d.accounts_dimensions_id ?? null).toBeNull();  // per-dimension attribution degraded
   });
 });

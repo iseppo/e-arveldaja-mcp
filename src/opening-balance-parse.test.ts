@@ -103,6 +103,33 @@ describe("parseOpeningBalances", () => {
     expect(r.openingDate).toBe("");
   });
 
+  it("drops a balanced summary/totals row whose bare integer sits after a free-text label", () => {
+    // A "Kokku" (Total) row where the bare integer looks like a Konto but is
+    // preceded by a free-text label — the register's Konto column is only ever
+    // preceded by Nr/Kuupäev, so this is a summary line, not an account. With
+    // both amounts equal the phantom would balance and slip in silently.
+    const withTotals = [
+      "Nr\tKuupäev\tKonto\tDeebet\tKreedit",
+      "1.\t01.01.2025\t1020 Pank\t1 000.00 €\t",
+      "\t\t2900 Kapital\t\t1 000.00 €",
+      "Kokku\t9999\t1 000.00\t1 000.00",
+    ].join("\n");
+    const r = parseOpeningBalances(withTotals);
+    expect(r.accounts.map(a => a.code)).not.toContain("9999");
+    expect(r.accounts.map(a => a.code).sort()).toEqual(["1020", "2900"]);
+  });
+
+  it("still parses a bare-code Konto that starts the row (no Nr/date columns pasted)", () => {
+    const text = [
+      "Konto\tDeebet\tKreedit\tTulemusüksus",
+      "1020\t1000.00 €\t\tLHV",
+      "2900\t\t1000.00 €\tKapital",
+    ].join("\n");
+    const r = parseOpeningBalances(text);
+    expect(r.accounts.map(a => a.code).sort()).toEqual(["1020", "2900"]);
+    expect(r.accounts.find(a => a.code === "1020")).toMatchObject({ debit: 1000, credit: 0 });
+  });
+
   it("parses positionally (debit, credit) when a space-run line carries both amounts", () => {
     const mixed = [
       "Nr\tKuupäev\tKonto\tDeebet\tKreedit",

@@ -49,7 +49,23 @@ export function parseOpeningBalances(rawText: string): ParsedOpeningBalances {
 
     // Locate the Konto cell: the first cell starting with an account code
     // (either code+name in one cell, or a bare code with the label elsewhere).
-    const kontoIdx = cells.findIndex(c => CODE_RE.test(c) || BARE_CODE_RE.test(c));
+    // A code+name cell (CODE_RE) is unambiguous. A BARE integer, however, is
+    // shape-identical to a summary total (e.g. "Kokku  9999  1000  1000"): the
+    // register's Konto column is only ever preceded by the Nr and Kuupäev
+    // columns, so a bare integer preceded by a free-text cell is a summary/
+    // amount, not an account code — skip it as a Konto candidate.
+    let kontoIdx = -1;
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i]!;
+      if (CODE_RE.test(c)) { kontoIdx = i; break; }
+      if (BARE_CODE_RE.test(c)) {
+        const precededOnlyByStructural = cells.slice(0, i).every(p => {
+          const t = p.trim();
+          return t === "" || ROW_NUMBER_RE.test(t) || DATE_RE.test(t);
+        });
+        if (precededOnlyByStructural) { kontoIdx = i; break; }
+      }
+    }
     if (kontoIdx === -1) continue;                     // header / title / noise
 
     const kontoCell = cells[kontoIdx]!;
