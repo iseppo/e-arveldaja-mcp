@@ -1782,7 +1782,7 @@ function camtPossibleDuplicateRow(descriptor: CamtCreateDescriptor, newApiId?: n
 }
 
 interface StatementBalanceCheckResult {
-  check: StatementBalanceCheck;
+  check?: StatementBalanceCheck;
   persisted: boolean;
   notes: string[];
 }
@@ -1794,6 +1794,12 @@ interface StatementBalanceCheckResult {
  * statement-balance history. In single-file rules mode the store is
  * unavailable, so the comparison still runs but persistence is skipped with a
  * note. Returns undefined when no usable balance/date anchor is available.
+ *
+ * FAIL-SAFE: this is an advisory sub-check and must never fail the host import.
+ * On execute the persist runs AFTER transactions are already created, so a
+ * throw here would report a failure for work that succeeded. Both the
+ * comparison and the persist are therefore wrapped so any error degrades to a
+ * note instead of propagating.
  */
 async function runStatementBalanceCheck(
   api: ApiContext,
@@ -1805,44 +1811,53 @@ async function runStatementBalanceCheck(
   const balanceDate = closing.date ?? fallbackDate;
   if (!balanceDate) return undefined;   // no anchor date → cannot reconcile
 
-  // The bank GL account backing this dimension (e.g. 1020). The dimension
-  // binding was validated upstream; this is a defensive re-read.
-  const dimensions = await api.readonly.getAccountDimensions();
-  const dimension = dimensions.find(entry => entry.id === accountsDimensionsId && !entry.is_deleted);
-  if (!dimension) return undefined;
-  const accountId = dimension.accounts_id;
+  let check: StatementBalanceCheck;
+  try {
+    // The bank GL account backing this dimension (e.g. 1020). The dimension
+    // binding was validated upstream; this is a defensive re-read.
+    const dimensions = await api.readonly.getAccountDimensions();
+    const dimension = dimensions.find(entry => entry.id === accountsDimensionsId && !entry.is_deleted);
+    if (!dimension) return undefined;
+    const accountId = dimension.accounts_id;
 
-  const direction = closing.direction === "DBIT" ? "DBIT" : closing.direction === "CRDT" ? "CRDT" : undefined;
-  const check = await checkStatementClosingBalance(api, {
-    dimensionId: accountsDimensionsId,
-    accountId,
-    closing: {
-      amount: closing.amount,
-      ...(direction ? { direction } : {}),
-      ...(closing.date ? { date: closing.date } : {}),
-      ...(closing.currency ? { currency: closing.currency } : {}),
-    },
-    fallbackDate: balanceDate,
-  });
+    const direction = closing.direction === "DBIT" ? "DBIT" : closing.direction === "CRDT" ? "CRDT" : undefined;
+    check = await checkStatementClosingBalance(api, {
+      dimensionId: accountsDimensionsId,
+      accountId,
+      closing: {
+        amount: closing.amount,
+        ...(direction ? { direction } : {}),
+        ...(closing.date ? { date: closing.date } : {}),
+        ...(closing.currency ? { currency: closing.currency } : {}),
+      },
+      fallbackDate: balanceDate,
+    });
+  } catch (error) {
+    return { persisted: false, notes: [`closing-balance check could not run: ${(error as Error).message}`] };
+  }
 
   const notes: string[] = [];
   let persisted = false;
   if (persist) {
-    if (readStatementBalances() === null) {
-      notes.push(
-        "Statement-balance history is not persisted in single-file rules mode (EARVELDAJA_RULES_FILE); " +
-        "the closing-balance comparison ran but was not stored.",
-      );
-    } else {
-      appendStatementBalance({
-        dimensionId: accountsDimensionsId,
-        date: check.balance_date,
-        closingBalance: check.statement_closing_balance,
-        currency: closing.currency ?? "EUR",
-        source: "camt",
-        recordedAt: new Date().toISOString(),
-      });
-      persisted = true;
+    try {
+      if (readStatementBalances() === null) {
+        notes.push(
+          "Statement-balance history is not persisted in single-file rules mode (EARVELDAJA_RULES_FILE); " +
+          "the closing-balance comparison ran but was not stored.",
+        );
+      } else {
+        appendStatementBalance({
+          dimensionId: accountsDimensionsId,
+          date: check.balance_date,
+          closingBalance: check.statement_closing_balance,
+          currency: closing.currency ?? "EUR",
+          source: "camt",
+          recordedAt: new Date().toISOString(),
+        });
+        persisted = true;
+      }
+    } catch (error) {
+      notes.push(`closing-balance history could not be persisted: ${(error as Error).message}`);
     }
   }
 
@@ -1960,13 +1975,15 @@ function renderCamtImportPayload(input: CamtImportRenderInput): Record<string, u
     }),
     ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
     ...(input.statementBalanceCheck !== undefined ? {
-      statement_balance_check: {
-        ...input.statementBalanceCheck.check,
-        persisted: input.statementBalanceCheck.persisted,
-        ...(input.statementBalanceCheck.notes.length > 0
-          ? { notes: input.statementBalanceCheck.notes }
-          : {}),
-      },
+      statement_balance_check: (() => {
+        const sbc = input.statementBalanceCheck;
+        const combinedNotes = [...(sbc.check?.notes ?? []), ...sbc.notes];
+        return {
+          ...(sbc.check ?? {}),
+          persisted: sbc.persisted,
+          ...(combinedNotes.length > 0 ? { notes: combinedNotes } : {}),
+        };
+      })(),
     } : {}),
   };
 }

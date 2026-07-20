@@ -1,5 +1,5 @@
 import { readFile } from "fs/promises";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createHash } from "node:crypto";
@@ -2971,5 +2971,28 @@ describe("camt import — statement closing-balance tripwire", () => {
       currency: "EUR",
       source: "camt",
     });
+  });
+
+  it("still reports created transactions and surfaces a note when the advisory persist path fails", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(camtXmlWithClosingBalance());
+    // A corrupt statement-balances.json makes readStatementBalances/persist throw.
+    writeFileSync(join(bundleDir, "statement-balances.json"), "{ not json", "utf8");
+    resetStatementBalanceCache();
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    // The host import must not fail because an advisory sub-check threw.
+    expect(result.isError).toBeFalsy();
+    expect(payload.mode).toBe("EXECUTED");
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+
+    const check = payload.statement_balance_check;
+    expect(check).toBeDefined();
+    expect(check.persisted).toBe(false);
+    expect(check.notes.join(" ")).toMatch(/could not (be persisted|run)/i);
   });
 });

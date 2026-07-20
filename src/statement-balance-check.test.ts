@@ -124,6 +124,27 @@ describe("checkStatementClosingBalance", () => {
     expect(result.within_tolerance).toBe(true);
   });
 
+  it("skips FX reconciliation for a non-EUR closing balance instead of a false-positive warning", async () => {
+    const api = createAccountingWorkflowApi({
+      // booked_balance is in EUR base; a USD statement figure would trip the
+      // tolerance if naively compared.
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("D", 170.00)]) },
+    });
+    const result = await checkStatementClosingBalance(api, {
+      dimensionId: DIMENSION_ID,
+      accountId: ACCOUNT_ID,
+      closing: { amount: 200.00, direction: "CRDT", date: BALANCE_DATE, currency: "USD" },
+      fallbackDate: BALANCE_DATE,
+    });
+    // Figures are still returned...
+    expect(result.booked_balance).toBe(170.00);
+    expect(result.statement_closing_balance).toBe(200.00);
+    // ...but no false-positive warning is raised for the currency mismatch.
+    expect(result.warnings).toEqual([]);
+    expect(result.within_tolerance).toBe(true);
+    expect(result.notes.some(note => /USD/.test(note) && /EUR/.test(note))).toBe(true);
+  });
+
   it("falls back to the statement period date when the balance node has no date", async () => {
     const api = createAccountingWorkflowApi({
       journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("D", 170.00)]) },

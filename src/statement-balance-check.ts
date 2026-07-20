@@ -9,6 +9,11 @@ import { isProjectTransaction } from "./transaction-status.js";
 // LOCKED: exceeds the known ~0.03 EUR Wise drift with headroom (decision 4).
 export const STATEMENT_BALANCE_TOLERANCE_EUR = 0.10;
 
+// The ledger keeps `base_amount` in this base currency, so a statement whose
+// closing balance is in another currency cannot be reconciled against the
+// booked balance without an FX rate we do not have here.
+const BASE_CURRENCY = "EUR";
+
 export interface StatementBalanceCheck {
   dimension_id: number;
   statement_closing_balance: number;
@@ -20,6 +25,7 @@ export interface StatementBalanceCheck {
   within_tolerance: boolean;
   tolerance: number;
   warnings: string[];
+  notes: string[];
 }
 
 /**
@@ -78,13 +84,25 @@ export async function checkStatementClosingBalance(
 
   const expectedBalance = roundMoney(bookedBalance + unconfirmedAmount);
   const difference = roundMoney(expectedBalance - statementClosing);
-  const withinTolerance = Math.abs(difference) <= tolerance;
 
   const warnings: string[] = [];
-  if (!withinTolerance) {
-    const currency = input.closing.currency ? ` ${input.closing.currency}` : "";
+  const notes: string[] = [];
+
+  // The booked balance is in the EUR base currency; a non-EUR closing balance
+  // is in the account currency, so comparing them would trip the tolerance on
+  // every statement. Return the figures but skip the FX reconciliation warning.
+  const currency = input.closing.currency ?? BASE_CURRENCY;
+  const reconcilable = currency === BASE_CURRENCY;
+  const withinTolerance = reconcilable ? Math.abs(difference) <= tolerance : true;
+
+  if (!reconcilable) {
+    notes.push(
+      `Closing balance is in ${currency} but ledger balances are in ${BASE_CURRENCY} base currency; ` +
+      `FX reconciliation skipped (no rate available at import).`,
+    );
+  } else if (!withinTolerance) {
     warnings.push(
-      `Statement closing balance ${statementClosing.toFixed(2)}${currency} does not match the expected ledger ` +
+      `Statement closing balance ${statementClosing.toFixed(2)} ${currency} does not match the expected ledger ` +
       `balance ${expectedBalance.toFixed(2)} (booked ${bookedBalance.toFixed(2)} + unconfirmed ${unconfirmedAmount.toFixed(2)}); ` +
       `difference ${difference.toFixed(2)} exceeds the ${tolerance.toFixed(2)} EUR tolerance. ` +
       `Review the ${input.dimensionId} dimension for missing, duplicated, or misdated entries.`,
@@ -102,5 +120,6 @@ export async function checkStatementClosingBalance(
     within_tolerance: withinTolerance,
     tolerance,
     warnings,
+    notes,
   };
 }
