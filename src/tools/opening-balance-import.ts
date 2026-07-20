@@ -42,6 +42,7 @@ export function registerOpeningBalanceTools(server: McpServer, _api: ApiContext)
           name: wrapUntrustedOcr(a.name) ?? a.name,     // name is pasted content → sandbox
           debit: a.debit,
           credit: a.credit,
+          dimension: a.dimension.map(d => wrapUntrustedOcr(d) ?? d), // dimension labels are pasted content → sandbox
         })),
         next_step: persist ? undefined
           : "Review the accounts above. To save, call again with dry_run=false.",

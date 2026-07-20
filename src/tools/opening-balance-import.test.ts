@@ -114,6 +114,21 @@ describe("import_opening_balances", () => {
     expect(String(acc.credit)).not.toMatch(/UNTRUSTED_OCR/);
   });
 
+  it("surfaces the captured dimension (sandbox-wrapped) in the dry-run preview", async () => {
+    const withLabel = [
+      "Nr\tKuupäev\tKonto\tDeebet\tKreedit",
+      "1.\t12.12.2024\t1020 AS LHV Pank EE637700771011212909\t1 000.00 €\t",
+      "\t\t2900 Kapital\t\t1 000.00 €",
+    ].join("\n");
+    const res = await callTool(tools, "import_opening_balances", { pasted_text: withLabel });
+    const parsed = parseMcpResponse(res) as {
+      accounts: Array<{ code: string; dimension: string[] }>;
+    };
+    const acc = parsed.accounts.find(a => a.code === "1020")!;
+    expect(acc.dimension).toEqual(expect.arrayContaining([expect.stringContaining("AS LHV Pank")]));
+    expect(acc.dimension.some(d => d.includes("UNTRUSTED_OCR_START"))).toBe(true);
+  });
+
   it("returns ok:false without throwing when persisting fails in single-file EARVELDAJA_RULES_FILE mode", async () => {
     const fileDir = mkdtempSync(join(tmpdir(), "ob-tool-file-"));
     delete process.env.EARVELDAJA_RULES_DIR;
