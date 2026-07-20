@@ -15,7 +15,8 @@ import { validatePostingDimensions } from "../../account-validation.js";
 import {
   findDuplicateBankPostings,
   formatDuplicatePostingWarnings,
-  resolveBankDimensions,
+  resolveBankDimensionsSafe,
+  DUPLICATE_SCAN_WINDOW_DAYS,
   type BankDimensionInfo,
   type DuplicatePostingCandidate,
   type DuplicatePostingScanResult,
@@ -166,13 +167,38 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     // incident this guard exists for (a manual journal crediting a bank
     // dimension directly, later re-booked by a reconcile). Fast-pathed: a
     // journal with no bank-dimension posting never triggers a journals scan.
-    const bankDims = await resolveBankDimensions(api);
-    const bankDimById = new Map(bankDims.map(d => [d.dimensionId, d]));
+    const bankDimsResult = await resolveBankDimensionsSafe(api);
+    const bankDimById = new Map(bankDimsResult.dimensions.map(d => [d.dimensionId, d]));
     const postingScans: Array<{
       dim: BankDimensionInfo;
       candidate: DuplicatePostingCandidate;
       scan: DuplicatePostingScanResult;
     }> = [];
+    // T3-M1: reference-data resolution failed. We can no longer tell which
+    // postings are bank postings, so if ANY posting carries a dimension (a
+    // potential bank posting) surface a single scan-unavailable note through the
+    // existing emit path; the fast-path (no dimensioned posting → no note) holds.
+    if (!bankDimsResult.scanAvailable) {
+      const firstDimPosting = postings.find(p => p.accounts_dimensions_id != null);
+      if (firstDimPosting) {
+        postingScans.push({
+          dim: { dimensionId: firstDimPosting.accounts_dimensions_id!, accountId: -1, title: "" },
+          candidate: {
+            accountId: -1,
+            dimensionId: firstDimPosting.accounts_dimensions_id!,
+            amount: firstDimPosting.base_amount ?? firstDimPosting.amount,
+            direction: firstDimPosting.type === "D" ? "D" : "C",
+            date: params.effective_date,
+          },
+          scan: {
+            scan_available: false,
+            scan_note: bankDimsResult.scanNote,
+            window_days: DUPLICATE_SCAN_WINDOW_DAYS,
+            suspects: [],
+          },
+        });
+      }
+    }
     for (const posting of postings) {
       if (posting.accounts_dimensions_id == null) continue;
       const dim = bankDimById.get(posting.accounts_dimensions_id);

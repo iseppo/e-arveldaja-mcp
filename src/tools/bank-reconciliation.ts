@@ -19,7 +19,7 @@ import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtim
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import {
   findDuplicateBankPostings,
-  resolveBankDimensions,
+  resolveBankDimensionsSafe,
   formatDuplicatePostingWarnings,
   type DuplicatePostingCandidate,
   type DuplicatePostingSuspect,
@@ -569,8 +569,15 @@ async function enrichExactMatchProjectionWithDuplicateGuard(
 ): Promise<void> {
   if (projection.confirms.length === 0) return;
 
-  const bankDims = await resolveBankDimensions(api);
-  const dimById = new Map(bankDims.map(d => [d.dimensionId, d]));
+  const bankDimsResult = await resolveBankDimensionsSafe(api);
+  if (!bankDimsResult.scanAvailable) {
+    // T3-M1: reference-data resolution failed. Record the scan-unavailable note
+    // and leave every descriptor in the confirm set — never block or throw on
+    // the guard's own reference read.
+    projection.duplicateScanNote ??= bankDimsResult.scanNote;
+    return;
+  }
+  const dimById = new Map(bankDimsResult.dimensions.map(d => [d.dimensionId, d]));
   const wrapTitle = (t: string): string => wrapUntrustedOcr(t) ?? "";
 
   const surviving: ExactConfirmDescriptor[] = [];
@@ -967,8 +974,10 @@ export function registerBankReconciliationTools(
       const purchaseIndex = buildInvoiceIndex(openPurchases);
       // Cross-mechanism duplicate guard (Task 3): resolve bank dimensions once so
       // each matched row can be checked against already-booked cash movements.
-      const suggestBankDims = await resolveBankDimensions(api);
-      const suggestDimById = new Map(suggestBankDims.map(d => [d.dimensionId, d]));
+      // T3-M1: a reference-fetch throw degrades to an empty map (no per-row
+      // annotation) plus a top-level scan-unavailable note — never fails the tool.
+      const suggestBankDimsResult = await resolveBankDimensionsSafe(api);
+      const suggestDimById = new Map(suggestBankDimsResult.dimensions.map(d => [d.dimensionId, d]));
       const results = [];
 
       for (const tx of unconfirmed) {
@@ -1107,6 +1116,7 @@ export function registerBankReconciliationTools(
             matched: results.length,
             unmatched: unconfirmed.length - results.length,
             matches: results,
+            ...(suggestBankDimsResult.scanAvailable ? {} : { duplicate_scan_note: suggestBankDimsResult.scanNote }),
           }),
         }],
       };

@@ -2471,6 +2471,7 @@ describe("create_transaction duplicate-posting guard", () => {
   function setupCreateTransaction(options: {
     journals?: unknown[];
     journalsThrows?: boolean;
+    bankDimsThrows?: boolean;
     create?: ReturnType<typeof vi.fn>;
   } = {}) {
     const create = options.create ?? vi.fn().mockResolvedValue({ created_object_id: 42 });
@@ -2480,7 +2481,9 @@ describe("create_transaction duplicate-posting guard", () => {
     const { api, handler } = getCrudToolHarness("create_transaction", {
       transactions: { create },
       readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
+        getBankAccounts: options.bankDimsThrows
+          ? vi.fn().mockRejectedValue(new Error("bank accounts unavailable"))
+          : vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
         getAccountDimensions: vi.fn().mockResolvedValue([
           { id: BANK_DIMENSION_ID, accounts_id: BANK_ACCOUNT_ID, is_deleted: false, title_est: "LHV" },
         ]),
@@ -2560,6 +2563,34 @@ describe("create_transaction duplicate-posting guard", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(payload.warnings?.some(w => /Duplicate scan unavailable/.test(w))).toBe(true);
   });
+
+  // T3-M1: the advisory guard's OWN reference-data fetch (resolveBankDimensions →
+  // getBankAccounts / getAccountDimensions) must never fail an otherwise-valid
+  // create. A reject there degrades to scan-unavailable, not a thrown tool.
+  it("resolveBankDimensions throws: creation still succeeds with a scan-unavailable note", async () => {
+    const { handler, create } = setupCreateTransaction({ bankDimsThrows: true });
+
+    const result = await handler(createParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as { warnings?: string[] };
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.warnings?.some(w => /Duplicate scan unavailable/.test(w))).toBe(true);
+    expect(payload).not.toHaveProperty("possible_duplicate_postings");
+  });
+
+  it("block_on_duplicate=true but resolveBankDimensions throws: creation proceeds (no refusal without evidence)", async () => {
+    const { handler, create } = setupCreateTransaction({ bankDimsThrows: true });
+
+    const result = await handler({ ...createParams, block_on_duplicate: true }) as {
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    };
+    const payload = parseMcpResponse(result.content[0]!.text) as { warnings?: string[] };
+
+    expect(result.isError).toBeFalsy();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.warnings?.some(w => /Duplicate scan unavailable/.test(w))).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2619,6 +2650,7 @@ describe("create_journal duplicate-posting guard", () => {
   function setupCreateJournal(options: {
     journals?: unknown[];
     journalsThrows?: boolean;
+    bankDimsThrows?: boolean;
     create?: ReturnType<typeof vi.fn>;
   } = {}) {
     const create = options.create ?? vi.fn().mockResolvedValue({ created_object_id: 42 });
@@ -2630,7 +2662,9 @@ describe("create_journal duplicate-posting guard", () => {
       readonly: {
         getAccounts: vi.fn().mockResolvedValue(accounts),
         getAccountDimensions: vi.fn().mockResolvedValue(accountDimensions),
-        getBankAccounts: vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
+        getBankAccounts: options.bankDimsThrows
+          ? vi.fn().mockRejectedValue(new Error("bank accounts unavailable"))
+          : vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
       },
     });
     return { api, handler, create, listAllWithPostings };
@@ -2694,6 +2728,30 @@ describe("create_journal duplicate-posting guard", () => {
     expect(result.isError).toBeFalsy();
     expect(create).toHaveBeenCalledTimes(1);
     expect(payload.warnings?.some(w => /Duplicate scan unavailable/.test(w))).toBe(true);
+  });
+
+  // T3-M1: resolveBankDimensions (getBankAccounts / getAccountDimensions) reject
+  // must not fail create_journal. A journal with a dimensioned (potential bank)
+  // posting degrades to a scan-unavailable note; the journal still creates.
+  it("resolveBankDimensions throws on a bank-dimension journal: creation still succeeds with a scan-unavailable note", async () => {
+    const { handler, create } = setupCreateJournal({ bankDimsThrows: true });
+
+    const result = await handler(bankJournalParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as { warnings?: string[] };
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.warnings?.some(w => /Duplicate scan unavailable/.test(w))).toBe(true);
+    expect(payload).not.toHaveProperty("possible_duplicate_postings");
+  });
+
+  it("resolveBankDimensions throws on a NON-bank journal: creation succeeds with no warnings (fast-path preserved)", async () => {
+    const { handler, create } = setupCreateJournal({ bankDimsThrows: true });
+
+    const result = await handler(nonBankJournalParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload).not.toHaveProperty("warnings");
   });
 });
 

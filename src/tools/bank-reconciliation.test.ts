@@ -2962,6 +2962,7 @@ describe("exact-match confirm duplicate-posting guard", () => {
   function setupGuardAutoConfirm(options: {
     journals?: unknown[];
     journalsThrows?: boolean;
+    bankDimsThrows?: boolean;
     toolName?: string;
   } = {}) {
     const server = { registerTool: vi.fn() } as any;
@@ -2978,7 +2979,9 @@ describe("exact-match confirm duplicate-posting guard", () => {
       saleInvoices: { listAll: vi.fn().mockResolvedValue([matchingSale]) },
       purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
       readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
+        getBankAccounts: options.bankDimsThrows
+          ? vi.fn().mockRejectedValue(new Error("bank accounts unavailable"))
+          : vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
         getAccountDimensions: vi.fn().mockResolvedValue([
           { id: BANK_DIMENSION_ID, accounts_id: BANK_ACCOUNT_ID, is_deleted: false, title_est: "LHV" },
         ]),
@@ -3021,6 +3024,33 @@ describe("exact-match confirm duplicate-posting guard", () => {
     expect(payload.results[0]!.status).toBe("would_confirm");
     expect(payload.duplicate_scan_note).toMatch(/Duplicate scan unavailable/);
     expect(payload.results[0]!.possible_duplicate_postings).toBeUndefined();
+  });
+
+  // T3-M1: the confirm flow's own resolveBankDimensions (getBankAccounts /
+  // getAccountDimensions) must never fail the host tool. A reject degrades to a
+  // scan-unavailable note; the confirm plan is unaffected (nothing blocked).
+  it("still succeeds and reports a scan-unavailable note when resolveBankDimensions throws", async () => {
+    const { handler } = setupGuardAutoConfirm({ bankDimsThrows: true });
+
+    const result = await handler({ execute: false, min_confidence: 50 });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.results[0]!.status).toBe("would_confirm");
+    expect(payload.duplicate_scan_note).toMatch(/Duplicate scan unavailable/);
+    expect(payload.results[0]!.possible_duplicate_postings).toBeUndefined();
+  });
+
+  // T3-M1 (suggest path): reconcile_transactions must still return its matches
+  // when resolveBankDimensions rejects — the duplicate annotation is best-effort.
+  it("reconcile_transactions: still returns matches with a scan-unavailable note when resolveBankDimensions throws", async () => {
+    const { handler } = setupGuardAutoConfirm({ bankDimsThrows: true, toolName: "reconcile_transactions" });
+
+    const result = await handler({ min_confidence: 50 });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.matched).toBe(1);
+    expect(payload.matches[0].possible_duplicate_postings).toBeUndefined();
+    expect(payload.duplicate_scan_note).toMatch(/Duplicate scan unavailable/);
   });
 
   it("blocks the confirm with block_on_duplicate=true and executes nothing for that transaction", async () => {

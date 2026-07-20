@@ -15,8 +15,9 @@ import { validateTransactionDistributionDimensions } from "../../account-validat
 import { createBankTransaction } from "../../bank-transaction-create.js";
 import {
   findDuplicateBankPostings,
-  resolveBankDimensions,
+  resolveBankDimensionsSafe,
   formatDuplicatePostingWarnings,
+  DUPLICATE_SCAN_WINDOW_DAYS,
   type DuplicatePostingCandidate,
   type DuplicatePostingScanResult,
 } from "../../bank-posting-duplicate-guard.js";
@@ -172,19 +173,39 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     // already-booked same-key cash movement before creating this transaction.
     // Advisory by default — only refuses when block_on_duplicate=true AND the
     // scan is available AND it actually found a suspect.
-    const bankDims = await resolveBankDimensions(api);
-    const dim = bankDims.find(d => d.dimensionId === params.accounts_dimensions_id);
+    const bankDimsResult = await resolveBankDimensionsSafe(api);
     let duplicateScan: DuplicatePostingScanResult | undefined;
     let candidate: DuplicatePostingCandidate | undefined;
-    if (dim) {
+    if (!bankDimsResult.scanAvailable) {
+      // Reference-data resolution failed (T3-M1): degrade to scan-unavailable so
+      // the advisory note surfaces and the create still proceeds — never block or
+      // fail the host tool on the guard's own reference read. accountId is unused
+      // when there are no suspects (the note line does not render it).
       candidate = {
-        accountId: dim.accountId,
-        dimensionId: dim.dimensionId,
+        accountId: -1,
+        dimensionId: params.accounts_dimensions_id,
         amount: params.amount,
         direction: params.type === "D" ? "D" : "C",
         date: params.date,
       };
-      duplicateScan = await findDuplicateBankPostings(api, candidate);
+      duplicateScan = {
+        scan_available: false,
+        scan_note: bankDimsResult.scanNote,
+        window_days: DUPLICATE_SCAN_WINDOW_DAYS,
+        suspects: [],
+      };
+    } else {
+      const dim = bankDimsResult.dimensions.find(d => d.dimensionId === params.accounts_dimensions_id);
+      if (dim) {
+        candidate = {
+          accountId: dim.accountId,
+          dimensionId: dim.dimensionId,
+          amount: params.amount,
+          direction: params.type === "D" ? "D" : "C",
+          date: params.date,
+        };
+        duplicateScan = await findDuplicateBankPostings(api, candidate);
+      }
     }
 
     if (

@@ -111,6 +111,36 @@ export async function resolveBankDimensions(api: {
   return result;
 }
 
+export interface SafeBankDimensions {
+  dimensions: BankDimensionInfo[];
+  scanAvailable: boolean;
+  scanNote?: string;
+}
+
+/**
+ * Fail-safe wrapper over `resolveBankDimensions` for the mutation-path guard
+ * hooks (create_transaction, create_journal, reconcile confirm/suggest). The
+ * guard is advisory only, so its OWN reference-data reads (`getBankAccounts` /
+ * `getAccountDimensions`) must never fail an otherwise-valid booking. Any throw
+ * degrades to `scanAvailable: false` with an empty dimension list and a
+ * scan-unavailable note (same "Duplicate scan unavailable:" prefix the journals
+ * fetch uses), mirroring how `checkIntakeCashDuplicates` guards the intake path.
+ */
+export async function resolveBankDimensionsSafe(api: {
+  readonly: { getBankAccounts(): Promise<BankAccount[]>; getAccountDimensions(): Promise<AccountDimension[]> };
+}): Promise<SafeBankDimensions> {
+  try {
+    return { dimensions: await resolveBankDimensions(api), scanAvailable: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      dimensions: [],
+      scanAvailable: false,
+      scanNote: `Duplicate scan unavailable: ${message} — bank-dimension resolution failed; cross-mechanism duplicate coverage is incomplete for this call.`,
+    };
+  }
+}
+
 /**
  * Pure in-memory matcher: scan `journals` for postings on
  * `candidate.accountId` within `+/-windowDays` of `candidate.date`, matching
