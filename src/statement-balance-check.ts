@@ -101,17 +101,33 @@ export async function checkStatementClosingBalance(
     );
   }
 
+  // This account's opening balance could not be attributed to a dimension (the
+  // fold posted it under a null dimension), so the per-dimension booked side is
+  // known-incomplete: the expected balance may omit the opening amount that
+  // really belongs to this dimension. Comparing it would trip the tolerance on
+  // a figure we already know is partial, so surface it as a note and suppress
+  // the mismatch warning — same treatment as the FX / indeterminate cases.
+  const openingDimensionUnmapped =
+    opening?.unmappedDimensions.some(u => u.startsWith(`${input.accountId}:`)) ?? false;
+
   // The booked balance is in the EUR base currency; a non-EUR closing balance
   // is in the account currency, so comparing them would trip the tolerance on
   // every statement. Return the figures but skip the FX reconciliation warning.
   const currency = input.closing.currency ?? BASE_CURRENCY;
   const reconcilable = currency === BASE_CURRENCY;
-  const withinTolerance = reconcilable ? Math.abs(difference) <= tolerance : true;
+  const withinTolerance =
+    reconcilable && !openingDimensionUnmapped ? Math.abs(difference) <= tolerance : true;
 
   if (!reconcilable) {
     notes.push(
       `Closing balance is in ${currency} but ledger balances are in ${BASE_CURRENCY} base currency; ` +
       `FX reconciliation skipped (no rate available at import).`,
+    );
+  } else if (openingDimensionUnmapped) {
+    notes.push(
+      `The opening balance for account ${input.accountId} has an unresolved dimension, so it was folded in ` +
+      `under a null dimension and is omitted from this dimension's expected balance; the tolerance check is ` +
+      `skipped to avoid a false mismatch. Re-import the opening balances with a matching dimension label to reconcile.`,
     );
   } else if (!withinTolerance) {
     warnings.push(

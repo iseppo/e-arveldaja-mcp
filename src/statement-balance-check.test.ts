@@ -6,7 +6,7 @@ import {
   checkStatementClosingBalance,
   STATEMENT_BALANCE_TOLERANCE_EUR,
 } from "./statement-balance-check.js";
-import { resetOpeningBalanceCache } from "./opening-balance-store.js";
+import { resetOpeningBalanceCache, writeOpeningBalances } from "./opening-balance-store.js";
 import { createAccountingWorkflowApi, fixtureTransaction } from "./__fixtures__/accounting-workflow.js";
 import type { Journal } from "./types/api.js";
 
@@ -165,6 +165,41 @@ describe("checkStatementClosingBalance", () => {
     expect(result.warnings).toEqual([]);
     expect(result.within_tolerance).toBe(true);
     expect(result.notes.some(note => /USD/.test(note) && /EUR/.test(note))).toBe(true);
+  });
+
+  it("suppresses the mismatch warning when this account's opening balance has an unresolved dimension", async () => {
+    // Opening balance for account 1020 whose dimension label matches none of the
+    // account's two dimensions → the fold posts it under a null dimension, so the
+    // per-dimension booked balance omits it. Comparing that partial booked side
+    // to a statement that DOES include the opening amount would trip the
+    // tolerance — a spurious warning the tripwire must suppress.
+    writeOpeningBalances({
+      openingDate: "2025-12-31",
+      accounts: [{ code: String(ACCOUNT_ID), name: "Pank", debit: 500, credit: 0, dimension: ["Nonexistent label"] }],
+      totals: { debit: 500, credit: 0 },
+      rawText: "",
+    }, "2026-07-20T00:00:00Z");
+    const api = createAccountingWorkflowApi({
+      accounts: [{ id: ACCOUNT_ID, balance_type: "D", name_est: "Pank" }],
+      accountDimensions: [
+        { id: DIMENSION_ID, accounts_id: ACCOUNT_ID, title_est: "LHV", is_deleted: false },
+        { id: 102, accounts_id: ACCOUNT_ID, title_est: "Wise", is_deleted: false },
+      ],
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("D", 170.00)]) },
+    });
+    const result = await checkStatementClosingBalance(api, {
+      dimensionId: DIMENSION_ID,
+      accountId: ACCOUNT_ID,
+      // Booked side sees only the 170 dimension posting (opening 500 is under
+      // null), so it would mismatch by exactly the 500 opening amount.
+      closing: { amount: 670.00, direction: "CRDT", date: BALANCE_DATE, currency: "EUR" },
+      fallbackDate: BALANCE_DATE,
+    });
+    expect(result.booked_balance).toBe(170.00);
+    expect(result.difference).toBe(-500.00);      // figures still reported
+    expect(result.within_tolerance).toBe(true);   // but tolerance mismatch is suppressed
+    expect(result.warnings).toEqual([]);
+    expect(result.notes.some(n => /opening balance/i.test(n) && /dimension/i.test(n))).toBe(true);
   });
 
   it("falls back to the statement period date when the balance node has no date", async () => {
