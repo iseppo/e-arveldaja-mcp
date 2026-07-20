@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-20
+
 ### Added
 
-- `compute_account_dimension_balances` — read-only per-dimension balance breakdown for one account (e.g. the LHV/Wise/Lightyear dimensions of account 1020); the total reconciles to `compute_account_balance`. The algbilanss opening-balance import now captures and attributes opening balances per dimension.
+- `compute_account_dimension_balances` — read-only per-dimension balance breakdown for one account (e.g. the LHV/Wise/Lightyear dimensions of account 1020); the total reconciles to `compute_account_balance`. The algbilanss opening-balance import now captures and attributes opening balances per dimension. This raises the default tool surface to 123 (118 with Lightyear disabled). When a multi-dimension account's pasted opening-balance label cannot be resolved to exactly one dimension, the amount is booked to the account without a dimension id and an advisory warning naming the unresolved label is surfaced (the label is sandbox-wrapped as untrusted text).
+
+### Changed
+
+- The server's session-start instructions and the README now carry an advisory about the **v0.22.0 backwards-booking regression window** (roughly Sunday 2026-07-19 22:30 – Monday 2026-07-20 04:15): anyone who ran an e-arveldaja-mcp session while 0.22.0 was current should compare what e-arveldaja reports as the bank-account balance against the real balance and re-import the affected bank statements if they differ.
 
 ## [0.22.1] - 2026-07-20
 
