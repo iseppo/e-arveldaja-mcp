@@ -71,6 +71,11 @@ export async function checkStatementClosingBalance(
   // transactions in the dimension dated on or before the balance date.
   const transactions = (await api.transactions.listAll()) as Transaction[];
   let unconfirmedRaw = 0;
+  // In-scope PROJECT rows whose direction cannot be determined are added to
+  // neither sum. Count them so their silent exclusion can be surfaced — we must
+  // NOT guess a sign, but the operator should know the expected balance omits
+  // them.
+  let excludedIndeterminateDirection = 0;
   for (const tx of transactions) {
     if (!isProjectTransaction(tx)) continue;
     if (tx.accounts_dimensions_id !== input.dimensionId) continue;
@@ -79,6 +84,7 @@ export async function checkStatementClosingBalance(
     const direction = bankTransactionDirection(tx);
     if (direction === "incoming") unconfirmedRaw += amount;
     else if (direction === "outgoing") unconfirmedRaw -= amount;
+    else excludedIndeterminateDirection += 1;
   }
   const unconfirmedAmount = roundMoney(unconfirmedRaw);
 
@@ -87,6 +93,13 @@ export async function checkStatementClosingBalance(
 
   const warnings: string[] = [];
   const notes: string[] = [];
+
+  if (excludedIndeterminateDirection > 0) {
+    notes.push(
+      `${excludedIndeterminateDirection} unconfirmed transaction(s) in this dimension had an indeterminate ` +
+      `direction and were excluded from the expected balance.`,
+    );
+  }
 
   // The booked balance is in the EUR base currency; a non-EUR closing balance
   // is in the account currency, so comparing them would trip the tolerance on

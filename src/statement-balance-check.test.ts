@@ -107,6 +107,28 @@ describe("checkStatementClosingBalance", () => {
     expect(result.warnings).toEqual([]);
   });
 
+  it("notes in-scope unconfirmed rows excluded for an indeterminate direction and omits them from unconfirmed_amount", async () => {
+    const api = createAccountingWorkflowApi({
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("D", 100.00)]) },
+      transactionRows: [
+        // Direction unknown: no type and no source-direction marker; in-dimension,
+        // dated on or before the balance date. It skews the expected balance
+        // silently unless surfaced.
+        fixtureTransaction({ id: 1, amount: 50.00, date: "2026-02-20", type: null, description: "", accounts_dimensions_id: DIMENSION_ID }),
+      ],
+    });
+    const result = await checkStatementClosingBalance(api, {
+      dimensionId: DIMENSION_ID,
+      accountId: ACCOUNT_ID,
+      closing: { amount: 100.00, direction: "CRDT", date: BALANCE_DATE, currency: "EUR" },
+      fallbackDate: BALANCE_DATE,
+    });
+    // The indeterminate row is not summed into the unconfirmed total...
+    expect(result.unconfirmed_amount).toBe(0);
+    // ...and its exclusion is surfaced as a note (no guessed sign).
+    expect(result.notes.some(note => /indeterminate direction/.test(note) && /excluded/.test(note))).toBe(true);
+  });
+
   it("treats a DBIT closing balance as a negative balance", async () => {
     const api = createAccountingWorkflowApi({
       journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("C", 40.00)]) },
