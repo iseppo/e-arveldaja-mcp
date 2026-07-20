@@ -307,7 +307,14 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     // if a LIVE (non-deleted) journal already carries the same source reference.
     // Creation still proceeds — this is a soft signal, not a block. Cheap fields
     // only (listAll, no postings); a scan failure never blocks creation.
-    if (params.document_number) {
+    //
+    // Gate to SOURCE-reference-shaped values (`PREFIX:...`) only. Plain document
+    // numbers (e.g. "INV-100") are legitimately reused across journals, so
+    // scanning them produces false-positive advisories; the guard is meant for
+    // stable mechanism-crossing references that carry a `WISE:`/`LY:`/`BANK:`-style
+    // prefix.
+    const isSourceRefShaped = /^[A-Za-z][\w-]*:/.test(params.document_number ?? "");
+    if (params.document_number && isSourceRefShaped) {
       try {
         const existingJournals = await api.journals.listAll();
         const priorLive = existingJournals.find(j =>

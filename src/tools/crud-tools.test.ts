@@ -2837,6 +2837,24 @@ describe("create_journal document_number source-ref advisory", () => {
     );
   });
 
+  // FIX 5: the advisory is for stable SOURCE references (WISE:/LY:/BANK:…), not
+  // plain document numbers that are legitimately reused. A prefix-less number
+  // shared with a live journal must NOT warn — and must not even scan.
+  it("does NOT warn (or scan) for a plain, non-source-ref document_number shared with a live journal", async () => {
+    const { handler, create, listAll } = setup({
+      existingJournals: [
+        { id: 321, effective_date: "2026-07-01", document_number: "INV-100", is_deleted: false, registered: true },
+      ],
+    });
+
+    const result = await handler({ ...journalParams, document_number: "INV-100" }) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(listAll).not.toHaveBeenCalled();
+    expect(payload).not.toHaveProperty("warnings");
+  });
+
   it("does NOT warn when the only journal with that document_number is deleted", async () => {
     const { handler, create } = setup({
       existingJournals: [
