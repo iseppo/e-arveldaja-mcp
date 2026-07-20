@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../../mcp-compat.js";
-import { toMcpJson } from "../../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../../mcp-json.js";
 import { desandboxAllStrings, renderExternalEntity } from "../../external-text-renderer.js";
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
@@ -12,6 +12,14 @@ import { applyListView, viewParam } from "../../list-views.js";
 import { withOpeningBalanceStatus } from "../../opening-balance-limitations.js";
 import { readOpeningBalances } from "../../opening-balance-store.js";
 import { validatePostingDimensions } from "../../account-validation.js";
+import {
+  findDuplicateBankPostings,
+  formatDuplicatePostingWarnings,
+  resolveBankDimensions,
+  type BankDimensionInfo,
+  type DuplicatePostingCandidate,
+  type DuplicatePostingScanResult,
+} from "../../bank-posting-duplicate-guard.js";
 import type { ApiContext } from "./shared.js";
 import {
   coerceId,
@@ -140,6 +148,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       "base_amount = EUR equivalent for non-EUR entries. " +
       "projects_* fields link the posting to project tracking dimensions."
     ),
+    block_on_duplicate: z.boolean().optional().describe("Refuse creation when a bank posting looks like an already-booked duplicate (default false: warn only)."),
   }, { ...create, title: "Create Journal" }, async (rawParams) => {
     const params = desandboxAllStrings(rawParams);
     const postings = parsePostings(params.postings);
@@ -151,6 +160,60 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     if (postingErrors.length > 0) {
       return toolError({ error: "Account validation failed", details: postingErrors });
     }
+
+    // Cross-mechanism duplicate guard (Task 5): consult only when at least one
+    // posting touches a known bank-account dimension — the exact shape of the
+    // incident this guard exists for (a manual journal crediting a bank
+    // dimension directly, later re-booked by a reconcile). Fast-pathed: a
+    // journal with no bank-dimension posting never triggers a journals scan.
+    const bankDims = await resolveBankDimensions(api);
+    const bankDimById = new Map(bankDims.map(d => [d.dimensionId, d]));
+    const postingScans: Array<{
+      dim: BankDimensionInfo;
+      candidate: DuplicatePostingCandidate;
+      scan: DuplicatePostingScanResult;
+    }> = [];
+    for (const posting of postings) {
+      if (posting.accounts_dimensions_id == null) continue;
+      const dim = bankDimById.get(posting.accounts_dimensions_id);
+      if (!dim) continue;
+      const candidate: DuplicatePostingCandidate = {
+        accountId: dim.accountId,
+        dimensionId: dim.dimensionId,
+        amount: posting.base_amount ?? posting.amount,
+        direction: posting.type === "D" ? "D" : "C",
+        date: params.effective_date,
+      };
+      const scan = await findDuplicateBankPostings(api, candidate);
+      postingScans.push({ dim, candidate, scan });
+    }
+
+    if (params.block_on_duplicate === true) {
+      const conflicting = new Map<number, { journal_id: number; journal_title: string; date: string; amount: number }>();
+      for (const ps of postingScans) {
+        if (!ps.scan.scan_available) continue;
+        for (const suspect of ps.scan.suspects) {
+          if (conflicting.has(suspect.journal_id)) continue;
+          conflicting.set(suspect.journal_id, {
+            journal_id: suspect.journal_id,
+            journal_title: wrapUntrustedOcr(suspect.journal_title) ?? "",
+            date: suspect.date,
+            amount: suspect.amount,
+          });
+        }
+      }
+      if (conflicting.size > 0) {
+        const journalIds = [...conflicting.keys()];
+        return toolError({
+          error: "Possible duplicate bank posting",
+          category: "possible_duplicate_posting",
+          conflicting_journal_ids: journalIds,
+          details: [...conflicting.values()],
+          next_action: `Verify journal(s) ${journalIds.join(", ")} before creating this journal, or retry without block_on_duplicate to proceed with an advisory warning.`,
+        });
+      }
+    }
+
     const result = await api.journals.create({
       ...params,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
@@ -175,12 +238,58 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
         })),
       },
     });
+
+    // Collect advisory warnings across all bank-dimension postings, deduped by
+    // journal_id so a journal that shows up as a suspect against more than one
+    // posting (e.g. an inter-account transfer touching two bank dimensions) is
+    // only reported once.
+    const seenJournalIds = new Set<number>();
+    let scanUnavailableNoteAdded = false;
+    const warnings: string[] = [];
+    const possibleDuplicatePostings: Array<{
+      accounts_id: number;
+      accounts_dimensions_id: number;
+      amount: number;
+      direction: "D" | "C";
+      suspects: Array<Record<string, unknown>>;
+    }> = [];
+    for (const ps of postingScans) {
+      const newSuspects = ps.scan.suspects.filter(s => !seenJournalIds.has(s.journal_id));
+      newSuspects.forEach(s => seenJournalIds.add(s.journal_id));
+      const filteredScan: DuplicatePostingScanResult = { ...ps.scan, suspects: newSuspects };
+      const lines = formatDuplicatePostingWarnings(filteredScan, ps.candidate, t => wrapUntrustedOcr(t) ?? "");
+      for (const line of lines) {
+        if (!ps.scan.scan_available && ps.scan.scan_note && line === ps.scan.scan_note) {
+          if (scanUnavailableNoteAdded) continue;
+          scanUnavailableNoteAdded = true;
+        }
+        warnings.push(line);
+      }
+      if (newSuspects.length > 0) {
+        possibleDuplicatePostings.push({
+          accounts_id: ps.dim.accountId,
+          accounts_dimensions_id: ps.dim.dimensionId,
+          amount: ps.candidate.amount,
+          direction: ps.candidate.direction,
+          suspects: newSuspects.map(s => ({ ...s, journal_title: wrapUntrustedOcr(s.journal_title) ?? "" })),
+        });
+      }
+    }
+
     return toolResponse({
       action: "created",
       entity: "journal",
       id: result.created_object_id,
       message: `Created journal${params.title ? ` "${params.title}"` : ""} on ${params.effective_date}.`,
       raw: result,
+      ...(warnings.length > 0
+        ? {
+            warnings,
+            ...(possibleDuplicatePostings.length > 0
+              ? { extra: { possible_duplicate_postings: possibleDuplicatePostings } }
+              : {}),
+          }
+        : {}),
     });
   });
 

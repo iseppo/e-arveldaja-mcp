@@ -2562,6 +2562,141 @@ describe("create_transaction duplicate-posting guard", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Task 5: cross-mechanism duplicate-posting guard on create_journal
+// ---------------------------------------------------------------------------
+
+describe("create_journal duplicate-posting guard", () => {
+  const BANK_DIMENSION_ID = 13172505;
+  const BANK_ACCOUNT_ID = 1020;
+  const EXPENSE_ACCOUNT_ID = 5250;
+  const DUP_JOURNAL_ID = 28425144;
+
+  // The exact incident: a registered manual journal already crediting the
+  // Wise bank dimension 226.80 EUR one day earlier — a cross-mechanism
+  // SUSPECT create_journal currently cannot see.
+  const duplicateJournal = {
+    id: DUP_JOURNAL_ID,
+    registered: true,
+    is_deleted: false,
+    effective_date: "2026-07-19",
+    title: "Manual bank booking",
+    document_number: "DOC-DUP-1",
+    operation_type: "MANUAL",
+    clients_id: null,
+    postings: [
+      { accounts_id: EXPENSE_ACCOUNT_ID, accounts_dimensions_id: null, type: "D", amount: 226.80, is_deleted: false },
+      { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "C", amount: 226.80, is_deleted: false },
+    ],
+  };
+
+  const accounts = [
+    { id: EXPENSE_ACCOUNT_ID, account_code: "5250", is_valid: true, allows_dimensions: false },
+    { id: BANK_ACCOUNT_ID, account_code: "1020", is_valid: true, allows_dimensions: true },
+  ];
+  const accountDimensions = [
+    { id: BANK_DIMENSION_ID, accounts_id: BANK_ACCOUNT_ID, is_deleted: false, title_est: "Wise" },
+  ];
+
+  const bankJournalParams = {
+    effective_date: "2026-07-20",
+    title: "Owner reimbursement",
+    postings: [
+      { accounts_id: EXPENSE_ACCOUNT_ID, type: "D" as const, amount: 226.80 },
+      { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "C" as const, amount: 226.80 },
+    ],
+  };
+
+  const nonBankJournalParams = {
+    effective_date: "2026-07-20",
+    title: "Non-bank accrual",
+    postings: [
+      { accounts_id: EXPENSE_ACCOUNT_ID, type: "D" as const, amount: 50 },
+      { accounts_id: EXPENSE_ACCOUNT_ID, type: "C" as const, amount: 50 },
+    ],
+  };
+
+  function setupCreateJournal(options: {
+    journals?: unknown[];
+    journalsThrows?: boolean;
+    create?: ReturnType<typeof vi.fn>;
+  } = {}) {
+    const create = options.create ?? vi.fn().mockResolvedValue({ created_object_id: 42 });
+    const listAllWithPostings = options.journalsThrows
+      ? vi.fn().mockRejectedValue(new Error("page cap exceeded"))
+      : vi.fn().mockResolvedValue(options.journals ?? []);
+    const { api, handler } = getCrudToolHarness("create_journal", {
+      journals: { create, listAllWithPostings },
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue(accounts),
+        getAccountDimensions: vi.fn().mockResolvedValue(accountDimensions),
+        getBankAccounts: vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
+      },
+    });
+    return { api, handler, create, listAllWithPostings };
+  }
+
+  it("the incident, third mechanism: matching suspect still creates the journal but warns POSSIBLE duplicate naming it", async () => {
+    const { handler, create } = setupCreateJournal({ journals: [duplicateJournal] });
+
+    const result = await handler(bankJournalParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      warnings?: string[];
+      possible_duplicate_postings?: Array<{ suspects: Array<{ journal_id: number }> }>;
+    };
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.warnings?.some(w => /POSSIBLE duplicate/.test(w) && w.includes(String(DUP_JOURNAL_ID)))).toBe(true);
+    expect(payload.possible_duplicate_postings?.some(
+      p => p.suspects.some(s => s.journal_id === DUP_JOURNAL_ID),
+    )).toBe(true);
+  });
+
+  it("non-bank journal: guard is not consulted at all (journals lister not called)", async () => {
+    const { handler, create, listAllWithPostings } = setupCreateJournal({ journals: [duplicateJournal] });
+
+    const result = await handler(nonBankJournalParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(listAllWithPostings).not.toHaveBeenCalled();
+    expect(payload).not.toHaveProperty("warnings");
+    expect(payload).not.toHaveProperty("possible_duplicate_postings");
+  });
+
+  it("block path: block_on_duplicate=true refuses creation with a toolError naming the conflicting journal", async () => {
+    const { handler, create } = setupCreateJournal({ journals: [duplicateJournal] });
+
+    const result = await handler({ ...bankJournalParams, block_on_duplicate: true }) as {
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    };
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      category?: string;
+      conflicting_journal_ids?: number[];
+    };
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("possible_duplicate_posting");
+    expect(payload.conflicting_journal_ids).toEqual([DUP_JOURNAL_ID]);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("block_on_duplicate=true but scan throws: creation proceeds with a scan-unavailable note (no refusal without evidence)", async () => {
+    const { handler, create } = setupCreateJournal({ journalsThrows: true });
+
+    const result = await handler({ ...bankJournalParams, block_on_duplicate: true }) as {
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    };
+    const payload = parseMcpResponse(result.content[0]!.text) as { warnings?: string[] };
+
+    expect(result.isError).toBeFalsy();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.warnings?.some(w => /Duplicate scan unavailable/.test(w))).toBe(true);
+  });
+});
+
 describe("P17 create_client legal-entity identity gate", () => {
   beforeEach(() => vi.mocked(logAudit).mockClear());
 
