@@ -2623,6 +2623,37 @@ describe("create_transaction duplicate-posting guard", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(payload.warnings?.some(w => /Duplicate scan unavailable/.test(w))).toBe(true);
   });
+
+  // FIX 5: the operator asked to block on duplicates, but the dimension is not a
+  // recognized bank dimension so the guard could not run. The block silently did
+  // not apply — surface that the transaction was created WITHOUT the requested
+  // protection (fail-safe: never blocks).
+  it("block_on_duplicate=true but dimension is not a recognized bank dimension: creates and surfaces a guard note", async () => {
+    const { handler, create } = setupCreateTransaction({ journals: [duplicateJournal] });
+
+    const result = await handler({
+      ...createParams,
+      accounts_dimensions_id: 4242,       // not the resolved BANK_DIMENSION_ID
+      block_on_duplicate: true,
+    }) as { isError?: boolean; content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as { duplicate_guard_note?: string };
+
+    expect(result.isError).toBeFalsy();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.duplicate_guard_note).toMatch(/block.*could not be evaluated|could not be evaluated/i);
+  });
+
+  it("block_on_duplicate=true but scan unavailable (bankDims throws): surfaces a guard note too", async () => {
+    const { handler, create } = setupCreateTransaction({ bankDimsThrows: true });
+
+    const result = await handler({ ...createParams, block_on_duplicate: true }) as {
+      content: Array<{ text: string }>;
+    };
+    const payload = parseMcpResponse(result.content[0]!.text) as { duplicate_guard_note?: string };
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.duplicate_guard_note).toBeTruthy();
+  });
 });
 
 // ---------------------------------------------------------------------------

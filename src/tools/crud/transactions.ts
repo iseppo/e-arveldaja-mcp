@@ -259,6 +259,27 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         accounts_dimensions_id: params.accounts_dimensions_id,
       },
     });
+    // Fail-safe surfacing: the operator asked to block on duplicates but the
+    // guard could not actually evaluate (dimension not a recognized bank
+    // dimension → no scan, or the scan was unavailable). Never block — but tell
+    // the operator the transaction was created WITHOUT that protection.
+    const blockRequestedButUnevaluated =
+      params.block_on_duplicate === true && duplicateScan?.scan_available !== true;
+
+    const extra: Record<string, unknown> = {};
+    if (blockRequestedButUnevaluated) {
+      extra.duplicate_guard_note =
+        "block_on_duplicate was requested but the duplicate block could not be evaluated " +
+        "(the dimension is not a recognized bank dimension, or the duplicate scan was unavailable); " +
+        "the transaction was created WITHOUT that protection.";
+    }
+    if (duplicateScan && candidate && duplicateScan.suspects.length > 0) {
+      extra.possible_duplicate_postings = duplicateScan.suspects.map(s => ({
+        ...s,
+        journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
+      }));
+    }
+
     return toolResponse({
       action: "created",
       entity: "transaction",
@@ -266,20 +287,9 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       message: `Created transaction ${params.amount} ${params.cl_currencies_id ?? "EUR"} on ${params.date}.`,
       raw: result,
       ...(duplicateScan && candidate && (duplicateScan.suspects.length > 0 || !duplicateScan.scan_available)
-        ? {
-            warnings: formatDuplicatePostingWarnings(duplicateScan, candidate, t => wrapUntrustedOcr(t) ?? ""),
-            ...(duplicateScan.suspects.length > 0
-              ? {
-                  extra: {
-                    possible_duplicate_postings: duplicateScan.suspects.map(s => ({
-                      ...s,
-                      journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
-                    })),
-                  },
-                }
-              : {}),
-          }
+        ? { warnings: formatDuplicatePostingWarnings(duplicateScan, candidate, t => wrapUntrustedOcr(t) ?? "") }
         : {}),
+      ...(Object.keys(extra).length > 0 ? { extra } : {}),
     });
   });
 
