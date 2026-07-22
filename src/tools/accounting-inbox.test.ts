@@ -7,6 +7,8 @@ import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
+import { GUIDED_TOOL_NAMES, runWithToolProfile } from "../tool-profile.js";
+import * as toolProfileModule from "../tool-profile.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { parseDocument } from "../document-parser.js";
@@ -2942,6 +2944,18 @@ ${entryXml}
     expect(payload.next_step_summary).toContain("create_owner_expense_reimbursement");
   });
 
+  it("guided resolve_review turns the owner-expense helper into a non-executable review proposal", async () => {
+    const handler = continueWorkflowHandler(DEFAULT_EXPOSURE);
+    const result = await runWithToolProfile("guided", () => handler({ action: "resolve_review", review_item_json: ownerExpenseReviewItem }));
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.status).toBe("needs_review");
+    expect(payload.blocker.code).toBe("advanced_action_unavailable_in_profile");
+    expect(payload.accounting_proposal.tool).toBe("create_owner_expense_reimbursement");
+    expect(payload.suggested_tools).toEqual(["get_setup_instructions"]);
+    expect(payload.next_actions).toEqual([{ tool: "get_setup_instructions", args: {}, approval_required: false }]);
+  });
+
   it("resolve_review falls back to create_journal when the tax tools are disabled (DISABLE_TAX_TOOLS)", async () => {
     const handler = continueWorkflowHandler({ ...DEFAULT_EXPOSURE, enableTaxTools: false });
     const result = await handler({ action: "resolve_review", review_item_json: ownerExpenseReviewItem });
@@ -2953,6 +2967,17 @@ ${entryXml}
     expect(payload.next_step_summary).not.toContain("create_owner_expense_reimbursement");
     expect(payload.next_step_summary).toContain("create_journal");
     expect(payload.next_step_summary).toContain("2110");
+  });
+
+  it("guided resolve_review also blocks the create_journal tax-disabled fallback", async () => {
+    const handler = continueWorkflowHandler({ ...DEFAULT_EXPOSURE, enableTaxTools: false });
+    const result = await runWithToolProfile("guided", () => handler({ action: "resolve_review", review_item_json: ownerExpenseReviewItem }));
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(payload.status).toBe("needs_review");
+    expect(payload.blocker.code).toBe("advanced_action_unavailable_in_profile");
+    expect(payload.accounting_proposal.tool).toBe("create_journal");
+    expect(payload.suggested_tools).toEqual(["get_setup_instructions"]);
   });
 
   it("prepare_action also honors DISABLE_TAX_TOOLS for the owner-expense fallback", async () => {
@@ -2986,6 +3011,59 @@ ${entryXml}
     expect(stepTools).not.toContain("import_camt053");
     const parseStep = payload.recommended_steps.find((s: any) => s.suggested_args?.mode === "parse");
     expect(parseStep?.tool).toBe("process_camt053");
+  });
+
+  it.each(["scan", "dry_run"] as const)("guided %s exposes only guided caller-facing actions", async (mode) => {
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+    });
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), api, DEFAULT_EXPOSURE);
+    const handler = getRegisteredToolHandler(server, "accounting_inbox");
+    const result = await runWithToolProfile("guided", () => handler({ mode, workspace_path: workspace }));
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const prepared = mode === "dry_run" ? payload.prepared_inbox : payload;
+
+    expect(prepared.recommended_steps.every((step: any) => GUIDED_TOOL_NAMES.includes(step.tool))).toBe(true);
+    if (prepared.next_recommended_action) {
+      expect(GUIDED_TOOL_NAMES).toContain(prepared.next_recommended_action.tool);
+    }
+  });
+
+  it.each(["scan", "dry_run"] as const)("guided %s promotes a future unknown caller action to top-level review", async (mode) => {
+    const originalProject = toolProfileModule.projectActionForCurrentProfile;
+    const projectionSpy = vi.spyOn(toolProfileModule, "projectActionForCurrentProfile").mockImplementation((action) => {
+      if (action.tool === "process_camt053") {
+        return {
+          status: "needs_review",
+          blocker: { code: "advanced_action_unavailable_in_profile", message: "Unavailable future action." },
+          proposal: { tool: "future_unknown_tool", args: action.args, approval_required: false },
+          next_actions: [{ tool: "get_setup_instructions", args: {}, approval_required: false }],
+        };
+      }
+      return originalProject(action);
+    });
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({ bankAccounts: [fixtureBankAccount()], accountDimensions: [fixtureAccountDimension()] });
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), api, DEFAULT_EXPOSURE);
+    const handler = getRegisteredToolHandler(server, "accounting_inbox");
+    try {
+      const result = await runWithToolProfile("guided", () => handler({ mode, workspace_path: workspace }));
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      const prepared = mode === "dry_run" ? payload.prepared_inbox : payload;
+      expect(payload.status ?? prepared.status).toBe("needs_review");
+      expect((payload.blocker ?? prepared.blocker).code).toBe("advanced_action_unavailable_in_profile");
+      expect((payload.accounting_proposal ?? prepared.accounting_proposal).tool).toBe("future_unknown_tool");
+      expect(prepared.recommended_steps.map((step: any) => step.tool)).toEqual(["get_setup_instructions"]);
+      expect(prepared.next_recommended_action.tool).toBe("get_setup_instructions");
+    } finally {
+      projectionSpy.mockRestore();
+    }
   });
 });
 

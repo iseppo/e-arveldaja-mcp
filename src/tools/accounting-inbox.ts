@@ -723,9 +723,65 @@ function pickNextRecommendedAction(steps: RecommendedStep[]): RecommendedStep | 
 // EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1 the granular names are valid and the
 // power-user mode prefers them. Past-tense `executed_steps` telemetry keeps the
 // real internal delegate (like the envelope's informational `delegated_tool`).
-function remapRecommendedStepTool<T extends { tool: string; suggested_args: Record<string, unknown> }>(step: T): T {
-  const remapped = remapHiddenGranularTool(step.tool, step.suggested_args);
-  return remapped ? { ...step, tool: remapped.tool, suggested_args: remapped.args } : step;
+interface BlockedRecommendedAction {
+  blocker: Record<string, unknown>;
+  proposal: Record<string, unknown>;
+  next_actions: Array<Record<string, unknown>>;
+}
+
+function projectPublicRecommendedSteps(
+  rawSteps: RecommendedStep[],
+  runtimeSafetyContext: RuntimeSafetyContext,
+  exposure: ToolExposureConfig,
+): { steps: RecommendedStep[]; blocked?: BlockedRecommendedAction } {
+  const steps: RecommendedStep[] = [];
+  let blocked: BlockedRecommendedAction | undefined;
+  for (const rawStep of rawSteps) {
+    const legacyRemap = exposure.exposeGranularTools
+      ? undefined
+      : remapHiddenGranularTool(rawStep.tool, rawStep.suggested_args);
+    const normalizedStep = legacyRemap
+      ? { ...rawStep, tool: legacyRemap.tool, suggested_args: legacyRemap.args }
+      : rawStep;
+    const publicStep = publicRecommendedStep(normalizedStep, runtimeSafetyContext);
+    const projected = projectActionForCurrentProfile({
+      tool: publicStep.tool,
+      args: publicStep.suggested_args,
+      approval_required: false,
+    });
+    if (isRecord(projected) && projected.status === "needs_review") {
+      blocked ??= {
+        blocker: projected.blocker as Record<string, unknown>,
+        proposal: {
+          ...(projected.proposal as Record<string, unknown>),
+          step: publicStep.step,
+          purpose: publicStep.purpose,
+          reason: publicStep.reason,
+        },
+        next_actions: projected.next_actions as Array<Record<string, unknown>>,
+      };
+      continue;
+    }
+    steps.push({
+      ...publicStep,
+      tool: typeof projected.tool === "string" ? projected.tool : publicStep.tool,
+      suggested_args: isRecord(projected.args) ? projected.args : publicStep.suggested_args,
+    });
+  }
+
+  if (!blocked) return { steps };
+  return {
+    steps: [{
+      step: 1,
+      tool: "get_setup_instructions",
+      purpose: "Review the unavailable advanced accounting proposal and choose a broader profile before continuing.",
+      recommended: true,
+      suggested_args: {},
+      missing_inputs: [],
+      reason: String(blocked.blocker.message ?? "The proposed action is unavailable in this profile."),
+    }],
+    blocked,
+  };
 }
 
 function publicInboxFile(
@@ -960,14 +1016,11 @@ function buildPreparedInboxPayload(
   runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): Record<string, unknown> {
-  // Rewrite hidden granular tool names in the caller-facing step list to their
-  // merged entry points unless the granular tools are exposed (see
-  // remapRecommendedStepTool). next_recommended_action is picked from the same
-  // rewritten list so the two stay consistent.
-  const rawSteps = exposure.exposeGranularTools
-    ? prepared.steps
-    : prepared.steps.map(remapRecommendedStepTool);
-  const steps = rawSteps.map(step => publicRecommendedStep(step, runtimeSafetyContext));
+  // Project every caller-facing structured action through the selected profile
+  // after paths become opaque refs. This remaps safe granular aliases and fails
+  // closed if a future/advanced action is not public in a guided profile.
+  const projected = projectPublicRecommendedSteps(prepared.steps, runtimeSafetyContext, exposure);
+  const steps = projected.steps;
   const questions = prepared.questions.map(publicQuestion);
   return {
     workspace_path: sandboxExternalText(prepared.workspacePath),
@@ -989,6 +1042,15 @@ function buildPreparedInboxPayload(
     questions,
     next_question: questions[0],
     next_recommended_action: pickNextRecommendedAction(steps),
+    ...(projected.blocked
+      ? {
+          status: "needs_review",
+          blocker: projected.blocked.blocker,
+          accounting_proposal: projected.blocked.proposal,
+          suggested_tools: ["get_setup_instructions"],
+          next_actions: projected.blocked.next_actions,
+        }
+      : {}),
     assistant_guidance: [
       "Ask only the questions listed under questions, and always start with the recommendation.",
       "Run dry-run steps before any execute=true mutation.",
@@ -1633,7 +1695,7 @@ async function buildAccountingInboxDryRunResponse(
   const prepared = await prepareAccountingInbox(api, params);
   const handlers = captureInternalToolHandlers(api, runtimeSafetyContext);
   const autopilot = await runAccountingInboxDryRunPipeline({ prepared, handlers });
-  const publicAutopilot = {
+  const publicAutopilot: Record<string, unknown> = {
     ...autopilot,
     executed_steps: autopilot.executed_steps.map(step => ({
       ...step,
@@ -1656,22 +1718,35 @@ async function buildAccountingInboxDryRunResponse(
   preparedPayload.next_question = autopilot.next_question
     ? publicFollowUp(autopilot.next_question, runtimeSafetyContext)
     : undefined;
-  // Keep the caller-facing next step consistent with the scan payload: rewrite a
-  // hidden granular tool to its merged entry point unless granular tools are exposed.
-  const nextRecommendedAction = autopilot.next_recommended_action && !exposure.exposeGranularTools
-    ? remapRecommendedStepTool(autopilot.next_recommended_action)
-    : autopilot.next_recommended_action;
-  preparedPayload.next_recommended_action = nextRecommendedAction
-    ? {
-        ...nextRecommendedAction,
-        purpose: sandboxExternalText(nextRecommendedAction.purpose),
-        suggested_args: publicSuggestedArgs(nextRecommendedAction.tool, nextRecommendedAction.suggested_args, runtimeSafetyContext),
-      }
-    : undefined;
+  const nextProjection = autopilot.next_recommended_action
+    ? projectPublicRecommendedSteps([autopilot.next_recommended_action], runtimeSafetyContext, exposure)
+    : { steps: [] as RecommendedStep[] };
+  const nextRecommendedAction = nextProjection.steps[0];
+  if (!isRecord(preparedPayload.blocker)) {
+    preparedPayload.next_recommended_action = nextRecommendedAction;
+    if (nextProjection.blocked) {
+      preparedPayload.status = "needs_review";
+      preparedPayload.blocker = nextProjection.blocked.blocker;
+      preparedPayload.accounting_proposal = nextProjection.blocked.proposal;
+      preparedPayload.suggested_tools = ["get_setup_instructions"];
+      preparedPayload.next_actions = nextProjection.blocked.next_actions;
+      preparedPayload.recommended_steps = nextProjection.steps;
+    }
+  }
+  publicAutopilot.next_recommended_action = preparedPayload.next_recommended_action;
 
   const payload = {
     prepared_inbox: preparedPayload,
     autopilot: publicAutopilot,
+    ...(isRecord(preparedPayload.blocker)
+      ? {
+          status: "needs_review",
+          blocker: preparedPayload.blocker,
+          accounting_proposal: preparedPayload.accounting_proposal,
+          suggested_tools: ["get_setup_instructions"],
+          next_actions: preparedPayload.next_actions,
+        }
+      : {}),
   };
   const workflow = remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload));
 
@@ -1723,6 +1798,33 @@ function buildReviewResolutionResponse(
     error: resolution.error,
     supported_review_types: resolution.supported_review_types,
   };
+
+  const projectedTools = (publicResolution.suggested_tools ?? []).map((tool) =>
+    projectActionForCurrentProfile({ tool, args: {}, approval_required: true })
+  );
+  const blocked = projectedTools.find((projected) => isRecord(projected) && projected.status === "needs_review");
+  if (isRecord(blocked) && blocked.status === "needs_review") {
+    return {
+      content: [{
+        type: "text",
+        text: toMcpJson({
+          ...publicResolution,
+          status: "needs_review",
+          blocker: blocked.blocker,
+          accounting_proposal: blocked.proposal,
+          suggested_tools: ["get_setup_instructions"],
+          next_actions: blocked.next_actions,
+          next_step_summary: (blocked.blocker as Record<string, unknown>).message,
+          assistant_guidance: reviewResolutionAssistantGuidance,
+        }),
+      }],
+    };
+  }
+  publicResolution.suggested_tools = projectedTools.map((projected, index) =>
+    isRecord(projected) && typeof projected.tool === "string"
+      ? projected.tool
+      : publicResolution.suggested_tools![index]!
+  );
 
   return {
     content: [{

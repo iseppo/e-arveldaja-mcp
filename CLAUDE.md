@@ -162,7 +162,7 @@ without changing the default:
 The standard surface is 125 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 120.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
 credential tools; enabling both raises it to the full 138. The five opt-out
-group flags trim the default further — `DISABLE_TAX_TOOLS` (−3),
+group flags trim the default further — `DISABLE_TAX_TOOLS` (−4),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
 every disable flag set (incl. Lightyear) lands near 80 tools. (The former

@@ -6,6 +6,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer } from "./server-bootstrap.js";
 import { TOOL_SURFACE_SETUP_INFO } from "./__fixtures__/tool-surface.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { parseMcpResponse } from "./mcp-json.js";
+import { currentToolProfile } from "./tool-profile.js";
 
 describe("PublicToolRegistrar", () => {
   it("filters the real production bootstrap without stdio", async () => {
@@ -51,5 +56,71 @@ describe("PublicToolRegistrar", () => {
       annotations: { destructiveHint: false },
       _meta: { earveldajaTool: toolMeta("delete_transaction") },
     }, vi.fn())).toThrow("destructive-risk metadata mismatch");
+  });
+
+  it("composes invocation scope outside the public profile callback", async () => {
+    const events: string[] = [];
+    let registered: (() => Promise<void>) | undefined;
+    const real = {
+      registerTool: (_name: string, _config: unknown, callback: () => Promise<void>) => { registered = callback; },
+    } as unknown as McpServer;
+    const scoped = new Proxy(real, {
+      get(target, property, receiver) {
+        if (property !== "registerTool") return Reflect.get(target, property, receiver);
+        return (name: string, config: unknown, callback: () => Promise<void>) =>
+          target.registerTool(name, config as any, async () => {
+            events.push("scope-enter");
+            await callback();
+            events.push("scope-exit");
+          });
+      },
+    }) as McpServer;
+    const publicServer = createPublicToolRegistrar(scoped, "guided");
+    publicServer.registerTool("recommend_workflow", { _meta: { earveldajaTool: toolMeta("recommend_workflow") } }, async () => {
+      events.push(`profile:${currentToolProfile()}`);
+    });
+
+    await registered!();
+    expect(events).toEqual(["scope-enter", "profile:guided", "scope-exit"]);
+  });
+
+  it("runs credential and plan tools through the active runtime scope", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "earveldaja-profile-scope-"));
+    const previousConfigDir = process.env.EARVELDAJA_CONFIG_DIR;
+    process.env.EARVELDAJA_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, ".env"), [
+      "EARVELDAJA_SERVER=live",
+      "EARVELDAJA_API_KEY_ID=scope-key",
+      "EARVELDAJA_API_PUBLIC_VALUE=scope-public",
+      "EARVELDAJA_API_PASSWORD=scope-password",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    const bootstrap = await createMcpServer({ configs: [], setupInfo: TOOL_SURFACE_SETUP_INFO, toolProfile: "full", connect: false });
+    const client = new Client({ name: "scope-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([bootstrap.server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const removal = await client.callTool({
+        name: "remove_stored_credentials",
+        arguments: { storage_scope: "global", target: "primary" },
+      });
+      const preview = parseMcpResponse((removal.content[0] as { text: string }).text) as Record<string, unknown>;
+      expect(removal.isError).not.toBe(true);
+      expect(preview.plan_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+      const page = await client.callTool({
+        name: "get_execution_plan_page",
+        arguments: { plan_handle: preview.plan_handle },
+      });
+      const pagePayload = parseMcpResponse((page.content[0] as { text: string }).text) as Record<string, unknown>;
+      expect(page.isError).not.toBe(true);
+      expect(pagePayload.contract).toBe("execution_plan_page_v1");
+    } finally {
+      await Promise.allSettled([client.close(), bootstrap.server.close()]);
+      if (previousConfigDir === undefined) delete process.env.EARVELDAJA_CONFIG_DIR;
+      else process.env.EARVELDAJA_CONFIG_DIR = previousConfigDir;
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });

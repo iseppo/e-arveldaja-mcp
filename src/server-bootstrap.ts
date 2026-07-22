@@ -557,7 +557,42 @@ export async function createMcpServer(
       "PDF invoice extraction, supplier resolution with business registry lookup, " +
       "and smart booking suggestions based on past invoices.",
   }, { instructions });
-  const server = options.wrapServer?.(baseServer) ?? baseServer;
+  // Registration order is a security boundary, not an implementation detail:
+  // every tool first receives connection/runtime scoping, then crosses the one
+  // public catalog/profile boundary. The optional observation wrapper sits
+  // between them so tests/measurements see real scoped registrations without
+  // bypassing either boundary.
+  const scopedServer = new Proxy(baseServer, {
+    get(target, prop, receiver) {
+      if (prop === "registerTool") {
+        return (...toolArgs: unknown[]) => {
+          const toolName = typeof toolArgs[0] === "string" ? toolArgs[0] : "unknown_tool";
+          const toolSpec = (toolArgs[1] && typeof toolArgs[1] === "object")
+            ? toolArgs[1] as { annotations?: { readOnlyHint?: boolean } }
+            : undefined;
+          const isReadOnly = toolSpec?.annotations?.readOnlyHint === true;
+          const lastIdx = toolArgs.length - 1;
+          if (lastIdx >= 0 && typeof toolArgs[lastIdx] === "function") {
+            toolArgs[lastIdx] = wrapToolHandler(toolName, isReadOnly, toolArgs[lastIdx] as any);
+          }
+          return (target.registerTool as any)(...toolArgs);
+        };
+      }
+
+      if (prop === "registerResource") {
+        return (...resourceArgs: unknown[]) => {
+          const lastIdx = resourceArgs.length - 1;
+          if (lastIdx >= 0 && typeof resourceArgs[lastIdx] === "function") {
+            resourceArgs[lastIdx] = wrapResourceHandler(resourceArgs[lastIdx] as any);
+          }
+          return (target.registerResource as any)(...resourceArgs);
+        };
+      }
+
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as McpServer;
+  const server = options.wrapServer?.(scopedServer) ?? scopedServer;
   const publicServer = createPublicToolRegistrar(server, toolProfile);
 
   // --- Multi-account tools ---
@@ -898,65 +933,35 @@ export async function createMcpServer(
     }) as unknown as T;
   }
 
-  // Create a proxy that pins tool and resource handlers to a connection snapshot.
-  const scopedServer = new Proxy(publicServer, {
-    get(target, prop, receiver) {
-      if (prop === "registerTool") {
-        return (...toolArgs: unknown[]) => {
-          const toolName = typeof toolArgs[0] === "string" ? toolArgs[0] : "unknown_tool";
-          const toolSpec = (toolArgs[1] && typeof toolArgs[1] === "object")
-            ? toolArgs[1] as { annotations?: { readOnlyHint?: boolean } }
-            : undefined;
-          const isReadOnly = toolSpec?.annotations?.readOnlyHint === true;
-          const lastIdx = toolArgs.length - 1;
-          if (lastIdx >= 0 && typeof toolArgs[lastIdx] === "function") {
-            toolArgs[lastIdx] = wrapToolHandler(toolName, isReadOnly, toolArgs[lastIdx] as any);
-          }
-          return (target.registerTool as any)(...toolArgs);
-        };
-      }
+  // Every public tool registration crosses the same profile/catalog boundary;
+  // that boundary delegates into the scoped server above.
+  registerCrudTools(publicServer, api, toolExposure);
+  registerAccountBalanceTools(publicServer, api);
+  registerPdfWorkflowTools(publicServer, api);
+  registerDocumentAttachmentTools(publicServer, api);
+  registerCurrencyRoundingTools(publicServer, api);
+  registerBankReconciliationTools(publicServer, api, runtimeSafetyContext, toolExposure);
+  registerFinancialStatementTools(publicServer, api, toolExposure);
+  registerAgingTools(publicServer, api, toolExposure);
+  if (toolExposure.enableSales) registerRecurringInvoiceTools(publicServer, api);
+  if (toolExposure.enableTaxTools) registerEstonianTaxTools(publicServer, api);
+  if (toolExposure.enableAnnualReport) registerAnnualReportTools(publicServer, api);
+  registerDocumentAuditTools(publicServer, api);
+  registerOpeningBalanceTools(publicServer, api);
+  registerReceiptInboxTools(publicServer, api, runtimeSafetyContext, toolExposure);
+  if (toolExposure.enableLightyear) registerLightyearTools(publicServer, api, runtimeSafetyContext);
+  registerWiseImportTools(publicServer, api, runtimeSafetyContext);
+  registerCamtImportTools(publicServer, api, runtimeSafetyContext, toolExposure);
+  registerAccountingInboxTools(publicServer, api, runtimeSafetyContext, toolExposure);
+  registerAnalyzeUnconfirmedTools(publicServer, api);
+  registerWorkflowRecommendationTools(publicServer, toolExposure);
+  registerPlanTools(publicServer, runtimeSafetyContext);
 
-      if (prop === "registerResource") {
-        return (...resourceArgs: unknown[]) => {
-          const lastIdx = resourceArgs.length - 1;
-          if (lastIdx >= 0 && typeof resourceArgs[lastIdx] === "function") {
-            resourceArgs[lastIdx] = wrapResourceHandler(resourceArgs[lastIdx] as any);
-          }
-          return (target.registerResource as any)(...resourceArgs);
-        };
-      }
-
-      return Reflect.get(target, prop, receiver);
-    },
-  }) as McpServer;
-
-  // Register all tools (via scopedServer so handlers get connection-pinned).
-  registerCrudTools(scopedServer, api, toolExposure);
-  registerAccountBalanceTools(scopedServer, api);
-  registerPdfWorkflowTools(scopedServer, api);
-  registerDocumentAttachmentTools(scopedServer, api);
-  registerCurrencyRoundingTools(scopedServer, api);
-  registerBankReconciliationTools(scopedServer, api, runtimeSafetyContext, toolExposure);
-  registerFinancialStatementTools(scopedServer, api, toolExposure);
-  registerAgingTools(scopedServer, api, toolExposure);
-  if (toolExposure.enableSales) registerRecurringInvoiceTools(scopedServer, api);
-  if (toolExposure.enableTaxTools) registerEstonianTaxTools(scopedServer, api);
-  if (toolExposure.enableAnnualReport) registerAnnualReportTools(scopedServer, api);
-  registerDocumentAuditTools(scopedServer, api);
-  registerOpeningBalanceTools(scopedServer, api);
-  registerReceiptInboxTools(scopedServer, api, runtimeSafetyContext, toolExposure);
-  if (toolExposure.enableLightyear) registerLightyearTools(scopedServer, api, runtimeSafetyContext);
-  registerWiseImportTools(scopedServer, api, runtimeSafetyContext);
-  registerCamtImportTools(scopedServer, api, runtimeSafetyContext, toolExposure);
-  registerAccountingInboxTools(scopedServer, api, runtimeSafetyContext, toolExposure);
-  registerAnalyzeUnconfirmedTools(scopedServer, api);
-  registerWorkflowRecommendationTools(scopedServer, toolExposure);
-  registerPlanTools(scopedServer, runtimeSafetyContext);
-
-  // Register resources via scopedServer so reads stay pinned to the selected connection
-  registerResources(scopedServer, api);
-  registerDynamicResources(scopedServer, api);
-  registerAccountingKnowledgeResources(scopedServer);
+  // Resources cross the scoped/observed server directly; the public registrar
+  // intentionally owns only the exhaustive tool catalog.
+  registerResources(server, api);
+  registerDynamicResources(server, api);
+  registerAccountingKnowledgeResources(server);
 
   // Register prompts
   registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined, toolExposure });
