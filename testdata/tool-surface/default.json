@@ -1,10 +1,10 @@
 {
   "profile": "default",
   "measurement": {
-    "toolCount": 125,
-    "toolsListBytes": 119058,
-    "descriptionsBytes": 15156,
-    "inputSchemasBytes": 73815,
+    "toolCount": 126,
+    "toolsListBytes": 119920,
+    "descriptionsBytes": 15288,
+    "inputSchemasBytes": 74296,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -5421,6 +5421,45 @@
       },
       "name": "get_execution_plan_page",
       "title": "Get Execution Plan Page"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Retrieve one bounded, read-only page of safe public details from a completed operation. This never resumes or mutates the operation.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "cursor": {
+            "description": "Optional opaque cursor returned by the preceding page",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "operation_handle": {
+            "description": "Opaque server-issued operation-result handle",
+            "pattern": "^[A-Za-z0-9_-]{43}$",
+            "type": "string"
+          },
+          "page_size": {
+            "description": "Maximum items to return. Default: 20; maximum: 50",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation_handle"
+        ],
+        "type": "object"
+      },
+      "name": "get_operation_result_page",
+      "title": "Get Operation Result Page"
     }
   ],
   "prompts": [

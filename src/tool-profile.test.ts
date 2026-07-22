@@ -25,11 +25,11 @@ describe("tool profiles", () => {
       "process_camt053", "import_wise_transactions", "reconcile_bank_transactions",
       "reconcile_inter_account_transfers", "classify_bank_transactions", "cleanup_camt_possible_duplicate",
       "save_auto_booking_rule", "compute_trial_balance", "list_connections", "switch_connection",
-      "get_setup_instructions", "get_execution_plan_page", "get_session_log",
+      "get_setup_instructions", "get_execution_plan_page", "get_operation_result_page", "get_session_log",
     ]);
     const guided = TOOL_CATALOG.filter((entry) => isToolVisibleForProfile(entry.name, "guided"));
     const guidedSales = TOOL_CATALOG.filter((entry) => isToolVisibleForProfile(entry.name, "guided-sales"));
-    expect(guided).toHaveLength(17);
+    expect(guided).toHaveLength(18);
     expect(guidedSales.map(({ name }) => name).filter((name) => !GUIDED_TOOL_NAMES.includes(name))).toEqual([
       "list_sale_invoices", "get_sale_invoice",
     ]);
@@ -43,6 +43,10 @@ describe("tool profiles", () => {
       for (const target of entry.facade_for ?? []) expect(names.has(target)).toBe(true);
       if (entry.granular_of) expect(names.has(entry.granular_of.tool)).toBe(true);
     }
+  });
+
+  it("keeps full equal to the exhaustive catalog", () => {
+    expect(TOOL_CATALOG.filter(entry => isToolVisibleForProfile(entry.name, "full"))).toEqual(TOOL_CATALOG);
   });
 
   it("equals the complete PR0 full surface and matches destructive annotations", async () => {

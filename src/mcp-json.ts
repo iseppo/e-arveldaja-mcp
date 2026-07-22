@@ -139,6 +139,11 @@ export function toMcpJson(obj: unknown): string {
   }
 }
 
+/** Measure the complete encoded MCP payload in UTF-8 bytes. */
+export function mcpSerializedByteLength(payload: unknown): number {
+  return Buffer.byteLength(toMcpJson(payload), "utf8");
+}
+
 /** Parse a TOON- or JSON-encoded MCP response back into an object. For use in tests and wrappers. */
 export function parseMcpResponse(text: string): unknown {
   // toMcpJson emits TOON, or falls back to a raw JSON string when TOON would

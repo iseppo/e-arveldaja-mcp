@@ -3,7 +3,7 @@ import { toolMeta } from "./tool-catalog.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export type ToolProfile = "guided" | "guided-sales" | "standard" | "full" | "custom";
-export const GUIDED_TOOL_NAMES = Object.freeze(`recommend_workflow accounting_inbox continue_accounting_workflow receipt_batch process_camt053 import_wise_transactions reconcile_bank_transactions reconcile_inter_account_transfers classify_bank_transactions cleanup_camt_possible_duplicate save_auto_booking_rule compute_trial_balance list_connections switch_connection get_setup_instructions get_execution_plan_page get_session_log`.split(" "));
+export const GUIDED_TOOL_NAMES = Object.freeze(`recommend_workflow accounting_inbox continue_accounting_workflow receipt_batch process_camt053 import_wise_transactions reconcile_bank_transactions reconcile_inter_account_transfers classify_bank_transactions cleanup_camt_possible_duplicate save_auto_booking_rule compute_trial_balance list_connections switch_connection get_setup_instructions get_execution_plan_page get_operation_result_page get_session_log`.split(" "));
 export const SETUP_PROFILE_CHOICES = Object.freeze([
   Object.freeze({ label: "Daily bookkeeping", profile: "guided" as const, enableLightyear: false }),
   Object.freeze({ label: "Daily bookkeeping plus sales invoices", profile: "guided-sales" as const, enableLightyear: false }),

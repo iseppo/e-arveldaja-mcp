@@ -5,7 +5,8 @@ import {
   measureResponseFixtures,
   REQUIRED_RESPONSE_FIXTURE_NAMES,
 } from "../scripts/measure-response-fixtures.js";
-import { parseMcpResponse } from "./mcp-json.js";
+import { mcpSerializedByteLength, parseMcpResponse, toMcpJson } from "./mcp-json.js";
+import { assertMcpPayloadWithinHardBudget, RESPONSE_BUDGETS } from "./response-budget.js";
 
 describe("response context-budget baseline", () => {
   it("pins deterministic final encoded bytes without enforcing a target budget", async () => {
@@ -27,5 +28,16 @@ describe("response context-budget baseline", () => {
     for (const fixture of fixtures) {
       expect(parseMcpResponse(fixture.encoded)).toEqual(fixture.payload);
     }
+  });
+
+  it("enforces UTF-8 boundaries after real whole-response serialization", () => {
+    const nearBoundary = { contract: "operation_summary_v1", message: "õ".repeat(5_000) };
+    const overBoundary = { contract: "operation_summary_v1", message: "õ".repeat(10_000) };
+    expect(mcpSerializedByteLength(nearBoundary)).toBe(Buffer.byteLength(toMcpJson(nearBoundary), "utf8"));
+    expect(mcpSerializedByteLength(nearBoundary)).toBeGreaterThan(RESPONSE_BUDGETS.normal.target);
+    expect(mcpSerializedByteLength(nearBoundary)).toBeLessThan(RESPONSE_BUDGETS.normal.hard);
+    expect(() => assertMcpPayloadWithinHardBudget(nearBoundary, "normal")).not.toThrow();
+    expect(mcpSerializedByteLength(overBoundary)).toBeGreaterThan(RESPONSE_BUDGETS.normal.hard);
+    expect(() => assertMcpPayloadWithinHardBudget(overBoundary, "normal")).toThrow("response_budget_exceeded");
   });
 });

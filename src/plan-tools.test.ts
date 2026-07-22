@@ -3,6 +3,7 @@ import { parseMcpResponse } from "./mcp-json.js";
 import { EXECUTION_PLAN_TTL_MS, type ExecutionPlanInput } from "./plan-store.js";
 import { createExecutionPlanPageHandler, registerPlanTools } from "./plan-tools.js";
 import { createTestRuntimeSafetyContext } from "./__fixtures__/runtime-safety.js";
+import { mcpPayloadBytes, RESPONSE_BUDGETS } from "./response-budget.js";
 
 const CURSOR_SECRET = Buffer.alloc(32, 7);
 
@@ -33,6 +34,68 @@ async function page(
 }
 
 describe("execution plan page tool", () => {
+  it("keeps the standard/full v1 handler and registration byte-for-byte compatible", async () => {
+    const runtime = createTestRuntimeSafetyContext();
+    const handle = runtime.planStore.issue("test", plan(3));
+    const legacy = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET });
+    const explicitStandard = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET, profile: "standard" });
+    const normalizeNonces = (text: string) => text.replace(/[0-9a-f]{32}/g, "<nonce>");
+    expect(normalizeNonces((await legacy({ plan_handle: handle })).content[0]!.text))
+      .toBe(normalizeNonces((await explicitStandard({ plan_handle: handle })).content[0]!.text));
+
+    for (const profile of ["standard", "full"] as const) {
+      const server = { registerTool: vi.fn() };
+      registerPlanTools(server as never, runtime, { profile });
+      const schema = server.registerTool.mock.calls[0]![1].inputSchema;
+      expect(Object.keys(schema)).toEqual(["plan_handle", "section", "cursor"]);
+    }
+  });
+
+  it("gives guided callers summary/full detail, default 20/max 50 pages, and bound cursors", async () => {
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile: "guided" } });
+    const firstHandle = runtime.planStore.issue("test", plan(55));
+    const secondHandle = runtime.planStore.issue("test", plan(55));
+    const handler = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET, profile: "guided" });
+    const first = await page(handler, { plan_handle: firstHandle } as any);
+    expect(first).toMatchObject({ contract: "execution_plan_page_v1", detail: "summary", range: { from: 1, to: 20, count: 20 } });
+    expect(first.commands).toHaveLength(20);
+    expect(first.commands[0]).not.toHaveProperty("review_data");
+    const summaryReviews = await page(handler, { plan_handle: firstHandle, section: "reviews" } as any);
+    expect(summaryReviews.items).toEqual([{ item_index: 1 }]);
+
+    const full = await page(handler, { plan_handle: firstHandle, detail: "full", page_size: 50 } as any);
+    expect(full.range).toEqual({ from: 1, to: 50, count: 50 });
+    expect(full.commands[0]).toHaveProperty("review_data");
+    for (const args of [
+      { plan_handle: secondHandle, cursor: first.next_cursor },
+      { plan_handle: firstHandle, cursor: first.next_cursor, page_size: 21 },
+      { plan_handle: firstHandle, cursor: first.next_cursor, detail: "full" },
+      { plan_handle: firstHandle, page_size: 51 },
+    ]) expect((await handler(args as any)).isError).toBe(true);
+
+    const server = { registerTool: vi.fn() };
+    registerPlanTools(server as never, runtime, { profile: "guided" });
+    const schema = server.registerTool.mock.calls[0]![1].inputSchema;
+    expect(schema).toHaveProperty("detail");
+    expect(schema).toHaveProperty("page_size");
+  });
+
+  it("caps guided full pages at 32 KiB and denies review after consumption", async () => {
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile: "guided" } });
+    const base = plan(30);
+    const handle = runtime.planStore.issue("test", {
+      ...base,
+      commands: base.commands.map((command, i) => ({ ...command, reviewProjection: { i, text: "õ🚀".repeat(1_000) } })),
+    });
+    const handler = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET, profile: "guided" });
+    const result = await handler({ plan_handle: handle, detail: "full", page_size: 20 } as any);
+    const decoded = parseMcpResponse(result.content[0]!.text) as any;
+    expect(decoded.commands.length).toBeGreaterThan(0);
+    expect(decoded.commands.length).toBeLessThan(20);
+    expect(mcpPayloadBytes(decoded)).toBeLessThanOrEqual(RESPONSE_BUDGETS.detail.hard);
+    runtime.planStore.consume(handle, "test");
+    expect((await handler({ plan_handle: handle } as any)).isError).toBe(true);
+  });
   it("returns deterministic 50/50/1 pages with totals on every page", async () => {
     const runtime = createTestRuntimeSafetyContext();
     const handle = runtime.planStore.issue("camt_import", plan(101));

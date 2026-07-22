@@ -1,10 +1,10 @@
 {
   "profile": "guided",
   "measurement": {
-    "toolCount": 17,
-    "toolsListBytes": 21573,
-    "descriptionsBytes": 2588,
-    "inputSchemasBytes": 14846,
+    "toolCount": 18,
+    "toolsListBytes": 22659,
+    "descriptionsBytes": 2731,
+    "inputSchemasBytes": 15540,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 2750
@@ -910,7 +910,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Retrieve one fixed-size, read-only review page from a server-issued execution plan. This does not consume or extend the plan and does not record or imply user approval.",
+      "description": "Retrieve one bounded, caller-sized, read-only review page from a server-issued execution plan. This does not consume or extend the plan and does not record or imply user approval.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -921,6 +921,20 @@
             "description": "Optional opaque cursor returned by the preceding page",
             "maxLength": 128,
             "type": "string"
+          },
+          "detail": {
+            "description": "Review detail. Default: summary",
+            "enum": [
+              "summary",
+              "full"
+            ],
+            "type": "string"
+          },
+          "page_size": {
+            "description": "Maximum items. Default: 20; maximum: 50",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
           },
           "plan_handle": {
             "description": "Canonical opaque server-issued execution plan handle",
@@ -944,6 +958,45 @@
       },
       "name": "get_execution_plan_page",
       "title": "Get Execution Plan Page"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Retrieve one bounded, read-only page of safe public details from a completed operation. This never resumes or mutates the operation.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "cursor": {
+            "description": "Optional opaque cursor returned by the preceding page",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "operation_handle": {
+            "description": "Opaque server-issued operation-result handle",
+            "pattern": "^[A-Za-z0-9_-]{43}$",
+            "type": "string"
+          },
+          "page_size": {
+            "description": "Maximum items to return. Default: 20; maximum: 50",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation_handle"
+        ],
+        "type": "object"
+      },
+      "name": "get_operation_result_page",
+      "title": "Get Operation Result Page"
     }
   ],
   "prompts": [

@@ -3,6 +3,7 @@ import type { ToolExposureConfig } from "../config.js";
 import { ExecutionPlanStore, type ExecutionPlanStoreOptions } from "../plan-store.js";
 import type { RuntimeSafetyContext, RuntimeSafetyScope } from "../runtime-safety-context.js";
 import { FileReferenceStore, type FileReferenceStoreOptions } from "../file-reference-store.js";
+import { OperationResultStore, type OperationResultStoreOptions } from "../operation-result-store.js";
 
 const DEFAULT_FEATURES: ToolExposureConfig = Object.freeze({
   enableLightyear: true,
@@ -30,6 +31,7 @@ export interface TestRuntimeSafetyContextOptions {
   };
   readonly planStore?: Omit<ExecutionPlanStoreOptions, "getActiveScope" | "now">;
   readonly fileReferenceStore?: Omit<FileReferenceStoreOptions, "getActiveScope" | "now">;
+  readonly operationResultStore?: Omit<OperationResultStoreOptions, "getActiveScope" | "now">;
 }
 
 function frozenScope(
@@ -79,10 +81,20 @@ export function createTestRuntimeSafetyContext(
     now: () => now,
     getActiveScope,
   });
+  let resultCounter = 0;
+  const operationResultStore = new OperationResultStore({
+    handleFactory: () => createHash("sha256")
+      .update(`test-operation-result:${resultCounter++}`)
+      .digest(),
+    ...options.operationResultStore,
+    now: () => now,
+    getActiveScope,
+  });
   return Object.freeze({
     serverInstanceId: scope.serverInstanceId,
     planStore,
     fileReferenceStore,
+    operationResultStore,
     getActiveScope,
     setNow(value: number) { now = value; },
     advanceTime(milliseconds: number) { now += milliseconds; },
