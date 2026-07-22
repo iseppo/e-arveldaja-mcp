@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { win32 } from "path";
 import { parseMcpResponse } from "../mcp-json.js";
 import type { registerReceiptInboxTools as registerReceiptInboxToolsType } from "./receipt-inbox.js";
@@ -37,6 +37,14 @@ const { registerReceiptInboxTools } = await import("./receipt-inbox.js") as {
   registerReceiptInboxTools: typeof registerReceiptInboxToolsType;
 };
 
+const hostPlatform = process.platform;
+
+function setPlatform(platform: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+}
+
+afterEach(() => setPlatform(hostPlatform));
+
 describe("receipt inbox folder path validation", () => {
   it("accepts Windows-style child folders under an allowed root", async () => {
     const server = { registerTool: vi.fn() } as any;
@@ -54,7 +62,25 @@ describe("receipt inbox folder path validation", () => {
     expect(payload.skipped).toEqual([]);
   });
 
-  it("fails closed for an expected reference binding when descriptor namespaces are unavailable", async () => {
+  it("uses portable expected-reference binding on macOS when descriptor paths are unavailable", async () => {
+    setPlatform("darwin");
+
+    await expect(scanReceiptFolderInternal(
+      "C:\\Allowed\\Receipts",
+      undefined,
+      undefined,
+      undefined,
+      { expectedCanonicalPath: "C:\\Allowed\\Receipts" },
+    )).resolves.toMatchObject({
+      folder_path: "C:\\Allowed\\Receipts",
+      files: [],
+      skipped: [],
+    });
+  });
+
+  it("fails closed on other platforms when descriptor namespaces are unavailable", async () => {
+    setPlatform("win32");
+
     await expect(scanReceiptFolderInternal(
       "C:\\Allowed\\Receipts",
       undefined,
