@@ -29,14 +29,26 @@ async function productionTypeScriptFiles(directory = SOURCE_ROOT): Promise<strin
 
 function usesInternalMcpDelegation(relativePath: string, source: string): boolean {
   const ast = parse(source, { sourceType: "module", plugins: ["typescript"], allowReturnOutsideFunction: true });
-  let detected = false;
-  const registriesWithStoredHandlers = new Set<string>();
-  const retrievedHandlerBindings = new Map<string, string>();
-  const invokedBindings = new Set<string>();
-  const directlyInvokedRegistries = new Set<string>();
-  const contentAliases = new Set<string>();
-
   type AstNode = { type: string; [key: string]: unknown };
+  type AliasFact = { target: string; source: string };
+  type RetrievalFact = { bindings: string[]; registry: string };
+  type CallFact = { binding?: string; registry?: string };
+  type ResultFact = { target: string; call: CallFact };
+  type ContentSourceFact = { alias: string; owner: string };
+  type ContentCallSourceFact = { alias: string; call: CallFact };
+
+  let directDetected = false;
+  const registrySeeds = new Set<string>();
+  const aliasFacts: AliasFact[] = [];
+  const retrievalFacts: RetrievalFact[] = [];
+  const invocationFacts: CallFact[] = [];
+  const resultFacts: ResultFact[] = [];
+  const contentSourceFacts: ContentSourceFact[] = [];
+  const contentCallSourceFacts: ContentCallSourceFact[] = [];
+  const contentFirstOwners = new Set<string>();
+  const contentFirstAliases = new Set<string>();
+  const contentFirstCalls: CallFact[] = [];
+
   const isNode = (value: unknown): value is AstNode =>
     typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string";
   const identifierName = (node: unknown): string | undefined =>
@@ -107,70 +119,118 @@ function usesInternalMcpDelegation(relativePath: string, source: string): boolea
       (node.type === "NumericLiteral" && node.value === 0)
       || ((node.type === "StringLiteral" || node.type === "Literal") && (node.value === 0 || node.value === "0"))
     );
-  const readsFirstContentItem = (node: AstNode): boolean => {
-    if (isMember(node) && node.computed === true) {
-      const receiver = expressionKey(node.object);
-      return isNumericZero(node.property) && (isContentAccess(node.object) || (receiver !== undefined && contentAliases.has(receiver)));
+  const callFromExpression = (node: unknown): AstNode | undefined => {
+    let expression = unwrapExpression(node);
+    if (expression?.type === "AwaitExpression") expression = unwrapExpression(expression.argument);
+    return expression && isCall(expression) ? expression : undefined;
+  };
+  const describeCall = (node: unknown): CallFact | undefined => {
+    const call = callFromExpression(node);
+    if (!call) return undefined;
+    const callee = unwrapExpression(call.callee);
+    if (!callee) return undefined;
+    if (callee.type === "Identifier") return { binding: callee.name as string };
+    if (isMember(callee) && ["call", "apply"].includes(staticPropertyName(callee.property) ?? "")) {
+      const receiver = unwrapExpression(callee.object);
+      return {
+        ...(expressionKey(receiver) ? { binding: expressionKey(receiver) } : {}),
+        ...(calledMethodReceiver(receiver, "get") ?? accessedRegistry(receiver)
+          ? { registry: calledMethodReceiver(receiver, "get") ?? accessedRegistry(receiver) }
+          : {}),
+      };
     }
-    if ((node.type === "CallExpression" || node.type === "OptionalCallExpression") && isMember(node.callee)) {
+    const directRegistry = calledMethodReceiver(callee, "get")
+      ?? (isMember(callee) && callee.computed === true ? expressionKey(callee.object) : undefined);
+    return {
+      ...(expressionKey(callee) ? { binding: expressionKey(callee) } : {}),
+      ...(directRegistry ? { registry: directRegistry } : {}),
+    };
+  };
+  const recordContentFirst = (node: AstNode): void => {
+    let contentExpression: AstNode | undefined;
+    let alias: string | undefined;
+
+    if (isMember(node) && node.computed === true && isNumericZero(node.property)) {
+      contentExpression = unwrapExpression(node.object);
+    } else if (isCall(node) && isMember(node.callee)) {
       const args = Array.isArray(node.arguments) ? node.arguments : [];
-      const receiver = expressionKey(node.callee.object);
-      return staticPropertyName(node.callee.property) === "at"
-        && isNumericZero(args[0])
-        && (isContentAccess(node.callee.object) || (receiver !== undefined && contentAliases.has(receiver)));
+      if (staticPropertyName(node.callee.property) === "at" && isNumericZero(args[0])) {
+        contentExpression = unwrapExpression(node.callee.object);
+      }
+    } else if (node.type === "VariableDeclarator" && isNode(node.id) && node.id.type === "ArrayPattern") {
+      contentExpression = unwrapExpression(node.init);
     }
-    return node.type === "VariableDeclarator"
-      && isNode(node.id)
-      && node.id.type === "ArrayPattern"
-      && (isContentAccess(node.init) || contentAliases.has(expressionKey(node.init) ?? ""));
+
+    if (!contentExpression) return;
+    if (isContentAccess(contentExpression)) {
+      const owner = expressionKey(contentExpression.object);
+      const ownerCall = describeCall(contentExpression.object);
+      if (owner) contentFirstOwners.add(owner);
+      else if (ownerCall) contentFirstCalls.push(ownerCall);
+      return;
+    }
+    alias = expressionKey(contentExpression);
+    if (alias) contentFirstAliases.add(alias);
   };
 
   const visit = (node: AstNode): void => {
-    if (detected) return;
     if (relativePath !== "src/mcp-json.ts" && node.type === "Identifier" && node.name === "parseMcpResponse") {
-      detected = true;
-      return;
+      directDetected = true;
     }
-    if (readsFirstContentItem(node)) {
-      detected = true;
-      return;
-    }
-    if ((node.type === "ObjectMethod" || node.type === "ClassMethod") && identifierName(node.key) === "registerTool") {
-      detected = true;
-      return;
+    if ((node.type === "ObjectMethod" || node.type === "ClassMethod") && staticPropertyName(node.key) === "registerTool") {
+      directDetected = true;
     }
     if (
       (node.type === "ObjectProperty" || node.type === "ClassProperty")
-      && identifierName(node.key) === "registerTool"
+      && staticPropertyName(node.key) === "registerTool"
       && isNode(node.value)
       && (node.value.type === "ArrowFunctionExpression" || node.value.type === "FunctionExpression")
     ) {
-      detected = true;
-      return;
+      directDetected = true;
     }
+
     const storedMap = calledMethodReceiver(node, "set");
-    if (storedMap) registriesWithStoredHandlers.add(storedMap);
+    if (storedMap) registrySeeds.add(storedMap);
     for (const method of ["push", "unshift"]) {
       const storedArray = calledMethodReceiver(node, method);
-      if (storedArray) registriesWithStoredHandlers.add(storedArray);
+      if (storedArray) registrySeeds.add(storedArray);
     }
 
     if (node.type === "AssignmentExpression" && isMember(node.left)) {
       const registry = expressionKey(node.left.object);
-      if (registry) registriesWithStoredHandlers.add(registry);
+      if (registry) registrySeeds.add(registry);
     }
+
     if (node.type === "AssignmentExpression") {
-      const alias = identifierName(node.left);
-      const source = expressionKey(node.right);
-      if (alias && (isContentAccess(node.right) || (source !== undefined && contentAliases.has(source)))) {
-        contentAliases.add(alias);
+      const targets = bindingNames(node.left);
+      const sourceKey = expressionKey(node.right);
+      if (sourceKey) {
+        for (const target of targets) aliasFacts.push({ target, source: sourceKey });
+      }
+      const retrievedRegistry = calledMethodReceiver(node.right, "get") ?? accessedRegistry(node.right);
+      if (retrievedRegistry && targets.length > 0) retrievalFacts.push({ bindings: targets, registry: retrievedRegistry });
+      const call = describeCall(node.right);
+      if (call) {
+        for (const target of targets) resultFacts.push({ target, call });
+      }
+      if (isContentAccess(node.right)) {
+        const owner = expressionKey((unwrapExpression(node.right) as AstNode).object);
+        const ownerCall = describeCall((unwrapExpression(node.right) as AstNode).object);
+        for (const alias of targets) {
+          if (owner) contentSourceFacts.push({ alias, owner });
+          else if (ownerCall) contentCallSourceFacts.push({ alias, call: ownerCall });
+        }
       }
     }
 
     if (node.type === "VariableDeclarator") {
       const binding = identifierName(node.id);
-      const retrievedMap = calledMethodReceiver(node.init, "get");
-      if (binding && retrievedMap) retrievedHandlerBindings.set(binding, retrievedMap);
+      const names = bindingNames(node.id);
+      const sourceKey = expressionKey(node.init);
+      if (binding && sourceKey) aliasFacts.push({ target: binding, source: sourceKey });
+      const retrievedRegistry = calledMethodReceiver(node.init, "get") ?? accessedRegistry(node.init);
+      if (retrievedRegistry && names.length > 0) retrievalFacts.push({ bindings: names, registry: retrievedRegistry });
+
       const initializer = unwrapExpression(node.init);
       if (
         binding
@@ -180,59 +240,52 @@ function usesInternalMcpDelegation(relativePath: string, source: string): boolea
           || (initializer.type === "ArrayExpression" && Array.isArray(initializer.elements) && initializer.elements.length > 0)
         )
       ) {
-        registriesWithStoredHandlers.add(binding);
+        registrySeeds.add(binding);
       }
-      const accessed = accessedRegistry(node.init);
-      if (accessed) {
-        for (const name of bindingNames(node.id)) retrievedHandlerBindings.set(name, accessed);
-      }
+
       if (isNode(node.id) && (node.id.type === "ArrayPattern" || node.id.type === "ObjectPattern")) {
         const sourceRegistry = expressionKey(node.init);
-        if (sourceRegistry) {
-          for (const name of bindingNames(node.id)) retrievedHandlerBindings.set(name, sourceRegistry);
-        }
+        if (sourceRegistry) retrievalFacts.push({ bindings: names, registry: sourceRegistry });
       }
-      const initializerKey = expressionKey(node.init);
-      if (binding && (isContentAccess(node.init) || (initializerKey !== undefined && contentAliases.has(initializerKey)))) {
-        contentAliases.add(binding);
+
+      const call = describeCall(node.init);
+      if (call && binding) resultFacts.push({ target: binding, call });
+
+      if (binding && isContentAccess(node.init)) {
+        const contentAccess = unwrapExpression(node.init)!;
+        const owner = expressionKey(contentAccess.object);
+        const ownerCall = describeCall(contentAccess.object);
+        if (owner) contentSourceFacts.push({ alias: binding, owner });
+        else if (ownerCall) contentCallSourceFacts.push({ alias: binding, call: ownerCall });
       }
+
       if (isNode(node.id) && node.id.type === "ObjectPattern") {
         const properties = Array.isArray(node.id.properties) ? node.id.properties : [];
         for (const property of properties) {
           if (isNode(property) && property.type === "ObjectProperty" && staticPropertyName(property.key) === "content") {
+            const owner = expressionKey(node.init);
+            const ownerCall = describeCall(node.init);
             if (isNode(property.value) && property.value.type === "ArrayPattern") {
-              detected = true;
-              return;
+              if (owner) contentFirstOwners.add(owner);
+              else if (ownerCall) contentFirstCalls.push(ownerCall);
+            } else {
+              for (const alias of bindingNames(property.value)) {
+                if (owner) contentSourceFacts.push({ alias, owner });
+                else if (ownerCall) contentCallSourceFacts.push({ alias, call: ownerCall });
+              }
             }
-            for (const name of bindingNames(property.value)) contentAliases.add(name);
           }
         }
       }
     }
 
     if (isCall(node)) {
-      const callee = unwrapExpression(node.callee);
-      let binding = identifierName(callee);
-      if (
-        !binding
-        && callee
-        && isMember(callee)
-        && ["call", "apply"].includes(staticPropertyName(callee.property) ?? "")
-      ) {
-        binding = identifierName(unwrapExpression(callee.object));
-        const directlyInvokedMap = calledMethodReceiver(callee.object, "get");
-        if (directlyInvokedMap) directlyInvokedRegistries.add(directlyInvokedMap);
-        const directlyInvokedRegistry = accessedRegistry(callee.object);
-        if (directlyInvokedRegistry) directlyInvokedRegistries.add(directlyInvokedRegistry);
-      }
-      if (binding) invokedBindings.add(binding);
-      const directlyInvokedMap = calledMethodReceiver(callee, "get");
-      if (directlyInvokedMap) directlyInvokedRegistries.add(directlyInvokedMap);
-      if (callee && isMember(callee) && callee.computed === true) {
-        const directlyInvokedRegistry = expressionKey(callee.object);
-        if (directlyInvokedRegistry) directlyInvokedRegistries.add(directlyInvokedRegistry);
-      }
+      const call = describeCall(node);
+      if (call) invocationFacts.push(call);
     }
+
+    recordContentFirst(node);
+
     for (const value of Object.values(node)) {
       if (isNode(value)) visit(value);
       else if (Array.isArray(value)) {
@@ -241,14 +294,49 @@ function usesInternalMcpDelegation(relativePath: string, source: string): boolea
     }
   };
   visit(ast.program as unknown as AstNode);
-  if (detected) return true;
-  for (const [binding, registry] of retrievedHandlerBindings) {
-    if (invokedBindings.has(binding) && registriesWithStoredHandlers.has(registry)) return true;
-  }
-  for (const registry of directlyInvokedRegistries) {
-    if (registriesWithStoredHandlers.has(registry)) return true;
-  }
-  return false;
+
+  const registries = new Set(registrySeeds);
+  const handlers = new Set<string>();
+  const handlerResults = new Set<string>();
+  const contentAliases = new Set<string>();
+  const add = (set: Set<string>, value: string | undefined): boolean => {
+    if (!value || set.has(value)) return false;
+    set.add(value);
+    return true;
+  };
+  const callHasHandlerProvenance = (call: CallFact): boolean =>
+    (call.binding !== undefined && handlers.has(call.binding))
+    || (call.registry !== undefined && registries.has(call.registry));
+
+  let changed: boolean;
+  do {
+    changed = false;
+    for (const fact of aliasFacts) {
+      if (registries.has(fact.source)) changed = add(registries, fact.target) || changed;
+      if (handlers.has(fact.source)) changed = add(handlers, fact.target) || changed;
+      if (handlerResults.has(fact.source)) changed = add(handlerResults, fact.target) || changed;
+      if (contentAliases.has(fact.source)) changed = add(contentAliases, fact.target) || changed;
+    }
+    for (const fact of retrievalFacts) {
+      if (!registries.has(fact.registry)) continue;
+      for (const binding of fact.bindings) changed = add(handlers, binding) || changed;
+    }
+    for (const fact of resultFacts) {
+      if (callHasHandlerProvenance(fact.call)) changed = add(handlerResults, fact.target) || changed;
+    }
+    for (const fact of contentSourceFacts) {
+      if (handlerResults.has(fact.owner)) changed = add(contentAliases, fact.alias) || changed;
+    }
+    for (const fact of contentCallSourceFacts) {
+      if (callHasHandlerProvenance(fact.call)) changed = add(contentAliases, fact.alias) || changed;
+    }
+  } while (changed);
+
+  if (directDetected) return true;
+  if (invocationFacts.some(callHasHandlerProvenance)) return true;
+  if ([...contentFirstOwners].some(owner => handlerResults.has(owner))) return true;
+  if ([...contentFirstAliases].some(alias => contentAliases.has(alias))) return true;
+  return contentFirstCalls.some(callHasHandlerProvenance);
 }
 
 async function currentProductionConsumers(): Promise<string[]> {
@@ -274,10 +362,10 @@ describe("internal MCP delegation architecture contract", () => {
 
   it("detects equivalent delegation syntax rather than only today's spellings", () => {
     const variants = [
-      `const first = result.content.at(0); return JSON.parse(first.text);`,
+      `const callbacks = new Map(); callbacks.set(tool, handler); const delegated = callbacks.get(tool); const result = await delegated(args); const first = result.content.at(0); return JSON.parse(first.text);`,
       `const callbacks = new Map(); const server = { registerTool(name, config, fn) { callbacks.set(name, fn); } };`,
       `const handlers = new Map(); const server = { registerTool: (name, cfg, cb) => handlers.set(name, cb) }; const delegated = handlers.get(tool); return delegated(args);`,
-      `const delegated = callbackMap.get(tool); const result = await delegated(args); const [first] = result.content; return first.text;`,
+      `const callbackMap = new Map(); callbackMap.set(tool, handler); const delegated = callbackMap.get(tool); const result = await delegated(args); const [first] = result.content; return first.text;`,
     ];
     for (const source of variants) {
       expect(usesInternalMcpDelegation("src/tools/new-consumer.ts", source), source).toBe(true);
@@ -355,14 +443,20 @@ describe("internal MCP delegation architecture contract", () => {
   });
 
   it("detects destructured, aliased, and computed reads of serialized handler content", () => {
+    const capturedResult = (body: string): string => `
+      const handlers = new Map();
+      handlers.set(tool, callback);
+      const delegated = handlers.get(tool);
+      ${body}
+    `;
     const variants = [
-      `const result = await delegated(args); const blocks = result.content; const first = blocks[0]; return first.text;`,
-      `const result = await delegated(args); const { content: blocks } = result; return blocks.at(0)?.text;`,
-      `const result = await delegated(args); const { content } = result; const [first] = content; return first.text;`,
-      `const result = await delegated(args); return result["content"][0]["text"];`,
-      `const result = await delegated(args); const blocks = result.content; const alias = blocks; return alias["0"]["text"];`,
-      `const result = await delegated(args); let blocks; blocks = result["content"]; return blocks.at(0)?.text;`,
-      `const { content: [first] } = await delegated(args); return first.text;`,
+      capturedResult(`const result = await delegated(args); const blocks = result.content; const first = blocks[0]; return first.text;`),
+      capturedResult(`const result = await delegated(args); const { content: blocks } = result; return blocks.at(0)?.text;`),
+      capturedResult(`const result = await delegated(args); const { content } = result; const [first] = content; return first.text;`),
+      capturedResult(`const result = await delegated(args); return result["content"][0]["text"];`),
+      capturedResult(`const result = await delegated(args); const blocks = result.content; const alias = blocks; return alias["0"]["text"];`),
+      capturedResult(`const result = await delegated(args); let blocks; blocks = result["content"]; return blocks.at(0)?.text;`),
+      capturedResult(`const { content: [first] } = await delegated(args); return first.text;`),
     ];
     for (const source of variants) {
       expect(usesInternalMcpDelegation("src/tools/new-consumer.ts", source), source).toBe(true);
@@ -378,6 +472,57 @@ describe("internal MCP delegation architecture contract", () => {
     ];
     for (const source of controls) {
       expect(usesInternalMcpDelegation("src/tools/data-only.ts", source), source).toBe(false);
+    }
+  });
+
+  it("converges handler, registry, and result provenance across aliases and assignments", () => {
+    const cases = [
+      {
+        name: "handler alias chain",
+        expected: true,
+        source: `
+          const handlers = new Map();
+          handlers.set(name, callback);
+          const handler = handlers.get(tool);
+          const handlerAlias = handler;
+          return handlerAlias(args);
+        `,
+      },
+      {
+        name: "assignment-based handler retrieval",
+        expected: true,
+        source: `
+          const handlers = new Map();
+          handlers.set(name, callback);
+          let handler;
+          handler = handlers.get(tool);
+          return handler(args);
+        `,
+      },
+      {
+        name: "registry alias chain",
+        expected: true,
+        source: `
+          const handlers = new Map();
+          handlers.set(name, callback);
+          const registryAlias = handlers;
+          const secondAlias = registryAlias;
+          const handler = secondAlias.get(tool);
+          return handler(args);
+        `,
+      },
+      {
+        name: "ordinary article content",
+        expected: false,
+        source: `const article = { content: ["intro"] }; return article.content[0];`,
+      },
+    ];
+
+    for (const testCase of cases) {
+      expect.soft(
+        usesInternalMcpDelegation("src/tools/provenance-case.ts", testCase.source),
+        testCase.name,
+      ).toBe(testCase.expected);
     }
   });
 });
