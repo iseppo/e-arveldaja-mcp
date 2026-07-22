@@ -199,6 +199,14 @@ describe("ExecutionPlanStore", () => {
     expectCode(() => runtime.planStore.consume(handle, "test"), "plan_handle_consumed");
   });
 
+  it.each(["profile", "catalogFingerprint"] as const)("rejects and consumes %s drift", (field) => {
+    const runtime = createTestRuntimeSafetyContext();
+    const handle = runtime.planStore.issue("test", input());
+    runtime.setScope({ [field]: `${runtime.getActiveScope()[field]}-changed` });
+    expectCode(() => runtime.planStore.consume(handle, "test"), "plan_scope_mismatch");
+    expectCode(() => runtime.planStore.consume(handle, "test"), "plan_handle_consumed");
+  });
+
   it("rejects replay and a handle from a restarted server context", () => {
     const first = createTestRuntimeSafetyContext();
     const handle = first.planStore.issue("test", input());

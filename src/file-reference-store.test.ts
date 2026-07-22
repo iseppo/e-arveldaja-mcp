@@ -14,6 +14,14 @@ function deterministicBytes(label: string): Uint8Array {
 }
 
 describe("FileReferenceStore", () => {
+  it.each(["profile", "catalogFingerprint"] as const)("rejects references after %s drift", (field) => {
+    const runtime = createTestRuntimeSafetyContext();
+    const ref = runtime.fileReferenceStore.issue({ canonicalPath: "/tmp/profile.csv", kind: "file", operation: FILE_REFERENCE_OPERATIONS.wise });
+    runtime.setScope({ [field]: `${runtime.getActiveScope()[field]}-changed` });
+    expect(() => runtime.fileReferenceStore.resolve(ref, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.wise }))
+      .toThrowError(new FileReferenceStoreError("file_reference_scope_mismatch"));
+  });
+
   it("is owned by the one explicit runtime safety context", () => {
     const runtime = createTestRuntimeSafetyContext();
     const ref = runtime.fileReferenceStore.issue({

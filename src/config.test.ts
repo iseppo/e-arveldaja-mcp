@@ -11,6 +11,7 @@ const CONFIG_ENV_KEYS = [
   "EARVELDAJA_API_PASSWORD",
   "EARVELDAJA_API_KEY_FILE",
   "EARVELDAJA_CONFIG_DIR",
+  "EARVELDAJA_PROFILE",
 ] as const;
 const CONNECTION_ENV_KEY_RE = /^EARVELDAJA_CONNECTION_\d+_(?:SERVER|API_KEY_ID|API_PUBLIC_VALUE|API_PASSWORD)$/;
 
@@ -60,6 +61,28 @@ beforeEach(() => {
   }
   isolatedConfigDir = mkdtempSync(join(tmpdir(), "earveldaja-config-test-global-"));
   process.env.EARVELDAJA_CONFIG_DIR = isolatedConfigDir;
+});
+
+describe("tool profile config", () => {
+  it("keeps the absent-profile default standard and makes full expose every optional group", async () => {
+    const { getToolProfileConfig } = await importFreshConfig();
+    expect(getToolProfileConfig({} as NodeJS.ProcessEnv).profile).toBe("standard");
+    expect(getToolProfileConfig({ EARVELDAJA_PROFILE: "full" } as NodeJS.ProcessEnv)).toEqual({
+      profile: "full",
+      exposure: {
+        enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true,
+        enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true,
+        enableSales: true, enableProducts: true,
+      },
+    });
+  });
+
+  it("forces custom when any explicit legacy exposure flag is present", async () => {
+    const { getToolProfileConfig } = await importFreshConfig();
+    expect(getToolProfileConfig({ EARVELDAJA_PROFILE: "guided", EARVELDAJA_DISABLE_SALES: "1" } as NodeJS.ProcessEnv)).toMatchObject({
+      profile: "custom", exposure: { enableSales: false },
+    });
+  });
 });
 
 afterEach(() => {
@@ -1251,6 +1274,33 @@ describe("credential preview/commit split (P18)", () => {
       expect(readFileSync(localEnvFile, "utf8")).toContain("# Company: Preview OÜ");
       // The committed file is private.
       expect(statSync(localEnvFile).mode & 0o077).toBe(0);
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates legacy exposure flags in the selected local env as one reviewed profile write", async () => {
+    const { tempDir, workDir, apiKeyFile, localEnvFile } = makeWorkDir();
+    writeFileSync(localEnvFile, "EARVELDAJA_DISABLE_SALES=0\nEARVELDAJA_EXPOSE_GRANULAR_TOOLS=1\n", { mode: 0o600 });
+    process.chdir(workDir);
+    try {
+      const { previewApiKeyCredentialImport, commitApiKeyCredentialImport } = await importFreshConfig(workDir);
+      const preview = await previewApiKeyCredentialImport({
+        apiKeyFile, storageScope: "local", workingDir: workDir, profile: "guided", verify: VERIFY,
+      });
+      expect(preview.projection.legacyExposureKeysRemoved).toEqual([
+        "EARVELDAJA_EXPOSE_GRANULAR_TOOLS",
+        "EARVELDAJA_DISABLE_SALES",
+      ]);
+      const result = commitApiKeyCredentialImport({
+        snapshot: preview.snapshot, projection: preview.projection, workingDir: workDir,
+      });
+      expect(result.profile).toBe("guided");
+      const stored = readFileSync(localEnvFile, "utf8");
+      expect(stored).toContain("EARVELDAJA_PROFILE=guided");
+      expect(stored).not.toContain("EARVELDAJA_DISABLE_SALES");
+      expect(stored).not.toContain("EARVELDAJA_EXPOSE_GRANULAR_TOOLS");
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });

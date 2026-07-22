@@ -57,6 +57,8 @@ export function createTestRuntimeSafetyContext(
     connectionFingerprint: "test-fingerprint",
     environmentKind: "demo",
     baseUrl: "https://demo-rmp-api.rik.ee/v1",
+    profile: "standard",
+    catalogFingerprint: "test-catalog-fingerprint",
     features: DEFAULT_FEATURES,
   }), options.scope);
   const getActiveScope = () => scope;

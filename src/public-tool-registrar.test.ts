@@ -1,0 +1,55 @@
+import { describe, expect, it, vi } from "vitest";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createPublicToolRegistrar } from "./public-tool-registrar.js";
+import { toolMeta } from "./tool-catalog.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createMcpServer } from "./server-bootstrap.js";
+import { TOOL_SURFACE_SETUP_INFO } from "./__fixtures__/tool-surface.js";
+
+describe("PublicToolRegistrar", () => {
+  it("filters the real production bootstrap without stdio", async () => {
+    const bootstrap = await createMcpServer({ configs: [], setupInfo: TOOL_SURFACE_SETUP_INFO, toolProfile: "guided", connect: false });
+    const client = new Client({ name: "profile-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([bootstrap.server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const names = (await client.listTools()).tools.map(({ name }) => name);
+      expect(names).toHaveLength(17);
+      expect(names).toContain("recommend_workflow");
+      expect(names).not.toContain("create_journal");
+    } finally {
+      await Promise.allSettled([client.close(), bootstrap.server.close()]);
+    }
+  });
+
+  it("filters only the public boundary and strips private catalog metadata", () => {
+    const registerTool = vi.fn();
+    const server = { registerTool } as unknown as McpServer;
+    const publicServer = createPublicToolRegistrar(server, "guided");
+    publicServer.registerTool("recommend_workflow", { _meta: { earveldajaTool: toolMeta("recommend_workflow") } }, vi.fn());
+    publicServer.registerTool("create_journal", { _meta: { earveldajaTool: toolMeta("create_journal") } }, vi.fn());
+    expect(registerTool).toHaveBeenCalledTimes(1);
+    expect(registerTool.mock.calls[0]![0]).toBe("recommend_workflow");
+    expect(registerTool.mock.calls[0]![1]).not.toHaveProperty("_meta.earveldajaTool");
+  });
+
+  it("rejects duplicate public names server-wide", () => {
+    const server = { registerTool: vi.fn() } as unknown as McpServer;
+    const first = createPublicToolRegistrar(server, "full");
+    const second = createPublicToolRegistrar(server, "full");
+    first.registerTool("recommend_workflow", { _meta: { earveldajaTool: toolMeta("recommend_workflow") } }, vi.fn());
+    expect(() => second.registerTool("recommend_workflow", { _meta: { earveldajaTool: toolMeta("recommend_workflow") } }, vi.fn()))
+      .toThrow("Duplicate public MCP tool name");
+  });
+
+  it("fails closed on missing metadata and destructive parity", () => {
+    const server = { registerTool: vi.fn() } as unknown as McpServer;
+    const publicServer = createPublicToolRegistrar(server, "full");
+    expect(() => publicServer.registerTool("unknown", {}, vi.fn())).toThrow("Missing ToolMeta");
+    expect(() => publicServer.registerTool("delete_transaction", {
+      annotations: { destructiveHint: false },
+      _meta: { earveldajaTool: toolMeta("delete_transaction") },
+    }, vi.fn())).toThrow("destructive-risk metadata mismatch");
+  });
+});

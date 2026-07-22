@@ -6,6 +6,8 @@ import { buildConnectionFingerprint } from "./connection-fingerprint.js";
 import type { ConnectionSnapshot } from "./connection-safety.js";
 import { ExecutionPlanStore, type ExecutionPlanStoreOptions } from "./plan-store.js";
 import { FileReferenceStore, type FileReferenceStoreOptions } from "./file-reference-store.js";
+import type { ToolProfile } from "./tool-profile.js";
+import { TOOL_CATALOG_FINGERPRINT } from "./tool-catalog.js";
 
 export type RuntimeEnvironmentKind = "live" | "demo" | "setup";
 
@@ -17,6 +19,8 @@ export interface RuntimeSafetyScope {
   readonly connectionFingerprint: string;
   readonly environmentKind: RuntimeEnvironmentKind;
   readonly baseUrl: string | null;
+  readonly profile: ToolProfile;
+  readonly catalogFingerprint: string;
   readonly features: Readonly<ToolExposureConfig>;
 }
 
@@ -31,6 +35,8 @@ export interface CreateRuntimeSafetyContextOptions {
   readonly invocationStorage: AsyncLocalStorage<ConnectionSnapshot>;
   readonly configs: readonly NamedConfig[];
   readonly toolExposure: ToolExposureConfig;
+  readonly toolProfile?: ToolProfile;
+  readonly catalogFingerprint?: string;
   readonly serverInstanceId?: string;
   readonly planStore?: Omit<ExecutionPlanStoreOptions, "getActiveScope">;
   readonly fileReferenceStore?: Omit<FileReferenceStoreOptions, "getActiveScope">;
@@ -124,6 +130,8 @@ export function createRuntimeSafetyContext(
   }
 
   const features = freezeFeatures(options.toolExposure);
+  const profile = options.toolProfile ?? "standard";
+  const catalogFingerprint = options.catalogFingerprint ?? TOOL_CATALOG_FINGERPRINT;
   const connections = Object.freeze(options.configs.map((entry, index) => {
     const baseUrl = normalizeBaseUrl(entry.config.baseUrl);
     return Object.freeze({
@@ -151,6 +159,8 @@ export function createRuntimeSafetyContext(
           connectionFingerprint: "setup",
           environmentKind: "setup" as const,
           baseUrl: null,
+          profile,
+          catalogFingerprint,
           features,
         });
       }
@@ -164,6 +174,8 @@ export function createRuntimeSafetyContext(
       connectionFingerprint: connection.fingerprint,
       environmentKind: connection.environmentKind,
       baseUrl: connection.baseUrl,
+      profile,
+      catalogFingerprint,
       features,
     });
   };

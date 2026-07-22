@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { registerPrompt, registerResource, registerTool } from "./mcp-compat.js";
+import { toolMeta } from "./tool-catalog.js";
 
 describe("mcp-compat", () => {
   it("maps legacy tool registrations to registerTool with first-class title", () => {
@@ -25,6 +26,7 @@ describe("mcp-compat", () => {
     expect(server.registerTool).toHaveBeenCalledWith(
       "list_clients",
       {
+        _meta: { earveldajaTool: toolMeta("list_clients") },
         title: "List Clients",
         description: "List all clients",
         inputSchema: {},

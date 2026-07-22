@@ -8,6 +8,7 @@ import type {
   ToolExposureConfig,
 } from "../config.js";
 import { createMcpServer } from "../server-bootstrap.js";
+import type { ToolProfile } from "../tool-profile.js";
 
 export interface MeasuredMcpSurface {
   toolCount: number;
@@ -25,6 +26,10 @@ export const TOOL_SURFACE_PROFILES = [
   "setup",
   "full",
   "lean-purchase",
+  "guided",
+  "guided-sales",
+  "standard",
+  "custom",
 ] as const;
 
 export type ToolSurfaceProfileName = typeof TOOL_SURFACE_PROFILES[number];
@@ -40,6 +45,7 @@ type ListedTool = {
 interface SurfaceProfile {
   setupMode: boolean;
   exposure: ToolExposureConfig;
+  toolProfile?: ToolProfile;
 }
 
 export interface ToolSurfaceSnapshot {
@@ -64,14 +70,33 @@ const DEFAULT_EXPOSURE: ToolExposureConfig = Object.freeze({
 });
 
 const PROFILES: Record<ToolSurfaceProfileName, SurfaceProfile> = {
-  default: { setupMode: false, exposure: DEFAULT_EXPOSURE },
-  setup: { setupMode: true, exposure: DEFAULT_EXPOSURE },
+  default: { setupMode: false, exposure: DEFAULT_EXPOSURE, toolProfile: "standard" },
+  setup: { setupMode: true, exposure: DEFAULT_EXPOSURE, toolProfile: "standard" },
   full: {
     setupMode: false,
+    toolProfile: "full",
     exposure: { ...DEFAULT_EXPOSURE, exposeGranularTools: true, exposeSetupTools: true },
   },
   "lean-purchase": {
     setupMode: false,
+    toolProfile: "custom",
+    exposure: {
+      enableLightyear: false,
+      exposeGranularTools: false,
+      exposeSetupTools: false,
+      enableTaxTools: false,
+      enableReferenceAdmin: false,
+      enableAnnualReport: false,
+      enableSales: false,
+      enableProducts: false,
+    },
+  },
+  guided: { setupMode: false, exposure: DEFAULT_EXPOSURE, toolProfile: "guided" },
+  "guided-sales": { setupMode: false, exposure: DEFAULT_EXPOSURE, toolProfile: "guided-sales" },
+  standard: { setupMode: false, exposure: DEFAULT_EXPOSURE, toolProfile: "standard" },
+  custom: {
+    setupMode: false,
+    toolProfile: "custom",
     exposure: {
       enableLightyear: false,
       exposeGranularTools: false,
@@ -200,6 +225,7 @@ export async function captureToolSurface(profileName: ToolSurfaceProfileName): P
     configs: profile.setupMode ? [] : [CONFIGURED_CONNECTION],
     setupInfo: TOOL_SURFACE_SETUP_INFO,
     toolExposure: profile.exposure,
+    ...(profile.toolProfile ? { toolProfile: profile.toolProfile } : {}),
     connect: false,
     wrapServer: recordingServer,
   });

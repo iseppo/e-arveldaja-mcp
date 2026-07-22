@@ -6,6 +6,7 @@ import { registerTool } from "../mcp-compat.js";
 import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
 import { desandboxText, sandboxExternalText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
+import { projectActionForCurrentProfile } from "../tool-profile.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
@@ -1761,6 +1762,31 @@ function buildReviewActionResponse(
         }
       : {}),
   };
+
+  const projectedAction = publicPrepared.proposed_action
+    ? projectActionForCurrentProfile({
+        tool: publicPrepared.proposed_action.tool,
+        args: isRecord(publicPrepared.proposed_action.args) ? publicPrepared.proposed_action.args : {},
+        approval_required: publicPrepared.proposed_action.approval_required,
+      })
+    : undefined;
+  if (isRecord(projectedAction) && projectedAction.status === "needs_review") {
+    return {
+      content: [{
+        type: "text",
+        text: toMcpJson({
+          ...publicPrepared,
+          status: "needs_review",
+          blocker: projectedAction.blocker,
+          accounting_proposal: projectedAction.proposal,
+          proposed_action: undefined,
+          suggested_tools: ["get_setup_instructions"],
+          next_actions: projectedAction.next_actions,
+          assistant_guidance: reviewActionAssistantGuidance,
+        }),
+      }],
+    };
+  }
 
   return {
     content: [{

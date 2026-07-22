@@ -1,5 +1,11 @@
 # Architecture Diagram
 
+## Public tool catalog and profiles
+
+`src/tool-catalog.ts` is the exhaustive metadata authority for the full MCP tool surface. Every public registration carries its `ToolMeta` through `registerTool`; `PublicToolRegistrar` validates uniqueness, catalog coverage, reference integrity, and destructive-annotation parity, then filters only the real top-level server. Internal Accounting Inbox capture servers therefore continue to receive the full handler set.
+
+`EARVELDAJA_PROFILE` resolves to `guided`, `guided-sales`, `standard`, `full`, or the legacy-flag-derived `custom`. The public boundary hides excluded tools, while runtime safety binds both the normalized profile and stable catalog fingerprint into execution plans and file references. Guided structured actions are projected before serialization: safe granular calls remap to merged facades; unavailable advanced or future calls become review-only proposals with `advanced_action_unavailable_in_profile` and only `get_setup_instructions` as an executable next action.
+
 ```mermaid
 graph TB
     subgraph Client["MCP Client"]
@@ -9,7 +15,7 @@ graph TB
     subgraph Server["MCP Server (Node.js + TypeScript)"]
         Entry["index.ts\nMCP entry point"]
 
-        subgraph Tools["tools/ — 122 tools across 16 modules"]
+        subgraph Tools["tools/ — 125 standard-profile tools"]
             CRUD["crud-tools.ts\nBasic CRUD"]
             PDF["pdf-workflow.ts\nInvoice PDF"]
             OCR["receipt-extraction.ts\nReceipt OCR"]

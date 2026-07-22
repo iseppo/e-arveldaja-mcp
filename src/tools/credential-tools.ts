@@ -7,6 +7,7 @@ import { readOnly, mutate, destructive } from "../annotations.js";
 import { isRecord } from "../record-utils.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { PlanStoreError } from "../plan-store.js";
+import type { ToolProfile } from "../tool-profile.js";
 import {
   commitApiKeyCredentialImport,
   commitRemoveStoredCredential,
@@ -15,6 +16,7 @@ import {
   previewApiKeyCredentialImport,
   previewRemoveStoredCredential,
   type Config,
+  type CredentialImportAction,
   type CredentialStorageScope,
   type CredentialVerificationResult,
   type ImportApiKeyCredentialsOptions,
@@ -62,7 +64,7 @@ function describeAvailability(storageScope: CredentialStorageScope): string {
 }
 
 function describeImportAction(
-  action: "created" | "appended" | "replaced" | "unchanged",
+  action: CredentialImportAction,
   envFile: string,
   target: "primary" | `connection_${number}`,
 ): string {
@@ -70,12 +72,13 @@ function describeImportAction(
     case "created": return `Would store them as the default connection in ${envFile}.`;
     case "appended": return `Would store them as an additional connection (${target}) in ${envFile}.`;
     case "replaced": return `Would replace the default connection in ${envFile}.`;
+    case "profile_updated": return `Would keep the existing ${target} credential and update the named tool profile in ${envFile}.`;
     case "unchanged": return `They are already stored as ${target} in ${envFile}, so no new credential block is needed.`;
   }
 }
 
 function describeCommittedAction(
-  action: "created" | "appended" | "replaced" | "unchanged",
+  action: CredentialImportAction,
   envFile: string,
   target: "primary" | `connection_${number}`,
 ): string {
@@ -83,6 +86,7 @@ function describeCommittedAction(
     case "created": return `Stored them as the default connection in ${envFile}.`;
     case "appended": return `Stored them as an additional connection (${target}) in ${envFile}.`;
     case "replaced": return `Replaced the default connection in ${envFile}.`;
+    case "profile_updated": return `Kept the existing ${target} credential and updated the named tool profile in ${envFile}.`;
     case "unchanged": return `They were already stored as ${target} in ${envFile}, so no new credential block was added.`;
   }
 }
@@ -172,9 +176,10 @@ export function registerCredentialTools(
       overwrite: z.boolean().optional().describe("Replace the default stored connection instead of appending. Default false."),
       execute: z.boolean().optional().describe("Persist the reviewed preview (default false = preview only, writes nothing)."),
       plan_handle: z.string().optional().describe("Plan handle returned by the reviewed preview. Required for execute=true."),
+      profile: z.enum(["guided", "guided-sales", "standard", "full"]).optional().describe("Optional tool profile stored in the selected local/global .env."),
     },
     { ...mutate, openWorldHint: true, title: "Import API Key Credentials" },
-    async ({ file_path, storage_scope, overwrite = false, execute = false, plan_handle }): Promise<ToolResponse> => {
+    async ({ file_path, storage_scope, overwrite = false, execute = false, plan_handle, profile }): Promise<ToolResponse> => {
       const apiKeyFileOrError = await resolveApiKeyFile(file_path);
       if (typeof apiKeyFileOrError !== "string") return apiKeyFileOrError;
       const apiKeyFile = apiKeyFileOrError;
@@ -193,6 +198,7 @@ export function registerCredentialTools(
         storageScope,
         overwrite,
         verify: deps.verify,
+        ...(profile ? { profile: profile as Exclude<ToolProfile, "custom"> } : {}),
       };
 
       if (execute !== true) {
@@ -215,6 +221,8 @@ export function registerCredentialTools(
             target: preview.projection.target,
             masked_api_key_id: preview.projection.maskedApiKeyId,
             restart_required: false,
+            ...(preview.projection.profile ? { profile: preview.projection.profile } : {}),
+            legacy_exposure_keys_removed: preview.projection.legacyExposureKeysRemoved,
             message: `${describeImportAction("unchanged", preview.projection.envFile, preview.projection.target)} No plan_handle is issued because there is nothing to persist.`,
           });
         }
@@ -242,12 +250,15 @@ export function registerCredentialTools(
           verified_at: preview.projection.verifiedAt,
           overwrite: preview.projection.overwrite,
           restart_required: false,
+          ...(preview.projection.profile ? { profile: preview.projection.profile } : {}),
+          legacy_exposure_keys_removed: preview.projection.legacyExposureKeysRemoved,
           message: `Verified credentials for ${preview.projection.companyName ?? "the target company"}. ${describeImportAction(preview.projection.action, preview.projection.envFile, preview.projection.target)} ${describeAvailability(preview.projection.storageScope)} Nothing has been written yet.`,
           next_step: "Review this projection, then call import_apikey_credentials again with execute=true and this plan_handle to persist.",
           suggested_execute_args: {
             ...(file_path !== undefined ? { file_path } : {}),
             storage_scope: preview.projection.storageScope,
             overwrite: preview.projection.overwrite,
+            ...(preview.projection.profile ? { profile: preview.projection.profile } : {}),
             execute: true,
             plan_handle: handle,
           },
@@ -305,6 +316,8 @@ export function registerCredentialTools(
         target: result.target,
         verified_at: result.verifiedAt,
         restart_required: true,
+        ...(result.profile ? { profile: result.profile } : {}),
+        legacy_exposure_keys_removed: result.legacyExposureKeysRemoved,
       });
     },
   );

@@ -12,8 +12,9 @@ import {
   NO_API_CREDENTIALS_FOUND_MESSAGE,
   getCredentialSetupInfo,
   findImportableApiKeyFiles,
-  getToolExposureConfig,
+  getToolProfileConfig,
   type CredentialStorageScope,
+  type CredentialImportAction,
   type Config,
   type CredentialSetupInfo,
   type ToolExposureConfig,
@@ -81,6 +82,8 @@ import { buildAuditLogLabels } from "./audit-log-labels.js";
 import { serializeToolMutationError } from "./mutation-audit.js";
 import { initAccountingRulesConnection } from "./accounting-rules.js";
 import { createRuntimeSafetyContext } from "./runtime-safety-context.js";
+import { createPublicToolRegistrar } from "./public-tool-registrar.js";
+import { exposureForProfile, SETUP_PROFILE_CHOICES, type ToolProfile } from "./tool-profile.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json") as { version: string };
@@ -230,6 +233,12 @@ export function buildSetupInstructionsPayload(
     message: isSetupMode
       ? "No API credentials configured. Server is running in setup mode."
       : "API credentials are configured. These are the supported ways to provide credentials for this working directory.",
+    profile: {
+      env_var: "EARVELDAJA_PROFILE",
+      default_for_this_release: "standard",
+      choices: SETUP_PROFILE_CHOICES,
+      note: "Choose one surface. Guided and guided-sales are opt-in compatibility profiles; after changing profile, restart and run fresh previews.",
+    },
   };
 }
 
@@ -301,7 +310,7 @@ function describeCredentialAvailability(storageScope: CredentialStorageScope): s
 }
 
 function describeCredentialImportAction(
-  action: "created" | "appended" | "replaced" | "unchanged",
+  action: CredentialImportAction,
   envFile: string,
   target: "primary" | `connection_${number}`,
 ): string {
@@ -312,6 +321,8 @@ function describeCredentialImportAction(
       return `Stored them as an additional connection (${target}) in ${envFile}.`;
     case "replaced":
       return `Replaced the default connection in ${envFile}.`;
+    case "profile_updated":
+      return `Kept the existing ${target} credential and updated the named tool profile in ${envFile}.`;
     case "unchanged":
       return `They were already stored as ${target} in ${envFile}, so no new credential block was added.`;
   }
@@ -351,6 +362,7 @@ export interface McpBootstrapOptions {
   configs?: readonly NamedConfig[];
   setupInfo?: CredentialSetupInfo;
   toolExposure?: ToolExposureConfig;
+  toolProfile?: ToolProfile;
   /** False registers the complete surface and returns without starting a transport. */
   connect?: boolean;
   /** Test/measurement seam for observing the real production registrations. */
@@ -506,11 +518,14 @@ export async function createMcpServer(
   // toolExposure decides which optional/redundant tools enter tools/list;
   // resolved here (before the server instructions) so both the setup-mode
   // instruction text and the setup-tool gating below can use it.
-  const toolExposure = options.toolExposure ?? getToolExposureConfig();
+  const resolvedProfile = getToolProfileConfig();
+  const toolProfile = options.toolProfile ?? resolvedProfile.profile;
+  const toolExposure = exposureForProfile(toolProfile, options.toolExposure ?? resolvedProfile.exposure);
   const runtimeSafetyContext = createRuntimeSafetyContext({
     invocationStorage,
     configs: allConfigs,
     toolExposure,
+    toolProfile,
   });
 
   const instructions = setupMode ? `Setup mode:
@@ -543,10 +558,11 @@ export async function createMcpServer(
       "and smart booking suggestions based on past invoices.",
   }, { instructions });
   const server = options.wrapServer?.(baseServer) ?? baseServer;
+  const publicServer = createPublicToolRegistrar(server, toolProfile);
 
   // --- Multi-account tools ---
 
-  registerTool(server, "get_setup_instructions",
+  registerTool(publicServer, "get_setup_instructions",
     "Show how to configure e-arveldaja API credentials when the server is running without connections.",
     {},
     { ...readOnly, openWorldHint: true, title: "Get Setup Instructions" },
@@ -567,16 +583,16 @@ export async function createMcpServer(
   // Persistence is preview-first and gated behind one-attempt plan handles; see
   // src/tools/credential-tools.ts.
   registerCredentialTools(
-    server,
+    publicServer,
     {
       verify: verifyImportedCredentials,
-      resolveStorageScope: () => resolveCredentialStorageScope(server),
+      resolveStorageScope: () => resolveCredentialStorageScope(publicServer),
     },
     runtimeSafetyContext,
     setupMode || toolExposure.exposeSetupTools,
   );
 
-  registerTool(server, "list_connections",
+  registerTool(publicServer, "list_connections",
     "List configured e-arveldaja connections and the active index.",
     {},
     { ...readOnly, title: "List Connections" },
@@ -610,7 +626,7 @@ export async function createMcpServer(
     }
   );
 
-  registerTool(server, "switch_connection",
+  registerTool(publicServer, "switch_connection",
     "Switch active e-arveldaja connection. Clears caches; interrupted in-flight tools are blocked from further API requests.",
     {
       index: z.number().int().describe("Connection index from list_connections"),
@@ -676,13 +692,13 @@ export async function createMcpServer(
     }
   );
 
-  registerCacheControlTool(server, {
+  registerCacheControlTool(publicServer, {
     getActiveConnectionIndex: () => allConfigs.length > 0 ? connectionState.activeIndex : undefined,
   });
 
   // --- Audit log tools ---
 
-  registerTool(server, "get_session_log",
+  registerTool(publicServer, "get_session_log",
     "Retrieve mutating-operation audit log Markdown for the current connection, another audit-log label, or connection:<raw name>.",
     {
       connection: z.string().optional().describe("Audit-log label, or connection:<raw connection name>; default current connection."),
@@ -732,7 +748,7 @@ export async function createMcpServer(
     }
   );
 
-  registerTool(server, "list_audit_logs",
+  registerTool(publicServer, "list_audit_logs",
     "List available human-readable audit log files.",
     {},
     { ...readOnly, title: "List Audit Logs" },
@@ -753,7 +769,7 @@ export async function createMcpServer(
     }
   );
 
-  registerTool(server, "clear_session_log",
+  registerTool(publicServer, "clear_session_log",
     "Clear the audit log for the current connection. DESTRUCTIVE — cannot be undone.",
     {},
     { ...destructive, title: "Clear Session Audit Log" },
@@ -883,7 +899,7 @@ export async function createMcpServer(
   }
 
   // Create a proxy that pins tool and resource handlers to a connection snapshot.
-  const scopedServer = new Proxy(server, {
+  const scopedServer = new Proxy(publicServer, {
     get(target, prop, receiver) {
       if (prop === "registerTool") {
         return (...toolArgs: unknown[]) => {

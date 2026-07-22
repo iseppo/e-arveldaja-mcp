@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { resolve, win32 } from "path";
 import { readFileSync, existsSync, statSync, readdirSync, realpathSync, lstatSync, writeFileSync, mkdirSync, chmodSync, renameSync, unlinkSync } from "fs";
 import { homedir } from "os";
+import { exposureForProfile, LEGACY_TOOL_EXPOSURE_ENV_KEYS, parseToolProfile, type ToolProfile } from "./tool-profile.js";
 export interface Config {
   apiKeyId: string;
   apiPublicValue: string;
@@ -17,6 +18,7 @@ export interface NamedConfig {
 }
 
 export type CredentialStorageScope = "local" | "global";
+export type CredentialImportAction = "created" | "appended" | "replaced" | "profile_updated" | "unchanged";
 
 export interface CredentialSetupInfo {
   mode: "setup";
@@ -46,6 +48,7 @@ export interface ImportApiKeyCredentialsOptions {
   workingDir?: string;
   globalConfigDir?: string;
   server?: "live" | "demo";
+  profile?: Exclude<ToolProfile, "custom">;
   verify: (config: Config) => Promise<CredentialVerificationResult>;
 }
 
@@ -55,9 +58,11 @@ export interface ImportApiKeyCredentialsResult {
   companyName: string | null;
   verifiedAt: string;
   created: boolean;
-  action: "created" | "appended" | "replaced" | "unchanged";
+  action: CredentialImportAction;
   sourceFile: string;
   target: "primary" | `connection_${number}`;
+  profile?: Exclude<ToolProfile, "custom">;
+  legacyExposureKeysRemoved: readonly string[];
 }
 
 export interface StoredCredentialSummary {
@@ -250,6 +255,11 @@ export function getToolExposureConfig(env: NodeJS.ProcessEnv = process.env): Too
     enableSales: !envFlagEnabled(env.EARVELDAJA_DISABLE_SALES),
     enableProducts: !envFlagEnabled(env.EARVELDAJA_DISABLE_PRODUCTS),
   };
+}
+
+export function getToolProfileConfig(env: NodeJS.ProcessEnv = process.env): { profile: ToolProfile; exposure: ToolExposureConfig } {
+  const profile = parseToolProfile(env);
+  return { profile, exposure: exposureForProfile(profile, getToolExposureConfig(env)) };
 }
 
 /**
@@ -1237,7 +1247,7 @@ export interface CredentialImportProjection {
   server: "live" | "demo";
   overwrite: boolean;
   target: "primary" | `connection_${number}`;
-  action: "created" | "appended" | "replaced" | "unchanged";
+  action: CredentialImportAction;
   companyName: string | null;
   verifiedAt: string;
   /** Display-only masked identifier — never the raw key id. */
@@ -1245,6 +1255,9 @@ export interface CredentialImportProjection {
   destinationExists: boolean;
   /** Read-only content fingerprint of the destination .env, for drift detection. */
   destinationStateToken: string;
+  profile?: Exclude<ToolProfile, "custom">;
+  /** Exact legacy exposure keys that the reviewed named-profile write removes. */
+  legacyExposureKeysRemoved: readonly string[];
 }
 
 export interface PreviewApiKeyCredentialImportResult {
@@ -1346,8 +1359,17 @@ export async function previewApiKeyCredentialImport(
   const overwrite = options.overwrite === true;
 
   let target: "primary" | `connection_${number}`;
-  let action: "created" | "appended" | "replaced" | "unchanged";
-  if (matchingTarget && !(overwrite && matchingTarget !== "primary")) {
+  let action: CredentialImportAction;
+  const legacyExposureKeysRemoved = options.profile === undefined
+    ? []
+    : LEGACY_TOOL_EXPOSURE_ENV_KEYS.filter((key) => Object.hasOwn(state.env, key));
+  const profileNeedsUpdate = options.profile !== undefined && (
+    state.env.EARVELDAJA_PROFILE !== options.profile || legacyExposureKeysRemoved.length > 0
+  );
+  if (matchingTarget && !(overwrite && matchingTarget !== "primary") && profileNeedsUpdate) {
+    target = matchingTarget;
+    action = "profile_updated";
+  } else if (matchingTarget && !(overwrite && matchingTarget !== "primary")) {
     target = matchingTarget;
     action = "unchanged";
   } else if (overwrite || !existingHasPrimaryCredentials) {
@@ -1372,6 +1394,8 @@ export async function previewApiKeyCredentialImport(
     maskedApiKeyId: maskApiKeyId(parsed.keyId),
     destinationExists: state.exists,
     destinationStateToken: state.token,
+    ...(options.profile ? { profile: options.profile } : {}),
+    legacyExposureKeysRemoved,
   };
   const snapshot: CredentialImportSecretSnapshot = {
     server,
@@ -1388,6 +1412,8 @@ export async function previewApiKeyCredentialImport(
     action,
     sourceFile: options.apiKeyFile,
     target,
+    ...(options.profile ? { profile: options.profile } : {}),
+    legacyExposureKeysRemoved,
   };
   return { projection, snapshot, unchanged: action === "unchanged", result };
 }
@@ -1428,17 +1454,29 @@ export function commitApiKeyCredentialImport(args: {
   const existingHasPrimaryCredentials = hasCompleteApiCredentialEnv(existingEnv);
   const existingBlocks = readStoredCredentialBlocks(existingEnv, { includePrimary: true, extraNamePrefix: "env" });
   const matchingTarget = findMatchingStoredCredentialTarget(existingBlocks, values);
+  const currentLegacyExposureKeys = projection.profile === undefined
+    ? []
+    : LEGACY_TOOL_EXPOSURE_ENV_KEYS.filter((key) => Object.hasOwn(existingEnv, key));
+  if (currentLegacyExposureKeys.join("\0") !== projection.legacyExposureKeysRemoved.join("\0")) {
+    throw new Error("Credential destination changed since the reviewed preview; re-run the preview.");
+  }
 
-  if (matchingTarget && !(projection.overwrite && matchingTarget !== "primary")) {
+  if (projection.action !== "profile_updated" && matchingTarget && !(projection.overwrite && matchingTarget !== "primary")) {
     throw new Error("Credential is already stored; re-run the preview.");
   }
 
   let mergedEnv = { ...existingEnv };
   const mergedMetadata: CredentialMetadataMap = { ...existingMetadata };
-  let action: "created" | "appended" | "replaced";
+  let action: Exclude<CredentialImportAction, "unchanged">;
   let target: "primary" | `connection_${number}`;
 
-  if (projection.overwrite || !existingHasPrimaryCredentials) {
+  if (projection.action === "profile_updated") {
+    if (!matchingTarget || matchingTarget !== projection.target) {
+      throw new Error("Credential destination changed since the reviewed preview; re-run the preview.");
+    }
+    target = matchingTarget;
+    action = "profile_updated";
+  } else if (projection.overwrite || !existingHasPrimaryCredentials) {
     target = "primary";
     action = existingHasPrimaryCredentials ? "replaced" : "created";
     mergedEnv = setStoredCredentialBlock(mergedEnv, target, values);
@@ -1464,6 +1502,11 @@ export function commitApiKeyCredentialImport(args: {
     sourceFile: projection.sourceFile,
   };
 
+  if (projection.profile) {
+    mergedEnv.EARVELDAJA_PROFILE = projection.profile;
+    for (const key of projection.legacyExposureKeysRemoved) delete mergedEnv[key];
+  }
+
   writePrivateEnvFile(targetEnvFile, serializeEnvFile(mergedEnv, mergedMetadata));
 
   return {
@@ -1475,6 +1518,8 @@ export function commitApiKeyCredentialImport(args: {
     action,
     sourceFile: projection.sourceFile,
     target,
+    ...(projection.profile ? { profile: projection.profile } : {}),
+    legacyExposureKeysRemoved: projection.legacyExposureKeysRemoved,
   };
 }
 

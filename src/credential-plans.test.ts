@@ -34,6 +34,7 @@ const IMPORT_PROJECTION: CredentialImportProjection = {
   maskedApiKeyId: "key-…7890",
   destinationExists: false,
   destinationStateToken: "token-aaa",
+  legacyExposureKeysRemoved: [],
 };
 
 const REMOVE_PROJECTION: CredentialRemoveProjection = {
@@ -81,6 +82,7 @@ describe("credentialImportFingerprint", () => {
     ["target", { target: "connection_1" as const }],
     ["action", { action: "appended" as const }],
     ["envFile", { envFile: "/other/.env" }],
+    ["legacyExposureKeysRemoved", { legacyExposureKeysRemoved: ["EARVELDAJA_DISABLE_SALES"] }],
   ])("changes when %s drifts", (_label, patch) => {
     const base = credentialImportFingerprint(IMPORT_PROJECTION, SNAPSHOT);
     expect(credentialImportFingerprint({ ...IMPORT_PROJECTION, ...patch }, SNAPSHOT)).not.toBe(base);

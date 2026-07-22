@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
+import { getToolExposureConfig, getToolProfileConfig, type ToolExposureConfig } from "../config.js";
 import { registerAccountingInboxTools } from "./accounting-inbox.js";
 import { registerBankReconciliationTools } from "./bank-reconciliation.js";
 import { registerCamtImportTools } from "./camt-import.js";
@@ -40,6 +40,11 @@ function registeredPromptNames(toolExposure: ToolExposureConfig): string[] {
 }
 
 describe("getToolExposureConfig", () => {
+  it("keeps standard as the absent-profile compatibility surface and maps full to all groups", () => {
+    expect(getToolProfileConfig({} as NodeJS.ProcessEnv).profile).toBe("standard");
+    expect(getToolProfileConfig({ EARVELDAJA_PROFILE: "full" } as NodeJS.ProcessEnv).exposure)
+      .toEqual(EXPOSED);
+  });
   it("fails every safety-sensitive registrar immediately without an explicit valid runtime context", () => {
     const server = { registerTool: vi.fn() } as any;
     const api = new Proxy({}, { get() { throw new Error("API must not be read"); } }) as any;

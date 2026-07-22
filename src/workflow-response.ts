@@ -1,4 +1,6 @@
 import { arrayAt, isRecord, numberAt, recordAt, stringAt } from "./record-utils.js";
+import { currentToolProfile, projectActionForCurrentProfile, remapHiddenGranularTool } from "./tool-profile.js";
+export { remapHiddenGranularTool } from "./tool-profile.js";
 
 export type WorkflowActionKind =
   | "tool_call"
@@ -72,69 +74,14 @@ type MaterializingDryRunTool =
 // contract only ever names a tool the caller can actually invoke. The merged
 // tools are always registered, so this remap is applied unconditionally (it is
 // a no-op for any name that is not a hidden granular constituent).
-interface MergedToolTarget {
-  tool: string;
-  args: Record<string, unknown>;
-}
-
-function mergedToolArgs(mode: string, granularArgs: Record<string, unknown>): Record<string, unknown> {
-  // The merged entry points accept the same underlying args plus a `mode`; the
-  // granular execute/execution_mode flag is subsumed by `mode`, so drop it.
-  const { execute: _execute, execution_mode: _executionMode, ...rest } = granularArgs;
-  return { mode, ...rest };
-}
-
-function receiptBatchMode(executionMode: unknown): string {
-  if (executionMode === "create") return "create";
-  if (executionMode === "create_and_confirm") return "create_and_confirm";
-  return "dry_run";
-}
-
-/**
- * Maps a hidden granular tool name plus the args it would have been delegated
- * with to the merged entry point that is actually registered, translating the
- * execute/execution_mode flag into the merged tool's `mode`. Returns undefined
- * for any tool that is not a hidden granular constituent (leave it untouched).
- */
-export function remapHiddenGranularTool(
-  tool: string,
-  args: Record<string, unknown>,
-): MergedToolTarget | undefined {
-  switch (tool) {
-    case "reconcile_transactions":
-      return { tool: "reconcile_bank_transactions", args: mergedToolArgs("suggest", args) };
-    case "auto_confirm_exact_matches":
-      return {
-        tool: "reconcile_bank_transactions",
-        args: mergedToolArgs(args.execute === true ? "execute_auto_confirm" : "dry_run_auto_confirm", args),
-      };
-    case "parse_camt053":
-      return { tool: "process_camt053", args: mergedToolArgs("parse", args) };
-    case "import_camt053":
-      return { tool: "process_camt053", args: mergedToolArgs(args.execute === true ? "execute" : "dry_run", args) };
-    case "scan_receipt_folder":
-      return { tool: "receipt_batch", args: mergedToolArgs("scan", args) };
-    case "process_receipt_batch":
-      return { tool: "receipt_batch", args: mergedToolArgs(receiptBatchMode(args.execution_mode), args) };
-    case "classify_unmatched_transactions":
-      return { tool: "classify_bank_transactions", args: mergedToolArgs("classify", args) };
-    case "apply_transaction_classifications":
-      return {
-        tool: "classify_bank_transactions",
-        args: mergedToolArgs(args.execute === true ? "execute_apply" : "dry_run_apply", args),
-      };
-    default:
-      return undefined;
-  }
-}
-
 function remapHiddenGranularAction(action: unknown): unknown {
   if (!isRecord(action)) return action;
   const tool = stringAt(action, "tool");
   if (!tool) return action;
   const remapped = remapHiddenGranularTool(tool, recordAt(action, "args") ?? {});
-  if (!remapped) return action;
-  return { ...action, tool: remapped.tool, args: remapped.args };
+  return projectActionForCurrentProfile(remapped
+    ? { ...action, tool: remapped.tool, args: remapped.args }
+    : { ...action, tool, args: recordAt(action, "args") ?? {} });
 }
 
 function remapHiddenGranularApprovalPreview(preview: unknown): unknown {
@@ -163,6 +110,25 @@ export function remapHiddenGranularWorkflowEnvelope(workflow: unknown): unknown 
   }
   if (workflow.approval_previews !== undefined) {
     next.approval_previews = arrayAt(workflow, "approval_previews").map(remapHiddenGranularApprovalPreview);
+  }
+  const actions = [next.recommended_next_action, ...arrayAt(next, "available_actions")].filter(isRecord);
+  const blocked = actions.find((action) => isRecord(action.blocker) && action.status === "needs_review");
+  if (blocked) {
+    const setupAction: WorkflowAction = {
+      kind: "tool_call",
+      label: "Show setup and profile instructions",
+      why: "Switch to standard or full before running a fresh preview.",
+      approval_required: false,
+      tool: "get_setup_instructions",
+      args: {},
+    };
+    next.status = "needs_review";
+    next.blocker = blocked.blocker;
+    next.proposal = blocked.proposal;
+    next.needs_review = [...arrayAt(next, "needs_review"), blocked.proposal];
+    next.recommended_next_action = setupAction;
+    next.available_actions = [setupAction];
+    next.approval_previews = [];
   }
   return next;
 }
@@ -421,7 +387,7 @@ export function buildWorkflowEnvelope(options: BuildWorkflowEnvelopeOptions): Wo
     ...(options.fallback_actions ?? []),
   ];
 
-  return {
+  const workflow: WorkflowEnvelope = {
     contract: "workflow_action_v1",
     summary: options.summary,
     done,
@@ -431,6 +397,9 @@ export function buildWorkflowEnvelope(options: BuildWorkflowEnvelopeOptions): Wo
     available_actions: availableActions,
     approval_previews: approvalPreviews,
   };
+  return currentToolProfile() === "guided" || currentToolProfile() === "guided-sales"
+    ? remapHiddenGranularWorkflowEnvelope(workflow) as WorkflowEnvelope
+    : workflow;
 }
 
 function sourceDocuments(args: Record<string, unknown>): string[] {

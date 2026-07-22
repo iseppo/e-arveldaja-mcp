@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { runWithToolProfile } from "./tool-profile.js";
 import {
   approvalPreviewFromDryRunStep,
   buildWorkflowEnvelope,
@@ -8,6 +9,20 @@ import {
 } from "./workflow-response.js";
 
 describe("workflow response helpers", () => {
+  it("projects an advanced guided action to review-only setup guidance", () => {
+    const workflow = runWithToolProfile("guided", () => buildWorkflowEnvelope({
+      summary: "Advanced proposal",
+      recommended_step: { tool: "create_journal", suggested_args: { amount: 12 } },
+    }));
+    expect(workflow).toMatchObject({
+      status: "needs_review",
+      blocker: { code: "advanced_action_unavailable_in_profile" },
+      proposal: { tool: "create_journal", args: { amount: 12 } },
+      recommended_next_action: { tool: "get_setup_instructions", args: {}, approval_required: false },
+      available_actions: [{ tool: "get_setup_instructions", args: {}, approval_required: false }],
+      approval_previews: [],
+    });
+  });
   it("uses domain labels for next tool calls and questions", () => {
     const workflow = buildWorkflowEnvelope({
       summary: "Prepared CAMT import.",

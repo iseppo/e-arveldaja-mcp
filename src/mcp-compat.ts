@@ -1,6 +1,7 @@
 import type { McpServer, ResourceMetadata, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { toolMeta, type ToolMeta } from "./tool-catalog.js";
 
 type UnknownRecord = Record<string, unknown>;
 type LegacyToolCallback<Args extends z.ZodRawShape> = (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown;
@@ -71,8 +72,11 @@ export function registerTool<Args extends z.ZodRawShape>(
   annotations: ToolAnnotations,
   cb: LegacyToolCallback<Args>,
 ): unknown;
+export function registerTool<Args extends z.ZodRawShape>(server: McpServer, name: string, description: string, paramsSchema: Args, annotations: ToolAnnotations, meta: ToolMeta, cb: LegacyToolCallback<Args>): unknown;
 export function registerTool(server: McpServer, name: string, ...rest: unknown[]): unknown {
   const callback = ensureCallback(rest.pop(), "tool", name);
+  const explicitMeta = rest.length > 0 && isRecord(rest[rest.length - 1]) && "feature" in (rest[rest.length - 1] as UnknownRecord)
+    ? rest.pop() as unknown as ToolMeta : undefined;
 
   let description: string | undefined;
   if (typeof rest[0] === "string") {
@@ -101,6 +105,7 @@ export function registerTool(server: McpServer, name: string, ...rest: unknown[]
     description,
     ...(inputSchema !== undefined ? { inputSchema } : {}),
     ...(normalized.annotations ? { annotations: normalized.annotations } : {}),
+    _meta: { earveldajaTool: explicitMeta ?? toolMeta(name) },
   }, callback);
 }
 

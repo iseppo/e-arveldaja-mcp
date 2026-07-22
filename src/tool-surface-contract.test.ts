@@ -22,6 +22,20 @@ describe("MCP tool-surface contract", () => {
     });
   }
 
+  it("keeps opt-in profile budgets and PR0 standard/full compatibility", async () => {
+    const [guided, guidedSales, standard, currentDefault, full] = await Promise.all([
+      captureToolSurface("guided"), captureToolSurface("guided-sales"), captureToolSurface("standard"),
+      captureToolSurface("default"), captureToolSurface("full"),
+    ]);
+    expect(guided.tools.length).toBeLessThanOrEqual(20);
+    expect(guidedSales.tools.length).toBeLessThanOrEqual(20);
+    const directDestructiveCrud = /^(?:delete|confirm|invalidate)_(?:client|product|journal|transaction|sale_invoice|purchase_invoice)$/;
+    expect(guided.tools.map(({ name }) => name).filter((name) => directDestructiveCrud.test(name))).toEqual([]);
+    expect(guidedSales.tools.map(({ name }) => name).filter((name) => directDestructiveCrud.test(name))).toEqual([]);
+    expect(standard.tools).toEqual(currentDefault.tools);
+    expect(new Set(full.tools.map(({ name }) => name)).size).toBe(full.tools.length);
+  });
+
   it("captures registrations by invoking the production bootstrap rather than recreating it", async () => {
     const bootstrapSource = await readFile(new URL("./server-bootstrap.ts", import.meta.url), "utf8");
     const fixtureSource = await readFile(new URL("./__fixtures__/tool-surface.ts", import.meta.url), "utf8");

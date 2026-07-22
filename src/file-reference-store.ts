@@ -95,6 +95,8 @@ function scopesEqual(left: RuntimeSafetyScope, right: RuntimeSafetyScope): boole
     left.connectionFingerprint === right.connectionFingerprint &&
     left.environmentKind === right.environmentKind &&
     left.baseUrl === right.baseUrl &&
+    left.profile === right.profile &&
+    left.catalogFingerprint === right.catalogFingerprint &&
     left.features.enableLightyear === right.features.enableLightyear &&
     left.features.exposeGranularTools === right.features.exposeGranularTools &&
     left.features.exposeSetupTools === right.features.exposeSetupTools &&

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Explicit MCP tool profiles and exhaustive catalog metadata.** `EARVELDAJA_PROFILE=guided|guided-sales|standard|full` selects a server-scoped public surface; absent profile preserves the 125-tool standard surface, `full` preserves the complete 138-tool surface, and legacy exposure flags normalize to `custom`. Guided surfaces are opt-in (17 tools; 19 with read-only sales lookup). Tool metadata, destructive parity, public-name uniqueness, facade/granular references, and full-surface set equality now fail closed.
+- **Profile-bound safety and setup persistence.** Runtime execution plans and file references bind the normalized profile plus catalog fingerprint. Credential import can store a validated profile in the same selected local/global `.env`; a reviewed named-profile selection also lists and removes legacy exposure keys there, including for profile-only updates to an already-stored credential. Guided structured actions that require an unavailable advanced tool preserve a non-executable accounting proposal, return `advanced_action_unavailable_in_profile`, and expose only `get_setup_instructions`; switching profiles always requires a fresh preview.
+
 ## [0.24.0] - 2026-07-21
 
 ### Added

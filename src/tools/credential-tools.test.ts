@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import dotenv from "dotenv";
 import {
   importApiKeyCredentials,
   type CredentialStorageScope,
@@ -19,6 +20,7 @@ import {
   persistCredentialImportViaPlan,
   type CredentialToolDeps,
 } from "./credential-tools.js";
+import { parseToolProfile } from "../tool-profile.js";
 
 // The reviewed credential surface persists to the GLOBAL .env, whose location is
 // resolved dynamically from EARVELDAJA_CONFIG_DIR — so tests can point it at a
@@ -44,6 +46,7 @@ const CONFIG_ENV_KEYS = [
   "EARVELDAJA_API_PASSWORD",
   "EARVELDAJA_API_KEY_FILE",
   "EARVELDAJA_CONFIG_DIR",
+  "EARVELDAJA_PROFILE",
 ] as const;
 
 const ORIGINAL_ENV = Object.fromEntries(CONFIG_ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -152,9 +155,70 @@ describe("import_apikey_credentials preview", () => {
     expect(payload.already_stored).toBe(true);
     expect(payload.plan_handle).toBeUndefined();
   });
+
+  it("returns unchanged with no handle when the credential and named profile are exact matches", async () => {
+    await importApiKeyCredentials({ ...importOptions(), profile: "standard" });
+    const { server } = registerImportServer();
+    const handler = getRegisteredToolHandler(server, "import_apikey_credentials");
+
+    const payload = parse(await handler({ ...IMPORT_ARGS(), profile: "standard" }));
+    expect(payload.action).toBe("unchanged");
+    expect(payload.already_stored).toBe(true);
+    expect(payload.plan_handle).toBeUndefined();
+  });
 });
 
 describe("import_apikey_credentials execute", () => {
+  it("persists the validated optional profile in the selected env file", async () => {
+    const { server } = registerImportServer();
+    const handler = getRegisteredToolHandler(server, "import_apikey_credentials");
+    const preview = parse(await handler({ ...IMPORT_ARGS(), profile: "guided-sales" }));
+    const result = parse(await handler({ ...IMPORT_ARGS(), profile: "guided-sales", execute: true, plan_handle: preview.plan_handle }));
+    expect(result.profile).toBe("guided-sales");
+    expect(readFileSync(envFile, "utf8")).toContain("EARVELDAJA_PROFILE=guided-sales");
+  });
+
+  it("rejects profile drift between credential preview and execute", async () => {
+    const { server } = registerImportServer();
+    const handler = getRegisteredToolHandler(server, "import_apikey_credentials");
+    const handle = parse(await handler({ ...IMPORT_ARGS(), profile: "guided" })).plan_handle as string;
+    const result = await handler({ ...IMPORT_ARGS(), profile: "full", execute: true, plan_handle: handle });
+    expect(result.isError).toBe(true);
+    expect(parse(result).category).toBe("plan_drift");
+    expect(existsSync(envFile)).toBe(false);
+  });
+
+  it("issues a reviewed profile-only update when the credential is already stored", async () => {
+    await importApiKeyCredentials(importOptions());
+    const { server } = registerImportServer();
+    const handler = getRegisteredToolHandler(server, "import_apikey_credentials");
+    const preview = parse(await handler({ ...IMPORT_ARGS(), profile: "guided" }));
+    expect(preview.action).toBe("profile_updated");
+    expect(typeof preview.plan_handle).toBe("string");
+    const result = parse(await handler({ ...IMPORT_ARGS(), profile: "guided", execute: true, plan_handle: preview.plan_handle }));
+    expect(result.action).toBe("profile_updated");
+    expect(readFileSync(envFile, "utf8")).toContain("EARVELDAJA_PROFILE=guided");
+  });
+
+  it.each(["guided", "guided-sales", "standard", "full"] as const)("removes legacy exposure flags and restarts as the requested %s profile", async (profile) => {
+    await importApiKeyCredentials(importOptions());
+    writeFileSync(envFile, `${readFileSync(envFile, "utf8")}EARVELDAJA_DISABLE_SALES=0\nEARVELDAJA_EXPOSE_GRANULAR_TOOLS=1\n`, { mode: 0o600 });
+    const { server } = registerImportServer();
+    const handler = getRegisteredToolHandler(server, "import_apikey_credentials");
+    const preview = parse(await handler({ ...IMPORT_ARGS(), profile }));
+    expect(preview.legacy_exposure_keys_removed).toEqual([
+      "EARVELDAJA_EXPOSE_GRANULAR_TOOLS",
+      "EARVELDAJA_DISABLE_SALES",
+    ]);
+    const result = parse(await handler({ ...IMPORT_ARGS(), profile, execute: true, plan_handle: preview.plan_handle }));
+    expect(result.action).toBe("profile_updated");
+    const stored = readFileSync(envFile, "utf8");
+    expect(stored).toContain(`EARVELDAJA_PROFILE=${profile}`);
+    expect(stored).not.toContain("EARVELDAJA_DISABLE_SALES");
+    expect(stored).not.toContain("EARVELDAJA_EXPOSE_GRANULAR_TOOLS");
+    expect(parseToolProfile(dotenv.parse(stored) as NodeJS.ProcessEnv)).toBe(profile);
+  });
+
   it("rejects execute without a plan_handle and writes nothing", async () => {
     const { server } = registerImportServer();
     const handler = getRegisteredToolHandler(server, "import_apikey_credentials");

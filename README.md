@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 123 tools, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 125 tools on the compatibility-preserving standard profile, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 > **⚠️ Action required if you used v0.22.0 (incoming transactions booked backwards).** A high-severity regression in **0.22.0** forced every newly created bank transaction to the "money out" direction, so **incoming** entries — owner deposits, customer receipts, refunds, and incoming inter-account transfers — were booked backwards (cash on the wrong side, moving the balance by twice the amount the wrong way). The ledger still balanced, so nothing errored. It is fixed in **0.22.1**. If you ran an e-arveldaja-mcp session while 0.22.0 was current (roughly **Sunday 2026-07-19 22:30 – Monday 2026-07-20 04:15**), any bank-statement entries created in that window are very likely wrong. Check what e-arveldaja reports as the bank-account balance against the real bank-account balance; if they differ, re-importing the affected bank statements fixes it. See the [changelog](CHANGELOG.md) for full details.
 >
@@ -123,6 +123,12 @@ The `import_opening_balances` tool parses the pasted register, checks that total
 
 ### Trimming the tool surface
 
+Choose one explicit surface with `EARVELDAJA_PROFILE`: `guided` is the opt-in 17-tool daily-bookkeeping surface; `guided-sales` adds read-only sales-invoice lookup (19 tools, no direct sales mutation); `standard` is the absent-variable compatibility default (125 tools); and `full` exposes all 138 tools, including granular and configured-mode credential administration.
+
+The setup choices map exactly: **Daily bookkeeping** → `guided`; **Daily bookkeeping plus sales invoices** → `guided-sales`; **Bookkeeping plus investments** → `standard` with Lightyear enabled; **Full advanced toolset** → `full`. Guided profiles are opt-in in this release, not the recommended/default daily surface. After changing profiles, restart and run fresh previews; an old proposal or plan handle is never approval under the new profile.
+
+Existing exposure flags remain compatible. If any legacy exposure flag is explicitly present, the effective profile is `custom` and those flags keep their existing independent behavior. A reviewed credential import that explicitly selects a named profile removes those legacy exposure keys from the same selected local/global `.env`, so restart resolves to the chosen profile rather than `custom`; the preview lists the exact keys to be removed. Profile and credentials use the same `.env`; there is no second config format.
+
 The tool list is sent into the model's context on every session, so it is a fixed per-session token cost. Several feature groups are opt-out — they are registered by default but can be dropped when a deployment does not use them:
 
 - `EARVELDAJA_DISABLE_LIGHTYEAR=1` — drops the Lightyear investment tools (`book_lightyear_*`, `parse_lightyear_*`, `lightyear_portfolio_summary`) and the `lightyear-booking` prompt. Use it when the company does not track investments.
@@ -132,7 +138,7 @@ The tool list is sent into the model's context on every session, so it is a fixe
 - `EARVELDAJA_DISABLE_SALES=1` — drops the sales-invoicing side: the 11 sale-invoice tools, `create_recurring_sale_invoices`, and receivables aging (`compute_receivables_aging`). Payables aging and all purchase-invoice tools stay. Use it for purchase-side-only bookkeeping.
 - `EARVELDAJA_DISABLE_PRODUCTS=1` — drops the product-catalog tools (`list/get/create/update/deactivate/reactivate/delete_product`). Products are chiefly the sale-invoice line-item catalog (purchase items key on `cl_purchase_articles_id`, though they can also carry an optional `products_id`), so a `DISABLE_SALES` deployment usually sets this too. It only removes catalog management — creating either invoice type still works — so the flags stay independent.
 
-A lean purchase-side-only deployment with every disable flag set (incl. Lightyear) lands near 80 tools instead of the default 123. Conversely, `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` and `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` register the hidden granular and credential-management tools when you need them.
+A lean purchase-side-only custom deployment with every disable flag set (incl. Lightyear) has 84 tools instead of the standard 125. Conversely, `EARVELDAJA_PROFILE=full` exposes the complete 138-tool catalog.
 
 Confirmed supplier history still wins over local rules for purchase booking defaults.
 

@@ -266,7 +266,7 @@ describe("user-journey accounting contract", () => {
         name: "setup",
         callCount: 3,
         requestBytes: 347,
-        responseBytes: 2_007,
+        responseBytes: 2_452,
         technicalIdPrompts: 0,
         ambiguityQuestions: 0,
         mutationCalls: 1,

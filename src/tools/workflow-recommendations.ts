@@ -5,6 +5,7 @@ import { registerTool } from "../mcp-compat.js";
 import { toolResponse } from "../tool-response.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
+import { currentToolProfile, isToolVisibleForProfile, projectActionForProfile } from "../tool-profile.js";
 import {
   ESTONIAN_VAT_METADATA,
   VAT_REGISTRATION_THRESHOLD_DISPLAY,
@@ -448,14 +449,24 @@ function visibleWorkflow(workflow: WorkflowGuide, hidden: Set<string>): Workflow
   };
 }
 
+function profileVisibleWorkflow(workflow: WorkflowGuide): WorkflowGuide | null {
+  const profile = currentToolProfile();
+  if (profile !== "guided" && profile !== "guided-sales") return workflow;
+  const primary_tools = workflow.primary_tools.filter((tool) => {
+    try { return isToolVisibleForProfile(tool, profile); } catch { return false; }
+  });
+  const next_actions = workflow.next_actions.map((action) => projectActionForProfile(action, profile))
+    .flatMap((action) => action.status === "needs_review"
+      ? [{ tool: "get_setup_instructions", args: {}, why: action.blocker.message }]
+      : [action]);
+  if (primary_tools.length === 0 && next_actions.every((action) => action.tool === "get_setup_instructions")) return null;
+  return { ...workflow, primary_tools, next_actions };
+}
+
 export function registerWorkflowRecommendationTools(
   server: McpServer,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): void {
-  const visibleWorkflows = WORKFLOWS
-    .map(workflow => visibleWorkflow(workflow, hiddenRecipeTools(exposure)))
-    .filter((workflow): workflow is WorkflowGuide => workflow !== null);
-
   registerTool(server, "recommend_workflow",
     "Recommend the safest e-arveldaja workflow for a user goal. Use this when the user asks what to do next or when choosing among many tools.",
     {
@@ -464,6 +475,11 @@ export function registerWorkflowRecommendationTools(
     },
     { ...readOnly, title: "Recommend Workflow" },
     async ({ goal, risk_tolerance }) => {
+      const visibleWorkflows = WORKFLOWS
+        .map(workflow => visibleWorkflow(workflow, hiddenRecipeTools(exposure)))
+        .filter((workflow): workflow is WorkflowGuide => workflow !== null)
+        .map(profileVisibleWorkflow)
+        .filter((workflow): workflow is WorkflowGuide => workflow !== null);
       const normalizedGoal = normalizeGoal(goal);
       const ranked = visibleWorkflows
         .map(workflow => ({ workflow, score: scoreWorkflow(workflow, normalizedGoal) }))
