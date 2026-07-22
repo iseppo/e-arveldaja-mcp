@@ -7,7 +7,8 @@ import { scanReceiptFolderInternal } from "./receipt-inbox-files.js";
 
 vi.mock("fs/promises", () => ({
   realpath: vi.fn().mockImplementation(async (path: unknown) => {
-    if (String(path).startsWith("/proc/") || String(path).startsWith("/dev/fd/")) {
+    if (String(path).startsWith("/proc/") ||
+      (String(path).startsWith("/dev/fd/") && process.platform !== "darwin")) {
       throw Object.assign(new Error("descriptor namespace unavailable"), { code: "ENOENT" });
     }
     return "C:\\Allowed\\Receipts";
@@ -18,7 +19,12 @@ vi.mock("fs/promises", () => ({
     stat: vi.fn().mockResolvedValue({ isDirectory: () => true, dev: 1, ino: 2 }),
     close: vi.fn().mockResolvedValue(undefined),
   }),
-  readdir: vi.fn().mockResolvedValue([]),
+  readdir: vi.fn().mockImplementation(async (path: unknown) => {
+    if (String(path).startsWith("/dev/fd/")) {
+      throw Object.assign(new Error("descriptor path is not traversable"), { code: "ENOTDIR" });
+    }
+    return [];
+  }),
   readFile: vi.fn(),
 }));
 
@@ -62,7 +68,7 @@ describe("receipt inbox folder path validation", () => {
     expect(payload.skipped).toEqual([]);
   });
 
-  it("uses portable expected-reference binding on macOS when descriptor paths are unavailable", async () => {
+  it("uses portable expected-reference binding on macOS when the descriptor path is not traversable", async () => {
     setPlatform("darwin");
 
     await expect(scanReceiptFolderInternal(

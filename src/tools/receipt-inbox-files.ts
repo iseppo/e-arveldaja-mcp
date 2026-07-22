@@ -119,7 +119,9 @@ async function openBoundReceiptDirectory(
 
     const binding = {
       canonicalPath,
-      accessPath: descriptorPath ?? canonicalPath,
+      accessPath: process.platform === "darwin"
+        ? canonicalPath
+        : descriptorPath ?? canonicalPath,
       ...(descriptorPath !== undefined ? { descriptorPath } : {}),
       handle,
     };
