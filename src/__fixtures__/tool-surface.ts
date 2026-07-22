@@ -191,6 +191,11 @@ function measure(
 
 export async function captureToolSurface(profileName: ToolSurfaceProfileName): Promise<ToolSurfaceSnapshot> {
   const profile = PROFILES[profileName];
+  // connect:false skips transport/startup work but intentionally runs the real
+  // registration bootstrap, which initializes process-local audit/accounting
+  // adapters and may create their configured directories. Measurements never
+  // invoke handlers and use deterministic fixture config; keep this helper in
+  // test/reporting processes rather than application runtime code.
   const bootstrap = await createMcpServer({
     configs: profile.setupMode ? [] : [CONFIGURED_CONNECTION],
     setupInfo: TOOL_SURFACE_SETUP_INFO,

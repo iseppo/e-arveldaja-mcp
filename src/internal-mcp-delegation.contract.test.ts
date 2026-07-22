@@ -30,10 +30,11 @@ async function productionTypeScriptFiles(directory = SOURCE_ROOT): Promise<strin
 function usesInternalMcpDelegation(relativePath: string, source: string): boolean {
   const ast = parse(source, { sourceType: "module", plugins: ["typescript"], allowReturnOutsideFunction: true });
   let detected = false;
-  const mapsWithStoredHandlers = new Set<string>();
+  const registriesWithStoredHandlers = new Set<string>();
   const retrievedHandlerBindings = new Map<string, string>();
   const invokedBindings = new Set<string>();
-  const directlyInvokedMaps = new Set<string>();
+  const directlyInvokedRegistries = new Set<string>();
+  const contentAliases = new Set<string>();
 
   type AstNode = { type: string; [key: string]: unknown };
   const isNode = (value: unknown): value is AstNode =>
@@ -79,22 +80,49 @@ function usesInternalMcpDelegation(relativePath: string, source: string): boolea
     if (!callee || !isMember(callee) || staticPropertyName(callee.property) !== method) return undefined;
     return expressionKey(callee.object);
   };
+  const accessedRegistry = (node: unknown): string | undefined => {
+    const expression = unwrapExpression(node);
+    return expression && isMember(expression) ? expressionKey(expression.object) : undefined;
+  };
+  const bindingNames = (node: unknown): string[] => {
+    const pattern = unwrapExpression(node);
+    if (!pattern) return [];
+    if (pattern.type === "Identifier") return [pattern.name as string];
+    if (pattern.type === "AssignmentPattern" || pattern.type === "RestElement") {
+      return bindingNames(pattern.left ?? pattern.argument);
+    }
+    if (pattern.type === "ObjectProperty") return bindingNames(pattern.value);
+    if (pattern.type === "ArrayPattern") {
+      return (Array.isArray(pattern.elements) ? pattern.elements : []).flatMap(bindingNames);
+    }
+    if (pattern.type === "ObjectPattern") {
+      return (Array.isArray(pattern.properties) ? pattern.properties : []).flatMap(bindingNames);
+    }
+    return [];
+  };
   const isContentAccess = (node: unknown): boolean =>
-    isMember(node) && identifierName(node.property) === "content";
+    isMember(node) && staticPropertyName(node.property) === "content";
   const isNumericZero = (node: unknown): boolean =>
-    isNode(node) && ((node.type === "NumericLiteral" && node.value === 0) || (node.type === "Literal" && node.value === 0));
+    isNode(node) && (
+      (node.type === "NumericLiteral" && node.value === 0)
+      || ((node.type === "StringLiteral" || node.type === "Literal") && (node.value === 0 || node.value === "0"))
+    );
   const readsFirstContentItem = (node: AstNode): boolean => {
     if (isMember(node) && node.computed === true) {
-      return isContentAccess(node.object) && isNumericZero(node.property);
+      const receiver = expressionKey(node.object);
+      return isNumericZero(node.property) && (isContentAccess(node.object) || (receiver !== undefined && contentAliases.has(receiver)));
     }
     if ((node.type === "CallExpression" || node.type === "OptionalCallExpression") && isMember(node.callee)) {
       const args = Array.isArray(node.arguments) ? node.arguments : [];
-      return identifierName(node.callee.property) === "at" && isContentAccess(node.callee.object) && isNumericZero(args[0]);
+      const receiver = expressionKey(node.callee.object);
+      return staticPropertyName(node.callee.property) === "at"
+        && isNumericZero(args[0])
+        && (isContentAccess(node.callee.object) || (receiver !== undefined && contentAliases.has(receiver)));
     }
     return node.type === "VariableDeclarator"
       && isNode(node.id)
       && node.id.type === "ArrayPattern"
-      && isContentAccess(node.init);
+      && (isContentAccess(node.init) || contentAliases.has(expressionKey(node.init) ?? ""));
   };
 
   const visit = (node: AstNode): void => {
@@ -121,12 +149,65 @@ function usesInternalMcpDelegation(relativePath: string, source: string): boolea
       return;
     }
     const storedMap = calledMethodReceiver(node, "set");
-    if (storedMap) mapsWithStoredHandlers.add(storedMap);
+    if (storedMap) registriesWithStoredHandlers.add(storedMap);
+    for (const method of ["push", "unshift"]) {
+      const storedArray = calledMethodReceiver(node, method);
+      if (storedArray) registriesWithStoredHandlers.add(storedArray);
+    }
+
+    if (node.type === "AssignmentExpression" && isMember(node.left)) {
+      const registry = expressionKey(node.left.object);
+      if (registry) registriesWithStoredHandlers.add(registry);
+    }
+    if (node.type === "AssignmentExpression") {
+      const alias = identifierName(node.left);
+      const source = expressionKey(node.right);
+      if (alias && (isContentAccess(node.right) || (source !== undefined && contentAliases.has(source)))) {
+        contentAliases.add(alias);
+      }
+    }
 
     if (node.type === "VariableDeclarator") {
       const binding = identifierName(node.id);
       const retrievedMap = calledMethodReceiver(node.init, "get");
       if (binding && retrievedMap) retrievedHandlerBindings.set(binding, retrievedMap);
+      const initializer = unwrapExpression(node.init);
+      if (
+        binding
+        && initializer
+        && (
+          (initializer.type === "ObjectExpression" && Array.isArray(initializer.properties) && initializer.properties.length > 0)
+          || (initializer.type === "ArrayExpression" && Array.isArray(initializer.elements) && initializer.elements.length > 0)
+        )
+      ) {
+        registriesWithStoredHandlers.add(binding);
+      }
+      const accessed = accessedRegistry(node.init);
+      if (accessed) {
+        for (const name of bindingNames(node.id)) retrievedHandlerBindings.set(name, accessed);
+      }
+      if (isNode(node.id) && (node.id.type === "ArrayPattern" || node.id.type === "ObjectPattern")) {
+        const sourceRegistry = expressionKey(node.init);
+        if (sourceRegistry) {
+          for (const name of bindingNames(node.id)) retrievedHandlerBindings.set(name, sourceRegistry);
+        }
+      }
+      const initializerKey = expressionKey(node.init);
+      if (binding && (isContentAccess(node.init) || (initializerKey !== undefined && contentAliases.has(initializerKey)))) {
+        contentAliases.add(binding);
+      }
+      if (isNode(node.id) && node.id.type === "ObjectPattern") {
+        const properties = Array.isArray(node.id.properties) ? node.id.properties : [];
+        for (const property of properties) {
+          if (isNode(property) && property.type === "ObjectProperty" && staticPropertyName(property.key) === "content") {
+            if (isNode(property.value) && property.value.type === "ArrayPattern") {
+              detected = true;
+              return;
+            }
+            for (const name of bindingNames(property.value)) contentAliases.add(name);
+          }
+        }
+      }
     }
 
     if (isCall(node)) {
@@ -140,11 +221,17 @@ function usesInternalMcpDelegation(relativePath: string, source: string): boolea
       ) {
         binding = identifierName(unwrapExpression(callee.object));
         const directlyInvokedMap = calledMethodReceiver(callee.object, "get");
-        if (directlyInvokedMap) directlyInvokedMaps.add(directlyInvokedMap);
+        if (directlyInvokedMap) directlyInvokedRegistries.add(directlyInvokedMap);
+        const directlyInvokedRegistry = accessedRegistry(callee.object);
+        if (directlyInvokedRegistry) directlyInvokedRegistries.add(directlyInvokedRegistry);
       }
       if (binding) invokedBindings.add(binding);
       const directlyInvokedMap = calledMethodReceiver(callee, "get");
-      if (directlyInvokedMap) directlyInvokedMaps.add(directlyInvokedMap);
+      if (directlyInvokedMap) directlyInvokedRegistries.add(directlyInvokedMap);
+      if (callee && isMember(callee) && callee.computed === true) {
+        const directlyInvokedRegistry = expressionKey(callee.object);
+        if (directlyInvokedRegistry) directlyInvokedRegistries.add(directlyInvokedRegistry);
+      }
     }
     for (const value of Object.values(node)) {
       if (isNode(value)) visit(value);
@@ -155,11 +242,11 @@ function usesInternalMcpDelegation(relativePath: string, source: string): boolea
   };
   visit(ast.program as unknown as AstNode);
   if (detected) return true;
-  for (const [binding, map] of retrievedHandlerBindings) {
-    if (invokedBindings.has(binding) && mapsWithStoredHandlers.has(map)) return true;
+  for (const [binding, registry] of retrievedHandlerBindings) {
+    if (invokedBindings.has(binding) && registriesWithStoredHandlers.has(registry)) return true;
   }
-  for (const map of directlyInvokedMaps) {
-    if (mapsWithStoredHandlers.has(map)) return true;
+  for (const registry of directlyInvokedRegistries) {
+    if (registriesWithStoredHandlers.has(registry)) return true;
   }
   return false;
 }
@@ -235,6 +322,62 @@ describe("internal MCP delegation architecture contract", () => {
     ];
     for (const source of variants) {
       expect(usesInternalMcpDelegation("src/tools/new-consumer.ts", source), source).toBe(true);
+    }
+  });
+
+  it("detects callable handlers retained in object and array registries", () => {
+    const variants = [
+      `
+        const handlers = Object.create(null);
+        handlers[name] = callback;
+        const delegated = handlers[requestedTool];
+        return delegated(args);
+      `,
+      `
+        const handlers = [];
+        handlers.push(callback);
+        const delegated = handlers[index];
+        return delegated.apply(undefined, [args]);
+      `,
+      `
+        const handlers = { parse: parseHandler };
+        return handlers[requestedTool](args);
+      `,
+      `
+        const handlers = [firstHandler, secondHandler];
+        const [delegated] = handlers;
+        return delegated(args);
+      `,
+    ];
+    for (const source of variants) {
+      expect(usesInternalMcpDelegation("src/tools/new-consumer.ts", source), source).toBe(true);
+    }
+  });
+
+  it("detects destructured, aliased, and computed reads of serialized handler content", () => {
+    const variants = [
+      `const result = await delegated(args); const blocks = result.content; const first = blocks[0]; return first.text;`,
+      `const result = await delegated(args); const { content: blocks } = result; return blocks.at(0)?.text;`,
+      `const result = await delegated(args); const { content } = result; const [first] = content; return first.text;`,
+      `const result = await delegated(args); return result["content"][0]["text"];`,
+      `const result = await delegated(args); const blocks = result.content; const alias = blocks; return alias["0"]["text"];`,
+      `const result = await delegated(args); let blocks; blocks = result["content"]; return blocks.at(0)?.text;`,
+      `const { content: [first] } = await delegated(args); return first.text;`,
+    ];
+    for (const source of variants) {
+      expect(usesInternalMcpDelegation("src/tools/new-consumer.ts", source), source).toBe(true);
+    }
+  });
+
+  it("does not classify ordinary data containers or non-invoked callback storage as delegation", () => {
+    const controls = [
+      `const records = []; records.push({ text: "row" }); const first = records[0]; return first.text;`,
+      `const article = { content: ["intro"] }; const { content: sections } = article; return sections.map(render);`,
+      `const registry = { current: "daily" }; const chosen = registry[current]; return format(chosen);`,
+      `const handlers = {}; handlers[name] = callback; return Object.keys(handlers);`,
+    ];
+    for (const source of controls) {
+      expect(usesInternalMcpDelegation("src/tools/data-only.ts", source), source).toBe(false);
     }
   });
 });

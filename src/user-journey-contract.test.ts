@@ -1,11 +1,13 @@
 import { Buffer } from "node:buffer";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { describe, expect, it } from "vitest";
 import { buildResponseFixtures, type ResponseFixtureName } from "../scripts/measure-response-fixtures.js";
-import { TOOL_SURFACE_SETUP_INFO } from "./__fixtures__/tool-surface.js";
+import { captureToolSurface, TOOL_SURFACE_SETUP_INFO } from "./__fixtures__/tool-surface.js";
 import { toMcpJson } from "./mcp-json.js";
 import { buildSetupInstructionsPayload } from "./server-bootstrap.js";
 
 type Approval = "obtained" | "not-required";
+const PLAN_HANDLE = "h".repeat(43);
 
 interface JourneyStep {
   tool: string;
@@ -125,7 +127,7 @@ const JOURNEYS: JourneyDefinition[] = [
     steps: [
       read("get_setup_instructions", {}),
       read("import_apikey_credentials", { file_path: "<ABSOLUTE_PATH>", storage_scope: "local", execute: false }),
-      approvedMutation("import_apikey_credentials", { file_path: "<ABSOLUTE_PATH>", storage_scope: "local", execute: true, plan_handle: "<HANDLE>" }),
+      approvedMutation("import_apikey_credentials", { file_path: "<ABSOLUTE_PATH>", storage_scope: "local", execute: true, plan_handle: PLAN_HANDLE }),
     ],
   },
   {
@@ -133,7 +135,13 @@ const JOURNEYS: JourneyDefinition[] = [
     steps: [
       read("get_vat_info", {}),
       read("extract_pdf_invoice", { file_path: "<ABSOLUTE_PATH>" }),
-      read("validate_invoice_data", { total_net: 100, total_vat: 24, total_gross: 124, invoice_date: "2026-06-15" }),
+      read("validate_invoice_data", {
+        total_net: 100,
+        total_vat: 24,
+        total_gross: 124,
+        invoice_date: "2026-06-15",
+        items: [{ total_net_price: 100, vat_rate_dropdown: 24 }],
+      }),
       read("resolve_supplier", { name: "Fixture Supplier OÜ", reg_code: "12345678", auto_create: false }),
       read("detect_duplicate_purchase_invoice", { invoice_number: "INV-2026-001", gross_price: 124, clients_id: 42 }),
       read("suggest_booking", { clients_id: 42, description: "Consulting service" }, { ambiguityQuestions: 1 }),
@@ -161,8 +169,8 @@ const JOURNEYS: JourneyDefinition[] = [
         technicalIdPrompts: 1,
         ambiguityQuestions: 1,
       }),
-      read("get_execution_plan_page", { plan_handle: "<HANDLE>" }, { responseFixture: "plan-page-first" }),
-      approvedMutation("process_camt053", { mode: "execute", file_path: "<ABSOLUTE_PATH>", accounts_dimensions_id: 101, plan_handle: "<HANDLE>" }, "generic-batch-100"),
+      read("get_execution_plan_page", { plan_handle: PLAN_HANDLE }, { responseFixture: "plan-page-first" }),
+      approvedMutation("process_camt053", { mode: "execute", file_path: "<ABSOLUTE_PATH>", accounts_dimensions_id: 101, plan_handle: PLAN_HANDLE }, "generic-batch-100"),
     ],
   },
   {
@@ -173,13 +181,13 @@ const JOURNEYS: JourneyDefinition[] = [
         technicalIdPrompts: 2,
         ambiguityQuestions: 1,
       }),
-      read("get_execution_plan_page", { plan_handle: "<HANDLE>" }, { responseFixture: "plan-page-first" }),
+      read("get_execution_plan_page", { plan_handle: PLAN_HANDLE }, { responseFixture: "plan-page-first" }),
       approvedMutation("import_wise_transactions", {
         file_path: "<ABSOLUTE_PATH>",
         accounts_dimensions_id: 202,
         fee_account_dimensions_id: 303,
         execute: true,
-        plan_handle: "<HANDLE>",
+        plan_handle: PLAN_HANDLE,
         approved_command_digest: "0".repeat(64),
       }, "generic-batch-100"),
     ],
@@ -197,7 +205,7 @@ const JOURNEYS: JourneyDefinition[] = [
         mode: "create_and_confirm",
         folder_path: "<ABSOLUTE_PATH>",
         accounts_dimensions_id: 101,
-        approved_manifest: [{ file_path: "<ABSOLUTE_PATH>/receipt-0001.pdf", sha256: "0".repeat(64) }],
+        approved_manifest: [{ relative_path: "receipt-0001.pdf", sha256: "0".repeat(64) }],
       }, "generic-batch-100"),
     ],
   },
@@ -206,8 +214,8 @@ const JOURNEYS: JourneyDefinition[] = [
     steps: [
       read("reconcile_bank_transactions", { mode: "suggest" }, { ambiguityQuestions: 1 }),
       read("reconcile_bank_transactions", { mode: "dry_run_auto_confirm", min_confidence: 100 }, { responseFixture: "generic-batch-30" }),
-      read("get_execution_plan_page", { plan_handle: "<HANDLE>" }, { responseFixture: "plan-page-first" }),
-      approvedMutation("reconcile_bank_transactions", { mode: "execute_auto_confirm", plan_handle: "<HANDLE>" }, "generic-batch-30"),
+      read("get_execution_plan_page", { plan_handle: PLAN_HANDLE }, { responseFixture: "plan-page-first" }),
+      approvedMutation("reconcile_bank_transactions", { mode: "execute_auto_confirm", plan_handle: PLAN_HANDLE }, "generic-batch-30"),
     ],
   },
   {
@@ -257,7 +265,7 @@ describe("user-journey accounting contract", () => {
       {
         name: "setup",
         callCount: 3,
-        requestBytes: 312,
+        requestBytes: 347,
         responseBytes: 2_007,
         technicalIdPrompts: 0,
         ambiguityQuestions: 0,
@@ -267,7 +275,7 @@ describe("user-journey accounting contract", () => {
       {
         name: "purchase-invoice",
         callCount: 9,
-        requestBytes: 1_128,
+        requestBytes: 1_185,
         responseBytes: 1_051,
         technicalIdPrompts: 1,
         ambiguityQuestions: 1,
@@ -277,7 +285,7 @@ describe("user-journey accounting contract", () => {
       {
         name: "camt",
         callCount: 3,
-        requestBytes: 330,
+        requestBytes: 400,
         responseBytes: 23_596,
         technicalIdPrompts: 1,
         ambiguityQuestions: 1,
@@ -287,7 +295,7 @@ describe("user-journey accounting contract", () => {
       {
         name: "wise",
         callCount: 3,
-        requestBytes: 486,
+        requestBytes: 556,
         responseBytes: 17_524,
         technicalIdPrompts: 2,
         ambiguityQuestions: 1,
@@ -297,7 +305,7 @@ describe("user-journey accounting contract", () => {
       {
         name: "receipt-batch",
         callCount: 3,
-        requestBytes: 474,
+        requestBytes: 462,
         responseBytes: 20_817,
         technicalIdPrompts: 1,
         ambiguityQuestions: 1,
@@ -307,7 +315,7 @@ describe("user-journey accounting contract", () => {
       {
         name: "reconciliation",
         callCount: 4,
-        requestBytes: 352,
+        requestBytes: 422,
         responseBytes: 8_759,
         technicalIdPrompts: 0,
         ambiguityQuestions: 1,
@@ -345,7 +353,7 @@ describe("user-journey accounting contract", () => {
     });
     expect(setup.steps[2]).toMatchObject({
       tool: "import_apikey_credentials",
-      request: { execute: true, plan_handle: "<HANDLE>" },
+      request: { execute: true, plan_handle: PLAN_HANDLE },
       mutation: true,
       approval: "obtained",
     });
@@ -358,6 +366,21 @@ describe("user-journey accounting contract", () => {
           step.responseFixture !== undefined || step.response !== undefined,
           `${journey.name}:${step.tool}`,
         ).toBe(true);
+      }
+    }
+  });
+
+  it("validates every journey request against its captured production input schema", async () => {
+    const surface = await captureToolSurface("full");
+    const schemas = new Map(surface.tools.map((tool) => [tool.name, tool.inputSchema]));
+    const validatorProvider = new AjvJsonSchemaValidator();
+
+    for (const journey of JOURNEYS) {
+      for (const step of journey.steps) {
+        const schema = schemas.get(step.tool);
+        expect(schema, `${journey.name}:${step.tool} is absent from the full production surface`).toBeDefined();
+        const result = validatorProvider.getValidator(schema as never)(step.request);
+        expect(result.valid, `${journey.name}:${step.tool}: ${result.errorMessage}`).toBe(true);
       }
     }
   });
