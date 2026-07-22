@@ -1857,8 +1857,8 @@ describe("M23 connection-scoped accounting-rule storage", () => {
     }
   });
 
-  it("M23 index initializes accounting rules from the live connection state", () => {
-    const source = readFileSync(join(process.cwd(), "src", "index.ts"), "utf8");
+  it("M23 server bootstrap initializes accounting rules from the live connection state", () => {
+    const source = readFileSync(join(process.cwd(), "src", "server-bootstrap.ts"), "utf8");
     expect(source).toContain('initAccountingRulesConnection');
     const call = source.match(/initAccountingRulesConnection\(\(\) => \(\{[\s\S]*?\}\)\);/)?.[0] ?? "";
     expect(call).toContain('allConfigs[connectionState.activeIndex]?.name ?? "setup"');

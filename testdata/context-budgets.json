@@ -1,0 +1,131 @@
+{
+  "schema": "context-budget-baseline-v1",
+  "fixtures": [
+    {
+      "name": "camt-10",
+      "category": "camt",
+      "itemCount": 10,
+      "encoding": "toon",
+      "encodedBytes": 1478,
+      "jsonBytes": 2696,
+      "sha256": "f4ca71753800a20ecc8bd4057ea634d81e97df427fd959cc7edc768845107ecb"
+    },
+    {
+      "name": "camt-100",
+      "category": "camt",
+      "itemCount": 100,
+      "encoding": "toon",
+      "encodedBytes": 12622,
+      "jsonBytes": 25629,
+      "sha256": "a652fb3cac0da7e7c3ae0a6819aebd755cf7a75e01bbb03ec2ef1886cc22d3d1"
+    },
+    {
+      "name": "camt-1000",
+      "category": "camt",
+      "itemCount": 1000,
+      "encoding": "toon",
+      "encodedBytes": 126589,
+      "jsonBytes": 257495,
+      "sha256": "e1d31fba5c0d006c7d4ed3859dbe9fbbf3da0585e4844f61d09b85cc51bff978"
+    },
+    {
+      "name": "receipts-10",
+      "category": "receipts",
+      "itemCount": 10,
+      "encoding": "toon",
+      "encodedBytes": 923,
+      "jsonBytes": 1671,
+      "sha256": "939d8b9d2e29f4b6e33713721159d6c59374ccbf1553cb4725723deed1a45803"
+    },
+    {
+      "name": "receipts-100",
+      "category": "receipts",
+      "itemCount": 100,
+      "encoding": "toon",
+      "encodedBytes": 7717,
+      "jsonBytes": 15664,
+      "sha256": "37a1ef914a198fc980e393ac7cbee974504b02e37502d5cf81604552059d704f"
+    },
+    {
+      "name": "classifications-10",
+      "category": "classification",
+      "itemCount": 10,
+      "encoding": "toon",
+      "encodedBytes": 2846,
+      "jsonBytes": 2602,
+      "sha256": "c19aa56c3dbdc9fc80509c0c8c49060879070c33db346096db196566681d37df"
+    },
+    {
+      "name": "classifications-100",
+      "category": "classification",
+      "itemCount": 100,
+      "encoding": "toon",
+      "encodedBytes": 27983,
+      "jsonBytes": 25510,
+      "sha256": "8d90df33936e306e686d6747b447892142385ff2861f7484547f00c8862d5710"
+    },
+    {
+      "name": "accounting-inbox-1",
+      "category": "accounting-inbox",
+      "itemCount": 1,
+      "encoding": "toon",
+      "encodedBytes": 444,
+      "jsonBytes": 435,
+      "sha256": "a66a5fe4c7b1e411696cfa854291599f66968cdacb10ab647e46194e57be6840"
+    },
+    {
+      "name": "accounting-inbox-20",
+      "category": "accounting-inbox",
+      "itemCount": 20,
+      "encoding": "toon",
+      "encodedBytes": 6394,
+      "jsonBytes": 6061,
+      "sha256": "cdae7d73412d26a78b16f74d953c97fe065dc5014dbf1b0d0122244e637b31ea"
+    },
+    {
+      "name": "accounting-inbox-100",
+      "category": "accounting-inbox",
+      "itemCount": 100,
+      "encoding": "toon",
+      "encodedBytes": 31563,
+      "jsonBytes": 29869,
+      "sha256": "71be3ddd74618e30b925b41f6828135dc9562a4b37b1a9c99dab80df077ed3d0"
+    },
+    {
+      "name": "plan-page-first",
+      "category": "plan-page",
+      "itemCount": 50,
+      "encoding": "toon",
+      "encodedBytes": 4424,
+      "jsonBytes": 6382,
+      "sha256": "74ad6ee921504415bf12310247fa3f8b55287a1ae67d19c3deb9acd5de397ce0"
+    },
+    {
+      "name": "plan-page-second",
+      "category": "plan-page",
+      "itemCount": 50,
+      "encoding": "toon",
+      "encodedBytes": 4436,
+      "jsonBytes": 6394,
+      "sha256": "1d66878ee85acc91aed511fe8cad4e3bcc96eee849fccdfbd866ba5cc732dee7"
+    },
+    {
+      "name": "generic-batch-30",
+      "category": "generic-batch",
+      "itemCount": 30,
+      "encoding": "toon",
+      "encodedBytes": 2090,
+      "jsonBytes": 5363,
+      "sha256": "8ae08a2faf8eb3c82f073f5ee8fed912ea58d9358511d8957f01a901c486c7f6"
+    },
+    {
+      "name": "generic-batch-100",
+      "category": "generic-batch",
+      "itemCount": 100,
+      "encoding": "toon",
+      "encodedBytes": 6550,
+      "jsonBytes": 17662,
+      "sha256": "edcf2069aac9350626db7304d4d797e742d5e6535f270d48d8caa499c9bace79"
+    }
+  ]
+}

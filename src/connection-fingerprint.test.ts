@@ -39,8 +39,8 @@ describe("H06-A connection fingerprint", () => {
     expect(resource.connectionFingerprint).toBe(buildConnectionFingerprint(config));
   });
 
-  it("H06-A makes index audit initialization reuse the shared helper", () => {
-    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  it("H06-A makes server bootstrap audit initialization reuse the shared helper", () => {
+    const source = readFileSync(new URL("./server-bootstrap.ts", import.meta.url), "utf8");
     expect(source).toContain("buildConnectionFingerprint(config.config)");
     expect(source).not.toMatch(/function buildConnectionFingerprint\s*\(/);
   });

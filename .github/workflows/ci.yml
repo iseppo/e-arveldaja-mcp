@@ -29,6 +29,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Report MCP surface sizes and deltas
+        run: npm run measure:surface
+
+      - name: Report response fixture sizes and deltas
+        run: npm run measure:responses
+
       - name: Unit tests
         run: npm test
 
