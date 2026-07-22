@@ -725,7 +725,8 @@ function pickNextRecommendedAction(steps: RecommendedStep[]): RecommendedStep | 
 // real internal delegate (like the envelope's informational `delegated_tool`).
 interface BlockedRecommendedAction {
   blocker: Record<string, unknown>;
-  proposal: Record<string, unknown>;
+  proposals: Array<Record<string, unknown>>;
+  safeActionContext: Array<Record<string, unknown>>;
   next_actions: Array<Record<string, unknown>>;
 }
 
@@ -736,6 +737,8 @@ function projectPublicRecommendedSteps(
 ): { steps: RecommendedStep[]; blocked?: BlockedRecommendedAction } {
   const steps: RecommendedStep[] = [];
   let blocked: BlockedRecommendedAction | undefined;
+  const blockedProposals: Array<Record<string, unknown>> = [];
+  const safeActionContext: Array<Record<string, unknown>> = [];
   for (const rawStep of rawSteps) {
     const legacyRemap = exposure.exposeGranularTools
       ? undefined
@@ -745,23 +748,33 @@ function projectPublicRecommendedSteps(
       : rawStep;
     const publicStep = publicRecommendedStep(normalizedStep, runtimeSafetyContext);
     const projected = projectActionForCurrentProfile({
+      kind: "tool_call",
+      label: publicStep.purpose,
+      why: publicStep.reason,
       tool: publicStep.tool,
       args: publicStep.suggested_args,
       approval_required: false,
+      step: publicStep.step,
+      recommended: publicStep.recommended,
+      missing_inputs: publicStep.missing_inputs,
     });
     if (isRecord(projected) && projected.status === "needs_review") {
+      const proposal = {
+        ...(projected.proposal as Record<string, unknown>),
+        step: publicStep.step,
+        label: publicStep.purpose,
+        why: publicStep.reason,
+      };
+      blockedProposals.push(proposal);
       blocked ??= {
         blocker: projected.blocker as Record<string, unknown>,
-        proposal: {
-          ...(projected.proposal as Record<string, unknown>),
-          step: publicStep.step,
-          purpose: publicStep.purpose,
-          reason: publicStep.reason,
-        },
+        proposals: blockedProposals,
+        safeActionContext,
         next_actions: projected.next_actions as Array<Record<string, unknown>>,
       };
       continue;
     }
+    safeActionContext.push(projected as Record<string, unknown>);
     steps.push({
       ...publicStep,
       tool: typeof projected.tool === "string" ? projected.tool : publicStep.tool,
@@ -1046,7 +1059,9 @@ function buildPreparedInboxPayload(
       ? {
           status: "needs_review",
           blocker: projected.blocked.blocker,
-          accounting_proposal: projected.blocked.proposal,
+          accounting_proposal: projected.blocked.proposals[0],
+          accounting_proposals: projected.blocked.proposals,
+          safe_action_context: projected.blocked.safeActionContext,
           suggested_tools: ["get_setup_instructions"],
           next_actions: projected.blocked.next_actions,
         }
@@ -1727,7 +1742,9 @@ async function buildAccountingInboxDryRunResponse(
     if (nextProjection.blocked) {
       preparedPayload.status = "needs_review";
       preparedPayload.blocker = nextProjection.blocked.blocker;
-      preparedPayload.accounting_proposal = nextProjection.blocked.proposal;
+      preparedPayload.accounting_proposal = nextProjection.blocked.proposals[0];
+      preparedPayload.accounting_proposals = nextProjection.blocked.proposals;
+      preparedPayload.safe_action_context = nextProjection.blocked.safeActionContext;
       preparedPayload.suggested_tools = ["get_setup_instructions"];
       preparedPayload.next_actions = nextProjection.blocked.next_actions;
       preparedPayload.recommended_steps = nextProjection.steps;
@@ -1743,6 +1760,8 @@ async function buildAccountingInboxDryRunResponse(
           status: "needs_review",
           blocker: preparedPayload.blocker,
           accounting_proposal: preparedPayload.accounting_proposal,
+          accounting_proposals: preparedPayload.accounting_proposals,
+          safe_action_context: preparedPayload.safe_action_context,
           suggested_tools: ["get_setup_instructions"],
           next_actions: preparedPayload.next_actions,
         }
@@ -1800,21 +1819,33 @@ function buildReviewResolutionResponse(
   };
 
   const projectedTools = (publicResolution.suggested_tools ?? []).map((tool) =>
-    projectActionForCurrentProfile({ tool, args: {}, approval_required: true })
+    projectActionForCurrentProfile({
+      kind: "tool_call",
+      label: `Use ${tool}`,
+      why: publicResolution.next_step_summary,
+      tool,
+      args: {},
+      approval_required: true,
+    })
   );
-  const blocked = projectedTools.find((projected) => isRecord(projected) && projected.status === "needs_review");
-  if (isRecord(blocked) && blocked.status === "needs_review") {
+  const blockedTools = projectedTools.filter((projected) => isRecord(projected) && projected.status === "needs_review");
+  if (blockedTools.length > 0) {
+    const accountingProposals = blockedTools.map((blocked) => (blocked as Record<string, unknown>).proposal);
+    const safeActionContext = projectedTools.filter((projected) => !(isRecord(projected) && projected.status === "needs_review"));
+    const firstBlocked = blockedTools[0] as Record<string, unknown>;
     return {
       content: [{
         type: "text",
         text: toMcpJson({
           ...publicResolution,
           status: "needs_review",
-          blocker: blocked.blocker,
-          accounting_proposal: blocked.proposal,
+          blocker: firstBlocked.blocker,
+          accounting_proposal: accountingProposals[0],
+          accounting_proposals: accountingProposals,
+          safe_action_context: safeActionContext,
           suggested_tools: ["get_setup_instructions"],
-          next_actions: blocked.next_actions,
-          next_step_summary: (blocked.blocker as Record<string, unknown>).message,
+          next_actions: firstBlocked.next_actions,
+          next_step_summary: (firstBlocked.blocker as Record<string, unknown>).message,
           assistant_guidance: reviewResolutionAssistantGuidance,
         }),
       }],
@@ -1867,6 +1898,10 @@ function buildReviewActionResponse(
 
   const projectedAction = publicPrepared.proposed_action
     ? projectActionForCurrentProfile({
+        ...publicPrepared.proposed_action,
+        kind: "tool_call",
+        label: `Use ${publicPrepared.proposed_action.tool}`,
+        why: publicPrepared.next_step_summary,
         tool: publicPrepared.proposed_action.tool,
         args: isRecord(publicPrepared.proposed_action.args) ? publicPrepared.proposed_action.args : {},
         approval_required: publicPrepared.proposed_action.approval_required,

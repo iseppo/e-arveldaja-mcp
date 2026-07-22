@@ -112,8 +112,29 @@ export function remapHiddenGranularWorkflowEnvelope(workflow: unknown): unknown 
     next.approval_previews = arrayAt(workflow, "approval_previews").map(remapHiddenGranularApprovalPreview);
   }
   const actions = [next.recommended_next_action, ...arrayAt(next, "available_actions")].filter(isRecord);
-  const blocked = actions.find((action) => isRecord(action.blocker) && action.status === "needs_review");
-  if (blocked) {
+  const uniqueByValue = (records: Record<string, unknown>[]): Record<string, unknown>[] => {
+    const seen = new Set<string>();
+    return records.filter((record) => {
+      let key: string;
+      try {
+        key = JSON.stringify(record);
+      } catch {
+        return true;
+      }
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const blockedActions = actions.filter((action) => isRecord(action.blocker) && action.status === "needs_review");
+  if (blockedActions.length > 0) {
+    const blockedProposals = uniqueByValue(blockedActions.map((action) => recordAt(action, "proposal") ?? {}));
+    const safeActionContext = uniqueByValue(actions.filter((action) => !(isRecord(action.blocker) && action.status === "needs_review")));
+    const actionProposals = uniqueByValue(actions.map((action) =>
+      isRecord(action.blocker) && action.status === "needs_review"
+        ? (recordAt(action, "proposal") ?? {})
+        : action
+    ));
     const setupAction: WorkflowAction = {
       kind: "tool_call",
       label: "Show setup and profile instructions",
@@ -123,9 +144,12 @@ export function remapHiddenGranularWorkflowEnvelope(workflow: unknown): unknown 
       args: {},
     };
     next.status = "needs_review";
-    next.blocker = blocked.blocker;
-    next.proposal = blocked.proposal;
-    next.needs_review = [...arrayAt(next, "needs_review"), blocked.proposal];
+    next.blocker = blockedActions[0]!.blocker;
+    next.proposal = blockedProposals[0];
+    next.blocked_proposals = blockedProposals;
+    next.safe_action_context = safeActionContext;
+    next.action_proposals = actionProposals;
+    next.needs_review = [...arrayAt(next, "needs_review"), ...blockedProposals];
     next.recommended_next_action = setupAction;
     next.available_actions = [setupAction];
     next.approval_previews = [];

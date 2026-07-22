@@ -188,6 +188,37 @@ describe("import_apikey_credentials execute", () => {
     expect(existsSync(envFile)).toBe(false);
   });
 
+  it("rejects changed verified company identity between preview and execute without writing", async () => {
+    const verify = vi.fn()
+      .mockResolvedValueOnce({ companyName: "Preview Company OÜ", verifiedAt: "2026-01-01T00:00:00.000Z" })
+      .mockResolvedValueOnce({ companyName: "Different Company OÜ", verifiedAt: "2026-01-02T00:00:00.000Z" });
+    const { server } = registerImportServer(buildDeps({ verify }));
+    const handler = getRegisteredToolHandler(server, "import_apikey_credentials");
+    const preview = parse(await handler(IMPORT_ARGS()));
+    const result = await handler({ ...IMPORT_ARGS(), execute: true, plan_handle: preview.plan_handle });
+
+    expect(result.isError).toBe(true);
+    expect(parse(result).category).toBe("plan_drift");
+    expect(existsSync(envFile)).toBe(false);
+  });
+
+  it("rejects changed verified company identity for a profile-only update without changing the env", async () => {
+    await importApiKeyCredentials({ ...importOptions(), profile: "standard" });
+    const before = readFileSync(envFile, "utf8");
+    const verify = vi.fn()
+      .mockResolvedValueOnce({ companyName: "Acme OÜ", verifiedAt: "2026-01-01T00:00:00.000Z" })
+      .mockResolvedValueOnce({ companyName: "Other Ledger OÜ", verifiedAt: "2026-01-02T00:00:00.000Z" });
+    const { server } = registerImportServer(buildDeps({ verify }));
+    const handler = getRegisteredToolHandler(server, "import_apikey_credentials");
+    const preview = parse(await handler({ ...IMPORT_ARGS(), profile: "guided" }));
+    expect(preview.action).toBe("profile_updated");
+    const result = await handler({ ...IMPORT_ARGS(), profile: "guided", execute: true, plan_handle: preview.plan_handle });
+
+    expect(result.isError).toBe(true);
+    expect(parse(result).category).toBe("plan_drift");
+    expect(readFileSync(envFile, "utf8")).toBe(before);
+  });
+
   it("issues a reviewed profile-only update when the credential is already stored", async () => {
     await importApiKeyCredentials(importOptions());
     const { server } = registerImportServer();

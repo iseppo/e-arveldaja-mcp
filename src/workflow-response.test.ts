@@ -459,4 +459,37 @@ describe("hidden-granular → merged entry-point remap", () => {
     expect(remapHiddenGranularWorkflowEnvelope(undefined)).toBeUndefined();
     expect(remapHiddenGranularWorkflowEnvelope("not an envelope")).toBe("not an envelope");
   });
+
+  it("guided fail-closed output preserves ordered multiple blocked proposals and safe action context", () => {
+    const safe = {
+      kind: "tool_call", label: "Open the inbox", why: "Continue the safe review.",
+      approval_required: false, tool: "accounting_inbox", args: { mode: "scan" }, source: "safe",
+    };
+    const firstBlocked = {
+      kind: "tool_call", label: "Create journal", why: "Post the adjustment.",
+      approval_required: true, tool: "create_journal", args: { amount: 12 }, source: "first",
+    };
+    const secondBlocked = {
+      kind: "tool_call", label: "Delete transaction", why: "Remove the duplicate.",
+      approval_required: true, tool: "delete_transaction", args: { id: 9 }, source: "second",
+    };
+    const remapped = runWithToolProfile("guided", () => remapHiddenGranularWorkflowEnvelope({
+      recommended_next_action: safe,
+      available_actions: [safe, firstBlocked, secondBlocked],
+      approval_previews: [{ execute_tool: "create_journal", execute_args: { amount: 12 } }],
+      needs_review: [],
+    })) as Record<string, any>;
+
+    expect(remapped.status).toBe("needs_review");
+    expect(remapped.blocker.code).toBe("advanced_action_unavailable_in_profile");
+    expect(remapped.blocked_proposals).toEqual([firstBlocked, secondBlocked]);
+    expect(remapped.proposal).toEqual(firstBlocked);
+    expect(remapped.safe_action_context).toEqual([safe]);
+    expect(remapped.action_proposals).toEqual([safe, firstBlocked, secondBlocked]);
+    expect(remapped.needs_review).toEqual([firstBlocked, secondBlocked]);
+    expect(remapped.recommended_next_action.tool).toBe("get_setup_instructions");
+    expect(remapped.recommended_next_action.approval_required).toBe(false);
+    expect(remapped.available_actions).toEqual([remapped.recommended_next_action]);
+    expect(remapped.approval_previews).toEqual([]);
+  });
 });

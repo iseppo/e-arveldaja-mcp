@@ -61,8 +61,23 @@ describe("tool profiles", () => {
       expect(projected.status).toBe("needs_review");
       expect(projected.blocker.code).toBe("advanced_action_unavailable_in_profile");
       expect(projected.next_actions).toEqual([{ tool: "get_setup_instructions", args: {}, approval_required: false }]);
-      expect(projected.proposal).toEqual({ tool, args: { amount: 12 } });
+      expect(projected.proposal).toEqual({ tool, args: { amount: 12 }, approval_required: true });
     }
+  });
+
+  it("preserves complete action metadata in a blocked proposal", () => {
+    const action = {
+      kind: "tool_call",
+      label: "Create the reviewed journal",
+      why: "The receipt needs a manual adjustment.",
+      approval_required: true,
+      tool: "create_journal",
+      args: { amount: 12 },
+      source: "accounting_inbox",
+    };
+    const projected = projectActionForProfile(action, "guided");
+    expect(projected.proposal).toEqual(action);
+    expect(projected.next_actions).toEqual([{ tool: "get_setup_instructions", args: {}, approval_required: false }]);
   });
 
   it("keeps standard/full actions and remaps safe guided granular aliases", () => {

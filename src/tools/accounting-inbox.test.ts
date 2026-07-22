@@ -3040,7 +3040,7 @@ ${entryXml}
         return {
           status: "needs_review",
           blocker: { code: "advanced_action_unavailable_in_profile", message: "Unavailable future action." },
-          proposal: { tool: "future_unknown_tool", args: action.args, approval_required: false },
+          proposal: { ...action, tool: "future_unknown_tool", args: action.args },
           next_actions: [{ tool: "get_setup_instructions", args: {}, approval_required: false }],
         };
       }
@@ -3059,6 +3059,20 @@ ${entryXml}
       expect(payload.status ?? prepared.status).toBe("needs_review");
       expect((payload.blocker ?? prepared.blocker).code).toBe("advanced_action_unavailable_in_profile");
       expect((payload.accounting_proposal ?? prepared.accounting_proposal).tool).toBe("future_unknown_tool");
+      const proposals = payload.accounting_proposals ?? prepared.accounting_proposals;
+      expect(proposals).toHaveLength(2);
+      expect(proposals.map((proposal: any) => proposal.step)).toEqual([1, 2]);
+      expect(proposals.every((proposal: any) =>
+        proposal.kind === "tool_call" &&
+        typeof proposal.label === "string" &&
+        typeof proposal.why === "string" &&
+        proposal.approval_required === false &&
+        proposal.tool === "future_unknown_tool"
+      )).toBe(true);
+      expect(proposals.every((proposal: any) => proposal.label.startsWith("<<UNTRUSTED_OCR_START:"))).toBe(true);
+      expect(proposals.every((proposal: any) => proposal.why.startsWith("<<UNTRUSTED_OCR_START:"))).toBe(true);
+      const safeContext = payload.safe_action_context ?? prepared.safe_action_context;
+      expect(safeContext.map((action: any) => action.tool)).toContain("classify_bank_transactions");
       expect(prepared.recommended_steps.map((step: any) => step.tool)).toEqual(["get_setup_instructions"]);
       expect(prepared.next_recommended_action.tool).toBe("get_setup_instructions");
     } finally {

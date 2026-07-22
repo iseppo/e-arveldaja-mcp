@@ -78,7 +78,9 @@ export function projectActionForProfile(action: Action, profile: ToolProfile): a
       code: "advanced_action_unavailable_in_profile",
       message: "This accounting action is unavailable in the selected guided profile. Switch to standard or full and run a fresh preview; a prior proposal or handle is not approval.",
     },
-    proposal: { tool: action.tool, args },
+    // Preserve the complete already-sanitized caller-facing action as a
+    // non-executable proposal. The only executable next action remains setup.
+    proposal: { ...action, args },
     next_actions: [{ tool: "get_setup_instructions", args: {}, approval_required: false }],
   };
 }

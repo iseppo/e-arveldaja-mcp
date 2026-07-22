@@ -83,9 +83,16 @@ describe("credentialImportFingerprint", () => {
     ["action", { action: "appended" as const }],
     ["envFile", { envFile: "/other/.env" }],
     ["legacyExposureKeysRemoved", { legacyExposureKeysRemoved: ["EARVELDAJA_DISABLE_SALES"] }],
+    ["companyName", { companyName: "Different Company OÜ" }],
   ])("changes when %s drifts", (_label, patch) => {
     const base = credentialImportFingerprint(IMPORT_PROJECTION, SNAPSHOT);
     expect(credentialImportFingerprint({ ...IMPORT_PROJECTION, ...patch }, SNAPSHOT)).not.toBe(base);
+  });
+
+  it("ignores verification timestamp drift and normalizes equivalent company names", () => {
+    const base = credentialImportFingerprint(IMPORT_PROJECTION, SNAPSHOT);
+    expect(credentialImportFingerprint({ ...IMPORT_PROJECTION, verifiedAt: "2099-01-01T00:00:00.000Z" }, SNAPSHOT)).toBe(base);
+    expect(credentialImportFingerprint({ ...IMPORT_PROJECTION, companyName: "  ACME\u00a0OÜ  " }, SNAPSHOT)).toBe(base);
   });
 });
 

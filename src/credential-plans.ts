@@ -13,6 +13,12 @@ import { canonicalPlanJson } from "./tools/camt-plan.js";
 export const CREDENTIAL_IMPORT_DOMAIN = "credential_import";
 export const CREDENTIAL_REMOVE_DOMAIN = "credential_remove";
 
+export function normalizeVerifiedCompanyName(companyName: string | null): string | null {
+  if (companyName === null) return null;
+  const normalized = companyName.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase("et-EE");
+  return normalized || null;
+}
+
 /**
  * PRIVATE drift fingerprint for a credential import. It folds in the raw secret
  * snapshot AND the full destination projection, so ANY source/destination/scope/
@@ -41,6 +47,7 @@ export function credentialImportFingerprint(
       action: projection.action,
       destination_exists: projection.destinationExists,
       destination_state_token: projection.destinationStateToken,
+      verified_company_name: normalizeVerifiedCompanyName(projection.companyName),
     }))
     .digest("hex");
 }
