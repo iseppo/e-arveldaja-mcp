@@ -3149,3 +3149,121 @@ describe("accounting inbox external-text display matrix (P07)", () => {
     expect(nonceOf(second.description as string)).not.toBe(outer);
   });
 });
+
+describe("continue_accounting_workflow continuation inputs", () => {
+  function continueRegistration() {
+    const server = { registerTool: vi.fn() } as any;
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {} as any, EXPOSE_GRANULAR);
+    const registration = server.registerTool.mock.calls.find(
+      ([name]: [string]) => name === "continue_accounting_workflow",
+    );
+    if (!registration) throw new Error("continue_accounting_workflow was not registered");
+    return registration as [string, { inputSchema: Record<string, z.ZodTypeAny> }, (...args: any[]) => any];
+  }
+
+  it("adds optional workflow_handle, item_id, and answer without dropping the deprecated inputs", () => {
+    const [, options] = continueRegistration();
+    const schema = options.inputSchema;
+    // New continuation inputs.
+    for (const key of ["workflow_handle", "item_id", "answer"]) {
+      expect(schema).toHaveProperty(key);
+      expect(schema[key]!.isOptional()).toBe(true);
+    }
+    // Deprecated-but-functional inputs stay exactly as before.
+    for (const key of ["action", "workflow_state_json", "review_item_json", "save_as_rule", "rule_override_json"]) {
+      expect(schema).toHaveProperty(key);
+    }
+    // workflow_handle accepts the 43-char base64url handle and rejects noise.
+    expect(schema.workflow_handle!.safeParse("A".repeat(43)).success).toBe(true);
+    expect(schema.workflow_handle!.safeParse("not a handle").success).toBe(false);
+    // answer is length-bounded.
+    expect(schema.answer!.safeParse("x".repeat(4001)).success).toBe(false);
+  });
+});
+
+describe("live accounting-inbox v1/v2 profile emission", () => {
+  const FULL_EXPOSURE = { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
+
+  async function emitWorkflowFor(profile: "guided" | "guided-sales" | "standard" | "full", mode: "scan" | "dry_run") {
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({ bankAccounts: [fixtureBankAccount()], accountDimensions: [fixtureAccountDimension()] });
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile } });
+    registerAccountingInboxTools(server, runtime, api, FULL_EXPOSURE);
+    const handler = getRegisteredToolHandler(server, "accounting_inbox");
+    const result = await runWithToolProfile(profile, () => handler({ mode, workspace_path: workspace }));
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    return { runtime, workflow: payload.workflow };
+  }
+
+  it.each(["scan", "dry_run"] as const)("guided %s emits workflow_action_v2 with a resolvable workflow_handle", async (mode) => {
+    for (const profile of ["guided", "guided-sales"] as const) {
+      const { runtime, workflow } = await emitWorkflowFor(profile, mode);
+      expect(workflow.contract).toBe("workflow_action_v2");
+      expect(workflow.workflow_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(workflow).not.toHaveProperty("available_actions");
+      expect(workflow).not.toHaveProperty("approval_previews");
+      // The live handle resolves back through the same store/scope.
+      const stored = runtime.workflowStateStore.inspect(workflow.workflow_handle);
+      expect(stored.workflow).toBe("accounting_inbox");
+      // Guided page stays LATENT (get_workflow_page not visible in guided yet).
+      if (workflow.page !== undefined) {
+        expect(workflow.page).toMatchObject({ available: false, tool: "get_workflow_page", args: {} });
+      }
+    }
+  });
+
+  it.each(["scan", "dry_run"] as const)("standard and full %s stay on workflow_action_v1 with no handle minted", async (mode) => {
+    for (const profile of ["standard", "full"] as const) {
+      const { runtime, workflow } = await emitWorkflowFor(profile, mode);
+      expect(workflow.contract).toBe("workflow_action_v1");
+      expect(workflow).toHaveProperty("available_actions");
+      expect(workflow).not.toHaveProperty("workflow_handle");
+      // Non-guided profiles never touch the workflow-state store.
+      expect(runtime.workflowStateStore.activeCount).toBe(0);
+    }
+  });
+
+  it("makes the guided workflow envelope smaller than the standard v1 envelope (token win)", async () => {
+    const guided = await emitWorkflowFor("guided", "scan");
+    const standard = await emitWorkflowFor("standard", "scan");
+    const guidedBytes = Buffer.byteLength(JSON.stringify(guided.workflow), "utf8");
+    const standardBytes = Buffer.byteLength(JSON.stringify(standard.workflow), "utf8");
+    expect(guidedBytes).toBeLessThan(standardBytes);
+  });
+
+  it("guided continue_accounting_workflow(next) tolerates a v1 envelope with no needs_review (no throw)", async () => {
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({ bankAccounts: [fixtureBankAccount()], accountDimensions: [fixtureAccountDimension()] });
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile: "guided" } });
+    registerAccountingInboxTools(server, runtime, api, FULL_EXPOSURE);
+    const handler = getRegisteredToolHandler(server, "continue_accounting_workflow");
+    const result = await runWithToolProfile("guided", () => handler({
+      action: "next",
+      workflow_state_json: '{"workflow":{"contract":"workflow_action_v1","summary":"x"}}',
+    }));
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(payload.workflow.contract).toBe("workflow_action_v2");
+    expect(payload.workflow.blockers).toEqual([]);
+    expect(payload.workflow.workflow_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it("degrades a guided emit to v1 when the workflow-state store is exhausted (no tool error)", async () => {
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({ bankAccounts: [fixtureBankAccount()], accountDimensions: [fixtureAccountDimension()] });
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile: "guided" }, workflowStateStore: { maxActive: 1 } });
+    // Fill the single-slot store so the emit-path issue() throws capacity_exceeded.
+    runtime.workflowStateStore.issue({ workflow: "accounting_inbox", status: "in_progress", items: [] });
+    expect(runtime.workflowStateStore.activeCount).toBe(1);
+    registerAccountingInboxTools(server, runtime, api, FULL_EXPOSURE);
+    const handler = getRegisteredToolHandler(server, "accounting_inbox");
+    const result = await runWithToolProfile("guided", () => handler({ mode: "scan", workspace_path: workspace }));
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    // A store failure degrades to the plain v1 envelope instead of failing the tool.
+    expect(payload.workflow.contract).toBe("workflow_action_v1");
+    expect(payload.workflow).not.toHaveProperty("workflow_handle");
+  });
+});

@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-125 tools by default on the compatibility-preserving `standard` profile; opt-in `guided` / `guided-sales` expose 17 / 19 tools, and `full` exposes all 138. There are 16 workflow prompts and 15 resources across 12 modules. Supports multiple companies/accounts.
+126 tools by default on the compatibility-preserving `standard` profile; opt-in `guided` / `guided-sales` expose 18 / 20 tools, and `full` exposes all 140. There are 16 workflow prompts and 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -97,7 +97,7 @@ attributed per dimension; its `total` reconciles to `compute_account_balance`.
 surface is a fixed per-session token cost. Eight env flags control optional
 parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
-`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (17 merged daily-bookkeeping tools), `guided-sales` (those 17 plus read-only `list_sale_invoices` / `get_sale_invoice`), `standard` (the absent-variable compatibility default, 125), or `full` (all 138, including granular/setup tools). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
+`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (18 merged daily-bookkeeping tools), `guided-sales` (those 18 plus read-only `list_sale_invoices` / `get_sale_invoice`), `standard` (the absent-variable compatibility default, 126), or `full` (all 140, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
 
 - **`EARVELDAJA_DISABLE_LIGHTYEAR=1`** — do not register the Lightyear
   investment tools (`book_lightyear_*`, `parse_lightyear_*`,
@@ -159,9 +159,9 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The standard surface is 125 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 120.
+The standard surface is 126 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 121.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both raises it to the full 138. The five opt-out
+credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 140. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−4),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
@@ -519,5 +519,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 125 tools (standard profile)
+const { tools } = await client.listTools(); // 126 tools (standard profile)
 ```

@@ -4,6 +4,7 @@ import { ExecutionPlanStore, type ExecutionPlanStoreOptions } from "../plan-stor
 import type { RuntimeSafetyContext, RuntimeSafetyScope } from "../runtime-safety-context.js";
 import { FileReferenceStore, type FileReferenceStoreOptions } from "../file-reference-store.js";
 import { OperationResultStore, type OperationResultStoreOptions } from "../operation-result-store.js";
+import { WorkflowStateStore, type WorkflowStateStoreOptions } from "../workflow-state-store.js";
 
 const DEFAULT_FEATURES: ToolExposureConfig = Object.freeze({
   enableLightyear: true,
@@ -32,6 +33,7 @@ export interface TestRuntimeSafetyContextOptions {
   readonly planStore?: Omit<ExecutionPlanStoreOptions, "getActiveScope" | "now">;
   readonly fileReferenceStore?: Omit<FileReferenceStoreOptions, "getActiveScope" | "now">;
   readonly operationResultStore?: Omit<OperationResultStoreOptions, "getActiveScope" | "assertConsumedPlan" | "retainConsumedPlan" | "now">;
+  readonly workflowStateStore?: Omit<WorkflowStateStoreOptions, "getActiveScope" | "now">;
 }
 
 function frozenScope(
@@ -93,11 +95,21 @@ export function createTestRuntimeSafetyContext(
     assertConsumedPlan: (handle, domain) => planStore.assertConsumed(handle, domain),
     retainConsumedPlan: (handle, domain) => planStore.retainConsumed(handle, domain),
   });
+  let workflowStateCounter = 0;
+  const workflowStateStore = new WorkflowStateStore({
+    handleFactory: () => createHash("sha256")
+      .update(`test-workflow-state:${workflowStateCounter++}`)
+      .digest(),
+    ...options.workflowStateStore,
+    now: () => now,
+    getActiveScope,
+  });
   return Object.freeze({
     serverInstanceId: scope.serverInstanceId,
     planStore,
     fileReferenceStore,
     operationResultStore,
+    workflowStateStore,
     getActiveScope,
     setNow(value: number) { now = value; },
     advanceTime(milliseconds: number) { now += milliseconds; },

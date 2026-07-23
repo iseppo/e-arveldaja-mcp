@@ -6,7 +6,7 @@ import { registerTool } from "../mcp-compat.js";
 import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
 import { desandboxText, sandboxExternalText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
-import { projectActionForCurrentProfile } from "../tool-profile.js";
+import { currentToolProfile, projectActionForCurrentProfile } from "../tool-profile.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
@@ -26,7 +26,8 @@ import {
   normalizeAutoBookingRuleMatch,
   saveAutoBookingRule,
 } from "../accounting-rules.js";
-import { remapHiddenGranularTool, remapHiddenGranularWorkflowEnvelope, workflowFromAccountingInboxPayload } from "../workflow-response.js";
+import { projectWorkflowResponse, remapHiddenGranularTool, remapHiddenGranularWorkflowEnvelope, workflowFromAccountingInboxPayload, type WorkflowEnvelope } from "../workflow-response.js";
+import { createPublicWorkflowStateDetail, type PublicWorkflowStateDetail } from "../workflow-state-store.js";
 import {
   runAccountingInboxDryRunPipeline,
   type AutopilotInternalToolHandler,
@@ -1681,6 +1682,59 @@ type AccountingInboxToolParams = {
   wise_account_dimension_id?: number;
 };
 
+// Reduce the review/decision rows of a v1 workflow envelope to safe, inert
+// workflow-state detail rows for the workflow handle. Fail-closed: any row that
+// cannot be reduced to the allowlisted public shape is skipped, never thrown.
+// Values are stored RAW (the page tool sandboxes on read, like every other
+// store), so nothing here re-wraps already-sandboxed text.
+function workflowStateDetailItems(workflow: unknown): PublicWorkflowStateDetail[] {
+  if (!isRecord(workflow)) return [];
+  const rows = [...arrayAt(workflow, "needs_review"), ...arrayAt(workflow, "needs_decision")];
+  const items: PublicWorkflowStateDetail[] = [];
+  for (const row of rows) {
+    if (!isRecord(row)) continue;
+    const candidate: Record<string, unknown> = {};
+    const itemId = stringAt(row, "item_id") ?? stringAt(row, "id");
+    if (itemId !== undefined) candidate.item_id = itemId;
+    const code = stringAt(row, "code");
+    if (code !== undefined) candidate.code = code;
+    const message = stringAt(row, "summary") ?? stringAt(row, "message") ?? stringAt(row, "question");
+    if (message !== undefined) candidate.message = message;
+    const severity = stringAt(row, "severity");
+    if (severity !== undefined) candidate.severity = severity;
+    const status = stringAt(row, "status");
+    if (status !== undefined) candidate.status = status;
+    if (Object.keys(candidate).length === 0) continue;
+    try { items.push(createPublicWorkflowStateDetail(candidate)); } catch { /* skip unrepresentable rows */ }
+  }
+  return items;
+}
+
+// Route the emitted v1 workflow envelope to the profile-appropriate output.
+// Guided/guided-sales receive the compact `workflow_action_v2` envelope backed by
+// a scope-bound workflow handle (the page reference stays latent until guided
+// adopts get_workflow_page); standard/full receive the exact same v1 object,
+// byte-for-byte. A workflow handle never records or implies approval.
+function emitWorkflowEnvelope(v1Workflow: unknown, runtimeSafetyContext: RuntimeSafetyContext): unknown {
+  if (!isRecord(v1Workflow)) return v1Workflow;
+  // Standard/full discard the v2 projection, so skip the detail-item reduction and
+  // the store round-trip entirely for them — their output stays byte-identical v1.
+  const profile = currentToolProfile();
+  if (profile !== "guided" && profile !== "guided-sales") return v1Workflow;
+  try {
+    return projectWorkflowResponse(
+      v1Workflow as unknown as WorkflowEnvelope,
+      runtimeSafetyContext.workflowStateStore,
+      { items: workflowStateDetailItems(v1Workflow) },
+    );
+  } catch {
+    // A workflow-state store failure (e.g. workflow_state_capacity_exceeded) must
+    // never fail the guided tool call: degrade to the plain v1 envelope (no
+    // workflow_handle). The normal path still always mints a handle and emits v2.
+    return v1Workflow;
+  }
+}
+
 async function buildAccountingInboxScanResponse(
   api: ApiContext,
   params: AccountingInboxToolParams,
@@ -1695,7 +1749,11 @@ async function buildAccountingInboxScanResponse(
       type: "text",
       text: toMcpJson({
         ...payload,
-        workflow: remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload)),
+        // The double remapHiddenGranularWorkflowEnvelope is intentional and idempotent:
+        // buildWorkflowEnvelope already remaps for guided/guided-sales, and a second
+        // pass here is a no-op (no blocked actions remain after the first) while still
+        // covering standard/full, which build the envelope unremapped.
+        workflow: emitWorkflowEnvelope(remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload)), runtimeSafetyContext),
       }),
     }],
   };
@@ -1767,7 +1825,10 @@ async function buildAccountingInboxDryRunResponse(
         }
       : {}),
   };
-  const workflow = remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload));
+  const workflow = emitWorkflowEnvelope(
+    remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload)),
+    runtimeSafetyContext,
+  );
 
   return {
     content: [{
@@ -1967,6 +2028,9 @@ export function registerAccountingInboxTools(
     "Continue an accounting workflow response, resolve a review item, or prepare an approval action.",
     {
       action: z.enum(["next", "resolve_review", "prepare_action"]).optional().describe("next reads workflow_state_json; resolve_review/prepare_action read review_item_json."),
+      workflow_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional().describe("Opaque server-issued workflow handle from a compact workflow_action_v2 response. Carries inert prior workflow state; never approval or mutation authority."),
+      item_id: z.string().max(128).optional().describe("Stable id of the workflow item this continuation answers (from a workflow_action_v2 blocker or page item)."),
+      answer: z.string().max(700).optional().describe("Free-text answer to the current workflow question, for a compact guided continuation. Capped so a whole continuation stays within the 1 KiB budget."),
       workflow_state_json: jsonObjectInput.optional().describe("Previous workflow response; required for action='next'."),
       review_item_json: jsonObjectInput.optional().describe("Review item object for action='resolve_review' or action='prepare_action'."),
       save_as_rule: z.boolean().optional().describe("For action='prepare_action', prepare save_auto_booking_rule when appropriate."),
@@ -1991,17 +2055,21 @@ export function registerAccountingInboxTools(
       }
 
       const workflowState = parseRequiredJsonObject(workflow_state_json, "workflow_state_json");
-      const workflow = remapHiddenGranularWorkflowEnvelope(
+      const v1Workflow = remapHiddenGranularWorkflowEnvelope(
         isRecord(workflowState.workflow)
           ? workflowState.workflow
           : workflowFromAccountingInboxPayload(workflowState),
       );
-      const nextAction = isRecord(workflow)
-        ? recordAt(workflow, "recommended_next_action")
+      // Derive the human label from the v1 envelope's recommended action so the
+      // message is identical across profiles; the emitted envelope may then be
+      // projected to the compact v2 form for guided/guided-sales.
+      const nextAction = isRecord(v1Workflow)
+        ? recordAt(v1Workflow, "recommended_next_action")
         : undefined;
       const actionLabel = nextAction
         ? stringAt(nextAction, "label") ?? stringAt(nextAction, "tool") ?? stringAt(nextAction, "kind")
         : undefined;
+      const workflow = emitWorkflowEnvelope(v1Workflow, runtimeSafetyContext);
 
       return {
         content: [{

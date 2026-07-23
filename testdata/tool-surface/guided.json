@@ -2,9 +2,9 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 18,
-    "toolsListBytes": 22659,
+    "toolsListBytes": 23272,
     "descriptionsBytes": 2731,
-    "inputSchemasBytes": 15540,
+    "inputSchemasBytes": 16153,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 2750
@@ -678,6 +678,16 @@
             ],
             "type": "string"
           },
+          "answer": {
+            "description": "Free-text answer to the current workflow question, for a compact guided continuation. Capped so a whole continuation stays within the 1 KiB budget.",
+            "maxLength": 700,
+            "type": "string"
+          },
+          "item_id": {
+            "description": "Stable id of the workflow item this continuation answers (from a workflow_action_v2 blocker or page item).",
+            "maxLength": 128,
+            "type": "string"
+          },
           "review_item_json": {
             "anyOf": [
               {
@@ -711,6 +721,11 @@
           "save_as_rule": {
             "description": "For action='prepare_action', prepare save_auto_booking_rule when appropriate.",
             "type": "boolean"
+          },
+          "workflow_handle": {
+            "description": "Opaque server-issued workflow handle from a compact workflow_action_v2 response. Carries inert prior workflow state; never approval or mutation authority.",
+            "pattern": "^[A-Za-z0-9_-]{43}$",
+            "type": "string"
           },
           "workflow_state_json": {
             "anyOf": [

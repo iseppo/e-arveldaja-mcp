@@ -7,6 +7,7 @@ import type { ConnectionSnapshot } from "./connection-safety.js";
 import { ExecutionPlanStore, type ExecutionPlanStoreOptions } from "./plan-store.js";
 import { FileReferenceStore, type FileReferenceStoreOptions } from "./file-reference-store.js";
 import { OperationResultStore, type OperationResultStoreOptions } from "./operation-result-store.js";
+import { WorkflowStateStore, type WorkflowStateStoreOptions } from "./workflow-state-store.js";
 import type { ToolProfile } from "./tool-profile.js";
 import { TOOL_CATALOG_FINGERPRINT } from "./tool-catalog.js";
 
@@ -31,6 +32,7 @@ export interface RuntimeSafetyContext {
   readonly planStore: ExecutionPlanStore;
   readonly fileReferenceStore: FileReferenceStore;
   readonly operationResultStore: OperationResultStore;
+  readonly workflowStateStore: WorkflowStateStore;
   getActiveScope(): RuntimeSafetyScope;
 }
 
@@ -44,6 +46,7 @@ export interface CreateRuntimeSafetyContextOptions {
   readonly planStore?: Omit<ExecutionPlanStoreOptions, "getActiveScope">;
   readonly fileReferenceStore?: Omit<FileReferenceStoreOptions, "getActiveScope">;
   readonly operationResultStore?: Omit<OperationResultStoreOptions, "getActiveScope" | "assertConsumedPlan" | "retainConsumedPlan">;
+  readonly workflowStateStore?: Omit<WorkflowStateStoreOptions, "getActiveScope">;
   readonly getVerifiedCompanyIdentity?: (connectionIndex: number) => string | null;
 }
 
@@ -52,7 +55,7 @@ export function assertRuntimeSafetyContext(value: unknown): asserts value is Run
     throw new Error("A valid runtime safety context is required.");
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  const required = ["serverInstanceId", "planStore", "fileReferenceStore", "operationResultStore", "getActiveScope"] as const;
+  const required = ["serverInstanceId", "planStore", "fileReferenceStore", "operationResultStore", "workflowStateStore", "getActiveScope"] as const;
   if (required.some(key => {
     const descriptor = descriptors[key];
     return !descriptor || !("value" in descriptor) || !descriptor.enumerable;
@@ -63,6 +66,7 @@ export function assertRuntimeSafetyContext(value: unknown): asserts value is Run
     !(descriptors.planStore!.value instanceof ExecutionPlanStore) ||
     !(descriptors.fileReferenceStore!.value instanceof FileReferenceStore) ||
     !(descriptors.operationResultStore!.value instanceof OperationResultStore) ||
+    !(descriptors.workflowStateStore!.value instanceof WorkflowStateStore) ||
     typeof descriptors.getActiveScope!.value !== "function") {
     throw new Error("A valid runtime safety context is required.");
   }
@@ -211,5 +215,9 @@ export function createRuntimeSafetyContext(
     assertConsumedPlan: (handle, domain) => planStore.assertConsumed(handle, domain),
     retainConsumedPlan: (handle, domain) => planStore.retainConsumed(handle, domain),
   });
-  return Object.freeze({ serverInstanceId, planStore, fileReferenceStore, operationResultStore, getActiveScope });
+  const workflowStateStore = new WorkflowStateStore({
+    ...options.workflowStateStore,
+    getActiveScope,
+  });
+  return Object.freeze({ serverInstanceId, planStore, fileReferenceStore, operationResultStore, workflowStateStore, getActiveScope });
 }

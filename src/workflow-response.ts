@@ -1,5 +1,7 @@
 import { arrayAt, isRecord, numberAt, recordAt, stringAt } from "./record-utils.js";
 import { currentToolProfile, projectActionForCurrentProfile, remapHiddenGranularTool } from "./tool-profile.js";
+import { buildWorkflowActionV2, type BuildWorkflowActionV2Options, type WorkflowActionV2 } from "./workflow-action-v2.js";
+import type { WorkflowStateStore } from "./workflow-state-store.js";
 export { remapHiddenGranularTool } from "./tool-profile.js";
 
 export type WorkflowActionKind =
@@ -424,6 +426,24 @@ export function buildWorkflowEnvelope(options: BuildWorkflowEnvelopeOptions): Wo
   return currentToolProfile() === "guided" || currentToolProfile() === "guided-sales"
     ? remapHiddenGranularWorkflowEnvelope(workflow) as WorkflowEnvelope
     : workflow;
+}
+
+/**
+ * Route a built v1 workflow envelope to the profile-appropriate output. Guided
+ * and guided-sales receive the compact, additive `workflow_action_v2` envelope
+ * backed by an opaque workflow handle; standard and full keep the byte-compatible
+ * `workflow_action_v1` envelope unchanged. A workflow handle never records or
+ * implies approval and grants no mutation authority.
+ */
+export function projectWorkflowResponse(
+  envelope: WorkflowEnvelope,
+  store: WorkflowStateStore,
+  options: BuildWorkflowActionV2Options = {},
+): WorkflowEnvelope | WorkflowActionV2 {
+  const profile = currentToolProfile();
+  return profile === "guided" || profile === "guided-sales"
+    ? buildWorkflowActionV2(envelope, store, options)
+    : envelope;
 }
 
 function sourceDocuments(args: Record<string, unknown>): string[] {

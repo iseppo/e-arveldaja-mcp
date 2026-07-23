@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { createTestRuntimeSafetyContext } from "./__fixtures__/runtime-safety.js";
 import { runWithToolProfile } from "./tool-profile.js";
 import {
   approvalPreviewFromDryRunStep,
   buildWorkflowEnvelope,
+  projectWorkflowResponse,
   remapHiddenGranularTool,
   remapHiddenGranularWorkflowEnvelope,
   workflowActionFromBlockedDryRunStep,
@@ -345,6 +347,43 @@ describe("workflow response helpers", () => {
       kind: "tool_call",
       tool: "continue_accounting_workflow",
     });
+  });
+});
+
+describe("profile-gated v1/v2 workflow projection", () => {
+  function envelope() {
+    return buildWorkflowEnvelope({
+      summary: "Prepared inbox.",
+      recommended_step: { tool: "process_camt053", suggested_args: { mode: "parse", file_path: "/tmp/s.xml" } },
+    });
+  }
+
+  it("keeps standard on the byte-compatible v1 envelope", () => {
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile: "standard" } });
+    const result = runWithToolProfile("standard", () => projectWorkflowResponse(envelope(), runtime.workflowStateStore, { workflow: "accounting_inbox" }));
+    expect(result.contract).toBe("workflow_action_v1");
+    expect(result).toHaveProperty("available_actions");
+    expect(runtime.workflowStateStore.activeCount).toBe(0);
+  });
+
+  it("keeps full on the v1 envelope", () => {
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile: "full" } });
+    const result = runWithToolProfile("full", () => projectWorkflowResponse(envelope(), runtime.workflowStateStore, { workflow: "accounting_inbox" }));
+    expect(result.contract).toBe("workflow_action_v1");
+  });
+
+  it("emits the compact v2 envelope for guided and guided-sales", () => {
+    for (const profile of ["guided", "guided-sales"] as const) {
+      const runtime = createTestRuntimeSafetyContext({ scope: { profile } });
+      const result = runWithToolProfile(profile, () => projectWorkflowResponse(
+        runWithToolProfile(profile, () => envelope()),
+        runtime.workflowStateStore,
+        { workflow: "accounting_inbox" },
+      ));
+      expect(result.contract).toBe("workflow_action_v2");
+      expect(result).not.toHaveProperty("available_actions");
+      expect((result as { workflow_handle: string }).workflow_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    }
   });
 });
 

@@ -52,6 +52,7 @@ import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js"
 import { registerWorkflowRecommendationTools } from "./tools/workflow-recommendations.js";
 import { registerPlanTools } from "./plan-tools.js";
 import { registerOperationResultTools } from "./operation-result-page.js";
+import { registerWorkflowPageTool } from "./workflow-page.js";
 import { clearConnectionCaches, registerCacheControlTool } from "./cache-control.js";
 import { registerResources } from "./resources/static-resources.js";
 import { registerDynamicResources } from "./resources/dynamic-resources.js";
@@ -963,6 +964,10 @@ export async function createMcpServer(
   registerWorkflowRecommendationTools(publicServer, toolExposure);
   registerPlanTools(publicServer, runtimeSafetyContext, { profile: toolProfile });
   registerOperationResultTools(publicServer, runtimeSafetyContext);
+  // Registered unconditionally (mirrors the operation-result page tool); the
+  // public registrar's profile gate keeps it in the `full` surface only for this
+  // release. Paging non-plan workflow state carried between continuation calls.
+  registerWorkflowPageTool(publicServer, runtimeSafetyContext);
 
   // Resources cross the scoped/observed server directly; the public registrar
   // intentionally owns only the exhaustive tool catalog.

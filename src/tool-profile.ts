@@ -12,6 +12,12 @@ export const SETUP_PROFILE_CHOICES = Object.freeze([
 ]);
 const GUIDED = new Set(GUIDED_TOOL_NAMES);
 const GUIDED_SALES = new Set([...GUIDED_TOOL_NAMES, "list_sale_invoices", "get_sale_invoice"]);
+// Workflow-infra tools that ship in the `full` surface only for this release.
+// get_workflow_page pages non-plan workflow state; guided/guided-sales adopt it
+// in a later task when the interim granular tools drop and free room under the
+// 20-tool cap. Registered unconditionally in server-bootstrap, but gated here so
+// standard/custom/guided/guided-sales surfaces stay unchanged until then.
+const FULL_ONLY_TOOL_NAMES = new Set(["get_workflow_page"]);
 export const LEGACY_TOOL_EXPOSURE_ENV_KEYS = ["EARVELDAJA_DISABLE_LIGHTYEAR", "EARVELDAJA_EXPOSE_GRANULAR_TOOLS", "EARVELDAJA_EXPOSE_SETUP_TOOLS", "EARVELDAJA_DISABLE_TAX_TOOLS", "EARVELDAJA_DISABLE_REFERENCE_ADMIN", "EARVELDAJA_DISABLE_ANNUAL_REPORT", "EARVELDAJA_DISABLE_SALES", "EARVELDAJA_DISABLE_PRODUCTS"] as const;
 const VALID = new Set<ToolProfile>(["guided", "guided-sales", "standard", "full", "custom"]);
 const PROFILE_STORAGE = new AsyncLocalStorage<ToolProfile>();
@@ -41,6 +47,7 @@ export function isToolVisibleForProfile(name: string, profile: ToolProfile): boo
   toolMeta(name);
   if (profile === "guided") return GUIDED.has(name);
   if (profile === "guided-sales") return GUIDED_SALES.has(name);
+  if (FULL_ONLY_TOOL_NAMES.has(name)) return profile === "full";
   return true;
 }
 
