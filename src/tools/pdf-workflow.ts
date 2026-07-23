@@ -105,6 +105,233 @@ function parseVatRate(rateValue?: string): number | undefined {
   return Number.isFinite(rate) ? rate : undefined;
 }
 
+export interface ValidateInvoiceDataParams {
+  total_net: number;
+  total_vat: number;
+  total_gross: number;
+  items: unknown;
+  invoice_date?: string;
+  due_date?: string;
+  cl_currencies_id?: string;
+  currency_rate?: number;
+  base_net_price?: number;
+  reg_code?: string;
+  vat_no?: string;
+}
+
+/**
+ * Pure invoice-totals / dates / FX-guardrail validation core, EXTRACTED
+ * verbatim from the `validate_invoice_data` handler body (behavior-preserving —
+ * the tool handler is now `toMcpJson(validateInvoiceData(args))`). Returns the
+ * exact payload the tool emitted, so `validate_invoice_data` stays byte-identical
+ * while the typed AccountingDocumentOperations reuse the same core. Any embedded
+ * `wrapUntrustedOcr` on echoed argument values is a value-guard for the message
+ * strings and is unchanged; it is not raw-OCR surfacing.
+ */
+export function validateInvoiceData(params: ValidateInvoiceDataParams): Record<string, unknown> {
+  const { total_net, total_vat, total_gross, items, invoice_date, due_date, cl_currencies_id, currency_rate, base_net_price, reg_code, vat_no } = params;
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const parsed = parseJsonObjectArray(items, "items");
+  if (!Array.isArray(parsed)) {
+    return { valid: false, errors: ["items must be a JSON array"], warnings: [] };
+  }
+  const parsedItems = parsed as Array<{
+    total_net_price?: number;
+    vat_rate_dropdown?: string;
+    custom_title?: string;
+  }>;
+  let computedItemVat = 0;
+  let itemVatInputs = 0;
+
+  // Check net + vat = gross (within 2 cents for rounding)
+  const computedGross = roundMoney(total_net + total_vat);
+  const diff = Math.abs(computedGross - total_gross);
+  if (diff > 0.02) {
+    errors.push(`net (${total_net}) + VAT (${total_vat}) = ${computedGross}, but gross is ${total_gross} (diff: ${diff.toFixed(2)})`);
+  } else if (diff > 0) {
+    warnings.push(`Minor rounding: net + VAT = ${computedGross}, gross = ${total_gross} (diff: ${diff.toFixed(2)})`);
+  }
+
+  // Check item totals sum to invoice net
+  if (parsedItems.length > 0) {
+    const itemNetSum = roundMoney(parsedItems.reduce((s, i) => s + (i.total_net_price ?? 0), 0));
+    const netDiff = Math.abs(itemNetSum - total_net);
+    if (netDiff > 0.02) {
+      errors.push(`Item net sum (${itemNetSum}) does not match invoice net (${total_net}) (diff: ${netDiff.toFixed(2)})`);
+    } else if (netDiff > 0) {
+      warnings.push(`Minor item rounding: sum ${itemNetSum} vs net ${total_net} (diff: ${netDiff.toFixed(2)})`);
+    }
+  }
+
+  // Check VAT rate consistency. Reduced/zero rates are date-independent;
+  // the canonical standard-rate timeline changes over time, so a line carrying a
+  // *standard-looking* rate that does not match the rate in force on the
+  // invoice date is flagged as a likely period/OCR mismatch.
+  // Keep historical 5% recognition for older press invoices; current
+  // reduced/zero rates and every standard timeline rate come from metadata.
+  const KNOWN_REDUCED_RATES = [
+    5,
+    ...ESTONIAN_VAT_METADATA.rates.reduced.map(entry => entry.rate),
+  ];
+  const KNOWN_STANDARD_RATES = ESTONIAN_VAT_METADATA.rates.standard.timeline
+    .map(period => period.rate);
+  const CURRENT_REDUCED_RATES_DISPLAY = ESTONIAN_VAT_METADATA.rates.reduced
+    .map(entry => entry.rate)
+    .sort((left, right) => left - right)
+    .join("/");
+  const expectedStandardRate = standardVatRateOn(invoice_date);
+  for (let idx = 0; idx < parsedItems.length; idx++) {
+    const item = parsedItems[idx]!;
+    const rate = parseVatRate(item.vat_rate_dropdown);
+    // Warnings reference the item by position only — item.custom_title is
+    // OCR/LLM-derived and must not be echoed unwrapped into server-authored
+    // text (see the untrusted-OCR policy in CLAUDE.md).
+    if (rate !== undefined) {
+      const isKnownRate = KNOWN_REDUCED_RATES.includes(rate) || KNOWN_STANDARD_RATES.includes(rate);
+      if (!isKnownRate) {
+        warnings.push(`Item ${idx + 1}: unusual VAT rate ${rate}%`);
+      } else if (
+        expectedStandardRate !== null &&
+        KNOWN_STANDARD_RATES.includes(rate) &&
+        rate !== expectedStandardRate
+      ) {
+        warnings.push(
+          // Only the strict-validated 10-char prefix (standardVatRateOn
+          // returned non-null) is echoed — never the raw arg, which could
+          // carry an injected suffix after a valid date.
+          `Item ${idx + 1}: ${rate}% does not match the standard VAT rate in force on ${invoice_date?.slice(0, 10) ?? ""} (${expectedStandardRate}%). ` +
+          `A current reduced/zero rate (${CURRENT_REDUCED_RATES_DISPLAY}%) may be valid; confirm this is not an OCR misread or a wrong booking period.`
+        );
+      }
+    }
+    if (item.total_net_price !== undefined && item.total_net_price < 0) {
+      warnings.push(`Item ${idx + 1}: negative net price ${item.total_net_price}`);
+    }
+    if (item.total_net_price !== undefined && rate !== undefined) {
+      computedItemVat += item.total_net_price * (rate / 100);
+      itemVatInputs++;
+    }
+  }
+
+  if (itemVatInputs > 0) {
+    computedItemVat = roundMoney(computedItemVat);
+    const itemVatDiff = Math.abs(computedItemVat - total_vat);
+    if (itemVatDiff > 0.05) {
+      warnings.push(`Summed per-item VAT (${computedItemVat}) does not match total VAT (${total_vat}) (diff: ${itemVatDiff.toFixed(2)})`);
+    }
+  }
+
+  // Validate dates — check format AND that the date actually exists on the calendar
+  const isValidCalendarDate = (s: string): boolean => {
+    const [y, m, d] = s.split("-").map(Number);
+    return toIsoDate(y!, m!, d!) === s;
+  };
+  // Only a strictly valid invoice date is safe to compare/echo downstream.
+  const validInvoiceDate = invoice_date && isValidCalendarDate(invoice_date) ? invoice_date : undefined;
+  if (invoice_date) {
+    if (!isValidCalendarDate(invoice_date)) {
+      // The rejected value may be OCR/LLM-derived; wrap it so its content
+      // (e.g. an injected newline + instruction) is delimited as data, not
+      // echoed as trusted server text.
+      errors.push(`Invalid invoice_date (expected valid YYYY-MM-DD). Received: ${wrapUntrustedOcr(invoice_date)}`);
+    } else {
+      // Guardrail against OCR date misreads (e.g. 2042-01-24) that would
+      // otherwise silently book into an impossible period.
+      const today = new Date();
+      const todayIso = today.toISOString().slice(0, 10);
+      const fiveYearsAgo = new Date(today.getTime());
+      fiveYearsAgo.setUTCFullYear(today.getUTCFullYear() - 5);
+      const fiveYearsAgoIso = fiveYearsAgo.toISOString().slice(0, 10);
+      const cutoffFuture = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      if (invoice_date > cutoffFuture) {
+        warnings.push(`invoice_date (${invoice_date}) is more than 30 days in the future — possible OCR misread, verify before booking`);
+      } else if (invoice_date < fiveYearsAgoIso) {
+        warnings.push(`invoice_date (${invoice_date}) is more than 5 years before today (${todayIso}) — possible OCR misread, verify before booking`);
+      }
+    }
+  }
+  if (due_date) {
+    if (!isValidCalendarDate(due_date)) {
+      errors.push(`Invalid due_date (expected valid YYYY-MM-DD). Received: ${wrapUntrustedOcr(due_date)}`);
+    } else if (validInvoiceDate && due_date < validInvoiceDate) {
+      warnings.push(`due_date (${due_date}) is before invoice_date (${validInvoiceDate})`);
+    }
+  }
+
+  // Zero/negative totals
+  if (total_gross <= 0) warnings.push(`Gross amount is ${total_gross} (zero or negative)`);
+  if (total_net <= 0) warnings.push(`Net amount is ${total_net} (zero or negative)`);
+
+  // Foreign-currency rate guardrail: bookings without an explicit
+  // currency_rate / base_net_price tend to land in PARTIALLY_PAID once the
+  // Wise card-payment kursi vahe shows up.
+  // cl_currencies_id is a free-form arg, so only echo it when it is a clean
+  // ISO-4217-shaped code; otherwise fall back to a generic label so a value
+  // like "USD\nIGNORE..." is never reflected as trusted warning text.
+  const rawCurrency = (cl_currencies_id ?? "EUR").toUpperCase();
+  const currencyCode = /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : "non-EUR";
+  if (currencyCode !== "EUR" && currency_rate === undefined && base_net_price === undefined) {
+    warnings.push(
+      `Foreign-currency invoice (${currencyCode}): no currency_rate or base_net_price provided. ` +
+      `Without these, the EUR booking may not match the actual Wise card-payment conversion and the invoice can stay PARTIALLY_PAID. ` +
+      `Pass currency_rate (Wise CSV "Source amount (after fees)" / "Target amount (after fees)") and/or base_gross_price to lock the EUR settlement.`
+    );
+  }
+
+  if (reg_code !== undefined && reg_code !== null) {
+    const trimmedReg = reg_code.trim();
+    if (trimmedReg) {
+      if (isValidEeRegistryCode(trimmedReg)) {
+        // valid — no warning
+      } else if (/^\d{8}$/.test(trimmedReg)) {
+        warnings.push(`reg_code "${wrapUntrustedOcr(trimmedReg)}" has an invalid Estonian registry-code checksum — possible OCR misread. Verify before booking.`);
+      } else {
+        warnings.push(`reg_code "${wrapUntrustedOcr(trimmedReg.slice(0, 20))}" is not a valid 8-digit Estonian registry code. Foreign registry-code checksums are not implemented; verify manually.`);
+      }
+    }
+  }
+
+  if (vat_no !== undefined && vat_no !== null) {
+    const trimmedVat = vat_no.trim();
+    if (trimmedVat) {
+      const normalized = trimmedVat.replace(/\s+/g, "").toUpperCase();
+      if (normalized.startsWith("EE")) {
+        if (isValidEeVatNumber(normalized)) {
+          // valid — no warning
+        } else if (/^EE\d{9}$/.test(normalized)) {
+          warnings.push(`vat_no "${wrapUntrustedOcr(normalized)}" has an invalid EE VAT checksum — possible OCR misread. Verify before booking.`);
+        } else {
+          warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" is not a valid EE+9-digit VAT number. Verify manually.`);
+        }
+      } else if (/^[A-Z]{2}[0-9A-Z]{6,}$/.test(normalized)) {
+        // Foreign VAT — permissive shape check only, soft warning.
+        warnings.push(`vat_no "${wrapUntrustedOcr(normalized)}" is a foreign VAT number; structural checksum not implemented for non-EE VATs. Verify manually if uncertain.`);
+      } else {
+        warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" does not match the expected VAT number shape (XX + 6+ alphanumeric). Verify before booking.`);
+      }
+    }
+  }
+
+  const valid = errors.length === 0;
+
+  return {
+    valid,
+    errors,
+    warnings,
+    summary: {
+      total_net,
+      total_vat,
+      total_gross,
+      computed_gross: computedGross,
+      item_count: parsedItems.length,
+    },
+    ...(valid
+      ? { note: "Validation passed. Proceed with create_purchase_invoice_from_pdf." }
+      : { note: "Fix the errors above before creating the invoice." }),
+  };
+}
+
 interface PdfHints {
   supplier_reg_code?: string;
   supplier_vat_no?: string;
@@ -303,218 +530,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       vat_no: z.string().optional().describe("Supplier VAT number (KMKR, e.g. EE102809963)"),
     },
     { ...readOnly, title: "Validate Invoice Data" },
-    async ({ total_net, total_vat, total_gross, items, invoice_date, due_date, cl_currencies_id, currency_rate, base_net_price, reg_code, vat_no }) => {
-      const errors: string[] = [];
-      const warnings: string[] = [];
-      const parsed = parseJsonObjectArray(items, "items");
-      if (!Array.isArray(parsed)) {
-        return {
-          content: [{
-            type: "text",
-            text: toMcpJson({ valid: false, errors: ["items must be a JSON array"], warnings: [] }),
-          }],
-        };
-      }
-      const parsedItems = parsed as Array<{
-        total_net_price?: number;
-        vat_rate_dropdown?: string;
-        custom_title?: string;
-      }>;
-      let computedItemVat = 0;
-      let itemVatInputs = 0;
-
-      // Check net + vat = gross (within 2 cents for rounding)
-      const computedGross = roundMoney(total_net + total_vat);
-      const diff = Math.abs(computedGross - total_gross);
-      if (diff > 0.02) {
-        errors.push(`net (${total_net}) + VAT (${total_vat}) = ${computedGross}, but gross is ${total_gross} (diff: ${diff.toFixed(2)})`);
-      } else if (diff > 0) {
-        warnings.push(`Minor rounding: net + VAT = ${computedGross}, gross = ${total_gross} (diff: ${diff.toFixed(2)})`);
-      }
-
-      // Check item totals sum to invoice net
-      if (parsedItems.length > 0) {
-        const itemNetSum = roundMoney(parsedItems.reduce((s, i) => s + (i.total_net_price ?? 0), 0));
-        const netDiff = Math.abs(itemNetSum - total_net);
-        if (netDiff > 0.02) {
-          errors.push(`Item net sum (${itemNetSum}) does not match invoice net (${total_net}) (diff: ${netDiff.toFixed(2)})`);
-        } else if (netDiff > 0) {
-          warnings.push(`Minor item rounding: sum ${itemNetSum} vs net ${total_net} (diff: ${netDiff.toFixed(2)})`);
-        }
-      }
-
-      // Check VAT rate consistency. Reduced/zero rates are date-independent;
-      // the canonical standard-rate timeline changes over time, so a line carrying a
-      // *standard-looking* rate that does not match the rate in force on the
-      // invoice date is flagged as a likely period/OCR mismatch.
-      // Keep historical 5% recognition for older press invoices; current
-      // reduced/zero rates and every standard timeline rate come from metadata.
-      const KNOWN_REDUCED_RATES = [
-        5,
-        ...ESTONIAN_VAT_METADATA.rates.reduced.map(entry => entry.rate),
-      ];
-      const KNOWN_STANDARD_RATES = ESTONIAN_VAT_METADATA.rates.standard.timeline
-        .map(period => period.rate);
-      const CURRENT_REDUCED_RATES_DISPLAY = ESTONIAN_VAT_METADATA.rates.reduced
-        .map(entry => entry.rate)
-        .sort((left, right) => left - right)
-        .join("/");
-      const expectedStandardRate = standardVatRateOn(invoice_date);
-      for (let idx = 0; idx < parsedItems.length; idx++) {
-        const item = parsedItems[idx]!;
-        const rate = parseVatRate(item.vat_rate_dropdown);
-        // Warnings reference the item by position only — item.custom_title is
-        // OCR/LLM-derived and must not be echoed unwrapped into server-authored
-        // text (see the untrusted-OCR policy in CLAUDE.md).
-        if (rate !== undefined) {
-          const isKnownRate = KNOWN_REDUCED_RATES.includes(rate) || KNOWN_STANDARD_RATES.includes(rate);
-          if (!isKnownRate) {
-            warnings.push(`Item ${idx + 1}: unusual VAT rate ${rate}%`);
-          } else if (
-            expectedStandardRate !== null &&
-            KNOWN_STANDARD_RATES.includes(rate) &&
-            rate !== expectedStandardRate
-          ) {
-            warnings.push(
-              // Only the strict-validated 10-char prefix (standardVatRateOn
-              // returned non-null) is echoed — never the raw arg, which could
-              // carry an injected suffix after a valid date.
-              `Item ${idx + 1}: ${rate}% does not match the standard VAT rate in force on ${invoice_date?.slice(0, 10) ?? ""} (${expectedStandardRate}%). ` +
-              `A current reduced/zero rate (${CURRENT_REDUCED_RATES_DISPLAY}%) may be valid; confirm this is not an OCR misread or a wrong booking period.`
-            );
-          }
-        }
-        if (item.total_net_price !== undefined && item.total_net_price < 0) {
-          warnings.push(`Item ${idx + 1}: negative net price ${item.total_net_price}`);
-        }
-        if (item.total_net_price !== undefined && rate !== undefined) {
-          computedItemVat += item.total_net_price * (rate / 100);
-          itemVatInputs++;
-        }
-      }
-
-      if (itemVatInputs > 0) {
-        computedItemVat = roundMoney(computedItemVat);
-        const itemVatDiff = Math.abs(computedItemVat - total_vat);
-        if (itemVatDiff > 0.05) {
-          warnings.push(`Summed per-item VAT (${computedItemVat}) does not match total VAT (${total_vat}) (diff: ${itemVatDiff.toFixed(2)})`);
-        }
-      }
-
-      // Validate dates — check format AND that the date actually exists on the calendar
-      const isValidCalendarDate = (s: string): boolean => {
-        const [y, m, d] = s.split("-").map(Number);
-        return toIsoDate(y!, m!, d!) === s;
-      };
-      // Only a strictly valid invoice date is safe to compare/echo downstream.
-      const validInvoiceDate = invoice_date && isValidCalendarDate(invoice_date) ? invoice_date : undefined;
-      if (invoice_date) {
-        if (!isValidCalendarDate(invoice_date)) {
-          // The rejected value may be OCR/LLM-derived; wrap it so its content
-          // (e.g. an injected newline + instruction) is delimited as data, not
-          // echoed as trusted server text.
-          errors.push(`Invalid invoice_date (expected valid YYYY-MM-DD). Received: ${wrapUntrustedOcr(invoice_date)}`);
-        } else {
-          // Guardrail against OCR date misreads (e.g. 2042-01-24) that would
-          // otherwise silently book into an impossible period.
-          const today = new Date();
-          const todayIso = today.toISOString().slice(0, 10);
-          const fiveYearsAgo = new Date(today.getTime());
-          fiveYearsAgo.setUTCFullYear(today.getUTCFullYear() - 5);
-          const fiveYearsAgoIso = fiveYearsAgo.toISOString().slice(0, 10);
-          const cutoffFuture = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-          if (invoice_date > cutoffFuture) {
-            warnings.push(`invoice_date (${invoice_date}) is more than 30 days in the future — possible OCR misread, verify before booking`);
-          } else if (invoice_date < fiveYearsAgoIso) {
-            warnings.push(`invoice_date (${invoice_date}) is more than 5 years before today (${todayIso}) — possible OCR misread, verify before booking`);
-          }
-        }
-      }
-      if (due_date) {
-        if (!isValidCalendarDate(due_date)) {
-          errors.push(`Invalid due_date (expected valid YYYY-MM-DD). Received: ${wrapUntrustedOcr(due_date)}`);
-        } else if (validInvoiceDate && due_date < validInvoiceDate) {
-          warnings.push(`due_date (${due_date}) is before invoice_date (${validInvoiceDate})`);
-        }
-      }
-
-      // Zero/negative totals
-      if (total_gross <= 0) warnings.push(`Gross amount is ${total_gross} (zero or negative)`);
-      if (total_net <= 0) warnings.push(`Net amount is ${total_net} (zero or negative)`);
-
-      // Foreign-currency rate guardrail: bookings without an explicit
-      // currency_rate / base_net_price tend to land in PARTIALLY_PAID once the
-      // Wise card-payment kursi vahe shows up.
-      // cl_currencies_id is a free-form arg, so only echo it when it is a clean
-      // ISO-4217-shaped code; otherwise fall back to a generic label so a value
-      // like "USD\nIGNORE..." is never reflected as trusted warning text.
-      const rawCurrency = (cl_currencies_id ?? "EUR").toUpperCase();
-      const currencyCode = /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : "non-EUR";
-      if (currencyCode !== "EUR" && currency_rate === undefined && base_net_price === undefined) {
-        warnings.push(
-          `Foreign-currency invoice (${currencyCode}): no currency_rate or base_net_price provided. ` +
-          `Without these, the EUR booking may not match the actual Wise card-payment conversion and the invoice can stay PARTIALLY_PAID. ` +
-          `Pass currency_rate (Wise CSV "Source amount (after fees)" / "Target amount (after fees)") and/or base_gross_price to lock the EUR settlement.`
-        );
-      }
-
-      if (reg_code !== undefined && reg_code !== null) {
-        const trimmedReg = reg_code.trim();
-        if (trimmedReg) {
-          if (isValidEeRegistryCode(trimmedReg)) {
-            // valid — no warning
-          } else if (/^\d{8}$/.test(trimmedReg)) {
-            warnings.push(`reg_code "${wrapUntrustedOcr(trimmedReg)}" has an invalid Estonian registry-code checksum — possible OCR misread. Verify before booking.`);
-          } else {
-            warnings.push(`reg_code "${wrapUntrustedOcr(trimmedReg.slice(0, 20))}" is not a valid 8-digit Estonian registry code. Foreign registry-code checksums are not implemented; verify manually.`);
-          }
-        }
-      }
-
-      if (vat_no !== undefined && vat_no !== null) {
-        const trimmedVat = vat_no.trim();
-        if (trimmedVat) {
-          const normalized = trimmedVat.replace(/\s+/g, "").toUpperCase();
-          if (normalized.startsWith("EE")) {
-            if (isValidEeVatNumber(normalized)) {
-              // valid — no warning
-            } else if (/^EE\d{9}$/.test(normalized)) {
-              warnings.push(`vat_no "${wrapUntrustedOcr(normalized)}" has an invalid EE VAT checksum — possible OCR misread. Verify before booking.`);
-            } else {
-              warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" is not a valid EE+9-digit VAT number. Verify manually.`);
-            }
-          } else if (/^[A-Z]{2}[0-9A-Z]{6,}$/.test(normalized)) {
-            // Foreign VAT — permissive shape check only, soft warning.
-            warnings.push(`vat_no "${wrapUntrustedOcr(normalized)}" is a foreign VAT number; structural checksum not implemented for non-EE VATs. Verify manually if uncertain.`);
-          } else {
-            warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" does not match the expected VAT number shape (XX + 6+ alphanumeric). Verify before booking.`);
-          }
-        }
-      }
-
-      const valid = errors.length === 0;
-
-      return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            valid,
-            errors,
-            warnings,
-            summary: {
-              total_net,
-              total_vat,
-              total_gross,
-              computed_gross: computedGross,
-              item_count: parsedItems.length,
-            },
-            ...(valid
-              ? { note: "Validation passed. Proceed with create_purchase_invoice_from_pdf." }
-              : { note: "Fix the errors above before creating the invoice." }),
-          }),
-        }],
-      };
-    }
+    async (params) => ({
+      content: [{ type: "text", text: toMcpJson(validateInvoiceData(params)) }],
+    })
   );
   // registry_data comes from the RIK/ariregister registry API (fetchRegistryData)
   // — external free text that reaches the LLM as DISPLAY. Its `name` and
@@ -651,6 +669,85 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     },
     { ...readOnly, title: "Suggest Purchase Booking" },
     async ({ clients_id, description, limit }) => {
+      const core = await computeBookingSuggestion(api, { clients_id, description, limit });
+      // Past-invoice custom_title is often the OCR description copied forward
+      // from the original receipt booking, so wrap at MCP output.
+      const sanitizedDetailed = core.past_invoices.map(inv => ({
+        ...inv,
+        items: inv.items?.map(item => ({
+          ...item,
+          custom_title: wrapUntrustedOcr(item.custom_title ?? undefined),
+        })),
+      }));
+      return {
+        content: [{
+          type: "text",
+          text: toMcpJson({
+            supplier_id: core.supplier_id,
+            past_invoices: sanitizedDetailed,
+            tax_notes: core.tax_notes,
+            ...(core.dimension_notes.length > 0 ? { dimension_notes: core.dimension_notes } : {}),
+            ...(core.history_notes.length > 0 ? { notes: core.history_notes } : {}),
+            suggestion: core.past_invoices.length > 0
+              ? "Use the purchase article, account, and VAT settings from the most recent similar invoice."
+              : "No past invoices found for this supplier. Use list_purchase_articles to find appropriate articles.",
+          }),
+        }],
+      };
+    }
+  );
+
+  registerCreatePurchaseInvoiceFromPdfTool(server, api);
+}
+
+export interface BookingSuggestionParams {
+  clients_id: number;
+  description?: string;
+  limit?: number;
+}
+
+export interface BookingSuggestionPastInvoiceItem {
+  custom_title?: string | null;
+  cl_purchase_articles_id?: number | null;
+  purchase_accounts_id?: number | null;
+  purchase_accounts_dimensions_id?: number | null;
+  total_net_price?: number | null;
+  vat_rate_dropdown?: string | null;
+  vat_accounts_id?: number | null;
+  vat_accounts_dimensions_id?: number | null;
+  cl_vat_articles_id?: number | null;
+  reversed_vat_id?: number | null;
+}
+
+export interface BookingSuggestionPastInvoice {
+  id?: number;
+  number?: string;
+  date?: string;
+  gross_price?: number | null;
+  liability_accounts_id?: number | null;
+  items?: BookingSuggestionPastInvoiceItem[] | undefined;
+}
+
+export interface BookingSuggestionCore {
+  supplier_id: number;
+  /** Most-recent-first confirmed invoices for this supplier, UNWRAPPED (custom_title raw). */
+  past_invoices: BookingSuggestionPastInvoice[];
+  tax_notes: ReturnType<typeof detectVatDeductionNotes>;
+  dimension_notes: string[];
+  history_notes: string[];
+}
+
+/**
+ * Pure suggest_booking core, EXTRACTED from the `suggest_booking` handler
+ * (behavior-preserving). Returns UNWRAPPED past-invoice history plus the
+ * KMS § 30 tax_notes and P10 ambiguous-dimension notes. The tool handler wraps
+ * past_invoice custom_title at MCP output; the typed AccountingDocumentOperations
+ * reuse this same core and the guided façade owns wrapping instead.
+ */
+export async function computeBookingSuggestion(
+  api: ApiContext,
+  { clients_id, description, limit }: BookingSuggestionParams,
+): Promise<BookingSuggestionCore> {
       const maxResults = limit ?? 3;
       const allInvoices = await api.purchaseInvoices.listAll();
 
@@ -763,17 +860,6 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         ...dimensionConflicts("vat_accounts_id", "vat_accounts_dimensions_id"),
       ];
 
-      // Past-invoice custom_title is often the OCR description copied forward
-      // from the original receipt booking, so wrap at MCP output. Internal
-      // match-against-description logic above already ran on plain strings.
-      const sanitizedDetailed = detailed.map(inv => ({
-        ...inv,
-        items: inv.items?.map(item => ({
-          ...item,
-          custom_title: wrapUntrustedOcr(item.custom_title ?? undefined),
-        })),
-      }));
-
       // Surface deterministic Estonian input-VAT deduction restrictions
       // (KMS § 30 entertainment, § 30 lg 4 passenger car) for this supplier.
       // Detection runs on plain strings (supplier name, the description arg,
@@ -787,24 +873,16 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         ],
       });
 
-      return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            supplier_id: clients_id,
-            past_invoices: sanitizedDetailed,
-            tax_notes,
-            ...(dimension_notes.length > 0 ? { dimension_notes } : {}),
-            ...(historyNotes.length > 0 ? { notes: historyNotes } : {}),
-            suggestion: detailed.length > 0
-              ? "Use the purchase article, account, and VAT settings from the most recent similar invoice."
-              : "No past invoices found for this supplier. Use list_purchase_articles to find appropriate articles.",
-          }),
-        }],
-      };
-    }
-  );
+  return {
+    supplier_id: clients_id,
+    past_invoices: detailed,
+    tax_notes,
+    dimension_notes,
+    history_notes: historyNotes,
+  };
+}
 
+export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api: ApiContext): void {
   registerTool(server, "create_purchase_invoice_from_pdf",
     "Create a draft purchase invoice from extracted document data and attach the source file. Direct-call contract: pass exact invoice vat_price/gross_price when known, never recalculate; non-EUR requires currency_rate (EUR per 1 foreign unit); base_* may lock actual EUR settlement.",
     {

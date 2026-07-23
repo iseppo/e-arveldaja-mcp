@@ -82,6 +82,28 @@ function representativeResponse(tool: string, request: Record<string, unknown>):
       return { dimensions: [{ id: 101, account_code: "5000", account_name: "Purchased services", active: true }], total: 1 };
     case "create_purchase_invoice_from_pdf":
       return { created: true, purchase_invoice_id: 90_001, confirmed: false, source_sha256: request.source_sha256 };
+    case "process_accounting_document":
+      return request.mode === "create"
+        ? {
+            result: { created_invoice_id: 90_001, document_uploaded: true, status: "SAVED" },
+            note: "Purchase invoice created as DRAFT and the source document uploaded. This is APPROVAL ONE (create/upload). Confirmation is a SEPARATE step — review, then confirm the invoice using its confirm plan handle below.",
+            confirm_plan: { plan_handle: "<HANDLE>", invoice_id: 90_001 },
+            mutation_occurred: true,
+          }
+        : {
+            summary: {
+              status: "ready_for_approval",
+              plan_handle: "<HANDLE>",
+              supplier: { status: "resolved", client_id: 42, name: "Fixture Supplier OÜ", match_type: "registry_code" },
+              extraction: { source_sha256: "0".repeat(64), page_count: 1, confidence_signals: {}, invoice_number: "INV-2026-001", invoice_date: "2026-06-15", total_net: 100, total_vat: 24, total_gross: 124 },
+              vat_validation: { valid: true, errors: [], warnings: [] },
+              duplicate: { candidate_duplicate_risk: false, candidate_invoice_number_matches: 0, candidate_same_amount_date_matches: 0, candidate_invalidated_matches: 0 },
+              blockers: [],
+              warnings: [],
+              next_step: "Review this preview. After explicit approval, call process_accounting_document with mode='create' and this plan_handle to create the DRAFT invoice; confirm it separately afterward.",
+            },
+            mutation_occurred: false,
+          };
     case "confirm_purchase_invoice":
       return { confirmed: true, purchase_invoice_id: request.id, journal_entry_id: 70_001 };
     case "reconcile_bank_transactions":
@@ -190,6 +212,34 @@ const JOURNEYS: JourneyDefinition[] = [
         plan_handle: PLAN_HANDLE,
         approved_command_digest: "0".repeat(64),
       }, "generic-batch-100"),
+    ],
+  },
+  {
+    // Guided single-document façade: prepare (read) -> approved create two-call.
+    // The unique supplier resolves automatically (no supplier_client_id /
+    // accounts_dimensions_id demanded on the read), and create returns a SECOND
+    // confirm plan that is NOT auto-run.
+    name: "accounting-document",
+    steps: [
+      read("process_accounting_document", { mode: "prepare", file_path: "<ABSOLUTE_PATH>" }, {
+        technicalIdPrompts: 0,
+        ambiguityQuestions: 0,
+      }),
+      read("get_execution_plan_page", { plan_handle: PLAN_HANDLE }, { responseFixture: "plan-page-first" }),
+      approvedMutation("process_accounting_document", {
+        mode: "create",
+        file_path: "<ABSOLUTE_PATH>",
+        plan_handle: PLAN_HANDLE,
+        source_sha256: "0".repeat(64),
+        supplier_client_id: 42,
+        invoice_number: "INV-2026-001",
+        invoice_date: "2026-06-15",
+        journal_date: "2026-06-15",
+        term_days: 14,
+        items: [{ custom_title: "Consulting service", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 100 }],
+        vat_price: 24,
+        gross_price: 124,
+      }),
     ],
   },
   {
@@ -314,6 +364,16 @@ describe("user-journey accounting contract", () => {
         responseBytes: 17_524,
         technicalIdPrompts: 2,
         ambiguityQuestions: 1,
+        mutationCalls: 1,
+        approvalBeforeMutation: true,
+      },
+      {
+        name: "accounting-document",
+        callCount: 3,
+        requestBytes: 734,
+        responseBytes: 5_723,
+        technicalIdPrompts: 0,
+        ambiguityQuestions: 0,
         mutationCalls: 1,
         approvalBeforeMutation: true,
       },

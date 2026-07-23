@@ -1,10 +1,10 @@
 {
   "profile": "full",
   "measurement": {
-    "toolCount": 141,
-    "toolsListBytes": 138573,
-    "descriptionsBytes": 17879,
-    "inputSchemasBytes": 86674,
+    "toolCount": 142,
+    "toolsListBytes": 142128,
+    "descriptionsBytes": 18384,
+    "inputSchemasBytes": 89471,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -5679,6 +5679,139 @@
       },
       "name": "process_bank_input",
       "title": "Process Bank Input"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Use mode='prepare' (default) to preview and get a plan handle; after explicit approval use mode='create' with that plan handle to create the DRAFT invoice and upload the document. Confirmation is a separate, later step. If the supplier is uniquely identifiable it resolves automatically.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "bank_account_no": {
+            "description": "mode='create': supplier bank account.",
+            "type": "string"
+          },
+          "base_gross_price": {
+            "description": "mode='create': actual settled EUR gross total.",
+            "type": "number"
+          },
+          "base_net_price": {
+            "description": "mode='create': EUR equivalent of net_price.",
+            "type": "number"
+          },
+          "base_vat_price": {
+            "description": "mode='create': EUR equivalent of vat_price.",
+            "type": "number"
+          },
+          "block_on_duplicate": {
+            "description": "mode='create': refuse creation when the cash outflow looks like an already-booked duplicate (default false: warn only).",
+            "type": "boolean"
+          },
+          "currency": {
+            "description": "mode='create': currency code (default EUR).",
+            "type": "string"
+          },
+          "currency_rate": {
+            "description": "mode='create': EUR per 1 foreign unit; required when currency != EUR.",
+            "exclusiveMinimum": 0,
+            "type": "number"
+          },
+          "file_path": {
+            "description": "Advanced: absolute path / base64 input to the invoice document. Provide exactly one of file_ref or file_path.",
+            "type": "string"
+          },
+          "file_ref": {
+            "description": "Opaque Accounting Inbox receipt_input file reference. Provide exactly one of file_ref or file_path.",
+            "type": "string"
+          },
+          "gross_price": {
+            "description": "mode='create': EXACT total gross from the invoice; never recalculate.",
+            "type": "number"
+          },
+          "invoice_date": {
+            "description": "mode='create': invoice date (YYYY-MM-DD).",
+            "type": "string"
+          },
+          "invoice_number": {
+            "description": "mode='create': invoice number.",
+            "type": "string"
+          },
+          "items": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {},
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "mode='create': reviewed invoice items."
+          },
+          "journal_date": {
+            "description": "mode='create': turnover/booking date (YYYY-MM-DD).",
+            "type": "string"
+          },
+          "liability_accounts_id": {
+            "description": "mode='create': liability account (default 2310).",
+            "type": "number"
+          },
+          "mode": {
+            "description": "Workflow phase. Defaults to prepare (preview).",
+            "enum": [
+              "prepare",
+              "create"
+            ],
+            "type": "string"
+          },
+          "notes": {
+            "description": "mode='create': optional notes. Do NOT use the source document filename.",
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "Execution-plan handle from the reviewed preview. Required for mode='create'.",
+            "type": "string"
+          },
+          "ref_number": {
+            "description": "mode='create': reference number.",
+            "type": "string"
+          },
+          "source_sha256": {
+            "description": "mode='create': the source_sha256 from the reviewed preview; binds the booking to the reviewed bytes.",
+            "type": "string"
+          },
+          "supplier_client_id": {
+            "description": "mode='create': the resolved supplier client ID.",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "term_days": {
+            "description": "mode='create': payment term days.",
+            "type": "number"
+          },
+          "vat_price": {
+            "description": "mode='create': EXACT total VAT from the invoice; never recalculate.",
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "name": "process_accounting_document",
+      "title": "Process Accounting Document"
     },
     {
       "annotations": {

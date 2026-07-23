@@ -435,6 +435,43 @@ describe("registerPrompts", () => {
     expect(text).toContain("new supplier record will be created after approval");
   });
 
+  it("surfaces the guided process_accounting_document façade as an approval-gated two-call flow", async () => {
+    const server = setupPromptServer();
+    const text = await getPromptText(server, "book-invoice", { file_path: "/tmp/invoice.pdf" });
+
+    // Façade is named and framed as the guided one-tool flow.
+    expect(text).toContain("process_accounting_document");
+    expect(text).toContain('mode: "prepare"');
+    expect(text).toContain('mode: "create"');
+    expect(text).toContain("summary.plan_handle");
+    // Two-call ordering: prepare/approve BEFORE create; create BEFORE confirm.
+    const prepare = text.indexOf('mode: "prepare"');
+    const approvalStop = text.indexOf("If the user has not explicitly approved the preview, stop here and wait.");
+    const createCall = text.indexOf('mode: "create"');
+    expect(prepare).toBeGreaterThan(-1);
+    expect(approvalStop).toBeGreaterThan(prepare);
+    expect(createCall).toBeGreaterThan(prepare);
+    // Staged safety survives on the façade path.
+    expect(text).toContain("is not approval");
+    expect(text).toContain("confirm_plan");
+    expect(text).toContain("carries NO raw OCR text");
+  });
+
+  it("keeps the shipped book-invoice markdown pointing at the guided façade", () => {
+    for (const relativePath of ["workflows/book-invoice.md", ".claude/commands/book-invoice.md"]) {
+      const text = readPromptSurface(relativePath);
+      expect(text).toContain("process_accounting_document");
+      expect(text).toContain('mode: "prepare"');
+      expect(text).toContain('mode: "create"');
+      expect(text).toContain("summary.plan_handle");
+      // Every staged-safety statement must survive the façade migration.
+      expect(text).toContain("untrusted OCR output");
+      expect(text).toContain("is not approval");
+      expect(text).toContain("confirmation is a distinct, later step");
+      expect(text).toContain("If the user has not explicitly approved the preview, stop here and wait.");
+    }
+  });
+
   it("uses the real reconciliation execution flags and confirm_transaction payload", async () => {
     const server = setupPromptServer();
     const autoText = await getPromptText(server, "reconcile-bank", { mode: "auto" });

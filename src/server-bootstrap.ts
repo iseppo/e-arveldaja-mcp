@@ -47,6 +47,7 @@ import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
 import { registerCamtImportTools } from "./tools/camt-import.js";
 import { registerProcessBankInputTool } from "./guided/process-bank-input.js";
+import { registerProcessAccountingDocumentTool } from "./guided/process-accounting-document.js";
 import { registerCredentialTools, persistCredentialImportViaPlan } from "./tools/credential-tools.js";
 import { registerAccountingInboxTools } from "./tools/accounting-inbox.js";
 import { registerAnalyzeUnconfirmedTools } from "./tools/analyze-unconfirmed.js";
@@ -961,6 +962,7 @@ export async function createMcpServer(
   registerWiseImportTools(publicServer, api, runtimeSafetyContext);
   registerCamtImportTools(publicServer, api, runtimeSafetyContext, toolExposure);
   registerProcessBankInputTool(publicServer, api, runtimeSafetyContext);
+  registerProcessAccountingDocumentTool(publicServer, api, runtimeSafetyContext);
   registerAccountingInboxTools(publicServer, api, runtimeSafetyContext, toolExposure);
   registerAnalyzeUnconfirmedTools(publicServer, api);
   registerWorkflowRecommendationTools(publicServer, toolExposure);

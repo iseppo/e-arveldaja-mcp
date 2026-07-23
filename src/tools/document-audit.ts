@@ -6,6 +6,185 @@ import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
 
+export interface DetectDuplicateFilters {
+  clients_id?: number;
+  date_from?: string;
+  date_to?: string;
+  invoice_number?: string;
+  gross_price?: number;
+}
+
+/**
+ * Pure duplicate-purchase-invoice detection core, EXTRACTED from the
+ * `detect_duplicate_purchase_invoice` handler (behavior-preserving). Returns the
+ * raw computed structure with UNWRAPPED supplier names; the tool handler wraps
+ * `supplier` at MCP output, and the typed AccountingDocumentOperations reuse this
+ * same core with the guided façade owning wrapping instead.
+ */
+export function detectDuplicatePurchaseInvoice(
+  allPurchases: PurchaseInvoice[],
+  { clients_id, date_from, date_to, invoice_number, gross_price }: DetectDuplicateFilters,
+): Record<string, unknown> {
+  const normalizedInvoiceNumber = invoice_number?.trim().toLowerCase();
+
+  const filtered = allPurchases.filter((inv: PurchaseInvoice) => {
+    if (inv.status === "DELETED" || inv.status === "INVALIDATED") return false;
+    if (clients_id && inv.clients_id !== clients_id) return false;
+    if (date_from && inv.create_date < date_from) return false;
+    if (date_to && inv.create_date > date_to) return false;
+    return true;
+  });
+
+  // Group by supplier + invoice number
+  const groups = new Map<string, PurchaseInvoice[]>();
+  for (const inv of filtered) {
+    const key = `${inv.clients_id}:${inv.number.trim().toLowerCase()}`;
+    const group = groups.get(key) ?? [];
+    group.push(inv);
+    groups.set(key, group);
+  }
+
+  const duplicates = [];
+  for (const [, invoices] of groups) {
+    if (invoices.length > 1) {
+      duplicates.push({
+        supplier: invoices[0]!.client_name ?? undefined,
+        invoice_number: invoices[0]!.number,
+        count: invoices.length,
+        invoices: invoices.map(inv => ({
+          id: inv.id,
+          date: inv.create_date,
+          gross: inv.gross_price,
+          status: inv.status,
+        })),
+      });
+    }
+  }
+
+  // Also check for same supplier + same amount + same date (different number)
+  const amountDupes = [];
+  const amountGroups = new Map<string, PurchaseInvoice[]>();
+  for (const inv of filtered) {
+    const key = `${inv.clients_id}:${inv.gross_price}:${inv.create_date}`;
+    const group = amountGroups.get(key) ?? [];
+    group.push(inv);
+    amountGroups.set(key, group);
+  }
+
+  for (const [, invoices] of amountGroups) {
+    if (invoices.length > 1) {
+      const numbers = new Set(invoices.map(i => i.number));
+      if (numbers.size > 1) { // Different invoice numbers but same amount+date
+        amountDupes.push({
+          supplier: invoices[0]!.client_name ?? undefined,
+          amount: invoices[0]!.gross_price,
+          date: invoices[0]!.create_date,
+          invoices: invoices.map(inv => ({
+            id: inv.id,
+            number: inv.number,
+            status: inv.status,
+          })),
+        });
+      }
+    }
+  }
+
+  const candidateInvoiceNumberMatches = normalizedInvoiceNumber
+    ? filtered.filter(inv => inv.number.trim().toLowerCase() === normalizedInvoiceNumber)
+    : [];
+  const candidateSameAmountDateMatches = gross_price !== undefined
+    ? filtered.filter(inv => inv.gross_price !== undefined && Math.abs(inv.gross_price - gross_price) <= 0.02)
+    : [];
+
+  // Also look at invalidated/deleted invoices for the candidate so the caller
+  // sees "we tried to book this before and voided it" instead of assuming new.
+  const voidedCandidates = allPurchases.filter((inv) => {
+    if (inv.status !== "DELETED" && inv.status !== "INVALIDATED") return false;
+    if (clients_id && inv.clients_id !== clients_id) return false;
+    if (date_from && inv.create_date < date_from) return false;
+    if (date_to && inv.create_date > date_to) return false;
+    const numberMatch = normalizedInvoiceNumber
+      ? inv.number.trim().toLowerCase() === normalizedInvoiceNumber
+      : false;
+    const amountMatch = gross_price !== undefined &&
+      inv.gross_price !== undefined &&
+      Math.abs(inv.gross_price - gross_price) <= 0.02;
+    return numberMatch || amountMatch;
+  });
+
+  return {
+    exact_duplicates: {
+      count: duplicates.length,
+      items: duplicates,
+    },
+    suspicious_same_amount_date: {
+      count: amountDupes.length,
+      items: amountDupes,
+    },
+    candidate_invoice_number_matches: {
+      count: candidateInvoiceNumberMatches.length,
+      items: candidateInvoiceNumberMatches.map(inv => ({
+        id: inv.id,
+        supplier: inv.client_name ?? undefined,
+        supplier_id: inv.clients_id,
+        invoice_number: inv.number,
+        date: inv.create_date,
+        gross: inv.gross_price,
+        status: inv.status,
+      })),
+    },
+    candidate_same_amount_date_matches: {
+      count: candidateSameAmountDateMatches.length,
+      items: candidateSameAmountDateMatches.map(inv => ({
+        id: inv.id,
+        supplier: inv.client_name ?? undefined,
+        supplier_id: inv.clients_id,
+        invoice_number: inv.number,
+        date: inv.create_date,
+        gross: inv.gross_price,
+        status: inv.status,
+      })),
+    },
+    candidate_invalidated_matches: {
+      count: voidedCandidates.length,
+      note: voidedCandidates.length > 0
+        ? "A previous booking of this same supplier+number or supplier+amount+date was invalidated or deleted — verify this isn't a re-attempt before creating."
+        : undefined,
+      items: voidedCandidates.map(inv => ({
+        id: inv.id,
+        supplier: inv.client_name ?? undefined,
+        supplier_id: inv.clients_id,
+        invoice_number: inv.number,
+        date: inv.create_date,
+        gross: inv.gross_price,
+        status: inv.status,
+      })),
+    },
+    candidate_duplicate_risk:
+      candidateInvoiceNumberMatches.length > 0 || candidateSameAmountDateMatches.length > 0,
+    total_invoices_checked: filtered.length,
+  };
+}
+
+/** Wrap every `supplier` string in a duplicate-detection result at MCP output. */
+function wrapDuplicateSuppliers(result: Record<string, unknown>): Record<string, unknown> {
+  const wrapItems = (items: Array<Record<string, unknown>>) =>
+    items.map(item => ({ ...item, supplier: wrapUntrustedOcr((item.supplier as string | undefined) ?? undefined) }));
+  const section = (value: unknown) => {
+    const s = value as { count: number; items: Array<Record<string, unknown>>; note?: unknown };
+    return { ...s, items: wrapItems(s.items) };
+  };
+  return {
+    exact_duplicates: section(result.exact_duplicates),
+    suspicious_same_amount_date: section(result.suspicious_same_amount_date),
+    candidate_invoice_number_matches: section(result.candidate_invoice_number_matches),
+    candidate_same_amount_date_matches: section(result.candidate_same_amount_date_matches),
+    candidate_invalidated_matches: section(result.candidate_invalidated_matches),
+    candidate_duplicate_risk: result.candidate_duplicate_risk,
+    total_invoices_checked: result.total_invoices_checked,
+  };
+}
+
 export function registerDocumentAuditTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "find_missing_documents",
@@ -100,148 +279,11 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
     { ...readOnly, title: "Detect Duplicate Purchase Invoices" },
     async ({ clients_id, date_from, date_to, invoice_number, gross_price }) => {
       const allPurchases = await api.purchaseInvoices.listAll();
-      const normalizedInvoiceNumber = invoice_number?.trim().toLowerCase();
-
-      const filtered = allPurchases.filter((inv: PurchaseInvoice) => {
-        if (inv.status === "DELETED" || inv.status === "INVALIDATED") return false;
-        if (clients_id && inv.clients_id !== clients_id) return false;
-        if (date_from && inv.create_date < date_from) return false;
-        if (date_to && inv.create_date > date_to) return false;
-        return true;
-      });
-
-      // Group by supplier + invoice number
-      const groups = new Map<string, PurchaseInvoice[]>();
-      for (const inv of filtered) {
-        const key = `${inv.clients_id}:${inv.number.trim().toLowerCase()}`;
-        const group = groups.get(key) ?? [];
-        group.push(inv);
-        groups.set(key, group);
-      }
-
-      const duplicates = [];
-      for (const [, invoices] of groups) {
-        if (invoices.length > 1) {
-          duplicates.push({
-            supplier: wrapUntrustedOcr(invoices[0]!.client_name ?? undefined),
-            invoice_number: invoices[0]!.number,
-            count: invoices.length,
-            invoices: invoices.map(inv => ({
-              id: inv.id,
-              date: inv.create_date,
-              gross: inv.gross_price,
-              status: inv.status,
-            })),
-          });
-        }
-      }
-
-      // Also check for same supplier + same amount + same date (different number)
-      const amountDupes = [];
-      const amountGroups = new Map<string, PurchaseInvoice[]>();
-      for (const inv of filtered) {
-        const key = `${inv.clients_id}:${inv.gross_price}:${inv.create_date}`;
-        const group = amountGroups.get(key) ?? [];
-        group.push(inv);
-        amountGroups.set(key, group);
-      }
-
-      for (const [, invoices] of amountGroups) {
-        if (invoices.length > 1) {
-          const numbers = new Set(invoices.map(i => i.number));
-          if (numbers.size > 1) { // Different invoice numbers but same amount+date
-            amountDupes.push({
-              supplier: wrapUntrustedOcr(invoices[0]!.client_name ?? undefined),
-              amount: invoices[0]!.gross_price,
-              date: invoices[0]!.create_date,
-              invoices: invoices.map(inv => ({
-                id: inv.id,
-                number: inv.number,
-                status: inv.status,
-              })),
-            });
-          }
-        }
-      }
-
-      const candidateInvoiceNumberMatches = normalizedInvoiceNumber
-        ? filtered.filter(inv => inv.number.trim().toLowerCase() === normalizedInvoiceNumber)
-        : [];
-      const candidateSameAmountDateMatches = gross_price !== undefined
-        ? filtered.filter(inv => inv.gross_price !== undefined && Math.abs(inv.gross_price - gross_price) <= 0.02)
-        : [];
-
-      // Also look at invalidated/deleted invoices for the candidate so the caller
-      // sees "we tried to book this before and voided it" instead of assuming new.
-      const voidedCandidates = allPurchases.filter((inv) => {
-        if (inv.status !== "DELETED" && inv.status !== "INVALIDATED") return false;
-        if (clients_id && inv.clients_id !== clients_id) return false;
-        if (date_from && inv.create_date < date_from) return false;
-        if (date_to && inv.create_date > date_to) return false;
-        const numberMatch = normalizedInvoiceNumber
-          ? inv.number.trim().toLowerCase() === normalizedInvoiceNumber
-          : false;
-        const amountMatch = gross_price !== undefined &&
-          inv.gross_price !== undefined &&
-          Math.abs(inv.gross_price - gross_price) <= 0.02;
-        return numberMatch || amountMatch;
-      });
-
+      const result = detectDuplicatePurchaseInvoice(allPurchases, { clients_id, date_from, date_to, invoice_number, gross_price });
       return {
         content: [{
           type: "text",
-          text: toMcpJson({
-            exact_duplicates: {
-              count: duplicates.length,
-              items: duplicates,
-            },
-            suspicious_same_amount_date: {
-              count: amountDupes.length,
-              items: amountDupes,
-            },
-            candidate_invoice_number_matches: {
-              count: candidateInvoiceNumberMatches.length,
-              items: candidateInvoiceNumberMatches.map(inv => ({
-                id: inv.id,
-                supplier: wrapUntrustedOcr(inv.client_name ?? undefined),
-                supplier_id: inv.clients_id,
-                invoice_number: inv.number,
-                date: inv.create_date,
-                gross: inv.gross_price,
-                status: inv.status,
-              })),
-            },
-            candidate_same_amount_date_matches: {
-              count: candidateSameAmountDateMatches.length,
-              items: candidateSameAmountDateMatches.map(inv => ({
-                id: inv.id,
-                supplier: wrapUntrustedOcr(inv.client_name ?? undefined),
-                supplier_id: inv.clients_id,
-                invoice_number: inv.number,
-                date: inv.create_date,
-                gross: inv.gross_price,
-                status: inv.status,
-              })),
-            },
-            candidate_invalidated_matches: {
-              count: voidedCandidates.length,
-              note: voidedCandidates.length > 0
-                ? "A previous booking of this same supplier+number or supplier+amount+date was invalidated or deleted — verify this isn't a re-attempt before creating."
-                : undefined,
-              items: voidedCandidates.map(inv => ({
-                id: inv.id,
-                supplier: wrapUntrustedOcr(inv.client_name ?? undefined),
-                supplier_id: inv.clients_id,
-                invoice_number: inv.number,
-                date: inv.create_date,
-                gross: inv.gross_price,
-                status: inv.status,
-              })),
-            },
-            candidate_duplicate_risk:
-              candidateInvoiceNumberMatches.length > 0 || candidateSameAmountDateMatches.length > 0,
-            total_invoices_checked: filtered.length,
-          }),
+          text: toMcpJson(wrapDuplicateSuppliers(result)),
         }],
       };
     }

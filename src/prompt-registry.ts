@@ -210,8 +210,8 @@ const PROMPT_DEFINITIONS = [
       file_path: absolutePath("Absolute path to the invoice document file (PDF/JPG/PNG)"),
     },
     setupOptions: {
-      offlineTools: ["extract_pdf_invoice", "validate_invoice_data"],
-      note: "Supplier resolution, duplicate detection, booking suggestions, invoice creation, and confirmation all require configured e-arveldaja credentials.",
+      offlineTools: ["process_accounting_document", "extract_pdf_invoice", "validate_invoice_data"],
+      note: "The guided one-tool flow (process_accounting_document), supplier resolution, duplicate detection, booking suggestions, invoice creation, and confirmation all require configured e-arveldaja credentials.",
     },
     featurePredicate: enabled,
     variants: NO_VARIANTS,

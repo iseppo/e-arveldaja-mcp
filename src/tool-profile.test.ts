@@ -22,14 +22,14 @@ describe("tool profiles", () => {
   it("pins the opt-in guided inventories", () => {
     expect([...GUIDED_TOOL_NAMES]).toEqual([
       "recommend_workflow", "accounting_inbox", "continue_accounting_workflow", "receipt_batch",
-      "process_bank_input", "reconcile_bank_transactions",
+      "process_accounting_document", "process_bank_input", "reconcile_bank_transactions",
       "reconcile_inter_account_transfers", "classify_bank_transactions", "cleanup_camt_possible_duplicate",
       "save_auto_booking_rule", "compute_trial_balance", "list_connections", "switch_connection",
       "get_setup_instructions", "get_execution_plan_page", "get_operation_result_page", "get_session_log",
     ]);
     const guided = TOOL_CATALOG.filter((entry) => isToolVisibleForProfile(entry.name, "guided"));
     const guidedSales = TOOL_CATALOG.filter((entry) => isToolVisibleForProfile(entry.name, "guided-sales"));
-    expect(guided).toHaveLength(17);
+    expect(guided).toHaveLength(18);
     expect(guidedSales.map(({ name }) => name).filter((name) => !GUIDED_TOOL_NAMES.includes(name))).toEqual([
       "list_sale_invoices", "get_sale_invoice",
     ]);
