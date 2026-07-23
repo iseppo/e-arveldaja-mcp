@@ -215,9 +215,9 @@ export function registerBankReconciliationTools(
   );
 
   registerTool(server, "reconcile_bank_transactions",
-    "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, and mode='inter_account_dry_run' for own-account transfer detection.",
+    "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
     {
-      mode: z.enum(["suggest", "dry_run_auto_confirm", "execute_auto_confirm", "inter_account_dry_run"])
+      mode: z.enum(["suggest", "dry_run_auto_confirm", "execute_auto_confirm", "inter_account_dry_run", "execute_inter_account"])
         .optional()
         .describe("Workflow phase to run. Defaults to suggest."),
       min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence threshold for invoice matching modes."),
@@ -230,7 +230,7 @@ export function registerBankReconciliationTools(
         "For the invoice-matching modes (suggest / dry_run_auto_confirm / execute_auto_confirm): refuse (or, in suggest, flag) an exact match whose cash movement appears already booked by another journal. Default false = advisory only."
       ),
       plan_handle: z.string().optional().describe(
-        "Execution-plan handle from the reviewed dry run. Required for mode='execute_auto_confirm' and forwarded to the confirm executor."
+        "Execution-plan handle from the reviewed dry run. Required for mode='execute_auto_confirm' and mode='execute_inter_account', and forwarded to the executor."
       ),
     },
     { ...batch, title: "Reconcile Bank Transactions" },
@@ -263,6 +263,16 @@ export function registerBankReconciliationTools(
               const outcome = await operations.prepareInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id });
               if (!outcome.ok) return reconPlanError(outcome.error.code, outcome.error.message);
               return compactResponse(renderInterAccountCompact({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle, connectionName }));
+            }
+            case "execute_inter_account": {
+              const outcome = await operations.executeInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, planHandle: plan_handle });
+              if (!outcome.ok) return reconPlanError(outcome.error.code, outcome.error.message);
+              const operationHandle = issueReconResultHandle(
+                buildReconInterAccountResultDetailItems(outcome.value.match),
+                plan_handle,
+                outcome.value.executionReport,
+              );
+              return compactResponse(renderInterAccountCompact({ mode: "EXECUTED", match: outcome.value.match, executionReport: outcome.value.executionReport, operationHandle, connectionName }));
             }
             default: {
               const outcome = await operations.suggestMatches({ minConfidence: min_confidence, blockOnDuplicate: block_on_duplicate });
@@ -312,6 +322,15 @@ export function registerBankReconciliationTools(
             ...(target_accounts_dimensions_id !== undefined ? { target_accounts_dimensions_id } : {}),
           };
           break;
+        case "execute_inter_account":
+          delegatedTool = "reconcile_inter_account_transfers";
+          delegatedArgs = {
+            execute: true,
+            ...(max_date_gap !== undefined ? { max_date_gap } : {}),
+            ...(target_accounts_dimensions_id !== undefined ? { target_accounts_dimensions_id } : {}),
+            ...(plan_handle !== undefined ? { plan_handle } : {}),
+          };
+          break;
       }
 
       let result: Record<string, unknown>;
@@ -333,6 +352,13 @@ export function registerBankReconciliationTools(
             const outcome = await operations.executeExactConfirm({ minConfidence: min_confidence, blockOnDuplicate: block_on_duplicate, planHandle: plan_handle });
             result = outcome.ok
               ? renderExactMatchPayload({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport })
+              : reconPlanErrorPayload(outcome.error.code, outcome.error.message);
+            break;
+          }
+          case "execute_inter_account": {
+            const outcome = await operations.executeInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, planHandle: plan_handle });
+            result = outcome.ok
+              ? buildInterAccountPayload({ mode: "EXECUTED", match: outcome.value.match, executionReport: outcome.value.executionReport })
               : reconPlanErrorPayload(outcome.error.code, outcome.error.message);
             break;
           }

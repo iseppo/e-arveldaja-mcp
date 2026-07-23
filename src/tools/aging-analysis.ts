@@ -78,6 +78,115 @@ function signedEffectiveGross(inv: {
   return inv.sale_invoice_type === "CREDIT_INVOICE" ? -Math.abs(amount) : amount;
 }
 
+// Minimal structural shape the pure aging core needs from either a SaleInvoice
+// or a PurchaseInvoice. Kept permissive so both entity types (and the reporting
+// op) can feed it.
+export interface AgingInvoiceInput {
+  id?: number;
+  number?: string;
+  client_name?: string | null;
+  clients_id?: number | null;
+  create_date?: string;
+  term_days?: number | null;
+  payment_status?: string;
+  status?: string;
+  base_gross_price?: number | null;
+  gross_price?: number | null;
+  sale_invoice_type?: string;
+}
+
+// Raw, unformatted aging computation — the single source of the bucketing
+// math (bucket boundaries, signedEffectiveGross/CREDIT_INVOICE handling, the
+// create_date <= asOfDate gate, top-N slicing, rounding). Callers add their own
+// output shape/warnings/OCR-wrapping. Both compute_receivables_aging and
+// compute_payables_aging and the run_accounting_report aging op route through
+// this so the accounting logic can never drift between copies.
+export interface AgingComputation {
+  total_unpaid_face_value: number;
+  total_invoices: number;
+  partially_paid_count: number;
+  missing_term_days_count: number;
+  aging_buckets: AgingBucket[];
+  top_parties: NamedTotal[];
+  unmatched: { count: number; total: number; oldest_days: number };
+}
+
+export function computeAgingBuckets(
+  invoices: readonly AgingInvoiceInput[],
+  asOfDate: string,
+): AgingComputation {
+  const unpaid = invoices.filter(inv =>
+    inv.payment_status !== "PAID" && inv.status === "CONFIRMED" &&
+    // Exclude future-dated invoices: an invoice issued after the as-of-date
+    // cutoff must not appear in that historical aging snapshot.
+    (inv.create_date == null || inv.create_date <= asOfDate)
+  );
+  const partiallyPaidCount = unpaid.filter(inv => inv.payment_status === "PARTIALLY_PAID").length;
+  const missingTermDaysCount = unpaid.filter(inv => inv.term_days == null).length;
+
+  const buckets = new Map<string, AgingBucket>();
+  const byParty = new Map<number, { name: string; total: number; oldest_days: number }>();
+  const unmatched = { count: 0, total: 0, oldest_days: 0 };
+
+  for (const inv of unpaid) {
+    // Missing term_days defaults to 0 (due on issue date) instead of
+    // producing an invalid due date that would abort the whole report.
+    const dueDateStr = addDaysToDate(inv.create_date ?? asOfDate, inv.term_days ?? 0);
+    const daysOverdue = daysBetween(dueDateStr, asOfDate);
+    const label = bucketLabel(daysOverdue);
+    const amount = signedEffectiveGross(inv);
+
+    const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };
+    bucket.count++;
+    bucket.total = roundMoney(bucket.total + amount);
+    bucket.invoices.push({
+      id: inv.id!,
+      number: inv.number ?? "",
+      client: inv.client_name ?? "",
+      amount: roundMoney(amount),
+      payment_status: inv.payment_status ?? "NOT_PAID",
+      days_overdue: Math.max(0, daysOverdue),
+    });
+    buckets.set(label, bucket);
+
+    // Null clients_id (e.g. card-payment-linked invoices) would collapse into a
+    // single nameless entry if keyed on `null`. Route them into a dedicated
+    // unmatched counter so the top-N party list stays meaningful.
+    if (inv.clients_id == null) {
+      unmatched.count++;
+      unmatched.total = roundMoney(unmatched.total + amount);
+      unmatched.oldest_days = Math.max(unmatched.oldest_days, daysOverdue);
+    } else {
+      const entry = byParty.get(inv.clients_id) ?? { name: inv.client_name ?? "", total: 0, oldest_days: 0 };
+      entry.total = roundMoney(entry.total + amount);
+      entry.oldest_days = Math.max(entry.oldest_days, daysOverdue);
+      byParty.set(inv.clients_id, entry);
+    }
+  }
+
+  const r = roundMoney;
+  const order = ["current", "1-30", "31-60", "61-90", "90+"];
+  const sortedBuckets = order
+    .map(label => buckets.get(label))
+    .filter((b): b is AgingBucket => !!b)
+    .map(b => ({ ...b, total: r(b.total), invoices: b.invoices.sort((a, b) => b.amount - a.amount).slice(0, 10) }));
+
+  const topParties = [...byParty.entries()]
+    .sort(([, a], [, b]) => b.total - a.total)
+    .slice(0, 10)
+    .map(([id, v]) => ({ clients_id: id, name: v.name, total: r(v.total), oldest_days: v.oldest_days }));
+
+  return {
+    total_unpaid_face_value: unpaid.reduce((s, inv) => roundMoney(s + signedEffectiveGross(inv)), 0),
+    total_invoices: unpaid.length,
+    partially_paid_count: partiallyPaidCount,
+    missing_term_days_count: missingTermDaysCount,
+    aging_buckets: sortedBuckets,
+    top_parties: topParties,
+    unmatched,
+  };
+}
+
 export function registerAgingTools(
   server: McpServer,
   api: ApiContext,
@@ -98,67 +207,11 @@ export function registerAgingTools(
 
 
       const allSales = await api.saleInvoices.listAll();
-      const unpaid = allSales.filter((inv: SaleInvoice) =>
-        inv.payment_status !== "PAID" && inv.status === "CONFIRMED" &&
-        // Exclude future-dated invoices: an invoice issued after the as-of-date
-        // cutoff must not appear in that historical aging snapshot.
-        (inv.create_date == null || inv.create_date <= today)
-      );
-      const partiallyPaidCount = unpaid.filter((inv: SaleInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
-      const missingTermDaysCount = unpaid.filter((inv: SaleInvoice) => inv.term_days == null).length;
-
-      const buckets = new Map<string, AgingBucket>();
-      const byClient = new Map<number, { name: string; total: number; oldest_days: number }>();
-      const unmatched = { count: 0, total: 0, oldest_days: 0 };
-
-      for (const inv of unpaid) {
-        // Missing term_days defaults to 0 (due on issue date) instead of
-        // producing an invalid due date that would abort the whole report.
-        const dueDateStr = addDaysToDate(inv.create_date, inv.term_days ?? 0);
-        const daysOverdue = daysBetween(dueDateStr, today);
-        const label = bucketLabel(daysOverdue);
-        const amount = signedEffectiveGross(inv);
-
-        const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };
-        bucket.count++;
-        bucket.total = roundMoney(bucket.total + amount);
-        bucket.invoices.push({
-          id: inv.id!,
-          number: inv.number ?? "",
-          client: inv.client_name ?? "",
-          amount: roundMoney(amount),
-          payment_status: inv.payment_status ?? "NOT_PAID",
-          days_overdue: Math.max(0, daysOverdue),
-        });
-        buckets.set(label, bucket);
-
-        // Null clients_id (e.g. card-payment-linked invoices) would collapse
-        // into a single nameless by-client entry if keyed on `null`. Route
-        // them into a dedicated unmatched counter so the top-debtors list
-        // stays meaningful.
-        if (inv.clients_id == null) {
-          unmatched.count++;
-          unmatched.total = roundMoney(unmatched.total + amount);
-          unmatched.oldest_days = Math.max(unmatched.oldest_days, daysOverdue);
-        } else {
-          const clientEntry = byClient.get(inv.clients_id) ?? { name: inv.client_name ?? "", total: 0, oldest_days: 0 };
-          clientEntry.total = roundMoney(clientEntry.total + amount);
-          clientEntry.oldest_days = Math.max(clientEntry.oldest_days, daysOverdue);
-          byClient.set(inv.clients_id, clientEntry);
-        }
-      }
-
+      const computed = computeAgingBuckets(allSales as AgingInvoiceInput[], today);
+      const { partially_paid_count: partiallyPaidCount, missing_term_days_count: missingTermDaysCount, unmatched } = computed;
       const r = roundMoney;
-      const order = ["current", "1-30", "31-60", "61-90", "90+"];
-      const sortedBuckets = order
-        .map(label => buckets.get(label))
-        .filter((b): b is AgingBucket => !!b)
-        .map(b => ({ ...b, total: r(b.total), invoices: b.invoices.sort((a, b) => b.amount - a.amount).slice(0, 10) }));
-
-      const topDebtors = [...byClient.entries()]
-        .sort(([, a], [, b]) => b.total - a.total)
-        .slice(0, 10)
-        .map(([id, v]) => ({ clients_id: id, name: v.name, total: r(v.total), oldest_days: v.oldest_days }));
+      const sortedBuckets = computed.aging_buckets;
+      const topDebtors = computed.top_parties;
 
       const warnings = [];
       if (partiallyPaidCount > 0) {
@@ -178,8 +231,8 @@ export function registerAgingTools(
           type: "text",
           text: toMcpJson({
             as_of_date: today,
-            total_unpaid_face_value: unpaid.reduce((s: number, inv: SaleInvoice) => roundMoney(s + signedEffectiveGross(inv)), 0),
-            total_invoices: unpaid.length,
+            total_unpaid_face_value: computed.total_unpaid_face_value,
+            total_invoices: computed.total_invoices,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sanitizeAgingBucketsForOutput(sortedBuckets),
             top_debtors: sanitizeNamedTotalsForOutput(topDebtors),
@@ -205,65 +258,11 @@ export function registerAgingTools(
 
 
       const allPurchases = await api.purchaseInvoices.listAll();
-      const unpaid = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.payment_status !== "PAID" && inv.status === "CONFIRMED" &&
-        // Exclude future-dated invoices: an invoice issued after the as-of-date
-        // cutoff must not appear in that historical aging snapshot.
-        (inv.create_date == null || inv.create_date <= today)
-      );
-      const partiallyPaidCount = unpaid.filter((inv: PurchaseInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
-      const missingTermDaysCount = unpaid.filter((inv: PurchaseInvoice) => inv.term_days == null).length;
-
-      const buckets = new Map<string, AgingBucket>();
-      const bySupplier = new Map<number, { name: string; total: number; oldest_days: number }>();
-      const unmatched = { count: 0, total: 0, oldest_days: 0 };
-
-      for (const inv of unpaid) {
-        // Missing term_days defaults to 0 (due on issue date) instead of
-        // producing an invalid due date that would abort the whole report.
-        const dueDateStr = addDaysToDate(inv.create_date, inv.term_days ?? 0);
-        const daysOverdue = daysBetween(dueDateStr, today);
-        const label = bucketLabel(daysOverdue);
-        const amount = signedEffectiveGross(inv);
-
-        const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };
-        bucket.count++;
-        bucket.total = roundMoney(bucket.total + amount);
-        bucket.invoices.push({
-          id: inv.id!,
-          number: inv.number,
-          client: inv.client_name,
-          amount: roundMoney(amount),
-          payment_status: inv.payment_status ?? "NOT_PAID",
-          days_overdue: Math.max(0, daysOverdue),
-        });
-        buckets.set(label, bucket);
-
-        // Same null-supplier handling as the receivables side — route null
-        // clients_id to a dedicated unmatched counter.
-        if (inv.clients_id == null) {
-          unmatched.count++;
-          unmatched.total = roundMoney(unmatched.total + amount);
-          unmatched.oldest_days = Math.max(unmatched.oldest_days, daysOverdue);
-        } else {
-          const supplierEntry = bySupplier.get(inv.clients_id) ?? { name: inv.client_name, total: 0, oldest_days: 0 };
-          supplierEntry.total = roundMoney(supplierEntry.total + amount);
-          supplierEntry.oldest_days = Math.max(supplierEntry.oldest_days, daysOverdue);
-          bySupplier.set(inv.clients_id, supplierEntry);
-        }
-      }
-
+      const computed = computeAgingBuckets(allPurchases as AgingInvoiceInput[], today);
+      const { partially_paid_count: partiallyPaidCount, missing_term_days_count: missingTermDaysCount, unmatched } = computed;
       const r = roundMoney;
-      const order = ["current", "1-30", "31-60", "61-90", "90+"];
-      const sortedBuckets = order
-        .map(label => buckets.get(label))
-        .filter((b): b is AgingBucket => !!b)
-        .map(b => ({ ...b, total: r(b.total), invoices: b.invoices.sort((a, b) => b.amount - a.amount).slice(0, 10) }));
-
-      const topCreditors = [...bySupplier.entries()]
-        .sort(([, a], [, b]) => b.total - a.total)
-        .slice(0, 10)
-        .map(([id, v]) => ({ clients_id: id, name: v.name, total: r(v.total), oldest_days: v.oldest_days }));
+      const sortedBuckets = computed.aging_buckets;
+      const topCreditors = computed.top_parties;
 
       const warnings = [];
       if (partiallyPaidCount > 0) {
@@ -283,8 +282,8 @@ export function registerAgingTools(
           type: "text",
           text: toMcpJson({
             as_of_date: today,
-            total_unpaid_face_value: unpaid.reduce((s: number, inv: PurchaseInvoice) => roundMoney(s + signedEffectiveGross(inv)), 0),
-            total_invoices: unpaid.length,
+            total_unpaid_face_value: computed.total_unpaid_face_value,
+            total_invoices: computed.total_invoices,
             partially_paid_count: partiallyPaidCount,
             aging_buckets: sanitizeAgingBucketsForOutput(sortedBuckets),
             top_creditors: sanitizeNamedTotalsForOutput(topCreditors),

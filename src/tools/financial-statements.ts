@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
-import type { Account, Journal, SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import type { Account, Journal, SaleInvoice, PurchaseInvoice, Transaction } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -144,6 +144,97 @@ function getMonthLastDay(month: string): number {
 }
 
 const monthRegex = /^\d{4}-\d{2}$/;
+
+// Raw month-end gather scan — the single source of the unconfirmed/overdue
+// filtering (journal registered/deleted gate, PROJECT status, journal_date and
+// term-based overdue math). Callers (month_end_close_checklist and the
+// run_accounting_report month_end op) add their own output shape/warnings/
+// OCR-wrapping so the accounting logic can never drift between copies.
+export interface MonthEndScanInput {
+  readonly journals: readonly Journal[];
+  readonly transactions: readonly Transaction[];
+  readonly saleInvoices: readonly SaleInvoice[];
+  readonly purchaseInvoices: readonly PurchaseInvoice[];
+  readonly dateFrom: string;
+  readonly dateTo: string;
+}
+
+export interface MonthEndScan {
+  unconfirmedJournals: Journal[];
+  unconfirmedTransactions: Transaction[];
+  unconfirmedSales: SaleInvoice[];
+  unconfirmedPurchases: PurchaseInvoice[];
+  overdueReceivables: SaleInvoice[];
+  overduePayables: PurchaseInvoice[];
+  missingTermDays: Array<{ entity: "sale_invoice" | "purchase_invoice"; id: number | undefined; number: string }>;
+  partiallyPaidReceivables: number;
+  partiallyPaidPayables: number;
+}
+
+export function gatherMonthEndScan(input: MonthEndScanInput): MonthEndScan {
+  const { journals, transactions, saleInvoices, purchaseInvoices, dateFrom, dateTo } = input;
+
+  const unconfirmedJournals = journals.filter(j =>
+    !j.is_deleted && !j.registered &&
+    j.effective_date >= dateFrom && j.effective_date <= dateTo
+  );
+
+  const unconfirmedTransactions = transactions.filter(tx =>
+    isProjectTransaction(tx) &&
+    tx.date >= dateFrom && tx.date <= dateTo
+  );
+
+  const unconfirmedSales = saleInvoices.filter(inv =>
+    inv.status === "PROJECT" &&
+    inv.journal_date >= dateFrom && inv.journal_date <= dateTo
+  );
+
+  const unconfirmedPurchases = purchaseInvoices.filter(inv =>
+    inv.status === "PROJECT" &&
+    inv.journal_date >= dateFrom && inv.journal_date <= dateTo
+  );
+
+  // Overdue check compares to the month-end date for reproducibility.
+  // term_days is typed as required but the upstream API occasionally serves it
+  // as null/undefined; treat missing as 0 so the invoice is still evaluated
+  // rather than silently dropped via NaN comparison.
+  const missingTermDays: Array<{ entity: "sale_invoice" | "purchase_invoice"; id: number | undefined; number: string }> = [];
+  const isOverdue = (
+    entity: "sale_invoice" | "purchase_invoice",
+    inv: SaleInvoice | PurchaseInvoice,
+  ): boolean => {
+    const term = inv.term_days;
+    if (term === undefined || term === null) {
+      missingTermDays.push({ entity, id: inv.id, number: inv.number ?? "" });
+    }
+    const d = new Date(inv.create_date + "T12:00:00Z");
+    d.setUTCDate(d.getUTCDate() + (term ?? 0));
+    return d.toISOString().split("T")[0]! < dateTo;
+  };
+
+  const overdueReceivables = saleInvoices.filter(inv =>
+    inv.payment_status !== "PAID" && inv.status === "CONFIRMED" && isOverdue("sale_invoice", inv)
+  );
+
+  const overduePayables = purchaseInvoices.filter(inv =>
+    inv.payment_status !== "PAID" && inv.status === "CONFIRMED" && isOverdue("purchase_invoice", inv)
+  );
+
+  const partiallyPaidReceivables = overdueReceivables.filter(inv => inv.payment_status === "PARTIALLY_PAID").length;
+  const partiallyPaidPayables = overduePayables.filter(inv => inv.payment_status === "PARTIALLY_PAID").length;
+
+  return {
+    unconfirmedJournals,
+    unconfirmedTransactions,
+    unconfirmedSales,
+    unconfirmedPurchases,
+    overdueReceivables,
+    overduePayables,
+    missingTermDays,
+    partiallyPaidReceivables,
+    partiallyPaidPayables,
+  };
+}
 
 export function registerFinancialStatementTools(
   server: McpServer,
@@ -359,54 +450,25 @@ export function registerFinancialStatementTools(
         api.purchaseInvoices.listAll(),
       ]);
 
-      const unconfirmedJournals = allJournals.filter(j =>
-        !j.is_deleted && !j.registered &&
-        j.effective_date >= dateFrom && j.effective_date <= dateTo
-      );
+      const {
+        unconfirmedJournals,
+        unconfirmedTransactions: unconfirmedTx,
+        unconfirmedSales,
+        unconfirmedPurchases,
+        overdueReceivables,
+        overduePayables,
+        missingTermDays,
+        partiallyPaidReceivables,
+        partiallyPaidPayables,
+      } = gatherMonthEndScan({
+        journals: allJournals,
+        transactions: allTx,
+        saleInvoices: allSales,
+        purchaseInvoices: allPurchases,
+        dateFrom,
+        dateTo,
+      });
 
-      const unconfirmedTx = allTx.filter(tx =>
-        isProjectTransaction(tx) &&
-        tx.date >= dateFrom && tx.date <= dateTo
-      );
-
-      const unconfirmedSales = allSales.filter((inv: SaleInvoice) =>
-        inv.status === "PROJECT" &&
-        inv.journal_date >= dateFrom && inv.journal_date <= dateTo
-      );
-
-      const unconfirmedPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.status === "PROJECT" &&
-        inv.journal_date >= dateFrom && inv.journal_date <= dateTo
-      );
-
-      // Overdue receivables (compare to month-end date for reproducibility).
-      // term_days is typed as required but the upstream API occasionally serves
-      // it as null/undefined; treat missing as 0 so the invoice is still
-      // evaluated rather than silently dropped via NaN comparison.
-      const missingTermDays: Array<{ entity: "sale_invoice" | "purchase_invoice"; id: number | undefined; number: string }> = [];
-      const isOverdue = (
-        entity: "sale_invoice" | "purchase_invoice",
-        inv: SaleInvoice | PurchaseInvoice,
-      ): boolean => {
-        const term = inv.term_days;
-        if (term === undefined || term === null) {
-          missingTermDays.push({ entity, id: inv.id, number: inv.number ?? "" });
-        }
-        const d = new Date(inv.create_date + "T12:00:00Z");
-        d.setUTCDate(d.getUTCDate() + (term ?? 0));
-        return d.toISOString().split("T")[0]! < dateTo;
-      };
-
-      const overdueReceivables = allSales.filter((inv: SaleInvoice) =>
-        inv.payment_status !== "PAID" && inv.status === "CONFIRMED" && isOverdue("sale_invoice", inv)
-      );
-
-      const overduePayables = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.payment_status !== "PAID" && inv.status === "CONFIRMED" && isOverdue("purchase_invoice", inv)
-      );
-
-      const partiallyPaidReceivables = overdueReceivables.filter((inv: SaleInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
-      const partiallyPaidPayables = overduePayables.filter((inv: PurchaseInvoice) => inv.payment_status === "PARTIALLY_PAID").length;
       const warnings: string[] = [];
       if (partiallyPaidReceivables > 0) {
         warnings.push(`${partiallyPaidReceivables} overdue receivable(s) are PARTIALLY_PAID and shown at full invoice amount; remaining balance may be lower.`);

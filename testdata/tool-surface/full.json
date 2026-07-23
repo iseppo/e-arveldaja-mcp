@@ -1,10 +1,10 @@
 {
   "profile": "full",
   "measurement": {
-    "toolCount": 142,
-    "toolsListBytes": 142128,
-    "descriptionsBytes": 18384,
-    "inputSchemasBytes": 89471,
+    "toolCount": 146,
+    "toolsListBytes": 148206,
+    "descriptionsBytes": 19658,
+    "inputSchemasBytes": 93298,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -3933,7 +3933,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, and mode='inter_account_dry_run' for own-account transfer detection.",
+      "description": "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -3962,12 +3962,13 @@
               "suggest",
               "dry_run_auto_confirm",
               "execute_auto_confirm",
-              "inter_account_dry_run"
+              "inter_account_dry_run",
+              "execute_inter_account"
             ],
             "type": "string"
           },
           "plan_handle": {
-            "description": "Execution-plan handle from the reviewed dry run. Required for mode='execute_auto_confirm' and forwarded to the confirm executor.",
+            "description": "Execution-plan handle from the reviewed dry run. Required for mode='execute_auto_confirm' and mode='execute_inter_account', and forwarded to the executor.",
             "type": "string"
           },
           "target_accounts_dimensions_id": {
@@ -5812,6 +5813,271 @@
       },
       "name": "process_accounting_document",
       "title": "Process Accounting Document"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Unified accounting-report entry point. report='trial_balance' | 'balance_sheet' | 'profit_and_loss' (both need period.from/to via date_from/date_to) | 'aging' (as_of_date) | 'month_end' (month YYYY-MM). Compact by default; detail='full' returns every line.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "as_of_date": {
+            "description": "aging only: cutoff date (YYYY-MM-DD, default today).",
+            "type": "string"
+          },
+          "date_from": {
+            "description": "Period start (YYYY-MM-DD). Required for profit_and_loss; optional for trial_balance.",
+            "type": "string"
+          },
+          "date_to": {
+            "description": "Period end / balance date (YYYY-MM-DD).",
+            "type": "string"
+          },
+          "detail": {
+            "description": "compact (default) caps long line lists; full returns every line.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "type": "string"
+          },
+          "month": {
+            "description": "month_end only: month (YYYY-MM).",
+            "type": "string"
+          },
+          "report": {
+            "description": "Which report to run.",
+            "enum": [
+              "trial_balance",
+              "balance_sheet",
+              "profit_and_loss",
+              "aging",
+              "month_end"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "report"
+        ],
+        "type": "object"
+      },
+      "name": "run_accounting_report",
+      "title": "Run Accounting Report"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Search persisted accounting records by a bounded entity + filters. entity ∈ journals|transactions|clients|purchase_invoices|sale_invoices|products. Filters are per-entity (page, date_from/date_to, status, payment_status, clients_id). Brief view by default; view='full' returns every field. Use inspect_accounting_record for one record's detail.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "clients_id": {
+            "description": "Filter by counterparty (invoices/transactions).",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "date_from": {
+            "description": "Only records on or after this date (YYYY-MM-DD), where the entity supports it.",
+            "type": "string"
+          },
+          "date_to": {
+            "description": "Only records on or before this date (YYYY-MM-DD), where the entity supports it.",
+            "type": "string"
+          },
+          "entity": {
+            "description": "Which record set to search.",
+            "enum": [
+              "journals",
+              "transactions",
+              "clients",
+              "purchase_invoices",
+              "sale_invoices",
+              "products"
+            ],
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number (default 1).",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "payment_status": {
+            "description": "Filter by payment status (invoices).",
+            "type": "string"
+          },
+          "status": {
+            "description": "Filter by status (invoices/transactions).",
+            "type": "string"
+          },
+          "view": {
+            "description": "brief (default) triage fields; full every field.",
+            "enum": [
+              "brief",
+              "full"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity"
+        ],
+        "type": "object"
+      },
+      "name": "search_accounting_records",
+      "title": "Search Accounting Records"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Fetch one persisted accounting record by entity + id. entity ∈ journals|transactions|clients|purchase_invoices|sale_invoices|products. Use search_accounting_records to find the id first.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "entity": {
+            "description": "Which record set to read from.",
+            "enum": [
+              "journals",
+              "transactions",
+              "clients",
+              "purchase_invoices",
+              "sale_invoices",
+              "products"
+            ],
+            "type": "string"
+          },
+          "id": {
+            "description": "Record ID.",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entity",
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "inspect_accounting_record",
+      "title": "Inspect Accounting Record"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. send dispatches a REAL e-invoice and is never one-shot.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "action": {
+            "description": "read: list|get|document|xml|delivery_options. prepare/execute: create|update|delete|confirm|invalidate|send.",
+            "type": "string"
+          },
+          "clients_id": {
+            "description": "read=list: filter by customer.",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "date_from": {
+            "description": "read=list: revenue date on/after (YYYY-MM-DD).",
+            "type": "string"
+          },
+          "date_to": {
+            "description": "read=list: revenue date on/before (YYYY-MM-DD).",
+            "type": "string"
+          },
+          "id": {
+            "description": "Invoice ID (required for everything except list/create).",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "mode": {
+            "description": "read (default), prepare (mint plan handle), or execute (consume it).",
+            "enum": [
+              "read",
+              "prepare",
+              "execute"
+            ],
+            "type": "string"
+          },
+          "page": {
+            "description": "read=list: page number.",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "create/update fields, or send request ({send_einvoice, send_email, email_addresses, ...})."
+          },
+          "payment_status": {
+            "description": "read=list: PAID|PARTIALLY_PAID|NOT_PAID.",
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "Execution-plan handle from mode='prepare'. Required for mode='execute'.",
+            "type": "string"
+          },
+          "status": {
+            "description": "read=list: PROJECT|CONFIRMED.",
+            "type": "string"
+          },
+          "view": {
+            "description": "read=list: brief (default) or full.",
+            "enum": [
+              "brief",
+              "full"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "manage_sale_invoice",
+      "title": "Manage Sale Invoice"
     },
     {
       "annotations": {

@@ -35,9 +35,11 @@ User-facing phases:
 
 If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` before running the checklist and statements.
 
-Call `month_end_close_checklist`:
+Call `run_accounting_report`:
+- `report`: `month_end`
 - `month`: YYYY-MM value
-- `fresh`: true if the user asked for fresh data and you did not already call `clear_cache`
+
+If the user asked for fresh data and you did not already call `clear_cache`, call `clear_cache` first (`run_accounting_report` reads through the cache). The granular `month_end_close_checklist` entry point remains available under standard/full and does the same work — call it with the same `month` (and `fresh`: true when you want it to bypass the cache instead of `clear_cache`); treat them as the same operation.
 
 ## Step 2: Flag blocking issues
 
@@ -85,23 +87,22 @@ Report exact duplicates (same supplier + invoice number) and suspicious matches 
 
 ## Step 5: Compute financial statements
 
-Call `compute_trial_balance`:
+Compute the closing statements through `run_accounting_report`. The granular `compute_trial_balance` / `compute_profit_and_loss` / `compute_balance_sheet` entry points remain available under standard/full and do the same work; treat them as the same operation. If the user asked for fresh data and you did not already call `clear_cache`, call `clear_cache` first (`run_accounting_report` reads through the cache; the granular tools also accept `fresh`: true to bypass it).
+
+Call `run_accounting_report` with report="trial_balance":
 - `date_from`: YYYY-MM-01
 - `date_to`: last day of the month
-- `fresh`: true if the user asked for fresh data and you did not already call `clear_cache`
 
 Verify total debits = total credits. Treat sub-cent rounding deltas (under 0.01 EUR) as acceptable in multi-currency books; anything larger is a blocker that needs investigation.
 
-Call `compute_profit_and_loss`:
+Call `run_accounting_report` with report="profit_and_loss":
 - `date_from`: YYYY-01-01 (fiscal-year start; use the company's fiscal-year start instead if it is not the calendar year)
 - `date_to`: last day of the month
-- `fresh`: true if the user asked for fresh data and you did not already call `clear_cache`
 
 Show YTD P&L: total revenue, total expenses, net profit.
 
-Call `compute_balance_sheet`:
+Call `run_accounting_report` with report="balance_sheet":
 - `date_to`: last day of the month
-- `fresh`: true if the user asked for fresh data and you did not already call `clear_cache`
 
 Verify balanced (assets = liabilities + equity).
 

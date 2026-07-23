@@ -3,7 +3,7 @@ import { toolMeta } from "./tool-catalog.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export type ToolProfile = "guided" | "guided-sales" | "standard" | "full" | "custom";
-export const GUIDED_TOOL_NAMES = Object.freeze(`recommend_workflow accounting_inbox continue_accounting_workflow receipt_batch process_accounting_document process_bank_input reconcile_bank_transactions reconcile_inter_account_transfers classify_bank_transactions cleanup_camt_possible_duplicate save_auto_booking_rule compute_trial_balance list_connections switch_connection get_setup_instructions get_execution_plan_page get_operation_result_page get_session_log`.split(" "));
+export const GUIDED_TOOL_NAMES = Object.freeze(`recommend_workflow accounting_inbox continue_accounting_workflow receipt_batch process_accounting_document process_bank_input reconcile_bank_transactions classify_bank_transactions cleanup_camt_possible_duplicate save_auto_booking_rule run_accounting_report search_accounting_records inspect_accounting_record list_connections switch_connection get_setup_instructions get_execution_plan_page get_operation_result_page get_session_log`.split(" "));
 export const SETUP_PROFILE_CHOICES = Object.freeze([
   Object.freeze({ label: "Daily bookkeeping", profile: "guided" as const, enableLightyear: false }),
   Object.freeze({ label: "Daily bookkeeping plus sales invoices", profile: "guided-sales" as const, enableLightyear: false }),
@@ -11,12 +11,16 @@ export const SETUP_PROFILE_CHOICES = Object.freeze([
   Object.freeze({ label: "Full advanced toolset", profile: "full" as const, enableLightyear: true }),
 ]);
 const GUIDED = new Set(GUIDED_TOOL_NAMES);
-const GUIDED_SALES = new Set([...GUIDED_TOOL_NAMES, "list_sale_invoices", "get_sale_invoice"]);
+const GUIDED_SALES = new Set([...GUIDED_TOOL_NAMES, "manage_sale_invoice"]);
 // Workflow-infra tools that ship in the `full` surface only for this release.
-// get_workflow_page pages non-plan workflow state; guided/guided-sales adopt it
-// in a later task when the interim granular tools drop and free room under the
-// 20-tool cap. Registered unconditionally in server-bootstrap, but gated here so
-// standard/custom/guided/guided-sales surfaces stay unchanged until then.
+// get_workflow_page pages non-plan workflow state. The interim granular guided
+// tools have now dropped (Task 14 folded reconcile_inter_account_transfers,
+// cleanup_camt_possible_duplicate, save_auto_booking_rule, compute_trial_balance
+// into merged/continuation façades), but get_workflow_page adoption stays
+// DEFERRED: no guided-reachable workflow action emits it as a next_action — the
+// workflow_action_v2 page reference is designed to stay latent (available:false)
+// when it is not visible, so guided never fails closed on it. Keeping it
+// full-only preserves the minimal, plan-faithful delta and the 20-tool headroom.
 const FULL_ONLY_TOOL_NAMES = new Set(["get_workflow_page"]);
 // process_bank_input is the guided unified bank façade. It is visible in the
 // guided/guided-sales surfaces (via GUIDED above) and in the exhaustive `full`
@@ -24,7 +28,14 @@ const FULL_ONLY_TOOL_NAMES = new Set(["get_workflow_page"]);
 // process_camt053 / import_wise_transactions entry points instead. Registered
 // unconditionally in server-bootstrap; this gate keeps standard/custom at their
 // pinned counts.
-const GUIDED_AND_FULL_ONLY_TOOL_NAMES = new Set(["process_bank_input", "process_accounting_document"]);
+const GUIDED_AND_FULL_ONLY_TOOL_NAMES = new Set([
+  "process_bank_input", "process_accounting_document",
+  // Task 14 typed-op façades: visible in guided (report/search/inspect) or
+  // guided-sales (manage_sale_invoice) via the GUIDED/GUIDED_SALES sets checked
+  // first, and in the exhaustive `full` surface, but hidden from standard/custom,
+  // which keep the granular compute_*/list_*/get_*/sale-invoice CRUD entry points.
+  "run_accounting_report", "search_accounting_records", "inspect_accounting_record", "manage_sale_invoice",
+]);
 export const LEGACY_TOOL_EXPOSURE_ENV_KEYS = ["EARVELDAJA_DISABLE_LIGHTYEAR", "EARVELDAJA_EXPOSE_GRANULAR_TOOLS", "EARVELDAJA_EXPOSE_SETUP_TOOLS", "EARVELDAJA_DISABLE_TAX_TOOLS", "EARVELDAJA_DISABLE_REFERENCE_ADMIN", "EARVELDAJA_DISABLE_ANNUAL_REPORT", "EARVELDAJA_DISABLE_SALES", "EARVELDAJA_DISABLE_PRODUCTS"] as const;
 const VALID = new Set<ToolProfile>(["guided", "guided-sales", "standard", "full", "custom"]);
 const PROFILE_STORAGE = new AsyncLocalStorage<ToolProfile>();
@@ -96,13 +107,28 @@ export function remapGuidedBankFacade(
   return { tool: "process_bank_input", args: rest };
 }
 
+// Task 14 (guided-only): the standalone reconcile_inter_account_transfers left
+// the guided surface; a guided workflow action that names it projects to the
+// merged reconcile_bank_transactions inter-account modes (Step 5a) so it stays a
+// visible, executable next action instead of failing closed. Applied ONLY in the
+// guided projection below — standard/full keep the standalone tool untouched.
+export function remapGuidedInterAccount(
+  tool: string,
+  args: Record<string, unknown>,
+): { tool: string; args: Record<string, unknown> } | undefined {
+  if (tool !== "reconcile_inter_account_transfers") return undefined;
+  return { tool: "reconcile_bank_transactions", args: mergedToolArgs(args.execute === true ? "execute_inter_account" : "inter_account_dry_run", args) };
+}
+
 export function projectActionForProfile(action: Action, profile: ToolProfile): any {
   if (profile !== "guided" && profile !== "guided-sales") return action;
   const args = action.args ?? {};
   const remapped = remapHiddenGranularTool(action.tool, args);
   const granularProjected = remapped ? { ...action, tool: remapped.tool, args: remapped.args } : action;
   const bankRemap = remapGuidedBankFacade(granularProjected.tool, granularProjected.args ?? {});
-  const projected = bankRemap ? { ...granularProjected, tool: bankRemap.tool, args: bankRemap.args } : granularProjected;
+  const bankProjected = bankRemap ? { ...granularProjected, tool: bankRemap.tool, args: bankRemap.args } : granularProjected;
+  const interAccountRemap = remapGuidedInterAccount(bankProjected.tool, bankProjected.args ?? {});
+  const projected = interAccountRemap ? { ...bankProjected, tool: interAccountRemap.tool, args: interAccountRemap.args } : bankProjected;
   let visible = false;
   try { visible = isToolVisibleForProfile(projected.tool, profile); } catch { visible = false; }
   if (visible) return projected;

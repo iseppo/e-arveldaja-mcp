@@ -664,35 +664,41 @@ describe("registerPrompts", () => {
     expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
   });
 
-  it("uses the real reporting tool parameter names in month-end and overview prompts", async () => {
+  it("routes month-end and overview reporting through run_accounting_report with the real report/period params", async () => {
     const server = setupPromptServer();
     const monthEndText = await getPromptText(server, "month-end-close", { month: "2026-03" });
     const overviewText = await getPromptText(server, "company-overview");
 
+    // Derived run-data still pins the concrete period the guided reader passes.
     expect(monthEndText).toContain('"date_from":"2026-03-01"');
     expect(monthEndText).toContain('"date_to":"2026-03-31"');
-    expect(monthEndText).toContain("Call `compute_balance_sheet`:");
-    expect(overviewText).toContain("compute_balance_sheet` with date_to:");
+    // The guided-visible unified façade leads; the granular compute_* names stay
+    // named as the standard/full fallback (reference-both).
+    expect(monthEndText).toContain('Call `run_accounting_report` with report="balance_sheet":');
+    expect(overviewText).toContain('run_accounting_report` with report="balance_sheet" and date_to:');
     expect(overviewText).toContain("date_from:");
-    // P13/P25: the payables aging call must carry the same operator-selected
-    // reporting date as as_of_date, so the aging snapshot shares one cutoff with
-    // the balance sheet / P&L instead of silently defaulting to today.
-    expect(overviewText).toContain("compute_payables_aging` with as_of_date:");
+    // P13/P25: the aging call must carry the same operator-selected reporting
+    // date as as_of_date, so the aging snapshot shares one cutoff with the
+    // balance sheet / P&L instead of silently defaulting to today.
+    expect(overviewText).toContain('run_accounting_report` with report="aging" and as_of_date:');
     expect(overviewText).not.toContain("start_date:");
     expect(overviewText).not.toContain("end_date:");
   });
 
-  it("passes one consistent as_of_date to both aging calls in company-overview (P13/P25)", () => {
+  it("passes one consistent as_of_date to the aging report in company-overview (P13/P25)", () => {
     for (const relativePath of ["workflows/company-overview.md", ".claude/commands/company-overview.md"]) {
       const text = readPromptSurface(relativePath);
-      // Both aging reports take the SAME operator-selected reporting date as
-      // their as_of_date, matching the date_to used for the balance sheet / P&L,
-      // so every figure in the overview shares one consistent cutoff.
-      expect(text).toContain("compute_payables_aging` with as_of_date:");
-      expect(text).toContain("compute_receivables_aging` with as_of_date:");
-      expect(text).toContain("the selected reporting date");
+      // The unified aging report takes the SAME operator-selected reporting date
+      // as its as_of_date, matching the date_to used for the balance sheet / P&L,
+      // so every figure in the overview shares one consistent cutoff — the
+      // payables side and the receivables side come from the same as_of_date.
+      expect(text).toContain('run_accounting_report` with report="aging" and as_of_date:');
+      expect(text).toContain("read the receivables side");
+      expect(text).toContain("as_of_date: the selected reporting date");
       // The single-cutoff intent is spelled out, not left implicit.
       expect(text).toContain("one consistent cutoff");
+      // The aging snapshot must never silently fall back to today's date.
+      expect(text).toContain("silently defaulting to today");
     }
   });
 

@@ -2,9 +2,9 @@
   "profile": "default",
   "measurement": {
     "toolCount": 126,
-    "toolsListBytes": 120533,
-    "descriptionsBytes": 15288,
-    "inputSchemasBytes": 74909,
+    "toolsListBytes": 120707,
+    "descriptionsBytes": 15412,
+    "inputSchemasBytes": 74959,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -3738,7 +3738,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, and mode='inter_account_dry_run' for own-account transfer detection.",
+      "description": "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -3767,12 +3767,13 @@
               "suggest",
               "dry_run_auto_confirm",
               "execute_auto_confirm",
-              "inter_account_dry_run"
+              "inter_account_dry_run",
+              "execute_inter_account"
             ],
             "type": "string"
           },
           "plan_handle": {
-            "description": "Execution-plan handle from the reviewed dry run. Required for mode='execute_auto_confirm' and forwarded to the confirm executor.",
+            "description": "Execution-plan handle from the reviewed dry run. Required for mode='execute_auto_confirm' and mode='execute_inter_account', and forwarded to the executor.",
             "type": "string"
           },
           "target_accounts_dimensions_id": {

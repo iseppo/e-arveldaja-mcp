@@ -35,17 +35,17 @@ This workflow is read-only. It should feel like a dashboard, not a ledger export
 
 If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` before reading reports.
 
-Use the SAME operator-selected reporting date as the single cutoff for every figure: pass it as `date_to` to the statement calls and as `as_of_date` to both aging calls, so the whole overview shares one consistent cutoff instead of the aging reports silently defaulting to today.
+Run every figure through `run_accounting_report`, using the SAME operator-selected reporting date as the single cutoff: pass it as `date_to` for the `report="balance_sheet"` and `report="profit_and_loss"` calls and as `as_of_date` for the `report="aging"` call, so the whole overview shares one consistent cutoff instead of the aging reports silently defaulting to today. Under the standard/full profiles the granular `compute_balance_sheet` / `compute_profit_and_loss` / `compute_payables_aging` entry points remain available and do the same work; treat them as the same operation.
 
 Follow these steps:
 
-1. Call `compute_balance_sheet` with date_to: the selected reporting date.
-2. Call `compute_profit_and_loss` with date_from: the selected period start and date_to: the selected reporting date.
-3. Call `compute_payables_aging` with as_of_date: the selected reporting date.
+1. Call `run_accounting_report` with report="balance_sheet" and date_to: the selected reporting date.
+2. Call `run_accounting_report` with report="profit_and_loss", date_from: the selected period start and date_to: the selected reporting date.
+3. Call `run_accounting_report` with report="aging" and as_of_date: the selected reporting date; read the payables side.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:sales -->
 Capability condition for `sales`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `compute_receivables_aging`. If any named tool is absent, skip this section and continue with the surrounding purchase-side workflow. Never call a missing tool to probe capability.
 
-4. Call `compute_receivables_aging` with as_of_date: the selected reporting date.
+4. From that same `run_accounting_report` `report="aging"` result (as_of_date: the selected reporting date), read the receivables side. The granular `compute_receivables_aging` entry point remains available under standard/full and does the same work; treat them as the same operation.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:sales -->
 Then summarize the company state using the returned figures:
    - balance-sheet health and whether the check balances

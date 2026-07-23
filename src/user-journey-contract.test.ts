@@ -5,6 +5,7 @@ import { buildResponseFixtures, type ResponseFixtureName } from "../scripts/meas
 import { captureToolSurface, TOOL_SURFACE_SETUP_INFO } from "./__fixtures__/tool-surface.js";
 import { toMcpJson } from "./mcp-json.js";
 import { buildSetupInstructionsPayload } from "./server-bootstrap.js";
+import { isToolVisibleForProfile, type ToolProfile } from "./tool-profile.js";
 
 type Approval = "obtained" | "not-required";
 const PLAN_HANDLE = "h".repeat(43);
@@ -468,5 +469,85 @@ describe("user-journey accounting contract", () => {
         expect(result.valid, `${journey.name}:${step.tool}: ${result.errorMessage}`).toBe(true);
       }
     }
+  });
+});
+
+// Task 14 (Step 6): the four guided milestone journeys, each proving a capability
+// is achievable END-TO-END inside the guided (or guided-sales) profile after the
+// surface fold. Beyond validating every request against the full production
+// schema, each step is asserted `isToolVisibleForProfile(tool, profile)` — the
+// achievability proof the byte-pinned JOURNEYS above (validated only against
+// `full`) does not carry.
+interface GuidedJourneyStep { tool: string; request: Record<string, unknown> }
+interface GuidedJourney { name: string; profile: ToolProfile; steps: GuidedJourneyStep[] }
+const GUIDED_JOURNEYS: GuidedJourney[] = [
+  {
+    name: "guided-inter-account-reconcile",
+    profile: "guided",
+    steps: [
+      { tool: "reconcile_bank_transactions", request: { mode: "inter_account_dry_run" } },
+      { tool: "get_execution_plan_page", request: { plan_handle: PLAN_HANDLE } },
+      { tool: "reconcile_bank_transactions", request: { mode: "execute_inter_account", plan_handle: PLAN_HANDLE } },
+    ],
+  },
+  {
+    name: "guided-duplicate-cleanup",
+    profile: "guided",
+    steps: [
+      { tool: "accounting_inbox", request: { mode: "scan", workspace_path: "<ABSOLUTE_PATH>" } },
+      { tool: "continue_accounting_workflow", request: { action: "prepare_action", review_item_json: { review_type: "camt_possible_duplicate" } } },
+      { tool: "cleanup_camt_possible_duplicate", request: { keep_transaction_id: 1, delete_transaction_id: 2 } },
+    ],
+  },
+  {
+    name: "guided-rule-saving",
+    profile: "guided",
+    steps: [
+      { tool: "continue_accounting_workflow", request: { action: "prepare_action", save_as_rule: true, review_item_json: { review_type: "auto_booking_rule_candidate" } } },
+      { tool: "save_auto_booking_rule", request: { match: "acme oü", purchase_accounts_id: 5000 } },
+    ],
+  },
+  {
+    name: "guided-trial-balance",
+    profile: "guided",
+    steps: [
+      { tool: "run_accounting_report", request: { report: "trial_balance" } },
+    ],
+  },
+];
+
+describe("guided milestone achievability contract", () => {
+  it("every guided journey step is visible in its profile", () => {
+    for (const journey of GUIDED_JOURNEYS) {
+      for (const step of journey.steps) {
+        expect(
+          isToolVisibleForProfile(step.tool, journey.profile),
+          `${journey.name}:${step.tool} is not visible in the ${journey.profile} profile`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("every guided journey request validates against its captured production schema", async () => {
+    const surface = await captureToolSurface("full");
+    const schemas = new Map(surface.tools.map((tool) => [tool.name, tool.inputSchema]));
+    const validatorProvider = new AjvJsonSchemaValidator();
+    for (const journey of GUIDED_JOURNEYS) {
+      for (const step of journey.steps) {
+        const schema = schemas.get(step.tool);
+        expect(schema, `${journey.name}:${step.tool} is absent from the full surface`).toBeDefined();
+        const result = validatorProvider.getValidator(schema as never)(step.request);
+        expect(result.valid, `${journey.name}:${step.tool}: ${result.errorMessage}`).toBe(true);
+      }
+    }
+  });
+
+  it("proves inter-account reconcile, duplicate cleanup, rule saving, and trial balance are each guided-achievable", () => {
+    expect(GUIDED_JOURNEYS.map((journey) => journey.name)).toEqual([
+      "guided-inter-account-reconcile",
+      "guided-duplicate-cleanup",
+      "guided-rule-saving",
+      "guided-trial-balance",
+    ]);
   });
 });

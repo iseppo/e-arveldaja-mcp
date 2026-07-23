@@ -1,0 +1,151 @@
+import { describe, expect, it, vi } from "vitest";
+import { createSaleInvoiceOperations } from "./invoice-operations.js";
+import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import type { ApiContext } from "../tools/crud/shared.js";
+
+vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
+
+function makeApi(saleInvoices: Record<string, unknown> = {}, readonlyApi: Record<string, unknown> = {}): ApiContext {
+  return {
+    saleInvoices: {
+      list: vi.fn().mockResolvedValue({ current_page: 1, total_pages: 1, items: [] }),
+      get: vi.fn().mockResolvedValue({ id: 1, status: "PROJECT" }),
+      create: vi.fn().mockResolvedValue({ created_object_id: 500 }),
+      update: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
+      confirm: vi.fn().mockResolvedValue({}),
+      invalidate: vi.fn().mockResolvedValue({}),
+      sendEinvoice: vi.fn().mockResolvedValue({ delivered: true }),
+      getSystemPdf: vi.fn().mockResolvedValue({ name: "inv.pdf", contents: "AAA" }),
+      getSystemXml: vi.fn().mockResolvedValue({ name: "inv.xml", contents: "BBB" }),
+      getDeliveryOptions: vi.fn().mockResolvedValue({ options: ["einvoice"] }),
+      ...saleInvoices,
+    },
+    readonly: {
+      getAccounts: vi.fn().mockResolvedValue([]),
+      getAccountDimensions: vi.fn().mockResolvedValue([]),
+      ...readonlyApi,
+    },
+  } as unknown as ApiContext;
+}
+
+describe("SaleInvoiceOperations read mode", () => {
+  it("lists when no id, gets when id present", async () => {
+    const api = makeApi();
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const listed = await ops.run({ mode: "read" });
+    expect(listed.ok && listed.value.action).toBe("list");
+    const got = await ops.run({ mode: "read", id: 7 });
+    expect(got.ok && got.value.action).toBe("get");
+    expect(api.saleInvoices.get).toHaveBeenCalledWith(7);
+  });
+});
+
+describe("SaleInvoiceOperations plan-handle two-call gate", () => {
+  it("execute without a plan_handle is refused before any API call (send)", async () => {
+    const send = vi.fn();
+    const api = makeApi({ sendEinvoice: send });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const outcome = await ops.run({ mode: "execute", action: "send", id: 9, planHandle: undefined });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_handle_required");
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("send runs only through prepare -> execute (real e-invoice never one-shot)", async () => {
+    const send = vi.fn().mockResolvedValue({ delivered: true });
+    const api = makeApi({ sendEinvoice: send });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "send", id: 9 });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok || prepared.value.mode !== "prepare") return;
+    expect(prepared.value.projection.destructive).toBe(true);
+    const executed = await ops.run({ mode: "execute", action: "send", id: 9, planHandle: prepared.value.planHandle, payload: { send_einvoice: true } });
+    expect(executed.ok).toBe(true);
+    expect(send).toHaveBeenCalledWith(9, expect.objectContaining({ send_einvoice: true }));
+  });
+
+  it("a plan_handle is consume-once — replaying it fails the second execute", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    const api = makeApi({ delete: del });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "delete", id: 3 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const handle = prepared.value.planHandle;
+    const first = await ops.run({ mode: "execute", action: "delete", id: 3, planHandle: handle });
+    expect(first.ok).toBe(true);
+    const second = await ops.run({ mode: "execute", action: "delete", id: 3, planHandle: handle });
+    expect(second.ok).toBe(false);
+    expect(del).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects execute action drift — a confirm plan cannot authorize a send (plan_drift, no send fired)", async () => {
+    const send = vi.fn().mockResolvedValue({ delivered: true });
+    const confirm = vi.fn().mockResolvedValue({});
+    const api = makeApi({ sendEinvoice: send, confirm });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "confirm", id: 5 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "send", id: 99, planHandle: prepared.value.planHandle, payload: { send_einvoice: true } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(send).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("rejects execute id drift — a confirm id=5 plan cannot authorize delete id=7 (plan_drift, no delete fired)", async () => {
+    const del = vi.fn().mockResolvedValue({});
+    const confirm = vi.fn().mockResolvedValue({});
+    const api = makeApi({ delete: del, confirm });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "confirm", id: 5 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "delete", id: 7, planHandle: prepared.value.planHandle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(del).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("matching prepare -> execute (confirm id=5) still succeeds", async () => {
+    const confirm = vi.fn().mockResolvedValue({});
+    const api = makeApi({ confirm });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "confirm", id: 5 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "confirm", id: 5, planHandle: prepared.value.planHandle });
+    expect(outcome.ok).toBe(true);
+    expect(confirm).toHaveBeenCalledWith(5);
+  });
+
+  it("update strips sandbox markers at the write boundary and blocks confirmed edits", async () => {
+    const update = vi.fn().mockResolvedValue({});
+    const get = vi.fn().mockResolvedValue({ id: 4, status: "PROJECT" });
+    const api = makeApi({ update, get });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "update", id: 4 });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const wrapped = "<<UNTRUSTED_OCR_START:abc>>Clean note<<UNTRUSTED_OCR_END:abc>>";
+    await ops.run({ mode: "execute", action: "update", id: 4, planHandle: prepared.value.planHandle, payload: { notes: wrapped } });
+    expect(update).toHaveBeenCalledWith(4, expect.objectContaining({ notes: "Clean note" }));
+
+    const confirmedGet = vi.fn().mockResolvedValue({ id: 5, status: "CONFIRMED" });
+    const confApi = makeApi({ update, get: confirmedGet });
+    const ops2 = createSaleInvoiceOperations(confApi, runtime);
+    const prepared2 = await ops2.run({ mode: "prepare", action: "update", id: 5 });
+    if (!prepared2.ok || prepared2.value.mode !== "prepare") throw new Error("prepare failed");
+    const blocked = await ops2.run({ mode: "execute", action: "update", id: 5, planHandle: prepared2.value.planHandle, payload: { gross_price: 1 } });
+    expect(blocked.ok).toBe(false);
+    if (blocked.ok) return;
+    expect(blocked.error.code).toBe("confirmed_record_immutable");
+  });
+});
