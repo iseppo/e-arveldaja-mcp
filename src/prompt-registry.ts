@@ -244,8 +244,8 @@ const PROMPT_DEFINITIONS = [
       date_to: optionalDate("Optional statement-entry upper bound (YYYY-MM-DD)"),
     },
     setupOptions: {
-      offlineTools: ["process_camt053"],
-      note: "Parsing the CAMT file can be done locally (process_camt053 mode='parse'), but dry-run imports and transaction creation require configured e-arveldaja credentials.",
+      offlineTools: ["process_bank_input"],
+      note: "Previewing the bank file can be done locally (process_bank_input mode='prepare'), but transaction creation requires configured e-arveldaja credentials.",
     },
     featurePredicate: enabled,
     variants: NO_VARIANTS,

@@ -66,8 +66,14 @@ export class CamtPreflightRejectedError extends Error {
 export async function loadCamt053SnapshotAndPreflight(
   source: FileInputSource,
   runtimeSafetyContext: RuntimeSafetyContext,
+  preloadedSnapshot?: FileInputSnapshot,
 ): Promise<{ snapshot: FileInputSnapshot; preflight: CamtPreflightResult }> {
-  const snapshot = await captureFileInputSnapshot(source, {
+  // ADDITIVE snapshot threading (bank façade): when the caller has already
+  // captured the immutable bytes ONCE (under the unified bank_input operation),
+  // it hands the frozen snapshot in by identity so this op does NOT read the
+  // path a second time. The granular process_camt053 path passes no snapshot and
+  // captures internally under camt_input exactly as before — byte-identical.
+  const snapshot = preloadedSnapshot ?? await captureFileInputSnapshot(source, {
     runtimeSafetyContext,
     operation: FILE_REFERENCE_OPERATIONS.camt,
     allowedExtensions: [".xml"],
@@ -458,6 +464,10 @@ export interface CamtExecuteInput {
   readonly dateFrom: string | undefined;
   readonly dateTo: string | undefined;
   readonly planHandle: string | undefined;
+  /** ADDITIVE: pre-captured immutable snapshot (bank façade). When present the
+   * execute path uses it as its single immutable re-read instead of capturing
+   * under camt_input, so a bank_input file_ref never re-resolves. */
+  readonly snapshot?: FileInputSnapshot;
 }
 
 export type CamtExecuteResult =
@@ -477,6 +487,7 @@ export async function executeCamtImport(
   input: CamtExecuteInput,
 ): Promise<CamtExecuteResult> {
   const { source, accountsDimensionsId, dateFrom, dateTo, planHandle } = input;
+  const preloadedSnapshot = input.snapshot;
   const normalizedArgs = camtNormalizedArgs(accountsDimensionsId, dateFrom, dateTo);
 
   // A plan handle is NOT human approval; the stop gates below stay in force.
@@ -500,7 +511,7 @@ export async function executeCamtImport(
   let snapshot: FileInputSnapshot;
   let preflight: CamtPreflightResult;
   try {
-    ({ snapshot, preflight } = await loadCamt053SnapshotAndPreflight(source, runtimeSafetyContext));
+    ({ snapshot, preflight } = await loadCamt053SnapshotAndPreflight(source, runtimeSafetyContext, preloadedSnapshot));
   } catch (error) {
     if (error instanceof FileInputSnapshotError) {
       return { ok: false, code: "plan_drift", message: "The CAMT source could not be re-read to match the reviewed plan." };

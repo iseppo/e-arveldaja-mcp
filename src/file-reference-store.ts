@@ -8,6 +8,7 @@ export const MAX_ACTIVE_FILE_REFERENCES = 128;
 export const FILE_REFERENCE_OPERATIONS = Object.freeze({
   camt: "camt_input",
   wise: "wise_input",
+  bank: "bank_input",
   receipt: "receipt_input",
   lightyearStatement: "lightyear_statement_input",
   lightyearGains: "lightyear_gains_input",

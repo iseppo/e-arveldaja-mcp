@@ -3036,7 +3036,7 @@ ${entryXml}
   it.each(["scan", "dry_run"] as const)("guided %s promotes a future unknown caller action to top-level review", async (mode) => {
     const originalProject = toolProfileModule.projectActionForCurrentProfile;
     const projectionSpy = vi.spyOn(toolProfileModule, "projectActionForCurrentProfile").mockImplementation((action) => {
-      if (action.tool === "process_camt053") {
+      if (action.tool === "process_bank_input") {
         return {
           status: "needs_review",
           blocker: { code: "advanced_action_unavailable_in_profile", message: "Unavailable future action." },

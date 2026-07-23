@@ -1,13 +1,13 @@
 {
   "profile": "guided",
   "measurement": {
-    "toolCount": 18,
-    "toolsListBytes": 23272,
-    "descriptionsBytes": 2731,
-    "inputSchemasBytes": 16153,
+    "toolCount": 17,
+    "toolsListBytes": 21997,
+    "descriptionsBytes": 2629,
+    "inputSchemasBytes": 15222,
     "largestTool": {
-      "name": "import_wise_transactions",
-      "bytes": 2750
+      "name": "process_bank_input",
+      "bytes": 2922
     },
     "serverInstructionsBytes": 2191,
     "promptMetadataBytes": 11072,
@@ -469,7 +469,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Import Wise transaction-history CSV rows. Direct-call contract: DRY RUN by default; execute=true creates rows; every created bank row uses API type C while source_direction preserves IN/OUT flow; fees use separate C transactions; inter-account transfers avoid double-counting confirmed counterpart journals.",
+      "description": "Unified bank-statement entry point. Auto-detects CAMT.053 XML vs Wise transaction-history CSV from the file content and imports it. Use mode='prepare' (default) to preview a dry run and get a plan handle, mode='execute' to create the reviewed transactions, or mode='show_details' to page the full per-row result. If the bank account dimension is unique it is resolved automatically.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -477,133 +477,90 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
           "accounts_dimensions_id": {
-            "description": "Bank account dimension ID for the Wise account in e-arveldaja",
+            "description": "Optional bank account dimension ID. Omit to let a unique bank account resolve automatically.",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
           },
           "approved_command_digest": {
-            "description": "Exact lowercase SHA-256 command digest returned by the reviewed dry run. Required for execute=true when mutations are planned.",
+            "description": "Wise only: exact lowercase SHA-256 command digest from the reviewed dry run. Required for Wise mode='execute'.",
             "pattern": "^[0-9a-f]{64}$",
             "type": "string"
           },
           "confirm_own_transfer_ids": {
-            "description": "Exact Wise IDs explicitly approved as own transfers. TRANSFER-* and BANK_DETAILS_PAYMENT_RETURN-* prefixes are hints only.",
+            "description": "Wise only: exact Wise IDs explicitly approved as own transfers.",
             "items": {
               "minLength": 1,
               "type": "string"
             },
             "type": "array"
           },
+          "cursor": {
+            "description": "mode='show_details' only: opaque cursor returned by the preceding page.",
+            "maxLength": 128,
+            "type": "string"
+          },
           "date_from": {
-            "description": "Only import transactions from this date (YYYY-MM-DD)",
-            "pattern": "^(\\d{4})-(\\d{2})-(\\d{2})$",
+            "description": "Only import entries from this date (YYYY-MM-DD).",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
             "type": "string"
           },
           "date_to": {
-            "description": "Only import transactions up to this date (YYYY-MM-DD)",
-            "pattern": "^(\\d{4})-(\\d{2})-(\\d{2})$",
+            "description": "Only import entries up to this date (YYYY-MM-DD).",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
             "type": "string"
           },
-          "execute": {
-            "description": "Actually create transactions (default false = dry run)",
-            "type": "boolean"
-          },
           "fee_account_dimensions_id": {
-            "description": "Account dimension ID for the Wise fee expense account.",
-            "type": "number"
-          },
-          "fee_account_relation_id": {
-            "description": "Deprecated alias for fee_account_dimensions_id.",
+            "description": "Wise only: account dimension ID for the Wise fee expense account.",
             "type": "number"
           },
           "file_path": {
-            "description": "Absolute path/base64 Wise CSV input. Provide exactly one of file_path or file_ref.",
+            "description": "Advanced: absolute path / base64 input. Provide exactly one of file_ref or file_path.",
             "type": "string"
           },
           "file_ref": {
-            "description": "Opaque Accounting Inbox Wise CSV reference. Provide exactly one of file_path or file_ref.",
+            "description": "Opaque Accounting Inbox bank_input file reference. Provide exactly one of file_ref or file_path.",
             "type": "string"
           },
           "inter_account_dimension_id": {
-            "description": "Other bank account dimension ID for inter-account transfers. Auto-detected if only one other bank account exists; required with 3+ bank accounts.",
+            "description": "Wise only: other bank account dimension ID for inter-account transfers.",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
-          },
-          "plan_handle": {
-            "description": "Execution-plan handle returned by the reviewed dry run. Required for execute=true in addition to approved_command_digest; the digest alone cannot execute.",
-            "type": "string"
-          },
-          "skip_jar_transfers": {
-            "description": "Skip Jar (savings pot) transfers — internal movements within Wise (default true)",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "accounts_dimensions_id"
-        ],
-        "type": "object"
-      },
-      "name": "import_wise_transactions",
-      "title": "Import Wise Transactions"
-    },
-    {
-      "annotations": {
-        "destructiveHint": true,
-        "idempotentHint": false,
-        "openWorldHint": true,
-        "readOnlyHint": false
-      },
-      "description": "Merged CAMT.053 entry point. Use mode='parse' to inspect a bank statement, mode='dry_run' to preview transaction import, or mode='execute' to create transactions after approval.",
-      "execution": {
-        "taskSupport": "forbidden"
-      },
-      "inputSchema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "accounts_dimensions_id": {
-            "description": "Bank account dimension ID in e-arveldaja. Required for dry_run and execute modes.",
-            "exclusiveMinimum": 0,
-            "maximum": 9007199254740991,
-            "type": "integer"
-          },
-          "date_from": {
-            "description": "Only import entries from this date (YYYY-MM-DD)",
-            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-            "type": "string"
-          },
-          "date_to": {
-            "description": "Only import entries up to this date (YYYY-MM-DD)",
-            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-            "type": "string"
-          },
-          "file_path": {
-            "description": "Absolute path/base64 input. Provide exactly one of file_path or file_ref.",
-            "type": "string"
-          },
-          "file_ref": {
-            "description": "Opaque Accounting Inbox CAMT file reference. Provide exactly one of file_path or file_ref.",
-            "type": "string"
           },
           "mode": {
-            "description": "Workflow phase to run. Defaults to parse.",
+            "description": "Workflow phase. Defaults to prepare (dry-run preview).",
             "enum": [
-              "parse",
-              "dry_run",
-              "execute"
+              "prepare",
+              "execute",
+              "show_details"
             ],
             "type": "string"
           },
-          "plan_handle": {
-            "description": "Execution-plan handle returned by the reviewed dry run. Required for mode='execute'.",
+          "operation_handle": {
+            "description": "mode='show_details' only: operation-result handle from a prior execute.",
+            "pattern": "^[A-Za-z0-9_-]{43}$",
             "type": "string"
+          },
+          "page_size": {
+            "description": "mode='show_details' only: maximum items to return (default 20, max 50).",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "plan_handle": {
+            "description": "Execution-plan handle from the reviewed dry run. Required for mode='execute'.",
+            "type": "string"
+          },
+          "skip_jar_transfers": {
+            "description": "Wise only: skip Jar (savings pot) transfers (default true).",
+            "type": "boolean"
           }
         },
         "type": "object"
       },
-      "name": "process_camt053",
-      "title": "Process CAMT.053"
+      "name": "process_bank_input",
+      "title": "Process Bank Input"
     },
     {
       "annotations": {

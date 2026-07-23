@@ -20,7 +20,10 @@ describe("PublicToolRegistrar", () => {
     await Promise.all([bootstrap.server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const names = (await client.listTools()).tools.map(({ name }) => name);
-      expect(names).toHaveLength(18);
+      expect(names).toHaveLength(17);
+      expect(names).toContain("process_bank_input");
+      expect(names).not.toContain("process_camt053");
+      expect(names).not.toContain("import_wise_transactions");
       expect(names).toContain("get_operation_result_page");
       expect(names).toContain("recommend_workflow");
       expect(names).not.toContain("create_journal");

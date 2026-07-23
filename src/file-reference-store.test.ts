@@ -22,6 +22,31 @@ describe("FileReferenceStore", () => {
       .toThrowError(new FileReferenceStoreError("file_reference_scope_mismatch"));
   });
 
+  it("isolates a bank_input reference from camt/wise/receipt operations", () => {
+    const runtime = createTestRuntimeSafetyContext();
+    const bankRef = runtime.fileReferenceStore.issue({
+      canonicalPath: "/tmp/bank.xml",
+      kind: "file",
+      operation: FILE_REFERENCE_OPERATIONS.bank,
+    });
+    // The bank_input ref resolves only under its own operation.
+    expect(runtime.fileReferenceStore.resolve(bankRef, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.bank }))
+      .toBe("/tmp/bank.xml");
+    for (const operation of [FILE_REFERENCE_OPERATIONS.camt, FILE_REFERENCE_OPERATIONS.wise, FILE_REFERENCE_OPERATIONS.receipt]) {
+      expect(() => runtime.fileReferenceStore.resolve(bankRef, { kind: "file", operation }))
+        .toThrowError(new FileReferenceStoreError("file_reference_operation_mismatch"));
+    }
+    // Conversely a camt_input ref cannot resolve through bank_input.
+    const camtRef = runtime.fileReferenceStore.issue({
+      canonicalPath: "/tmp/bank.xml",
+      kind: "file",
+      operation: FILE_REFERENCE_OPERATIONS.camt,
+    });
+    expect(camtRef).not.toBe(bankRef);
+    expect(() => runtime.fileReferenceStore.resolve(camtRef, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.bank }))
+      .toThrowError(new FileReferenceStoreError("file_reference_operation_mismatch"));
+  });
+
   it("is owned by the one explicit runtime safety context", () => {
     const runtime = createTestRuntimeSafetyContext();
     const ref = runtime.fileReferenceStore.issue({

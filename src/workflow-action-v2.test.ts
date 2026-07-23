@@ -26,8 +26,8 @@ describe("workflow_action_v2", () => {
     expect(v2.contract).toBe("workflow_action_v2");
     expect(v2.status).toBe("in_progress");
     expect(v2.next_action).toEqual({
-      tool: "process_camt053",
-      args: { mode: "dry_run", file_path: "/tmp/statement.xml" },
+      tool: "process_bank_input",
+      args: { file_path: "/tmp/statement.xml" },
       approval_required: false,
     });
     expect(v2.alternative_action_count).toBe(1);

@@ -552,20 +552,19 @@ describe("registerPrompts", () => {
       accounts_dimensions_id: 77,
     });
 
+    expect(text).toContain("process_bank_input");
     expect(text).toContain("process_camt053");
     expect(text).toContain("parse_camt053");
     expect(text).toContain("import_camt053");
-    expect(text).toContain("statement_metadata");
-    expect(text).toContain("`mode`: `parse`");
-    expect(text).toContain("`mode`: `dry_run`");
+    expect(text).toContain("`mode`: `prepare`");
     expect(text).toContain("`mode`: `execute`");
-    expect(text).toContain("treat them as the same tool");
-    expect(text).toContain("execution.summary");
-    expect(text).toContain("execution.results");
-    expect(text).toContain("execution.audit_reference");
-    expect(text).toContain("skipped_summary");
-    expect(text).toContain("created_count");
-    expect(text).toContain("error_count");
+    expect(text).toContain('mode="show_details"');
+    expect(text).toContain("treat them as the same operation");
+    expect(text).toContain("summary.counts");
+    expect(text).toContain("summary.totals");
+    expect(text).toContain("summary.samples");
+    expect(text).toContain("summary.blockers");
+    expect(text).toContain("summary.plan_handle");
     expect(text).toContain("if the older matched transaction is already confirmed, keep it by default");
     expect(text).toContain("offer to confirm it inline using `confirm_transaction`");
     expect(text).toContain("prefer `cleanup_camt_possible_duplicate`");
@@ -580,20 +579,22 @@ describe("registerPrompts", () => {
       accounts_dimensions_id: 88,
     });
 
+    expect(text).toContain("process_bank_input");
     expect(text).toContain("import_wise_transactions");
     expect(text).toContain("fee_account_dimensions_id");
     expect(text).toContain("inter_account_dimension_id");
     expect(text).toContain("list_account_dimensions");
-    expect(text).toContain("execute: false");
-    expect(text).toContain("execute: true");
+    expect(text).toContain("`mode`: `prepare`");
+    expect(text).toContain("`mode`: `execute`");
     expect(text).toContain("approved_command_digest");
-    expect(text).toContain("digest returned by the reviewed dry run");
-    expect(text).toContain("execution.summary");
-    expect(text).toContain("execution.skipped");
-    expect(text).toContain("execution.errors");
-    expect(text).toContain("execution.audit_reference");
-    expect(text).toContain("Use top-level `skipped_details` only as a grouped convenience summary");
-    expect(text).toContain("invoice_currency_fixes");
+    expect(text).toContain("digest returned by the reviewed preview");
+    expect(text).toContain("summary.counts");
+    expect(text).toContain("summary.totals");
+    expect(text).toContain("summary.samples");
+    expect(text).toContain("summary.warnings");
+    expect(text).toContain("summary.blockers");
+    expect(text).toContain("summary.plan_handle");
+    expect(text).toContain("invoice currency fixes");
     expect(text).toContain("fee confirmations");
     expect(text).toContain("inter-account confirmations or skips");
     expect(text).toContain("each invoice FX update");
@@ -666,8 +667,26 @@ describe("registerPrompts", () => {
       expect(schema.accounts_dimensions_id.safeParse(undefined).success).toBe(true);
 
       const text = await getPromptText(server, promptName, {});
-      expect(text).toContain("list_account_dimensions");
+      // Every one of these workflows resolves the bank dimension BEFORE asking the
+      // user, then confirms recommendation-first rather than demanding an ID up front.
       expect(text).toContain("recommendation-first confirmation");
+    }
+
+    // The granular receipt/classify workflows call `list_account_dimensions` directly
+    // before the user is asked.
+    for (const promptName of ["receipt-batch", "import-wise", "classify-unmatched"]) {
+      const text = await getPromptText(server, promptName, {});
+      expect(text).toContain("list_account_dimensions");
+    }
+
+    // The guided bank façade auto-resolves a unique bank account and only returns a
+    // `needs_input`/`choices` question on ambiguity — the migrated equivalent of
+    // discovering the dimension before asking the user.
+    for (const promptName of ["import-camt", "import-wise"]) {
+      const text = await getPromptText(server, promptName, {});
+      expect(text).toContain("resolves the `accounts_dimensions_id` automatically");
+      expect(text).toContain("needs_input");
+      expect(text).toContain("choices");
     }
   });
 
@@ -1018,20 +1037,20 @@ describe("registerPrompts", () => {
     for (const relativePath of ["workflows/import-camt.md", ".claude/commands/import-camt.md"]) {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("process_camt053");
-      expect(text).toContain("treat them as the same tool");
-      expect(text).toContain("`mode`: `dry_run`");
+      expect(text).toContain("treat them as the same operation");
+      expect(text).toContain("`mode`: `prepare`");
       expect(text).toContain("`mode`: `execute`");
-      expect(text).toContain("execution.summary");
-      expect(text).toContain("execution.audit_reference");
+      expect(text).toContain("summary.counts");
+      expect(text).toContain("summary.plan_handle");
       expect(text.toLowerCase()).toContain("approval");
     }
 
     for (const relativePath of ["workflows/import-wise.md", ".claude/commands/import-wise.md"]) {
       const text = readPromptSurface(relativePath);
-      expect(text).toContain("execute: false");
-      expect(text).toContain("execute: true");
-      expect(text).toContain("execution.summary");
-      expect(text).toContain("execution.audit_reference");
+      expect(text).toContain("`mode`: `prepare`");
+      expect(text).toContain("`mode`: `execute`");
+      expect(text).toContain("summary.counts");
+      expect(text).toContain("summary.plan_handle");
       expect(text.toLowerCase()).toContain("approval");
     }
   });
@@ -1089,16 +1108,16 @@ describe("registerPrompts", () => {
   it("keeps shipped import-camt markdown prompts aligned with actual dry-run fields", () => {
     const text = readPromptSurface(".claude/commands/import-camt.md");
 
-    expect(text).toContain("execution.summary.total_statement_entries");
-    expect(text).toContain("execution.summary.eligible_entries");
-    expect(text).toContain("execution.summary.filtered_out");
-    expect(text).toContain("execution.summary.created_count");
-    expect(text).toContain("execution.summary.skipped_count");
-    expect(text).toContain("execution.summary.error_count");
-    expect(text).toContain("execution.summary");
-    expect(text).toContain("execution.results");
+    expect(text).toContain("summary.counts");
+    expect(text).toContain("total statement entries");
+    expect(text).toContain("filtered out");
+    expect(text).toContain("would-create");
+    expect(text).toContain("possible duplicates");
+    expect(text).toContain("summary.totals");
+    expect(text).toContain("summary.samples");
+    expect(text).toContain("summary.blockers");
+    expect(text).toContain("summary.plan_handle");
     expect(text).toContain("sample");
-    expect(text).toContain("skipped_summary");
     expect(text).not.toContain("skipped_duplicate_details");
     expect(text).not.toContain("Review `results`");
   });
@@ -1106,12 +1125,12 @@ describe("registerPrompts", () => {
   it("keeps shipped import-camt markdown prompts aligned with plan-handle execution binding", () => {
     for (const relativePath of ["workflows/import-camt.md", ".claude/commands/import-camt.md"]) {
       const text = readPromptSurface(relativePath);
-      expect(text).toContain("result.plan_handle");
-      expect(text).toContain("get_execution_plan_page");
+      expect(text).toContain("summary.plan_handle");
+      expect(text).toContain("get_operation_result_page");
       expect(text).toContain("plan_drift");
-      expect(text).toContain("`plan_handle`: the `result.plan_handle` from the reviewed dry run");
+      expect(text).toContain("`plan_handle`: the `summary.plan_handle` from the reviewed preview");
       expect(text).toContain("The plan handle is not approval");
-      expect(text).toContain("result.execution.execution_report");
+      expect(text).toContain("summary.status");
     }
   });
 

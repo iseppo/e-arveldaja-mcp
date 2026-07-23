@@ -3,7 +3,7 @@ import { toolMeta } from "./tool-catalog.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export type ToolProfile = "guided" | "guided-sales" | "standard" | "full" | "custom";
-export const GUIDED_TOOL_NAMES = Object.freeze(`recommend_workflow accounting_inbox continue_accounting_workflow receipt_batch process_camt053 import_wise_transactions reconcile_bank_transactions reconcile_inter_account_transfers classify_bank_transactions cleanup_camt_possible_duplicate save_auto_booking_rule compute_trial_balance list_connections switch_connection get_setup_instructions get_execution_plan_page get_operation_result_page get_session_log`.split(" "));
+export const GUIDED_TOOL_NAMES = Object.freeze(`recommend_workflow accounting_inbox continue_accounting_workflow receipt_batch process_bank_input reconcile_bank_transactions reconcile_inter_account_transfers classify_bank_transactions cleanup_camt_possible_duplicate save_auto_booking_rule compute_trial_balance list_connections switch_connection get_setup_instructions get_execution_plan_page get_operation_result_page get_session_log`.split(" "));
 export const SETUP_PROFILE_CHOICES = Object.freeze([
   Object.freeze({ label: "Daily bookkeeping", profile: "guided" as const, enableLightyear: false }),
   Object.freeze({ label: "Daily bookkeeping plus sales invoices", profile: "guided-sales" as const, enableLightyear: false }),
@@ -18,6 +18,13 @@ const GUIDED_SALES = new Set([...GUIDED_TOOL_NAMES, "list_sale_invoices", "get_s
 // 20-tool cap. Registered unconditionally in server-bootstrap, but gated here so
 // standard/custom/guided/guided-sales surfaces stay unchanged until then.
 const FULL_ONLY_TOOL_NAMES = new Set(["get_workflow_page"]);
+// process_bank_input is the guided unified bank façade. It is visible in the
+// guided/guided-sales surfaces (via GUIDED above) and in the exhaustive `full`
+// surface, but hidden from standard/custom, which keep the granular
+// process_camt053 / import_wise_transactions entry points instead. Registered
+// unconditionally in server-bootstrap; this gate keeps standard/custom at their
+// pinned counts.
+const GUIDED_AND_FULL_ONLY_TOOL_NAMES = new Set(["process_bank_input"]);
 export const LEGACY_TOOL_EXPOSURE_ENV_KEYS = ["EARVELDAJA_DISABLE_LIGHTYEAR", "EARVELDAJA_EXPOSE_GRANULAR_TOOLS", "EARVELDAJA_EXPOSE_SETUP_TOOLS", "EARVELDAJA_DISABLE_TAX_TOOLS", "EARVELDAJA_DISABLE_REFERENCE_ADMIN", "EARVELDAJA_DISABLE_ANNUAL_REPORT", "EARVELDAJA_DISABLE_SALES", "EARVELDAJA_DISABLE_PRODUCTS"] as const;
 const VALID = new Set<ToolProfile>(["guided", "guided-sales", "standard", "full", "custom"]);
 const PROFILE_STORAGE = new AsyncLocalStorage<ToolProfile>();
@@ -48,6 +55,7 @@ export function isToolVisibleForProfile(name: string, profile: ToolProfile): boo
   if (profile === "guided") return GUIDED.has(name);
   if (profile === "guided-sales") return GUIDED_SALES.has(name);
   if (FULL_ONLY_TOOL_NAMES.has(name)) return profile === "full";
+  if (GUIDED_AND_FULL_ONLY_TOOL_NAMES.has(name)) return profile === "full";
   return true;
 }
 
@@ -71,11 +79,30 @@ export function remapHiddenGranularTool(tool: string, args: Record<string, unkno
     default: return undefined;
   }
 }
+// Guided profiles present ONE unified bank façade. The merged process_camt053 /
+// import_wise_transactions and their granular constituents all collapse to
+// process_bank_input (mode defaults to prepare). The execute flag and legacy
+// mode hint are dropped; file_ref/file_path/dimension/fee/date args carry over —
+// all valid process_bank_input inputs. Standard/full are untouched.
+const BANK_FACADE_SOURCE_TOOLS = new Set([
+  "process_camt053", "parse_camt053", "import_camt053", "import_wise_transactions",
+]);
+export function remapGuidedBankFacade(
+  tool: string,
+  args: Record<string, unknown>,
+): { tool: string; args: Record<string, unknown> } | undefined {
+  if (!BANK_FACADE_SOURCE_TOOLS.has(tool)) return undefined;
+  const { execute: _execute, mode: _mode, ...rest } = args;
+  return { tool: "process_bank_input", args: rest };
+}
+
 export function projectActionForProfile(action: Action, profile: ToolProfile): any {
   if (profile !== "guided" && profile !== "guided-sales") return action;
   const args = action.args ?? {};
   const remapped = remapHiddenGranularTool(action.tool, args);
-  const projected = remapped ? { ...action, tool: remapped.tool, args: remapped.args } : action;
+  const granularProjected = remapped ? { ...action, tool: remapped.tool, args: remapped.args } : action;
+  const bankRemap = remapGuidedBankFacade(granularProjected.tool, granularProjected.args ?? {});
+  const projected = bankRemap ? { ...granularProjected, tool: bankRemap.tool, args: bankRemap.args } : granularProjected;
   let visible = false;
   try { visible = isToolVisibleForProfile(projected.tool, profile); } catch { visible = false; }
   if (visible) return projected;

@@ -132,6 +132,11 @@ export interface WiseRunInput {
   readonly dateFrom: string | undefined;
   readonly dateTo: string | undefined;
   readonly skipJarTransfers: boolean | undefined;
+  /** ADDITIVE (bank façade): an immutable snapshot captured ONCE upstream under
+   * the unified bank_input operation, threaded by identity so the Wise op does
+   * not read the source a second time. Absent for the granular
+   * import_wise_transactions path, which captures internally under wise_input. */
+  readonly snapshot?: FileInputSnapshot;
 }
 
 /**
@@ -166,7 +171,11 @@ async function runWiseImport(
   const skipJars = skip_jar_transfers !== false;
   let inputSnapshot: FileInputSnapshot;
   try {
-    inputSnapshot = await captureFileInputSnapshot({
+    // ADDITIVE snapshot threading (bank façade): reuse the pre-captured immutable
+    // bytes when present so a bank_input file_ref is never re-resolved under
+    // wise_input and the source is read only once. The granular path passes no
+    // snapshot and captures internally under wise_input — byte-identical.
+    inputSnapshot = input.snapshot ?? await captureFileInputSnapshot({
       ...(source.file_path !== undefined ? { file_path: source.file_path } : {}),
       ...(source.file_ref !== undefined ? { file_ref: source.file_ref } : {}),
     }, {

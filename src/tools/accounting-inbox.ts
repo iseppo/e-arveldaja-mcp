@@ -6,7 +6,7 @@ import { registerTool } from "../mcp-compat.js";
 import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
 import { desandboxText, sandboxExternalText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
-import { currentToolProfile, projectActionForCurrentProfile } from "../tool-profile.js";
+import { currentToolProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
@@ -694,13 +694,24 @@ function projectPublicRecommendedSteps(
   let blocked: BlockedRecommendedAction | undefined;
   const blockedProposals: Array<Record<string, unknown>> = [];
   const safeActionContext: Array<Record<string, unknown>> = [];
+  const profile = currentToolProfile();
+  const guidedBankFacade = profile === "guided" || profile === "guided-sales";
   for (const rawStep of rawSteps) {
     const legacyRemap = exposure.exposeGranularTools
       ? undefined
       : remapHiddenGranularTool(rawStep.tool, rawStep.suggested_args);
-    const normalizedStep = legacyRemap
+    const legacyStep = legacyRemap
       ? { ...rawStep, tool: legacyRemap.tool, suggested_args: legacyRemap.args }
       : rawStep;
+    // Guided profiles recommend the unified process_bank_input façade instead of
+    // the merged process_camt053 / import_wise_transactions (which are not guided-
+    // visible). The bank_input file reference is minted downstream in
+    // publicSuggestedArgs. Standard/full keep the camt/wise recommendation and
+    // their camt_input/wise_input references byte-identical.
+    const bankRemap = guidedBankFacade ? remapGuidedBankFacade(legacyStep.tool, legacyStep.suggested_args) : undefined;
+    const normalizedStep = bankRemap
+      ? { ...legacyStep, tool: bankRemap.tool, suggested_args: bankRemap.args }
+      : legacyStep;
     const publicStep = publicRecommendedStep(normalizedStep, runtimeSafetyContext);
     const projected = projectActionForCurrentProfile({
       kind: "tool_call",
@@ -810,9 +821,11 @@ function publicSuggestedArgs(
   const directFilePath = typeof suggestedArgs.file_path === "string" ? suggestedArgs.file_path : undefined;
   const directFolderPath = typeof suggestedArgs.folder_path === "string" ? suggestedArgs.folder_path : undefined;
   if (directFilePath !== undefined) {
-    const operation = tool === "import_wise_transactions"
-      ? FILE_REFERENCE_OPERATIONS.wise
-      : FILE_REFERENCE_OPERATIONS.camt;
+    const operation = tool === "process_bank_input"
+      ? FILE_REFERENCE_OPERATIONS.bank
+      : tool === "import_wise_transactions"
+        ? FILE_REFERENCE_OPERATIONS.wise
+        : FILE_REFERENCE_OPERATIONS.camt;
     delete suggestedArgs.file_path;
     suggestedArgs.file_ref = runtimeSafetyContext.fileReferenceStore.issue({
       canonicalPath: directFilePath,

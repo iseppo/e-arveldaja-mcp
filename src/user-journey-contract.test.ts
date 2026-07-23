@@ -193,6 +193,21 @@ const JOURNEYS: JourneyDefinition[] = [
     ],
   },
   {
+    // Guided unified bank façade: prepare -> execute two-call over the same
+    // immutable snapshot, with the bank dimension resolved automatically (no
+    // technical id demanded on the unique path).
+    name: "bank-input",
+    steps: [
+      read("process_bank_input", { mode: "prepare", file_path: "<ABSOLUTE_PATH>" }, {
+        responseFixture: "camt-100",
+        technicalIdPrompts: 0,
+        ambiguityQuestions: 0,
+      }),
+      read("get_execution_plan_page", { plan_handle: PLAN_HANDLE }, { responseFixture: "plan-page-first" }),
+      approvedMutation("process_bank_input", { mode: "execute", file_path: "<ABSOLUTE_PATH>", plan_handle: PLAN_HANDLE }, "generic-batch-100"),
+    ],
+  },
+  {
     name: "receipt-batch",
     steps: [
       read("receipt_batch", { mode: "scan", folder_path: "<ABSOLUTE_PATH>" }, { responseFixture: "receipts-100" }),
@@ -299,6 +314,16 @@ describe("user-journey accounting contract", () => {
         responseBytes: 17_524,
         technicalIdPrompts: 2,
         ambiguityQuestions: 1,
+        mutationCalls: 1,
+        approvalBeforeMutation: true,
+      },
+      {
+        name: "bank-input",
+        callCount: 3,
+        requestBytes: 348,
+        responseBytes: 23_596,
+        technicalIdPrompts: 0,
+        ambiguityQuestions: 0,
         mutationCalls: 1,
         approvalBeforeMutation: true,
       },

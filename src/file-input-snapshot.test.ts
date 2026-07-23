@@ -24,6 +24,33 @@ afterEach(async () => {
 });
 
 describe("captureFileInputSnapshot", () => {
+  it("captures the unified bank_input snapshot under a .xml+.csv extension union", async () => {
+    const root = await mkdtemp(join(tmpdir(), "file-snapshot-bank-"));
+    roots.push(root);
+    const bankOptions = (runtimeSafetyContext = runtime()) => ({
+      runtimeSafetyContext,
+      operation: FILE_REFERENCE_OPERATIONS.bank,
+      allowedExtensions: [".xml", ".csv"],
+      maxSize: 10 * 1024 * 1024,
+    });
+
+    const xmlPath = join(root, "statement.xml");
+    await writeFile(xmlPath, "<?xml version=\"1.0\"?><Doc/>");
+    const csvPath = join(root, "statement.csv");
+    await writeFile(csvPath, "a,b\n1,2\n");
+    const txtPath = join(root, "statement.txt");
+    await writeFile(txtPath, "nope");
+
+    const xmlSnapshot = await captureFileInputSnapshot({ file_path: xmlPath }, bankOptions());
+    expect(xmlSnapshot.identity.extension).toBe(".xml");
+    const csvSnapshot = await captureFileInputSnapshot({ file_path: csvPath }, bankOptions());
+    expect(csvSnapshot.identity.extension).toBe(".csv");
+
+    // A disallowed extension is still rejected by the union allowlist.
+    await expect(captureFileInputSnapshot({ file_path: txtPath }, bankOptions()))
+      .rejects.toBeInstanceOf(FileInputSnapshotError);
+  });
+
   it("reads a validated local file exactly once and returns immutable byte copies", async () => {
     const root = await mkdtemp(join(tmpdir(), "file-snapshot-"));
     roots.push(root);

@@ -1,7 +1,7 @@
 import type { OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
-import type { FileInputSource } from "../file-input-snapshot.js";
+import type { FileInputSource, FileInputSnapshot } from "../file-input-snapshot.js";
 import {
   assertStatementAccountMatchesDimension,
   buildImportProjection,
@@ -36,6 +36,11 @@ export interface CamtImportInput {
   readonly accountsDimensionsId: number;
   readonly dateFrom: string | undefined;
   readonly dateTo: string | undefined;
+  /** ADDITIVE (bank façade): an immutable snapshot captured ONCE upstream under
+   * the unified bank_input operation. When present it is threaded by identity so
+   * the op does not read the source a second time. Absent for the granular
+   * process_camt053 path, which captures internally under camt_input. */
+  readonly snapshot?: FileInputSnapshot;
 }
 
 export interface CamtExecuteInput extends CamtImportInput {
@@ -77,7 +82,7 @@ class CamtOperationsImpl implements CamtOperations {
     const { source, accountsDimensionsId, dateFrom, dateTo } = input;
     // DRY RUN: preflight, preserve the existing stop gates, project the import,
     // and issue an immutable execution plan the operator reviews.
-    const { snapshot, preflight } = await loadCamt053SnapshotAndPreflight(source, this.runtimeSafetyContext);
+    const { snapshot, preflight } = await loadCamt053SnapshotAndPreflight(source, this.runtimeSafetyContext, input.snapshot);
     if (!preflight.ok) throw new CamtPreflightRejectedError(preflight.source, preflight.rejected_fields);
     const loaded = preflight.value;
 
@@ -134,6 +139,7 @@ class CamtOperationsImpl implements CamtOperations {
       dateFrom: input.dateFrom,
       dateTo: input.dateTo,
       planHandle: input.planHandle,
+      ...(input.snapshot !== undefined ? { snapshot: input.snapshot } : {}),
     });
     return result.ok
       ? ok(result.execution)
