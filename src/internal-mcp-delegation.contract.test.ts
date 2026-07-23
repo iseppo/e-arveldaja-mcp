@@ -8,7 +8,6 @@ const SOURCE_ROOT = resolve("src");
 const ALLOWED_PRODUCTION_CONSUMERS = [
   "src/tools/accounting-inbox-autopilot-service.ts",
   "src/tools/accounting-inbox.ts",
-  "src/tools/receipt-inbox.ts",
 ] as const;
 
 async function productionTypeScriptFiles(directory = SOURCE_ROOT): Promise<string[]> {
@@ -348,7 +347,7 @@ async function currentProductionConsumers(): Promise<string[]> {
 }
 
 describe("internal MCP delegation architecture contract", () => {
-  it("allows exactly the four current production consumers and no new ones", async () => {
+  it("allows exactly the two current production consumers and no new ones", async () => {
     expect(await currentProductionConsumers()).toEqual(ALLOWED_PRODUCTION_CONSUMERS);
   });
 

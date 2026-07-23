@@ -6,20 +6,16 @@ import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtim
 import { FILE_REFERENCE_OPERATIONS, FileReferenceStoreError } from "../file-reference-store.js";
 import { sandboxExternalText } from "../external-text-renderer.js";
 import { registerTool } from "../mcp-compat.js";
-import { canonicalBusinessText, parseMcpResponse, toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { toolError } from "../tool-error.js";
 import { HttpError } from "../http-client.js";
 import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
-import { roundMoney } from "../money.js";
-import { reportProgress } from "../progress.js";
 import { readOnly, batch } from "../annotations.js";
-import { logAudit } from "../audit-log.js";
-import { buildBatchExecutionContract } from "../batch-execution.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { type ApiContext, isCompanyVatRegistered, jsonObjectOrArrayInput, safeJsonParse, coerceId, tagNotes } from "./crud-tools.js";
-import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
+import { type ApiContext, jsonObjectOrArrayInput, coerceId } from "./crud-tools.js";
+import { getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeCompanyName } from "../company-name.js";
@@ -37,17 +33,12 @@ import {
   type TransactionGroupClassification,
   CATEGORY_KEYWORD_MAP,
   buildKeywordSuggestion,
-  categorizeTransactionGroup,
   classifyReceiptDocument,
-  deriveAutoBookedNetAmount,
-  deriveAutoBookedVatPrice,
   detectReverseChargeFromText,
   computeMinOcrConfidence,
   extractReceiptFieldsFromText,
   findAccountByKeywords,
   findPurchaseArticleByKeywords,
-  getBookingSuggestionVatConfig,
-  getAutoBookedVatConfig,
   hasAutoBookableReceiptFields,
   inferSupplierCountry,
   LOW_OCR_CONFIDENCE_THRESHOLD,
@@ -67,10 +58,9 @@ import {
 } from "../accounting-rules.js";
 import {
   type ReviewGuidance,
-  buildClassificationReviewGuidance,
   buildReceiptReviewGuidance,
 } from "../estonian-accounting-guidance.js";
-import { buildWorkflowEnvelope, remapHiddenGranularWorkflowResult } from "../workflow-response.js";
+import { remapHiddenGranularWorkflowResult } from "../workflow-response.js";
 import { DEFAULT_LIABILITY_ACCOUNT, EMTA_PREPAYMENT_ACCOUNT } from "../accounting-defaults.js";
 import {
   RECEIPT_BATCH_EXECUTION_MODES,
@@ -80,8 +70,6 @@ import {
   type ReceiptBatchFileResult,
   type ReceiptFileInfo,
   type ReceiptFileSnapshot,
-  type ReceiptInboxToolHandler,
-  type ReceiptInboxToolResult,
   type ReceiptProcessingContext,
 } from "./receipt-inbox-types.js";
 import {
@@ -114,6 +102,13 @@ import {
   type ReceiptBatchCompactInput,
   type ReceiptBatchFileRefProjection,
 } from "../receipts/presenter.js";
+import { createClassificationOperations } from "../receipts/classification-operations.js";
+import {
+  renderApplyClassificationsCompact,
+  renderApplyClassificationsFull,
+  renderClassificationAnalysisCompact,
+  renderUnmatchedAnalysisFull,
+} from "../receipts/classification-presenter.js";
 import { currentToolProfile } from "../tool-profile.js";
 
 const POSSIBLE_MATCH_THRESHOLD = 70;
@@ -145,13 +140,13 @@ export function supplierCountryNeedsReview(supplierResolution: SupplierResolutio
     !supplierResolution.preview_client.cl_code_country;
 }
 
-interface TransactionGroup {
+export interface TransactionGroup {
   normalized_counterparty: string;
   display_counterparty: string;
   transactions: Transaction[];
 }
 
-interface ClassifiedTransactionSuggestion {
+export interface ClassifiedTransactionSuggestion {
   purchase_article_id?: number;
   purchase_article_name?: string;
   purchase_account_id?: number;
@@ -166,7 +161,7 @@ interface ClassifiedTransactionSuggestion {
   reason: string;
 }
 
-interface ClassifiedTransactionGroupResult {
+export interface ClassifiedTransactionGroupResult {
   category: TransactionClassificationCategory;
   apply_mode: ClassificationApplyMode;
   normalized_counterparty: string;
@@ -190,9 +185,9 @@ interface ClassifiedTransactionGroupResult {
   }>;
 }
 
-type PartialClassificationStatus = "PROJECT" | "CONFIRMED" | "VOID" | "UNKNOWN";
+export type PartialClassificationStatus = "PROJECT" | "CONFIRMED" | "VOID" | "UNKNOWN";
 
-interface PartialClassificationMutation {
+export interface PartialClassificationMutation {
   category: "mutation_indeterminate" | "mutation_failed";
   mutation_may_have_occurred: true;
   failed_stage:
@@ -207,11 +202,11 @@ interface PartialClassificationMutation {
   next_action: string;
 }
 
-function invoiceClassificationStatus(status: unknown): PartialClassificationStatus {
+export function invoiceClassificationStatus(status: unknown): PartialClassificationStatus {
   return status === "PROJECT" || status === "CONFIRMED" ? status : "UNKNOWN";
 }
 
-function transactionClassificationStatus(
+export function transactionClassificationStatus(
   transaction: Pick<Transaction, "status" | "is_deleted">,
 ): PartialClassificationStatus {
   if (transaction.is_deleted === true) return "UNKNOWN";
@@ -222,7 +217,7 @@ function transactionClassificationStatus(
     : "UNKNOWN";
 }
 
-function isAmbiguousPostCreateFailure(error: unknown): boolean {
+export function isAmbiguousPostCreateFailure(error: unknown): boolean {
   return isMutationIndeterminate(error) || (
     error instanceof HttpError && error.status === "network"
   );
@@ -261,13 +256,13 @@ export function shouldGateCreation(
   };
 }
 
-function shouldProcessExpenseAsPurchaseInvoice(classification: TransactionClassificationCategory): boolean {
+export function shouldProcessExpenseAsPurchaseInvoice(classification: TransactionClassificationCategory): boolean {
   return classification === "saas_subscriptions" ||
     classification === "bank_fees" ||
     classification === "card_purchases";
 }
 
-function buildOwnerCounterpartySet(clients: Client[]): Set<string> {
+export function buildOwnerCounterpartySet(clients: Client[]): Set<string> {
   const owners = clients.filter(client =>
     !client.is_deleted &&
     client.is_physical_entity &&
@@ -276,7 +271,7 @@ function buildOwnerCounterpartySet(clients: Client[]): Set<string> {
   return new Set(owners.map(client => normalizeCounterpartyName(client.name)).filter(Boolean));
 }
 
-function groupTransactionsByCounterparty(transactions: Transaction[]): TransactionGroup[] {
+export function groupTransactionsByCounterparty(transactions: Transaction[]): TransactionGroup[] {
   const groups = new Map<string, TransactionGroup>();
 
   for (const transaction of transactions) {
@@ -589,7 +584,7 @@ export function buildClassificationSuggestion(
   return defaultSuggestion;
 }
 
-async function resolveClassificationSuggestion(
+export async function resolveClassificationSuggestion(
   api: ApiContext,
   context: Pick<ReceiptProcessingContext, "purchaseInvoices" | "purchaseArticlesWithVat" | "accounts">,
   clients: Client[],
@@ -944,7 +939,7 @@ export function selectBatchBankTransactions(
   );
 }
 
-function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): boolean {
+export function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): boolean {
   if (tx.type !== "D" && tx.type !== "C") return false;
   const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
 
@@ -967,37 +962,6 @@ function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPur
   }
 
   return false;
-}
-
-function toClassifiedResult(
-  group: TransactionGroup,
-  classification: TransactionGroupClassification,
-  suggestion: ClassifiedTransactionSuggestion,
-  reviewGuidance?: ReviewGuidance,
-): ClassifiedTransactionGroupResult {
-  return {
-    category: classification.category,
-    apply_mode: classification.apply_mode,
-    normalized_counterparty: group.normalized_counterparty,
-    display_counterparty: group.display_counterparty,
-    recurring: classification.recurring,
-    similar_amounts: classification.similar_amounts,
-    total_amount: roundMoney(group.transactions.reduce((sum, transaction) => sum + transaction.amount, 0)),
-    suggested_booking: suggestion,
-    reasons: classification.reasons,
-    review_guidance: reviewGuidance,
-    transactions: group.transactions.map(transaction => ({
-      id: transaction.id,
-      type: transaction.type,
-      amount: transaction.amount,
-      date: transaction.date,
-      description: wrapUntrustedOcr(transaction.description ?? undefined),
-      bank_account_name: wrapUntrustedOcr(transaction.bank_account_name ?? undefined),
-      bank_subtype: transaction.bank_subtype,
-      accounts_dimensions_id: transaction.accounts_dimensions_id,
-      clients_id: transaction.clients_id,
-    })),
-  };
 }
 
 export async function resolveSupplierFromTransaction(
@@ -1049,7 +1013,7 @@ function validateClassificationGroup(item: unknown, index: number): void {
   }
 }
 
-function extractClassificationGroups(payload: unknown): ClassifiedTransactionGroupResult[] {
+export function extractClassificationGroups(payload: unknown): ClassifiedTransactionGroupResult[] {
   let groups: unknown[];
   if (Array.isArray(payload)) {
     groups = payload;
@@ -1076,11 +1040,15 @@ export function registerReceiptInboxTools(
   receiptDirectoryAccess: Omit<ReceiptDirectoryAccessOptions, "expectedCanonicalPath"> = {},
 ): void {
   assertRuntimeSafetyContext(runtimeSafetyContext);
-  const handlers = new Map<string, ReceiptInboxToolHandler>();
-  // Typed receipt batch operations. The batch tools are thin adapters over this
-  // facade + the ../receipts/presenter.js envelope builder; the classification
-  // path below still delegates via invokeCapturedTool (Task 9).
+  // Typed receipt batch + classification operations. Every batch and classify
+  // tool is a thin adapter over one of these facades + its presenter; there is
+  // no serialized-MCP delegation (no invokeCapturedTool / parseMcpResponse /
+  // handlers registry) anymore.
   const operations = createReceiptBatchOperations(api, runtimeSafetyContext);
+  // wrapUntrustedOcr is injected so the classification operation module never
+  // imports it: the operation returns unwrapped data, and the only OCR-origin
+  // error fragment it must sandbox in a note goes through this adapter-owned wrap.
+  const classificationOperations = createClassificationOperations(api, runtimeSafetyContext, wrapUntrustedOcr);
 
   // Constituents fully covered by merged entry points: receipt_batch
   // (scan / dry_run / create / create_and_confirm) covers scan_receipt_folder +
@@ -1243,7 +1211,8 @@ export function registerReceiptInboxTools(
     annotations: ToolAnnotations,
     cb: (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown,
   ): void {
-    handlers.set(name, cb as unknown as ReceiptInboxToolHandler);
+    // Granular constituents stay registered (routed internally by the merged
+    // entry points) but only enter tools/list when EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1.
     if (granularOnlyTools.has(name) && !exposure.exposeGranularTools) return;
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
@@ -1567,99 +1536,18 @@ export function registerReceiptInboxTools(
     },
     { ...readOnly, title: "Classify Unmatched Transactions" },
     async ({ accounts_dimensions_id, date_from, date_to }) => {
-      const [transactions, saleInvoices, purchaseInvoices, clients, purchaseArticlesWithVat, accounts] = await Promise.all([
-        api.transactions.listAll(),
-        api.saleInvoices.listAll(),
-        api.purchaseInvoices.listAll(),
-        api.clients.listAll(),
-        getPurchaseArticlesWithVat(api),
-        api.readonly.getAccounts(),
-      ]);
-
-      const openSales = saleInvoices.filter(invoice =>
-        invoice.status === "CONFIRMED" && invoice.payment_status !== "PAID",
-      );
-      const openPurchases = purchaseInvoices.filter(invoice =>
-        invoice.status === "CONFIRMED" && invoice.payment_status !== "PAID",
-      );
-      const ownerCounterparties = buildOwnerCounterpartySet(clients);
-
-      const unconfirmed = transactions.filter(transaction =>
-        transaction.accounts_dimensions_id === accounts_dimensions_id &&
-        isProjectTransaction(transaction) &&
-        (!date_from || transaction.date >= date_from) &&
-        (!date_to || transaction.date <= date_to),
-      );
-
-      const unmatched = unconfirmed.filter(transaction => !existingInvoiceMatch(transaction, openSales, openPurchases));
-      const groups = groupTransactionsByCounterparty(unmatched);
-      const context = {
-        purchaseInvoices,
-        purchaseArticlesWithVat,
-        accounts,
-      };
-      const classifiedGroups: ClassifiedTransactionGroupResult[] = [];
-
-      for (const group of groups) {
-        const classification = categorizeTransactionGroup({
-          normalized_counterparty: group.normalized_counterparty,
-          display_counterparty: group.display_counterparty,
-          transactions: group.transactions,
-          owner_counterparties: ownerCounterparties,
-        });
-        const resolved = await resolveClassificationSuggestion(api, context, clients, group, classification);
-        const applyMode = resolved.applyMode;
-        classifiedGroups.push(toClassifiedResult(group, {
-          ...classification,
-          apply_mode: applyMode,
-        }, resolved.suggestion, applyMode !== "purchase_invoice"
-          ? buildClassificationReviewGuidance({
-              category: classification.category,
-              displayCounterparty: group.display_counterparty,
-            })
-          : undefined));
-      }
-
-      const categoryCounts = classifiedGroups.reduce<Record<string, number>>((counts, group) => {
-        counts[group.category] = (counts[group.category] ?? 0) + group.transactions.length;
-        return counts;
-      }, {});
-
-      // display_counterparty and each transaction's description/bank_account_name
-      // originate from bank-statement import and are attacker-controllable at
-      // the counterparty layer. Wrap at the MCP boundary so classify output
-      // reaching the LLM is sandboxed. apply_transaction_classifications
-      // re-fetches transactions by id, so wrapped text in the JSON payload
-      // never participates in server-side lookups.
-      const sanitizedGroups = classifiedGroups.map(g => ({
-        ...g,
-        // normalized_counterparty is derived from imported bank-statement text
-        // and would otherwise leak unwrapped via the `...g` spread. Wrap it with
-        // the same OCR sandbox as display_counterparty.
-        normalized_counterparty: wrapUntrustedOcr(g.normalized_counterparty) ?? g.normalized_counterparty,
-        display_counterparty: wrapUntrustedOcr(g.display_counterparty) ?? g.display_counterparty,
-        transactions: g.transactions.map(t => ({
-          ...t,
-          description: wrapUntrustedOcr(t.description ?? undefined),
-          bank_account_name: wrapUntrustedOcr(t.bank_account_name ?? undefined),
-        })),
-      }));
-
+      // Granular tool: always the byte-identical FULL envelope (granular tools
+      // are only exposed under full/EXPOSE_GRANULAR, never a guided profile).
+      const outcome = await classificationOperations.analyzeUnmatched({
+        accountsDimensionsId: accounts_dimensions_id,
+        ...(date_from !== undefined ? { dateFrom: date_from } : {}),
+        ...(date_to !== undefined ? { dateTo: date_to } : {}),
+      });
+      if (!outcome.ok) return toolError({ error: outcome.error.message, category: outcome.error.code });
       return {
         content: [{
           type: "text",
-          text: toMcpJson({
-            schema_version: 1,
-            accounts_dimensions_id,
-            period: {
-              from: date_from ?? "all",
-              to: date_to ?? "all",
-            },
-            total_unconfirmed: unconfirmed.length,
-            total_unmatched: unmatched.length,
-            category_counts: categoryCounts,
-            groups: sanitizedGroups,
-          }),
+          text: toMcpJson(renderUnmatchedAnalysisFull({ result: outcome.value })),
         }],
       };
     },
@@ -1674,462 +1562,24 @@ export function registerReceiptInboxTools(
     },
     { ...batch, title: "Apply Transaction Classifications" },
     async ({ classifications_json, execute }) => {
-      const dryRun = execute !== true;
-      const parsed = typeof classifications_json === "string"
-        ? safeJsonParse(classifications_json, "classifications_json")
-        : classifications_json;
-      const groups = extractClassificationGroups(parsed);
-
-      const [clients, purchaseArticlesWithVat, purchaseInvoices, accounts] = await Promise.all([
-        api.clients.listAll(),
-        getPurchaseArticlesWithVat(api),
-        api.purchaseInvoices.listAll(),
-        api.readonly.getAccounts(),
-      ]);
-      const isVatRegistered = await isCompanyVatRegistered(api);
-      const results: Array<{
-        category: TransactionClassificationCategory;
-        counterparty: string;
-        status: "applied" | "skipped" | "dry_run_preview" | "failed";
-        notes: string[];
-        transactions: number[];
-        created_invoice_ids?: number[];
-        linked_transaction_ids?: number[];
-        partial_mutations?: PartialClassificationMutation[];
-      }> = [];
-
-      for (let index = 0; index < groups.length; index++) {
-        const group = groups[index]!;
-        await reportProgress(index, groups.length);
-        const notes: string[] = [];
-        const transactionIds = group.transactions.map(transaction => transaction.id).filter((id): id is number => id !== undefined);
-        const createdInvoiceIds: number[] = [];
-        const linkedTransactionIds: number[] = [];
-        const partialMutations: PartialClassificationMutation[] = [];
-        let wouldCreateCount = 0;
-        let attemptedCreateCount = 0;
-
-        try {
-          const freshTransactions: Transaction[] = [];
-          for (const transactionStub of group.transactions) {
-            if (!transactionStub.id) {
-              notes.push("Skipped a transaction without ID.");
-              continue;
-            }
-
-            try {
-              const transaction = await api.transactions.get(transactionStub.id);
-              if (transaction.is_deleted) {
-                notes.push(`Transaction ${transactionStub.id} was deleted since classification; skipped.`);
-                continue;
-              }
-              if (transaction.status === "CONFIRMED") {
-                notes.push(`Transaction ${transactionStub.id} was confirmed since classification; skipped.`);
-                continue;
-              }
-              if (transaction.status !== "PROJECT") {
-                notes.push(`Transaction ${transactionStub.id} is no longer bookable (status ${transaction.status ?? "UNKNOWN"}); skipped.`);
-                continue;
-              }
-              freshTransactions.push(transaction);
-            } catch (error) {
-              // Only a confirmed 404 means the transaction is genuinely gone.
-              // A transient 503/timeout/network error must NOT be swallowed as a
-              // benign skip — rethrow so it surfaces as a real group failure and
-              // is counted, instead of silently dropping a valid PROJECT tx.
-              if (error instanceof HttpError && error.status === 404) {
-                notes.push(`Transaction ${transactionStub.id} no longer exists.`);
-              } else {
-                throw error;
-              }
-            }
-          }
-
-          if (freshTransactions.length === 0) {
-            notes.push("No unconfirmed transactions remain in this classification group.");
-            results.push({
-              category: group.category,
-              counterparty: group.display_counterparty,
-              status: "skipped",
-              notes,
-              transactions: transactionIds,
-            });
-            continue;
-          }
-
-          if (group.apply_mode !== "purchase_invoice" || !shouldProcessExpenseAsPurchaseInvoice(group.category)) {
-            notes.push(`Category ${group.category} is review-only and is not auto-booked as a purchase invoice.`);
-            results.push({
-              category: group.category,
-              counterparty: group.display_counterparty,
-              status: "skipped",
-              notes,
-              transactions: transactionIds,
-            });
-            continue;
-          }
-
-          if (!group.suggested_booking.purchase_article_id) {
-            notes.push("Missing suggested purchase article ID. Re-run classification after maintaining purchase articles.");
-            results.push({
-              category: group.category,
-              counterparty: group.display_counterparty,
-              status: "skipped",
-              notes,
-              transactions: transactionIds,
-            });
-            continue;
-          }
-
-          for (const transaction of freshTransactions) {
-            const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun, group.category);
-            const supplier = supplierResolution.client;
-            const supplierId = supplier?.id;
-            const supplierMetadata = supplierResolution.client ?? supplierResolution.preview_client;
-            const grossAmount = roundMoney(Math.abs(transaction.amount));
-            const transactionCurrency = (transaction.cl_currencies_id ?? "EUR").toUpperCase();
-            const transactionCurrencyRate = transaction.currency_rate;
-            // M10: the caller echoes classify output back in classifications_json,
-            // where counterparty fields were sandbox-wrapped for display. Strip
-            // the markers to the canonical business value BEFORE it drives rule
-            // matching (findAutoBookingRule), booking suggestions, or is written
-            // into the audit summary below — nothing persisted/matched may carry
-            // a sandbox marker. The response still re-wraps counterparty text.
-            const transactionGroup: TransactionGroup = {
-              normalized_counterparty: canonicalBusinessText(group.normalized_counterparty),
-              display_counterparty: canonicalBusinessText(group.display_counterparty),
-              transactions: [transaction],
-            };
-            const resolved = await resolveClassificationSuggestion(api, {
-              purchaseInvoices,
-              purchaseArticlesWithVat,
-              accounts,
-            }, clients, transactionGroup, {
-              category: group.category,
-              apply_mode: group.apply_mode,
-              recurring: group.recurring,
-              similar_amounts: group.similar_amounts,
-              reasons: group.reasons,
-            });
-            if (!supplier?.id && dryRun) {
-              notes.push(`Dry run: transaction ${transaction.id} would require creating a supplier for ${group.display_counterparty}.`);
-            }
-            if (!supplier?.id && !dryRun) {
-              notes.push(`Transaction ${transaction.id} could not resolve a supplier client.`);
-              continue;
-            }
-
-            if (resolved.applyMode !== "purchase_invoice") {
-              notes.push(`Transaction ${transaction.id} requires manual review before booking. ${resolved.suggestion.reason}`);
-              continue;
-            }
-
-            if (
-              transactionCurrency !== "EUR" &&
-              (!Number.isFinite(transactionCurrencyRate) || (transactionCurrencyRate ?? 0) <= 0)
-            ) {
-              notes.push(
-                `Non-EUR transaction ${transaction.id} uses ${transactionCurrency} but has no currency_rate. Review manually or retry after the transaction exposes a valid EUR conversion rate.`
-              );
-              continue;
-            }
-
-            const article = purchaseArticlesWithVat.find(item => item.id === resolved.suggestion.purchase_article_id);
-            const vatConfig = getBookingSuggestionVatConfig({
-              item: {
-                vat_rate_dropdown: resolved.suggestion.vat_rate_dropdown,
-                reversed_vat_id: resolved.suggestion.reversed_vat_id,
-              } as PurchaseInvoiceItem,
-            }) ?? getAutoBookedVatConfig();
-            const netAmount = deriveAutoBookedNetAmount(grossAmount, vatConfig);
-            const purchaseItem = applyPurchaseVatDefaults(
-              purchaseArticlesWithVat,
-              {
-                cl_purchase_articles_id: resolved.suggestion.purchase_article_id,
-                purchase_accounts_id: resolved.suggestion.purchase_account_id ?? article?.accounts_id,
-                purchase_accounts_dimensions_id: resolved.suggestion.purchase_account_dimensions_id,
-                custom_title: transaction.description ?? `Auto-booked ${group.category}`,
-                unit_net_price: netAmount,
-                total_net_price: netAmount,
-                amount: 1,
-                ...vatConfig,
-              },
-              isVatRegistered,
-            );
-
-            if (dryRun) {
-              wouldCreateCount += 1;
-              notes.push(`Dry run: would create purchase invoice for transaction ${transaction.id}.`);
-              continue;
-            }
-
-            if (!supplier || !supplierId) {
-              notes.push(`Transaction ${transaction.id} could not resolve a supplier client.`);
-              continue;
-            }
-
-            const invoice = await api.purchaseInvoices.createAndSetTotals(
-              {
-                clients_id: supplierId,
-                client_name: supplier.name,
-                number: `AUTO-TX-${transaction.id}`,
-                create_date: transaction.date,
-                journal_date: transaction.date,
-                term_days: 0,
-                cl_currencies_id: transactionCurrency,
-                ...(transactionCurrency !== "EUR" ? { currency_rate: transactionCurrencyRate } : {}),
-                liability_accounts_id: resolved.suggestion.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
-                notes: tagNotes(`Auto-created from classified bank transaction ${transaction.id}`),
-                items: [purchaseItem],
-              },
-              deriveAutoBookedVatPrice(grossAmount, vatConfig),
-              grossAmount,
-              isVatRegistered,
-            );
-            const invoiceId = invoice.id;
-            if (!invoiceId) {
-              throw new Error("createAndSetTotals resolved without a purchase invoice ID");
-            }
-            attemptedCreateCount += 1;
-            createdInvoiceIds.push(invoiceId);
-            let observedInvoiceStatus = invoiceClassificationStatus(invoice.status);
-            logAudit({
-              tool: "apply_transaction_classifications", action: "CREATED", entity_type: "purchase_invoice",
-              entity_id: invoiceId,
-              summary: `Auto-booked purchase invoice from transaction ${transaction.id} (${transactionGroup.display_counterparty})`,
-              details: { supplier_name: supplier.name, invoice_number: `AUTO-TX-${transaction.id}`, date: transaction.date, total_gross: grossAmount },
-            });
-
-            type InvoiceInvalidationOutcome =
-              | { ok: true }
-              | { ok: false; error: unknown };
-
-            const invalidateAutoCreatedInvoice = async (
-              reason: string,
-            ): Promise<InvoiceInvalidationOutcome> => {
-              try {
-                await api.purchaseInvoices.invalidate(invoiceId);
-                notes.push(`Invalidated auto-created purchase invoice ${invoiceId} because ${reason}.`);
-                return { ok: true };
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                notes.push(
-                  `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${wrapUntrustedOcr(message) ?? message}.`,
-                );
-                return { ok: false, error };
-              }
-            };
-
-            const recordPostCreateFailure = (
-              error: unknown,
-              failedStage: PartialClassificationMutation["failed_stage"],
-              createdInvoiceStatus: PartialClassificationStatus,
-              transactionStatus: PartialClassificationStatus,
-            ): void => {
-              const ambiguous = isAmbiguousPostCreateFailure(error);
-              const nextAction = failedStage === "transaction_reread"
-                ? `Use existing purchase invoice ${invoiceId}. Freshly read transaction ${transaction.id}, then continue only after explicit approval.`
-                : failedStage === "invoice_invalidation"
-                  ? `Freshly read existing purchase invoice ${invoiceId} before any further action, then continue only after explicit approval.`
-                  : failedStage === "invoice_confirmation"
-                    ? `Use existing purchase invoice ${invoiceId}. Freshly read that invoice and transaction ${transaction.id}, then continue only after explicit approval.`
-                    : `Use existing confirmed purchase invoice ${invoiceId}. Freshly read transaction ${transaction.id}, then continue only after explicit approval.`;
-              partialMutations.push({
-                category: ambiguous ? "mutation_indeterminate" : "mutation_failed",
-                mutation_may_have_occurred: true,
-                failed_stage: failedStage,
-                created_invoice_id: invoiceId,
-                created_invoice_status: createdInvoiceStatus,
-                attempted_transaction_id: transaction.id!,
-                transaction_status: transactionStatus,
-                next_action: nextAction,
-              });
-              notes.push(nextAction);
-            };
-
-            let freshTransaction: Transaction;
-            try {
-              freshTransaction = await api.transactions.get(transaction.id!);
-            } catch (error) {
-              recordPostCreateFailure(error, "transaction_reread", observedInvoiceStatus, "UNKNOWN");
-              continue;
-            }
-
-            if (!isProjectTransaction(freshTransaction)) {
-              const invalidation = await invalidateAutoCreatedInvoice(
-                `transaction ${transaction.id} is no longer bookable (status ${freshTransaction.status ?? "UNKNOWN"})`,
-              );
-              if (invalidation.ok) {
-                const createdIndex = createdInvoiceIds.lastIndexOf(invoiceId);
-                if (createdIndex >= 0) createdInvoiceIds.splice(createdIndex, 1);
-              } else {
-                recordPostCreateFailure(
-                  invalidation.error,
-                  "invoice_invalidation",
-                  isAmbiguousPostCreateFailure(invalidation.error) ? "UNKNOWN" : observedInvoiceStatus,
-                  transactionClassificationStatus(freshTransaction),
-                );
-              }
-              continue;
-            }
-
-            try {
-              await api.purchaseInvoices.confirmWithTotals(invoiceId, isVatRegistered);
-              observedInvoiceStatus = "CONFIRMED";
-              logAudit({
-                tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "purchase_invoice",
-                entity_id: invoiceId,
-                summary: `Auto-confirmed purchase invoice ${invoiceId} for transaction ${transaction.id}`,
-                details: { invoice_id: invoiceId, transaction_id: transaction.id },
-              });
-            } catch (error) {
-              recordPostCreateFailure(
-                error,
-                "invoice_confirmation",
-                isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : observedInvoiceStatus,
-                "PROJECT",
-              );
-              continue;
-            }
-
-            try {
-              await api.transactions.confirm(transaction.id!, [{
-                related_table: "purchase_invoices",
-                related_id: invoiceId,
-                amount: transaction.amount,
-              }]);
-              logAudit({
-                tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
-                entity_id: transaction.id!,
-                summary: `Auto-confirmed transaction ${transaction.id} against invoice ${invoiceId}`,
-                details: { amount: transaction.amount, invoice_id: invoiceId },
-              });
-            } catch (error) {
-              recordPostCreateFailure(
-                error,
-                "transaction_confirmation",
-                "CONFIRMED",
-                isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : "PROJECT",
-              );
-              continue;
-            }
-
-            linkedTransactionIds.push(transaction.id!);
-          }
-
-          const status = dryRun
-            ? (wouldCreateCount > 0 ? "dry_run_preview" : "skipped")
-            : partialMutations.length > 0
-              ? "failed"
-              : attemptedCreateCount > 0 && linkedTransactionIds.length === attemptedCreateCount
-                ? "applied"
-                : attemptedCreateCount > 0
-                  ? "failed"
-                  : "skipped";
-
-          if (status === "failed" && linkedTransactionIds.length > 0) {
-            notes.push(
-              `Group reported as failed; the following transactions were already booked successfully and were left in place: ${linkedTransactionIds.join(", ")}.`
-            );
-          }
-
-          results.push({
-            category: group.category,
-            counterparty: group.display_counterparty,
-            status,
-            notes,
-            transactions: transactionIds,
-            created_invoice_ids: dryRun ? undefined : createdInvoiceIds,
-            linked_transaction_ids: dryRun ? undefined : linkedTransactionIds,
-            partial_mutations: partialMutations.length > 0 ? partialMutations : undefined,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          notes.push(message);
-          results.push({
-            category: group.category,
-            counterparty: group.display_counterparty,
-            status: "failed",
-            notes,
-            transactions: transactionIds,
-            created_invoice_ids: dryRun ? undefined : createdInvoiceIds,
-            linked_transaction_ids: dryRun ? undefined : linkedTransactionIds,
-            partial_mutations: partialMutations.length > 0 ? partialMutations : undefined,
-          });
-        }
-      }
-
-      const summary = {
-        applied: results.filter(result => result.status === "applied").length,
-        skipped: results.filter(result => result.status === "skipped").length,
-        dry_run_preview: results.filter(result => result.status === "dry_run_preview").length,
-        failed: results.filter(result => result.status === "failed").length,
-      };
-      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
-      const workflowArgs = {
-        classifications_json,
-        execute: false,
-      };
-      const workflowSummary = dryRun
-        ? `Classification dry run would create ${summary.dry_run_preview} purchase invoice group(s), skip ${summary.skipped}, and fail ${summary.failed}.`
-        : `Applied ${summary.applied} classification group(s), skipped ${summary.skipped}, and failed ${summary.failed}.`;
-      const workflow = buildWorkflowEnvelope({
-        summary: workflowSummary,
-        dry_run_steps: dryRun
-          ? [{
-              tool: "apply_transaction_classifications",
-              summary: workflowSummary,
-              suggested_args: workflowArgs,
-              preview: summary,
-            }]
-          : [],
+      // Granular tool: always the byte-identical FULL envelope (granular tools
+      // are only exposed under full/EXPOSE_GRANULAR, never a guided profile).
+      const outcome = await classificationOperations.applyClassifications({
+        classificationsJson: classifications_json,
+        execute,
       });
-
+      if (!outcome.ok) return toolError({ error: outcome.error.message, category: outcome.error.code });
       return {
         content: [{
           type: "text",
-          text: toMcpJson({
-            mode,
-            dry_run: dryRun,
-            summary,
-            workflow,
-            results,
-            execution: buildBatchExecutionContract({
-              mode,
-              summary,
-              results: results.filter(result =>
-                result.status === "applied" ||
-                result.status === "dry_run_preview"
-              ),
-              skipped: results.filter(result => result.status === "skipped"),
-              errors: results.filter(result => result.status === "failed"),
-            }),
-          }),
+          text: toMcpJson(renderApplyClassificationsFull({
+            result: outcome.value,
+            classificationsJson: classifications_json,
+          })),
         }],
       };
     },
   );
-
-  async function invokeCapturedTool(
-    tool: string,
-    args: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    const handler = handlers.get(tool);
-    if (!handler) {
-      throw new Error(`Classification wrapper could not find tool handler for ${tool}`);
-    }
-
-    const result = await handler(args);
-    const text = result.content[0]?.text;
-    if (!text) {
-      throw new Error(`Classification wrapper received no text payload from ${tool}`);
-    }
-
-    const parsed = parseMcpResponse(text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : { value: parsed };
-  }
 
   registerTool(server,
     "classify_bank_transactions",
@@ -2146,6 +1596,12 @@ export function registerReceiptInboxTools(
       const selectedMode = mode ?? "classify";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
+      // Call the typed operation + presenter DIRECTLY — no invokeCapturedTool /
+      // parseMcpResponse round-trip. delegated_tool/delegated_args still report
+      // the granular tool + args this merged entry point routes to. Guided
+      // profiles get the token-lean compact summary; standard/full keep the
+      // byte-identical full envelope.
+      let result: unknown;
 
       if (selectedMode === "classify") {
         if (accounts_dimensions_id === undefined) {
@@ -2157,6 +1613,24 @@ export function registerReceiptInboxTools(
           ...(date_from !== undefined ? { date_from } : {}),
           ...(date_to !== undefined ? { date_to } : {}),
         };
+        const outcome = await classificationOperations.analyzeUnmatched({
+          accountsDimensionsId: accounts_dimensions_id,
+          ...(date_from !== undefined ? { dateFrom: date_from } : {}),
+          ...(date_to !== undefined ? { dateTo: date_to } : {}),
+        });
+        if (!outcome.ok) return toolError({ error: outcome.error.message, category: outcome.error.code });
+        result = useCompactReceipts()
+          ? renderClassificationAnalysisCompact({
+              result: outcome.value,
+              accountsDimensionsId: accounts_dimensions_id,
+              ...(date_from !== undefined ? { dateFrom: date_from } : {}),
+              ...(date_to !== undefined ? { dateTo: date_to } : {}),
+              ...((): { connectionName?: string } => {
+                const connectionName = activeConnectionName();
+                return connectionName !== undefined ? { connectionName } : {};
+              })(),
+            })
+          : renderUnmatchedAnalysisFull({ result: outcome.value });
       } else {
         if (classifications_json === undefined) {
           throw new Error("classifications_json is required when applying transaction classifications");
@@ -2166,9 +1640,26 @@ export function registerReceiptInboxTools(
           classifications_json,
           execute: selectedMode === "execute_apply",
         };
+        const outcome = await classificationOperations.applyClassifications({
+          classificationsJson: classifications_json,
+          execute: selectedMode === "execute_apply",
+        });
+        if (!outcome.ok) return toolError({ error: outcome.error.message, category: outcome.error.code });
+        result = useCompactReceipts()
+          ? renderApplyClassificationsCompact({
+              result: outcome.value,
+              classificationsJson: classifications_json,
+              ...((): { connectionName?: string } => {
+                const connectionName = activeConnectionName();
+                return connectionName !== undefined ? { connectionName } : {};
+              })(),
+            })
+          : renderApplyClassificationsFull({
+              result: outcome.value,
+              classificationsJson: classifications_json,
+            });
       }
 
-      const result = await invokeCapturedTool(delegatedTool, delegatedArgs);
       return {
         content: [{
           type: "text",
