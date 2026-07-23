@@ -140,7 +140,7 @@ function createGuidedExecutionPlanPageHandler(
         const commands = (fullCommands ?? summaryCommands)?.slice(0, count);
         const items = (fullItems ?? summaryItems)?.slice(0, count);
         return Object.freeze({
-          contract: "execution_plan_page_v1" as const,
+          contract: "execution_plan_page_v2" as const,
           plan_handle, plan_schema: plan.schema, operation: plan.domain,
           total_commands: plan.commands.length, category_counts: plan.counts, monetary_totals: plan.totals,
           section, detail, section_total: sectionTotal,

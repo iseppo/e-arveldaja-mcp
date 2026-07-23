@@ -20,10 +20,54 @@ const FORBIDDEN_KEYS = new Set([
 ]);
 
 export type OperationResultStatus = "completed" | "partial" | "indeterminate";
+export type PublicResultScalar = string | number | boolean | null;
+export interface PublicResultRecord { readonly [key: string]: PublicResultValue; }
+export type PublicResultValue = PublicResultScalar | readonly PublicResultScalar[] | PublicResultRecord;
+export interface PublicOperationResultDetailInput {
+  readonly item_id?: PublicResultScalar;
+  readonly id?: PublicResultScalar;
+  readonly index?: PublicResultScalar;
+  readonly i?: PublicResultScalar;
+  readonly label?: PublicResultScalar;
+  readonly name?: PublicResultScalar;
+  readonly code?: PublicResultScalar;
+  readonly message?: PublicResultScalar;
+  readonly severity?: PublicResultScalar;
+  readonly status?: PublicResultScalar;
+  readonly amount?: PublicResultScalar;
+  readonly currency?: PublicResultScalar;
+  readonly date?: PublicResultScalar;
+  readonly account?: PublicResultScalar;
+  readonly account_id?: PublicResultScalar;
+  readonly description?: PublicResultScalar;
+  readonly count?: PublicResultScalar;
+  readonly total?: PublicResultScalar;
+  readonly reason?: PublicResultScalar;
+  readonly text?: PublicResultScalar;
+  readonly value?: PublicResultScalar;
+  readonly values?: readonly PublicResultScalar[];
+  readonly labels?: readonly PublicResultScalar[];
+  readonly codes?: readonly PublicResultScalar[];
+  readonly messages?: readonly PublicResultScalar[];
+  readonly warnings?: readonly PublicResultScalar[];
+  readonly tags?: readonly PublicResultScalar[];
+  readonly source_documents?: readonly PublicResultScalar[];
+  readonly nested?: PublicOperationResultDetailInput;
+  readonly counts?: PublicOperationResultDetailInput;
+  readonly totals?: PublicOperationResultDetailInput;
+  readonly period?: PublicOperationResultDetailInput;
+  readonly range?: PublicOperationResultDetailInput;
+  readonly summary?: PublicOperationResultDetailInput;
+  readonly details?: PublicOperationResultDetailInput;
+}
+export interface PublicOperationResultDetail {
+  readonly contract: "operation_result_detail_v1";
+  readonly data: PublicResultRecord;
+}
 export interface OperationResultInput {
   readonly operation: string;
   readonly status: OperationResultStatus;
-  readonly items: readonly unknown[];
+  readonly items: readonly PublicOperationResultDetail[];
   readonly plan_handle: string;
 }
 export interface StoredOperationResult {
@@ -47,6 +91,17 @@ const MESSAGES: Readonly<Record<OperationResultStoreErrorCode, string>> = Object
   operation_result_data_invalid: "The operation result contains unsafe or oversized data.",
   operation_result_handle_collision: "Unable to allocate a unique operation-result handle.",
 });
+
+const PUBLIC_DETAIL_SCALAR_FIELDS = new Set([
+  "item_id", "id", "index", "i", "label", "name", "code", "message", "severity", "status",
+  "amount", "currency", "date", "account", "account_id", "description", "count", "total", "reason", "text", "value",
+]);
+const PUBLIC_DETAIL_LIST_FIELDS = new Set(["values", "labels", "codes", "messages", "warnings", "tags", "source_documents"]);
+const PUBLIC_DETAIL_RECORD_FIELDS = new Set(["nested", "counts", "totals", "period", "range", "summary", "details"]);
+const FORBIDDEN_PUBLIC_FIELD_FRAGMENT = /(?:auth|authorization|bearer|cookie|jwt|accesskey|privatekey|session|token|secret|password|credential|apikey|approval|command|executable|action|parameter|argument|request|payload|tool)/;
+const EXECUTABLE_POSITIONAL_VALUE = /^(?:delete|create|update|confirm|execute|post|put|patch|remove|upload|import)_[a-z0-9_.-]+$/i;
+const CREDENTIAL_VALUE = /^(?:bearer\s+\S+|(?:authorization|auth|cookie|set-cookie|jwt|token|secret|password|access[ _-]?key|api[ _-]?key)\s*(?::|=|$)|(?:session|sid|jwt|token|secret|password|access[ _-]?key|api[ _-]?key)[ _-]*=|eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)/i;
+const publicDetailBrands = new WeakSet<object>();
 
 export class OperationResultStoreError extends Error {
   constructor(readonly code: OperationResultStoreErrorCode) {
@@ -108,6 +163,51 @@ function assertPublicProjection(value: unknown): void {
     } finally { active.delete(candidate); }
   };
   visit(value);
+}
+
+function assertSafePublicDetailData(value: unknown): asserts value is PublicResultRecord {
+  assertPublicProjection(value);
+  const visitRecord = (record: unknown): void => {
+    if (typeof record !== "object" || record === null || Array.isArray(record) || Object.getPrototypeOf(record) !== Object.prototype) invalid();
+    for (const [key, child] of Object.entries(record)) {
+      const normalized = normalizedKey(key);
+      if (FORBIDDEN_PUBLIC_FIELD_FRAGMENT.test(normalized)) invalid();
+      if (PUBLIC_DETAIL_SCALAR_FIELDS.has(key)) {
+        if (child !== null && typeof child !== "string" && typeof child !== "number" && typeof child !== "boolean") invalid();
+        if (typeof child === "number" && !Number.isFinite(child)) invalid();
+        if (typeof child === "string" && CREDENTIAL_VALUE.test(child.trim())) invalid();
+      } else if (PUBLIC_DETAIL_LIST_FIELDS.has(key)) {
+        if (!Array.isArray(child) || child.some(item =>
+          item !== null && typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean")) invalid();
+        if (child.some(item => typeof item === "number" && !Number.isFinite(item))) invalid();
+        if (child.some(item => typeof item === "string" && (CREDENTIAL_VALUE.test(item.trim()) || EXECUTABLE_POSITIONAL_VALUE.test(item.trim())))) invalid();
+      } else if (PUBLIC_DETAIL_RECORD_FIELDS.has(key)) {
+        visitRecord(child);
+      } else {
+        invalid();
+      }
+    }
+  };
+  visitRecord(value);
+}
+
+export function createPublicOperationResultDetail(
+  data: PublicOperationResultDetailInput,
+): PublicOperationResultDetail {
+  assertSafePublicDetailData(data);
+  const safeData = cloneAndFreezePlanData(data) as PublicResultRecord;
+  const detail = Object.freeze({ contract: "operation_result_detail_v1" as const, data: safeData });
+  publicDetailBrands.add(detail);
+  return detail;
+}
+
+function readPublicOperationResultDetail(value: unknown): PublicResultRecord {
+  if (typeof value !== "object" || value === null || !publicDetailBrands.has(value)) invalid();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 2 || !keys.includes("contract") || !keys.includes("data") ||
+    descriptors.contract?.value !== "operation_result_detail_v1" || !("value" in (descriptors.data ?? {}))) invalid();
+  return descriptors.data!.value as PublicResultRecord;
 }
 
 function cloneScope(scope: RuntimeSafetyScope): RuntimeSafetyScope {
@@ -194,7 +294,8 @@ export class OperationResultStore {
   issue(input: OperationResultInput): string {
     const safeInput = readResultInput(input);
     assertPublicProjection(safeInput.items);
-    const items = cloneAndFreezePlanData(safeInput.items) as readonly PlanData[];
+    const publicItems = safeInput.items.map(readPublicOperationResultDetail);
+    const items = cloneAndFreezePlanData(publicItems) as readonly PlanData[];
     const now = this.#readNow();
     const expiresAt = now + this.#ttlMs;
     if (!Number.isSafeInteger(expiresAt)) invalid();

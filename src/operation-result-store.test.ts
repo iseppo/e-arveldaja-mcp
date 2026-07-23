@@ -5,6 +5,7 @@ import {
   MAX_ACTIVE_OPERATION_RESULTS,
   OPERATION_RESULT_TTL_MS,
   OperationResultStoreError,
+  createPublicOperationResultDetail,
 } from "./operation-result-store.js";
 import type { ExecutionPlanInput } from "./plan-store.js";
 
@@ -19,7 +20,12 @@ function consumedPlan(runtime: ReturnType<typeof createTestRuntimeSafetyContext>
 }
 
 function result(runtime: ReturnType<typeof createTestRuntimeSafetyContext>, items: readonly unknown[] = [{ item_id: "1", amount: 12.5 }]) {
-  return { operation: "camt_import", status: "completed" as const, items, plan_handle: consumedPlan(runtime) };
+  return {
+    operation: "camt_import",
+    status: "completed" as const,
+    items: items.map(item => createPublicOperationResultDetail(item as never)),
+    plan_handle: consumedPlan(runtime),
+  };
 }
 
 describe("operation result store", () => {
@@ -55,6 +61,90 @@ describe("operation result store", () => {
       expect(() => runtime.operationResultStore.issue(result(runtime, [item]))).toThrowError(OperationResultStoreError);
     }
     expect(runtime.operationResultStore.activeCount).toBe(0);
+  });
+
+  it("rejects raw, credential-bearing, executable, and positional result projections", () => {
+    const probes: readonly unknown[] = [
+      { item_id: "raw-but-unconstructed" },
+      { auth_header: "Bearer top-secret" },
+      { AUTH_HEADER: "Bearer top-secret" },
+      { cookie: "session=secret" },
+      { jwt: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature" },
+      { access_key_id: "AKIAEXAMPLE" },
+      { action: "delete_transaction", parameters: { id: 1 } },
+      { request_payload: { operation: "delete_transaction" } },
+      ["delete_transaction", { id: 1 }],
+      { values: ["delete_transaction", { id: 1 }] },
+      { values: ["cookie", "session=secret"] },
+      { messages: ["authorization", "Bearer top-secret"] },
+      { nested: { "Session-Cookie": "secret" } },
+    ];
+    for (const probe of probes) {
+      const runtime = createTestRuntimeSafetyContext();
+      expect(() => runtime.operationResultStore.issue({
+        operation: "camt_import", status: "completed", items: [probe] as never, plan_handle: consumedPlan(runtime),
+      }))
+        .toThrowError(OperationResultStoreError);
+    }
+    for (const probe of probes.slice(1)) {
+      expect(() => createPublicOperationResultDetail(probe as never))
+        .toThrowError(OperationResultStoreError);
+    }
+  });
+
+  it("stores constructed inert report rows with scalar, list, and nested summary fields", () => {
+    const runtime = createTestRuntimeSafetyContext();
+    const detail = createPublicOperationResultDetail({
+      item_id: "row-1",
+      status: "completed",
+      amount: 12.5,
+      labels: ["verified", "imported"],
+      nested: { label: "cash", counts: { count: 2 } },
+    });
+    const handle = runtime.operationResultStore.issue({
+      operation: "camt_import", status: "completed", items: [detail], plan_handle: consumedPlan(runtime),
+    });
+    expect(runtime.operationResultStore.inspect(handle).items).toEqual([{
+      item_id: "row-1", status: "completed", amount: 12.5, labels: ["verified", "imported"], nested: { label: "cash", counts: { count: 2 } },
+    }]);
+  });
+
+  it("rejects structural forgeries and clones while retaining constructor branding and immutability", () => {
+    const runtime = createTestRuntimeSafetyContext();
+    const source = { item_id: "row-1", nested: { label: "safe" } };
+    const branded = createPublicOperationResultDetail(source);
+    const forged = { contract: "operation_result_detail_v1", data: { item_id: "forged" } };
+    const cloned = { ...branded };
+    source.nested.label = "mutated";
+
+    expect(branded).toMatchObject({ contract: "operation_result_detail_v1", data: { item_id: "row-1", nested: { label: "safe" } } });
+    expect(Object.isFrozen(branded)).toBe(true);
+    expect(Object.isFrozen(branded.data)).toBe(true);
+    for (const detail of [forged, cloned]) {
+      expect(() => runtime.operationResultStore.issue({
+        operation: "camt_import", status: "completed", items: [detail] as never, plan_handle: consumedPlan(runtime),
+      })).toThrowError(OperationResultStoreError);
+    }
+  });
+
+  it("rejects proxied, accessor-backed, and sparse item arrays without executing traps or getters", () => {
+    const detail = createPublicOperationResultDetail({ item_id: "row-1" });
+    let proxyRead = false;
+    const proxied = new Proxy([detail], { get(target, property, receiver) { proxyRead = true; return Reflect.get(target, property, receiver); } });
+    let getterRead = false;
+    const accessorBacked: unknown[] = [];
+    Object.defineProperty(accessorBacked, "0", { enumerable: true, get() { getterRead = true; return detail; } });
+    Object.defineProperty(accessorBacked, "length", { value: 1, writable: true });
+    const sparse = new Array(1);
+
+    for (const items of [proxied, accessorBacked, sparse]) {
+      const runtime = createTestRuntimeSafetyContext();
+      expect(() => runtime.operationResultStore.issue({
+        operation: "camt_import", status: "completed", items: items as never, plan_handle: consumedPlan(runtime),
+      })).toThrowError(OperationResultStoreError);
+    }
+    expect(proxyRead).toBe(false);
+    expect(getterRead).toBe(false);
   });
 
   it("rejects unsafe or non-exact top-level result envelopes before reading getters", () => {

@@ -36,7 +36,10 @@ export type OperationSummaryInput = Omit<OperationSummaryV1, "contract">;
 
 export function createOperationSummary(
   input: OperationSummaryInput,
-  options: Readonly<{ budget?: Extract<ResponseBudgetKind, "normal" | "batch"> }> = {},
+  options: Readonly<{
+    budget?: Extract<ResponseBudgetKind, "normal" | "batch">;
+    measureEnvelope?: "summary";
+  }> = {},
 ): OperationSummaryV1 {
   const budget = RESPONSE_BUDGETS[options.budget ?? "normal"];
   const safe = cloneAndFreezePlanData({ ...input, contract: "operation_summary_v1" } as unknown as PlanData) as unknown as OperationSummaryV1;
@@ -55,7 +58,7 @@ export function createOperationSummary(
           returned_items: blockers.length + samples.length,
         }
       : undefined;
-    return cloneAndFreezePlanData({
+    return {
       ...safe,
       ...(scope ? { scope } : {}),
       ...(safe.samples !== undefined ? { samples } : {}),
@@ -63,17 +66,45 @@ export function createOperationSummary(
       ...(safe.blockers !== undefined ? { blockers } : {}),
       ...(details ? { details } : {}),
       contract: "operation_summary_v1",
-    } as unknown as PlanData) as unknown as OperationSummaryV1;
+    };
   };
+  const bytes = (summary: OperationSummaryV1): number => mcpPayloadBytes(
+    options.measureEnvelope === "summary" ? { summary } : summary,
+  );
   let summary = build();
-  while (mcpPayloadBytes(summary) > budget.target) {
-    if (samples.length > 0) samples = samples.slice(0, -1);
-    else if (warnings.length > 0) warnings = warnings.slice(0, -1);
-    else if (sourceDocuments.length > 0) sourceDocuments = sourceDocuments.slice(0, -1);
-    else if (blockers.length > 1) blockers = blockers.slice(0, -1);
-    else break;
+  const maximizeFittingPrefix = (
+    length: number,
+    minimum: number,
+    setLength: (length: number) => void,
+  ): boolean => {
+    setLength(minimum);
     summary = build();
+    if (bytes(summary) > budget.target) return false;
+    let low = minimum;
+    let high = length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      setLength(middle);
+      summary = build();
+      if (bytes(summary) <= budget.target) low = middle;
+      else high = middle - 1;
+    }
+    setLength(low);
+    summary = build();
+    return true;
+  };
+  if (bytes(summary) > budget.target) {
+    const allSamples = samples;
+    const allWarnings = warnings;
+    const allSourceDocuments = sourceDocuments;
+    const allBlockers = blockers;
+    const fitsAfterSamples = allSamples.length > 0 && maximizeFittingPrefix(allSamples.length, 0, length => { samples = allSamples.slice(0, length); });
+    const fitsAfterWarnings = fitsAfterSamples || (allWarnings.length > 0 && maximizeFittingPrefix(allWarnings.length, 0, length => { warnings = allWarnings.slice(0, length); }));
+    const fitsAfterDocuments = fitsAfterWarnings || (allSourceDocuments.length > 0 && maximizeFittingPrefix(allSourceDocuments.length, 0, length => { sourceDocuments = allSourceDocuments.slice(0, length); }));
+    if (!fitsAfterDocuments && allBlockers.length > 1) {
+      maximizeFittingPrefix(allBlockers.length, 1, length => { blockers = allBlockers.slice(0, length); });
+    }
   }
-  if (mcpPayloadBytes(summary) > budget.hard) throw new ResponseBudgetError();
-  return summary;
+  if (bytes(summary) > budget.hard) throw new ResponseBudgetError();
+  return cloneAndFreezePlanData(summary as unknown as PlanData) as unknown as OperationSummaryV1;
 }

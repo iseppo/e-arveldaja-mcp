@@ -68,4 +68,28 @@ describe("compact batch responses", () => {
     expect(mcpPayloadBytes(response)).toBeLessThanOrEqual(RESPONSE_BUDGETS.batch.target);
     expect(response.summary.details).toMatchObject({ available: true, returned_items: 1, total_items: 2 });
   });
+
+  it("compacts 500 blockers in bounded time while preserving priority order and paging counts", { timeout: 12_000 }, () => {
+    const items = Array.from({ length: 500 }, (_, index) => ({
+      item_id: `b${String(index).padStart(3, "0")}`,
+      status: "blocked" as const,
+      code: index < 250 ? "high" : "low",
+      message: `row-${index}-${"x".repeat(120)}`,
+      priority: index < 250 ? 10 : 1,
+    }));
+    const startedAt = performance.now();
+    const response = buildCompactBatchResponse({ status: "partial", message: "Review blockers", operation_handle: "result", items });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(3_000);
+    expect(response.summary.counts).toEqual({ total: 500, completed: 0, blocked: 500, review: 0 });
+    expect(response.summary.samples).toEqual([]);
+    expect(response.summary.blockers?.length).toBeGreaterThan(0);
+    expect(response.summary.blockers?.every(item => item.code === "high")).toBe(true);
+    expect(response.summary.blockers?.map(item => item.item_id)).toEqual(
+      [...(response.summary.blockers ?? [])].map(item => item.item_id).sort(),
+    );
+    expect(response.summary.details).toMatchObject({ available: true, total_items: 500, returned_items: response.summary.blockers?.length });
+    expect(mcpPayloadBytes(response)).toBeLessThanOrEqual(RESPONSE_BUDGETS.batch.target);
+  });
 });

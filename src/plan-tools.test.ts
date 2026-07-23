@@ -40,8 +40,10 @@ describe("execution plan page tool", () => {
     const legacy = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET });
     const explicitStandard = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET, profile: "standard" });
     const normalizeNonces = (text: string) => text.replace(/[0-9a-f]{32}/g, "<nonce>");
-    expect(normalizeNonces((await legacy({ plan_handle: handle })).content[0]!.text))
+    const legacyResponse = await legacy({ plan_handle: handle });
+    expect(normalizeNonces(legacyResponse.content[0]!.text))
       .toBe(normalizeNonces((await explicitStandard({ plan_handle: handle })).content[0]!.text));
+    expect(parseMcpResponse(legacyResponse.content[0]!.text)).toMatchObject({ contract: "execution_plan_page_v1" });
 
     for (const profile of ["standard", "full"] as const) {
       const server = { registerTool: vi.fn() };
@@ -57,7 +59,7 @@ describe("execution plan page tool", () => {
     const secondHandle = runtime.planStore.issue("test", plan(55));
     const handler = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET, profile: "guided" });
     const first = await page(handler, { plan_handle: firstHandle } as any);
-    expect(first).toMatchObject({ contract: "execution_plan_page_v1", detail: "summary", range: { from: 1, to: 20, count: 20 } });
+    expect(first).toMatchObject({ contract: "execution_plan_page_v2", detail: "summary", range: { from: 1, to: 20, count: 20 } });
     expect(first.commands).toHaveLength(20);
     expect(first.commands[0]).not.toHaveProperty("review_data");
     const summaryReviews = await page(handler, { plan_handle: firstHandle, section: "reviews" } as any);

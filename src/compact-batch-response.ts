@@ -1,7 +1,6 @@
 import type { OperationSummaryStatus } from "./operation-summary.js";
 import { createOperationSummary } from "./operation-summary.js";
 import type { CompactReviewItem } from "./operation-outcome.js";
-import { mcpPayloadBytes, RESPONSE_BUDGETS, ResponseBudgetError } from "./response-budget.js";
 import { sandboxExternalText } from "./external-text-renderer.js";
 
 export interface BatchItem {
@@ -46,30 +45,18 @@ export function buildCompactBatchResponse(input: {
   const samples = [...partition.completed, ...partition.review]
     .slice(0, 3)
     .map(item => reviewItem(item, "warning"));
-  const build = (includedBlockers: readonly CompactReviewItem[], includedSamples: readonly CompactReviewItem[]) => Object.freeze({ summary: createOperationSummary({
+  return Object.freeze({ summary: createOperationSummary({
     status: input.status,
     message: input.message,
     counts: { total: input.items.length, completed: partition.completed.length, blocked: partition.blocked.length, review: partition.review.length },
-    blockers: includedBlockers,
-    samples: [...includedSamples],
+    blockers,
+    samples: [...samples],
     details: {
-      available: input.items.length > includedBlockers.length + includedSamples.length,
+      available: input.items.length > blockers.length + samples.length,
       total_items: input.items.length,
-      returned_items: includedBlockers.length + includedSamples.length,
+      returned_items: blockers.length + samples.length,
       tool: "get_operation_result_page",
       args: { operation_handle: input.operation_handle },
     },
-  }, { budget: "batch" }) });
-
-  let includedBlockers = blockers;
-  let includedSamples = samples;
-  let response = build(includedBlockers, includedSamples);
-  while (mcpPayloadBytes(response) > RESPONSE_BUDGETS.batch.target) {
-    if (includedSamples.length > 0) includedSamples = includedSamples.slice(0, -1);
-    else if (includedBlockers.length > 1) includedBlockers = includedBlockers.slice(0, -1);
-    else break;
-    response = build(includedBlockers, includedSamples);
-  }
-  if (mcpPayloadBytes(response) > RESPONSE_BUDGETS.batch.hard) throw new ResponseBudgetError();
-  return response;
+  }, { budget: "batch", measureEnvelope: "summary" }) });
 }
