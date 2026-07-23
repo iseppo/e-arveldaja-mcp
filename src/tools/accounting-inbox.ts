@@ -15,11 +15,8 @@ import { roundMoney } from "../money.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import { jsonObjectInput, parseJsonObject, type ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
-import { registerCamtImportTools } from "./camt-import.js";
 import { camtDuplicateStructuredCorroborators, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
-import { registerWiseImportTools } from "./wise-import.js";
-import { registerReceiptInboxTools } from "./receipt-inbox.js";
-import { registerBankReconciliationTools } from "./bank-reconciliation.js";
+import { createAccountingOperations } from "../accounting-operations.js";
 import type { ReviewGuidance } from "../estonian-accounting-guidance.js";
 import {
   getAccountingRulesPath,
@@ -29,10 +26,7 @@ import {
 } from "../accounting-rules.js";
 import { projectWorkflowResponse, remapHiddenGranularTool, remapHiddenGranularWorkflowEnvelope, workflowFromAccountingInboxPayload, type WorkflowEnvelope } from "../workflow-response.js";
 import { createPublicWorkflowStateDetail, type PublicWorkflowStateDetail } from "../workflow-state-store.js";
-import {
-  runAccountingInboxDryRunPipeline,
-  type AutopilotInternalToolHandler,
-} from "./accounting-inbox-autopilot-service.js";
+import { runAccountingInboxDryRunPipeline } from "./accounting-inbox-autopilot-service.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 
@@ -1152,31 +1146,6 @@ async function prepareAccountingInbox(
   };
 }
 
-function captureInternalToolHandlers(
-  api: ApiContext,
-  runtimeSafetyContext: RuntimeSafetyContext,
-): Map<string, AutopilotInternalToolHandler> {
-  assertRuntimeSafetyContext(runtimeSafetyContext);
-  const handlers = new Map<string, AutopilotInternalToolHandler>();
-  const server = {
-    registerTool(name: string, _config: unknown, handler: AutopilotInternalToolHandler) {
-      handlers.set(name, handler);
-    },
-  } as unknown as McpServer;
-
-  // This registry feeds the internal autopilot pipeline, not the MCP tool
-  // surface, so it must always see every tool regardless of what the operator
-  // exposes in tools/list via EARVELDAJA_EXPOSE_GRANULAR_TOOLS.
-  const captureEverything: ToolExposureConfig = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
-
-  registerCamtImportTools(server, api, runtimeSafetyContext, captureEverything);
-  registerWiseImportTools(server, api, runtimeSafetyContext);
-  registerReceiptInboxTools(server, api, runtimeSafetyContext, captureEverything);
-  registerBankReconciliationTools(server, api, runtimeSafetyContext, captureEverything);
-
-  return handlers;
-}
-
 function reviewGuidanceFromRecord(record: Record<string, unknown>): ReviewGuidance | undefined {
   const guidance = recordAt(record, "review_guidance");
   if (!guidance) return undefined;
@@ -1767,8 +1736,8 @@ async function buildAccountingInboxDryRunResponse(
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   const prepared = await prepareAccountingInbox(api, params);
-  const handlers = captureInternalToolHandlers(api, runtimeSafetyContext);
-  const autopilot = await runAccountingInboxDryRunPipeline({ prepared, handlers });
+  const operations = createAccountingOperations(api, runtimeSafetyContext);
+  const autopilot = await runAccountingInboxDryRunPipeline({ prepared, operations });
   const publicAutopilot: Record<string, unknown> = {
     ...autopilot,
     executed_steps: autopilot.executed_steps.map(step => ({

@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { canonicalBusinessText, parseMcpResponse, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
+import { canonicalBusinessText, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import {
   buildCamtDuplicateReviewGuidance,
@@ -10,6 +10,15 @@ import {
   receiptDryRunLeavesPendingMaterialization,
   summarizeReceiptDryRunPreview,
 } from "./accounting-inbox-autopilot.js";
+import type { OperationOutcome } from "../operation-outcome.js";
+import type { AccountingOperations } from "../accounting-operations.js";
+import type { CamtParseResult } from "../camt/types.js";
+import type { CamtImportPreview } from "../camt/presenter.js";
+import type { WiseImportPreview } from "../wise/presenter.js";
+import { isNonErrorWiseSkipReason } from "../wise/preflight.js";
+import type { ReceiptBatchResult } from "../receipts/types.js";
+import type { UnmatchedAnalysisResult } from "../receipts/classification-operations.js";
+import type { InterAccountPreview } from "../banking/reconciliation/types.js";
 
 export interface AutopilotRecommendedStep {
   step: number;
@@ -114,10 +123,6 @@ export interface AccountingInboxDryRunPipelineResult {
   next_recommended_action?: AutopilotRecommendedStep;
   user_summary: string;
 }
-
-export type AutopilotInternalToolHandler = (
-  args: Record<string, unknown>,
-) => Promise<{ content: Array<{ text?: string }> }>;
 
 /**
  * Deterministic, resume-stable identifier for one accountant-review item.
@@ -264,58 +269,107 @@ function pickNextAutopilotRecommendedAction(
   });
 }
 
-async function invokeInternalTool(
-  handlers: Map<string, AutopilotInternalToolHandler>,
+function fileInputSource(args: Record<string, unknown>): { file_path?: string; file_ref?: string } {
+  const filePath = stringAt(args, "file_path");
+  const fileRef = stringAt(args, "file_ref");
+  return {
+    ...(filePath !== undefined ? { file_path: filePath } : {}),
+    ...(fileRef !== undefined ? { file_ref: fileRef } : {}),
+  };
+}
+
+/**
+ * Dispatch one recommended step to its typed operation on the AccountingOperations
+ * facade, mapping the step's suggested_args to the operation's typed input. This
+ * replaces the former captured-MCP-handler round-trip: there is no handler Map,
+ * no serialized response, and no MCP-JSON decoding boundary — the caller reads the
+ * typed OperationOutcome<T>.value directly. Only DRY-RUN read/preview methods are
+ * bound (the autopilot never applies/mutates).
+ */
+function invokeAutopilotOperation(
+  operations: AccountingOperations,
   tool: string,
   args: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  const handler = handlers.get(tool);
-  if (!handler) {
-    throw new Error(`Internal inbox autopilot could not find tool handler for ${tool}`);
+): Promise<OperationOutcome<unknown>> {
+  switch (tool) {
+    case "parse_camt053":
+      return operations.parseBankInput({ source: fileInputSource(args) });
+    case "import_camt053":
+      return operations.prepareCamtImport({
+        source: fileInputSource(args),
+        accountsDimensionsId: numberAt(args, "accounts_dimensions_id") ?? 0,
+        dateFrom: stringAt(args, "date_from"),
+        dateTo: stringAt(args, "date_to"),
+      });
+    case "import_wise_transactions":
+      return operations.prepareWiseImport({
+        source: fileInputSource(args),
+        accountsDimensionsId: numberAt(args, "accounts_dimensions_id") ?? 0,
+        feeAccountDimensionsId: numberAt(args, "fee_account_dimensions_id"),
+        feeAccountRelationId: numberAt(args, "fee_account_relation_id"),
+        interAccountDimensionId: numberAt(args, "inter_account_dimension_id"),
+        confirmOwnTransferIds: undefined,
+        approvedCommandDigest: undefined,
+        dateFrom: stringAt(args, "date_from"),
+        dateTo: stringAt(args, "date_to"),
+        skipJarTransfers: undefined,
+      });
+    case "process_receipt_batch":
+      return operations.prepareReceiptBatch({
+        folderPath: stringAt(args, "folder_path") ?? "",
+        accountsDimensionsId: numberAt(args, "accounts_dimensions_id") ?? 0,
+        ...(stringAt(args, "date_from") !== undefined ? { dateFrom: stringAt(args, "date_from")! } : {}),
+        ...(stringAt(args, "date_to") !== undefined ? { dateTo: stringAt(args, "date_to")! } : {}),
+      });
+    case "classify_unmatched_transactions":
+      return operations.classifyTransactions({
+        accountsDimensionsId: numberAt(args, "accounts_dimensions_id") ?? 0,
+        ...(stringAt(args, "date_from") !== undefined ? { dateFrom: stringAt(args, "date_from")! } : {}),
+        ...(stringAt(args, "date_to") !== undefined ? { dateTo: stringAt(args, "date_to")! } : {}),
+      });
+    case "reconcile_inter_account_transfers":
+      return operations.prepareInterAccount({
+        maxDateGap: numberAt(args, "max_date_gap"),
+        targetAccountsDimensionsId: numberAt(args, "target_accounts_dimensions_id"),
+      });
+    default:
+      throw new Error(`Internal inbox autopilot has no operation binding for ${tool}`);
   }
-
-  const result = await handler(args);
-  const text = result.content[0]?.text;
-  if (!text) {
-    throw new Error(`Internal inbox autopilot received no text payload from ${tool}`);
-  }
-
-  const parsed = parseMcpResponse(text);
-  if (!isRecord(parsed)) {
-    throw new Error(`Internal inbox autopilot expected an object payload from ${tool}`);
-  }
-  return parsed;
 }
 
 function summarizeAutopilotToolResult(
   tool: string,
-  payload: Record<string, unknown>,
+  value: unknown,
 ): { summary: string; preview?: Record<string, unknown>; followUps: AutopilotFollowUp[] } {
   switch (tool) {
     case "parse_camt053": {
-      const summary = recordAt(payload, "summary") ?? {};
+      const parsed = value as CamtParseResult;
+      const entryCount = parsed.summary.entry_count;
+      const duplicateCount = parsed.summary.duplicate_count;
       return {
-        summary: `Parsed CAMT preview with ${numberAt(summary, "entry_count") ?? 0} entries and ${numberAt(summary, "duplicate_count") ?? 0} duplicate hint(s) inside the statement.`,
+        summary: `Parsed CAMT preview with ${entryCount} entries and ${duplicateCount} duplicate hint(s) inside the statement.`,
         preview: {
-          entry_count: numberAt(summary, "entry_count") ?? 0,
-          duplicate_count: numberAt(summary, "duplicate_count") ?? 0,
-          iban: recordAt(payload, "statement_metadata") ? stringAt(recordAt(payload, "statement_metadata")!, "iban") : undefined,
+          entry_count: entryCount,
+          duplicate_count: duplicateCount,
+          iban: parsed.statement_metadata.iban,
         },
         followUps: [],
       };
     }
     case "import_camt053": {
-      const execution = recordAt(payload, "execution") ?? {};
-      const summary = recordAt(execution, "summary") ?? {};
-      const reviewItems = arrayAt(execution, "needs_review").filter(isRecord);
+      const preview = value as CamtImportPreview;
+      const createdCount = preview.createdCount;
+      const skippedCount = preview.projection.skipped.length;
+      const errorCount = preview.errorCount;
+      const reviewItems = preview.possibleDuplicates as unknown as Record<string, unknown>[];
       const reviewCount = reviewItems.length;
       return {
-        summary: `CAMT dry run would create ${numberAt(summary, "created_count") ?? 0} transaction(s), skip ${numberAt(summary, "skipped_count") ?? 0}, raise ${reviewCount} possible duplicate review item(s), and report ${numberAt(summary, "error_count") ?? 0} error(s).`,
+        summary: `CAMT dry run would create ${createdCount} transaction(s), skip ${skippedCount}, raise ${reviewCount} possible duplicate review item(s), and report ${errorCount} error(s).`,
         preview: {
-          created_count: numberAt(summary, "created_count") ?? 0,
-          skipped_count: numberAt(summary, "skipped_count") ?? 0,
+          created_count: createdCount,
+          skipped_count: skippedCount,
           possible_duplicate_count: reviewCount,
-          error_count: numberAt(summary, "error_count") ?? 0,
+          error_count: errorCount,
         },
         followUps: reviewItems.map((item) => {
           const hasConfirmedMatch = arrayAt(item, "existing_transactions").some((candidate) =>
@@ -355,14 +409,19 @@ function summarizeAutopilotToolResult(
       };
     }
     case "import_wise_transactions": {
-      const execution = recordAt(payload, "execution") ?? {};
-      const summary = recordAt(execution, "summary") ?? {};
-      const errorCount = numberAt(summary, "error_count") ?? 0;
+      const preview = value as WiseImportPreview;
+      // The Wise presenter splits the `skipped` render rows into non-error
+      // skips vs errors by reason (isNonErrorWiseSkipReason). The summarizer must
+      // reproduce that split so `error_count` / `skipped` match the former
+      // decoded execution.summary exactly (M12 gating reads created/error counts).
+      const created = preview.created.length;
+      const skipped = preview.skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason)).length;
+      const errorCount = preview.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason)).length;
       return {
-        summary: `Wise dry run would create ${numberAt(summary, "created") ?? 0} transaction(s), skip ${numberAt(summary, "skipped") ?? 0}, and report ${errorCount} error(s).`,
+        summary: `Wise dry run would create ${created} transaction(s), skip ${skipped}, and report ${errorCount} error(s).`,
         preview: {
-          created: numberAt(summary, "created") ?? 0,
-          skipped: numberAt(summary, "skipped") ?? 0,
+          created,
+          skipped,
           error_count: errorCount,
         },
         followUps: errorCount > 0
@@ -375,11 +434,14 @@ function summarizeAutopilotToolResult(
       };
     }
     case "process_receipt_batch": {
-      const execution = recordAt(payload, "execution") ?? {};
-      const summary = recordAt(execution, "summary") ?? {};
-      const preview = buildReceiptDryRunPreview(summary);
-      const followUps: AutopilotFollowUp[] = arrayAt(execution, "needs_review")
-        .filter(isRecord)
+      const result = value as ReceiptBatchResult;
+      const preview = buildReceiptDryRunPreview(result.summary as unknown as Record<string, unknown>);
+      // Per-file review rows are the raw batch results with status needs_review.
+      // sanitizeReceiptResultForOutput leaves file.name / classification RAW (it
+      // wraps only OCR-derived extracted/supplier/error text), so the summary text
+      // and stableReviewId identity are byte-identical to the former decoded rows.
+      const reviewResults = result.results.filter(entry => entry.status === "needs_review") as unknown as Record<string, unknown>[];
+      const followUps: AutopilotFollowUp[] = reviewResults
         .map((item) => {
           const file = recordAt(item, "file");
           const fileName = stringAt(file ?? {}, "name") ?? "receipt";
@@ -413,16 +475,21 @@ function summarizeAutopilotToolResult(
       };
     }
     case "classify_unmatched_transactions": {
-      const groups = arrayAt(payload, "groups");
+      // UNWRAPPED analysis value: the op returns camelCase totalUnmatched /
+      // categoryCounts (the presenter renders the snake_case envelope); the
+      // groups are the same ClassifiedTransactionGroupResult rows the presenter
+      // wraps for output, so apply_mode/category are read raw here.
+      const result = value as UnmatchedAnalysisResult;
+      const groups = result.groups as unknown as Record<string, unknown>[];
       const reviewGroups = groups.filter((group) =>
         isRecord(group) && stringAt(group, "apply_mode") !== "purchase_invoice"
       );
       return {
-        summary: `Classified ${numberAt(payload, "total_unmatched") ?? 0} unmatched transaction(s) into ${groups.length} group(s), of which ${reviewGroups.length} still need accounting judgement instead of auto-booking.`,
+        summary: `Classified ${result.totalUnmatched} unmatched transaction(s) into ${groups.length} group(s), of which ${reviewGroups.length} still need accounting judgement instead of auto-booking.`,
         preview: {
-          total_unmatched: numberAt(payload, "total_unmatched") ?? 0,
+          total_unmatched: result.totalUnmatched,
           group_count: groups.length,
-          category_counts: recordAt(payload, "category_counts") ?? {},
+          category_counts: result.categoryCounts,
         },
         followUps: reviewGroups.map((group) => {
           const record = group as Record<string, unknown>;
@@ -444,9 +511,14 @@ function summarizeAutopilotToolResult(
       };
     }
     case "reconcile_inter_account_transfers": {
-      const execution = recordAt(payload, "execution") ?? {};
-      const summary = recordAt(execution, "summary") ?? {};
-      const ambiguous = numberAt(summary, "skipped_ambiguous") ?? 0;
+      // The presenter builds execution.summary from the match arrays' lengths;
+      // read the same lengths off the typed InterAccountPreview.match.
+      const match = (value as InterAccountPreview).match;
+      const matchedPairs = match.matchedPairs.length;
+      const matchedOneSided = match.matchedOneSided.length;
+      const ambiguous = match.ambiguousPairs.length;
+      const skippedAlreadyHandled = match.skippedAlreadyHandled.length;
+      const errorCount = match.errors.length;
       const followUps = ambiguous > 0
         ? [{
             source: tool,
@@ -455,13 +527,13 @@ function summarizeAutopilotToolResult(
           }]
         : [];
       return {
-        summary: `Inter-account transfer dry run found ${numberAt(summary, "matched_pairs") ?? 0} matched pair(s), ${numberAt(summary, "matched_one_sided") ?? 0} one-sided match(es), ${ambiguous} ambiguous case(s), and ${numberAt(summary, "error_count") ?? 0} error(s).`,
+        summary: `Inter-account transfer dry run found ${matchedPairs} matched pair(s), ${matchedOneSided} one-sided match(es), ${ambiguous} ambiguous case(s), and ${errorCount} error(s).`,
         preview: {
-          matched_pairs: numberAt(summary, "matched_pairs") ?? 0,
-          matched_one_sided: numberAt(summary, "matched_one_sided") ?? 0,
+          matched_pairs: matchedPairs,
+          matched_one_sided: matchedOneSided,
           skipped_ambiguous: ambiguous,
-          skipped_already_handled: numberAt(summary, "skipped_already_handled") ?? 0,
-          error_count: numberAt(summary, "error_count") ?? 0,
+          skipped_already_handled: skippedAlreadyHandled,
+          error_count: errorCount,
         },
         followUps,
       };
@@ -532,10 +604,10 @@ function leavesPendingMaterializationAfterDryRun(
 
 export async function runAccountingInboxDryRunPipeline({
   prepared,
-  handlers,
+  operations,
 }: {
   prepared: AutopilotPreparedInboxData;
-  handlers: Map<string, AutopilotInternalToolHandler>;
+  operations: AccountingOperations;
 }): Promise<AccountingInboxDryRunPipelineResult> {
   const executedSteps: AutopilotStepResult[] = [];
   const skippedSteps: AutopilotStepResult[] = [];
@@ -594,8 +666,14 @@ export async function runAccountingInboxDryRunPipeline({
     }
 
     try {
-      const payload = await invokeInternalTool(handlers, step.tool, step.suggested_args);
-      const summarized = summarizeAutopilotToolResult(step.tool, payload);
+      const outcome = await invokeAutopilotOperation(operations, step.tool, step.suggested_args);
+      if (!outcome.ok) {
+        // A domain failure (ok:false) surfaces as a failed step, exactly like a
+        // thrown operation error — the dry-run pipeline never proceeds on an
+        // operation that did not produce a value.
+        throw new Error(outcome.error.message);
+      }
+      const summarized = summarizeAutopilotToolResult(step.tool, outcome.value);
       executedSteps.push({
         step: step.step,
         tool: step.tool,

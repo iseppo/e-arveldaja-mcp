@@ -5,10 +5,7 @@ import { describe, expect, it } from "vitest";
 
 const SOURCE_ROOT = resolve("src");
 
-const ALLOWED_PRODUCTION_CONSUMERS = [
-  "src/tools/accounting-inbox-autopilot-service.ts",
-  "src/tools/accounting-inbox.ts",
-] as const;
+const ALLOWED_PRODUCTION_CONSUMERS = [] as const;
 
 async function productionTypeScriptFiles(directory = SOURCE_ROOT): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -347,8 +344,8 @@ async function currentProductionConsumers(): Promise<string[]> {
 }
 
 describe("internal MCP delegation architecture contract", () => {
-  it("allows exactly the two current production consumers and no new ones", async () => {
-    expect(await currentProductionConsumers()).toEqual(ALLOWED_PRODUCTION_CONSUMERS);
+  it("allows no production consumers of internal MCP delegation", async () => {
+    expect(await currentProductionConsumers()).toEqual([]);
   });
 
   it("keeps the parser definition isolated from the production allowlist", async () => {
