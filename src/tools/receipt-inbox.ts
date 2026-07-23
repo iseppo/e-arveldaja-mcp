@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { basename, dirname, join } from "node:path";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
@@ -102,6 +102,19 @@ import {
   buildReceiptBatchWorkflow,
   buildReceiptBatchWorkflowSummary,
 } from "./receipt-inbox-summary.js";
+import {
+  createReceiptBatchOperations,
+  resolveReceiptBatchExecutionMode,
+} from "../receipts/batch-operations.js";
+import {
+  receiptApprovedManifestRequiredError,
+  receiptIdentityRetryableError,
+  renderReceiptBatchCompact,
+  renderReceiptBatchFull,
+  type ReceiptBatchCompactInput,
+  type ReceiptBatchFileRefProjection,
+} from "../receipts/presenter.js";
+import { currentToolProfile } from "../tool-profile.js";
 
 const POSSIBLE_MATCH_THRESHOLD = 70;
 
@@ -125,19 +138,6 @@ const manifestSchema = z.array(z.union([
 type ReceiptManifestInputEntry = z.infer<typeof manifestSchema>[number];
 
 export { buildDryRunCreatedInvoicePreview };
-
-function resolveReceiptBatchExecutionMode(
-  execute: boolean | undefined,
-  executionMode: ReceiptBatchExecutionMode | undefined,
-): { mode: ReceiptBatchExecutionMode; legacyExecuteCreate: boolean } {
-  if (executionMode) {
-    return { mode: executionMode, legacyExecuteCreate: false };
-  }
-  if (execute === true) {
-    return { mode: "create", legacyExecuteCreate: true };
-  }
-  return { mode: "dry_run", legacyExecuteCreate: false };
-}
 
 export function supplierCountryNeedsReview(supplierResolution: SupplierResolution): boolean {
   return !supplierResolution.client &&
@@ -232,48 +232,6 @@ function isAmbiguousPostCreateFailure(error: unknown): boolean {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function maybeAddLlmFallbackNote(notes: string[], fallback: InvoiceExtractionFallback): void {
-  if (!fallback.recommended) return;
-  // With the #20 confidence model, `recommended` is true for any non-high
-  // outcome — including medium with no missing required fields (e.g.
-  // supplier_resolution_failed only). Don't emit "incomplete ()" when the
-  // field list is empty; surface the confidence signals instead.
-  if (fallback.missing_required_fields.length > 0) {
-    const missing = fallback.missing_required_fields.join(", ");
-    notes.push(`Deterministic extraction is incomplete (${missing}). Use extracted.raw_text and llm_fallback guidance instead of guessing missing fields.`);
-  } else {
-    const detail = fallback.confidence_signals.length > 0
-      ? fallback.confidence_signals.join(", ")
-      : fallback.reason;
-    notes.push(`Deterministic extraction confidence is ${fallback.confidence} (${detail}). Use extracted.raw_text and llm_fallback guidance to verify before booking.`);
-  }
-}
-
-function buildNeedsReviewResult(
-  file: ReceiptFileInfo,
-  classification: ReceiptClassification,
-  extracted: ExtractedReceiptFields,
-  fallback: InvoiceExtractionFallback,
-  notes: string[],
-  extras?: Pick<ReceiptBatchFileResult, "supplier_resolution" | "booking_suggestion" | "referenced_invoice">,
-): ReceiptBatchFileResult {
-  return {
-    file,
-    classification,
-    status: "needs_review",
-    extracted,
-    llm_fallback: fallback,
-    ...extras,
-    review_guidance: buildReceiptReviewGuidance({
-      classification,
-      notes,
-      extracted,
-      llmFallback: fallback,
-    }),
-    notes,
-  };
-}
-
 // Exported for unit tests.
 export function shouldGateCreation(
   summary: InvoiceExtractionFallback,
@@ -363,7 +321,9 @@ function buildSuggestionFromBookingHistory(bookingSuggestion: BookingSuggestion)
   };
 }
 
-function resolveAutoBookingRuleTargets(
+// Exported for the receipt auto-booking merge chain, which now lives in
+// ../receipts/batch-operations.js (shared with the classification path here).
+export function resolveAutoBookingRuleTargets(
   purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
   accounts: Account[],
   rule: AccountingAutoBookingRule,
@@ -383,16 +343,7 @@ function resolveAutoBookingRuleTargets(
   return { article, account };
 }
 
-function inferReceiptAutoBookingCategory(
-  extracted: Pick<ExtractedReceiptFields, "supplier_name" | "description">,
-): TransactionClassificationCategory | undefined {
-  const text = `${extracted.supplier_name ?? ""} ${extracted.description ?? ""}`.toLowerCase();
-  return CATEGORY_KEYWORD_MAP.find(entry =>
-    entry.category !== "unknown" && (entry.receiptAutoBookingPattern ?? entry.pattern).test(text)
-  )?.category;
-}
-
-function resolveMergedPurchaseAccountDimension(
+export function resolveMergedPurchaseAccountDimension(
   baseDimensionId: number | null | undefined,
   baseAccountId: number | undefined,
   resolvedAccountId: number | undefined,
@@ -450,124 +401,6 @@ function buildSuggestionFromRule(
     matched_invoice_number: baseSuggestion?.matched_invoice_number,
     reason: rule.reason ?? baseSuggestion?.reason ?? "Defaulted from local accounting-rules.md counterparty rule.",
   };
-}
-
-function mergeReceiptAutoBookingRule(
-  bookingSuggestion: BookingSuggestion | undefined,
-  purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>,
-  accounts: Account[],
-  rule: AccountingAutoBookingRule,
-  description: string,
-): BookingSuggestion | undefined {
-  const { article, account } = resolveAutoBookingRuleTargets(purchaseArticlesWithVat, accounts, rule);
-  const baseItem = bookingSuggestion?.item;
-  let changed = false;
-
-  const mergedItem: PurchaseInvoiceItem = {
-    ...(baseItem ?? {}),
-    custom_title: baseItem?.custom_title ?? description,
-    amount: baseItem?.amount ?? 1,
-  };
-
-  const resolvedArticleId = article?.id ?? rule.purchase_article_id;
-  if (resolvedArticleId !== undefined && mergedItem.cl_purchase_articles_id !== resolvedArticleId) {
-    mergedItem.cl_purchase_articles_id = resolvedArticleId;
-    changed = true;
-  }
-
-  const resolvedAccountId = account?.id ?? article?.accounts_id ?? rule.purchase_account_id;
-  if (resolvedAccountId !== undefined && mergedItem.purchase_accounts_id !== resolvedAccountId) {
-    mergedItem.purchase_accounts_id = resolvedAccountId;
-    changed = true;
-  }
-
-  const mergedPurchaseAccountDimensionsId = resolveMergedPurchaseAccountDimension(
-    baseItem?.purchase_accounts_dimensions_id,
-    baseItem?.purchase_accounts_id,
-    resolvedAccountId,
-    rule.purchase_account_dimensions_id,
-  );
-  if ((mergedItem.purchase_accounts_dimensions_id ?? undefined) !== mergedPurchaseAccountDimensionsId) {
-    if (mergedPurchaseAccountDimensionsId === undefined) {
-      delete mergedItem.purchase_accounts_dimensions_id;
-    } else {
-      mergedItem.purchase_accounts_dimensions_id = mergedPurchaseAccountDimensionsId;
-    }
-    changed = true;
-  }
-
-  if (rule.vat_rate_dropdown !== undefined && mergedItem.vat_rate_dropdown !== rule.vat_rate_dropdown) {
-    mergedItem.vat_rate_dropdown = rule.vat_rate_dropdown;
-    changed = true;
-  }
-
-  if (rule.reversed_vat_id !== undefined && mergedItem.reversed_vat_id !== rule.reversed_vat_id) {
-    mergedItem.reversed_vat_id = rule.reversed_vat_id;
-    changed = true;
-  }
-
-  const mergedSuggestedAccount = account ?? bookingSuggestion?.suggested_account;
-  const mergedSuggestedArticle = article
-    ? { id: article.id, name: article.name_est || article.name_eng }
-    : bookingSuggestion?.suggested_purchase_article;
-  const mergedLiabilityAccountId = rule.liability_account_id ?? bookingSuggestion?.suggested_liability_account_id;
-
-  if (
-    rule.liability_account_id !== undefined &&
-    bookingSuggestion?.suggested_liability_account_id !== rule.liability_account_id
-  ) {
-    changed = true;
-  }
-
-  const hasBookingTarget = mergedItem.cl_purchase_articles_id !== undefined || mergedItem.purchase_accounts_id !== undefined;
-  if (!hasBookingTarget) {
-    return bookingSuggestion;
-  }
-
-  if (!changed && bookingSuggestion) {
-    return bookingSuggestion;
-  }
-
-  return {
-    source: "local_rules",
-    matched_invoice_id: bookingSuggestion?.matched_invoice_id,
-    matched_invoice_number: bookingSuggestion?.matched_invoice_number,
-    suggested_account: mergedSuggestedAccount,
-    suggested_purchase_article: mergedSuggestedArticle,
-    suggested_liability_account_id: mergedLiabilityAccountId,
-    item: mergedItem,
-  };
-}
-
-function applyReceiptAutoBookingRule(
-  bookingSuggestion: BookingSuggestion | undefined,
-  extracted: Pick<ExtractedReceiptFields, "supplier_name" | "description">,
-  context: Pick<ReceiptProcessingContext, "purchaseArticlesWithVat" | "accounts">,
-): BookingSuggestion | undefined {
-  if (bookingSuggestion?.source === "supplier_history") {
-    return bookingSuggestion;
-  }
-
-  const normalizedSupplier = normalizeCounterpartyName(extracted.supplier_name);
-  if (!normalizedSupplier) {
-    return bookingSuggestion;
-  }
-
-  const inferredCategory = inferReceiptAutoBookingCategory(extracted);
-  const rule = inferredCategory !== undefined
-    ? findAutoBookingRule(normalizedSupplier, inferredCategory)
-    : findAutoBookingRule(normalizedSupplier);
-  if (!rule) {
-    return bookingSuggestion;
-  }
-
-  return mergeReceiptAutoBookingRule(
-    bookingSuggestion,
-    context.purchaseArticlesWithVat,
-    context.accounts,
-    rule,
-    extracted.description ?? extracted.supplier_name ?? "Receipt expense",
-  );
 }
 
 /**
@@ -848,30 +681,9 @@ async function resolveClassificationSuggestion(
   return { applyMode: classification.apply_mode, suggestion: defaultSuggestion };
 }
 
-async function extractReceiptFields(
-  snapshot: ReceiptFileSnapshot,
-  ownCompanyVat?: string,
-  ownCompanyRegistryCode?: string,
-): Promise<ExtractedReceiptFields> {
-  // Parse the immutable snapshot bytes (snapshot_path), never the live folder
-  // file, so the parser and the later uploader observe byte-identical content.
-  const parsedDocument = await parseDocument(snapshot.snapshot_path);
-  const allTextItems = parsedDocument.result?.pages?.flatMap(page =>
-    (page.textItems ?? []).map(item => ({
-      ...item,
-      pageNum: page.pageNum,
-    }))
-  );
-  return extractReceiptFieldsFromText(parsedDocument.text, snapshot.file.name, {
-    ownCompanyVat,
-    ownCompanyRegistryCode,
-    textItems: allTextItems,
-    minOcrConfidence: computeMinOcrConfidence(allTextItems),
-    partialOcrFailure: parsedDocument.ocrPartialFailure,
-  });
-}
-
-function normalizeVatForCompare(value: string | null | undefined): string {
+// Exported for the batch operation's per-file loop (../receipts/batch-operations.js)
+// and the classification/self-match guards below.
+export function normalizeVatForCompare(value: string | null | undefined): string {
   return normalizeVatValue(value) ?? "";
 }
 
@@ -1132,325 +944,6 @@ export function selectBatchBankTransactions(
   );
 }
 
-interface ProcessSingleReceiptOptions {
-  ownCompanyVat?: string;
-  ownCompanyRegistryCode?: string;
-  bankTransactions: Transaction[];
-  executionMode: ReceiptBatchExecutionMode;
-  legacyExecuteCreate: boolean;
-  dryRun: boolean;
-  consumedTransactionIds: Set<number>;
-  previousResults: ReceiptBatchFileResult[];
-}
-
-async function processSingleReceipt(
-  api: ApiContext,
-  context: ReceiptProcessingContext,
-  snapshot: ReceiptFileSnapshot,
-  options: ProcessSingleReceiptOptions,
-): Promise<ReceiptBatchFileResult> {
-  const file = snapshot.file;
-  const notes: string[] = [];
-
-  try {
-    const extracted = await extractReceiptFields(snapshot, options.ownCompanyVat, options.ownCompanyRegistryCode);
-    const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
-    const selfVatDetected = detectSelfVatOnly(extracted, options.ownCompanyVat);
-    const signals: ExtractionConfidenceSignals = {};
-    if (extracted.partial_ocr_failure) signals.partial_ocr_failure = true;
-    if (extracted.min_ocr_confidence !== undefined && extracted.min_ocr_confidence < LOW_OCR_CONFIDENCE_THRESHOLD) {
-      signals.low_ocr_confidence = true;
-    }
-    if (selfVatDetected) signals.self_vat_detected = true;
-    const selfRegCodeDetected = detectSelfRegCodeOnly(extracted, options.ownCompanyRegistryCode);
-    if (selfRegCodeDetected) signals.self_reg_code_detected = true;
-    // #1: an echo-only supplier identifier (rationale coordinate_confirmed_echo)
-    // is kept but UNCONFIRMED — coordinate data cannot tell a legit supplier-id
-    // echo in the buyer block from a buyer-id echo in a supplier-column
-    // reference line. Route it to review so the operator verifies the supplier
-    // before booking, rather than trusting it as coordinate-confirmed.
-    const supplierIdentifierEcho =
-      extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
-      extracted.vat_no_rationale === "coordinate_confirmed_echo";
-    if (supplierIdentifierEcho) {
-      signals.supplier_identifier_echo_unconfirmed = true;
-      notes.push(
-        "Supplier identifier was only kept because the same value also appears in a supplier column (echo). Coordinate data cannot confirm it is the supplier's own code — verify the supplier before booking (#1).",
-      );
-    }
-    const inferredSupplierCountry = inferSupplierCountry(extracted);
-    const summarize = () => summarizeInvoiceExtraction(extracted, signals, "extracted.raw_text", inferredSupplierCountry);
-    const llmFallback = summarize();
-
-    if (file.file_type !== "pdf") {
-      notes.push("Image receipt OCR-parsed with LiteParse.");
-    }
-    if (selfVatDetected) {
-      notes.push(
-        "Document only printed the buyer's VAT (matches active company). Supplier VAT cleared — verify supplier manually before booking (#14).",
-      );
-    }
-    if (selfRegCodeDetected) {
-      notes.push(
-        "Document only printed the buyer's registry code (matches active company). Supplier reg code cleared — verify supplier manually before booking (#22).",
-      );
-    }
-
-    if (classification !== "purchase_invoice") {
-      const referencedInvoice =
-        classification === "payment_receipt"
-          ? buildReferencedInvoiceForPaymentReceipt(extracted.invoice_number, context.purchaseInvoices, {
-              ...(extracted.supplier_name ? { name: extracted.supplier_name } : {}),
-            })
-          : undefined;
-      notes.push(
-        classification === "owner_paid_expense_reimbursement"
-          ? "PDF looks like an owner-paid expense receipt. Review manually before booking."
-          : classification === "payment_receipt"
-            ? `Document is a payment receipt${
-                referencedInvoice
-                  // invoice_number is OCR-derived; wrap only the interpolated
-                  // fragment so it is delimited as data, consistent with how
-                  // `error` is wrapped elsewhere (#9).
-                  ? ` for invoice ${wrapUntrustedOcr(referencedInvoice.invoice_number) ?? referencedInvoice.invoice_number}`
-                  : ""
-              }, not a separate purchase invoice. Booking it would duplicate the underlying invoice — attach to the existing invoice document instead (#15).`
-            : "Document could not be classified as a supplier purchase invoice.",
-      );
-      maybeAddLlmFallbackNote(notes, llmFallback);
-      return buildNeedsReviewResult(file, classification, extracted, llmFallback, notes, {
-        ...(referencedInvoice ? { referenced_invoice: referencedInvoice } : {}),
-      });
-    }
-
-    if (!hasAutoBookableReceiptFields(extracted)) {
-      notes.push("Missing supplier name, confident invoice number, invoice date, or gross total required for auto-booking.");
-      maybeAddLlmFallbackNote(notes, llmFallback);
-      return buildNeedsReviewResult(file, classification, extracted, llmFallback, notes);
-    }
-
-    const ownCompanyOptions = options.ownCompanyVat || options.ownCompanyRegistryCode
-      ? {
-          ...(options.ownCompanyVat ? { ownCompanyVat: options.ownCompanyVat } : {}),
-          ...(options.ownCompanyRegistryCode ? { ownCompanyRegistryCode: options.ownCompanyRegistryCode } : {}),
-        }
-      : undefined;
-    const supplierResolution = await resolveSupplierInternal(
-      api,
-      context.clients,
-      extracted,
-      false,
-      ownCompanyOptions,
-    );
-    if (supplierResolution.self_match_blocked) {
-      notes.push(
-        "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
-      );
-    }
-    if (!supplierResolution.found) signals.supplier_resolution_failed = true;
-    if (!supplierResolution.client && !supplierResolution.preview_client) {
-      const fallback = summarize();
-      notes.push("Supplier could not be resolved or prepared for creation.");
-      maybeAddLlmFallbackNote(notes, fallback);
-      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
-        supplier_resolution: supplierResolution,
-      });
-    }
-
-    if (supplierCountryNeedsReview(supplierResolution)) {
-      const fallback = summarize();
-      notes.push("Supplier country could not be inferred from IBAN, VAT number, or OCR country text. Manual review required before booking.");
-      maybeAddLlmFallbackNote(notes, fallback);
-      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
-        supplier_resolution: supplierResolution,
-      });
-    }
-
-    const resolvedClientId = supplierResolution.client?.id;
-    if (!resolvedClientId && options.dryRun) {
-      notes.push("Dry run: supplier would need to be created before invoice creation.");
-    }
-
-    const bookingSuggestion = applyReceiptAutoBookingRule(
-      resolvedClientId
-      ? await suggestBookingInternal(api, context, resolvedClientId, extracted.description ?? extracted.supplier_name ?? "Receipt expense")
-      : buildKeywordSuggestion(
-        context.purchaseArticlesWithVat,
-        context.accounts,
-        `${extracted.description ?? ""} ${extracted.supplier_name ?? ""}`,
-      ),
-      extracted,
-      context,
-    );
-
-    if (bookingSuggestion) {
-      // #6: if a recent-invoice GET rejected, the booking suggestion may be
-      // based on stale history — surface the degradation note so the operator
-      // knows the freshest history may be missing.
-      if (bookingSuggestion.history_partial_note) {
-        notes.push(bookingSuggestion.history_partial_note);
-      }
-      applyReverseChargeAutoDetection(bookingSuggestion, extracted, supplierResolution, context.isVatRegistered, notes);
-      if (bookingSuggestion.reverse_charge_reason === "foreign_supplier_default") {
-        signals.foreign_reverse_charge_default_unverified = true;
-      }
-      signals.booking_from_history = bookingSuggestion.source === "supplier_history";
-      if (
-        bookingSuggestion.suggested_account?.is_fixed_asset &&
-        extracted.total_gross !== undefined &&
-        extracted.total_gross < 1000
-      ) {
-        signals.improbable_fixed_asset = true;
-      }
-      if (
-        detectReverseChargeFromText(extracted.raw_text) &&
-        !bookingSuggestion.item.reversed_vat_id
-      ) {
-        signals.reverse_charge_phrase_unhandled = true;
-      }
-    }
-
-    if (!bookingSuggestion) {
-      const fallback = summarize();
-      notes.push("Could not find a purchase article / account suggestion for this receipt.");
-      maybeAddLlmFallbackNote(notes, fallback);
-      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
-        supplier_resolution: supplierResolution,
-      });
-    }
-
-    if (extracted.invoice_number) {
-      const myInvoice = extracted.invoice_number.trim().toLowerCase();
-      const myRegCode = extracted.supplier_reg_code?.trim();
-      const myVat = normalizeVatForCompare(extracted.supplier_vat_no);
-      const myNameKey = extracted.supplier_name ? normalizeCompanyName(extracted.supplier_name) : "";
-      const earlier = options.previousResults.find(prev => {
-        if (prev.extracted?.invoice_number?.trim().toLowerCase() !== myInvoice) return false;
-        if (resolvedClientId && prev.supplier_resolution?.client?.id === resolvedClientId) return true;
-        if (myRegCode && prev.extracted?.supplier_reg_code?.trim() === myRegCode) return true;
-        if (myVat && normalizeVatForCompare(prev.extracted?.supplier_vat_no) === myVat) return true;
-        if (myNameKey.length >= 4 && prev.extracted?.supplier_name &&
-            normalizeCompanyName(prev.extracted.supplier_name) === myNameKey) return true;
-        return false;
-      });
-      if (earlier) {
-        signals.duplicate_invoice_in_batch = true;
-      }
-    }
-
-    if (resolvedClientId && extracted.invoice_number && extracted.invoice_date && extracted.total_gross !== undefined) {
-      const duplicate = findDuplicateInvoice(
-        context.purchaseInvoices,
-        resolvedClientId,
-        extracted.invoice_number,
-        extracted.invoice_date,
-        extracted.total_gross,
-      );
-      if (duplicate) {
-        return {
-          file,
-          classification,
-          status: "skipped_duplicate",
-          extracted,
-          llm_fallback: summarize(),
-          supplier_resolution: supplierResolution,
-          booking_suggestion: bookingSuggestion,
-          duplicate_match: duplicate,
-          notes: [`Skipped duplicate by ${duplicate.reason}.`],
-        };
-      }
-    }
-
-    const preCreateSummary = summarize();
-    const creationGate = shouldGateCreation(preCreateSummary, options.executionMode);
-    if (creationGate.gate) {
-      const tense = options.dryRun ? "would be skipped" : "skipped";
-      notes.push(
-        `Auto-create ${tense}: confidence is ${preCreateSummary.confidence} (${creationGate.reason}). Manual review required before booking or confirming (#19).`,
-      );
-      return buildNeedsReviewResult(file, classification, extracted, preCreateSummary, notes, {
-        supplier_resolution: supplierResolution,
-        booking_suggestion: bookingSuggestion,
-      });
-    }
-
-    let materializedSupplierResolution = supplierResolution;
-    if (!options.dryRun && !supplierResolution.found && supplierResolution.preview_client) {
-      materializedSupplierResolution = await resolveSupplierInternal(
-        api,
-        context.clients,
-        extracted,
-        true,
-        ownCompanyOptions,
-      );
-      if (materializedSupplierResolution.self_match_blocked) {
-        notes.push(
-          "Refused to resolve supplier to the active company — manual supplier resolution required (#14).",
-        );
-      }
-    }
-
-    if (materializedSupplierResolution.self_match_blocked && !materializedSupplierResolution.found) {
-      notes.push("Supplier materialization blocked: self-match detected. Manual review required.");
-      const fallback = summarize();
-      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
-        supplier_resolution: materializedSupplierResolution,
-        booking_suggestion: bookingSuggestion,
-      });
-    }
-
-    // P17: the legal-entity identity gate refused to auto-create the supplier
-    // (no verified Estonian registry code, no explicit natural person, and no
-    // operator attestation for a foreign registration). Create NEITHER the
-    // supplier NOR the invoice — route to manual review.
-    if (materializedSupplierResolution.code === "legal_entity_identity_required" && !materializedSupplierResolution.found) {
-      notes.push(
-        `Supplier auto-create refused: ${materializedSupplierResolution.reason ?? "a verified legal-entity identity is required"} Manual review required before booking.`,
-      );
-      const fallback = summarize();
-      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
-        supplier_resolution: materializedSupplierResolution,
-        booking_suggestion: bookingSuggestion,
-      });
-    }
-
-    const created = await createAndMaybeMatchPurchaseInvoice(
-      api,
-      context,
-      snapshot,
-      extracted,
-      materializedSupplierResolution,
-      bookingSuggestion,
-      options.bankTransactions,
-      options.executionMode,
-      options.legacyExecuteCreate,
-      options.consumedTransactionIds,
-    );
-
-    return {
-      file,
-      classification,
-      status: created.status,
-      extracted,
-      llm_fallback: summarize(),
-      supplier_resolution: materializedSupplierResolution,
-      booking_suggestion: bookingSuggestion,
-      created_invoice: created.created_invoice,
-      bank_match: created.bank_match,
-      notes: created.notes,
-      error: created.error,
-    };
-  } catch (error) {
-    return {
-      file,
-      classification: "unclassifiable",
-      status: "failed",
-      notes,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
 function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): boolean {
   if (tx.type !== "D" && tx.type !== "C") return false;
   const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
@@ -1584,6 +1077,10 @@ export function registerReceiptInboxTools(
 ): void {
   assertRuntimeSafetyContext(runtimeSafetyContext);
   const handlers = new Map<string, ReceiptInboxToolHandler>();
+  // Typed receipt batch operations. The batch tools are thin adapters over this
+  // facade + the ../receipts/presenter.js envelope builder; the classification
+  // path below still delegates via invokeCapturedTool (Task 9).
+  const operations = createReceiptBatchOperations(api, runtimeSafetyContext);
 
   // Constituents fully covered by merged entry points: receipt_batch
   // (scan / dry_run / create / create_and_confirm) covers scan_receipt_folder +
@@ -1688,8 +1185,8 @@ export function registerReceiptInboxTools(
     };
   }
 
-  function publicReceiptManifest(snapshot: ReceiptBatchSnapshot) {
-    return snapshot.files.map(({ file, sha256 }) => ({
+  function publicReceiptManifest(files: ReadonlyArray<{ file: ReceiptFileInfo; sha256: string }>) {
+    return files.map(({ file, sha256 }) => ({
       file_ref: runtimeSafetyContext.fileReferenceStore.issue({
         canonicalPath: file.path,
         kind: "file",
@@ -1697,6 +1194,13 @@ export function registerReceiptInboxTools(
       }),
       display_name: sandboxExternalText(file.name),
       sha256,
+    }));
+  }
+
+  function publicReceiptSkipped(scan: { skipped: Array<{ name: string; reason: string }> }) {
+    return scan.skipped.map(({ name, reason }) => ({
+      display_name: sandboxExternalText(name),
+      display_reason: sandboxExternalText(reason),
     }));
   }
 
@@ -1744,6 +1248,126 @@ export function registerReceiptInboxTools(
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
 
+  // Shared batch adapter: resolves the file reference, runs the identity /
+  // approved-manifest safety gates (whose ORDER + ownership of the
+  // fileReferenceStore stay in the tool layer), invokes the typed operation, and
+  // hands the UNWRAPPED result to the presenter. Returns either a byte-identical
+  // non-mutating toolError (identity retryable / manifest required) or the FULL
+  // envelope object (before toMcpJson). Both process_receipt_batch and the merged
+  // receipt_batch non-scan modes route through here — NO invokeCapturedTool /
+  // parseMcpResponse round-trip on the batch path anymore.
+  // Guided profiles receive the token-lean compact receipt surface; standard/full
+  // keep the byte-identical full envelope.
+  const useCompactReceipts = (): boolean => {
+    const profile = currentToolProfile();
+    return profile === "guided" || profile === "guided-sales";
+  };
+  const activeConnectionName = (): string | undefined => {
+    try {
+      return runtimeSafetyContext.getActiveScope().connectionName;
+    } catch {
+      return undefined;
+    }
+  };
+
+  async function runReceiptBatchFull(args: {
+    folder_path?: string;
+    file_ref?: string;
+    accounts_dimensions_id: number;
+    execution_mode?: ReceiptBatchExecutionMode;
+    execute?: boolean;
+    date_from?: string;
+    date_to?: string;
+    transaction_date_from?: string;
+    transaction_date_to?: string;
+    approved_manifest?: ReceiptManifestInputEntry[];
+  }): Promise<{ ok: true; fullObj: Record<string, unknown>; compactInput: ReceiptBatchCompactInput } | { ok: false; error: CallToolResult }> {
+    const receiptFolder = await resolveReceiptFolder(args.folder_path, args.file_ref);
+    const workflowFolderPath = receiptFolder.path;
+    const { mode: executionMode, legacyExecuteCreate } = resolveReceiptBatchExecutionMode(
+      args.execute,
+      args.execution_mode,
+    );
+    const dryRun = executionMode === "dry_run";
+    // M09: the active company's identity feeds the #22 self-match guard. If a
+    // PRESENT invoice_info endpoint fails transiently, fail closed BEFORE any
+    // snapshot/mutation instead of booking with weakened protection.
+    const ownCompanyIdentity = await loadOwnCompanyIdentity(api);
+    if (ownCompanyIdentity.status === "retryable_error") {
+      return { ok: false, error: receiptIdentityRetryableError(ownCompanyIdentity.reason) };
+    }
+    // H15: creating/confirming without the dry-run manifest is refused so the
+    // approved-bytes binding below cannot be bypassed.
+    if (!dryRun && args.approved_manifest === undefined) {
+      return { ok: false, error: receiptApprovedManifestRequiredError() };
+    }
+    const pointOfUseFolderPath = await receiptFolder.revalidateAtPointOfUse();
+    const normalizedApprovedManifest = dryRun || args.approved_manifest === undefined
+      ? undefined
+      : normalizeApprovedReceiptManifest(
+          args.approved_manifest,
+          pointOfUseFolderPath,
+          args.file_ref !== undefined,
+        );
+    const outcome = await operations.runBatch({
+      resolvedFolderPath: pointOfUseFolderPath,
+      accountsDimensionsId: args.accounts_dimensions_id,
+      executionMode,
+      legacyExecuteCreate,
+      dryRun,
+      ...(args.date_from !== undefined ? { dateFrom: args.date_from } : {}),
+      ...(args.date_to !== undefined ? { dateTo: args.date_to } : {}),
+      ...(args.transaction_date_from !== undefined ? { transactionDateFrom: args.transaction_date_from } : {}),
+      ...(args.transaction_date_to !== undefined ? { transactionDateTo: args.transaction_date_to } : {}),
+      ...(normalizedApprovedManifest !== undefined ? { approvedManifest: normalizedApprovedManifest } : {}),
+      directoryAccessOptions: directoryAccessOptions(receiptFolder.expectedCanonicalPath),
+      ...(ownCompanyIdentity.invoiceCompanyName !== undefined ? { ownCompanyName: ownCompanyIdentity.invoiceCompanyName } : {}),
+    });
+    if (!outcome.ok) {
+      return { ok: false, error: toolError({ error: outcome.error.message, category: outcome.error.code }) };
+    }
+    const result = outcome.value;
+    const fileRefProjection: ReceiptBatchFileRefProjection | undefined = args.file_ref !== undefined
+      ? {
+          projectResult: publicReceiptResult,
+          manifest: publicReceiptManifest(result.snapshotFiles),
+          skipped: publicReceiptSkipped(result.scan),
+          folderPathOut: sandboxExternalText(result.scan.folder_path),
+        }
+      : undefined;
+    const fullObj = renderReceiptBatchFull({
+      result,
+      accountsDimensionsId: args.accounts_dimensions_id,
+      ...(args.file_ref !== undefined ? { fileRef: args.file_ref } : {}),
+      workflowFolderPath,
+      ...(args.date_from !== undefined ? { dateFrom: args.date_from } : {}),
+      ...(args.date_to !== undefined ? { dateTo: args.date_to } : {}),
+      ...(args.transaction_date_from !== undefined ? { transactionDateFrom: args.transaction_date_from } : {}),
+      ...(args.transaction_date_to !== undefined ? { transactionDateTo: args.transaction_date_to } : {}),
+      ...(fileRefProjection !== undefined ? { fileRefProjection } : {}),
+    });
+    const compactInput: ReceiptBatchCompactInput = {
+      result,
+      accountsDimensionsId: args.accounts_dimensions_id,
+      executionMode,
+      ...(args.file_ref !== undefined ? { fileRef: args.file_ref } : {}),
+      // Same reviewed-set artifact the FULL envelope emits (projection.manifest
+      // for the file_ref path, result.manifest for a direct folder). The compact
+      // DRY_RUN inlines it so the guided dry_run→create flow is self-completable.
+      responseManifest: fileRefProjection !== undefined ? fileRefProjection.manifest : result.manifest,
+      workflowFolderPath,
+      ...(args.date_from !== undefined ? { dateFrom: args.date_from } : {}),
+      ...(args.date_to !== undefined ? { dateTo: args.date_to } : {}),
+      ...(args.transaction_date_from !== undefined ? { transactionDateFrom: args.transaction_date_from } : {}),
+      ...(args.transaction_date_to !== undefined ? { transactionDateTo: args.transaction_date_to } : {}),
+      ...((): { connectionName?: string } => {
+        const connectionName = activeConnectionName();
+        return connectionName !== undefined ? { connectionName } : {};
+      })(),
+    };
+    return { ok: true, fullObj, compactInput };
+  }
+
   // scan_receipt_folder is covered by receipt_batch mode="scan" (which calls
   // scanReceiptFolderInternal directly), so it is granular-gated too.
   if (exposure.exposeGranularTools) registerTool(server,
@@ -1760,17 +1384,18 @@ export function registerReceiptInboxTools(
     async ({ folder_path, file_ref, file_types, date_from, date_to }) => {
       const receiptFolder = await resolveReceiptFolder(folder_path, file_ref);
       const resolvedFolderPath = await receiptFolder.revalidateAtPointOfUse();
-      const result = await scanReceiptFolderInternal(
+      const scanOutcome = await operations.scan({
         resolvedFolderPath,
-        file_types,
-        date_from,
-        date_to,
-        directoryAccessOptions(receiptFolder.expectedCanonicalPath),
-      );
+        ...(file_types !== undefined ? { fileTypes: file_types } : {}),
+        ...(date_from !== undefined ? { dateFrom: date_from } : {}),
+        ...(date_to !== undefined ? { dateTo: date_to } : {}),
+        directoryAccessOptions: directoryAccessOptions(receiptFolder.expectedCanonicalPath),
+      });
+      const result = scanOutcome.ok ? scanOutcome.value : undefined;
       return {
         content: [{
           type: "text",
-          text: toMcpJson(file_ref !== undefined
+          text: toMcpJson(file_ref !== undefined && result !== undefined
             ? publicReceiptScan(result, file_ref)
             : result),
         }],
@@ -1795,154 +1420,25 @@ export function registerReceiptInboxTools(
     },
     { ...batch, openWorldHint: true, title: "Process Receipt Batch" },
     async ({ folder_path, file_ref, accounts_dimensions_id, execution_mode, execute, date_from, date_to, transaction_date_from, transaction_date_to, approved_manifest }) => {
-      const receiptFolder = await resolveReceiptFolder(folder_path, file_ref);
-      const resolvedFolderPath = receiptFolder.path;
-      const { mode: executionMode, legacyExecuteCreate } = resolveReceiptBatchExecutionMode(
-        execute,
-        execution_mode as ReceiptBatchExecutionMode | undefined,
-      );
-      const dryRun = executionMode === "dry_run";
-      // M09: the active company's identity feeds the #22 self-match guard. If a
-      // PRESENT invoice_info endpoint fails transiently we cannot tell whether
-      // identity would have blocked a self-match, so fail closed BEFORE any
-      // snapshot/mutation instead of booking with weakened protection. (A
-      // permanently-absent endpoint stays best-effort — see loadOwnCompanyIdentity.)
-      const ownCompanyIdentity = await loadOwnCompanyIdentity(api);
-      if (ownCompanyIdentity.status === "retryable_error") {
-        return toolError({
-          error: "Could not load own-company identity; refusing to auto-process receipts",
-          category: "manual_review_required",
-          protection_state: "retryable_error",
-          reason: ownCompanyIdentity.reason,
-          next_action: "Retry once the invoice_info endpoint is reachable again.",
-        });
-      }
-      // H15: creating/confirming without the dry-run manifest is refused so the
-      // approved-bytes binding below cannot be bypassed.
-      if (!dryRun && approved_manifest === undefined) {
-        return toolError({ category: "approved_manifest_required", error: "approved_manifest is required for receipt mutation" });
-      }
-      // Snapshot every receipt's bytes ONCE and (for create/confirm) verify the
-      // folder still matches the approved manifest before any API mutation.
-      const pointOfUseFolderPath = await receiptFolder.revalidateAtPointOfUse();
-      const normalizedApprovedManifest = dryRun || approved_manifest === undefined
-        ? undefined
-        : normalizeApprovedReceiptManifest(
-            approved_manifest as ReceiptManifestInputEntry[],
-            pointOfUseFolderPath,
-            file_ref !== undefined,
-          );
-      const snapshot = await prepareReceiptBatchSnapshot(
-        pointOfUseFolderPath,
-        undefined,
-        date_from,
-        date_to,
-        normalizedApprovedManifest,
-        directoryAccessOptions(receiptFolder.expectedCanonicalPath),
-      );
-      try {
-      const scan = snapshot.scan;
-      const vatInfo = await api.readonly.getVatInfo();
-      const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
-      const context: ReceiptProcessingContext = {
-        clients: await api.clients.listAll(),
-        purchaseInvoices: await api.purchaseInvoices.listAll(),
-        purchaseArticlesWithVat: await getPurchaseArticlesWithVat(api),
-        accounts: await api.readonly.getAccounts(),
-        isVatRegistered: !!vatInfo.vat_number,
-      };
-      const ownCompanyRegistryCode = deriveOwnCompanyRegistryCode(
-        context.clients,
-        ownCompanyVat,
-        ownCompanyIdentity.invoiceCompanyName,
-      );
-      const allTransactions = await api.transactions.listAll();
-      const bankTransactions = selectBatchBankTransactions(allTransactions, accounts_dimensions_id, {
-        ...(transaction_date_from ? { transaction_date_from } : {}),
-        ...(transaction_date_to ? { transaction_date_to } : {}),
-      });
-      const consumedTransactionIds = new Set<number>();
-      const results: ReceiptBatchFileResult[] = [];
-
-      for (let index = 0; index < snapshot.files.length; index++) {
-        const fileSnapshot = snapshot.files[index]!;
-        await reportProgress(index, snapshot.files.length);
-        results.push(await processSingleReceipt(api, context, fileSnapshot, {
-          ownCompanyVat,
-          ownCompanyRegistryCode,
-          bankTransactions,
-          executionMode,
-          legacyExecuteCreate,
-          dryRun,
-          consumedTransactionIds,
-          previousResults: results,
-        }));
-      }
-
-      const summary = buildReceiptBatchSummary({
-        executionMode,
-        legacyExecuteCreate,
-        dryRun,
-        scannedFiles: scan.files.length,
-        skippedInvalidFiles: scan.skipped.length,
-        results,
-      });
-      const mode = dryRun ? "DRY_RUN" : "EXECUTED";
-      const sanitizedResults = file_ref !== undefined
-        ? results.map(result => publicReceiptResult(result))
-        : results.map(sanitizeReceiptResultForOutput);
-      const responseManifest = file_ref !== undefined
-        ? publicReceiptManifest(snapshot)
-        : snapshot.manifest;
-      const workflowArgs = {
-        ...(file_ref !== undefined ? { file_ref } : { folder_path: resolvedFolderPath }),
+      const outcome = await runReceiptBatchFull({
+        ...(folder_path !== undefined ? { folder_path } : {}),
+        ...(file_ref !== undefined ? { file_ref } : {}),
         accounts_dimensions_id,
-        ...(date_from ? { date_from } : {}),
-        ...(date_to ? { date_to } : {}),
-        ...(transaction_date_from ? { transaction_date_from } : {}),
-        ...(transaction_date_to ? { transaction_date_to } : {}),
-        execution_mode: "create",
-        approved_manifest: responseManifest,
-      };
-      const workflowSummary = buildReceiptBatchWorkflowSummary(summary);
-      const workflow = buildReceiptBatchWorkflow({
-        summary,
-        workflowSummary,
-        sanitizedResults,
-        workflowArgs,
+        ...(execution_mode !== undefined ? { execution_mode: execution_mode as ReceiptBatchExecutionMode } : {}),
+        ...(execute !== undefined ? { execute } : {}),
+        ...(date_from !== undefined ? { date_from } : {}),
+        ...(date_to !== undefined ? { date_to } : {}),
+        ...(transaction_date_from !== undefined ? { transaction_date_from } : {}),
+        ...(transaction_date_to !== undefined ? { transaction_date_to } : {}),
+        ...(approved_manifest !== undefined ? { approved_manifest: approved_manifest as ReceiptManifestInputEntry[] } : {}),
       });
-
+      if (!outcome.ok) return outcome.error;
       return {
         content: [{
           type: "text",
-          text: toMcpJson({
-            mode,
-            execution_mode: executionMode,
-            folder_path: file_ref !== undefined ? sandboxExternalText(scan.folder_path) : scan.folder_path,
-            ...(file_ref !== undefined ? { file_ref } : {}),
-            accounts_dimensions_id,
-            summary,
-            workflow,
-            // H15: bytes were snapshotted once and (for create/confirm) checked
-            // against the approved manifest, so there is no execution-time
-            // re-scan drift. Echo the manifest the operator approved / must
-            // approve so the create call can bind to these exact bytes.
-            approved_manifest: responseManifest,
-            skipped: file_ref !== undefined
-              ? publicReceiptScan(scan, file_ref).skipped
-              : scan.skipped,
-            results: sanitizedResults,
-            execution: buildReceiptBatchExecution({
-              mode,
-              summary,
-              sanitizedResults,
-            }),
-          }),
+          text: toMcpJson(outcome.fullObj),
         }],
       };
-      } finally {
-        await snapshot.cleanup();
-      }
     },
   );
 
@@ -1978,14 +1474,15 @@ export function registerReceiptInboxTools(
           ...(date_from !== undefined ? { date_from } : {}),
           ...(date_to !== undefined ? { date_to } : {}),
         };
-        const scan = await scanReceiptFolderInternal(
+        const scanOutcome = await operations.scan({
           resolvedFolderPath,
-          file_types,
-          date_from,
-          date_to,
-          directoryAccessOptions(receiptFolder.expectedCanonicalPath),
-        );
-        result = file_ref !== undefined
+          ...(file_types !== undefined ? { fileTypes: file_types } : {}),
+          ...(date_from !== undefined ? { dateFrom: date_from } : {}),
+          ...(date_to !== undefined ? { dateTo: date_to } : {}),
+          directoryAccessOptions: directoryAccessOptions(receiptFolder.expectedCanonicalPath),
+        });
+        const scan = scanOutcome.ok ? scanOutcome.value : undefined;
+        result = file_ref !== undefined && scan !== undefined
           ? publicReceiptScan(scan, file_ref)
           : scan;
       } else {
@@ -1993,7 +1490,10 @@ export function registerReceiptInboxTools(
           throw new Error("accounts_dimensions_id is required when mode is dry_run, create, or create_and_confirm");
         }
         // H15: create/create_and_confirm must carry the exact manifest a dry_run
-        // returned so the snapshot layer can reject a folder that changed.
+        // returned so the snapshot layer can reject a folder that changed. This
+        // pre-check keeps the merged path's ordering: a missing manifest is
+        // refused BEFORE any own-company identity load (the operation would run
+        // the identity gate first).
         if (selectedMode !== "dry_run" && approved_manifest === undefined) {
           return toolError({ category: "approved_manifest_required", error: "approved_manifest is required for receipt mutation" });
         }
@@ -2008,7 +1508,27 @@ export function registerReceiptInboxTools(
           ...(transaction_date_to !== undefined ? { transaction_date_to } : {}),
           ...(approved_manifest !== undefined ? { approved_manifest } : {}),
         };
-        result = await invokeCapturedTool(delegatedTool, delegatedArgs);
+        // Call the typed operation + presenter DIRECTLY — no invokeCapturedTool /
+        // parseMcpResponse round-trip. The full envelope object the granular
+        // process_receipt_batch tool would have produced is built here and reused
+        // as `result` below (byte-identical to the former delegated payload).
+        const batch = await runReceiptBatchFull({
+          ...(folder_path !== undefined ? { folder_path } : {}),
+          ...(file_ref !== undefined ? { file_ref } : {}),
+          accounts_dimensions_id,
+          execution_mode: selectedMode,
+          ...(date_from !== undefined ? { date_from } : {}),
+          ...(date_to !== undefined ? { date_to } : {}),
+          ...(transaction_date_from !== undefined ? { transaction_date_from } : {}),
+          ...(transaction_date_to !== undefined ? { transaction_date_to } : {}),
+          ...(approved_manifest !== undefined ? { approved_manifest: approved_manifest as ReceiptManifestInputEntry[] } : {}),
+        });
+        if (!batch.ok) return batch.error;
+        // Guided profiles get the token-lean compact summary as the delegated
+        // result; standard/full keep the byte-identical full envelope.
+        result = useCompactReceipts()
+          ? renderReceiptBatchCompact(batch.compactInput)
+          : batch.fullObj;
       }
 
       const publicDelegatedArgs = file_ref !== undefined && approved_manifest !== undefined
