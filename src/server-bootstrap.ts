@@ -456,6 +456,10 @@ export async function createMcpServer(
     ? createSetupModeApiContext(setupInfo)
     : createScopedApiContext(connectionState, connectionContexts, invocationStorage);
   const resolvedAuditCompanyNames = new Map<number, string | null>();
+  allConfigs.forEach((config, index) => {
+    const verifiedCompanyName = normalizeAuditCompanyName(config.verifiedCompanyName);
+    if (verifiedCompanyName) resolvedAuditCompanyNames.set(index, verifiedCompanyName);
+  });
   const auditLabelResolutionPromises = new Map<number, Promise<void>>();
 
   function applyAuditLogLabels(): void {
@@ -527,6 +531,7 @@ export async function createMcpServer(
     configs: allConfigs,
     toolExposure,
     toolProfile,
+    getVerifiedCompanyIdentity: (index) => resolvedAuditCompanyNames.get(index) ?? null,
   });
 
   const instructions = setupMode ? `Setup mode:
@@ -842,7 +847,7 @@ export async function createMcpServer(
       }
       try {
         return await invocationStorage.run(snapshot, async () => {
-          if (!setupMode && !isReadOnly) {
+          if (!setupMode) {
             await ensureAuditLogLabelResolved(snapshot.index);
           }
           const runInExtra = extra

@@ -230,6 +230,7 @@ describe("loadAllConfigs", () => {
       expect(configs).toHaveLength(1);
       expect(configs[0]!.name).toBe("env");
       expect(configs[0]!.config.apiKeyId).toBe("key-id");
+      expect(configs[0]!.verifiedCompanyName).toBe("Acme OÜ");
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });
@@ -770,8 +771,10 @@ describe("loadAllConfigs", () => {
       expect(configs).toHaveLength(2);
       expect(configs[0]!.name).toBe("env");
       expect(configs[0]!.config.apiKeyId).toBe("first-id");
+      expect(configs[0]!.verifiedCompanyName).toBe("Primary OÜ");
       expect(configs[1]!.name).toBe("env-global-1");
       expect(configs[1]!.config.apiKeyId).toBe("second-id");
+      expect(configs[1]!.verifiedCompanyName).toBe("Second OÜ");
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });

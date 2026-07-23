@@ -12,22 +12,25 @@ const MAX_HANDLE_ATTEMPTS = 16;
 const OPERATION_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/;
 const FORBIDDEN_KEYS = new Set([
   "password", "apikey", "apikeyid", "apipublicvalue", "apipassword", "credential", "credentials", "secret", "token", "authorization",
+  "privatekey", "sessioncookie", "bearer",
   "privatepayload", "normalizedargs", "sourceidentities", "livesnapshot", "planhandle",
   "command", "commands", "executable", "tool", "args",
   "approved", "approval", "approvalrequired", "approvalstate",
   "__proto__", "constructor", "prototype",
 ]);
 
-export type OperationResultStatus = "completed" | "partial" | "indeterminate" | "failed";
+export type OperationResultStatus = "completed" | "partial" | "indeterminate";
 export interface OperationResultInput {
   readonly operation: string;
   readonly status: OperationResultStatus;
   readonly items: readonly unknown[];
+  readonly plan_handle: string;
 }
 export interface StoredOperationResult {
   readonly operation: string;
   readonly status: OperationResultStatus;
   readonly items: readonly PlanData[];
+  readonly planHandle: string;
   readonly scope: RuntimeSafetyScope;
   readonly issuedAt: number;
   readonly expiresAt: number;
@@ -59,6 +62,8 @@ export interface OperationResultStoreOptions {
   readonly ttlMs?: number;
   readonly maxActive?: number;
   readonly maxTombstones?: number;
+  readonly assertConsumedPlan: (handle: string, domain: string) => void;
+  readonly retainConsumedPlan: (handle: string, domain: string) => () => void;
 }
 
 function invalid(): never { throw new OperationResultStoreError("operation_result_data_invalid"); }
@@ -66,7 +71,7 @@ function normalizedKey(key: string): string { return key.replace(/[^a-z0-9]/gi, 
 function forbiddenKey(key: string): boolean {
   const normalized = normalizedKey(key);
   return FORBIDDEN_KEYS.has(normalized) ||
-    /(?:token|secret|password|credential|apikey)/.test(normalized) ||
+    /(?:token|secret|password|credential|apikey|privatekey|sessioncookie|bearer)/.test(normalized) ||
     normalized.includes("approval") || normalized.includes("executionplan") ||
     normalized.startsWith("command") || normalized.startsWith("tool") ||
     normalized === "arguments";
@@ -109,7 +114,24 @@ function cloneScope(scope: RuntimeSafetyScope): RuntimeSafetyScope {
   return cloneAndFreezePlanData(scope) as unknown as RuntimeSafetyScope;
 }
 function scopesEqual(left: RuntimeSafetyScope, right: RuntimeSafetyScope): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return left.serverInstanceId === right.serverInstanceId &&
+    left.connectionIndex === right.connectionIndex &&
+    left.connectionGeneration === right.connectionGeneration &&
+    left.connectionName === right.connectionName &&
+    left.connectionFingerprint === right.connectionFingerprint &&
+    left.environmentKind === right.environmentKind &&
+    left.baseUrl === right.baseUrl &&
+    left.verifiedCompanyIdentity === right.verifiedCompanyIdentity &&
+    left.profile === right.profile &&
+    left.catalogFingerprint === right.catalogFingerprint &&
+    left.features.enableLightyear === right.features.enableLightyear &&
+    left.features.exposeGranularTools === right.features.exposeGranularTools &&
+    left.features.exposeSetupTools === right.features.exposeSetupTools &&
+    left.features.enableTaxTools === right.features.enableTaxTools &&
+    left.features.enableReferenceAdmin === right.features.enableReferenceAdmin &&
+    left.features.enableAnnualReport === right.features.enableAnnualReport &&
+    left.features.enableSales === right.features.enableSales &&
+    left.features.enableProducts === right.features.enableProducts;
 }
 function encodeHandle(bytes: Uint8Array): string {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength !== HANDLE_BYTES) throw new OperationResultStoreError("operation_result_handle_collision");
@@ -126,7 +148,7 @@ function canonicalHandle(handle: unknown): handle is string {
 function readResultInput(candidate: unknown): OperationResultInput {
   if (typeof candidate !== "object" || candidate === null || utilTypes.isProxy(candidate) || Object.getPrototypeOf(candidate) !== Object.prototype) invalid();
   const keys = Reflect.ownKeys(candidate);
-  const expected = new Set(["operation", "status", "items"]);
+  const expected = new Set(["operation", "status", "items", "plan_handle"]);
   if (keys.length !== expected.size || keys.some(key => typeof key !== "string" || !expected.has(key))) invalid();
   const descriptors = Object.getOwnPropertyDescriptors(candidate);
   const values: Record<string, unknown> = {};
@@ -136,8 +158,8 @@ function readResultInput(candidate: unknown): OperationResultInput {
     values[key] = descriptor.value;
   }
   if (typeof values.operation !== "string" || !OPERATION_PATTERN.test(values.operation) ||
-    typeof values.status !== "string" || !["completed", "partial", "indeterminate", "failed"].includes(values.status) ||
-    !Array.isArray(values.items)) invalid();
+    typeof values.status !== "string" || !["completed", "partial", "indeterminate"].includes(values.status) ||
+    !Array.isArray(values.items) || typeof values.plan_handle !== "string") invalid();
   return values as unknown as OperationResultInput;
 }
 
@@ -150,6 +172,9 @@ export class OperationResultStore {
   readonly #ttlMs: number;
   readonly #maxActive: number;
   readonly #maxTombstones: number;
+  readonly #assertConsumedPlan: (handle: string, domain: string) => void;
+  readonly #retainConsumedPlan: (handle: string, domain: string) => () => void;
+  readonly #planProofReleases = new Map<string, () => void>();
 
   constructor(options: OperationResultStoreOptions) {
     this.#getActiveScope = options.getActiveScope;
@@ -158,6 +183,8 @@ export class OperationResultStore {
     this.#ttlMs = options.ttlMs ?? OPERATION_RESULT_TTL_MS;
     this.#maxActive = options.maxActive ?? MAX_ACTIVE_OPERATION_RESULTS;
     this.#maxTombstones = options.maxTombstones ?? MAX_OPERATION_RESULT_TOMBSTONES;
+    this.#assertConsumedPlan = options.assertConsumedPlan;
+    this.#retainConsumedPlan = options.retainConsumedPlan;
     if (!Number.isSafeInteger(this.#ttlMs) || this.#ttlMs <= 0 || !Number.isSafeInteger(this.#maxActive) || this.#maxActive <= 0 ||
       !Number.isSafeInteger(this.#maxTombstones) || this.#maxTombstones <= 0) invalid();
   }
@@ -175,13 +202,22 @@ export class OperationResultStore {
     if (this.#active.size >= this.#maxActive) throw new OperationResultStoreError("operation_result_capacity_exceeded");
     let scope: RuntimeSafetyScope;
     try { scope = cloneScope(this.#getActiveScope()); } catch { invalid(); }
-    const stored = Object.freeze({ operation: safeInput.operation, status: safeInput.status, items, scope, issuedAt: now, expiresAt });
-    for (let attempt = 0; attempt < MAX_HANDLE_ATTEMPTS; attempt += 1) {
-      const handle = encodeHandle(this.#handleFactory());
-      if (this.#active.has(handle) || this.#tombstones.has(handle)) continue;
-      this.#active.set(handle, stored);
-      return handle;
+    const stored = Object.freeze({ operation: safeInput.operation, status: safeInput.status, items, planHandle: safeInput.plan_handle, scope, issuedAt: now, expiresAt });
+    let releasePlanProof: () => void;
+    try { releasePlanProof = this.#retainConsumedPlan(safeInput.plan_handle, safeInput.operation); } catch { invalid(); }
+    try {
+      for (let attempt = 0; attempt < MAX_HANDLE_ATTEMPTS; attempt += 1) {
+        const handle = encodeHandle(this.#handleFactory());
+        if (this.#active.has(handle) || this.#tombstones.has(handle)) continue;
+        this.#active.set(handle, stored);
+        this.#planProofReleases.set(handle, releasePlanProof);
+        return handle;
+      }
+    } catch (error) {
+      releasePlanProof();
+      throw error;
     }
+    releasePlanProof();
     throw new OperationResultStoreError("operation_result_handle_collision");
   }
 
@@ -189,18 +225,24 @@ export class OperationResultStore {
     if (!canonicalHandle(handle)) throw new OperationResultStoreError("operation_result_handle_invalid");
     const now = this.#readNow();
     const stored = this.#active.get(handle);
-    if (stored && now >= stored.expiresAt) { this.#active.delete(handle); this.#addTombstone(handle); }
+    if (stored && now >= stored.expiresAt) { this.#expire(handle); this.#addTombstone(handle); }
     this.#purge(now);
     if (!stored || now >= stored.expiresAt) throw new OperationResultStoreError(stored || this.#tombstones.has(handle) ? "operation_result_expired" : "operation_result_handle_invalid");
     let current: RuntimeSafetyScope;
     try { current = cloneScope(this.#getActiveScope()); } catch { throw new OperationResultStoreError("operation_result_scope_mismatch"); }
     if (!scopesEqual(stored.scope, current)) throw new OperationResultStoreError("operation_result_scope_mismatch");
+    try { this.#assertConsumedPlan(stored.planHandle, stored.operation); } catch { throw new OperationResultStoreError("operation_result_scope_mismatch"); }
     return stored;
   }
 
   #readNow(): number { const now = this.#now(); if (!Number.isSafeInteger(now) || now < 0) invalid(); return now; }
   #purge(now: number): void {
-    for (const [handle, stored] of this.#active) if (now >= stored.expiresAt) { this.#active.delete(handle); this.#addTombstone(handle); }
+    for (const [handle, stored] of this.#active) if (now >= stored.expiresAt) { this.#expire(handle); this.#addTombstone(handle); }
+  }
+  #expire(handle: string): void {
+    this.#active.delete(handle);
+    this.#planProofReleases.get(handle)?.();
+    this.#planProofReleases.delete(handle);
   }
   #addTombstone(handle: string): void {
     this.#tombstones.delete(handle);

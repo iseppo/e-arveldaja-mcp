@@ -96,6 +96,8 @@ export interface ExecutionPlanStoreOptions {
 
 interface Tombstone {
   readonly reason: "consumed" | "expired";
+  readonly proof?: Readonly<{ domain: string; scope: RuntimeSafetyScope }>;
+  readonly pins: number;
 }
 
 function failData(): never {
@@ -208,6 +210,7 @@ function scopesEqual(left: RuntimeSafetyScope, right: RuntimeSafetyScope): boole
     left.connectionFingerprint === right.connectionFingerprint &&
     left.environmentKind === right.environmentKind &&
     left.baseUrl === right.baseUrl &&
+    left.verifiedCompanyIdentity === right.verifiedCompanyIdentity &&
     left.profile === right.profile &&
     left.catalogFingerprint === right.catalogFingerprint &&
     left.features.enableLightyear === right.features.enableLightyear &&
@@ -376,7 +379,35 @@ export class ExecutionPlanStore {
     if (!this.#scopeMatches(plan.scope)) {
       throw new PlanStoreError("plan_scope_mismatch");
     }
+    this.#addTombstone(handle, "consumed", { domain: plan.domain, scope: plan.scope });
     return plan;
+  }
+
+  /** Read-only proof that this exact plan completed successful consumption. */
+  assertConsumed(handle: string, expectedDomain: string): void {
+    this.#validateHandle(handle);
+    validateDomain(expectedDomain);
+    const tombstone = this.#tombstones.get(handle);
+    if (!tombstone?.proof) throw new PlanStoreError(tombstone ? "plan_handle_consumed" : "plan_handle_invalid");
+    if (tombstone.proof.domain !== expectedDomain) throw new PlanStoreError("plan_domain_mismatch");
+    if (!this.#scopeMatches(tombstone.proof.scope)) throw new PlanStoreError("plan_scope_mismatch");
+  }
+
+  /** Keep a successful-consumption proof available for a dependent result TTL. */
+  retainConsumed(handle: string, expectedDomain: string): () => void {
+    this.assertConsumed(handle, expectedDomain);
+    const tombstone = this.#tombstones.get(handle)!;
+    this.#tombstones.set(handle, Object.freeze({ ...tombstone, pins: tombstone.pins + 1 }));
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.#tombstones.get(handle);
+      if (current?.proof && current.pins > 0) {
+        this.#tombstones.set(handle, Object.freeze({ ...current, pins: current.pins - 1 }));
+        this.#trimTombstones();
+      }
+    };
   }
 
   #validateHandle(handle: string): void {
@@ -423,13 +454,19 @@ export class ExecutionPlanStore {
     }
   }
 
-  #addTombstone(handle: string, reason: Tombstone["reason"]): void {
+  #addTombstone(handle: string, reason: Tombstone["reason"], proof?: Tombstone["proof"]): void {
+    const pins = this.#tombstones.get(handle)?.pins ?? 0;
     this.#tombstones.delete(handle);
-    this.#tombstones.set(handle, Object.freeze({ reason }));
+    this.#tombstones.set(handle, Object.freeze({ reason, pins, ...(proof ? { proof: Object.freeze(proof) } : {}) }));
+    this.#trimTombstones(proof ? handle : undefined);
+  }
+
+  #trimTombstones(protectedHandle?: string): void {
     while (this.#tombstones.size > this.#maxTombstones) {
-      const oldest = this.#tombstones.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.#tombstones.delete(oldest);
+      const evictable = [...this.#tombstones]
+        .find(([handle, tombstone]) => handle !== protectedHandle && tombstone.pins === 0)?.[0];
+      if (evictable === undefined) break;
+      this.#tombstones.delete(evictable);
     }
   }
 }

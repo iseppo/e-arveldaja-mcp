@@ -171,6 +171,7 @@ describe("ExecutionPlanStore", () => {
     ["connection fingerprint", { connectionFingerprint: "other-fingerprint" }],
     ["environment kind", { environmentKind: "live" as const }],
     ["normalized base URL", { baseUrl: "https://rmp-api.rik.ee/v1" }],
+    ["verified company identity", { verifiedCompanyIdentity: "other oü" }],
   ] satisfies ReadonlyArray<readonly [string, Partial<RuntimeSafetyScope>]>)
   ("rejects and consumes %s drift", (_label, patch) => {
     const runtime = createTestRuntimeSafetyContext();
@@ -398,10 +399,35 @@ describe("ExecutionPlanStore", () => {
       connectionName: "original-name",
       environmentKind: "demo",
       baseUrl: "https://demo-rmp-api.rik.ee/v1",
+      verifiedCompanyIdentity: null,
       features: { enableSales: true },
     });
     expect(Object.isFrozen(scope)).toBe(true);
     expect(Object.isFrozen(scope.features)).toBe(true);
+  });
+
+  it("derives and normalizes verified company identity while preserving profile and catalog scope", () => {
+    const storage = new AsyncLocalStorage<ConnectionSnapshot>();
+    const fixture = createTestRuntimeSafetyContext();
+    let verified = "  Acme\u00a0OÜ  ";
+    const runtime = createRuntimeSafetyContext({
+      invocationStorage: storage,
+      configs: [{
+        name: "acme",
+        verifiedCompanyName: "Stored Name OÜ",
+        config: { apiKeyId: "id", apiPublicValue: "public", apiPassword: "password", baseUrl: "https://demo-rmp-api.rik.ee/v1" },
+      }],
+      toolExposure: { ...fixture.getActiveScope().features },
+      toolProfile: "guided",
+      catalogFingerprint: "catalog-v2",
+      serverInstanceId: "company-test-server-instance-00000001",
+      getVerifiedCompanyIdentity: () => verified,
+    });
+    const first = storage.run({ index: 0, generation: 0 }, () => runtime.getActiveScope());
+    expect(first).toMatchObject({ verifiedCompanyIdentity: "acme oü", profile: "guided", catalogFingerprint: "catalog-v2" });
+    verified = "Other AS";
+    const second = storage.run({ index: 0, generation: 0 }, () => runtime.getActiveScope());
+    expect(second.verifiedCompanyIdentity).toBe("other as");
   });
 
   it("derives an explicit setup scope and rejects unknown snapshot indices", () => {
@@ -419,6 +445,7 @@ describe("ExecutionPlanStore", () => {
       environmentKind: "setup",
       connectionIndex: null,
       baseUrl: null,
+      verifiedCompanyIdentity: null,
       connectionGeneration: 3,
     });
     expect(() => storage.run({ index: 1, generation: 3 }, () => runtime.getActiveScope()))

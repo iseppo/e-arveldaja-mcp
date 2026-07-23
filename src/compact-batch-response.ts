@@ -51,7 +51,7 @@ export function buildCompactBatchResponse(input: {
     message: input.message,
     counts: { total: input.items.length, completed: partition.completed.length, blocked: partition.blocked.length, review: partition.review.length },
     blockers: includedBlockers,
-    samples: includedSamples,
+    samples: [...includedSamples],
     details: {
       available: input.items.length > includedBlockers.length + includedSamples.length,
       total_items: input.items.length,
@@ -59,7 +59,7 @@ export function buildCompactBatchResponse(input: {
       tool: "get_operation_result_page",
       args: { operation_handle: input.operation_handle },
     },
-  }) });
+  }, { budget: "batch" }) });
 
   let includedBlockers = blockers;
   let includedSamples = samples;

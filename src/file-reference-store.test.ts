@@ -168,6 +168,7 @@ describe("FileReferenceStore", () => {
       { connectionFingerprint: "other-fingerprint" },
       { environmentKind: "live" as const },
       { baseUrl: "https://rmp-api.rik.ee/v1" },
+      { verifiedCompanyIdentity: "other oü" },
       { features: { enableSales: false } },
       { features: { enableLightyear: false } },
       { features: { exposeGranularTools: true } },

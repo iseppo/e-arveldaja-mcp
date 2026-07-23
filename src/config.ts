@@ -14,6 +14,8 @@ export interface Config {
 export interface NamedConfig {
   name: string;
   filePath?: string;
+  /** Company name from credential metadata written only after API verification. */
+  verifiedCompanyName?: string | null;
   config: Config;
 }
 
@@ -1021,7 +1023,7 @@ export function loadAllConfigs(): NamedConfig[] {
   const baseUrl = getBaseUrl();
   const configs: NamedConfig[] = [];
   const seen = new Set<string>();
-  const seenConnections = new Set<string>();
+  const seenConnections = new Map<string, number>();
   const explicitApiKeyFile = process.env.EARVELDAJA_API_KEY_FILE?.trim();
   const explicitApiKeyConfig = explicitApiKeyFile
     ? parseApiKeyFile(explicitApiKeyFile)
@@ -1035,8 +1037,14 @@ export function loadAllConfigs(): NamedConfig[] {
 
   const addConfig = (entry: NamedConfig): void => {
     const connectionKey = `${entry.config.baseUrl}\n${entry.config.apiKeyId}\n${entry.config.apiPublicValue}\n${entry.config.apiPassword}`;
-    if (seenConnections.has(connectionKey)) return;
-    seenConnections.add(connectionKey);
+    const existingIndex = seenConnections.get(connectionKey);
+    if (existingIndex !== undefined) {
+      if (entry.verifiedCompanyName && !configs[existingIndex]!.verifiedCompanyName) {
+        configs[existingIndex] = { ...configs[existingIndex]!, verifiedCompanyName: entry.verifiedCompanyName };
+      }
+      return;
+    }
+    seenConnections.set(connectionKey, configs.length);
     configs.push(entry);
   };
 
@@ -1097,11 +1105,13 @@ export function loadAllConfigs(): NamedConfig[] {
       extraNamePrefix: candidate.extraNamePrefix,
       primaryName: candidate.extraNamePrefix,
     });
+    const metadata = parseEnvMetadata(candidate.envFile);
 
     for (const stored of storedConnections) {
       addConfig({
         name: stored.name,
         filePath: candidate.envFile,
+        verifiedCompanyName: metadata[stored.target]?.companyName ?? null,
         config: {
           apiKeyId: stored.apiKeyId,
           apiPublicValue: stored.apiPublicValue,

@@ -31,7 +31,7 @@ export interface TestRuntimeSafetyContextOptions {
   };
   readonly planStore?: Omit<ExecutionPlanStoreOptions, "getActiveScope" | "now">;
   readonly fileReferenceStore?: Omit<FileReferenceStoreOptions, "getActiveScope" | "now">;
-  readonly operationResultStore?: Omit<OperationResultStoreOptions, "getActiveScope" | "now">;
+  readonly operationResultStore?: Omit<OperationResultStoreOptions, "getActiveScope" | "assertConsumedPlan" | "retainConsumedPlan" | "now">;
 }
 
 function frozenScope(
@@ -59,6 +59,7 @@ export function createTestRuntimeSafetyContext(
     connectionFingerprint: "test-fingerprint",
     environmentKind: "demo",
     baseUrl: "https://demo-rmp-api.rik.ee/v1",
+    verifiedCompanyIdentity: "acme",
     profile: "standard",
     catalogFingerprint: "test-catalog-fingerprint",
     features: DEFAULT_FEATURES,
@@ -89,6 +90,8 @@ export function createTestRuntimeSafetyContext(
     ...options.operationResultStore,
     now: () => now,
     getActiveScope,
+    assertConsumedPlan: (handle, domain) => planStore.assertConsumed(handle, domain),
+    retainConsumedPlan: (handle, domain) => planStore.retainConsumed(handle, domain),
   });
   return Object.freeze({
     serverInstanceId: scope.serverInstanceId,

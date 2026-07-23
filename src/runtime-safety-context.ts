@@ -20,6 +20,7 @@ export interface RuntimeSafetyScope {
   readonly connectionFingerprint: string;
   readonly environmentKind: RuntimeEnvironmentKind;
   readonly baseUrl: string | null;
+  readonly verifiedCompanyIdentity: string | null;
   readonly profile: ToolProfile;
   readonly catalogFingerprint: string;
   readonly features: Readonly<ToolExposureConfig>;
@@ -42,7 +43,8 @@ export interface CreateRuntimeSafetyContextOptions {
   readonly serverInstanceId?: string;
   readonly planStore?: Omit<ExecutionPlanStoreOptions, "getActiveScope">;
   readonly fileReferenceStore?: Omit<FileReferenceStoreOptions, "getActiveScope">;
-  readonly operationResultStore?: Omit<OperationResultStoreOptions, "getActiveScope">;
+  readonly operationResultStore?: Omit<OperationResultStoreOptions, "getActiveScope" | "assertConsumedPlan" | "retainConsumedPlan">;
+  readonly getVerifiedCompanyIdentity?: (connectionIndex: number) => string | null;
 }
 
 export function assertRuntimeSafetyContext(value: unknown): asserts value is RuntimeSafetyContext {
@@ -120,6 +122,12 @@ function createServerInstanceId(): string {
   return randomBytes(32).toString("base64url");
 }
 
+export function normalizeVerifiedCompanyIdentity(companyName: string | null | undefined): string | null {
+  if (typeof companyName !== "string") return null;
+  const normalized = companyName.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase("et-EE");
+  return normalized || null;
+}
+
 /**
  * Build the one server-owned safety context. Active scope is derived only from
  * the AsyncLocalStorage invocation snapshot and immutable startup config. It
@@ -144,6 +152,7 @@ export function createRuntimeSafetyContext(
       fingerprint: buildConnectionFingerprint(entry.config),
       baseUrl,
       environmentKind: environmentKind(baseUrl),
+      verifiedCompanyIdentity: normalizeVerifiedCompanyIdentity(entry.verifiedCompanyName),
     });
   }));
 
@@ -163,6 +172,7 @@ export function createRuntimeSafetyContext(
           connectionFingerprint: "setup",
           environmentKind: "setup" as const,
           baseUrl: null,
+          verifiedCompanyIdentity: null,
           profile,
           catalogFingerprint,
           features,
@@ -178,6 +188,9 @@ export function createRuntimeSafetyContext(
       connectionFingerprint: connection.fingerprint,
       environmentKind: connection.environmentKind,
       baseUrl: connection.baseUrl,
+      verifiedCompanyIdentity: normalizeVerifiedCompanyIdentity(
+        options.getVerifiedCompanyIdentity?.(connection.index) ?? connection.verifiedCompanyIdentity,
+      ),
       profile,
       catalogFingerprint,
       features,
@@ -195,6 +208,8 @@ export function createRuntimeSafetyContext(
   const operationResultStore = new OperationResultStore({
     ...options.operationResultStore,
     getActiveScope,
+    assertConsumedPlan: (handle, domain) => planStore.assertConsumed(handle, domain),
+    retainConsumedPlan: (handle, domain) => planStore.retainConsumed(handle, domain),
   });
   return Object.freeze({ serverInstanceId, planStore, fileReferenceStore, operationResultStore, getActiveScope });
 }

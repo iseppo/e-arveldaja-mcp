@@ -124,4 +124,48 @@ describe("PublicToolRegistrar", () => {
       rmSync(configDir, { recursive: true, force: true });
     }
   });
+
+  it("resolves verified company identity before read-only tools and reuses verified startup metadata", async () => {
+    const config = {
+      name: "company-scope",
+      config: { apiKeyId: "id", apiPublicValue: "public", apiPassword: "password", baseUrl: "https://demo-rmp-api.rik.ee/v1" },
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ invoice_company_name: "Live Company OÜ" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const bootstrap = await createMcpServer({ configs: [config], toolProfile: "guided", connect: false });
+    const client = new Client({ name: "company-scope-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([bootstrap.server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const response = await client.callTool({ name: "list_connections", arguments: {} });
+      expect(response.isError).not.toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]![0])).toContain("/invoice_info");
+    } finally {
+      await Promise.allSettled([client.close(), bootstrap.server.close()]);
+      vi.unstubAllGlobals();
+    }
+
+    const shouldNotFetch = vi.fn().mockRejectedValue(new Error("startup metadata should prevent lookup"));
+    vi.stubGlobal("fetch", shouldNotFetch);
+    const metadataBootstrap = await createMcpServer({
+      configs: [{ ...config, verifiedCompanyName: "Stored Company OÜ" }],
+      toolProfile: "guided",
+      connect: false,
+    });
+    const metadataClient = new Client({ name: "company-metadata-test", version: "1" });
+    const [metadataClientTransport, metadataServerTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([metadataBootstrap.server.connect(metadataServerTransport), metadataClient.connect(metadataClientTransport)]);
+    try {
+      const response = await metadataClient.callTool({ name: "list_connections", arguments: {} });
+      expect(response.isError).not.toBe(true);
+      expect(shouldNotFetch).not.toHaveBeenCalled();
+    } finally {
+      await Promise.allSettled([metadataClient.close(), metadataBootstrap.server.close()]);
+      vi.unstubAllGlobals();
+    }
+  });
 });

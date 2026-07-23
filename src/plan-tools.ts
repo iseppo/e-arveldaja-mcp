@@ -156,7 +156,7 @@ function createGuidedExecutionPlanPageHandler(
         });
       };
       let payload = build();
-      while (mcpPayloadBytes(payload) > RESPONSE_BUDGETS.detail.hard && end > offset + 1) { end -= 1; payload = build(); }
+      while (mcpPayloadBytes(payload) > RESPONSE_BUDGETS.detail.target && end > offset + 1) { end -= 1; payload = build(); }
       if (mcpPayloadBytes(payload) > RESPONSE_BUDGETS.detail.hard) throw new ResponseBudgetError();
       return { content: [{ type: "text", text: toMcpJson(payload) }] };
     } catch (error) { return errorResult(error); }

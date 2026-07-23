@@ -92,7 +92,7 @@ describe("execution plan page tool", () => {
     const decoded = parseMcpResponse(result.content[0]!.text) as any;
     expect(decoded.commands.length).toBeGreaterThan(0);
     expect(decoded.commands.length).toBeLessThan(20);
-    expect(mcpPayloadBytes(decoded)).toBeLessThanOrEqual(RESPONSE_BUDGETS.detail.hard);
+    expect(mcpPayloadBytes(decoded)).toBeLessThanOrEqual(RESPONSE_BUDGETS.detail.target);
     runtime.planStore.consume(handle, "test");
     expect((await handler({ plan_handle: handle } as any)).isError).toBe(true);
   });

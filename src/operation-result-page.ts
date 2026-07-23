@@ -69,6 +69,10 @@ export function createOperationResultPageHandler(runtimeSafetyContext: RuntimeSa
         review_data: sandboxExternalText(canonicalJson(item)),
       }));
       let end = maximumEnd;
+      const profile = runtimeSafetyContext.getActiveScope().profile;
+      const reductionLimit = profile === "guided" || profile === "guided-sales"
+        ? RESPONSE_BUDGETS.detail.target
+        : RESPONSE_BUDGETS.detail.hard;
       const build = () => Object.freeze({
         contract: "operation_result_page_v1" as const, operation_handle, operation: stored.operation, status: stored.status,
         total_items: stored.items.length,
@@ -78,7 +82,7 @@ export function createOperationResultPageHandler(runtimeSafetyContext: RuntimeSa
         items: Object.freeze(renderedItems.slice(0, end - offset)),
       });
       let payload = build();
-      while (mcpPayloadBytes(payload) > RESPONSE_BUDGETS.detail.hard && end > offset + 1) { end -= 1; payload = build(); }
+      while (mcpPayloadBytes(payload) > reductionLimit && end > offset + 1) { end -= 1; payload = build(); }
       if (mcpPayloadBytes(payload) > RESPONSE_BUDGETS.detail.hard) return errorResult(new ResponseBudgetError());
       return { content: [{ type: "text", text: toMcpJson(payload) }] };
     } catch (error) { return errorResult(error); }
