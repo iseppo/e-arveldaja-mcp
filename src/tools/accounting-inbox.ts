@@ -29,6 +29,15 @@ import { createPublicWorkflowStateDetail, type PublicWorkflowStateDetail } from 
 import { runAccountingInboxDryRunPipeline } from "./accounting-inbox-autopilot-service.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
+import {
+  buildBankDimensionCandidates,
+  normalizeIban,
+  pickSingleCandidateByIban,
+  pickSingleCandidateByPattern,
+  projectBankResolution,
+  resolveBankAccountSync,
+  type BankDimensionCandidate,
+} from "../resolution/bank-account-resolution.js";
 
 const MIN_AUTO_BOOKING_RULE_MATCH_LENGTH = 3;
 
@@ -78,13 +87,6 @@ interface ReceiptFolderCandidate {
   receipt_file_count: number;
   sample_files: string[];
   last_modified_at?: string;
-}
-
-interface BankDimensionCandidate {
-  accounts_dimensions_id: number;
-  label: string;
-  iban?: string;
-  match_reason: string;
 }
 
 interface RecommendedStep {
@@ -163,11 +165,6 @@ interface ReviewActionPreparationResult {
 
 function dateIso(value: Date): string {
   return value.toISOString();
-}
-
-function normalizeIban(value: string | undefined | null): string | undefined {
-  const normalized = (value ?? "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-  return normalized || undefined;
 }
 
 function extractFirstIban(text: string): string | undefined {
@@ -380,55 +377,6 @@ function detectReceiptFolders(files: ScannedFileInfo[]): ReceiptFolderCandidate[
     );
 }
 
-function buildBankDimensionCandidates(
-  bankAccounts: BankAccount[],
-  accountDimensions: AccountDimension[],
-): BankDimensionCandidate[] {
-  const dimensionById = new Map<number, AccountDimension>();
-  for (const dimension of accountDimensions) {
-    if (dimension.id !== undefined && !dimension.is_deleted) {
-      dimensionById.set(dimension.id, dimension);
-    }
-  }
-
-  return bankAccounts
-    .filter(account => account.accounts_dimensions_id !== undefined)
-    .map((account) => {
-      const dimension = account.accounts_dimensions_id !== undefined
-        ? dimensionById.get(account.accounts_dimensions_id)
-        : undefined;
-      return {
-        accounts_dimensions_id: account.accounts_dimensions_id!,
-        label: account.account_name_est || account.bank_name || dimension?.title_est || `Dimension ${account.accounts_dimensions_id}`,
-        iban: account.iban_code ?? account.account_no,
-        match_reason: dimension?.title_est
-          ? `Linked bank account + dimension title "${dimension.title_est}"`
-          : "Linked bank account dimension",
-      };
-    })
-    .filter((candidate, index, all) =>
-      all.findIndex(other => other.accounts_dimensions_id === candidate.accounts_dimensions_id) === index
-    );
-}
-
-function pickSingleCandidateByPattern(
-  candidates: BankDimensionCandidate[],
-  pattern: RegExp,
-): BankDimensionCandidate | undefined {
-  const matches = candidates.filter(candidate => pattern.test(candidate.label) || pattern.test(candidate.iban ?? ""));
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-function pickSingleCandidateByIban(
-  candidates: BankDimensionCandidate[],
-  iban: string | undefined,
-): BankDimensionCandidate | undefined {
-  const normalizedIban = normalizeIban(iban);
-  if (!normalizedIban) return undefined;
-  const matches = candidates.filter(candidate => normalizeIban(candidate.iban) === normalizedIban);
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
 function buildBankDefaults(
   bankAccounts: BankAccount[],
   accountDimensions: AccountDimension[],
@@ -444,9 +392,17 @@ function buildBankDefaults(
     : pickSingleCandidateByPattern(candidates, /\bwise\b/i);
 
   const localBankCandidates = candidates.filter(candidate => candidate.accounts_dimensions_id !== wiseCandidate?.accounts_dimensions_id);
-  const uniqueLocalBank = localBankCandidates.length === 1 ? localBankCandidates[0] : undefined;
 
-  const suggestedBankDimensionId = overrides.bank_account_dimension_id ?? uniqueLocalBank?.accounts_dimensions_id;
+  // The bank-level default = override → unique-local-bank-by-count (rungs 1/6 of
+  // the shared resolver; the inbox supplies no statement IBAN, saved-default
+  // port, currency, or history, so rungs 2/3/4/5 stay dark). The adapter
+  // projects the three-way result back to today's `number | undefined`
+  // (resolved → value; ambiguous | not_found → undefined → question), so the
+  // emitted default is byte-identical to the former `override ?? uniqueLocalBank`.
+  const suggestedBankDimensionId = projectBankResolution(resolveBankAccountSync({
+    candidates: localBankCandidates,
+    override: overrides.bank_account_dimension_id,
+  }));
   const suggestedReceiptDimensionId = overrides.receipt_matching_dimension_id ?? suggestedBankDimensionId;
   const feeDimensions = accountDimensions.filter(dimension =>
     dimension.accounts_id === DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT &&
@@ -471,12 +427,15 @@ function resolveSuggestedCamtDimensionId(
   file: InboxFileCandidate,
   defaults: ReturnType<typeof buildBankDefaults>,
 ): number | undefined {
-  if (defaults.bank_dimension_from_override) {
-    return defaults.suggested_bank_dimension_id;
-  }
-
-  return pickSingleCandidateByIban(defaults.local_bank_candidates, file.detected_iban)?.accounts_dimensions_id ??
-    defaults.suggested_bank_dimension_id;
+  // Per-CAMT ordered fallback via the shared resolver: override → unique
+  // statement IBAN → unique-local-bank-by-count. The adapter projects the
+  // three-way result back to today's `number | undefined`, byte-identical to
+  // the former `override ? default : (ibanUnique ?? default)`.
+  return projectBankResolution(resolveBankAccountSync({
+    candidates: defaults.local_bank_candidates,
+    override: defaults.bank_dimension_from_override ? defaults.suggested_bank_dimension_id : undefined,
+    statementIban: file.detected_iban,
+  }));
 }
 
 function buildCamtImportReason(

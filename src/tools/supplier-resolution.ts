@@ -1,11 +1,10 @@
-import { closest, distance } from "fastest-levenshtein";
 import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { logAudit } from "../audit-log.js";
-import { normalizeCompanyName } from "../company-name.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { validateLegalEntityIdentity } from "../legal-entity-identity.js";
 import { desandboxText } from "../external-text-renderer.js";
+import { matchSupplier } from "../resolution/supplier-default-resolution.js";
 import {
   type ExtractedReceiptFields,
   type TransactionClassificationCategory,
@@ -13,6 +12,21 @@ import {
   looksLikePersonCounterparty,
   normalizeCounterpartyName,
 } from "./receipt-extraction.js";
+
+// The pure match-decision core (self-match #14/#22, H13 strong-identifier
+// conflict, normalized/fuzzy name tiers, and the desandboxText write-boundary
+// canonicalization) lives in `../resolution/supplier-default-resolution.ts`.
+// Re-exported here so callers importing from this module keep resolving; the
+// create/persist path + fetchRegistryData network I/O stay below.
+export {
+  matchSupplier,
+  resolveSupplierDefault,
+  type SupplierMatchFields,
+  type SupplierMatchOptions,
+  type SupplierMatchOutcome,
+  type SupplierMatchType,
+  type SupplierRef,
+} from "../resolution/supplier-default-resolution.js";
 
 export type SupplierIdentityFields = Pick<ExtractedReceiptFields, "supplier_name" | "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "raw_text">;
 
@@ -145,170 +159,32 @@ export async function resolveSupplierInternal(
   execute: boolean,
   options?: SupplierResolutionOptions,
 ): Promise<SupplierResolution> {
-  // Canonicalize the external-origin identity fields at this shared resolution/
-  // creation boundary: supplier_name/reg_code/vat_no/iban can arrive sandbox-
-  // wrapped from a round-tripped extract response, and this function both MATCHES
-  // on them and (with execute=true) CREATES a client from them via
-  // api.clients.create — a path that bypasses the create_client tool's own strip.
-  // Removing every marker here guarantees none is used as a match key or persisted
-  // onto a new client, for all callers (pdf-workflow + receipt-inbox). raw_text is
-  // left untouched (detection input, never persisted or matched as a key).
-  fields = {
-    ...fields,
-    supplier_name: fields.supplier_name !== undefined ? desandboxText(fields.supplier_name) : undefined,
-    supplier_reg_code: fields.supplier_reg_code !== undefined ? desandboxText(fields.supplier_reg_code) : undefined,
-    supplier_vat_no: fields.supplier_vat_no !== undefined ? desandboxText(fields.supplier_vat_no) : undefined,
-    supplier_iban: fields.supplier_iban !== undefined ? desandboxText(fields.supplier_iban) : undefined,
-  };
-  const ownVat = normalizeVatForCompare(options?.ownCompanyVat);
-  const ownCode = options?.ownCompanyRegistryCode?.trim() || undefined;
-  const isSelfClient = (client: Client): boolean => {
-    if (ownVat && normalizeVatForCompare(client.invoice_vat_no) === ownVat) return true;
-    if (ownCode && client.code?.trim() === ownCode) return true;
-    return false;
-  };
-  let selfMatchBlocked = false;
-
-  // H13: a strong identifier (registry code / VAT) that CONTRADICTS a
-  // name-matched client's own strong identifier vetoes the name match. Two
-  // deliberate scoping rules keep this from refusing legitimate suppliers:
-  //  - Own-company IDs are excluded. A supplier_reg_code/vat that equals the
-  //    active company's identity is a header mis-scan of the buyer (issues
-  //    #14/#22), not a supplier signal, so it must not veto a real name match.
-  //  - Only a genuine contradiction counts. If the candidate client has no
-  //    strong identifier of that kind on file, absence is not conflict — the
-  //    name match resolves and the invoice's identifier can enrich the record.
-  const suppliedRegCode = fields.supplier_reg_code?.trim() || undefined;
-  const suppliedVat = normalizeVatForCompare(fields.supplier_vat_no);
-  const foreignRegCode = suppliedRegCode && suppliedRegCode !== ownCode ? suppliedRegCode : undefined;
-  const foreignVat = suppliedVat && suppliedVat !== ownVat ? suppliedVat : undefined;
-  const strongIdentifierConflict = (candidate: Client): string | undefined => {
-    if (foreignRegCode) {
-      const candidateCode = candidate.code?.trim();
-      if (candidateCode && candidateCode !== foreignRegCode) {
-        return `Invoice registry code ${foreignRegCode} conflicts with matched client's registry code ${candidateCode} — resolve the supplier manually.`;
-      }
-    }
-    if (foreignVat) {
-      const candidateVat = normalizeVatForCompare(candidate.invoice_vat_no);
-      if (candidateVat && candidateVat !== foreignVat) {
-        return `Invoice VAT number conflicts with matched client's VAT number — resolve the supplier manually.`;
-      }
-    }
-    return undefined;
-  };
-  const conflictResult = (reason: string): SupplierResolution => ({
-    found: false,
-    created: false,
-    match_type: "strong_identifier_conflict",
-    requires_manual_review: true,
-    reason,
-  });
-
-  // self_match_blocked is meant to flag results where the returned client is
-  // suspect (none was found, or only the previewed-new path is left). When
-  // we successfully resolve to a different real supplier via a later step
-  // (e.g. fuzzy name match), the returned result is not suspect — earlier
-  // self-match attempts are bookkeeping only — so we DO NOT propagate the
-  // flag onto found:true returns. The own-VAT-on-page note is surfaced
-  // separately in receipt-inbox via detectSelfVatOnly.
-
-  if (fields.supplier_reg_code) {
-    if (ownCode && fields.supplier_reg_code.trim() === ownCode) {
-      // Mirrors the VAT-on-page guard below (#22): the OCR may have read
-      // the buyer's own registry code as the supplier code. Block before
-      // client lookup so we never create a supplier with our own code.
-      selfMatchBlocked = true;
-    } else {
-      const byCode = clients.find(client => client.code === fields.supplier_reg_code && !client.is_deleted);
-      if (byCode) {
-        if (isSelfClient(byCode)) {
-          selfMatchBlocked = true;
-        } else {
-          return { found: true, created: false, match_type: "registry_code", client: byCode };
-        }
-      }
-    }
+  // Match half — delegated to the pure, extracted match-decision core
+  // (self-match #14/#22, H13 strong-identifier conflict, normalized/fuzzy name
+  // tiers, and the desandboxText write-boundary canonicalization). Behavior is
+  // preserved exactly; only the create/persist path below stays here.
+  const matchOutcome = matchSupplier(clients, fields, options);
+  if (matchOutcome.kind === "matched") {
+    return { found: true, created: false, match_type: matchOutcome.match_type, client: matchOutcome.client };
   }
-
-  if (fields.supplier_vat_no) {
-    const normalizedVat = normalizeVatForCompare(fields.supplier_vat_no);
-    if (normalizedVat && ownVat && normalizedVat === ownVat) {
-      selfMatchBlocked = true;
-    } else if (normalizedVat) {
-      const byVat = clients.find(client =>
-        !client.is_deleted &&
-        normalizeVatForCompare(client.invoice_vat_no) === normalizedVat,
-      );
-      if (byVat) {
-        if (isSelfClient(byVat)) {
-          selfMatchBlocked = true;
-        } else {
-          return { found: true, created: false, match_type: "vat_no", client: byVat };
-        }
-      }
-    }
+  if (matchOutcome.kind === "conflict") {
+    return {
+      found: false,
+      created: false,
+      match_type: "strong_identifier_conflict",
+      requires_manual_review: true,
+      reason: matchOutcome.reason,
+    };
   }
-
-  if (fields.supplier_name) {
-    const activeClients = clients.filter(client => !client.is_deleted && !isSelfClient(client));
-
-    // First try a normalized-name exact match. Strips legal-form suffixes
-    // (LLC, Inc, PBC, AG, …) and punctuation, so an invoice supplier like
-    // "Anthropic, PBC" finds an existing "Anthropic" client. Without this
-    // tier, the fuzzy fallback's 0.7 similarity threshold rejects the
-    // pair (≈0.6 in our measurements) and the supplier_history lookup
-    // that drives reuse of prior bookings never fires.
-    //
-    // Two guards prevent the new tier from silently miscoding:
-    //  - Minimum-length floor (≥ 4 chars after normalization) mirrors the
-    //    fuzzy tier's `shorterLen >= 4` check, so a single common word
-    //    like "solutions" can't bridge two unrelated suppliers.
-    //  - Ambiguity bail-out: if multiple clients share the same
-    //    normalized key, we fall through to the fuzzy tier rather than
-    //    picking one arbitrarily.
-    const normalizedSupplierName = normalizeCompanyName(fields.supplier_name);
-    if (normalizedSupplierName && normalizedSupplierName.length >= 4) {
-      const normalizedExactMatches = activeClients.filter(
-        client => normalizeCompanyName(client.name) === normalizedSupplierName,
-      );
-      if (normalizedExactMatches.length === 1) {
-        const candidate = normalizedExactMatches[0]!;
-        const conflict = strongIdentifierConflict(candidate);
-        if (conflict) return conflictResult(conflict);
-        return {
-          found: true,
-          created: false,
-          match_type: "name_normalized",
-          client: candidate,
-        };
-      }
-      // length === 0 → no match, length > 1 → ambiguous, both fall
-      // through to the fuzzy tier which has stricter inclusion checks.
-    }
-
-    const names = activeClients.map(client => client.name);
-    if (names.length > 0) {
-      const bestMatch = closest(fields.supplier_name, names);
-      const matchedClient = activeClients.find(client => client.name === bestMatch);
-      const maxLen = Math.max(fields.supplier_name.length, bestMatch.length);
-      const similarity = maxLen > 0 ? 1 - distance(fields.supplier_name, bestMatch) / maxLen : 0;
-      const shorterLen = Math.min(fields.supplier_name.length, bestMatch.length);
-      if (
-        matchedClient &&
-        similarity >= 0.7 &&
-        shorterLen >= 4 &&
-        (
-          bestMatch.toLowerCase().includes(fields.supplier_name.toLowerCase()) ||
-          fields.supplier_name.toLowerCase().includes(bestMatch.toLowerCase())
-        )
-      ) {
-        const conflict = strongIdentifierConflict(matchedClient);
-        if (conflict) return conflictResult(conflict);
-        return { found: true, created: false, match_type: "name_fuzzy", client: matchedClient };
-      }
-    }
-  }
+  // no_match — proceed to the create/persist path with the desandboxed fields.
+  // self_match_blocked flags a suspect result (none found, or only the
+  // previewed-new path is left); it is never propagated onto a found:true
+  // return. The own-VAT-on-page note is surfaced separately in receipt-inbox
+  // via detectSelfVatOnly.
+  fields = matchOutcome.canonicalFields;
+  const ownVat = matchOutcome.ownVat;
+  const ownCode = matchOutcome.ownCode;
+  const selfMatchBlocked = matchOutcome.selfMatchBlocked;
 
   const overrides = options?._resolveSupplierOverrides;
   // The caller-supplied country override reaches previewClient.cl_code_country and
