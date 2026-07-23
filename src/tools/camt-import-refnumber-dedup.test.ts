@@ -7,8 +7,8 @@ import {
   isTrustedCamtDescriptionMetadata,
   buildExistingDuplicateKeysForEntry,
   buildExistingTransactionDuplicateKey,
-  type ParsedCamtEntry,
-} from "./camt-import.js";
+} from "../camt/duplicate-identity.js";
+import type { ParsedCamtEntry } from "../camt/types.js";
 
 // FIX A — MAJOR #1: CAMT dedup dead for references longer than the ref_number
 // cap. Task 9 added ref_number truncation + full-ref weaving into `description`
