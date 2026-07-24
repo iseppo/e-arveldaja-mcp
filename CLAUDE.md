@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-126 tools by default on the compatibility-preserving `standard` profile; opt-in `guided` / `guided-sales` expose 18 / 20 tools, and `full` exposes all 140. There are 16 workflow prompts and 15 resources across 12 modules. Supports multiple companies/accounts.
+127 tools by default on the compatibility-preserving `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 147. There are 16 workflow prompts and 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -97,7 +97,9 @@ attributed per dimension; its `total` reconciles to `compute_account_balance`.
 surface is a fixed per-session token cost. Eight env flags control optional
 parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
-`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (18 merged daily-bookkeeping tools), `guided-sales` (those 18 plus read-only `list_sale_invoices` / `get_sale_invoice`), `standard` (the absent-variable compatibility default, 126), or `full` (all 140, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
+`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the read-only `manage_sale_invoice` sales-lookup façade, 20 total), `standard` (the absent-variable compatibility default, 127), or `full` (all 147, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
+
+`get_server_status` is a compact read-only tool (version, active profile, and any active point-of-use release notices) registered unconditionally like `get_setup_instructions`; it needs no credentials and belongs to no opt-out group, so it is visible in `standard`/`full` (and setup mode) but not the guided surfaces. The fixed per-session `instructions` string is kept lean (built in `src/server/server-instructions.ts`, under 1.5 KiB): detailed VAT / bank-direction / reporting guidance lives in the owning `workflows/*.md` prompts, and the v0.22.0 incoming-direction regression advisory is a point-of-use release notice (`src/server/release-notices.ts`) surfaced only at the start of the affected bank flows, not in the global text.
 
 - **`EARVELDAJA_DISABLE_LIGHTYEAR=1`** — do not register the Lightyear
   investment tools (`book_lightyear_*`, `parse_lightyear_*`,
@@ -159,9 +161,9 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The standard surface is 126 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 121.
+The standard surface is 127 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 122.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 140. The five opt-out
+credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 147. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−4),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
@@ -519,5 +521,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 126 tools (standard profile)
+const { tools } = await client.listTools(); // 127 tools (standard profile)
 ```

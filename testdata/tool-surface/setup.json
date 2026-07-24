@@ -1,10 +1,10 @@
 {
   "profile": "setup",
   "measurement": {
-    "toolCount": 129,
-    "toolsListBytes": 124045,
-    "descriptionsBytes": 15964,
-    "inputSchemasBytes": 77002,
+    "toolCount": 130,
+    "toolsListBytes": 124516,
+    "descriptionsBytes": 16117,
+    "inputSchemasBytes": 77087,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -33,6 +33,25 @@
       },
       "name": "get_setup_instructions",
       "title": "Get Setup Instructions"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Report the running e-arveldaja MCP server version, the active tool profile, and any active point-of-use release notices. Read-only; needs no credentials.",
+      "execution": {
+        "taskSupport": "forbidden"
+      },
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {},
+        "type": "object"
+      },
+      "name": "get_server_status",
+      "title": "Get Server Status"
     },
     {
       "annotations": {

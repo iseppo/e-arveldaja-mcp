@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 125 tools on the compatibility-preserving standard profile, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 127 tools on the compatibility-preserving standard profile, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 > **⚠️ Action required if you used v0.22.0 (incoming transactions booked backwards).** A high-severity regression in **0.22.0** forced every newly created bank transaction to the "money out" direction, so **incoming** entries — owner deposits, customer receipts, refunds, and incoming inter-account transfers — were booked backwards (cash on the wrong side, moving the balance by twice the amount the wrong way). The ledger still balanced, so nothing errored. It is fixed in **0.22.1**. If you ran an e-arveldaja-mcp session while 0.22.0 was current (roughly **Sunday 2026-07-19 22:30 – Monday 2026-07-20 04:15**), any bank-statement entries created in that window are very likely wrong. Check what e-arveldaja reports as the bank-account balance against the real bank-account balance; if they differ, re-importing the affected bank statements fixes it. See the [changelog](CHANGELOG.md) for full details.
 >
@@ -123,7 +123,7 @@ The `import_opening_balances` tool parses the pasted register, checks that total
 
 ### Trimming the tool surface
 
-Choose one explicit surface with `EARVELDAJA_PROFILE`: `guided` is the opt-in 17-tool daily-bookkeeping surface; `guided-sales` adds read-only sales-invoice lookup (19 tools, no direct sales mutation); `standard` is the absent-variable compatibility default (125 tools); and `full` exposes all 138 tools, including granular and configured-mode credential administration.
+Choose one explicit surface with `EARVELDAJA_PROFILE`: `guided` is the opt-in 19-tool daily-bookkeeping surface; `guided-sales` adds a read-only sales-invoice lookup façade (20 tools, no direct sales mutation); `standard` is the absent-variable compatibility default (127 tools); and `full` exposes all 147 tools, including granular and configured-mode credential administration. Every non-guided surface also carries `get_server_status`, a compact read-only report of the running version, active profile, and any active point-of-use release notices.
 
 The setup choices map exactly: **Daily bookkeeping** → `guided`; **Daily bookkeeping plus sales invoices** → `guided-sales`; **Bookkeeping plus investments** → `standard` with Lightyear enabled; **Full advanced toolset** → `full`. Guided profiles are opt-in in this release, not the recommended/default daily surface. After changing profiles, restart and run fresh previews; an old proposal or plan handle is never approval under the new profile.
 

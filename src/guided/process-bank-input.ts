@@ -45,6 +45,7 @@ import type { Elicitor } from "../elicitation.js";
 import type { ConnectionDefaultsStore } from "../connection-defaults-store.js";
 import type { OperationResultStatus } from "../operation-result-store.js";
 import { createOperationResultPageHandler } from "../operation-result-page.js";
+import { getActiveNoticesForFlow, type ReleaseFlow } from "../server/release-notices.js";
 
 // GUIDED FAÇADE. `process_bank_input` unifies CAMT.053 and Wise import behind one
 // guided-visible tool. It captures the immutable source ONCE under the unified
@@ -65,6 +66,20 @@ function textResult(payload: Record<string, unknown>, isError = false) {
     ...(isError ? { isError: true } : {}),
     content: [{ type: "text" as const, text: toMcpJson(payload) }],
   };
+}
+
+/**
+ * Point-of-use release notices: build a payload emitter for one bank flow that
+ * prepends any active bank notices to every response the flow constructs, so
+ * guided bank flows surface them at the start of the affected flow. Notices are
+ * first-party advisory metadata (NOT untrusted OCR) so they are emitted
+ * unwrapped. Merged into the payload BEFORE encoding — the façade never parses
+ * an MCP response (internal-mcp-delegation contract).
+ */
+function releaseNoticeEmitter(flow: ReleaseFlow, now: () => Date) {
+  const notices = getActiveNoticesForFlow(flow, now());
+  return (payload: Record<string, unknown>, isError = false) =>
+    textResult(notices.length > 0 ? { release_notices: notices, ...payload } : payload, isError);
 }
 
 /** The single bank ledger (GL) account backing the candidate dimensions, when
@@ -91,6 +106,8 @@ export interface ProcessBankInputDeps {
   elicit?: Elicitor;
   /** Persisted connection-defaults store. Absent ⇒ rung 3 stays dark. */
   defaultsStore?: ConnectionDefaultsStore;
+  /** Injectable clock for point-of-use release-notice gating. Absent ⇒ real time. */
+  now?: () => Date;
 }
 
 export function registerProcessBankInputTool(
@@ -100,7 +117,7 @@ export function registerProcessBankInputTool(
   deps: ProcessBankInputDeps = {},
 ): void {
   assertRuntimeSafetyContext(runtimeSafetyContext);
-  const { elicit, defaultsStore } = deps;
+  const { elicit, defaultsStore, now = () => new Date() } = deps;
   const camtOperations = createCamtOperations(api, runtimeSafetyContext);
   const wiseOperations = createWiseOperations(api, runtimeSafetyContext);
   const pageHandler = createOperationResultPageHandler(runtimeSafetyContext, { cursorSecret: randomBytes(32) });
@@ -335,6 +352,8 @@ export function registerProcessBankInputTool(
   }
 
   async function handleCamt(mode: "prepare" | "execute", args: BankArgs, source: FileInputSource, snapshot: FileInputSnapshot, statementIban: string | undefined, statementCurrency: string | undefined) {
+    // Prepend any active CAMT-flow release notices to every response this flow builds.
+    const emit = releaseNoticeEmitter("camt", now);
     const resolved = await resolveDimensionOrElicit(args.accounts_dimensions_id, statementIban, statementCurrency, "camt");
     if (!resolved.ok) return resolved.response;
     const accountsDimensionsId = resolved.value;
@@ -343,24 +362,26 @@ export function registerProcessBankInputTool(
         const outcome = await camtOperations.prepareImport({
           source, accountsDimensionsId, dateFrom: args.date_from, dateTo: args.date_to, snapshot,
         });
-        if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
-        return textResult(renderCamtImportCompact({ mode: "DRY_RUN", data: outcome.value }));
+        if (!outcome.ok) return emit({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
+        return emit(renderCamtImportCompact({ mode: "DRY_RUN", data: outcome.value }));
       }
       const outcome = await camtOperations.executeImport({
         source, accountsDimensionsId, dateFrom: args.date_from, dateTo: args.date_to, planHandle: args.plan_handle, snapshot,
       });
-      if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
+      if (!outcome.ok) return emit({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
       const operationHandle = issueCamtResultHandle(outcome.value, args.plan_handle);
-      return textResult(renderCamtImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
+      return emit(renderCamtImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
     } catch (error) {
       if (error instanceof CamtPreflightRejectedError) {
-        return textResult(importPreflightFailurePayload(error.source, error.rejected), true);
+        return emit(importPreflightFailurePayload(error.source, error.rejected), true);
       }
       throw error;
     }
   }
 
   async function handleWise(mode: "prepare" | "execute", args: BankArgs, source: FileInputSource, snapshot: FileInputSnapshot) {
+    // Prepend any active Wise-flow release notices to every response this flow builds.
+    const emit = releaseNoticeEmitter("wise", now);
     // Wise CSV carries no statement IBAN/currency to the façade; the resolver
     // relies on override / saved default / unique-local rungs.
     const resolved = await resolveDimensionOrElicit(args.accounts_dimensions_id, undefined, undefined, "wise");
@@ -395,9 +416,9 @@ export function registerProcessBankInputTool(
         ? await wiseOperations.execute({ ...runInput, planHandle: args.plan_handle })
         : await wiseOperations.prepare(runInput);
       if (!outcome.ok) return renderWiseFailure(simpleFailureFromCode(outcome.error.code));
-      if (mode !== "execute") return textResult(renderWiseImportCompact({ mode: "DRY_RUN", data: outcome.value }));
+      if (mode !== "execute") return emit(renderWiseImportCompact({ mode: "DRY_RUN", data: outcome.value }));
       const operationHandle = issueWiseResultHandle(outcome.value, args.plan_handle);
-      return textResult(renderWiseImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
+      return emit(renderWiseImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
     } catch (error) {
       if (error instanceof WiseOperationFailedError) return renderWiseFailure(error.failure);
       throw error;

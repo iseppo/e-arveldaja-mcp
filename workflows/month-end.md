@@ -14,6 +14,8 @@ User-facing phases:
 
 If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` before running the checklist and statements.
 
+Reporting is only accurate after the relevant journals, invoices, and transactions are confirmed: the unconfirmed (PROJECT) records surfaced as blockers below are not yet in the ledger, so the computed statements do not reflect them until they are confirmed.
+
 Call `run_accounting_report`:
 - `report`: `month_end`
 - `month`: YYYY-MM value

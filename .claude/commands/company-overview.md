@@ -35,6 +35,8 @@ This workflow is read-only. It should feel like a dashboard, not a ledger export
 
 If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` before reading reports.
 
+Reporting is only accurate after the relevant journals, invoices, and transactions are confirmed: unconfirmed (PROJECT) records are not yet in the ledger. If recent activity may still be unconfirmed, say so in the summary rather than presenting the figures as final.
+
 Run every figure through `run_accounting_report`, using the SAME operator-selected reporting date as the single cutoff: pass it as `date_to` for the `report="balance_sheet"` and `report="profit_and_loss"` calls and as `as_of_date` for the `report="aging"` call, so the whole overview shares one consistent cutoff instead of the aging reports silently defaulting to today. Under the standard/full profiles the granular `compute_balance_sheet` / `compute_profit_and_loss` / `compute_payables_aging` entry points remain available and do the same work; treat them as the same operation.
 
 Follow these steps:

@@ -7,6 +7,21 @@ import {
 } from "../scripts/measure-response-fixtures.js";
 import { mcpSerializedByteLength, parseMcpResponse, toMcpJson } from "./mcp-json.js";
 import { assertMcpPayloadWithinHardBudget, RESPONSE_BUDGETS } from "./response-budget.js";
+import type { ToolExposureConfig } from "./config.js";
+import { buildServerInstructions } from "./server/server-instructions.js";
+
+const INSTRUCTION_TARGET_BYTES = 1536; // 1.5 KiB soft target
+const INSTRUCTION_HARD_BYTES = 2048; // 2 KiB hard bound
+const CONTEXT_BUDGET_EXPOSURE: ToolExposureConfig = Object.freeze({
+  enableLightyear: true,
+  exposeGranularTools: false,
+  exposeSetupTools: false,
+  enableTaxTools: true,
+  enableReferenceAdmin: true,
+  enableAnnualReport: true,
+  enableSales: true,
+  enableProducts: true,
+});
 
 describe("response context-budget baseline", () => {
   it("pins deterministic final encoded bytes without enforcing a target budget", async () => {
@@ -57,6 +72,22 @@ describe("response context-budget baseline", () => {
       answer: "x".repeat(700),
     };
     expect(Buffer.byteLength(toMcpJson(worstCase), "utf8")).toBeLessThanOrEqual(CONTINUATION_HARD_BYTES);
+  });
+
+  it("keeps the fixed per-session server-instruction string within the context budget", () => {
+    // The configured (non-setup) instruction string is loaded on every session,
+    // so it is a fixed per-session context cost. Task 16 trimmed it under 1.5 KiB
+    // by moving detailed guidance into the owning workflow prompts and binding the
+    // v0.22.0 regression advisory to a point-of-use release notice.
+    const instructions = buildServerInstructions({ setupMode: false, toolExposure: CONTEXT_BUDGET_EXPOSURE });
+    const bytes = Buffer.byteLength(instructions, "utf8");
+    expect(bytes).toBeLessThan(INSTRUCTION_TARGET_BYTES);
+    expect(bytes).toBeLessThanOrEqual(INSTRUCTION_HARD_BYTES);
+
+    // The setup-mode branch is also on the per-session path; hold it under the
+    // same hard bound so a future edit cannot blow the budget there either.
+    const setup = buildServerInstructions({ setupMode: true, toolExposure: CONTEXT_BUDGET_EXPOSURE });
+    expect(Buffer.byteLength(setup, "utf8")).toBeLessThanOrEqual(INSTRUCTION_HARD_BYTES);
   });
 
   it("enforces UTF-8 boundaries after real whole-response serialization", () => {

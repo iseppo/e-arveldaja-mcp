@@ -98,6 +98,26 @@ describe("process_bank_input", () => {
     expect(text).not.toContain("delegated_tool");
   });
 
+  it("prepends the active v0.22.0 bank release notice to a CAMT flow response, unwrapped", async () => {
+    // Pinned in-window date (window is [2026-07-19, 2026-10-19)) so this
+    // assertion is deterministic and not wall-clock-dependent.
+    const { handler } = setup({ deps: { now: () => new Date("2026-08-01T00:00:00Z") } });
+    const result = await handler({ mode: "prepare", file_path: inlineXml(fixtureCamtXml()) });
+    const payload = parse(result);
+    expect(Array.isArray(payload.release_notices)).toBe(true);
+    expect(payload.release_notices.map((n: { id: string }) => n.id)).toContain("v0.22.0-incoming-direction-regression");
+    // First-party advisory text — NOT wrapped in the untrusted-OCR sandbox.
+    expect(payload.release_notices[0].message).not.toContain("UNTRUSTED_OCR_START");
+  });
+
+  it("omits the release notice from a CAMT flow response once the window has closed", async () => {
+    // Pinned after-window date proves the gate closes deterministically too.
+    const { handler } = setup({ deps: { now: () => new Date("2026-11-01T00:00:00Z") } });
+    const result = await handler({ mode: "prepare", file_path: inlineXml(fixtureCamtXml()) });
+    const payload = parse(result);
+    expect(payload.release_notices).toBeUndefined();
+  });
+
   it("runs the two-call prepare -> execute path over the same immutable snapshot", async () => {
     const { handler, api } = setup();
     const source = inlineXml(fixtureCamtXml());
