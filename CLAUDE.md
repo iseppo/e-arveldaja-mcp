@@ -341,7 +341,20 @@ src/
   auth.ts                # HMAC-SHA-384 request signing
   http-client.ts         # Authenticated HTTP client (rate-limited, 60s timeout)
   cache.ts               # In-memory TTL cache (300s default, 500 entry max)
-  index.ts               # Server entry point, wires everything together
+  index.ts               # Process entry point: stderr tee + createMcpServer() + fatal handling
+  server-bootstrap.ts    # Thin re-export barrel (createMcpServer, buildSetupInstructionsPayload) — see server/
+  server/
+    create-server.ts     # createMcpServer composition root: config/setup-mode, McpServer, registration-order boundary, transport connect
+    register-system-tools.ts # Multi-account + audit-log + credential + cache-control tool registrations (exact order)
+    register-domain-tools.ts # Full domain-tool + resources + prompts registrations (exact order — security boundary)
+    setup-mode.ts        # Setup-mode payloads/errors, credential-blocked API proxy, buildSetupInstructionsPayload
+    server-instructions.ts # Lean per-session `instructions` string (< 1.5 KiB)
+    release-notices.ts   # Point-of-use release notices + get_server_status payload
+  runtime/
+    connection-manager.ts  # Active-connection state + atomic switch_connection core (generation bump + dual cache clear)
+    invocation-scope.ts    # Per-invocation AsyncLocalStorage snapshot store + connection-scoped API context
+    audit-label-resolver.ts # Resolve-on-first-use audit-log company-name labelling
+    runtime-context.ts     # Assembles + constructs the runtime safety context (plan/file-ref/op-result/workflow stores)
   prompt-registry.ts     # Canonical workflow-prompt registry (names, string-only arg schemas, sales variants)
   prompt-arguments.ts    # Strict string→typed parsers for prompt arguments
   workflow-prompt-source.ts # Loads workflows/*.md bodies + run-data for the registry

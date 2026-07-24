@@ -1858,7 +1858,10 @@ describe("M23 connection-scoped accounting-rule storage", () => {
   });
 
   it("M23 server bootstrap initializes accounting rules from the live connection state", () => {
-    const source = readFileSync(join(process.cwd(), "src", "server-bootstrap.ts"), "utf8");
+    // createMcpServer (and this accounting-rules init block) moved into the
+    // src/server/create-server.ts orchestrator during the runtime-bootstrap
+    // decomposition; server-bootstrap.ts is now a thin re-export barrel.
+    const source = readFileSync(join(process.cwd(), "src", "server", "create-server.ts"), "utf8");
     expect(source).toContain('initAccountingRulesConnection');
     const call = source.match(/initAccountingRulesConnection\(\(\) => \(\{[\s\S]*?\}\)\);/)?.[0] ?? "";
     expect(call).toContain('allConfigs[connectionState.activeIndex]?.name ?? "setup"');

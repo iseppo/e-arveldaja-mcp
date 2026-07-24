@@ -40,7 +40,10 @@ describe("H06-A connection fingerprint", () => {
   });
 
   it("H06-A makes server bootstrap audit initialization reuse the shared helper", () => {
-    const source = readFileSync(new URL("./server-bootstrap.ts", import.meta.url), "utf8");
+    // The audit/fingerprint initialization moved with createMcpServer into the
+    // src/server/create-server.ts orchestrator during the runtime-bootstrap
+    // decomposition (server-bootstrap.ts is now a thin re-export barrel).
+    const source = readFileSync(new URL("./server/create-server.ts", import.meta.url), "utf8");
     expect(source).toContain("buildConnectionFingerprint(config.config)");
     expect(source).not.toMatch(/function buildConnectionFingerprint\s*\(/);
   });

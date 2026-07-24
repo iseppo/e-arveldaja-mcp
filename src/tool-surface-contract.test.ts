@@ -42,7 +42,11 @@ describe("MCP tool-surface contract", () => {
   });
 
   it("captures registrations by invoking the production bootstrap rather than recreating it", async () => {
-    const bootstrapSource = await readFile(new URL("./server-bootstrap.ts", import.meta.url), "utf8");
+    // The bootstrap was decomposed: createMcpServer now lives in the
+    // src/server/create-server.ts orchestrator (server-bootstrap.ts is a thin
+    // re-export barrel). This still pins that the production entrypoint exists
+    // and that the fixture invokes it rather than re-declaring registrations.
+    const bootstrapSource = await readFile(new URL("./server/create-server.ts", import.meta.url), "utf8");
     const fixtureSource = await readFile(new URL("./__fixtures__/tool-surface.ts", import.meta.url), "utf8");
 
     expect(bootstrapSource).toContain("export async function createMcpServer");

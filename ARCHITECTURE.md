@@ -13,7 +13,7 @@ graph TB
     end
 
     subgraph Server["MCP Server (Node.js + TypeScript)"]
-        Entry["index.ts\nMCP entry point"]
+        Entry["index.ts → server/create-server.ts\nMCP entry point + bootstrap"]
 
         subgraph Tools["tools/ — 125 standard-profile tools"]
             CRUD["crud-tools.ts\nBasic CRUD"]
@@ -100,6 +100,52 @@ graph TB
 | **HTTP client** | Rate-limited, timeout-guarded outbound calls |
 | **Config** | Multi-company credential loading & switching |
 | **Audit log** | Append-only markdown log of all mutations |
+
+## Runtime bootstrap decomposition
+
+Server startup is composed from focused modules rather than one god-file. The
+former `src/server-bootstrap.ts` is now a thin re-export barrel (kept only so
+existing `./server-bootstrap.js` importers — `index.ts`, the tool-surface
+fixture, `tool-profile.ts`, `resolution/company-resolution.ts`, `elicitation.ts`,
+and several contract tests — need zero churn). `createMcpServer` and
+`buildSetupInstructionsPayload` are re-exported from it.
+
+- **`src/index.ts`** — process entry point: installs the stderr tee and calls
+  `createMcpServer()`, with top-level fatal-error handling. The stdio transport
+  connect, `setLogger` wiring, and setup-mode startup credential import remain
+  owned by the `createMcpServer` orchestrator (behavior-preserving: those steps
+  are ordered against the connected server and the `connect:false` test seam).
+- **`src/server/create-server.ts`** — the `createMcpServer` composition root:
+  config loading + setup-mode detection, connection/audit initialization, the
+  `McpServer` construction, the registration-order security boundary (scoping
+  Proxy → public catalog/profile boundary → `wrapToolHandler`/`wrapResourceHandler`),
+  transport connect, and startup messaging. Owns `buildApiContext`,
+  `verifyImportedCredentials`, and credential storage-scope resolution.
+- **`src/server/register-system-tools.ts`** — the multi-account / audit-log
+  system tools (`get_setup_instructions`, `get_server_status`, `list_connections`,
+  `switch_connection`, `get_session_log`, `list_audit_logs`, `clear_session_log`)
+  plus `registerCredentialTools` and the cache-control tool, in exact order.
+- **`src/server/register-domain-tools.ts`** — the full domain-tool surface,
+  resources, and prompts, in the exact registration order (a documented
+  security boundary).
+- **`src/server/setup-mode.ts`** — setup-mode payloads/errors, the credential-
+  blocked API proxy, and `buildSetupInstructionsPayload`, shared by the
+  handler-wrapping machinery and the system-tool registrations.
+- **`src/server/server-instructions.ts`** — the lean per-session `instructions`
+  string (see Workflow prompt pipeline for where detailed guidance lives).
+- **`src/runtime/connection-manager.ts`** — active-connection state creation and
+  the atomic `switch_connection` core (generation bump + dual cache clear).
+- **`src/runtime/invocation-scope.ts`** — the per-invocation `AsyncLocalStorage`
+  snapshot store and the connection-scoped API context.
+- **`src/runtime/audit-label-resolver.ts`** — resolve-on-first-use audit-log
+  company-name labelling.
+- **`src/runtime/runtime-context.ts`** — assembles and constructs the runtime
+  safety context (plan / file-reference / operation-result / workflow-state
+  stores + active-scope resolver).
+
+The decomposition is strictly behavior-preserving: the tool surface, schemas,
+instruction text, and responses are byte-for-byte unchanged
+(`npm run measure:surface` / `measure:responses` show +0 on every profile).
 
 ## Opening-balance folding
 
