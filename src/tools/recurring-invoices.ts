@@ -36,6 +36,27 @@ export interface RecurringCloneParams {
 }
 
 /**
+ * Single source of truth for the recurring format validation. The standalone
+ * `create_recurring_sale_invoices` tool enforces these on its Zod schema
+ * (`.regex(...)` above), but the `manage_sale_invoice` action='recurring' façade
+ * reaches the shared core via `parseRecurringParams`, which only type-checks —
+ * so the façade MUST call this to reject malformed input (a bad `invoice_ids`
+ * like "1oops" would otherwise `parseInt` to invoice 1; a bad `source_month`
+ * → NaN dates; a noncanonical `target_date` → an unrediscoverable dedup marker)
+ * BEFORE any clone/API read. Reuses the exact module regex constants so the two
+ * entry points never drift. Returns an error message, or undefined when valid.
+ */
+export function validateRecurringParams(params: RecurringCloneParams): string | undefined {
+  if (!MONTH_REGEX.test(params.source_month)) return "source_month must be in YYYY-MM format.";
+  if (!ISO_DATE_REGEX.test(params.target_date)) return "target_date must be in YYYY-MM-DD format.";
+  if (!ISO_DATE_REGEX.test(params.target_journal_date)) return "target_journal_date must be in YYYY-MM-DD format.";
+  if (params.invoice_ids !== undefined && !COMMA_SEPARATED_IDS_REGEX.test(params.invoice_ids)) {
+    return "invoice_ids must be comma-separated numeric invoice IDs.";
+  }
+  return undefined;
+}
+
+/**
  * Single source of truth for the recurring sale-invoice clone. Clones
  * previous-month CONFIRMED sale invoices into DRAFT recurring invoices,
  * dedup-guarded by recurring-clone markers. Returns the MCP payload object
@@ -48,6 +69,12 @@ export async function computeRecurringClone(
   params: RecurringCloneParams,
   options: { dryRun: boolean },
 ): Promise<Record<string, unknown>> {
+      // Belt-and-suspenders: never clone from an unvalidated shape. The
+      // standalone tool passes Zod-validated input so this never trips there
+      // (output stays identical); the façade validates and rejects earlier, so
+      // this only guards a future direct caller of the shared core.
+      const coreValidationError = validateRecurringParams(params);
+      if (coreValidationError) throw new Error(`Invalid recurring parameters: ${coreValidationError}`);
       const { source_month, target_date, target_journal_date, invoice_ids, auto_confirm } = params;
       const isDryRun = options.dryRun;
       const allSales = await api.saleInvoices.listAll();

@@ -1,7 +1,7 @@
 import type { OperationOutcome } from "../operation-outcome.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
 import type { ApiContext } from "../tools/crud/shared.js";
-import { computeRecurringClone, type RecurringCloneParams } from "../tools/recurring-invoices.js";
+import { computeRecurringClone, validateRecurringParams, type RecurringCloneParams } from "../tools/recurring-invoices.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { desandboxAllStrings } from "../external-text-renderer.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
@@ -272,39 +272,54 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       reviews: [],
       privatePayload: { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) },
     };
-    const planHandle = this.runtimeSafetyContext.planStore.issue(SALE_INVOICE_PLAN_DOMAIN, planInput);
     // Create-preview: resolve the inline customer READ-ONLY (creation disabled)
     // so the operator reviews the customer identity — EXISTING (id) vs NEW
-    // (would-create) — before approving. Kept OUT of the plan snapshot above so
-    // the wrapped (nonce-bearing) name never enters the plan fingerprint; the
+    // (would-create) — before approving. Resolved BEFORE issuing the handle: an
+    // inline customer the read-only resolver refuses (P17 needs_input) must NOT
+    // be shown ready-for-approval with a usable handle (the matching execute
+    // would refuse it anyway), so on needs_input we return a needs_input outcome
+    // and issue NO plan handle. Kept OUT of the plan snapshot above so the
+    // wrapped (nonce-bearing) name never enters the plan fingerprint; the
     // clients_id path (no `client`) leaves the projection untouched.
-    const clientDisplay = await this.prepareClientPreview(input);
-    return ok({ mode: "prepare", action: input.action, ...(input.id !== undefined ? { id: input.id } : {}), planHandle, projection: { ...projection, ...clientDisplay } });
+    const clientPreview = await this.prepareClientPreview(input);
+    if (clientPreview.kind === "needs_input") {
+      return fail(clientPreview.code, clientPreview.message);
+    }
+    const planHandle = this.runtimeSafetyContext.planStore.issue(SALE_INVOICE_PLAN_DOMAIN, planInput);
+    return ok({ mode: "prepare", action: input.action, ...(input.id !== undefined ? { id: input.id } : {}), planHandle, projection: { ...projection, ...clientPreview.projection } });
   }
 
   /** Read-only projection add-on describing how the inline `client` on a create
-   * would resolve. Empty for non-create actions or a clients_id-only payload. */
-  private async prepareClientPreview(input: SaleInvoicePrepareInput): Promise<Record<string, string | number | boolean>> {
-    if (input.action !== "create") return {};
+   * would resolve. `kind:"display"` (empty for non-create actions or a
+   * clients_id-only payload) carries the projection; `kind:"needs_input"` is the
+   * P17 refusal (H13 conflict / self-match) — the caller must issue no handle. */
+  private async prepareClientPreview(input: SaleInvoicePrepareInput): Promise<
+    | { readonly kind: "display"; readonly projection: Record<string, string | number | boolean> }
+    | { readonly kind: "needs_input"; readonly code: string; readonly message: string }
+  > {
+    if (input.action !== "create") return { kind: "display", projection: {} };
     const hasClientsId = input.payload?.clients_id !== undefined && input.payload?.clients_id !== null;
     const clientInput = parseClientInput(input.payload);
-    if (hasClientsId || clientInput === undefined) return {};
+    if (hasClientsId || clientInput === undefined) return { kind: "display", projection: {} };
     const resolved = await this.resolveInvoiceClient(clientInput, false);
     if (resolved.status === "existing") {
-      return { client_resolution: "existing", clients_id: resolved.clients_id };
+      return { kind: "display", projection: { client_resolution: "existing", clients_id: resolved.clients_id } };
     }
     if (resolved.status === "needs_input") {
-      return { client_resolution: "needs_input", client_resolution_reason: resolved.message };
+      return { kind: "needs_input", code: resolved.code, message: resolved.message };
     }
     if (resolved.status === "would_create") {
       const wrapped = wrapUntrustedOcr(resolved.preview_name ?? clientInput.name);
       return {
-        client_resolution: "would_create",
-        ...(wrapped !== undefined ? { client_name: wrapped } : {}),
-        ...(resolved.reg_code !== undefined ? { client_reg_code: resolved.reg_code } : {}),
+        kind: "display",
+        projection: {
+          client_resolution: "would_create",
+          ...(wrapped !== undefined ? { client_name: wrapped } : {}),
+          ...(resolved.reg_code !== undefined ? { client_reg_code: resolved.reg_code } : {}),
+        },
       };
     }
-    return {};
+    return { kind: "display", projection: {} };
   }
 
   private async prepareRecurring(input: SaleInvoicePrepareInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
@@ -312,6 +327,11 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     if (!params) {
       return fail("recurring_params_required", "action='recurring' requires payload with source_month (YYYY-MM), target_date and target_journal_date (YYYY-MM-DD).");
     }
+    // Enforce the recurring format regexes the standalone tool gets from its Zod
+    // schema — the façade would otherwise reach the core with a malformed shape.
+    // Reject BEFORE issuing a plan handle or reading the clone via computeRecurringClone.
+    const paramsError = validateRecurringParams(params);
+    if (paramsError) return fail("recurring_params_invalid", paramsError);
     // PREVIEW: run the shared clone core with dryRun=true. This is the projection
     // the operator reviews before approving.
     const preview = await computeRecurringClone(this.api, params, { dryRun: true });
@@ -368,6 +388,11 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       if (!recurringParams) {
         return fail("recurring_params_required", "action='recurring' requires payload with source_month (YYYY-MM), target_date and target_journal_date (YYYY-MM-DD).");
       }
+      // Reject a malformed recurring payload here too — BEFORE the drift check
+      // and before computeRecurringClone (the clone/API read). Without this a bad
+      // invoice_ids/source_month would slip past a matching handle into the core.
+      const paramsError = validateRecurringParams(recurringParams);
+      if (paramsError) return fail("recurring_params_invalid", paramsError);
       boundArgs = recurringNormalizedArgs(recurringParams);
     } else if (input.action === "create" || input.action === "update" || input.action === "send") {
       // Recompute the SAME payload fingerprint bound at prepare so a changed

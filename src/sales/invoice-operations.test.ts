@@ -289,7 +289,7 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     }
   });
 
-  it("P17: an H13 strong-identifier conflict creates NEITHER client NOR invoice", async () => {
+  it("P17: an H13 strong-identifier conflict is refused at prepare (no handle) — NEITHER client NOR invoice", async () => {
     const create = vi.fn();
     const clientCreate = vi.fn();
     const api = makeApi(
@@ -300,12 +300,44 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     const runtime = createTestRuntimeSafetyContext();
     const ops = createSaleInvoiceOperations(api, runtime);
     const payload = { client: { name: "Twin OÜ", reg_code: "17133416" }, items: [] };
+    // Fix B: the read-only preview resolves needs_input, so prepare refuses
+    // BEFORE issuing a handle — the operator can never approve an unresolvable
+    // customer. (A fail outcome carries no `value`, hence no planHandle.)
     const prepared = await ops.run({ mode: "prepare", action: "create", payload });
-    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
-    const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload });
-    expect(executed.ok).toBe(false);
+    expect(prepared.ok).toBe(false);
+    if (prepared.ok) return;
+    expect(prepared.error.code).toBe("client_identifier_conflict");
     expect(create).not.toHaveBeenCalled();
     expect(clientCreate).not.toHaveBeenCalled();
+  });
+
+  it("P17 (TOCTOU): a would_create at prepare that becomes an H13 conflict at execute is refused by executeCreate — NEITHER client NOR invoice", async () => {
+    // Defense-in-depth for the narrow race the two-call gate cannot see: prepare
+    // resolves the inline customer read-only to would_create (handle issued), then
+    // between prepare and execute another client appears that makes the same
+    // identity an H13 strong-identifier conflict. The prepare-time gate (Fix B)
+    // already refuses unresolvable customers up front, so this exercises the
+    // execute-side refusal branch (executeCreate) directly.
+    const create = vi.fn();
+    const clientCreate = vi.fn();
+    const listAll = vi.fn().mockResolvedValue([]); // prepare: no match → would_create
+    const api = makeApi({ create }, {}, { listAll, create: clientCreate });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const payload = { client: { name: "Twin OÜ", reg_code: "17133416" }, items: [] };
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare should succeed as would_create");
+    expect(prepared.value.projection.client_resolution).toBe("would_create");
+    expect(clientCreate).not.toHaveBeenCalled();
+    // The client set changes underneath us: a same-name client with a DIFFERENT
+    // strong identifier now exists → resolving with creation enabled hits H13.
+    listAll.mockResolvedValue([{ id: 50, name: "Twin OÜ", code: "10000000", is_deleted: false }]);
+    const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload });
+    expect(executed.ok).toBe(false);
+    if (executed.ok) return;
+    expect(executed.error.code).toBe("client_identifier_conflict");
+    expect(create).not.toHaveBeenCalled(); // no invoice
+    expect(clientCreate).not.toHaveBeenCalled(); // no client
   });
 
   it("create with neither clients_id nor client.name is a validation error", async () => {
@@ -494,5 +526,95 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     expect(outcome.error.code).toBe("plan_drift");
     expect(create).not.toHaveBeenCalled();
     expect(clientCreate).not.toHaveBeenCalled();
+  });
+
+  // ---- FIX A — recurring format validation must run in the façade too, not
+  // only on the standalone tool's Zod schema. Malformed input must be rejected
+  // BEFORE any clone / API read.
+  const recurringSource = {
+    id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: "Acme OU",
+    sale_invoice_type: "INVOICE", number_prefix: "ARV",
+    items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100 }],
+  };
+
+  it("FixA: recurring PREPARE with malformed invoice_ids is rejected before any clone/API read (recurring_params_invalid)", async () => {
+    const create = vi.fn();
+    const listAll = vi.fn().mockResolvedValue([recurringSource]);
+    const api = makeApi({ create, listAll, get: vi.fn().mockResolvedValue(recurringSource) });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const outcome = await ops.run({ mode: "prepare", action: "recurring", payload: { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01", invoice_ids: "1oops" } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("recurring_params_invalid");
+    expect(listAll).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("FixA: recurring PREPARE with malformed source_month (2026-13) is rejected (recurring_params_invalid)", async () => {
+    const create = vi.fn();
+    const listAll = vi.fn().mockResolvedValue([recurringSource]);
+    const api = makeApi({ create, listAll, get: vi.fn().mockResolvedValue(recurringSource) });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const outcome = await ops.run({ mode: "prepare", action: "recurring", payload: { source_month: "2026-13", target_date: "2026-02-01", target_journal_date: "2026-02-01" } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("recurring_params_invalid");
+    expect(listAll).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("FixA: recurring EXECUTE with malformed invoice_ids is rejected before any clone (recurring_params_invalid, no create)", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const api = makeApi({ listAll: vi.fn().mockResolvedValue([recurringSource]), get: vi.fn().mockResolvedValue(recurringSource), create });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const validParams = { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" };
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: validParams });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: { ...validParams, invoice_ids: "1oops" } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("recurring_params_invalid");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  // ---- FIX B — a create whose inline customer resolves to needs_input (P17
+  // refusal) must NOT be shown as ready-for-approval: no plan handle is issued.
+  it("FixB: prepare create with an inline client that resolves needs_input issues NO plan handle", async () => {
+    const create = vi.fn();
+    const clientCreate = vi.fn();
+    const api = makeApi(
+      { create },
+      {},
+      { listAll: vi.fn().mockResolvedValue([{ id: 50, name: "Twin OÜ", code: "10000000", is_deleted: false }]), create: clientCreate },
+    );
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    // Twin name + a contradicting strong identifier (reg_code) → H13 conflict → needs_input.
+    const outcome = await ops.run({ mode: "prepare", action: "create", payload: { client: { name: "Twin OÜ", reg_code: "17133416" }, items: [] } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return; // a fail outcome carries no `value`, so no planHandle can be issued
+    expect(outcome.error.code).toBe("client_identifier_conflict");
+    expect(clientCreate).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("FixB: prepare create with a would_create client STILL issues a plan handle (positive control)", async () => {
+    const clientCreate = vi.fn();
+    const api = makeApi({}, {}, { listAll: vi.fn().mockResolvedValue([]), create: clientCreate });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { client: { name: "Brand New Buyer OÜ" }, items: [] } });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    expect(typeof prepared.value.planHandle).toBe("string");
+    expect(prepared.value.projection.client_resolution).toBe("would_create");
+    expect(clientCreate).not.toHaveBeenCalled();
+  });
+
+  it("FixB: prepare create with an explicit clients_id still issues a plan handle (positive control)", async () => {
+    const api = makeApi({}, {}, { listAll: vi.fn().mockResolvedValue([]) });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { clients_id: 9, items: [] } });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    expect(typeof prepared.value.planHandle).toBe("string");
   });
 });
