@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 149984,
+    "toolsListBytes": 150216,
     "descriptionsBytes": 20180,
-    "inputSchemasBytes": 94321,
+    "inputSchemasBytes": 94553,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 3938
@@ -6082,7 +6082,7 @@
                 "type": "string"
               }
             ],
-            "description": "create/update fields, send request ({send_einvoice, send_email, email_addresses, ...}), or recurring params ({source_month:YYYY-MM, target_date:YYYY-MM-DD, target_journal_date:YYYY-MM-DD, invoice_ids?, auto_confirm?})."
+            "description": "create/update fields, send request ({send_einvoice, send_email, email_addresses, ...}), or recurring params ({source_month:YYYY-MM, target_date:YYYY-MM-DD, target_journal_date:YYYY-MM-DD, invoice_ids?, auto_confirm?}). For create, pass EITHER clients_id OR an inline client to resolve-or-create a customer ({name, reg_code?, vat_no?, iban?, country?}); on any identity conflict the create is refused and neither the client nor the invoice is created."
           },
           "payment_status": {
             "description": "read=list: PAID|PARTIALLY_PAID|NOT_PAID.",

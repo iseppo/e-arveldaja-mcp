@@ -94,6 +94,14 @@ export interface SupplierResolutionOptions {
      * bearing OCR sandbox markers.
      */
     foreign_identity_attested?: boolean;
+    /**
+     * Role flags for a newly-created client record. Defaults preserve the
+     * historical supplier-only behavior (is_client:false, is_supplier:true).
+     * The sales side (inline customer create in manage_sale_invoice) inverts
+     * these to persist a real customer (is_client:true, is_supplier:false) so
+     * it appears in customer lists.
+     */
+    role?: { is_client?: boolean; is_supplier?: boolean };
   };
 }
 
@@ -235,8 +243,8 @@ export async function resolveSupplierInternal(
   const previewClient: Partial<Client> = {
     name: clientName,
     code: previewRegCode,
-    is_client: false,
-    is_supplier: true,
+    is_client: overrides?.role?.is_client ?? false,
+    is_supplier: overrides?.role?.is_supplier ?? true,
     cl_code_country: supplierCountry,
     is_juridical_entity: !isPhysicalEntity,
     is_physical_entity: isPhysicalEntity,

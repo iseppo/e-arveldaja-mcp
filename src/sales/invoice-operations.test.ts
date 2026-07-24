@@ -5,7 +5,11 @@ import type { ApiContext } from "../tools/crud/shared.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
-function makeApi(saleInvoices: Record<string, unknown> = {}, readonlyApi: Record<string, unknown> = {}): ApiContext {
+function makeApi(
+  saleInvoices: Record<string, unknown> = {},
+  readonlyApi: Record<string, unknown> = {},
+  clientsApi: Record<string, unknown> = {},
+): ApiContext {
   return {
     saleInvoices: {
       list: vi.fn().mockResolvedValue({ current_page: 1, total_pages: 1, items: [] }),
@@ -24,7 +28,15 @@ function makeApi(saleInvoices: Record<string, unknown> = {}, readonlyApi: Record
     readonly: {
       getAccounts: vi.fn().mockResolvedValue([]),
       getAccountDimensions: vi.fn().mockResolvedValue([]),
+      getVatInfo: vi.fn().mockResolvedValue({}),
+      getInvoiceInfo: vi.fn().mockResolvedValue({}),
       ...readonlyApi,
+    },
+    clients: {
+      listAll: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({ created_object_id: 42 }),
+      get: vi.fn().mockResolvedValue({ id: 42, name: "New Buyer OÜ" }),
+      ...clientsApi,
     },
   } as unknown as ApiContext;
 }
@@ -184,6 +196,121 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     if (outcome.ok) return;
     expect(outcome.error.code).toBe("plan_handle_required");
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it("create with an existing-matching client resolves to its id — invoice created, NO new client", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 500 });
+    const clientCreate = vi.fn();
+    const api = makeApi(
+      { create },
+      {},
+      { listAll: vi.fn().mockResolvedValue([{ id: 42, name: "Acme OÜ", code: "17133416", is_deleted: false }]), create: clientCreate },
+    );
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { client: { name: "Acme OÜ", reg_code: "17133416" }, items: [] } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload: { client: { name: "Acme OÜ", reg_code: "17133416" }, items: [] } });
+    expect(executed.ok).toBe(true);
+    expect(clientCreate).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledTimes(1);
+    const sent = create.mock.calls[0]![0] as Record<string, unknown>;
+    expect(sent.clients_id).toBe(42);
+    expect(sent.client).toBeUndefined();
+  });
+
+  it("create with a brand-NEW client creates the client, then the invoice against the new id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const create = vi.fn().mockResolvedValue({ created_object_id: 500 });
+      const clientCreate = vi.fn().mockResolvedValue({ created_object_id: 77 });
+      const clientGet = vi.fn().mockResolvedValue({ id: 77, name: "New Buyer OÜ" });
+      const api = makeApi(
+        { create },
+        {},
+        { listAll: vi.fn().mockResolvedValue([]), create: clientCreate, get: clientGet },
+      );
+      const runtime = createTestRuntimeSafetyContext();
+      const ops = createSaleInvoiceOperations(api, runtime);
+      const payload = { client: { name: "New Buyer OÜ", reg_code: "17133416", country: "EST" }, items: [] };
+      const prepared = await ops.run({ mode: "prepare", action: "create", payload });
+      if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+      const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload });
+      expect(executed.ok).toBe(true);
+      expect(clientCreate).toHaveBeenCalledTimes(1);
+      expect(create).toHaveBeenCalledTimes(1);
+      const sent = create.mock.calls[0]![0] as Record<string, unknown>;
+      expect(sent.clients_id).toBe(77);
+      // A sales-created customer must be persisted as a CLIENT (not supplier-only)
+      // so it shows up in customer lists.
+      const persistedClient = clientCreate.mock.calls[0]![0] as Record<string, unknown>;
+      expect(persistedClient.is_client).toBe(true);
+      expect(persistedClient.is_supplier).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("P17: an H13 strong-identifier conflict creates NEITHER client NOR invoice", async () => {
+    const create = vi.fn();
+    const clientCreate = vi.fn();
+    const api = makeApi(
+      { create },
+      {},
+      { listAll: vi.fn().mockResolvedValue([{ id: 50, name: "Twin OÜ", code: "10000000", is_deleted: false }]), create: clientCreate },
+    );
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const payload = { client: { name: "Twin OÜ", reg_code: "17133416" }, items: [] };
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload });
+    expect(executed.ok).toBe(false);
+    expect(create).not.toHaveBeenCalled();
+    expect(clientCreate).not.toHaveBeenCalled();
+  });
+
+  it("create with neither clients_id nor client.name is a validation error", async () => {
+    const create = vi.fn();
+    const api = makeApi({ create });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { items: [] } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload: { items: [] } });
+    expect(executed.ok).toBe(false);
+    if (executed.ok) return;
+    expect(executed.error.code).toBe("client_required");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("prepare with a new-customer client resolves read-only — projection shows would_create, no client persisted", async () => {
+    const clientCreate = vi.fn();
+    const api = makeApi({}, {}, { listAll: vi.fn().mockResolvedValue([]), create: clientCreate });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { client: { name: "Brand New Buyer OÜ" }, items: [] } });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    expect(prepared.value.projection.client_resolution).toBe("would_create");
+    expect(String(prepared.value.projection.client_name)).toContain("Brand New Buyer");
+    expect(clientCreate).not.toHaveBeenCalled();
+  });
+
+  it("create with an explicit clients_id is unchanged — no client resolution, no clients.listAll", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 500 });
+    const listAll = vi.fn().mockResolvedValue([]);
+    const api = makeApi({ create }, {}, { listAll });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { clients_id: 9, items: [] } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload: { clients_id: 9, items: [] } });
+    expect(executed.ok).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect((create.mock.calls[0]![0] as Record<string, unknown>).clients_id).toBe(9);
+    expect(listAll).not.toHaveBeenCalled();
   });
 
   it("update strips sandbox markers at the write boundary and blocks confirmed edits", async () => {

@@ -8,18 +8,30 @@ vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
 type Handler = (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
 
-function makeApi(over: Record<string, unknown> = {}): ApiContext {
+function makeApi(over: Record<string, unknown> = {}, clientsApi: Record<string, unknown> = {}): ApiContext {
   return {
     saleInvoices: {
       list: vi.fn().mockResolvedValue({ current_page: 1, total_pages: 1, items: [] }),
       get: vi.fn().mockResolvedValue({ id: 1, status: "PROJECT" }),
+      create: vi.fn().mockResolvedValue({ created_object_id: 500 }),
       delete: vi.fn().mockResolvedValue({}),
       confirm: vi.fn().mockResolvedValue({}),
       invalidate: vi.fn().mockResolvedValue({}),
       sendEinvoice: vi.fn().mockResolvedValue({ delivered: true }),
       ...over,
     },
-    readonly: { getAccounts: vi.fn().mockResolvedValue([]), getAccountDimensions: vi.fn().mockResolvedValue([]) },
+    readonly: {
+      getAccounts: vi.fn().mockResolvedValue([]),
+      getAccountDimensions: vi.fn().mockResolvedValue([]),
+      getVatInfo: vi.fn().mockResolvedValue({}),
+      getInvoiceInfo: vi.fn().mockResolvedValue({}),
+    },
+    clients: {
+      listAll: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({ created_object_id: 77 }),
+      get: vi.fn().mockResolvedValue({ id: 77, name: "New Buyer OÜ" }),
+      ...clientsApi,
+    },
   } as unknown as ApiContext;
 }
 
@@ -86,6 +98,53 @@ describe("manage_sale_invoice façade", () => {
     const idx = text.indexOf(INJECT);
     expect(idx).toBeGreaterThan(-1);
     expect(text.slice(0, idx)).toContain("UNTRUSTED_OCR_START");
+  });
+
+  it("create with an inline new-customer client resolves-or-creates the client then the invoice", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const create = vi.fn().mockResolvedValue({ created_object_id: 500 });
+      const clientCreate = vi.fn().mockResolvedValue({ created_object_id: 77 });
+      const handler = setup(makeApi({ create }, { listAll: vi.fn().mockResolvedValue([]), create: clientCreate, get: vi.fn().mockResolvedValue({ id: 77, name: "New Buyer OÜ" }) }));
+      const payload = { client: { name: "New Buyer OÜ", reg_code: "17133416", country: "EST" }, items: [] };
+      const prepared = parse(await handler({ mode: "prepare", action: "create", payload }));
+      expect(prepared.status).toBe("ready_for_approval");
+      expect(clientCreate).not.toHaveBeenCalled();
+      const executed = parse(await handler({ mode: "execute", action: "create", plan_handle: prepared.plan_handle, payload }));
+      expect(executed.mutation_occurred).toBe(true);
+      expect(clientCreate).toHaveBeenCalledTimes(1);
+      expect(create).toHaveBeenCalledTimes(1);
+      expect((create.mock.calls[0]![0] as Record<string, unknown>).clients_id).toBe(77);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("prepare create with a new-customer client shows would_create with a wrapped client name", async () => {
+    const create = vi.fn();
+    const clientCreate = vi.fn();
+    const handler = setup(makeApi({ create }, { listAll: vi.fn().mockResolvedValue([]), create: clientCreate }));
+    const result = await handler({ mode: "prepare", action: "create", payload: { client: { name: "Fresh Buyer OÜ" }, items: [] } });
+    const prepared = parse(result);
+    expect(prepared.projection.client_resolution).toBe("would_create");
+    expect(clientCreate).not.toHaveBeenCalled();
+    const text = result.content[0]!.text;
+    expect(text).toContain("UNTRUSTED_OCR_START");
+    expect(text).toContain("Fresh Buyer");
+  });
+
+  it("P17: a conflicting inline client returns needs_input and creates neither client nor invoice", async () => {
+    const create = vi.fn();
+    const clientCreate = vi.fn();
+    const handler = setup(makeApi({ create }, { listAll: vi.fn().mockResolvedValue([{ id: 50, name: "Twin OÜ", code: "10000000", is_deleted: false }]), create: clientCreate }));
+    const payload = { client: { name: "Twin OÜ", reg_code: "17133416" }, items: [] };
+    const prepared = parse(await handler({ mode: "prepare", action: "create", payload }));
+    const executed = await handler({ mode: "execute", action: "create", plan_handle: prepared.plan_handle, payload });
+    expect(executed.isError).toBe(true);
+    expect(parse(executed).mutation_occurred).toBe(false);
+    expect(create).not.toHaveBeenCalled();
+    expect(clientCreate).not.toHaveBeenCalled();
   });
 
   it("execute without a plan_handle is refused (destructive confirm)", async () => {

@@ -620,6 +620,26 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
     );
     expect(create).toHaveBeenCalledTimes(1);
     expect(result.created).toBe(true);
+    // Default (no role override): the created record is a SUPPLIER, not a
+    // client — the purchase-side behavior must stay byte-identical.
+    const created = create.mock.calls[0]![0] as { is_supplier: boolean; is_client: boolean };
+    expect(created.is_supplier).toBe(true);
+    expect(created.is_client).toBe(false);
+  });
+
+  it("honors an explicit role override — creating a client, not a supplier", async () => {
+    const { api, create } = makeCreateApi();
+    const result = await resolveSupplierInternal(
+      api,
+      [],
+      { supplier_name: "Buyer Co OÜ", supplier_reg_code: "17133416" },
+      true,
+      { _resolveSupplierOverrides: { country: "EST", role: { is_client: true, is_supplier: false } } },
+    );
+    expect(result.created).toBe(true);
+    const created = create.mock.calls[0]![0] as { is_supplier: boolean; is_client: boolean };
+    expect(created.is_client).toBe(true);
+    expect(created.is_supplier).toBe(false);
   });
 
   it("refuses to create an Estonian supplier with no reg code (name only), creating nothing", async () => {

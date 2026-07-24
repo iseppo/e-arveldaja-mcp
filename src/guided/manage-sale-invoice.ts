@@ -75,7 +75,7 @@ export function registerManageSaleInvoiceTool(
       action: z.string().optional().describe("read: list|get|document|xml|delivery_options. prepare/execute: create|update|delete|confirm|invalidate|send|recurring."),
       id: coerceId.optional().describe("Invoice ID (required for everything except list/create/recurring)."),
       plan_handle: z.string().optional().describe("Execution-plan handle from mode='prepare'. Required for mode='execute'."),
-      payload: jsonObjectInput.optional().describe("create/update fields, send request ({send_einvoice, send_email, email_addresses, ...}), or recurring params ({source_month:YYYY-MM, target_date:YYYY-MM-DD, target_journal_date:YYYY-MM-DD, invoice_ids?, auto_confirm?})."),
+      payload: jsonObjectInput.optional().describe("create/update fields, send request ({send_einvoice, send_email, email_addresses, ...}), or recurring params ({source_month:YYYY-MM, target_date:YYYY-MM-DD, target_journal_date:YYYY-MM-DD, invoice_ids?, auto_confirm?}). For create, pass EITHER clients_id OR an inline client to resolve-or-create a customer ({name, reg_code?, vat_no?, iban?, country?}); on any identity conflict the create is refused and neither the client nor the invoice is created."),
       view: z.enum(["brief", "full"]).optional().describe("read=list: brief (default) or full."),
       page: z.number().int().positive().optional().describe("read=list: page number."),
       date_from: z.string().optional().describe("read=list: revenue date on/after (YYYY-MM-DD)."),

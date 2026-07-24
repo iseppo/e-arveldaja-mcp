@@ -4,6 +4,10 @@ import type { ApiContext } from "../tools/crud/shared.js";
 import { computeRecurringClone, type RecurringCloneParams } from "../tools/recurring-invoices.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { desandboxAllStrings } from "../external-text-renderer.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
+import { isRecord } from "../record-utils.js";
+import { resolveSupplierInternal } from "../tools/supplier-resolution.js";
+import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
 import { decodeApiResponseCritical, decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
 import { canonicalPlanJson } from "../tools/camt-plan.js";
 import { validateSaleInvoiceItemDimensions } from "../account-validation.js";
@@ -68,6 +72,47 @@ function recurringNormalizedArgs(params: RecurringCloneParams): PlanRecord {
     ...(params.invoice_ids !== undefined ? { invoice_ids: params.invoice_ids } : {}),
   };
 }
+
+/** The inline resolve-or-create customer fields accepted on a create payload as
+ * an ALTERNATIVE to `clients_id`. Mapped onto resolveSupplierInternal's
+ * SupplierIdentityFields — a customer is a `client` record, same as a supplier. */
+interface InvoiceClientInput {
+  readonly name: string;
+  readonly reg_code?: string;
+  readonly vat_no?: string;
+  readonly iban?: string;
+  readonly country?: string;
+}
+
+/** Extract the inline `client` object from a create payload. Returns undefined
+ * when absent or when `name` is missing/blank (the resolver's only hard
+ * requirement). Values are read as-is; markers are stripped inside the resolver
+ * (matchSupplier canonicalizes) and, for execute, the payload is already
+ * desandboxed at the write boundary. */
+function parseClientInput(payload: Record<string, unknown> | undefined): InvoiceClientInput | undefined {
+  const client = payload?.client;
+  if (!isRecord(client)) return undefined;
+  const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() !== "" ? v : undefined);
+  const name = str(client.name);
+  if (name === undefined) return undefined;
+  return {
+    name,
+    ...(str(client.reg_code) !== undefined ? { reg_code: str(client.reg_code) } : {}),
+    ...(str(client.vat_no) !== undefined ? { vat_no: str(client.vat_no) } : {}),
+    ...(str(client.iban) !== undefined ? { iban: str(client.iban) } : {}),
+    ...(str(client.country) !== undefined ? { country: str(client.country) } : {}),
+  };
+}
+
+/** Result of the inline customer resolve-or-create. `needs_input` is the P17
+ * "create neither" signal — the resolver refused (identity gate / conflict /
+ * self-match / unresolved), so the caller must create NEITHER the client NOR
+ * the invoice. */
+type InvoiceClientResolution =
+  | { readonly status: "existing"; readonly clients_id: number }
+  | { readonly status: "created"; readonly clients_id: number }
+  | { readonly status: "would_create"; readonly preview_name?: string; readonly reg_code?: string }
+  | { readonly status: "needs_input"; readonly code: string; readonly message: string };
 
 class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
   constructor(
@@ -140,7 +185,38 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       privatePayload: { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) },
     };
     const planHandle = this.runtimeSafetyContext.planStore.issue(SALE_INVOICE_PLAN_DOMAIN, planInput);
-    return ok({ mode: "prepare", action: input.action, ...(input.id !== undefined ? { id: input.id } : {}), planHandle, projection });
+    // Create-preview: resolve the inline customer READ-ONLY (creation disabled)
+    // so the operator reviews the customer identity — EXISTING (id) vs NEW
+    // (would-create) — before approving. Kept OUT of the plan snapshot above so
+    // the wrapped (nonce-bearing) name never enters the plan fingerprint; the
+    // clients_id path (no `client`) leaves the projection untouched.
+    const clientDisplay = await this.prepareClientPreview(input);
+    return ok({ mode: "prepare", action: input.action, ...(input.id !== undefined ? { id: input.id } : {}), planHandle, projection: { ...projection, ...clientDisplay } });
+  }
+
+  /** Read-only projection add-on describing how the inline `client` on a create
+   * would resolve. Empty for non-create actions or a clients_id-only payload. */
+  private async prepareClientPreview(input: SaleInvoicePrepareInput): Promise<Record<string, string | number | boolean>> {
+    if (input.action !== "create") return {};
+    const hasClientsId = input.payload?.clients_id !== undefined && input.payload?.clients_id !== null;
+    const clientInput = parseClientInput(input.payload);
+    if (hasClientsId || clientInput === undefined) return {};
+    const resolved = await this.resolveInvoiceClient(clientInput, false);
+    if (resolved.status === "existing") {
+      return { client_resolution: "existing", clients_id: resolved.clients_id };
+    }
+    if (resolved.status === "needs_input") {
+      return { client_resolution: "needs_input", client_resolution_reason: resolved.message };
+    }
+    if (resolved.status === "would_create") {
+      const wrapped = wrapUntrustedOcr(resolved.preview_name ?? clientInput.name);
+      return {
+        client_resolution: "would_create",
+        ...(wrapped !== undefined ? { client_name: wrapped } : {}),
+        ...(resolved.reg_code !== undefined ? { client_reg_code: resolved.reg_code } : {}),
+      };
+    }
+    return {};
   }
 
   private async prepareRecurring(input: SaleInvoicePrepareInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
@@ -226,9 +302,90 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     }
   }
 
+  /**
+   * Resolve-or-create the inline `client` for a create, REUSING the purchase
+   * side's resolveSupplierInternal primitive directly (a customer is a `client`
+   * record just like a supplier). All of its guards apply unchanged: the
+   * self-match block (#14/#22), the H13 strong-identifier conflict, and the P17
+   * legal-entity identity gate. `execute=false` is the read-only preview
+   * (`api.clients.create` never runs). P17 "create neither": on ANY refusal the
+   * resolver returns created:false, so returning `needs_input` here guarantees
+   * no client was persisted and the caller skips the invoice too.
+   */
+  private async resolveInvoiceClient(clientInput: InvoiceClientInput, execute: boolean): Promise<InvoiceClientResolution> {
+    const clients = await this.api.clients.listAll();
+    const { ownCompanyVat, ownCompanyRegistryCode } = await resolveOwnCompanyIdentifiers(this.api, clients);
+    const resolution = await resolveSupplierInternal(
+      this.api,
+      clients,
+      {
+        supplier_name: clientInput.name,
+        ...(clientInput.reg_code !== undefined ? { supplier_reg_code: clientInput.reg_code } : {}),
+        ...(clientInput.vat_no !== undefined ? { supplier_vat_no: clientInput.vat_no } : {}),
+        ...(clientInput.iban !== undefined ? { supplier_iban: clientInput.iban } : {}),
+      },
+      execute,
+      {
+        ...(ownCompanyVat !== undefined ? { ownCompanyVat } : {}),
+        ...(ownCompanyRegistryCode !== undefined ? { ownCompanyRegistryCode } : {}),
+        // A sales-created customer is a CLIENT, not a supplier — invert the
+        // resolver's supplier-only default so it appears in customer lists.
+        _resolveSupplierOverrides: { country: clientInput.country ?? "EST", role: { is_client: true, is_supplier: false } },
+      },
+    );
+
+    // P17 / H13 / self-match refusals — create NEITHER client NOR invoice.
+    if (resolution.requires_manual_review) {
+      return { status: "needs_input", code: "client_identifier_conflict", message: resolution.reason ?? "The customer identity conflicts with an existing client — resolve it manually." };
+    }
+    if (resolution.code === "legal_entity_identity_required") {
+      return { status: "needs_input", code: resolution.code, message: resolution.reason ?? "Refusing to auto-create a customer without a verified legal-entity identity. Supply a checksum-valid Estonian reg_code, or an existing clients_id." };
+    }
+    if (resolution.self_match_blocked) {
+      return { status: "needs_input", code: "client_is_own_company", message: "The customer identifiers match the active company itself — refusing to resolve or create the buyer as its own customer." };
+    }
+    if (resolution.found && resolution.client?.id !== undefined) {
+      return { status: "existing", clients_id: resolution.client.id };
+    }
+    if (resolution.created && resolution.client?.id !== undefined) {
+      return { status: "created", clients_id: resolution.client.id };
+    }
+    if (!execute) {
+      return {
+        status: "would_create",
+        ...(resolution.preview_client?.name !== undefined ? { preview_name: resolution.preview_client.name } : {}),
+        ...(clientInput.reg_code !== undefined ? { reg_code: clientInput.reg_code } : {}),
+      };
+    }
+    return { status: "needs_input", code: "client_unresolved", message: "Could not resolve or create the customer from the provided client fields — supply a clients_id or a verified identity." };
+  }
+
   private async executeCreate(input: SaleInvoiceExecuteInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
     const raw = input.payload ?? {};
     const params = desandboxAllStrings(raw) as Record<string, unknown>;
+    // Inline resolve-or-create customer: create requires EITHER clients_id OR a
+    // client object with a name. When only `client` is present, resolve it (with
+    // creation enabled) and use the resolved/created id as clients_id.
+    const hasClientsId = params.clients_id !== undefined && params.clients_id !== null;
+    const clientInput = parseClientInput(params);
+    if (!hasClientsId && clientInput === undefined) {
+      return fail("client_required", "create requires either clients_id or a client object with at least { name }.");
+    }
+    let resolvedClientsId: number | undefined;
+    if (!hasClientsId && clientInput !== undefined) {
+      const resolved = await this.resolveInvoiceClient(clientInput, true);
+      if (resolved.status !== "existing" && resolved.status !== "created") {
+        // needs_input (P17 refusal) — or, defensively, an unexpected would_create
+        // on the execute path. Create NEITHER the client NOR the invoice.
+        const code = resolved.status === "needs_input" ? resolved.code : "client_unresolved";
+        const message = resolved.status === "needs_input" ? resolved.message : "Could not resolve or create the customer.";
+        return fail(code, message);
+      }
+      resolvedClientsId = resolved.clients_id;
+    }
+    // Never forward the inline `client` object to the sale-invoice API.
+    delete params.client;
+    if (resolvedClientsId !== undefined) params.clients_id = resolvedClientsId;
     const items = desandboxAllStrings(parseSaleInvoiceItems(raw.items));
     const [accounts, accountDimensions] = await Promise.all([
       this.api.readonly.getAccounts(),
