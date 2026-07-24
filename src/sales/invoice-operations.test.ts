@@ -187,6 +187,43 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("recurring: execute with auto_confirm=true against an auto_confirm-absent preview → plan_drift, no clone (no silent DRAFT→register escalation)", async () => {
+    const source = { id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: "Acme OU",
+      sale_invoice_type: "INVOICE", number_prefix: "ARV", items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100 }] };
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const confirm = vi.fn().mockResolvedValue({ status: "CONFIRMED" });
+    const api = makeApi({ listAll: vi.fn().mockResolvedValue([source]), get: vi.fn().mockResolvedValue(source), create, confirm });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    // Preview reviewed WITHOUT auto_confirm → DRAFT-only clones on the approval card.
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    // Execute tries to escalate to auto_confirm=true (create AND register) via the same handle.
+    const outcome = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01", auto_confirm: true } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(create).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("recurring: execute with auto_confirm matching the reviewed preview runs the real clone", async () => {
+    const source = { id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: "Acme OU",
+      sale_invoice_type: "INVOICE", number_prefix: "ARV", items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100 }] };
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const confirm = vi.fn().mockResolvedValue({ status: "CONFIRMED" });
+    const api = makeApi({ listAll: vi.fn().mockResolvedValue([source]), get: vi.fn().mockResolvedValue(source), create, confirm });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const params = { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01", auto_confirm: true };
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: params });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const executed = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: params });
+    expect(executed.ok).toBe(true);
+    if (!executed.ok || executed.value.mode !== "execute") throw new Error("execute failed");
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
   it("recurring: execute without a plan_handle is refused before any clone", async () => {
     const create = vi.fn();
     const api = makeApi({ listAll: vi.fn().mockResolvedValue([]), create });

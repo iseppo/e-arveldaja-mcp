@@ -58,10 +58,14 @@ function parseRecurringParams(payload: Record<string, unknown> | undefined): Rec
 }
 
 /**
- * The drift-binding fingerprint for a recurring plan. Binds ONLY the reviewed
- * clone params (source_month/target_date/target_journal_date/invoice_ids) — NOT
- * an invoice id and NOT auto_confirm — so an execute must target exactly the
- * reviewed recurring run.
+ * The drift-binding fingerprint for a recurring plan. Binds the reviewed clone
+ * params (source_month/target_date/target_journal_date/invoice_ids) AND
+ * auto_confirm — the dry-run preview can never reflect confirmation, so
+ * auto_confirm is bound here to stop an approved "create DRAFT clones" preview
+ * from being executed as "create AND register" via the same handle. It is
+ * normalized to a canonical boolean (absent === false) so an unchanged run
+ * still matches, while flipping it to true drifts. NOT an invoice id (recurring
+ * has none).
  */
 function recurringNormalizedArgs(params: RecurringCloneParams): PlanRecord {
   return {
@@ -69,6 +73,7 @@ function recurringNormalizedArgs(params: RecurringCloneParams): PlanRecord {
     source_month: params.source_month,
     target_date: params.target_date,
     target_journal_date: params.target_journal_date,
+    auto_confirm: params.auto_confirm === true,
     ...(params.invoice_ids !== undefined ? { invoice_ids: params.invoice_ids } : {}),
   };
 }
