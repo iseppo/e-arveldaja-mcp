@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { HttpClient } from "../http-client.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse } from "../types/api.js";
+import type { CreatePurchaseInvoiceRequest, UpdatePurchaseInvoiceRequest } from "../types/mutations.js";
 import { BaseResource } from "./base-resource.js";
 import { roundMoney, parseVatRateDropdown } from "../money.js";
 
@@ -164,6 +165,19 @@ function normalizeItemsForNonVat(
 export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   constructor(client: HttpClient) {
     super(client, "/purchase_invoices");
+  }
+
+  // Narrow the create/update boundary from `Partial<PurchaseInvoice>` to request
+  // types that omit server-managed fields (id, status, payment_status,
+  // journals/settlements/transactions back-refs, …). Delegates to the base
+  // mutate/cache logic; the internal createAndSetTotals / confirmWithTotals paths
+  // call through these overrides unchanged.
+  override async create(data: CreatePurchaseInvoiceRequest): Promise<ApiResponse> {
+    return super.create(data);
+  }
+
+  override async update(id: number, data: UpdatePurchaseInvoiceRequest): Promise<ApiResponse> {
+    return super.update(id, data);
   }
 
   /**

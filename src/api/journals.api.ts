@@ -1,10 +1,22 @@
 import type { HttpClient } from "../http-client.js";
 import type { Journal, ApiResponse } from "../types/api.js";
+import type { CreateJournalRequest, UpdateJournalRequest } from "../types/mutations.js";
 import { BaseResource, cache } from "./base-resource.js";
 
 export class JournalsApi extends BaseResource<Journal> {
   constructor(client: HttpClient) {
     super(client, "/journals");
+  }
+
+  // Narrow the create/update boundary from `Partial<Journal>` to request types
+  // that omit server-managed fields (id, number, registered, register_date,
+  // operations_id, operation_type, …). Delegates to the base mutate/cache logic.
+  override async create(data: CreateJournalRequest): Promise<ApiResponse> {
+    return super.create(data);
+  }
+
+  override async update(id: number, data: UpdateJournalRequest): Promise<ApiResponse> {
+    return super.update(id, data);
   }
 
   /**

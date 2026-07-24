@@ -1,10 +1,23 @@
 import type { HttpClient } from "../http-client.js";
 import type { SaleInvoice, SaleInvoiceDeliveryOptions, SaleInvoiceDeliveryRequest, ApiResponse, ApiFile } from "../types/api.js";
+import type { CreateSaleInvoiceRequest, UpdateSaleInvoiceRequest } from "../types/mutations.js";
 import { BaseResource } from "./base-resource.js";
 
 export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   constructor(client: HttpClient) {
     super(client, "/sale_invoices");
+  }
+
+  // Narrow the create/update boundary from `Partial<SaleInvoice>` to request
+  // types that omit server-managed fields (id, number, status, payment_status,
+  // journals/settlements/transactions/deliveries back-refs, …). Delegates to the
+  // base mutate/cache logic.
+  override async create(data: CreateSaleInvoiceRequest): Promise<ApiResponse> {
+    return super.create(data);
+  }
+
+  override async update(id: number, data: UpdateSaleInvoiceRequest): Promise<ApiResponse> {
+    return super.update(id, data);
   }
 
   async confirm(id: number): Promise<ApiResponse> {

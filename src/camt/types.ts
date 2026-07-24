@@ -1,4 +1,5 @@
 import type { Client, Transaction } from "../types/api.js";
+import type { CreateBankTransactionRequest } from "../types/mutations.js";
 import type { StatementBalanceCheck } from "../statement-balance-check.js";
 
 // --- Parsed statement data ---------------------------------------------------
@@ -104,20 +105,14 @@ export interface ClientResolutionCache {
   byName: Map<string, ClientResolution>;
 }
 
-export type CreateTransactionPayload = Pick<Transaction,
-  "accounts_dimensions_id" |
-  "type" |
-  "amount" |
-  "cl_currencies_id" |
-  "date"
-> & Partial<Pick<Transaction,
-  "description" |
-  "bank_account_name" |
-  "bank_account_no" |
-  "clients_id" |
-  "ref_number" |
-  "bank_ref_number"
->>;
+// The CAMT create payload feeds `createBankTransaction`, so it mirrors the
+// caller-facing request type (non-null optional fields, matching the parsed
+// CAMT entry field types) plus the server-derived `type` the projector sets from
+// the statement direction. Assignable to CreateBankTransactionRequest at the
+// write boundary.
+export type CreateTransactionPayload = CreateBankTransactionRequest & {
+  type: string;
+};
 
 // --- Projection --------------------------------------------------------------
 

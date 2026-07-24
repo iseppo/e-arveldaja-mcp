@@ -1,6 +1,7 @@
 import type { HttpClient } from "../http-client.js";
 import { HttpError, type HttpMethod } from "../http-client.js";
 import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice, ApiResponse } from "../types/api.js";
+import type { CreateBankTransactionPayload, UpdateBankTransactionRequest } from "../types/mutations.js";
 import { isMutationIndeterminate, MutationIndeterminateError } from "../mutation-outcome.js";
 import { BaseResource } from "./base-resource.js";
 
@@ -37,6 +38,19 @@ export class TransactionsApi extends BaseResource<Transaction> {
 
   public invalidateTransactionsAfterAmbiguousCleanup(): void {
     this.invalidateCache();
+  }
+
+  // Narrow the create/update boundary from the inherited `Partial<Transaction>`
+  // to operation-specific request types. `create` accepts the derived-`type`
+  // payload (only `createBankTransaction` calls it, at the single write
+  // boundary); `update` is metadata-scoped + `clients_id` (incl. null-clear).
+  // Both delegate to the base mutate/cache logic unchanged.
+  override async create(data: CreateBankTransactionPayload): Promise<ApiResponse> {
+    return super.create(data);
+  }
+
+  override async update(id: number, data: UpdateBankTransactionRequest): Promise<ApiResponse> {
+    return super.update(id, data);
   }
 
   /**
@@ -137,7 +151,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
 
       if (clientsIdWasSet) {
         try {
-          await this.update(id, { clients_id: null } as Partial<Transaction>);
+          await this.update(id, { clients_id: null });
         } catch (rollbackErr) {
           const normalizedNetworkCause = getNormalizedNetworkCause(rollbackErr);
           if (normalizedNetworkCause) {

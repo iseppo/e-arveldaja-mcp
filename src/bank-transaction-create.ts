@@ -1,4 +1,5 @@
-import type { ApiResponse, Transaction } from "./types/api.js";
+import type { ApiResponse } from "./types/api.js";
+import type { CreateBankTransactionPayload, CreateBankTransactionRequest } from "./types/mutations.js";
 import { bankTransactionDirection, type BankTransactionDirection } from "./bank-transaction-direction.js";
 import { canonicalRefNumber } from "./ref-number.js";
 
@@ -66,7 +67,7 @@ function weaveRefBeforeTrailingMarker(current: string, fullRef: string): string 
 
 export interface BankTransactionCreateApi {
   transactions: {
-    create(payload: Partial<Transaction>): Promise<ApiResponse>;
+    create(payload: CreateBankTransactionPayload): Promise<ApiResponse>;
   };
 }
 
@@ -90,12 +91,15 @@ export interface BankTransactionCreateApi {
  */
 export function createBankTransaction(
   api: BankTransactionCreateApi,
-  input: Partial<Transaction>,
+  input: CreateBankTransactionRequest,
   direction?: BankTransactionDirection,
 ): Promise<ApiResponse> {
+  // `input` cannot carry a caller-supplied `type` — CreateBankTransactionRequest
+  // omits it, so raw `type` is un-passable at compile time. The API `type` is
+  // derived here from the explicit direction / signed source_direction marker.
   const resolved = direction ?? bankTransactionDirection(input);
   const type = resolved === "incoming" ? "D" : "C";
-  const { type: _callerSuppliedType, ...payload } = input;
+  const payload = input;
 
   // Canonicalize the source reference to the backend cap. On truncation, weave
   // the full reference into the description (before any trailing direction

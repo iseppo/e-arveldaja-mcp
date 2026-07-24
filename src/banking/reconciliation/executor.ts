@@ -4,6 +4,7 @@ import { isProjectTransaction } from "../../transaction-status.js";
 import { roundMoney } from "../../money.js";
 import { normalizeCompanyName } from "../../company-name.js";
 import { bankTransactionDirection } from "../../bank-transaction-direction.js";
+import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { logAudit } from "../../audit-log.js";
 import { reportProgress } from "../../progress.js";
 import { MutationIndeterminateError } from "../../mutation-outcome.js";
@@ -130,14 +131,16 @@ export async function runSuggestMatches(
 
   // Get unpaid invoices (including partially paid)
   const allSales = await api.saleInvoices.listAll();
-  const openSales = allSales.filter((inv: SaleInvoice) =>
-    inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
-  );
+  const openSales = allSales.filter((inv: SaleInvoice) => {
+    const critical = decodeInvoiceStatusCritical(inv);
+    return critical.payment_status !== "PAID" && critical.status === "CONFIRMED";
+  });
 
   const allPurchases = await api.purchaseInvoices.listAll();
-  const openPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-    inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
-  );
+  const openPurchases = allPurchases.filter((inv: PurchaseInvoice) => {
+    const critical = decodeInvoiceStatusCritical(inv);
+    return critical.payment_status !== "PAID" && critical.status === "CONFIRMED";
+  });
 
   const saleIndex = buildInvoiceIndex(openSales);
   const purchaseIndex = buildInvoiceIndex(openPurchases);

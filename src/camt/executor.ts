@@ -4,6 +4,7 @@ import { reportProgress } from "../progress.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { createBankTransaction } from "../bank-transaction-create.js";
+import { decodeApiResponseCritical } from "../api/critical-codecs.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { checkStatementClosingBalance } from "../statement-balance-check.js";
 import { appendStatementBalance, readStatementBalances } from "../statement-balance-store.js";
@@ -562,7 +563,7 @@ export async function executeCamtImport(
       const descriptor = projection.descriptors[index]!;
       const direction = descriptor.entry.direction === "CRDT" ? "incoming" : "outgoing";
       const response = await createBankTransaction(api, descriptor.payload, direction);
-      const createdId = response.created_object_id;
+      const createdId = decodeApiResponseCritical(response).created_object_id;
       logAudit({
         tool: "import_camt053", action: "IMPORTED", entity_type: "transaction",
         entity_id: createdId,

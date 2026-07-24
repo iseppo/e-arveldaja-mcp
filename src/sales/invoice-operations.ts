@@ -3,6 +3,7 @@ import type { ExecutionPlanInput } from "../plan-store.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { desandboxAllStrings } from "../external-text-renderer.js";
+import { decodeApiResponseCritical, decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
 import { canonicalPlanJson } from "../tools/camt-plan.js";
 import { validateSaleInvoiceItemDimensions } from "../account-validation.js";
 import { parseSaleInvoiceItems, tagNotes } from "../tools/crud/shared.js";
@@ -166,7 +167,7 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     } as never);
     logAudit({
       tool: "manage_sale_invoice", action: "CREATED", entity_type: "sale_invoice",
-      entity_id: (result as { created_object_id?: number }).created_object_id,
+      entity_id: decodeApiResponseCritical(result).created_object_id,
       summary: `Created sale invoice for client ${String(params.clients_id)}`,
       details: { clients_id: params.clients_id },
     });
@@ -176,7 +177,7 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
   private async executeUpdate(input: SaleInvoiceExecuteInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
     const parsed = desandboxAllStrings(input.payload ?? {}) as Record<string, unknown>;
     const current = await this.api.saleInvoices.get(input.id!);
-    if ((current as { status?: string }).status === "CONFIRMED") {
+    if (decodeInvoiceStatusCritical(current).status === "CONFIRMED") {
       return fail("confirmed_record_immutable", "Confirmed sale_invoice cannot be updated — invalidate, edit the draft, then re-confirm.");
     }
     const result = await this.api.saleInvoices.update(input.id!, parsed as never);
