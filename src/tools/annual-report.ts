@@ -1280,19 +1280,46 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
         };
       }
 
+      // Partial mutation must be VISIBLE (invariant 9): a failure after the
+      // first created journal returns a structured `partial` result naming the
+      // already-created journal IDs and the concrete next action — never a
+      // generic error that hides the committed drafts.
       const created = [];
       for (const proposal of executableProposals) {
-        const result = await api.journals.create({
-          title: proposal.title,
-          effective_date: proposal.effective_date,
-          document_number: proposal.document_number,
-          cl_currencies_id: "EUR",
-          postings: proposal.postings.map((posting) => ({
-            accounts_id: posting.accounts_id,
-            type: posting.type,
-            amount: posting.amount,
-          })),
-        });
+        let result;
+        try {
+          result = await api.journals.create({
+            title: proposal.title,
+            effective_date: proposal.effective_date,
+            document_number: proposal.document_number,
+            cl_currencies_id: "EUR",
+            postings: proposal.postings.map((posting) => ({
+              accounts_id: posting.accounts_id,
+              type: posting.type,
+              amount: posting.amount,
+            })),
+          });
+        } catch (error: unknown) {
+          const createdIds = created
+            .map((entry) => entry.api_response.created_object_id)
+            .filter((id): id is number => id !== undefined);
+          return toolError({
+            error: "Year-end close stopped part-way: a closing journal failed to create.",
+            status: "partial",
+            failed_proposal: { title: proposal.title, effective_date: proposal.effective_date, document_number: proposal.document_number },
+            failure: error instanceof Error ? error.message : String(error),
+            created_journals: created.map((entry) => ({
+              journal_id: entry.api_response.created_object_id,
+              title: entry.title,
+              effective_date: entry.effective_date,
+              document_number: entry.document_number,
+            })),
+            remaining_proposals: executableProposals.slice(created.length + 1).length,
+            next_action: createdIds.length > 0
+              ? `Draft closing journals ${createdIds.join(", ")} were already created. Either delete them (delete_journal) and re-run execute_year_end_close after fixing the failure, or create the remaining entries manually — re-running now is blocked by the existing-close guard.`
+              : "No journals were created. Fix the failure and re-run execute_year_end_close.",
+          });
+        }
         logAudit({
           tool: "create_annual_closing_entries", action: "CREATED", entity_type: "journal",
           entity_id: result.created_object_id,

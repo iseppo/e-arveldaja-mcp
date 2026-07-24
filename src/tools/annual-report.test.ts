@@ -13,6 +13,8 @@ import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { OPENING_BALANCE_ACTIONABLE_WARNING } from "../opening-balance-limitations.js";
 import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 
+vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
+
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
 
 afterEach(() => {
@@ -52,7 +54,7 @@ function makeAccount(overrides: Partial<Account> & Pick<Account,
 
 function createApi(
   journals: Journal[],
-  options: { transactions?: unknown[]; extraAccounts?: Account[] } = {},
+  options: { transactions?: unknown[]; extraAccounts?: Account[]; journalsCreate?: (data: unknown) => Promise<unknown> } = {},
 ): ApiContext {
   const accounts: Account[] = [
     makeAccount({
@@ -143,6 +145,7 @@ function createApi(
     },
     journals: {
       listAllWithPostings: async () => journals,
+      ...(options.journalsCreate !== undefined ? { create: options.journalsCreate } : {}),
     },
   } as unknown as ApiContext;
 }
@@ -153,12 +156,14 @@ function setupTool(
     journals?: Journal[];
     transactions?: unknown[];
     extraAccounts?: Account[];
+    journalsCreate?: (data: unknown) => Promise<unknown>;
   } = {},
 ): (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> {
   const server = { registerTool: vi.fn() } as any;
   const api = createApi(options.journals ?? [], {
     transactions: options.transactions,
     extraAccounts: options.extraAccounts,
+    ...(options.journalsCreate !== undefined ? { journalsCreate: options.journalsCreate } : {}),
   });
   registerAnnualReportTools(server, api);
 
@@ -1017,5 +1022,32 @@ Current year profit account: 2999
     const warning = (report.warnings as string[]).find((w) => w.includes("neither asset line"));
     expect(warning).toBeDefined();
     expect(warning).toContain("999");
+  });
+});
+
+describe("execute_year_end_close partial-mutation visibility (F-YEAR-END-PARTIAL)", () => {
+  it("creates the closing journals and reports each created draft", async () => {
+    const journalsCreate = vi.fn().mockResolvedValue({ created_object_id: 7701 });
+    const handler = setupTool("execute_year_end_close", { journals: makeM20BaseJournals(), journalsCreate });
+    const result = await handler({ year: 2025, confirm: true });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+    expect(journalsCreate).toHaveBeenCalledTimes(1);
+    expect(payload.created_journals).toHaveLength(1);
+    expect(payload.created_journals[0].api_response.created_object_id).toBe(7701);
+  });
+
+  it("returns a structured partial result — never a bare thrown error — when a closing journal fails to create", async () => {
+    const journalsCreate = vi.fn().mockRejectedValue(new Error("backend 500"));
+    const handler = setupTool("execute_year_end_close", { journals: makeM20BaseJournals(), journalsCreate });
+    const result = await handler({ year: 2025, confirm: true });
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+    expect(payload.status).toBe("partial");
+    expect(payload.error).toContain("stopped part-way");
+    expect(payload.failure).toContain("backend 500");
+    // Nothing was created before the failure — the report says so explicitly
+    // and gives the concrete next action.
+    expect(payload.created_journals).toEqual([]);
+    expect(payload.next_action).toContain("No journals were created");
+    expect(journalsCreate).toHaveBeenCalledTimes(1);
   });
 });
