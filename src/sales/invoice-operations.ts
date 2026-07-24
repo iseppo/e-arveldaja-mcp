@@ -10,6 +10,7 @@ import { resolveSupplierInternal } from "../tools/supplier-resolution.js";
 import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
 import { decodeApiResponseCritical, decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
+import { validateOptionalStrictDateRange } from "../strict-date.js";
 import { validateSaleInvoiceItemDimensions } from "../account-validation.js";
 import { parseSaleInvoiceItems, tagNotes } from "../tools/crud/shared.js";
 import { logAudit } from "../audit-log.js";
@@ -109,19 +110,57 @@ function parseClientInput(payload: Record<string, unknown> | undefined): Invoice
   };
 }
 
-/** Hard-reject a create payload that carries BOTH `clients_id` AND an inline
- * `client` object. The documented contract is EITHER/OR — silently dropping the
- * inline client (and its H13/P17/self-match identity guards) would contradict
- * it. Returns a failure outcome when both are present, otherwise undefined.
- * Presence is checked on the RAW payload (a wrapped OCR name is still non-blank),
- * so no desandbox is needed here. */
+/** True iff the RAW create payload carries a `client` key with a non-null value.
+ * Presence is checked on the raw key — NOT via parseClientInput — so a malformed
+ * or empty inline `client` (e.g. `{}`) is still detected as "the caller intended
+ * an inline client" and cannot be silently dropped. */
+function hasInlineClientKey(payload: Record<string, unknown> | undefined): boolean {
+  if (payload === undefined) return false;
+  if (!Object.prototype.hasOwnProperty.call(payload, "client")) return false;
+  return payload.client !== undefined && payload.client !== null;
+}
+
+/** Reject a create payload whose inline-`client` intent cannot be honoured.
+ * Two failure shapes, both decided from the RAW key presence (a wrapped OCR name
+ * is still non-blank, so no desandbox is needed):
+ *  - `clients_id` AND an inline `client` key together → `client_input_conflict`.
+ *    The documented contract is EITHER/OR; silently dropping the inline client
+ *    (and its H13/P17/self-match identity guards) would contradict it. Detected
+ *    from the raw `client` key, so `clients_id + {client:{}}` no longer slips
+ *    through with the inline client vanishing.
+ *  - an inline `client` key present WITHOUT clients_id but malformed/empty (no
+ *    non-blank name) → `client_invalid`. A caller that clearly meant to pass an
+ *    inline client but sent an unusable object must get an explicit error, never
+ *    a silent fall-through to "clients_id missing".
+ * Returns a failure outcome when either holds, otherwise undefined. */
 function clientInputConflict(payload: Record<string, unknown> | undefined): OperationOutcome<never> | undefined {
   const hasClientsId = payload?.clients_id !== undefined && payload?.clients_id !== null;
-  const clientInput = parseClientInput(payload);
-  if (hasClientsId && clientInput !== undefined) {
+  const hasClientKey = hasInlineClientKey(payload);
+  if (hasClientsId && hasClientKey) {
     return fail<never>("client_input_conflict", "Provide EITHER clients_id OR an inline client object, not both.");
   }
+  if (!hasClientsId && hasClientKey && parseClientInput(payload) === undefined) {
+    return fail<never>("client_invalid", "The inline client object is missing a non-blank name. Provide { name, reg_code?, vat_no?, iban?, country? } or a clients_id.");
+  }
   return undefined;
+}
+
+/**
+ * Apply the sale-invoice create defaults that `executeCreate` applies before the
+ * API call, IN PLACE on a copy's field set, so the effective payload the drift
+ * fingerprint binds matches the effective payload the API receives. An omitted
+ * default and its explicit value therefore fingerprint identically (no spurious
+ * plan_drift), while a changed real field still drifts. This is the SINGLE
+ * source of these defaults — executeCreate calls it too, so the fingerprint and
+ * the API write can never disagree on what the default is. Only the
+ * always-defaulted scalar fields are normalized here; `notes` (tagNotes
+ * transform) and `items` (parseSaleInvoiceItems) stay bound verbatim. */
+function applyCreateDefaults(rest: Record<string, unknown>): void {
+  rest.number_suffix = (rest.number_suffix as string | undefined) ?? "";
+  rest.cl_currencies_id = (rest.cl_currencies_id as string | undefined) ?? "EUR";
+  rest.cl_countries_id = (rest.cl_countries_id as string | undefined) ?? "EST";
+  rest.sale_invoice_type = (rest.sale_invoice_type as string | undefined) ?? "INVOICE";
+  rest.show_client_balance = (rest.show_client_balance as boolean | undefined) ?? false;
 }
 
 /**
@@ -129,15 +168,19 @@ function clientInputConflict(payload: Record<string, unknown> | undefined): Oper
  * into the plan at prepare AND recomputed at execute so canonicalPlanJson
  * rejects a changed payload as plan_drift with zero side effect. The payload is
  * desandboxAllStrings-desandboxed FIRST — the per-call random OCR nonce would
- * otherwise always drift between prepare and execute. For create the inline
- * `client` contribution is reduced to IDENTITY-only (name/reg_code/vat_no/iban/
- * country via parseClientInput) so it agrees with prepareClientPreview's
- * read-only resolution; the raw `client` object and the non-semantic `view`
- * field are dropped. Everything else in the payload (clients_id, items,
- * invoice-level amounts, dates, send flags/recipients) is bound verbatim —
- * conservatively, a spurious drift is safer than an unbound field.
- * delete/confirm/invalidate carry no meaningful payload and are NOT routed here
- * (they stay id-only). stripUndefinedDeep makes the result safe for the plan
+ * otherwise always drift between prepare and execute. For create the fingerprint
+ * binds the EFFECTIVE payload the API receives after defaulting
+ * (applyCreateDefaults, matching executeCreate) so a semantically-identical
+ * omitted-vs-explicit default (cl_currencies_id "EUR", cl_countries_id "EST",
+ * sale_invoice_type "INVOICE", show_client_balance false, number_suffix "")
+ * does NOT produce a spurious drift; the inline `client` contribution is reduced
+ * to IDENTITY-only (name/reg_code/vat_no/iban/country via parseClientInput) so it
+ * agrees with prepareClientPreview's read-only resolution; the raw `client`
+ * object and the non-semantic `view` field are dropped. Everything else
+ * (clients_id, items, invoice-level amounts, dates, send flags/recipients) is
+ * bound verbatim — conservatively, a spurious drift is safer than an unbound
+ * field. delete/confirm/invalidate carry no meaningful payload and are NOT routed
+ * here (they stay id-only). stripUndefinedDeep makes the result safe for the plan
  * store (which rejects `undefined`) and order-insensitive for the comparison.
  */
 function saleMutationFingerprint(
@@ -151,6 +194,7 @@ function saleMutationFingerprint(
     const rest = { ...p };
     delete rest.client;
     delete rest.view;
+    applyCreateDefaults(rest);
     const clientInput = parseClientInput(p);
     return stripUndefinedDeep({
       ...base,
@@ -212,6 +256,11 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     switch (action) {
       case "list": {
         const f = input.filters ?? {};
+        // Strict calendar-date validation for the list filters: a malformed or
+        // non-existent date (2026-02-31, 2026-13-01, date_from > date_to) is
+        // rejected here rather than passed to the backend to coerce ambiguously.
+        const dateError = validateOptionalStrictDateRange("date_from", f.date_from, "date_to", f.date_to);
+        if (dateError) return fail("invalid_date_filter", dateError);
         const result = await this.api.saleInvoices.list({
           ...(f.page !== undefined ? { page: f.page } : {}),
           ...(f.date_from !== undefined ? { start_date: f.date_from } : {}),
@@ -366,6 +415,22 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     if (input.planHandle === undefined) {
       return fail("plan_handle_required", `action='${input.action}' requires a plan_handle from a prior mode='prepare'.`);
     }
+    // Syntactic validation of recurring params runs BEFORE the plan handle is
+    // consumed: a malformed date/month/invoice_ids is a bad-input rejection, not
+    // a drift, and must never burn a consume-once handle. (The semantic drift
+    // check below still uses the consumed plan.)
+    let recurringParams: RecurringCloneParams | undefined;
+    if (input.action === "recurring") {
+      recurringParams = parseRecurringParams(input.payload);
+      if (!recurringParams) {
+        return fail("recurring_params_required", "action='recurring' requires payload with source_month (YYYY-MM), target_date and target_journal_date (YYYY-MM-DD).");
+      }
+      // Reject a malformed recurring payload BEFORE consuming the handle and
+      // before computeRecurringClone (the clone/API read). Without this a bad
+      // invoice_ids/source_month would slip past a matching handle into the core.
+      const paramsError = validateRecurringParams(recurringParams);
+      if (paramsError) return fail("recurring_params_invalid", paramsError);
+    }
     let storedPlan;
     try {
       storedPlan = this.runtimeSafetyContext.planStore.consume(input.planHandle, SALE_INVOICE_PLAN_DOMAIN);
@@ -381,19 +446,9 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     // reconciliation executor. Rejected with ZERO side effect — before any
     // api.saleInvoices.* call.
     // For recurring, the plan binds the reviewed clone PARAMS (not an invoice id).
-    let recurringParams: RecurringCloneParams | undefined;
     let boundArgs: PlanRecord;
     if (input.action === "recurring") {
-      recurringParams = parseRecurringParams(input.payload);
-      if (!recurringParams) {
-        return fail("recurring_params_required", "action='recurring' requires payload with source_month (YYYY-MM), target_date and target_journal_date (YYYY-MM-DD).");
-      }
-      // Reject a malformed recurring payload here too — BEFORE the drift check
-      // and before computeRecurringClone (the clone/API read). Without this a bad
-      // invoice_ids/source_month would slip past a matching handle into the core.
-      const paramsError = validateRecurringParams(recurringParams);
-      if (paramsError) return fail("recurring_params_invalid", paramsError);
-      boundArgs = recurringNormalizedArgs(recurringParams);
+      boundArgs = recurringNormalizedArgs(recurringParams!);
     } else if (input.action === "create" || input.action === "update" || input.action === "send") {
       // Recompute the SAME payload fingerprint bound at prepare so a changed
       // create/update/send payload drift-rejects here, before any api call.
@@ -509,7 +564,10 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     const dimErrors = validateSaleInvoiceItemDimensions(items, accounts, accountDimensions);
     if (dimErrors.length > 0) return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`);
     // Only after validation passes: resolve-or-create the inline customer.
+    // Track whether the customer was CREATED here (vs. an existing match) so a
+    // later invoice-create failure can compensate the orphaned master-data row.
     let resolvedClientsId: number | undefined;
+    let createdClientId: number | undefined;
     if (!hasClientsId && clientInput !== undefined) {
       const resolved = await this.resolveInvoiceClient(clientInput, true);
       if (resolved.status !== "existing" && resolved.status !== "created") {
@@ -520,6 +578,7 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
         return fail(code, message);
       }
       resolvedClientsId = resolved.clients_id;
+      if (resolved.status === "created") createdClientId = resolved.clients_id;
     }
     // Never forward the inline `client` object to the sale-invoice API. Also
     // drop `view` so the payload sent to the API exactly matches the surface the
@@ -527,16 +586,56 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     delete params.client;
     delete params.view;
     if (resolvedClientsId !== undefined) params.clients_id = resolvedClientsId;
-    const result = await this.api.saleInvoices.create({
-      ...params,
-      number_suffix: (params.number_suffix as string | undefined) ?? "",
-      cl_currencies_id: (params.cl_currencies_id as string | undefined) ?? "EUR",
-      cl_countries_id: (params.cl_countries_id as string | undefined) ?? "EST",
-      sale_invoice_type: (params.sale_invoice_type as string | undefined) ?? "INVOICE",
-      show_client_balance: (params.show_client_balance as boolean | undefined) ?? false,
-      notes: tagNotes(params.notes as string | undefined),
-      items,
-    } as never);
+    // Apply the SAME defaults saleMutationFingerprint bound, so the API write and
+    // the drift fingerprint agree on every effective field.
+    applyCreateDefaults(params);
+    let result: unknown;
+    try {
+      result = await this.api.saleInvoices.create({
+        ...params,
+        notes: tagNotes(params.notes as string | undefined),
+        items,
+      } as never);
+    } catch (createError) {
+      // Compensating cleanup: the inline customer we JUST created is now orphaned
+      // master data (the invoice it was created for did not persist). An existing
+      // client is never touched. Deactivate the new client to roll it back.
+      if (createdClientId === undefined) throw createError;
+      const invoiceErrorMessage = createError instanceof Error ? createError.message : String(createError);
+      try {
+        await this.api.clients.deactivate(createdClientId);
+      } catch (cleanupError) {
+        // Cleanup itself failed or is indeterminate (e.g. network) — surface a
+        // structured partial outcome carrying the created client id, the invoice
+        // failure, the cleanup failure, and the exact next action. NEVER hide it
+        // behind a generic error: the operator must know a client row remains.
+        const cleanupErrorMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        return {
+          ok: false,
+          error: {
+            code: "client_rollback_indeterminate",
+            message:
+              `The sale-invoice create failed (${invoiceErrorMessage}) and the compensating deactivation of the newly-created customer (clients_id=${createdClientId}) ALSO failed (${cleanupErrorMessage}). ` +
+              `A customer record may remain active. Next action: manually deactivate or delete clients_id=${createdClientId} in e-arveldaja, then retry the invoice.`,
+            retry: "unknown",
+          },
+          blockers: [],
+        };
+      }
+      // Cleanup succeeded — the orphan was rolled back. Report a structured
+      // failure that states the invoice was not created and the client was
+      // deactivated, so no active orphan remains.
+      return {
+        ok: false,
+        error: {
+          code: "invoice_create_failed_client_rolled_back",
+          message:
+            `The sale-invoice create failed (${invoiceErrorMessage}). The newly-created customer (clients_id=${createdClientId}) was rolled back (deactivated), so no orphaned customer remains. Retry the invoice once the create error is resolved.`,
+          retry: "safe",
+        },
+        blockers: [],
+      };
+    }
     logAudit({
       tool: "manage_sale_invoice", action: "CREATED", entity_type: "sale_invoice",
       entity_id: decodeApiResponseCritical(result).created_object_id,

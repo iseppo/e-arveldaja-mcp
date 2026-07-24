@@ -617,4 +617,195 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
     expect(typeof prepared.value.planHandle).toBe("string");
   });
+
+  // ---- P2 §9 — inline client creation must not orphan master data. When the
+  // customer was CREATED here and the subsequent invoice create fails, the new
+  // client must be compensated (deactivated); a pre-existing client is untouched.
+  function newClientCreateApi(over: {
+    saleCreate: ReturnType<typeof vi.fn>;
+    deactivate?: ReturnType<typeof vi.fn>;
+  }) {
+    return makeApi(
+      { create: over.saleCreate },
+      {},
+      {
+        listAll: vi.fn().mockResolvedValue([]), // no match → resolver creates a new client
+        create: vi.fn().mockResolvedValue({ created_object_id: 77 }),
+        get: vi.fn().mockResolvedValue({ id: 77, name: "New Buyer OÜ" }),
+        ...(over.deactivate ? { deactivate: over.deactivate } : { deactivate: vi.fn().mockResolvedValue({}) }),
+      },
+    );
+  }
+  const newClientPayload = { client: { name: "New Buyer OÜ", reg_code: "17133416", country: "EST" }, items: [] };
+
+  it("P2 §9: created client + invoice create fails + cleanup succeeds → deactivate called, structured rollback failure, no active orphan", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const saleCreate = vi.fn().mockRejectedValue(new Error("invoice boom"));
+      const deactivate = vi.fn().mockResolvedValue({});
+      const api = newClientCreateApi({ saleCreate, deactivate });
+      const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+      const prepared = await ops.run({ mode: "prepare", action: "create", payload: newClientPayload });
+      if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+      const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload: newClientPayload });
+      expect(executed.ok).toBe(false);
+      if (executed.ok) return;
+      expect(executed.error.code).toBe("invoice_create_failed_client_rolled_back");
+      expect(executed.error.message).toContain("77");
+      expect(deactivate).toHaveBeenCalledWith(77);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("P2 §9: created client + invoice create fails + cleanup ALSO fails → indeterminate partial outcome carrying the client id + next action", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const saleCreate = vi.fn().mockRejectedValue(new Error("invoice boom"));
+      const deactivate = vi.fn().mockRejectedValue(new Error("network down"));
+      const api = newClientCreateApi({ saleCreate, deactivate });
+      const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+      const prepared = await ops.run({ mode: "prepare", action: "create", payload: newClientPayload });
+      if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+      const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload: newClientPayload });
+      expect(executed.ok).toBe(false);
+      if (executed.ok) return;
+      expect(executed.error.code).toBe("client_rollback_indeterminate");
+      expect(executed.error.message).toContain("77");
+      expect(executed.error.message).toContain("network down");
+      expect(deactivate).toHaveBeenCalledWith(77);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("P2 §9: EXISTING client + invoice create fails → NO cleanup (the pre-existing client is never deactivated)", async () => {
+    const saleCreate = vi.fn().mockRejectedValue(new Error("invoice boom"));
+    const deactivate = vi.fn();
+    const api = makeApi(
+      { create: saleCreate },
+      {},
+      { listAll: vi.fn().mockResolvedValue([{ id: 42, name: "Acme OÜ", code: "17133416", is_deleted: false }]), create: vi.fn(), deactivate },
+    );
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const payload = { client: { name: "Acme OÜ", reg_code: "17133416" }, items: [] };
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    // The invoice-create error propagates unchanged (no client was created here,
+    // so there is nothing to roll back) and deactivate is never called.
+    await expect(
+      ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload }),
+    ).rejects.toThrow("invoice boom");
+    expect(deactivate).not.toHaveBeenCalled();
+  });
+
+  it("P2 §9: clients_id path + invoice create fails → NO cleanup", async () => {
+    const saleCreate = vi.fn().mockRejectedValue(new Error("invoice boom"));
+    const deactivate = vi.fn();
+    const api = makeApi({ create: saleCreate }, {}, { listAll: vi.fn().mockResolvedValue([]), deactivate });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { clients_id: 9, items: [] } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    await expect(
+      ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload: { clients_id: 9, items: [] } }),
+    ).rejects.toThrow("invoice boom");
+    expect(deactivate).not.toHaveBeenCalled();
+  });
+
+  // ---- P3 §14.2 — clients_id + inline client conflict must be detected from the
+  // RAW key presence; a malformed/empty inline client must never be silently
+  // dropped.
+  it("P3 §14.2: clients_id + an EMPTY inline client object is a hard conflict (not silently dropped)", async () => {
+    const create = vi.fn();
+    const clientCreate = vi.fn();
+    const api = makeApi({ create }, {}, { listAll: vi.fn().mockResolvedValue([]), create: clientCreate });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const outcome = await ops.run({ mode: "prepare", action: "create", payload: { clients_id: 9, client: {}, items: [] } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("client_input_conflict");
+    expect(create).not.toHaveBeenCalled();
+    expect(clientCreate).not.toHaveBeenCalled();
+  });
+
+  it("P3 §14.2: a malformed inline client alone (no clients_id, no name) is an explicit error, not a silent skip", async () => {
+    const create = vi.fn();
+    const clientCreate = vi.fn();
+    const api = makeApi({ create }, {}, { listAll: vi.fn().mockResolvedValue([]), create: clientCreate });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const outcome = await ops.run({ mode: "prepare", action: "create", payload: { client: {}, items: [] } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("client_invalid");
+    expect(create).not.toHaveBeenCalled();
+    expect(clientCreate).not.toHaveBeenCalled();
+  });
+
+  // ---- P3 §14.3 — the create fingerprint binds the EFFECTIVE payload (after
+  // defaulting), so an omitted-vs-explicit default does NOT drift, while a
+  // changed real field DOES.
+  it("P3 §14.3: omitted default at prepare vs explicit same default at execute does NOT drift", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 500 });
+    const api = makeApi({ create }, {}, { listAll: vi.fn().mockResolvedValue([]) });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    // prepare omits all defaults
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { clients_id: 9, items: [] } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    // execute supplies the SAME values the server would have defaulted
+    const executed = await ops.run({
+      mode: "execute", action: "create", planHandle: prepared.value.planHandle,
+      payload: { clients_id: 9, items: [], cl_currencies_id: "EUR", cl_countries_id: "EST", sale_invoice_type: "INVOICE", show_client_balance: false, number_suffix: "" },
+    });
+    expect(executed.ok).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("P3 §14.3: a changed real field (gross_price) DOES drift with zero API calls", async () => {
+    const create = vi.fn();
+    const api = makeApi({ create }, {}, { listAll: vi.fn().mockResolvedValue([]) });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { clients_id: 9, items: [], gross_price: 100 } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload: { clients_id: 9, items: [], gross_price: 200 } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  // ---- P2 §10 — strict calendar-date validation on the read=list date filters.
+  it("P2 §10: read=list with a non-existent date_from (2026-02-31) is rejected before the API list call", async () => {
+    const list = vi.fn();
+    const api = makeApi({ list });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const outcome = await ops.run({ mode: "read", action: "list", filters: { date_from: "2026-02-31" } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("invalid_date_filter");
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("P2 §10: recurring EXECUTE with a non-existent date does NOT consume the plan handle (rejected pre-consume)", async () => {
+    const source = { id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: "Acme OU",
+      sale_invoice_type: "INVOICE", number_prefix: "ARV", items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100 }] };
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const api = makeApi({ listAll: vi.fn().mockResolvedValue([source]), get: vi.fn().mockResolvedValue(source), create });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const validParams = { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" };
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: validParams });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const handle = prepared.value.planHandle;
+    // Execute with a non-existent target_date → rejected on syntax before consume.
+    const bad = await ops.run({ mode: "execute", action: "recurring", planHandle: handle, payload: { ...validParams, target_date: "2026-02-31" } });
+    expect(bad.ok).toBe(false);
+    if (bad.ok) return;
+    expect(bad.error.code).toBe("recurring_params_invalid");
+    expect(create).not.toHaveBeenCalled();
+    // Because the handle was NOT consumed, a correct execute still succeeds.
+    const good = await ops.run({ mode: "execute", action: "recurring", planHandle: handle, payload: validParams });
+    expect(good.ok).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
 });

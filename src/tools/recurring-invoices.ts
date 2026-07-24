@@ -6,6 +6,7 @@ import { type ApiContext, tagNotes } from "./crud-tools.js";
 import type { SaleInvoice } from "../types/api.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
+import { parseStrictDate, parseStrictMonth } from "../strict-date.js";
 
 const RECURRING_CLONE_MARKER_PREFIX = "RECURRING_SOURCE_INVOICE";
 const RECURRING_CLONE_MARKER_RE = /RECURRING_SOURCE_INVOICE:\d+:TARGET_DATE:\d{4}-\d{2}-\d{2}/g;
@@ -43,13 +44,16 @@ export interface RecurringCloneParams {
  * so the façade MUST call this to reject malformed input (a bad `invoice_ids`
  * like "1oops" would otherwise `parseInt` to invoice 1; a bad `source_month`
  * → NaN dates; a noncanonical `target_date` → an unrediscoverable dedup marker)
- * BEFORE any clone/API read. Reuses the exact module regex constants so the two
- * entry points never drift. Returns an error message, or undefined when valid.
+ * BEFORE any clone/API read. Uses the shared strict calendar-date parser
+ * (`src/strict-date.ts`) rather than a bare shape regex, so a syntactically
+ * well-formed but non-existent calendar date (2026-02-29, 2026-02-31,
+ * 2026-13-01, 2026-00-10) is rejected here too — the backend would otherwise
+ * coerce it unpredictably. Returns an error message, or undefined when valid.
  */
 export function validateRecurringParams(params: RecurringCloneParams): string | undefined {
-  if (!MONTH_REGEX.test(params.source_month)) return "source_month must be in YYYY-MM format.";
-  if (!ISO_DATE_REGEX.test(params.target_date)) return "target_date must be in YYYY-MM-DD format.";
-  if (!ISO_DATE_REGEX.test(params.target_journal_date)) return "target_journal_date must be in YYYY-MM-DD format.";
+  if (!parseStrictMonth(params.source_month)) return "source_month must be a real calendar month in YYYY-MM format.";
+  if (!parseStrictDate(params.target_date)) return "target_date must be a real calendar date in YYYY-MM-DD format.";
+  if (!parseStrictDate(params.target_journal_date)) return "target_journal_date must be a real calendar date in YYYY-MM-DD format.";
   if (params.invoice_ids !== undefined && !COMMA_SEPARATED_IDS_REGEX.test(params.invoice_ids)) {
     return "invoice_ids must be comma-separated numeric invoice IDs.";
   }
@@ -150,7 +154,9 @@ export async function computeRecurringClone(
             client: wrapUntrustedOcr(full.client_name ?? undefined),
             items_count: full.items.length,
             gross_price: full.gross_price,
-            status: "would_create",
+            // Distinguish the exact execution effect on EACH row so the approval
+            // card never says "draft" for a row that auto_confirm will register.
+            status: auto_confirm ? "would_create_and_confirm" : "would_create_draft",
           });
           existingCloneMarkers.set(recurringMarker, {});
           continue;
@@ -257,15 +263,26 @@ export async function computeRecurringClone(
       const skippedExistingCount = results.filter(r => r.status === "skipped_existing").length;
       const createErrorsCount = results.filter(r => r.status === "error").length;
       const confirmErrorsCount = results.filter(r => r.status === "confirm_error").length;
-      const wouldCreateCount = results.filter(r => r.status === "would_create").length;
+      const wouldCreateCount = results.filter(r => r.status === "would_create_draft" || r.status === "would_create_and_confirm").length;
       const wouldSkipExistingCount = results.filter(r => r.status === "would_skip_existing").length;
+
+      // The execution effect is EXPLICIT and identical between preview and
+      // execute so an operator approving a DRAFT-only preview can never be handed
+      // a register-on-create effect. auto_confirm is normalized to a canonical
+      // boolean; every would-created clone is also confirmed when it is true, so
+      // would_confirm == would_create in the create_and_confirm effect.
+      const autoConfirmEffective = auto_confirm === true;
+      const executionEffect = autoConfirmEffective ? "create_and_confirm" : "create_drafts";
 
       return {
         mode: isDryRun ? "DRY_RUN" : "EXECUTED",
+        execution_effect: executionEffect,
+        auto_confirm: autoConfirmEffective,
         source_month,
         target_date,
         source_count: sourceInvoices.length,
         would_create: isDryRun ? wouldCreateCount : undefined,
+        would_confirm: isDryRun ? (autoConfirmEffective ? wouldCreateCount : 0) : undefined,
         would_skip_existing: isDryRun ? wouldSkipExistingCount : undefined,
         created: isDryRun ? undefined : createdCount,
         confirmed: isDryRun ? undefined : confirmedCount,
@@ -274,7 +291,11 @@ export async function computeRecurringClone(
         create_errors: isDryRun ? undefined : createErrorsCount,
         confirm_errors: isDryRun ? undefined : confirmErrorsCount,
         results,
-        ...(isDryRun && { note: "Preview only. Omit dry_run or set dry_run=false to create the invoices." }),
+        ...(isDryRun && {
+          note: autoConfirmEffective
+            ? "Preview only. auto_confirm=true: on execute each clone is CREATED and immediately REGISTERED (confirmed) — it enters the ledger as a booked receivable, NOT an editable draft. Omit dry_run or set dry_run=false to proceed."
+            : "Preview only. Each clone is created as an editable DRAFT (not registered). Omit dry_run or set dry_run=false to create the invoices.",
+        }),
       };
 }
 

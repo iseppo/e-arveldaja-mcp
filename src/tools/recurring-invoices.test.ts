@@ -260,6 +260,80 @@ describe("recurring invoices tool", () => {
     expect(coreResult.created).toBe(1);
   });
 
+  // ---- P1-1 — the auto_confirm execution effect must be explicit in the
+  // dry-run preview: the approval card cannot say "draft" for a row that
+  // auto_confirm will immediately register.
+  it("P1-1: auto_confirm=false preview shows create_drafts effect, would_confirm 0, and would_create_draft rows", async () => {
+    const { api, handler } = setupRecurringTool();
+    const result = await handler({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+      dry_run: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+    expect(payload.mode).toBe("DRY_RUN");
+    expect(payload.execution_effect).toBe("create_drafts");
+    expect(payload.auto_confirm).toBe(false);
+    expect(payload.would_create).toBe(1);
+    expect(payload.would_confirm).toBe(0);
+    expect((payload.results as Array<Record<string, unknown>>)[0]!.status).toBe("would_create_draft");
+    expect(String(payload.note)).toContain("DRAFT");
+    expect(api.saleInvoices.create).not.toHaveBeenCalled();
+    expect(api.saleInvoices.confirm).not.toHaveBeenCalled();
+  });
+
+  it("P1-1: auto_confirm=true preview shows create_and_confirm effect, exact would_confirm count, and would_create_and_confirm rows", async () => {
+    const { api, handler } = setupRecurringTool();
+    const result = await handler({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+      auto_confirm: true,
+      dry_run: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+    expect(payload.mode).toBe("DRY_RUN");
+    expect(payload.execution_effect).toBe("create_and_confirm");
+    expect(payload.auto_confirm).toBe(true);
+    expect(payload.would_create).toBe(1);
+    expect(payload.would_confirm).toBe(1);
+    expect((payload.results as Array<Record<string, unknown>>)[0]!.status).toBe("would_create_and_confirm");
+    // Approval text must warn the invoices are REGISTERED into the ledger, not drafts.
+    expect(String(payload.note)).toContain("REGISTERED");
+    expect(api.saleInvoices.create).not.toHaveBeenCalled();
+    expect(api.saleInvoices.confirm).not.toHaveBeenCalled();
+  });
+
+  it("P1-1: execute result carries the same execution_effect as the preview", async () => {
+    const { handler } = setupRecurringTool();
+    const params = { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01", auto_confirm: true };
+    const preview = parseMcpResponse((await handler({ ...params, dry_run: true })).content[0]!.text);
+    const executed = parseMcpResponse((await handler({ ...params, dry_run: false })).content[0]!.text);
+    expect(preview.execution_effect).toBe("create_and_confirm");
+    expect(executed.execution_effect).toBe(preview.execution_effect);
+    expect(executed.auto_confirm).toBe(true);
+    expect(executed.confirmed).toBe(1);
+  });
+
+  // ---- P2 §10 — strict calendar-date validation now rejects a well-formed but
+  // non-existent date at the shared validator (not just a shape regex).
+  it("P2: a non-existent calendar target_date (2026-02-31) is rejected before any clone/API read", async () => {
+    const { api, handler } = setupRecurringTool();
+    await expect(
+      handler({ source_month: "2026-01", target_date: "2026-02-31", target_journal_date: "2026-02-01", dry_run: true }),
+    ).rejects.toThrow(/real calendar date/);
+    expect(api.saleInvoices.listAll).not.toHaveBeenCalled();
+    expect(api.saleInvoices.create).not.toHaveBeenCalled();
+  });
+
+  it("P2: a leap-day target_date (2024-02-29) is accepted", async () => {
+    const { handler } = setupRecurringTool();
+    const result = await handler({ source_month: "2024-01", target_date: "2024-02-29", target_journal_date: "2024-02-29", dry_run: true });
+    const payload = parseMcpResponse(result.content[0]!.text);
+    expect(payload.mode).toBe("DRY_RUN");
+  });
+
   it("reports an error instead of silently skipping source invoices without items", async () => {
     const sourceWithoutItems = buildSaleInvoice({ items: [] });
     const { api, handler } = setupRecurringTool({
