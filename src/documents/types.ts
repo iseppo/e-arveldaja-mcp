@@ -134,6 +134,24 @@ export interface AccountingDocumentConfirmation {
   readonly mutationOccurred: true;
   /** Raw register-endpoint response (UNWRAPPED). */
   readonly result: ApiResponse;
+  /** Draft supplier name read back from the registered invoice for the confirm
+   *  receipt. UNWRAPPED domain value — the façade wraps it (an OCR-created
+   *  client name is untrusted). Omitted (undefined) if the best-effort read-back
+   *  failed — an advisory echo must never fail a completed registration. */
+  readonly echoedSupplierName?: string;
+  /** Draft gross (invoice `gross_price`, the invoice-currency face value) read
+   *  back for the confirm receipt. Labelled by `echoedCurrency`. Omitted if the
+   *  read-back failed or the field was absent. */
+  readonly echoedGross?: number;
+  /** Invoice currency (`cl_currencies_id`) read back for the confirm receipt, so
+   *  `echoedGross` is never an unlabelled number. Omitted if the read-back
+   *  failed. */
+  readonly echoedCurrency?: string;
+  /** EUR-settled gross (`base_gross_price`) read back for the confirm receipt —
+   *  the figure the ledger actually moves. Only meaningful when the invoice is
+   *  non-EUR (for an EUR invoice it equals `echoedGross`). Omitted if the
+   *  read-back failed or the field was absent. */
+  readonly echoedBaseGross?: number;
 }
 
 export interface AccountingDocumentOperations {

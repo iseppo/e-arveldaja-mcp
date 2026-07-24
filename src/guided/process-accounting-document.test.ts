@@ -334,4 +334,81 @@ describe("process_accounting_document", () => {
     expect(parse(result).mutation_occurred).toBe(false);
     expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
   });
+
+  it("confirm response echoes the registered supplier + gross as a post-register receipt (wrapped supplier name, EUR invoice → no total_gross_eur)", async () => {
+    const { path, sha256 } = writeTempPdf();
+    const { handler } = setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockResolvedValue({ client_name: "Acme OÜ", gross_price: 59.94, cl_currencies_id: "EUR", base_gross_price: 59.94 }),
+        createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_001, status: "SAVED" }),
+        confirmWithTotals: vi.fn(),
+        confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+    const created = await createDraft(handler, path, sha256);
+    const planHandle = created.confirm_plan.plan_handle as string;
+    const invoiceId = created.confirm_plan.invoice_id as number;
+
+    const confirmed = parse(await handler({ mode: "confirm", invoice_id: invoiceId, plan_handle: planHandle }));
+    expect(confirmed.mutation_occurred).toBe(true);
+    expect(confirmed.result.supplier_name).toContain("Acme OÜ");
+    expect(confirmed.result.supplier_name).toContain("UNTRUSTED_OCR_START");
+    expect(confirmed.result.total_gross).toBe(59.94);
+    expect(confirmed.result.currency).toBe("EUR");
+    // EUR invoice: the EUR base equals the face value, so it is not echoed twice.
+    expect("total_gross_eur" in confirmed.result).toBe(false);
+    expect(confirmed.note).toContain("ledger-affecting");
+  });
+
+  it("confirm response labels a foreign-currency gross and echoes the EUR amount booked (total_gross_eur)", async () => {
+    const { path, sha256 } = writeTempPdf();
+    const { handler } = setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockResolvedValue({ client_name: "Acme Inc", gross_price: 100, cl_currencies_id: "USD", base_gross_price: 92.5 }),
+        createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_002, status: "SAVED" }),
+        confirmWithTotals: vi.fn(),
+        confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+    const created = await createDraft(handler, path, sha256);
+    const planHandle = created.confirm_plan.plan_handle as string;
+    const invoiceId = created.confirm_plan.invoice_id as number;
+
+    const confirmed = parse(await handler({ mode: "confirm", invoice_id: invoiceId, plan_handle: planHandle }));
+    expect(confirmed.mutation_occurred).toBe(true);
+    expect(confirmed.result.total_gross).toBe(100);
+    expect(confirmed.result.currency).toBe("USD");
+    expect(confirmed.result.total_gross_eur).toBe(92.5);
+  });
+
+  it("confirm response is an id-only receipt (no echo keys, no ledger-affecting note) when the read-back is absent", async () => {
+    const { path, sha256 } = writeTempPdf();
+    const { handler } = confirmCapableSetup();
+    const created = await createDraft(handler, path, sha256);
+    const planHandle = created.confirm_plan.plan_handle as string;
+    const invoiceId = created.confirm_plan.invoice_id as number;
+
+    const confirmed = parse(await handler({ mode: "confirm", invoice_id: invoiceId, plan_handle: planHandle }));
+    expect(confirmed.mutation_occurred).toBe(true);
+    expect(confirmed.result.confirmed_invoice_id).toBe(invoiceId);
+    expect(confirmed.result.status).toBe("CONFIRMED");
+    expect("supplier_name" in confirmed.result).toBe(false);
+    expect("total_gross" in confirmed.result).toBe(false);
+    expect("currency" in confirmed.result).toBe(false);
+    expect("total_gross_eur" in confirmed.result).toBe(false);
+    // The note must NOT promise values that were omitted.
+    expect(confirmed.note).not.toContain("ledger-affecting");
+  });
 });

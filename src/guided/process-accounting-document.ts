@@ -246,12 +246,33 @@ export function registerProcessAccountingDocumentTool(
         if (!outcome.ok) {
           return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
         }
+        // Post-register receipt: echo the supplier + gross read back from the
+        // registered invoice so APPROVAL TWO names WHO and HOW MUCH, not a bare
+        // id. `total_gross` is the invoice-currency face value, labelled by
+        // `currency`; `total_gross_eur` is the EUR figure the ledger moved,
+        // surfaced only for a non-EUR invoice (for EUR it equals total_gross).
+        const hasEcho = outcome.value.echoedSupplierName !== undefined || outcome.value.echoedGross !== undefined;
+        const showEurGross = outcome.value.echoedBaseGross !== undefined
+          && outcome.value.echoedCurrency !== undefined
+          && outcome.value.echoedCurrency !== "EUR";
         return textResult({
           result: {
             confirmed_invoice_id: outcome.value.confirmedInvoiceId,
             status: outcome.value.status,
+            ...(outcome.value.echoedSupplierName !== undefined
+              ? { supplier_name: wrapUntrustedOcr(outcome.value.echoedSupplierName) }
+              : {}),
+            ...(outcome.value.echoedGross !== undefined
+              ? { total_gross: outcome.value.echoedGross }
+              : {}),
+            ...(outcome.value.echoedCurrency !== undefined
+              ? { currency: outcome.value.echoedCurrency }
+              : {}),
+            ...(showEurGross ? { total_gross_eur: outcome.value.echoedBaseGross } : {}),
           },
-          note: "Purchase invoice confirmed (registered) into the ledger. This is APPROVAL TWO (confirm).",
+          note: hasEcho
+            ? "Purchase invoice confirmed (registered) into the ledger. This is APPROVAL TWO (confirm). The supplier and gross above are the ledger-affecting values read back from the registered invoice; total_gross is in `currency`, and total_gross_eur (when shown) is the EUR amount booked."
+            : "Purchase invoice confirmed (registered) into the ledger. This is APPROVAL TWO (confirm).",
           mutation_occurred: true,
         });
       }

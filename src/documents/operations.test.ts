@@ -357,4 +357,50 @@ describe("AccountingDocumentOperations.confirmDraft", () => {
     if (outcome.ok) return;
     expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
   });
+
+  it("echoes the registered invoice's supplier name + gross read back after confirm (confirm receipt)", async () => {
+    const api = createAccountingWorkflowApi({
+      clientRows: [],
+      purchaseInvoiceRows: [],
+      purchaseInvoices: {
+        confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+        get: vi.fn().mockResolvedValue({ client_name: "Acme OÜ", gross_price: 100, cl_currencies_id: "USD", base_gross_price: 92.5 }),
+      },
+    });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createAccountingDocumentOperations(api, runtime);
+    const handle = mintConfirmPlan(runtime, 90_001);
+    const outcome = await ops.confirmDraft({ planHandle: handle, invoiceId: 90_001 });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(api.purchaseInvoices.get).toHaveBeenCalledWith(90_001);
+    expect(outcome.value.echoedSupplierName).toBe("Acme OÜ");
+    expect(outcome.value.echoedGross).toBe(100);
+    expect(outcome.value.echoedCurrency).toBe("USD");
+    expect(outcome.value.echoedBaseGross).toBe(92.5);
+  });
+
+  it("degrades to an id-only receipt (fail-safe) when the post-register read-back fails — registration is NOT rolled back", async () => {
+    const api = createAccountingWorkflowApi({
+      clientRows: [],
+      purchaseInvoiceRows: [],
+      purchaseInvoices: {
+        confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+        get: vi.fn().mockRejectedValue(new Error("read-back unavailable")),
+      },
+    });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createAccountingDocumentOperations(api, runtime);
+    const handle = mintConfirmPlan(runtime, 90_001);
+    const outcome = await ops.confirmDraft({ planHandle: handle, invoiceId: 90_001 });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(api.purchaseInvoices.confirm).toHaveBeenCalledWith(90_001);
+    expect(outcome.value.confirmedInvoiceId).toBe(90_001);
+    expect(outcome.value.mutationOccurred).toBe(true);
+    expect(outcome.value.echoedSupplierName).toBeUndefined();
+    expect(outcome.value.echoedGross).toBeUndefined();
+    expect(outcome.value.echoedCurrency).toBeUndefined();
+    expect(outcome.value.echoedBaseGross).toBeUndefined();
+  });
 });

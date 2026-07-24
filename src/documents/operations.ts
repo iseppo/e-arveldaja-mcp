@@ -542,7 +542,38 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       summary: `Confirmed purchase invoice ${input.invoiceId} from document`,
       details: {},
     });
-    return ok({ confirmedInvoiceId: input.invoiceId, status: "CONFIRMED", mutationOccurred: true, result });
+
+    // Best-effort confirm receipt: read the registered invoice back so the
+    // ledger-affecting approval names the supplier + gross, not a bare id.
+    // Reading the stored invoice entity is trusted ledger state (NOT a re-read of
+    // the OCR source), and it is FAIL-SAFE — the registration already succeeded,
+    // so a read-back error degrades to an id-only receipt, never a failure.
+    let echoedSupplierName: string | undefined;
+    let echoedGross: number | undefined;
+    let echoedCurrency: string | undefined;
+    let echoedBaseGross: number | undefined;
+    try {
+      const registered = await this.api.purchaseInvoices.get(input.invoiceId);
+      echoedSupplierName = registered.client_name !== undefined ? desandboxText(registered.client_name) : undefined;
+      echoedGross = registered.gross_price;
+      echoedCurrency = registered.cl_currencies_id;
+      echoedBaseGross = registered.base_gross_price;
+    } catch {
+      echoedSupplierName = undefined;
+      echoedGross = undefined;
+      echoedCurrency = undefined;
+      echoedBaseGross = undefined;
+    }
+    return ok({
+      confirmedInvoiceId: input.invoiceId,
+      status: "CONFIRMED",
+      mutationOccurred: true,
+      result,
+      ...(echoedSupplierName !== undefined ? { echoedSupplierName } : {}),
+      ...(echoedGross !== undefined ? { echoedGross } : {}),
+      ...(echoedCurrency !== undefined ? { echoedCurrency } : {}),
+      ...(echoedBaseGross !== undefined ? { echoedBaseGross } : {}),
+    });
   }
 }
 
