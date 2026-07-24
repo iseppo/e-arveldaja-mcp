@@ -35,7 +35,10 @@ export interface WorkflowActionV2 {
   next_action: WorkflowActionV2NextAction;
   alternative_action_count: number;
   blockers: WorkflowActionV2Blocker[];
-  workflow_handle: string;
+  // Present ONLY when the response carries pageable detail state. An item-less
+  // response mints no handle, so a stream of item-less guided responses can no
+  // longer fill the workflow-state store (§12).
+  workflow_handle?: string;
   page?: WorkflowActionV2Page;
 }
 
@@ -102,10 +105,13 @@ function blockerFrom(item: unknown): WorkflowActionV2Blocker {
  * next_action (routed through the same profile projection v1 uses, so a
  * fail-closed advanced action stays fail-closed), a numeric count of the
  * remaining alternatives instead of the full array, blockers derived from
- * needs_review, and an opaque server-owned workflow_handle. The optional page
- * reference is only actionable where get_workflow_page is visible in the active
- * profile; otherwise it stays latent (available:false, no handle) so the
- * envelope never points at a tool the caller cannot invoke.
+ * needs_review, and — only when there is pageable detail state — an opaque
+ * server-owned workflow_handle. An item-less response mints no handle and takes
+ * no store slot, so a stream of item-less guided responses cannot fill the
+ * workflow-state store (§12). The optional page reference is only actionable
+ * where get_workflow_page is visible in the active profile; otherwise it stays
+ * latent (available:false, no handle) so the envelope never points at a tool the
+ * caller cannot invoke.
  */
 export function buildWorkflowActionV2(
   envelope: WorkflowEnvelope,
@@ -114,11 +120,15 @@ export function buildWorkflowActionV2(
 ): WorkflowActionV2 {
   const status = deriveStatus(envelope);
   const items = options.items ?? [];
-  const workflowHandle = store.issue({
-    workflow: options.workflow ?? "accounting_inbox",
-    status,
-    items,
-  });
+  // Mint a workflow-state handle ONLY when there is pageable detail state. Every
+  // guided workflow response used to mint a fresh 30-minute handle even with zero
+  // pageable items, so ~128 rapid item-less calls could fill the store and start
+  // returning capacity errors. An item-less response now carries no handle, takes
+  // no store slot, and needs none — there is nothing to page (§12).
+  const hasPageableItems = items.length > 0;
+  const workflowHandle = hasPageableItems
+    ? store.issue({ workflow: options.workflow ?? "accounting_inbox", status, items })
+    : undefined;
   // Read collection/text fields defensively: a guided continue_accounting_workflow
   // envelope can be derived from user-supplied workflow_state_json and may lack
   // needs_review / summary entirely, so never dereference them non-defensively.
@@ -131,9 +141,9 @@ export function buildWorkflowActionV2(
     next_action: nextActionFrom(envelope.recommended_next_action),
     alternative_action_count: Math.max(0, availableActions.length - 1),
     blockers: arrayAt(record, "needs_review").map(blockerFrom),
-    workflow_handle: workflowHandle,
   };
-  if (items.length > 0) {
+  if (workflowHandle !== undefined) {
+    v2.workflow_handle = workflowHandle;
     const visible = isToolVisibleForProfile(WORKFLOW_PAGE_TOOL, currentToolProfile());
     v2.page = {
       available: visible,

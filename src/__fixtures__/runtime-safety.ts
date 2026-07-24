@@ -110,6 +110,7 @@ export function createTestRuntimeSafetyContext(
     fileReferenceStore,
     operationResultStore,
     workflowStateStore,
+    operationResultPageCursorSecret: Buffer.alloc(32, 7),
     getActiveScope,
     setNow(value: number) { now = value; },
     advanceTime(milliseconds: number) { now += milliseconds; },

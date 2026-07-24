@@ -227,6 +227,12 @@ export function createExecutionPlanPageHandler(
         ...(commands ? { commands: Object.freeze(commands) } : {}),
         ...(items ? { items: Object.freeze(items) } : {}),
       });
+      // Every profile's pager must enforce the hard budget. The standard/full
+      // pager is fixed-stride (50 per page, cursor offsets are multiples of the
+      // page size), so it cannot shrink a page the way the guided pager does;
+      // an oversized fixed page is a structured `response_budget_exceeded` error
+      // rather than a silently over-budget response.
+      if (mcpPayloadBytes(payload) > RESPONSE_BUDGETS.detail.hard) throw new ResponseBudgetError();
       return { content: [{ type: "text", text: toMcpJson(payload) }] };
     } catch (error) {
       return errorResult(error);

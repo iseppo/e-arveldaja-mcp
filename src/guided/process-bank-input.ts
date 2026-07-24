@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
@@ -121,7 +120,10 @@ export function registerProcessBankInputTool(
   const { elicit, defaultsStore, now = () => new Date() } = deps;
   const camtOperations = createCamtOperations(api, runtimeSafetyContext);
   const wiseOperations = createWiseOperations(api, runtimeSafetyContext);
-  const pageHandler = createOperationResultPageHandler(runtimeSafetyContext, { cursorSecret: randomBytes(32) });
+  // Sign show_details cursors with the ONE shared operation-result-page secret
+  // owned by the runtime context, so a cursor issued by get_operation_result_page
+  // is valid here and vice versa (P3 §14.4).
+  const pageHandler = createOperationResultPageHandler(runtimeSafetyContext, { cursorSecret: runtimeSafetyContext.operationResultPageCursorSecret });
 
   // Execute-only: mint a get_operation_result_page handle bound to the just
   // consumed plan. Fail-safe — the import already mutated, so a store failure

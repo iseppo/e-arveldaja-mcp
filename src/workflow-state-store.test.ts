@@ -31,6 +31,19 @@ describe("workflow state store", () => {
     expect(Object.isFrozen((stored.items[0] as any).nested)).toBe(true);
   });
 
+  it("admits a detail under the per-item budget but refuses one no page size could reach (item_too_large)", () => {
+    const runtime = createTestRuntimeSafetyContext();
+    const underHandle = runtime.workflowStateStore.issue(state([{ item_id: "1", text: "a".repeat(10_000) }]));
+    expect(runtime.workflowStateStore.inspect(underHandle).items).toHaveLength(1);
+
+    expect(() => runtime.workflowStateStore.issue(state([{ item_id: "2", text: "€".repeat(15_000) }])))
+      .toThrowError(expect.objectContaining({ code: "workflow_state_item_too_large" }));
+    expect(() => runtime.workflowStateStore.issue(state([{ item_id: "3", text: "x".repeat(20_001) }])))
+      .toThrowError(expect.objectContaining({ code: "workflow_state_item_too_large" }));
+
+    expect(runtime.workflowStateStore.activeCount).toBe(1);
+  });
+
   it("rejects proxies, accessors, cycles, unsafe keys, credentials, plans, commands, and approval state", () => {
     const runtime = createTestRuntimeSafetyContext();
     const cyclic: any = {}; cyclic.self = cyclic;

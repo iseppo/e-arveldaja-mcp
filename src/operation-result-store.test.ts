@@ -40,6 +40,25 @@ describe("operation result store", () => {
     expect(Object.isFrozen((stored.items[0] as any).nested)).toBe(true);
   });
 
+  it("admits a detail under the per-item budget but refuses one no page size could reach (item_too_large)", () => {
+    const runtime = createTestRuntimeSafetyContext();
+    // Just under the per-item render budget: admitted and pageable.
+    const underHandle = runtime.operationResultStore.issue(result(runtime, [{ item_id: "1", text: "a".repeat(10_000) }]));
+    expect(runtime.operationResultStore.inspect(underHandle).items).toHaveLength(1);
+
+    // Faithfully rendered but over the byte budget (multi-byte content pushes a
+    // one-item page over the hard budget): rejected at insertion, no slot taken.
+    expect(() => runtime.operationResultStore.issue(result(runtime, [{ item_id: "2", text: "€".repeat(15_000) }])))
+      .toThrowError(expect.objectContaining({ code: "operation_result_item_too_large" }));
+
+    // Over the sandbox display cap: would be replaced by the "too large"
+    // sentinel and silently lose its content — also rejected.
+    expect(() => runtime.operationResultStore.issue(result(runtime, [{ item_id: "3", text: "x".repeat(20_001) }])))
+      .toThrowError(expect.objectContaining({ code: "operation_result_item_too_large" }));
+
+    expect(runtime.operationResultStore.activeCount).toBe(1);
+  });
+
   it("rejects proxies, accessors, cycles, unsafe keys, credentials, plans, commands, and approval state", () => {
     const runtime = createTestRuntimeSafetyContext();
     const cyclic: any = {}; cyclic.self = cyclic;

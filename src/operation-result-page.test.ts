@@ -110,6 +110,28 @@ describe("operation result page", () => {
     expect(first.items[0].review_data).not.toBe(second.items[0].review_data);
   });
 
+  it("shares one cursor signer across entrypoints so a cursor issued by one is valid at the other (§14.4)", async () => {
+    const runtime = createTestRuntimeSafetyContext();
+    const handle = runtime.operationResultStore.issue({
+      operation: "test", status: "completed",
+      items: publicItems(Array.from({ length: 60 }, (_, i) => ({ i }))),
+      plan_handle: consumePlan(runtime),
+    });
+    // Entry A = the registered get_operation_result_page tool; Entry B = a guided
+    // façade's show_details path. Both sign with the ONE shared secret owned by
+    // the runtime context, so a cursor minted at A resumes correctly at B.
+    const entryA = createOperationResultPageHandler(runtime, { cursorSecret: runtime.operationResultPageCursorSecret });
+    const entryB = createOperationResultPageHandler(runtime, { cursorSecret: runtime.operationResultPageCursorSecret });
+    const firstFromA = await payload(entryA, { operation_handle: handle, page_size: 20 });
+    const secondFromB = await payload(entryB, { operation_handle: handle, cursor: firstFromA.next_cursor, page_size: 20 });
+    expect(secondFromB.range).toEqual({ from: 21, to: 40, count: 20 });
+
+    // A handler signing with any other secret must reject that cursor — proving
+    // the cross-entrypoint validity comes from the shared secret, not chance.
+    const mismatched = createOperationResultPageHandler(runtime, { cursorSecret: Buffer.alloc(32, 99) });
+    expect((await mismatched({ operation_handle: handle, cursor: firstFromA.next_cursor, page_size: 20 })).isError).toBe(true);
+  });
+
   it("pins the consumed-plan proof for the live result TTL despite unrelated plan churn", async () => {
     const runtime = createTestRuntimeSafetyContext({ planStore: { maxTombstones: 1 } });
     const proof = consumePlan(runtime);

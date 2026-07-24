@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -97,5 +97,8 @@ export function registerOperationResultTools(server: McpServer, runtimeSafetyCon
       cursor: z.string().max(128).optional().describe("Optional opaque cursor returned by the preceding page"),
       page_size: z.number().int().min(1).max(MAX_OPERATION_RESULT_PAGE_SIZE).optional().describe("Maximum items to return. Default: 20; maximum: 50"),
     }, { ...readOnly, title: "Get Operation Result Page" },
-    createOperationResultPageHandler(runtimeSafetyContext, { cursorSecret: randomBytes(CURSOR_SECRET_BYTES) }));
+    // Sign with the ONE shared cursor secret owned by the runtime context so a
+    // cursor issued here is also valid at the façade show_details entrypoint
+    // (P3 §14.4). Never mint a fresh per-registration secret.
+    createOperationResultPageHandler(runtimeSafetyContext, { cursorSecret: runtimeSafetyContext.operationResultPageCursorSecret }));
 }

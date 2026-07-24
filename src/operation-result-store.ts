@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { types as utilTypes } from "node:util";
 import { cloneAndFreezePlanData, type PlanData } from "./plan-store.js";
+import { detailItemFitsSinglePage } from "./response-budget.js";
 import type { RuntimeSafetyScope } from "./runtime-safety-context.js";
 
 export const OPERATION_RESULT_TTL_MS = 600_000;
@@ -81,7 +82,8 @@ export interface StoredOperationResult {
 }
 export type OperationResultStoreErrorCode =
   | "operation_result_capacity_exceeded" | "operation_result_handle_invalid" | "operation_result_expired"
-  | "operation_result_scope_mismatch" | "operation_result_data_invalid" | "operation_result_handle_collision";
+  | "operation_result_scope_mismatch" | "operation_result_data_invalid" | "operation_result_handle_collision"
+  | "operation_result_item_too_large";
 
 const MESSAGES: Readonly<Record<OperationResultStoreErrorCode, string>> = Object.freeze({
   operation_result_capacity_exceeded: "The operation-result store is full. Wait for a result to expire.",
@@ -90,6 +92,7 @@ const MESSAGES: Readonly<Record<OperationResultStoreErrorCode, string>> = Object
   operation_result_scope_mismatch: "The operation-result handle no longer matches the active runtime scope.",
   operation_result_data_invalid: "The operation result contains unsafe or oversized data.",
   operation_result_handle_collision: "Unable to allocate a unique operation-result handle.",
+  operation_result_item_too_large: "A single operation-result detail is too large to page within the response budget.",
 });
 
 const PUBLIC_DETAIL_SCALAR_FIELDS = new Set([
@@ -296,6 +299,13 @@ export class OperationResultStore {
     assertPublicProjection(safeInput.items);
     const publicItems = safeInput.items.map(readPublicOperationResultDetail);
     const items = cloneAndFreezePlanData(publicItems) as readonly PlanData[];
+    // Refuse any single detail too large to be returned as a one-item page. This
+    // runs before any side effect (no capacity slot taken, no plan proof pinned),
+    // so an oversized item is a clean structured error rather than an admitted
+    // detail no page size could ever reach.
+    for (const item of items) {
+      if (!detailItemFitsSinglePage(item)) throw new OperationResultStoreError("operation_result_item_too_large");
+    }
     const now = this.#readNow();
     const expiresAt = now + this.#ttlMs;
     if (!Number.isSafeInteger(expiresAt)) invalid();

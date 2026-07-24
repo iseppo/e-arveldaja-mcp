@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createTestRuntimeSafetyContext } from "./__fixtures__/runtime-safety.js";
 import { runWithToolProfile } from "./tool-profile.js";
+import { createPublicWorkflowStateDetail } from "./workflow-state-store.js";
 import {
   approvalPreviewFromDryRunStep,
   buildWorkflowEnvelope,
@@ -375,14 +376,30 @@ describe("profile-gated v1/v2 workflow projection", () => {
   it("emits the compact v2 envelope for guided and guided-sales", () => {
     for (const profile of ["guided", "guided-sales"] as const) {
       const runtime = createTestRuntimeSafetyContext({ scope: { profile } });
+      // A response WITH pageable detail state mints and carries a workflow handle.
+      const items = [createPublicWorkflowStateDetail({ item_id: "1", label: "row one" })];
+      const result = runWithToolProfile(profile, () => projectWorkflowResponse(
+        runWithToolProfile(profile, () => envelope()),
+        runtime.workflowStateStore,
+        { workflow: "accounting_inbox", items },
+      ));
+      expect(result.contract).toBe("workflow_action_v2");
+      expect(result).not.toHaveProperty("available_actions");
+      expect((result as { workflow_handle: string }).workflow_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    }
+  });
+
+  it("mints no workflow handle for an item-less guided v2 envelope (§12)", () => {
+    for (const profile of ["guided", "guided-sales"] as const) {
+      const runtime = createTestRuntimeSafetyContext({ scope: { profile } });
       const result = runWithToolProfile(profile, () => projectWorkflowResponse(
         runWithToolProfile(profile, () => envelope()),
         runtime.workflowStateStore,
         { workflow: "accounting_inbox" },
       ));
       expect(result.contract).toBe("workflow_action_v2");
-      expect(result).not.toHaveProperty("available_actions");
-      expect((result as { workflow_handle: string }).workflow_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect((result as { workflow_handle?: string }).workflow_handle).toBeUndefined();
+      expect(runtime.workflowStateStore.activeCount).toBe(0);
     }
   });
 });
