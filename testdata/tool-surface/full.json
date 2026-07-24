@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 149500,
-    "descriptionsBytes": 19979,
-    "inputSchemasBytes": 94038,
+    "toolsListBytes": 149724,
+    "descriptionsBytes": 20068,
+    "inputSchemasBytes": 94173,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 3938
@@ -5906,7 +5906,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Search persisted accounting records by a bounded entity + filters. entity ∈ journals|transactions|clients|purchase_invoices|sale_invoices|products. Filters are per-entity (page, date_from/date_to, status, payment_status, clients_id). Brief view by default; view='full' returns every field. Use inspect_accounting_record for one record's detail.",
+      "description": "Search persisted accounting records by a bounded entity + filters. entity ∈ journals|transactions|clients|purchase_invoices|sale_invoices|products. Filters are per-entity (page, date_from/date_to, status, payment_status, clients_id); clients also accept query (fuzzy name search, e.g. find a supplier/customer id by name). Brief view by default; view='full' returns every field. Use inspect_accounting_record for one record's detail.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -5947,6 +5947,10 @@
           },
           "payment_status": {
             "description": "Filter by payment status (invoices).",
+            "type": "string"
+          },
+          "query": {
+            "description": "clients: find by name (fuzzy); when set, page is ignored and all matches return in one page.",
             "type": "string"
           },
           "status": {

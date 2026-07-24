@@ -41,6 +41,7 @@ interface SearchArgs {
   status?: string;
   payment_status?: string;
   clients_id?: number;
+  query?: string;
   view?: ListView;
 }
 
@@ -56,7 +57,7 @@ export function registerSearchAccountingRecordsTool(
 
   registerTool(server,
     "search_accounting_records",
-    "Search persisted accounting records by a bounded entity + filters. entity ∈ journals|transactions|clients|purchase_invoices|sale_invoices|products. Filters are per-entity (page, date_from/date_to, status, payment_status, clients_id). Brief view by default; view='full' returns every field. Use inspect_accounting_record for one record's detail.",
+    "Search persisted accounting records by a bounded entity + filters. entity ∈ journals|transactions|clients|purchase_invoices|sale_invoices|products. Filters are per-entity (page, date_from/date_to, status, payment_status, clients_id); clients also accept query (fuzzy name search, e.g. find a supplier/customer id by name). Brief view by default; view='full' returns every field. Use inspect_accounting_record for one record's detail.",
     {
       entity: z.enum(RECORD_ENTITIES).describe("Which record set to search."),
       page: z.number().int().positive().optional().describe("Page number (default 1)."),
@@ -65,6 +66,7 @@ export function registerSearchAccountingRecordsTool(
       status: z.string().optional().describe("Filter by status (invoices/transactions)."),
       payment_status: z.string().optional().describe("Filter by payment status (invoices)."),
       clients_id: z.number().int().positive().optional().describe("Filter by counterparty (invoices/transactions)."),
+      query: z.string().optional().describe("clients: find by name (fuzzy); when set, page is ignored and all matches return in one page."),
       view: z.enum(["brief", "full"]).optional().describe("brief (default) triage fields; full every field."),
     },
     { ...readOnly, title: "Search Accounting Records" },
@@ -78,6 +80,7 @@ export function registerSearchAccountingRecordsTool(
           ...(args.status !== undefined ? { status: args.status } : {}),
           ...(args.payment_status !== undefined ? { payment_status: args.payment_status } : {}),
           ...(args.clients_id !== undefined ? { clients_id: args.clients_id } : {}),
+          ...(args.query !== undefined ? { query: args.query } : {}),
         },
       });
       if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code }, true);

@@ -1,6 +1,7 @@
 import type { OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { ListParams } from "../api/base-resource.js";
+import { desandboxText } from "../external-text-renderer.js";
 import type {
   AccountingRecord,
   InspectAccountingRecordInput,
@@ -27,7 +28,7 @@ type FilterKey = keyof RecordSearchFilters;
 const ENTITY_FILTERS: Record<RecordEntity, ReadonlySet<FilterKey>> = {
   journals: new Set<FilterKey>(["page", "date_from", "date_to"]),
   transactions: new Set<FilterKey>(["page", "date_from", "date_to", "status", "clients_id"]),
-  clients: new Set<FilterKey>(["page"]),
+  clients: new Set<FilterKey>(["page", "query"]),
   purchase_invoices: new Set<FilterKey>(["page", "date_from", "date_to", "status", "payment_status", "clients_id"]),
   sale_invoices: new Set<FilterKey>(["page", "date_from", "date_to", "status", "payment_status", "clients_id"]),
   products: new Set<FilterKey>(["page"]),
@@ -78,6 +79,23 @@ class RecordOperationsImpl implements RecordOperations {
       if (!allowed.has(key)) {
         return fail("filter_not_allowed", `Filter "${key}" is not allowed for entity "${input.entity}".`);
       }
+    }
+
+    // clients name search: reuse the EXACT matcher search_client performs
+    // (api.clients.findByName — the single source of truth), so results are
+    // byte-identical to search_client for the same query. Strip sandbox markers
+    // first (desandboxText), exactly as search_client does, so a name
+    // round-tripped from a wrapped read still matches. `query` is bound to
+    // clients only by the allowlist above; any other entity is already rejected.
+    if (input.entity === "clients" && filters.query !== undefined) {
+      const matches = await this.api.clients.findByName(desandboxText(filters.query));
+      return ok({
+        entity: "clients",
+        page: 1,
+        total_pages: 1,
+        total_items: matches.length,
+        items: matches,
+      });
     }
 
     const params: ListParams = { page: filters.page ?? 1 };

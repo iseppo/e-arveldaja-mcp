@@ -27,6 +27,8 @@ export interface RecordSearchFilters {
   readonly status?: string;
   readonly payment_status?: string;
   readonly clients_id?: number;
+  /** clients-ONLY: fuzzy name search (same matcher as search_client). */
+  readonly query?: string;
 }
 
 export interface SearchAccountingRecordsInput {

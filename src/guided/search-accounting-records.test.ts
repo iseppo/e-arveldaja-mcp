@@ -51,6 +51,23 @@ describe("search_accounting_records façade", () => {
     expect(result.isError).toBe(true);
     expect(parse(result).category).toBe("filter_not_allowed");
   });
+
+  it("clients query='name' finds by fuzzy name via the shared search_client matcher", async () => {
+    const findByName = vi.fn().mockResolvedValue([{ id: 7, name: "Bolt OÜ" }]);
+    const api = makeApi({ clients: { list: vi.fn(), get: vi.fn(), findByName } });
+    const handler = setupSearch(api);
+    const result = await handler({ entity: "clients", query: "bolt" });
+    expect(result.isError).toBeFalsy();
+    expect(findByName).toHaveBeenCalledWith("bolt");
+    expect(parse(result).items.length).toBe(1);
+  });
+
+  it("rejects query on a non-clients entity (bounded allowlist intact)", async () => {
+    const handler = setupSearch(makeApi());
+    const result = await handler({ entity: "transactions", query: "bolt" });
+    expect(result.isError).toBe(true);
+    expect(parse(result).category).toBe("filter_not_allowed");
+  });
 });
 
 describe("inspect_accounting_record façade", () => {
