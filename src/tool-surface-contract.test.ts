@@ -27,8 +27,13 @@ describe("MCP tool-surface contract", () => {
       captureToolSurface("guided"), captureToolSurface("guided-sales"), captureToolSurface("standard"),
       captureToolSurface("default"), captureToolSurface("full"),
     ]);
-    expect(guided.tools.length).toBeLessThanOrEqual(20);
-    expect(guidedSales.tools.length).toBeLessThanOrEqual(20);
+    // Guided is sized for routing clarity, not token cost. The design TARGET is
+    // <=20; 21-24 is a deliberate recorded-exception band and 24 is the hard
+    // backstop above which the surface must be redesigned by merging, not grown.
+    // This guard enforces the backstop; the target and add/don't-add criteria
+    // live in docs/guided-tool-policy.md. (Today both are 19/20, well under.)
+    expect(guided.tools.length).toBeLessThanOrEqual(24);
+    expect(guidedSales.tools.length).toBeLessThanOrEqual(24);
     const directDestructiveCrud = /^(?:delete|confirm|invalidate)_(?:client|product|journal|transaction|sale_invoice|purchase_invoice)$/;
     expect(guided.tools.map(({ name }) => name).filter((name) => directDestructiveCrud.test(name))).toEqual([]);
     expect(guidedSales.tools.map(({ name }) => name).filter((name) => directDestructiveCrud.test(name))).toEqual([]);
