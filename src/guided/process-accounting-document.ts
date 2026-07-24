@@ -281,28 +281,34 @@ export function registerProcessAccountingDocumentTool(
         // id. `total_gross` is the invoice-currency face value, labelled by
         // `currency`; `total_gross_eur` is the EUR figure the ledger moved,
         // surfaced only for a non-EUR invoice (for EUR it equals total_gross).
-        const hasEcho = outcome.value.echoedSupplierName !== undefined || outcome.value.echoedGross !== undefined;
-        const showEurGross = outcome.value.echoedBaseGross !== undefined
-          && outcome.value.echoedCurrency !== undefined
+        // Distinct receipt branches (P3 §14.1): only claim what was actually
+        // read back, and never surface an amount without its currency label.
+        const supplierKnown = outcome.value.echoedSupplierName !== undefined;
+        const grossKnown = outcome.value.echoedGross !== undefined && outcome.value.echoedCurrency !== undefined;
+        const showEurGross = grossKnown
+          && outcome.value.echoedBaseGross !== undefined
           && outcome.value.echoedCurrency !== "EUR";
+        const base = "Purchase invoice confirmed (registered) into the ledger. This is APPROVAL TWO (confirm).";
+        const note = supplierKnown && grossKnown
+          ? `${base} The supplier and gross above are the ledger-affecting values read back from the registered invoice; total_gross is in \`currency\`, and total_gross_eur (when shown) is the EUR amount booked.`
+          : supplierKnown
+            ? `${base} The supplier above is the ledger-affecting value read back from the registered invoice; the gross could not be read back.`
+            : grossKnown
+              ? `${base} The gross above (labelled by \`currency\`) is the ledger-affecting value read back from the registered invoice; the supplier could not be read back.`
+              : base;
         return textResult({
           result: {
             confirmed_invoice_id: outcome.value.confirmedInvoiceId,
             status: outcome.value.status,
-            ...(outcome.value.echoedSupplierName !== undefined
+            ...(supplierKnown
               ? { supplier_name: wrapUntrustedOcr(outcome.value.echoedSupplierName) }
               : {}),
-            ...(outcome.value.echoedGross !== undefined
-              ? { total_gross: outcome.value.echoedGross }
-              : {}),
-            ...(outcome.value.echoedCurrency !== undefined
-              ? { currency: outcome.value.echoedCurrency }
+            ...(grossKnown
+              ? { total_gross: outcome.value.echoedGross, currency: outcome.value.echoedCurrency }
               : {}),
             ...(showEurGross ? { total_gross_eur: outcome.value.echoedBaseGross } : {}),
           },
-          note: hasEcho
-            ? "Purchase invoice confirmed (registered) into the ledger. This is APPROVAL TWO (confirm). The supplier and gross above are the ledger-affecting values read back from the registered invoice; total_gross is in `currency`, and total_gross_eur (when shown) is the EUR amount booked."
-            : "Purchase invoice confirmed (registered) into the ledger. This is APPROVAL TWO (confirm).",
+          note,
           mutation_occurred: true,
         });
       }

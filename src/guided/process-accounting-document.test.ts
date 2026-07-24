@@ -449,6 +449,54 @@ describe("process_accounting_document", () => {
     expect(confirmed.result.total_gross_eur).toBe(92.5);
   });
 
+  function confirmSetupWithReadback(readback: Record<string, unknown>) {
+    return setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockResolvedValue(readback),
+        createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_001, status: "SAVED" }),
+        confirmWithTotals: vi.fn(),
+        confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+  }
+
+  async function confirmWithReadback(readback: Record<string, unknown>) {
+    const { path, sha256 } = writeTempPdf();
+    const { handler } = confirmSetupWithReadback(readback);
+    const created = await createDraft(handler, path, sha256);
+    return parse(await handler({ mode: "confirm", invoice_id: created.confirm_plan.invoice_id, plan_handle: created.confirm_plan.plan_handle }));
+  }
+
+  it("confirm receipt with ONLY a supplier read back never claims the gross is shown (P3 §14.1 branch)", async () => {
+    const confirmed = await confirmWithReadback({ client_name: "Acme OÜ" });
+    expect(confirmed.result.supplier_name).toContain("Acme OÜ");
+    expect("total_gross" in confirmed.result).toBe(false);
+    expect("currency" in confirmed.result).toBe(false);
+    expect(confirmed.note).toContain("the gross could not be read back");
+    expect(confirmed.note).not.toContain("supplier and gross above");
+  });
+
+  it("confirm receipt with ONLY an amount+currency read back never claims the supplier is shown (P3 §14.1 branch)", async () => {
+    const confirmed = await confirmWithReadback({ gross_price: 42.5, cl_currencies_id: "EUR" });
+    expect("supplier_name" in confirmed.result).toBe(false);
+    expect(confirmed.result.total_gross).toBe(42.5);
+    expect(confirmed.result.currency).toBe("EUR");
+    expect(confirmed.note).toContain("the supplier could not be read back");
+  });
+
+  it("confirm receipt suppresses an amount whose currency label is missing — a gross is never surfaced unlabelled (P3 §14.1)", async () => {
+    const confirmed = await confirmWithReadback({ client_name: "Acme OÜ", gross_price: 42.5 });
+    expect("total_gross" in confirmed.result).toBe(false);
+    expect("currency" in confirmed.result).toBe(false);
+    expect(confirmed.result.supplier_name).toContain("Acme OÜ");
+  });
+
   it("confirm response is an id-only receipt (no echo keys, no ledger-affecting note) when the read-back is absent", async () => {
     const { path, sha256 } = writeTempPdf();
     const { handler } = confirmCapableSetup();
