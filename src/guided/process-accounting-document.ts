@@ -17,6 +17,7 @@ import { formatDuplicatePostingWarnings } from "../bank-posting-duplicate-guard.
 import type { AccountingDocumentPreview } from "../documents/types.js";
 import type { Resolution } from "../resolution/types.js";
 import type { SupplierRef } from "../resolution/supplier-default-resolution.js";
+import type { Elicitor } from "../elicitation.js";
 
 // GUIDED FAÇADE. `process_accounting_document` unifies the single-document
 // purchase-invoice booking flow (extract → validate → resolve supplier → check
@@ -178,12 +179,19 @@ interface DocArgs {
   block_on_duplicate?: boolean;
 }
 
+export interface ProcessAccountingDocumentDeps {
+  /** Capability-aware elicitor. Absent (tests) ⇒ text needs_input only. */
+  elicit?: Elicitor;
+}
+
 export function registerProcessAccountingDocumentTool(
   server: McpServer,
   api: ApiContext,
   runtimeSafetyContext: RuntimeSafetyContext,
+  deps: ProcessAccountingDocumentDeps = {},
 ): void {
   assertRuntimeSafetyContext(runtimeSafetyContext);
+  const { elicit } = deps;
   const operations = createAccountingDocumentOperations(api, runtimeSafetyContext);
 
   registerTool(server,
@@ -251,7 +259,52 @@ export function registerProcessAccountingDocumentTool(
           ...(args.supplier_client_id !== undefined ? { overrides: { supplier_client_id: args.supplier_client_id } } : {}),
         });
         if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
-        const rendered = renderPreview(outcome.value);
+
+        // Capability-aware supplier elicitation: when the supplier is ambiguous
+        // and no override was supplied, offer the bounded choice as a form. On an
+        // answer, RE-RUN prepare with the chosen supplier_client_id override (the
+        // answer is never trusted straight into a booking); on an unsupported
+        // client, fall through to the existing compact needs_input preview. No
+        // secret is ever elicited, and no supplier default is persisted.
+        let preview = outcome.value;
+        const supplierResolution = preview.supplierResolution;
+        // Only offer a form when the resolver produced BOUNDED choices. Supplier
+        // resolution currently surfaces `ambiguous` as an empty-choice "resolve
+        // manually" conflict (or `not_found`) — nothing to pick from — so this is
+        // dormant for suppliers and falls through to the existing needs_input
+        // question. It engages if/when a resolver offers concrete candidates.
+        if (
+          elicit &&
+          args.supplier_client_id === undefined &&
+          supplierResolution.status === "ambiguous" &&
+          supplierResolution.choices.length > 0
+        ) {
+          const choices = supplierResolution.choices;
+          const elicited = await elicit({
+            message: "Which supplier is this invoice from?",
+            fields: {
+              supplier_client_id: {
+                type: "enum",
+                title: "Supplier",
+                choices: choices.map(choice => ({ const: choice.id, title: wrapUntrustedOcr(choice.label) ?? choice.id })),
+              },
+            },
+            required: ["supplier_client_id"],
+            needsInput: supplierNeedsInput(supplierResolution),
+          });
+          if (elicited.kind === "answered") {
+            const chosenRaw = elicited.content.supplier_client_id;
+            const chosen = typeof chosenRaw === "string" || typeof chosenRaw === "number" ? Number(chosenRaw) : NaN;
+            if (Number.isInteger(chosen) && choices.some(c => c.id === String(chosen))) {
+              const reRun = await operations.prepare({ source, snapshot, overrides: { supplier_client_id: chosen } });
+              if (reRun.ok) preview = reRun.value;
+            }
+          }
+          // declined / unsupported ⇒ keep the original preview (its needs_input
+          // question is the text fallback).
+        }
+
+        const rendered = renderPreview(preview);
         return textResult(rendered.summary.status === "needs_input"
           ? { status: "needs_input", ...rendered }
           : rendered);

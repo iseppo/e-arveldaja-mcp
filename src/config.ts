@@ -105,6 +105,7 @@ const SERVERS = {
 
 const APP_CONFIG_DIR_NAME = "e-arveldaja-mcp";
 const GLOBAL_ENV_FILE_NAME = ".env";
+const CONNECTION_DEFAULTS_FILE_NAME = "connection-defaults.json";
 const CWD = process.cwd();
 const API_CREDENTIAL_ENV_KEYS = [
   "EARVELDAJA_API_KEY_ID",
@@ -275,23 +276,29 @@ function escapeForLog(text: string): string {
   return text.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }
 
-function validateCredentialFile(filePath: string): boolean {
+/**
+ * Read-side security gate shared by credential loading and the connection-defaults
+ * store: a private file is safe to READ only when it is a real (non-symlink) file,
+ * owned by the current user, and NOT accessible by group/others (mode & 0o077 === 0).
+ * Any I/O error (incl. ENOENT) → false. `kind` labels the file in warnings.
+ */
+export function isSecurePrivateFile(filePath: string, kind = "credential file"): boolean {
   try {
     const fileInfo = lstatSync(filePath);
     if (fileInfo.isSymbolicLink()) {
-      process.stderr.write(`WARNING: Ignoring symlinked credential file: ${escapeForLog(filePath)}\n`);
+      process.stderr.write(`WARNING: Ignoring symlinked ${kind}: ${escapeForLog(filePath)}\n`);
       return false;
     }
 
     const stats = statSync(filePath);
     if (!stats.isFile()) {
-      process.stderr.write(`WARNING: Ignoring non-file credential path: ${escapeForLog(filePath)}\n`);
+      process.stderr.write(`WARNING: Ignoring non-file ${kind} path: ${escapeForLog(filePath)}\n`);
       return false;
     }
 
     if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
       process.stderr.write(
-        `WARNING: Ignoring credential file not owned by the current user: ${escapeForLog(filePath)}\n`
+        `WARNING: Ignoring ${kind} not owned by the current user: ${escapeForLog(filePath)}\n`
       );
       return false;
     }
@@ -308,6 +315,10 @@ function validateCredentialFile(filePath: string): boolean {
   } catch {
     return false;
   }
+}
+
+function validateCredentialFile(filePath: string): boolean {
+  return isSecurePrivateFile(filePath, "credential file");
 }
 
 function toUniqueDirs(dirs: string[]): string[] {
@@ -370,6 +381,13 @@ export function getGlobalConfigDir(): string {
 
 export function getGlobalEnvFile(globalConfigDir = getGlobalConfigDir()): string {
   return resolve(globalConfigDir, GLOBAL_ENV_FILE_NAME);
+}
+
+/** Path to the connection-scoped persisted-defaults store. Lives under the same
+ * per-user global config dir credentials use (honors EARVELDAJA_CONFIG_DIR) — NOT
+ * the accounting-rules bundle, so it also works under single-file rules mode. */
+export function getConnectionDefaultsFile(globalConfigDir = getGlobalConfigDir()): string {
+  return resolve(globalConfigDir, CONNECTION_DEFAULTS_FILE_NAME);
 }
 
 export function getCredentialSetupInfo(
@@ -739,11 +757,23 @@ function removeStoredCredentialBlock(
   return next;
 }
 
-function writePrivateEnvFile(filePath: string, content: string): void {
+/**
+ * Atomic + private (0600) write, shared by every secret/hint file the server
+ * persists. Refuses to write through a symlinked target, creates the parent dir
+ * 0700, writes content into a 0600 temp in the SAME directory, enforces its mode
+ * explicitly, then renames over the target. This guarantees the content is never
+ * briefly present in a world-readable (0644) file — as it would be if we wrote
+ * into an existing 0644 file and chmod'd AFTER — and a failed permission
+ * tightening aborts loudly rather than silently leaving it world-readable.
+ *
+ * Exported so the connection-defaults store reuses the EXACT same 0600-atomic
+ * primitive as the credential .env writer; the two paths must never diverge.
+ */
+export function writePrivateFile(filePath: string, content: string): void {
   try {
     const info = lstatSync(filePath);
     if (info.isSymbolicLink()) {
-      throw new Error(`Refusing to write .env through symlink: ${filePath}`);
+      throw new Error(`Refusing to write through symlink: ${filePath}`);
     }
   } catch (error) {
     if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -751,18 +781,12 @@ function writePrivateEnvFile(filePath: string, content: string): void {
     } else if (error instanceof Error) {
       throw error;
     } else {
-      throw new Error(`Could not prepare env file for writing: ${filePath}`);
+      throw new Error(`Could not prepare file for writing: ${filePath}`);
     }
     // File may not exist yet.
   }
 
   mkdirSync(resolve(filePath, ".."), { recursive: true, mode: 0o700 });
-  // Atomic + private write: create a 0600 temp in the same directory, enforce
-  // its mode explicitly, then rename over the target. This guarantees the secret
-  // is never briefly present in a world-readable (0644) file — as it would be if
-  // we wrote content into an existing 0644 file and chmod'd it AFTER — and a
-  // failed permission tightening aborts loudly rather than silently leaving the
-  // password world-readable.
   const tmpPath = `${filePath}.tmp-${process.pid}`;
   try {
     writeFileSync(tmpPath, content, { mode: 0o600 });
@@ -772,6 +796,10 @@ function writePrivateEnvFile(filePath: string, content: string): void {
     try { unlinkSync(tmpPath); } catch { /* temp may not exist */ }
     throw error;
   }
+}
+
+function writePrivateEnvFile(filePath: string, content: string): void {
+  writePrivateFile(filePath, content);
 }
 
 export function serializeEnvFile(

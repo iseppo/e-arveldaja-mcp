@@ -240,9 +240,11 @@ function verifySavedDefault(pointer: SavedBankDefaultPointer, input: BankResolut
     if (pointer.ledgerAccountId !== input.expectedLedgerAccountId) return false;
     if (dim.accounts_id !== input.expectedLedgerAccountId) return false;
   }
-  // currency constraint
-  if (input.statementCurrency !== undefined && pointer.currency !== undefined &&
-    pointer.currency !== input.statementCurrency) {
+  // currency constraint — FAIL-CLOSED (F-SAVED-DEFAULT-CURRENCY-FAILCLOSED):
+  // a statement that carries a currency requires the pointer to carry a MATCHING
+  // one. An undefined pointer.currency no longer passes a currency-bearing
+  // statement (that was fail-OPEN → same-connection wrong-currency book).
+  if (input.statementCurrency !== undefined && pointer.currency !== input.statementCurrency) {
     return false;
   }
   // IBAN constraint

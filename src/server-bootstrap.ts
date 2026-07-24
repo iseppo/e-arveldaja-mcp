@@ -46,6 +46,8 @@ import { registerReceiptInboxTools } from "./tools/receipt-inbox.js";
 import { registerLightyearTools } from "./tools/lightyear-investments.js";
 import { registerWiseImportTools } from "./tools/wise-import.js";
 import { registerCamtImportTools } from "./tools/camt-import.js";
+import { createElicitor } from "./elicitation.js";
+import { createConnectionDefaultsStore, type ConnectionDefaultsStore } from "./connection-defaults-store.js";
 import { registerProcessBankInputTool } from "./guided/process-bank-input.js";
 import { registerProcessAccountingDocumentTool } from "./guided/process-accounting-document.js";
 import { registerRunAccountingReportTool } from "./guided/run-accounting-report.js";
@@ -274,41 +276,39 @@ async function verifyImportedCredentials(config: Config): Promise<{ companyName:
 async function resolveCredentialStorageScope(
   server: McpServer,
 ): Promise<CredentialStorageScope | null> {
-  try {
-    const result = await server.server.elicitInput({
-      mode: "form",
-      message: "Where should this e-arveldaja configuration be available?",
-      requestedSchema: {
-        type: "object",
-        properties: {
-          storage_scope: {
-            type: "string",
-            title: "Configuration availability",
-            description: "Choose whether this verified configuration should work only when you start the MCP server from this folder, or from any folder on this computer.",
-            oneOf: [
-              { const: "global", title: "Any folder on this computer" },
-              { const: "local", title: "Only this folder" },
-            ],
-            default: "global",
-          },
-        },
-        required: ["storage_scope"],
+  // Behavior-preserving: routes the storage-scope form through the shared
+  // capability-aware elicitation wrapper (proves the generalization). An
+  // unsupported client still surfaces the same friendly "call with storage_scope"
+  // guidance; decline/cancel still returns null.
+  const outcome = await createElicitor(server)({
+    message: "Where should this e-arveldaja configuration be available?",
+    fields: {
+      storage_scope: {
+        type: "enum",
+        title: "Configuration availability",
+        description: "Choose whether this verified configuration should work only when you start the MCP server from this folder, or from any folder on this computer.",
+        choices: [
+          { const: "global", title: "Any folder on this computer" },
+          { const: "local", title: "Only this folder" },
+        ],
+        default: "global",
       },
-    });
+    },
+    required: ["storage_scope"],
+    // Unused as a payload here — an unsupported client is translated into the
+    // established friendly throw below rather than a needs_input response.
+    needsInput: { status: "needs_input", category: "credential_storage_scope_required" },
+  });
 
-    if (result.action !== "accept" || !result.content || typeof result.content.storage_scope !== "string") {
-      return null;
-    }
-
-    return result.content.storage_scope === "local" ? "local" : "global";
-  } catch (error) {
-    if (error instanceof Error && /Client does not support form elicitation/i.test(error.message)) {
-      throw new Error(
-        "Client does not support interactive setup prompting. Call import_apikey_credentials with storage_scope=\"local\" for this folder only or storage_scope=\"global\" to make it available when starting the MCP server from any folder."
-      );
-    }
-    throw error;
+  if (outcome.kind === "unsupported") {
+    throw new Error(
+      "Client does not support interactive setup prompting. Call import_apikey_credentials with storage_scope=\"local\" for this folder only or storage_scope=\"global\" to make it available when starting the MCP server from any folder."
+    );
   }
+  if (outcome.kind === "declined") return null;
+  const scope = outcome.content.storage_scope;
+  if (typeof scope !== "string") return null;
+  return scope === "local" ? "local" : "global";
 }
 
 function describeCredentialAvailability(storageScope: CredentialStorageScope): string {
@@ -965,8 +965,19 @@ export async function createMcpServer(
   if (toolExposure.enableLightyear) registerLightyearTools(publicServer, api, runtimeSafetyContext);
   registerWiseImportTools(publicServer, api, runtimeSafetyContext);
   registerCamtImportTools(publicServer, api, runtimeSafetyContext, toolExposure);
-  registerProcessBankInputTool(publicServer, api, runtimeSafetyContext);
-  registerProcessAccountingDocumentTool(publicServer, api, runtimeSafetyContext);
+  // Guided-façade shared services: a capability-aware elicitor over the scoped
+  // server, and the secure connection-defaults store that makes the persisted
+  // saved-bank-default rung live. Both are inert until a client answers an
+  // ambiguity form (elicitor) or a hint is persisted with explicit consent.
+  const guidedElicitor = createElicitor(publicServer);
+  const connectionDefaultsStore: ConnectionDefaultsStore = createConnectionDefaultsStore();
+  registerProcessBankInputTool(publicServer, api, runtimeSafetyContext, {
+    elicit: guidedElicitor,
+    defaultsStore: connectionDefaultsStore,
+  });
+  registerProcessAccountingDocumentTool(publicServer, api, runtimeSafetyContext, {
+    elicit: guidedElicitor,
+  });
   registerRunAccountingReportTool(publicServer, api, toolExposure);
   registerSearchAccountingRecordsTool(publicServer, api, toolExposure);
   registerInspectAccountingRecordTool(publicServer, api, toolExposure);

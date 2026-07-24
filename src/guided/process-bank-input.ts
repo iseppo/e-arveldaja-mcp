@@ -36,9 +36,13 @@ import {
 } from "../wise/presenter.js";
 import {
   buildBankDimensionCandidates,
-  resolveBankAccountSync,
+  resolveBankAccount,
+  type BankResolutionInput,
 } from "../resolution/bank-account-resolution.js";
+import type { AccountDimension } from "../types/api.js";
 import type { Resolution } from "../resolution/types.js";
+import type { Elicitor } from "../elicitation.js";
+import type { ConnectionDefaultsStore } from "../connection-defaults-store.js";
 import type { OperationResultStatus } from "../operation-result-store.js";
 import { createOperationResultPageHandler } from "../operation-result-page.js";
 
@@ -63,12 +67,40 @@ function textResult(payload: Record<string, unknown>, isError = false) {
   };
 }
 
+/** The single bank ledger (GL) account backing the candidate dimensions, when
+ * they all share ONE — the `expectedLedgerAccountId` rung-3 requires. Ambiguous
+ * (multiple ledger accounts) or unknown ⇒ undefined ⇒ rung 3 stays dark. */
+function uniqueLedgerAccountId(
+  candidates: readonly { accounts_dimensions_id: number }[],
+  accountDimensions: readonly AccountDimension[],
+): number | undefined {
+  const dimById = new Map<number, AccountDimension>();
+  for (const dim of accountDimensions) {
+    if (dim.id !== undefined && !dim.is_deleted) dimById.set(dim.id, dim);
+  }
+  const ledgerIds = new Set<number>();
+  for (const candidate of candidates) {
+    const dim = dimById.get(candidate.accounts_dimensions_id);
+    if (dim?.accounts_id !== undefined) ledgerIds.add(dim.accounts_id);
+  }
+  return ledgerIds.size === 1 ? [...ledgerIds][0] : undefined;
+}
+
+export interface ProcessBankInputDeps {
+  /** Capability-aware elicitor. Absent (tests) ⇒ text needs_input only. */
+  elicit?: Elicitor;
+  /** Persisted connection-defaults store. Absent ⇒ rung 3 stays dark. */
+  defaultsStore?: ConnectionDefaultsStore;
+}
+
 export function registerProcessBankInputTool(
   server: McpServer,
   api: ApiContext,
   runtimeSafetyContext: RuntimeSafetyContext,
+  deps: ProcessBankInputDeps = {},
 ): void {
   assertRuntimeSafetyContext(runtimeSafetyContext);
+  const { elicit, defaultsStore } = deps;
   const camtOperations = createCamtOperations(api, runtimeSafetyContext);
   const wiseOperations = createWiseOperations(api, runtimeSafetyContext);
   const pageHandler = createOperationResultPageHandler(runtimeSafetyContext, { cursorSecret: randomBytes(32) });
@@ -120,44 +152,168 @@ export function registerProcessBankInputTool(
     }
   };
 
-  // Resolve the bank dimension WITHOUT ever demanding a technical id on a unique
-  // match. Feed the CAMT statement IBAN as the statement-IBAN evidence rung; an
-  // explicit override always wins. Never guesses — a tie/zero surfaces as a
-  // compact question.
-  async function resolveDimension(override: number | undefined, statementIban: string | undefined): Promise<Resolution<number>> {
+  interface DimensionResolution {
+    resolution: Resolution<number>;
+    input: BankResolutionInput;
+    expectedLedgerAccountId: number | undefined;
+    scope: ReturnType<RuntimeSafetyContext["getActiveScope"]>;
+  }
+
+  // Build the full resolver input for the CURRENT fetch and run the ASYNC
+  // resolver. Rung 3 (the persisted saved-default) goes live here: the store is
+  // read through the port and re-verified (active/connection/ledger/currency/
+  // IBAN/candidate) by verifySavedDefault before it can resolve — a hint NEVER
+  // short-circuits the resolver. With no store/scope, it degrades to the same
+  // override → IBAN → unique-local behaviour as before.
+  async function resolveDimension(
+    override: number | undefined,
+    statementIban: string | undefined,
+    statementCurrency: string | undefined,
+  ): Promise<DimensionResolution> {
+    const scope = runtimeSafetyContext.getActiveScope();
     const [bankAccounts, accountDimensions] = await Promise.all([
       api.readonly.getBankAccounts(),
       api.readonly.getAccountDimensions(),
     ]);
     const candidates = buildBankDimensionCandidates(bankAccounts, accountDimensions);
-    return resolveBankAccountSync({
+    const expectedLedgerAccountId = uniqueLedgerAccountId(candidates, accountDimensions);
+
+    const canUseSavedDefault = defaultsStore !== undefined &&
+      scope.connectionFingerprint !== undefined &&
+      expectedLedgerAccountId !== undefined;
+
+    const input: BankResolutionInput = {
       candidates,
       ...(override !== undefined ? { override } : {}),
       ...(statementIban ? { statementIban } : {}),
-    });
+      ...(statementCurrency ? { statementCurrency } : {}),
+      accountDimensions,
+      ...(expectedLedgerAccountId !== undefined ? { expectedLedgerAccountId } : {}),
+      ...(canUseSavedDefault
+        ? {
+            currentConnectionId: scope.connectionFingerprint,
+            savedDefaultPort: defaultsStore!.bankDefaultPort({
+              connectionId: scope.connectionFingerprint,
+              environmentKind: scope.environmentKind,
+            }),
+          }
+        : {}),
+    };
+    return { resolution: await resolveBankAccount(input), input, expectedLedgerAccountId, scope };
   }
 
   // F-RESOLVER-FACADE-WRAP: the pure resolver returns question / choice labels
   // embedding statement/account text; wrap them here, at the façade boundary.
-  function resolverQuestion(resolution: Resolution<number>) {
+  function resolverQuestionPayload(resolution: Resolution<number>): Record<string, unknown> {
     if (resolution.status === "ambiguous") {
-      return textResult({
+      return {
         status: "needs_input",
         category: "bank_account_dimension_required",
         question: wrapUntrustedOcr(resolution.question),
         choices: resolution.choices.map(choice => ({ id: choice.id, label: wrapUntrustedOcr(choice.label) })),
         mutation_occurred: false,
-      });
+      };
     }
     const question = resolution.status === "not_found"
       ? resolution.question
       : "A bank account dimension is required.";
-    return textResult({
+    return {
       status: "needs_input",
       category: "bank_account_dimension_required",
       question: wrapUntrustedOcr(question),
       mutation_occurred: false,
+    };
+  }
+
+  function resolverQuestion(resolution: Resolution<number>) {
+    return textResult(resolverQuestionPayload(resolution));
+  }
+
+  /**
+   * Resolve the bank dimension, offering a capability-aware form when the
+   * resolver (incl. rung 3) still cannot resolve. On an elicitation answer the
+   * resolver is RE-RUN with the chosen candidate as an override (the answer is
+   * never trusted straight into a plan), and — only with explicit
+   * `remember_for_connection` consent, AFTER re-resolution — the choice is
+   * persisted as a non-secret hint that future scans re-validate.
+   */
+  async function resolveDimensionOrElicit(
+    override: number | undefined,
+    statementIban: string | undefined,
+    statementCurrency: string | undefined,
+    inputType: "camt" | "wise",
+  ): Promise<{ ok: true; value: number } | { ok: false; response: ReturnType<typeof textResult> }> {
+    const first = await resolveDimension(override, statementIban, statementCurrency);
+    if (first.resolution.status === "resolved") return { ok: true, value: first.resolution.value };
+
+    // No elicitor, or nothing to choose from ⇒ the existing compact question.
+    if (!elicit || first.resolution.status !== "ambiguous") {
+      return { ok: false, response: resolverQuestion(first.resolution) };
+    }
+    const choices = first.resolution.choices;
+    const outcome = await elicit({
+      message: "Which bank account dimension should be used for this statement?",
+      fields: {
+        accounts_dimensions_id: {
+          type: "enum",
+          title: "Bank account dimension",
+          choices: choices.map(choice => ({ const: choice.id, title: wrapUntrustedOcr(choice.label) ?? choice.id })),
+        },
+        remember_for_connection: {
+          type: "boolean",
+          title: "Remember this choice for this connection",
+          description: "Store only a non-secret hint (the bank dimension id) so future statements on this connection resolve automatically. Re-validated on every read.",
+          default: false,
+        },
+      },
+      required: ["accounts_dimensions_id"],
+      needsInput: resolverQuestionPayload(first.resolution),
     });
+
+    if (outcome.kind === "unsupported") return { ok: false, response: textResult(outcome.needsInput) };
+    if (outcome.kind === "declined") return { ok: false, response: resolverQuestion(first.resolution) };
+
+    const chosenRaw = outcome.content.accounts_dimensions_id;
+    const chosen = typeof chosenRaw === "string" || typeof chosenRaw === "number" ? Number(chosenRaw) : NaN;
+    // The answer must be one of the candidates we offered (never trust a
+    // free-form value); anything else falls back to a fresh question.
+    if (!Number.isInteger(chosen) || !choices.some(c => c.id === String(chosen))) {
+      return { ok: false, response: resolverQuestion(first.resolution) };
+    }
+
+    // RE-RUN the resolver (resolver-revalidation-before-plan) — the plan value is
+    // minted by the resolver, not read straight from the answer.
+    const second = await resolveDimension(chosen, statementIban, statementCurrency);
+    if (second.resolution.status !== "resolved") {
+      return { ok: false, response: resolverQuestion(second.resolution) };
+    }
+    const value = second.resolution.value;
+
+    // Persist ONLY with explicit consent, AFTER re-validation, and only a
+    // currency-carrying, ledger-bound, non-secret hint (fail-closed). Best-effort:
+    // a persist failure never blocks the import.
+    if (
+      outcome.content.remember_for_connection === true &&
+      defaultsStore !== undefined &&
+      second.scope.connectionFingerprint !== undefined &&
+      second.expectedLedgerAccountId !== undefined &&
+      statementCurrency
+    ) {
+      try {
+        defaultsStore.saveBankDefault({
+          connectionId: second.scope.connectionFingerprint,
+          environmentKind: second.scope.environmentKind,
+          accounts_dimensions_id: value,
+          ledgerAccountId: second.expectedLedgerAccountId,
+          currency: statementCurrency,
+          ...(statementIban ? { iban: statementIban } : {}),
+          input_type: inputType,
+        });
+      } catch {
+        /* hint persistence is best-effort; never fail the import over it. */
+      }
+    }
+    return { ok: true, value };
   }
 
   interface BankArgs {
@@ -178,10 +334,10 @@ export function registerProcessBankInputTool(
     page_size?: number;
   }
 
-  async function handleCamt(mode: "prepare" | "execute", args: BankArgs, source: FileInputSource, snapshot: FileInputSnapshot, statementIban: string | undefined) {
-    const resolution = await resolveDimension(args.accounts_dimensions_id, statementIban);
-    if (resolution.status !== "resolved") return resolverQuestion(resolution);
-    const accountsDimensionsId = resolution.value;
+  async function handleCamt(mode: "prepare" | "execute", args: BankArgs, source: FileInputSource, snapshot: FileInputSnapshot, statementIban: string | undefined, statementCurrency: string | undefined) {
+    const resolved = await resolveDimensionOrElicit(args.accounts_dimensions_id, statementIban, statementCurrency, "camt");
+    if (!resolved.ok) return resolved.response;
+    const accountsDimensionsId = resolved.value;
     try {
       if (mode === "prepare") {
         const outcome = await camtOperations.prepareImport({
@@ -205,9 +361,11 @@ export function registerProcessBankInputTool(
   }
 
   async function handleWise(mode: "prepare" | "execute", args: BankArgs, source: FileInputSource, snapshot: FileInputSnapshot) {
-    const resolution = await resolveDimension(args.accounts_dimensions_id, undefined);
-    if (resolution.status !== "resolved") return resolverQuestion(resolution);
-    const accountsDimensionsId = resolution.value;
+    // Wise CSV carries no statement IBAN/currency to the façade; the resolver
+    // relies on override / saved default / unique-local rungs.
+    const resolved = await resolveDimensionOrElicit(args.accounts_dimensions_id, undefined, undefined, "wise");
+    if (!resolved.ok) return resolved.response;
+    const accountsDimensionsId = resolved.value;
 
     // Preserve the Wise digest gate before any read/mutation.
     if (args.approved_command_digest !== undefined && (
@@ -319,7 +477,7 @@ export function registerProcessBankInputTool(
       }
 
       return detected.format === "camt"
-        ? handleCamt(mode, args, source, snapshot, detected.preflight.value.statement_metadata.iban)
+        ? handleCamt(mode, args, source, snapshot, detected.preflight.value.statement_metadata.iban, detected.preflight.value.statement_metadata.currency)
         : handleWise(mode, args, source, snapshot);
     },
   );

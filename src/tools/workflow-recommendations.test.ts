@@ -31,7 +31,49 @@ describe("recommend_workflow", () => {
     const { options } = getRecommendWorkflowHarness();
 
     expect(options.inputSchema).toHaveProperty("goal");
+    // interaction_style replaces the misleading risk_tolerance; the deprecated
+    // option is still advertised for the compatibility window.
+    expect(options.inputSchema).toHaveProperty("interaction_style");
     expect(options.inputSchema).toHaveProperty("risk_tolerance");
+  });
+
+  it("echoes the resolved interaction_style and no longer defaults a risk_tolerance echo", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+    const payload = parseMcpResponse((await handler({ goal: "import bank statement CAMT file" })).content[0]!.text) as Record<string, any>;
+    expect(payload.interaction_style).toBe("guided");
+    // With no risk_tolerance supplied, it is not echoed back.
+    expect(payload.risk_tolerance).toBeUndefined();
+  });
+
+  it("still ACCEPTS deprecated risk_tolerance and maps careful→detailed (detail depth only)", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+    const careful = parseMcpResponse((await handler({ goal: "import bank statement CAMT file", risk_tolerance: "careful" })).content[0]!.text) as Record<string, any>;
+    expect(careful.interaction_style).toBe("detailed");
+    expect(careful.risk_tolerance).toBe("careful"); // echoed back when supplied
+    const fast = parseMcpResponse((await handler({ goal: "import bank statement CAMT file", risk_tolerance: "fast" })).content[0]!.text) as Record<string, any>;
+    expect(fast.interaction_style).toBe("concise");
+  });
+
+  it("interaction_style / risk_tolerance NEVER change which workflow or steps are recommended", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+    const baseline = parseMcpResponse((await handler({ goal: "import bank statement CAMT file" })).content[0]!.text) as Record<string, any>;
+    for (const args of [
+      { interaction_style: "concise" as const },
+      { interaction_style: "detailed" as const },
+      { risk_tolerance: "fast" as const },
+      { risk_tolerance: "careful" as const },
+    ]) {
+      const payload = parseMcpResponse((await handler({ goal: "import bank statement CAMT file", ...args })).content[0]!.text) as Record<string, any>;
+      expect(payload.recommended_workflow.id).toBe(baseline.recommended_workflow.id);
+      expect(payload.next_actions).toEqual(baseline.next_actions);
+      expect(payload.risk_policy).toEqual(baseline.risk_policy);
+    }
+  });
+
+  it("explicit interaction_style overrides the deprecated risk_tolerance mapping", async () => {
+    const { handler } = getRecommendWorkflowHarness();
+    const payload = parseMcpResponse((await handler({ goal: "import bank statement CAMT file", interaction_style: "concise", risk_tolerance: "careful" })).content[0]!.text) as Record<string, any>;
+    expect(payload.interaction_style).toBe("concise");
   });
 
   it("recommends the CAMT import workflow for bank statement goals", async () => {

@@ -471,10 +471,18 @@ export function registerWorkflowRecommendationTools(
     "Recommend the safest e-arveldaja workflow for a user goal. Use this when the user asks what to do next or when choosing among many tools.",
     {
       goal: z.string().optional().describe("Natural-language goal, such as 'book this invoice PDF' or 'import bank statement'. Omit to list common workflows."),
-      risk_tolerance: z.enum(["fast", "balanced", "careful"]).optional().describe("How much friction to prefer. balanced keeps boring safe steps low-friction and interrupts on risk."),
+      interaction_style: z.enum(["concise", "guided", "detailed"]).optional().describe("How much explanation/detail to include. Affects response depth ONLY — it never changes which workflow or steps are recommended, and never any safety behavior."),
+      risk_tolerance: z.enum(["fast", "balanced", "careful"]).optional().describe("DEPRECATED — use interaction_style. Accepted for compatibility and mapped to detail depth only (fast→concise, balanced→guided, careful→detailed); it controls no safety behavior."),
     },
     { ...readOnly, title: "Recommend Workflow" },
-    async ({ goal, risk_tolerance }) => {
+    async ({ goal, interaction_style, risk_tolerance }) => {
+      // interaction_style controls DETAIL DEPTH only (never workflow selection or
+      // safety). risk_tolerance is deprecated: mapped ONLY to a detail depth.
+      const mappedFromRisk = risk_tolerance === "fast" ? "concise"
+        : risk_tolerance === "careful" ? "detailed"
+        : risk_tolerance === "balanced" ? "guided"
+        : undefined;
+      const resolvedInteractionStyle = interaction_style ?? mappedFromRisk ?? "guided";
       const visibleWorkflows = WORKFLOWS
         .map(workflow => visibleWorkflow(workflow, hiddenRecipeTools(exposure)))
         .filter((workflow): workflow is WorkflowGuide => workflow !== null)
@@ -492,7 +500,8 @@ export function registerWorkflowRecommendationTools(
           message: "Listed common e-arveldaja workflows. Pass goal to get a single recommendation.",
           raw: null,
           extra: {
-            risk_tolerance: risk_tolerance ?? "balanced",
+            interaction_style: resolvedInteractionStyle,
+            ...(risk_tolerance !== undefined ? { risk_tolerance } : {}),
             available_workflows: visibleWorkflows.map(compactWorkflow),
             workflow: buildWorkflowEnvelope({
               summary: "Listed common e-arveldaja workflows. Pass goal to get a single recommendation.",
@@ -517,7 +526,8 @@ export function registerWorkflowRecommendationTools(
         raw: best,
         next_actions: best.next_actions,
         extra: {
-          risk_tolerance: risk_tolerance ?? "balanced",
+          interaction_style: resolvedInteractionStyle,
+          ...(risk_tolerance !== undefined ? { risk_tolerance } : {}),
           recommended_workflow: compactWorkflow(best),
           risk_policy: best.risk_policy,
           alternatives: ranked.slice(1, 4).map(entry => compactWorkflow(entry.workflow)),

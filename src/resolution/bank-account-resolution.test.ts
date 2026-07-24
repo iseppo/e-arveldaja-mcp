@@ -220,6 +220,20 @@ describe("resolveBankAccount (async) — injected SavedBankDefaultPort re-verifi
     expect(r.status).toBe("ambiguous");
   });
 
+  it("FAIL-CLOSED: discards a currency-less saved default against a currency-carrying statement", async () => {
+    // F-SAVED-DEFAULT-CURRENCY-FAILCLOSED: an undefined pointer.currency must NOT
+    // pass a USD statement (previously fail-OPEN → same-connection wrong-currency book).
+    const port = makePort({ accounts_dimensions_id: 102, connectionId: "conn-A", ledgerAccountId: 1020 });
+    const r = await resolveBankAccount({ ...base, statementCurrency: "USD", savedDefaultPort: port });
+    expect(r.status).toBe("ambiguous"); // rung 3 rejected, falls through, NOT resolved
+  });
+
+  it("still resolves a currency-less saved default when the statement carries NO currency", async () => {
+    const port = makePort({ accounts_dimensions_id: 102, connectionId: "conn-A", ledgerAccountId: 1020 });
+    const r = await resolveBankAccount({ ...base, savedDefaultPort: port });
+    expect(r).toMatchObject({ status: "resolved", value: 102 });
+  });
+
   it("override and unique IBAN outrank the saved default", async () => {
     const port = makePort({ accounts_dimensions_id: 102, connectionId: "conn-A", ledgerAccountId: 1020 });
     const overrideR = await resolveBankAccount({ ...base, override: 101, savedDefaultPort: port });

@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerProcessAccountingDocumentTool } from "./process-accounting-document.js";
+import { registerProcessAccountingDocumentTool, type ProcessAccountingDocumentDeps } from "./process-accounting-document.js";
+import type { ElicitOutcome, Elicitor } from "../elicitation.js";
 import { parseDocument } from "../document-parser.js";
 import { createAccountingWorkflowApi, fixtureAccount, fixtureClient } from "../__fixtures__/accounting-workflow.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
@@ -37,14 +38,23 @@ function writeTempPdf(contents = "%PDF-1.4 fixture"): { path: string; sha256: st
 
 type Handler = (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
 
-function setup(options: Parameters<typeof createAccountingWorkflowApi>[0] = {}) {
+function setup(options: Parameters<typeof createAccountingWorkflowApi>[0] & { deps?: ProcessAccountingDocumentDeps } = {}) {
+  const { deps, ...apiOptions } = options;
   const runtime = createTestRuntimeSafetyContext();
-  const api = createAccountingWorkflowApi(options);
+  const api = createAccountingWorkflowApi(apiOptions);
   const server = { registerTool: vi.fn() } as any;
-  registerProcessAccountingDocumentTool(server, api, runtime);
+  registerProcessAccountingDocumentTool(server, api, runtime, deps ?? {});
   const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_accounting_document");
   if (!registration) throw new Error("process_accounting_document was not registered");
   return { runtime, api, handler: registration[2] as Handler };
+}
+
+function stubElicitor(outcome: ElicitOutcome, calls: { count: number; lastFields?: Record<string, unknown> }): Elicitor {
+  return async (opts) => {
+    calls.count += 1;
+    calls.lastFields = opts.fields as Record<string, unknown>;
+    return outcome;
+  };
 }
 
 const parse = (result: { content: Array<{ text: string }> }) => parseMcpResponse(result.content[0]!.text) as any;
@@ -103,6 +113,28 @@ describe("process_accounting_document", () => {
     expect(payload.summary.supplier.status).toBe("needs_input");
     // The extracted supplier_name is OCR-sandbox-wrapped at output.
     expect(result.content[0]!.text).toContain("UNTRUSTED_OCR_START");
+  });
+
+  it("does NOT open a supplier form when the resolver offers no bounded choices, and never elicits a secret", async () => {
+    // Supplier resolution surfaces an unresolved supplier as an empty-choice
+    // "resolve manually" conflict / not_found — nothing to pick — so the guided
+    // façade must NOT open an elicitation form; the compact needs_input question
+    // stands. (The bank façade exercises the answered/persist elicit path.)
+    mockedParseDocument.mockResolvedValue({
+      text: "Some Vendor\nInvoice INV-9\nTotal 20.00 EUR",
+      pageCount: 1, ocrPartialFailure: false,
+      result: { pages: [{ pageNum: 1, textItems: [{ text: "Some Vendor", x: 0, y: 0, width: 50, height: 10, confidence: 0.9 }] }] },
+    } as any);
+    const { path } = writeTempPdf();
+    const a = fixtureClient({ id: 1, name: "Some Vendor", is_supplier: true });
+    const b = fixtureClient({ id: 2, name: "Some Vendor", is_supplier: true });
+    const calls = { count: 0 } as { count: number; lastFields?: Record<string, unknown> };
+    const elicit = stubElicitor({ kind: "answered", content: { supplier_client_id: "2" } }, calls);
+    const { handler } = setup({ clientRows: [a, b], purchaseInvoiceRows: [], deps: { elicit } });
+    const payload = parse(await handler({ mode: "prepare", file_path: path }));
+    expect(calls.count).toBe(0); // no bounded choices ⇒ no form opened
+    expect(payload.status).toBe("needs_input");
+    expect(payload.summary.supplier.status).toBe("needs_input");
   });
 
   it("runs the two-call prepare -> create path over the same source, then returns a SEPARATE confirm plan", async () => {

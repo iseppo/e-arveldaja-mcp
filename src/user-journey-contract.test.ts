@@ -1,6 +1,16 @@
 import { Buffer } from "node:buffer";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
+import {
+  resolveBankAccount,
+  type BankDimensionCandidate,
+} from "./resolution/bank-account-resolution.js";
+import type { AccountDimension } from "./types/api.js";
+import { createConnectionDefaultsStore } from "./connection-defaults-store.js";
+import { createElicitor, type ElicitOutcome } from "./elicitation.js";
 import { buildResponseFixtures, type ResponseFixtureName } from "../scripts/measure-response-fixtures.js";
 import { captureToolSurface, TOOL_SURFACE_SETUP_INFO } from "./__fixtures__/tool-surface.js";
 import { toMcpJson } from "./mcp-json.js";
@@ -549,5 +559,102 @@ describe("guided milestone achievability contract", () => {
       "guided-rule-saving",
       "guided-trial-balance",
     ]);
+  });
+});
+
+// Task 15 (Step 7): four EXECUTABLE journeys proving the persisted-defaults +
+// capability-aware-elicitation contract end to end (the byte-pinned JOURNEYS
+// above model static fixtures and cannot execute a store/elicit round-trip).
+describe("Task 15 — persisted-defaults & elicitation journeys", () => {
+  const tempDirs: string[] = [];
+  const storePath = () => { const d = mkdtempSync(join(tmpdir(), "uj-defaults-")); tempDirs.push(d); return join(d, "connection-defaults.json"); };
+  afterAll(() => { while (tempDirs.length) { try { rmSync(tempDirs.pop()!, { recursive: true, force: true }); } catch { /* ignore */ } } });
+
+  const cand = (id: number, label: string): BankDimensionCandidate => ({ accounts_dimensions_id: id, label, match_reason: "Linked bank account dimension" });
+  const twoBanks = [cand(101, "LHV"), cand(102, "SEB")];
+  const dims: AccountDimension[] = [{ id: 101, accounts_id: 1020, title_est: "LHV" }, { id: 102, accounts_id: 1020, title_est: "SEB" }];
+  const scope = { connectionId: "conn-A", environmentKind: "live" as const };
+
+  // A fake MCP server whose client supports elicitation and accepts a chosen
+  // dimension. Counts how many forms are opened (the "one-question" friction).
+  function elicitorAcceptingDimension(chosenId: string, counter: { forms: number }) {
+    const server = {
+      server: {
+        getClientCapabilities: () => ({ elicitation: {} }),
+        elicitInput: async () => { counter.forms += 1; return { action: "accept", content: { accounts_dimensions_id: chosenId, remember_for_connection: true } }; },
+      },
+    };
+    return createElicitor(server as never);
+  }
+
+  it("journey 1 — unique/no-question: a single-candidate bank resolves with ZERO questions", async () => {
+    const counter = { forms: 0 };
+    const elicit = elicitorAcceptingDimension("101", counter);
+    const resolution = await resolveBankAccount({ candidates: [cand(101, "LHV")] });
+    // Unique local bank ⇒ resolved without ever opening a form.
+    expect(resolution).toMatchObject({ status: "resolved", value: 101 });
+    // No form was needed (technicalIdPrompts:0, ambiguityQuestions:0).
+    expect(counter.forms).toBe(0);
+    void elicit;
+  });
+
+  it("journey 2 — ambiguous/one-question: EXACTLY one elicitation form, then resolves", async () => {
+    const counter = { forms: 0 };
+    const elicit = elicitorAcceptingDimension("102", counter);
+    const first = await resolveBankAccount({ candidates: twoBanks, accountDimensions: dims });
+    expect(first.status).toBe("ambiguous"); // needs exactly one question
+    const outcome: ElicitOutcome = await elicit({
+      message: "Which bank account dimension should be used?",
+      fields: { accounts_dimensions_id: { type: "enum", choices: first.status === "ambiguous" ? first.choices.map(c => ({ const: c.id, title: c.label })) : [] } },
+      required: ["accounts_dimensions_id"],
+      needsInput: { status: "needs_input" },
+    });
+    expect(counter.forms).toBe(1); // exactly ONE question
+    expect(outcome.kind).toBe("answered");
+    // The answer is re-run through the resolver (override), never trusted directly.
+    const second = await resolveBankAccount({ candidates: twoBanks, accountDimensions: dims, override: 102 });
+    expect(second).toMatchObject({ status: "resolved", value: 102 });
+  });
+
+  it("journey 3 — persistence-consent: consented hint makes the NEXT scan resolve via rung 3 with ZERO questions", async () => {
+    const store = createConnectionDefaultsStore(storePath());
+    // Operator answered with consent on the first (ambiguous) scan → persisted.
+    store.saveBankDefault({ ...scope, accounts_dimensions_id: 102, ledgerAccountId: 1020, currency: "EUR", input_type: "camt" });
+    const counter = { forms: 0 };
+    const elicit = elicitorAcceptingDimension("999", counter);
+    // Second scan, same connection: rung 3 resolves BEFORE any question.
+    const resolution = await resolveBankAccount({
+      candidates: twoBanks,
+      accountDimensions: dims,
+      currentConnectionId: "conn-A",
+      expectedLedgerAccountId: 1020,
+      statementCurrency: "EUR",
+      savedDefaultPort: store.bankDefaultPort(scope),
+    });
+    expect(resolution).toMatchObject({ status: "resolved", value: 102 });
+    if (resolution.status === "resolved") expect(resolution.evidence.map(e => e.tag)).toContain("saved_default");
+    expect(counter.forms).toBe(0); // no fresh question on the second scan
+    void elicit;
+  });
+
+  it("journey 4 — no-secret-elicitation: the wrapper REFUSES any credential/secret field", async () => {
+    const server = { server: { getClientCapabilities: () => ({ elicitation: {} }), elicitInput: async () => ({ action: "accept", content: {} }) } };
+    const elicit = createElicitor(server as never);
+    for (const secretKey of ["api_key", "apiKey", "password", "public_value", "secret_token"]) {
+      await expect(elicit({ message: "m", fields: { [secretKey]: { type: "string" } }, needsInput: {} })).rejects.toThrow();
+    }
+    // A bounded, non-secret bank form is accepted.
+    await expect(elicit({
+      message: "Which bank account dimension?",
+      fields: { accounts_dimensions_id: { type: "enum", choices: [{ const: "101", title: "LHV" }] }, remember_for_connection: { type: "boolean" } },
+      needsInput: {},
+    })).resolves.toBeDefined();
+  });
+
+  it("journey 3 corollary — the persisted document holds NO secret material", () => {
+    const store = createConnectionDefaultsStore(storePath());
+    store.saveBankDefault({ ...scope, accounts_dimensions_id: 102, ledgerAccountId: 1020, currency: "EUR" } as never);
+    const pointer = store.readBankDefault({ ...scope, expectedLedgerAccountId: 1020 });
+    expect(JSON.stringify(pointer)).not.toMatch(/api.?key|password|secret|public.?value|token/i);
   });
 });

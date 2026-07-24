@@ -2,9 +2,9 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 29606,
+    "toolsListBytes": 29947,
     "descriptionsBytes": 3934,
-    "inputSchemasBytes": 20803,
+    "inputSchemasBytes": 21144,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 3554
@@ -1189,8 +1189,17 @@
             "description": "Natural-language goal, such as 'book this invoice PDF' or 'import bank statement'. Omit to list common workflows.",
             "type": "string"
           },
+          "interaction_style": {
+            "description": "How much explanation/detail to include. Affects response depth ONLY — it never changes which workflow or steps are recommended, and never any safety behavior.",
+            "enum": [
+              "concise",
+              "guided",
+              "detailed"
+            ],
+            "type": "string"
+          },
           "risk_tolerance": {
-            "description": "How much friction to prefer. balanced keeps boring safe steps low-friction and interrupts on risk.",
+            "description": "DEPRECATED — use interaction_style. Accepted for compatibility and mapped to detail depth only (fast→concise, balanced→guided, careful→detailed); it controls no safety behavior.",
             "enum": [
               "fast",
               "balanced",

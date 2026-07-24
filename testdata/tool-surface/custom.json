@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 85,
-    "toolsListBytes": 79461,
+    "toolsListBytes": 79802,
     "descriptionsBytes": 9951,
-    "inputSchemasBytes": 49099,
+    "inputSchemasBytes": 49440,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -3562,8 +3562,17 @@
             "description": "Natural-language goal, such as 'book this invoice PDF' or 'import bank statement'. Omit to list common workflows.",
             "type": "string"
           },
+          "interaction_style": {
+            "description": "How much explanation/detail to include. Affects response depth ONLY — it never changes which workflow or steps are recommended, and never any safety behavior.",
+            "enum": [
+              "concise",
+              "guided",
+              "detailed"
+            ],
+            "type": "string"
+          },
           "risk_tolerance": {
-            "description": "How much friction to prefer. balanced keeps boring safe steps low-friction and interrupts on risk.",
+            "description": "DEPRECATED — use interaction_style. Accepted for compatibility and mapped to detail depth only (fast→concise, balanced→guided, careful→detailed); it controls no safety behavior.",
             "enum": [
               "fast",
               "balanced",
