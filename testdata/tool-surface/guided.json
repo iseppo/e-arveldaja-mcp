@@ -2,9 +2,9 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 19,
-    "toolsListBytes": 29674,
+    "toolsListBytes": 29977,
     "descriptionsBytes": 4093,
-    "inputSchemasBytes": 20949,
+    "inputSchemasBytes": 21252,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 4718
@@ -311,6 +311,10 @@
             ],
             "type": "string"
           },
+          "plan_handle": {
+            "description": "Consume-once handle from dry_run (plan_handles.create / .create_and_confirm). REQUIRED for create/create_and_confirm.",
+            "type": "string"
+          },
           "transaction_date_from": {
             "description": "Optional bank accounting-date lower bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_from.",
             "type": "string"
@@ -385,6 +389,10 @@
               "dry_run_apply",
               "execute_apply"
             ],
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "Consume-once handle returned by mode='dry_run_apply'. REQUIRED for mode='execute_apply'.",
             "type": "string"
           }
         },

@@ -35,6 +35,37 @@ const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
 // with the full surface exposed (default hides them behind the merged tools).
 const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
 
+// P0-2: execute_apply now REQUIRES the consume-once plan_handle minted by
+// dry_run_apply. This helper runs the reviewed dry run over the SAME
+// classifications_json (with the base/default mocks, before any per-test
+// once-sequences are installed) and returns the handle, then clears mock call
+// history so the following execute-phase assertions count only the execute call.
+// The dry-run fetches each transaction once via the same default mock, so the
+// minted plan matches what execute recomputes (no spurious drift). Call this
+// right after setup and BEFORE installing any mockResolvedValueOnce sequences.
+async function mintApplyHandle(
+  handler: (args: Record<string, unknown>) => Promise<{ content: { text: string }[] }>,
+  api: any,
+  classificationsJson: unknown,
+  opts: { merged?: boolean } = {},
+): Promise<string> {
+  const dryArgs = opts.merged
+    ? { mode: "dry_run_apply", classifications_json: classificationsJson }
+    : { classifications_json: classificationsJson, execute: false };
+  const res = await handler(dryArgs);
+  const payload = parseMcpResponse(res.content[0]!.text) as any;
+  const handle = opts.merged ? payload.result?.plan_handle : payload.plan_handle;
+  if (typeof handle !== "string") {
+    throw new Error(`dry_run_apply did not mint a plan_handle: ${JSON.stringify(payload).slice(0, 300)}`);
+  }
+  api.transactions.get?.mockClear?.();
+  api.transactions.confirm?.mockClear?.();
+  api.purchaseInvoices.createAndSetTotals?.mockClear?.();
+  api.purchaseInvoices.confirmWithTotals?.mockClear?.();
+  api.purchaseInvoices.invalidate?.mockClear?.();
+  return handle;
+}
+
 afterEach(() => {
   if (ORIGINAL_RULES_FILE === undefined) {
     delete process.env.EARVELDAJA_RULES_FILE;
@@ -344,6 +375,7 @@ describe("H14 post-create recovery state", () => {
   for (const testCase of cases) {
     it(testCase.name, async () => {
       const { handler, api } = setupH14Tool("apply_transaction_classifications");
+      const planHandle = await mintApplyHandle(handler, api, [H14_CLASSIFICATION]);
       api.purchaseInvoices.createAndSetTotals.mockResolvedValue({
         ...H14_INVOICE,
         status: testCase.createStatus,
@@ -361,6 +393,7 @@ describe("H14 post-create recovery state", () => {
       const result = await handler({
         classifications_json: [H14_CLASSIFICATION],
         execute: true,
+        plan_handle: planHandle,
       });
       const payload = parseMcpResponse(result.content[0]!.text) as any;
 
@@ -413,11 +446,13 @@ describe("H14 accumulator and invalidation recovery", () => {
 
   it("H14 merged wrapper preserves granular partial mutations unchanged", async () => {
     const { handler, api } = setupH14Tool("classify_bank_transactions");
+    const planHandle = await mintApplyHandle(handler, api, [H14_CLASSIFICATION], { merged: true });
     api.transactions.confirm.mockRejectedValueOnce(h14StructuredAmbiguity("transaction_confirmation"));
 
     const result = await handler({
       mode: "execute_apply",
       classifications_json: [H14_CLASSIFICATION],
+      plan_handle: planHandle,
     });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
     const expectedPartial = {
@@ -443,6 +478,7 @@ describe("H14 accumulator and invalidation recovery", () => {
 
   it("H14 later group error does not erase an earlier partial mutation", async () => {
     const { handler, api } = setupH14Tool("apply_transaction_classifications");
+    const planHandle = await mintApplyHandle(handler, api, [{ ...H14_CLASSIFICATION, transactions: [H14_TX, tx100] }]);
     api.purchaseInvoices.createAndSetTotals
       .mockResolvedValueOnce(H14_INVOICE)
       .mockRejectedValueOnce(new Error("second create rejected"));
@@ -452,6 +488,7 @@ describe("H14 accumulator and invalidation recovery", () => {
     const result = await handler({
       classifications_json: [{ ...H14_CLASSIFICATION, transactions: [H14_TX, tx100] }],
       execute: true,
+      plan_handle: planHandle,
     });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
@@ -474,6 +511,7 @@ describe("H14 accumulator and invalidation recovery", () => {
 
   it("H14 multi-transaction partial plus success preserves both outcomes", async () => {
     const { handler, api } = setupH14Tool("apply_transaction_classifications");
+    const planHandle = await mintApplyHandle(handler, api, [{ ...H14_CLASSIFICATION, transactions: [H14_TX, tx100] }]);
     configureDistinctInvoices(api);
     api.purchaseInvoices.confirmWithTotals.mockImplementation(async (id: number) => {
       if (id === 701) throw h14StructuredAmbiguity("invoice_confirmation");
@@ -483,6 +521,7 @@ describe("H14 accumulator and invalidation recovery", () => {
     const result = await handler({
       classifications_json: [{ ...H14_CLASSIFICATION, transactions: [H14_TX, tx100] }],
       execute: true,
+      plan_handle: planHandle,
     });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
@@ -505,6 +544,7 @@ describe("H14 accumulator and invalidation recovery", () => {
 
   it("H14 partial state is isolated across multiple groups", async () => {
     const { handler, api } = setupH14Tool("apply_transaction_classifications");
+    const planHandle = await mintApplyHandle(handler, api, [H14_CLASSIFICATION, group100]);
     configureDistinctInvoices(api);
     api.transactions.confirm.mockImplementation(async (id: number) => {
       if (id === 99) throw h14StructuredAmbiguity("transaction_confirmation");
@@ -514,6 +554,7 @@ describe("H14 accumulator and invalidation recovery", () => {
     const result = await handler({
       classifications_json: [H14_CLASSIFICATION, group100],
       execute: true,
+      plan_handle: planHandle,
     });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
@@ -583,6 +624,7 @@ describe("H14 accumulator and invalidation recovery", () => {
     for (const testCase of invalidationCases) {
       it(testCase.name, async () => {
         const { handler, api } = setupH14Tool("apply_transaction_classifications");
+        const planHandle = await mintApplyHandle(handler, api, [H14_CLASSIFICATION]);
         api.transactions.get
           .mockResolvedValueOnce(H14_TX)
           .mockResolvedValueOnce(testCase.freshTransaction);
@@ -595,6 +637,7 @@ describe("H14 accumulator and invalidation recovery", () => {
         const result = await handler({
           classifications_json: [H14_CLASSIFICATION],
           execute: true,
+          plan_handle: planHandle,
         });
         const payload = parseMcpResponse(result.content[0]!.text) as any;
 
@@ -926,6 +969,7 @@ describe("receipt inbox tool status handling", () => {
         mode: "create",
         file_ref: fileRef,
         accounts_dimensions_id: 100,
+        plan_handle: processedPayload.result.plan_handles.create,
         approved_manifest: publicManifest.map((entry: any) => ({
           ...entry,
           display_name: hostileCallerDisplay,
@@ -1020,13 +1064,22 @@ describe("receipt inbox tool status handling", () => {
       const { handler } = setupReceiptTool("receipt_batch", createTestRuntimeSafetyContext());
 
       for (const mode of ["dry_run", "create", "create_and_confirm"] as const) {
+        // P0-3: a mutation mode must present the consume-once handle its own
+        // dry_run minted for that effect. Mint a fresh one per mutation call
+        // (each consumes its handle).
+        let planHandle: string | undefined;
+        if (mode !== "dry_run") {
+          const dry = await handler({ mode: "dry_run", folder_path: tempDir, accounts_dimensions_id: 100 });
+          const dryHandles = (parseMcpResponse(dry.content[0]!.text) as any).result.plan_handles;
+          planHandle = mode === "create" ? dryHandles.create : dryHandles.create_and_confirm;
+        }
         const result = await handler({
           mode,
           folder_path: tempDir,
           accounts_dimensions_id: 100,
           // H15: create/create_and_confirm require the dry-run manifest; the
           // folder is empty, so the approved manifest is [].
-          ...(mode === "dry_run" ? {} : { approved_manifest: [] }),
+          ...(mode === "dry_run" ? {} : { approved_manifest: [], plan_handle: planHandle }),
         });
         const payload = parseMcpResponse(result.content[0]!.text) as any;
 
@@ -1103,12 +1156,15 @@ describe("receipt inbox tool status handling", () => {
       const merged = setupReceiptTool("receipt_batch", createTestRuntimeSafetyContext());
       const dry = await merged.handler({ mode: "dry_run", folder_path: folder, accounts_dimensions_id: 100 });
       const dryPayload = parseMcpResponse(dry.content[0]!.text) as any;
-      // The dry-run echoes the exact manifest the operator must approve.
+      // The dry-run echoes the exact manifest the operator must approve, plus the
+      // consume-once plan handle create must carry (P0-3).
       expect(dryPayload.result.approved_manifest).toEqual([]);
+      expect(dryPayload.result.plan_handles.create).toEqual(expect.any(String));
 
       const execute = await merged.handler({
         mode: "create", folder_path: folder, accounts_dimensions_id: 100,
         approved_manifest: dryPayload.result.approved_manifest,
+        plan_handle: dryPayload.result.plan_handles.create,
       });
       expect((parseMcpResponse(execute.content[0]!.text) as any).delegated_args).toMatchObject({
         execution_mode: "create", approved_manifest: [],
@@ -1701,7 +1757,8 @@ describe("receipt inbox tool status handling", () => {
       }],
     }]);
 
-    const result = await handler({ classifications_json: classificationsJson, execute: true });
+    const planHandle = await mintApplyHandle(handler, api, classificationsJson);
+    const result = await handler({ classifications_json: classificationsJson, execute: true, plan_handle: planHandle });
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.results).toHaveLength(1);
@@ -1799,7 +1856,8 @@ describe("receipt inbox tool status handling", () => {
       }],
     }]);
 
-    const result = await handler({ classifications_json: classificationsJson, execute: true });
+    const planHandle = await mintApplyHandle(handler, api, classificationsJson);
+    const result = await handler({ classifications_json: classificationsJson, execute: true, plan_handle: planHandle });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
     expect(payload.results).toHaveLength(1);
@@ -1835,14 +1893,17 @@ describe("receipt inbox tool status handling", () => {
       const dryPayload = parseMcpResponse(dryResult.content[0]!.text) as any;
       expect(dryPayload.approved_manifest).toEqual([]);
       expect(dryPayload.warning).toBeUndefined();
+      // P0-3: dry_run also mints the consume-once plan handle create must present.
+      expect(dryPayload.plan_handles.create).toEqual(expect.any(String));
 
-      // create with the approved manifest proceeds; the snapshot binding means
-      // there is no execution-time re-scan warning.
+      // create with the approved manifest AND the reviewed plan handle proceeds;
+      // the snapshot binding means there is no execution-time re-scan warning.
       const createResult = await handler({
         folder_path: tempDir,
         accounts_dimensions_id: 100,
         execution_mode: "create",
         approved_manifest: dryPayload.approved_manifest,
+        plan_handle: dryPayload.plan_handles.create,
       });
       const createPayload = parseMcpResponse(createResult.content[0]!.text) as any;
       expect(createPayload.warning).toBeUndefined();
@@ -2183,7 +2244,8 @@ describe("receipt inbox tool status handling", () => {
       ],
     }]);
 
-    const result = await handler({ classifications_json: classificationsJson, execute: true });
+    const planHandle = await mintApplyHandle(handler, api, classificationsJson);
+    const result = await handler({ classifications_json: classificationsJson, execute: true, plan_handle: planHandle });
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.summary).toMatchObject({ applied: 1, failed: 0 });
@@ -2199,6 +2261,22 @@ describe("receipt inbox tool status handling", () => {
 
   it("apply_transaction_classifications reports failed when a draft invoice is invalidated after stale transaction detection", async () => {
     const getImpl = vi.fn()
+      // First PROJECT read is consumed by the dry_run_apply plan mint (mintApplyHandle);
+      // the second PROJECT is the execute fingerprint pass; the VOID is the post-create
+      // freshness re-read that triggers the stale-invalidation branch.
+      .mockResolvedValueOnce({
+        id: 43,
+        status: "PROJECT",
+        is_deleted: false,
+        type: "C",
+        amount: 25,
+        date: "2026-03-22",
+        accounts_dimensions_id: 100,
+        bank_account_name: "OpenAI",
+        description: "ChatGPT subscription",
+        cl_currencies_id: "EUR",
+        clients_id: 7,
+      })
       .mockResolvedValueOnce({
         id: 43,
         status: "PROJECT",
@@ -2314,7 +2392,8 @@ describe("receipt inbox tool status handling", () => {
       }],
     }]);
 
-    const result = await handler({ classifications_json: classificationsJson, execute: true });
+    const planHandle = await mintApplyHandle(handler, api, classificationsJson);
+    const result = await handler({ classifications_json: classificationsJson, execute: true, plan_handle: planHandle });
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.results).toHaveLength(1);
@@ -2458,7 +2537,12 @@ describe("receipt inbox tool status handling", () => {
       ],
     }]);
 
-    const result = await handler({ classifications_json: classificationsJson, execute: true });
+    const planHandle = await mintApplyHandle(handler, api, classificationsJson);
+    // The dry_run_apply mint fetched each transaction once; reset the per-id get
+    // counter so the execute phase's "first read PROJECT, re-read VOID" staleness
+    // sequence for tx 45 starts fresh (the plan already bound the reviewed effect).
+    getCounts.clear();
+    const result = await handler({ classifications_json: classificationsJson, execute: true, plan_handle: planHandle });
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.summary).toMatchObject({
@@ -2488,14 +2572,16 @@ describe("apply_transaction_classifications persists canonical counterparty text
     // counterparty fields were sandbox-wrapped for display. The persisted audit
     // summary must carry the canonical name, not the nonce delimiters.
     vi.mocked(logAudit).mockClear();
-    const { handler } = setupH14Tool("apply_transaction_classifications");
+    const { handler, api } = setupH14Tool("apply_transaction_classifications");
     const wrappedClassification = {
       ...H14_CLASSIFICATION,
       normalized_counterparty: wrapUntrustedOcr("openai"),
       display_counterparty: wrapUntrustedOcr("OpenAI"),
     };
 
-    const result = await handler({ classifications_json: [wrappedClassification], execute: true });
+    const planHandle = await mintApplyHandle(handler, api, [wrappedClassification]);
+    vi.mocked(logAudit).mockClear();
+    const result = await handler({ classifications_json: [wrappedClassification], execute: true, plan_handle: planHandle });
 
     const createdCall = vi.mocked(logAudit).mock.calls.find(([entry]) => entry.action === "CREATED");
     expect(createdCall).toBeDefined();

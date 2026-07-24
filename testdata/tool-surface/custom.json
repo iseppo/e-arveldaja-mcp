@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 80676,
+    "toolsListBytes": 80979,
     "descriptionsBytes": 10104,
-    "inputSchemasBytes": 49927,
+    "inputSchemasBytes": 50230,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -3030,6 +3030,10 @@
             ],
             "type": "string"
           },
+          "plan_handle": {
+            "description": "Consume-once handle from dry_run (plan_handles.create / .create_and_confirm). REQUIRED for create/create_and_confirm.",
+            "type": "string"
+          },
           "transaction_date_from": {
             "description": "Optional bank accounting-date lower bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_from.",
             "type": "string"
@@ -3104,6 +3108,10 @@
               "dry_run_apply",
               "execute_apply"
             ],
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "Consume-once handle returned by mode='dry_run_apply'. REQUIRED for mode='execute_apply'.",
             "type": "string"
           }
         },

@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 151399,
+    "toolsListBytes": 151998,
     "descriptionsBytes": 20442,
-    "inputSchemasBytes": 95473,
+    "inputSchemasBytes": 96072,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 4718
@@ -4843,6 +4843,10 @@
             "description": "Folder path with receipts. Provide exactly one of folder_path or file_ref.",
             "type": "string"
           },
+          "plan_handle": {
+            "description": "Consume-once handle returned by dry_run (plan_handles.create / .create_and_confirm). REQUIRED for create/create_and_confirm.",
+            "type": "string"
+          },
           "transaction_date_from": {
             "description": "Optional bank accounting-date lower bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_from.",
             "type": "string"
@@ -4963,6 +4967,10 @@
             ],
             "type": "string"
           },
+          "plan_handle": {
+            "description": "Consume-once handle from dry_run (plan_handles.create / .create_and_confirm). REQUIRED for create/create_and_confirm.",
+            "type": "string"
+          },
           "transaction_date_from": {
             "description": "Optional bank accounting-date lower bound for auto-matching (YYYY-MM-DD). Independent of the receipt file date_from.",
             "type": "string"
@@ -5056,6 +5064,10 @@
           "execute": {
             "description": "Actually create invoices and link transactions (default false = dry run)",
             "type": "boolean"
+          },
+          "plan_handle": {
+            "description": "Consume-once handle from the matching dry run. REQUIRED when execute=true.",
+            "type": "string"
           }
         },
         "required": [
@@ -5126,6 +5138,10 @@
               "dry_run_apply",
               "execute_apply"
             ],
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "Consume-once handle returned by mode='dry_run_apply'. REQUIRED for mode='execute_apply'.",
             "type": "string"
           }
         },

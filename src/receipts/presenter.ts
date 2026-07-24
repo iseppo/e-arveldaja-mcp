@@ -104,6 +104,9 @@ export function renderReceiptBatchFull(input: ReceiptBatchFullInput): Record<str
     ...(input.transactionDateTo ? { transaction_date_to: input.transactionDateTo } : {}),
     execution_mode: "create",
     approved_manifest: responseManifest,
+    // P0-3: the create call REQUIRES this consume-once handle bound to the
+    // reviewed dry_run effect. The manifest alone is no longer approval.
+    ...(result.planHandles?.create !== undefined ? { plan_handle: result.planHandles.create } : {}),
   };
   const workflowSummary = buildReceiptBatchWorkflowSummary(summary);
   const workflow = buildReceiptBatchWorkflow({
@@ -126,6 +129,10 @@ export function renderReceiptBatchFull(input: ReceiptBatchFullInput): Record<str
     // the manifest the operator approved / must approve so the create call can
     // bind to these exact bytes.
     approved_manifest: responseManifest,
+    // P0-3: the per-effect consume-once handles minted by dry_run. create /
+    // create_and_confirm each REQUIRE the matching handle; the manifest is no
+    // longer the sole approval artifact.
+    ...(result.planHandles !== undefined ? { plan_handles: result.planHandles } : {}),
     skipped: projection !== undefined ? projection.skipped : scan.skipped,
     results: sanitizedResults,
     execution: buildReceiptBatchExecution({
@@ -372,6 +379,9 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
           ...(input.transactionDateTo ? { transaction_date_to: input.transactionDateTo } : {}),
           approved_manifest_required: true,
           approved_manifest: input.responseManifest ?? result.manifest,
+          // P0-3: the create call REQUIRES this consume-once handle bound to the
+          // reviewed effect; without it create fails closed (plan_handle_required).
+          ...(result.planHandles?.create !== undefined ? { plan_handle: result.planHandles.create } : {}),
         },
         approval_required: true,
       }

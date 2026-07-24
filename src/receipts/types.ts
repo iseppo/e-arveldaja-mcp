@@ -48,6 +48,11 @@ export interface ReceiptBatchRunInput {
   readonly directoryAccessOptions: ReceiptDirectoryAccessOptions;
   /** invoice_company_name from the already-loaded own-company identity. */
   readonly ownCompanyName?: string;
+  /** P0-3: REQUIRED for create / create_and_confirm. The consume-once handle
+   * minted by the matching dry_run for THIS execution effect. A missing /
+   * replayed / out-of-scope / expired handle, or one minted for the other effect
+   * (create vs create_and_confirm), fails closed with zero mutation. */
+  readonly planHandle?: string;
 }
 
 export interface ReceiptScanRunInput {
@@ -78,4 +83,11 @@ export interface ReceiptBatchResult {
   readonly summary: ReceiptBatchSummary;
   readonly manifest: ReceiptApprovedManifestEntry[];
   readonly snapshotFiles: ReceiptBatchSnapshotFile[];
+  /** P0-3: minted on dry_run only — the consume-once handles the operator must
+   * present to actually mutate. Each is bound to ONE execution effect so a
+   * `create` approval can never be replayed as `create_and_confirm`. */
+  readonly planHandles?: {
+    readonly create: string;
+    readonly create_and_confirm: string;
+  };
 }
