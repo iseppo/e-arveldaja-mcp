@@ -90,14 +90,42 @@ function renderPreview(preview: AccountingDocumentPreview) {
       }
     : undefined;
 
+  // P0-1: three-state status. An extraction-only preview (no bound booking) is
+  // "extracted" — it carries NO plan handle and is NOT create approval; only a
+  // prepare that bound the final booking fields is "ready_for_approval".
   const status = supplier.status === "needs_input" || preview.blockers.length > 0
     ? "needs_input"
-    : "ready_for_approval";
+    : (preview.planHandle !== undefined ? "ready_for_approval" : "extracted");
+
+  // Render the bound canonical booking model for operator review, wrapping the
+  // untrusted OCR-origin strings (supplier name, notes, item titles) HERE at
+  // the façade boundary (F-RESOLVER-FACADE-WRAP).
+  const bp = preview.bookingProjection as Record<string, unknown> | undefined;
+  const bookingReview = bp
+    ? {
+        ...bp,
+        ...(typeof bp.supplier_name === "string" ? { supplier_name: wrapUntrustedOcr(bp.supplier_name) } : {}),
+        ...(typeof bp.notes === "string" ? { notes: wrapUntrustedOcr(bp.notes) } : {}),
+        ...(Array.isArray(bp.items)
+          ? {
+              items: bp.items.map(item => (item && typeof item === "object"
+                ? {
+                    ...(item as Record<string, unknown>),
+                    ...(typeof (item as Record<string, unknown>).custom_title === "string"
+                      ? { custom_title: wrapUntrustedOcr((item as Record<string, unknown>).custom_title as string) }
+                      : {}),
+                  }
+                : item)),
+            }
+          : {}),
+      }
+    : undefined;
 
   return {
     summary: {
       status,
-      plan_handle: preview.planHandle,
+      ...(preview.planHandle !== undefined ? { plan_handle: preview.planHandle } : {}),
+      ...(bookingReview !== undefined ? { booking_review: bookingReview } : {}),
       supplier,
       extraction: {
         source_sha256: preview.extraction.source_sha256,
@@ -146,8 +174,10 @@ function renderPreview(preview: AccountingDocumentPreview) {
       blockers: preview.blockers,
       warnings: preview.warnings,
       next_step: status === "ready_for_approval"
-        ? "Review this preview. After explicit approval, call process_accounting_document with mode='create' and this plan_handle to create the DRAFT invoice; confirm it separately afterward."
-        : "Resolve the flagged items (supplier/validation) before booking.",
+        ? "Review the bound booking_review model above — it is the EXACT write model create will execute. After explicit approval, call mode='create' with this plan_handle, the same source, source_sha256, and the SAME booking fields; any changed field is rejected as plan_drift. Confirm separately afterward."
+        : status === "extracted"
+          ? "Review these extracted values with the operator. This extraction preview is NOT create approval and carries no plan handle. When the operator has confirmed the final booking values, call mode='prepare' again with the same source PLUS the final booking fields (supplier_client_id, invoice_number, invoice_date, journal_date, term_days, items, vat_price, gross_price, …) to obtain the create plan handle."
+          : "Resolve the flagged items (supplier/validation) before booking.",
     },
     mutation_occurred: false,
   };
@@ -197,20 +227,20 @@ export function registerProcessAccountingDocumentTool(
 
   registerTool(server,
     "process_accounting_document",
-    "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Use mode='prepare' (default) to preview and get a plan handle; after explicit approval use mode='create' with that plan handle to create the DRAFT invoice and upload the document; then use mode='confirm' with the returned confirm_plan handle and its invoice_id to register (confirm) the draft into the ledger. If the supplier is uniquely identifiable it resolves automatically.",
+    "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Flow: (1) mode='prepare' with only the file → extraction preview (NO plan handle — an OCR preview is never create approval); (2) after the operator reviews the values, mode='prepare' again with the file PLUS the final booking fields (supplier_client_id, invoice_number, dates, term_days, items, totals) → the server binds the exact write model and returns the plan_handle; (3) after explicit approval, mode='create' with that plan_handle, source_sha256 and the SAME booking fields — any changed field is rejected as plan_drift; (4) mode='confirm' with the returned confirm_plan handle and invoice_id registers the draft separately.",
     {
       mode: z.enum(["prepare", "create", "confirm"]).optional().describe("Workflow phase. Defaults to prepare (preview)."),
       file_ref: z.string().optional().describe("Opaque Accounting Inbox receipt_input file reference. Provide exactly one of file_ref or file_path."),
       file_path: z.string().optional().describe("Advanced: absolute path / base64 input to the invoice document. Provide exactly one of file_ref or file_path."),
-      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed mode='prepare'. REQUIRED for mode='create': every create must follow a prepare, giving mandatory consume-once replay + scope protection. The booking is additionally bound to the reviewed bytes by source_sha256 (also required). (For mode='confirm', pass the confirm_plan handle returned by create.)"),
+      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed booking-binding mode='prepare' (the prepare that included the final booking fields). REQUIRED for mode='create': the handle binds the full canonical write model — consume-once, scope-bound, and drift-checked field by field at create. (For mode='confirm', pass the confirm_plan handle returned by create.)"),
       source_sha256: z.string().optional().describe("mode='create': the source_sha256 from the reviewed preview; binds the booking to the reviewed bytes."),
       invoice_id: coerceId.optional().describe("mode='confirm': the invoice id from the create step's confirm_plan."),
-      supplier_client_id: coerceId.optional().describe("mode='create': the resolved supplier client ID."),
-      invoice_number: z.string().optional().describe("mode='create': invoice number."),
-      invoice_date: z.string().optional().describe("mode='create': invoice date (YYYY-MM-DD)."),
-      journal_date: z.string().optional().describe("mode='create': turnover/booking date (YYYY-MM-DD)."),
-      term_days: z.number().optional().describe("mode='create': payment term days."),
-      items: jsonObjectArrayInput.optional().describe("mode='create': reviewed invoice items."),
+      supplier_client_id: coerceId.optional().describe("Booking-binding prepare + mode='create': the resolved supplier client ID. (In an extraction-only prepare it acts as a supplier-resolution override.)"),
+      invoice_number: z.string().optional().describe("Booking-binding prepare + mode='create': invoice number."),
+      invoice_date: z.string().optional().describe("Booking-binding prepare + mode='create': invoice date (YYYY-MM-DD)."),
+      journal_date: z.string().optional().describe("Booking-binding prepare + mode='create': turnover/booking date (YYYY-MM-DD)."),
+      term_days: z.number().optional().describe("Booking-binding prepare + mode='create': payment term days."),
+      items: jsonObjectArrayInput.optional().describe("Reviewed invoice items. In mode='prepare' their presence switches to booking-binding prepare (binds the exact write model and returns the create plan_handle); REQUIRED again unchanged in mode='create'."),
       vat_price: z.number().optional().describe("mode='create': EXACT total VAT from the invoice; never recalculate."),
       gross_price: z.number().optional().describe("mode='create': EXACT total gross from the invoice; never recalculate."),
       liability_accounts_id: z.number().optional().describe("mode='create': liability account (default 2310)."),
@@ -301,10 +331,48 @@ export function registerProcessAccountingDocumentTool(
       }
 
       if (mode === "prepare") {
+        // P0-1: presence of `items` switches prepare into booking-binding mode —
+        // the FINAL reviewed booking fields are required as a set, the server
+        // computes the canonical effective write model, and the returned
+        // plan_handle binds it. Without `items` this is an extraction-only
+        // preview: NO create plan handle is issued.
+        let booking;
+        if (args.items !== undefined) {
+          const missingBooking: string[] = [];
+          if (args.supplier_client_id === undefined) missingBooking.push("supplier_client_id");
+          if (args.invoice_number === undefined) missingBooking.push("invoice_number");
+          if (args.invoice_date === undefined) missingBooking.push("invoice_date");
+          if (args.journal_date === undefined) missingBooking.push("journal_date");
+          if (args.term_days === undefined) missingBooking.push("term_days");
+          if (missingBooking.length > 0) {
+            return textResult({ error: `Missing required booking fields for mode='prepare' with items: ${missingBooking.join(", ")}`, category: "missing_required_fields", mutation_occurred: false }, true);
+          }
+          booking = {
+            supplierClientId: args.supplier_client_id!,
+            invoiceNumber: args.invoice_number!,
+            invoiceDate: args.invoice_date!,
+            journalDate: args.journal_date!,
+            termDays: args.term_days!,
+            items: args.items,
+            ...(args.vat_price !== undefined ? { vatPrice: args.vat_price } : {}),
+            ...(args.gross_price !== undefined ? { grossPrice: args.gross_price } : {}),
+            ...(args.liability_accounts_id !== undefined ? { liabilityAccountsId: args.liability_accounts_id } : {}),
+            ...(args.notes !== undefined ? { notes: args.notes } : {}),
+            ...(args.ref_number !== undefined ? { refNumber: args.ref_number } : {}),
+            ...(args.bank_account_no !== undefined ? { bankAccountNo: args.bank_account_no } : {}),
+            ...(args.currency !== undefined ? { currency: args.currency } : {}),
+            ...(args.currency_rate !== undefined ? { currencyRate: args.currency_rate } : {}),
+            ...(args.base_net_price !== undefined ? { baseNetPrice: args.base_net_price } : {}),
+            ...(args.base_vat_price !== undefined ? { baseVatPrice: args.base_vat_price } : {}),
+            ...(args.base_gross_price !== undefined ? { baseGrossPrice: args.base_gross_price } : {}),
+            ...(args.block_on_duplicate !== undefined ? { blockOnDuplicate: args.block_on_duplicate } : {}),
+          };
+        }
         const outcome = await operations.prepare({
           source,
           snapshot,
           ...(args.supplier_client_id !== undefined ? { overrides: { supplier_client_id: args.supplier_client_id } } : {}),
+          ...(booking !== undefined ? { booking } : {}),
         });
         if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
 

@@ -2,12 +2,12 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 31689,
-    "descriptionsBytes": 4303,
-    "inputSchemasBytes": 22516,
+    "toolsListBytes": 32328,
+    "descriptionsBytes": 4565,
+    "inputSchemasBytes": 22893,
     "largestTool": {
       "name": "process_accounting_document",
-      "bytes": 4079
+      "bytes": 4718
     },
     "serverInstructionsBytes": 857,
     "promptMetadataBytes": 11072,
@@ -500,7 +500,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Use mode='prepare' (default) to preview and get a plan handle; after explicit approval use mode='create' with that plan handle to create the DRAFT invoice and upload the document; then use mode='confirm' with the returned confirm_plan handle and its invoice_id to register (confirm) the draft into the ledger. If the supplier is uniquely identifiable it resolves automatically.",
+      "description": "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Flow: (1) mode='prepare' with only the file → extraction preview (NO plan handle — an OCR preview is never create approval); (2) after the operator reviews the values, mode='prepare' again with the file PLUS the final booking fields (supplier_client_id, invoice_number, dates, term_days, items, totals) → the server binds the exact write model and returns the plan_handle; (3) after explicit approval, mode='create' with that plan_handle, source_sha256 and the SAME booking fields — any changed field is rejected as plan_drift; (4) mode='confirm' with the returned confirm_plan handle and invoice_id registers the draft separately.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -549,7 +549,7 @@
             "type": "number"
           },
           "invoice_date": {
-            "description": "mode='create': invoice date (YYYY-MM-DD).",
+            "description": "Booking-binding prepare + mode='create': invoice date (YYYY-MM-DD).",
             "type": "string"
           },
           "invoice_id": {
@@ -559,7 +559,7 @@
             "type": "integer"
           },
           "invoice_number": {
-            "description": "mode='create': invoice number.",
+            "description": "Booking-binding prepare + mode='create': invoice number.",
             "type": "string"
           },
           "items": {
@@ -578,10 +578,10 @@
                 "type": "string"
               }
             ],
-            "description": "mode='create': reviewed invoice items."
+            "description": "Reviewed invoice items. In mode='prepare' their presence switches to booking-binding prepare (binds the exact write model and returns the create plan_handle); REQUIRED again unchanged in mode='create'."
           },
           "journal_date": {
-            "description": "mode='create': turnover/booking date (YYYY-MM-DD).",
+            "description": "Booking-binding prepare + mode='create': turnover/booking date (YYYY-MM-DD).",
             "type": "string"
           },
           "liability_accounts_id": {
@@ -602,7 +602,7 @@
             "type": "string"
           },
           "plan_handle": {
-            "description": "Execution-plan handle from the reviewed mode='prepare'. REQUIRED for mode='create': every create must follow a prepare, giving mandatory consume-once replay + scope protection. The booking is additionally bound to the reviewed bytes by source_sha256 (also required). (For mode='confirm', pass the confirm_plan handle returned by create.)",
+            "description": "Execution-plan handle from the reviewed booking-binding mode='prepare' (the prepare that included the final booking fields). REQUIRED for mode='create': the handle binds the full canonical write model — consume-once, scope-bound, and drift-checked field by field at create. (For mode='confirm', pass the confirm_plan handle returned by create.)",
             "type": "string"
           },
           "ref_number": {
@@ -614,13 +614,13 @@
             "type": "string"
           },
           "supplier_client_id": {
-            "description": "mode='create': the resolved supplier client ID.",
+            "description": "Booking-binding prepare + mode='create': the resolved supplier client ID. (In an extraction-only prepare it acts as a supplier-resolution override.)",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
           },
           "term_days": {
-            "description": "mode='create': payment term days.",
+            "description": "Booking-binding prepare + mode='create': payment term days.",
             "type": "number"
           },
           "vat_price": {
