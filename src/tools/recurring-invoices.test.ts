@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { registerRecurringInvoiceTools } from "./recurring-invoices.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { computeRecurringClone, registerRecurringInvoiceTools } from "./recurring-invoices.js";
+import { canonicalBusinessText, parseMcpResponse } from "../mcp-json.js";
 
 function buildSaleInvoice(overrides: Record<string, unknown> = {}) {
   return {
@@ -219,6 +219,45 @@ describe("recurring invoices tool", () => {
         confirm_error: "Confirm failed",
       }),
     ]);
+  });
+
+  it("extracted core produces the same result as the tool handler (parity, nonces aside)", async () => {
+    // Build TWO independent API mocks with identical behavior so the tool and
+    // the extracted core each get a fresh, non-shared mock (the tool handler
+    // mutates its own existingCloneMarkers map).
+    const params = { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" };
+
+    const toolSetup = setupRecurringTool();
+    const toolResult = await toolSetup.handler({ ...params, dry_run: false });
+    const toolPayload = parseMcpResponse(toolResult.content[0]!.text) as Record<string, unknown>;
+
+    const coreApi = {
+      saleInvoices: {
+        listAll: vi.fn().mockResolvedValue([buildSaleInvoice()]),
+        get: vi.fn().mockResolvedValue(buildSaleInvoice()),
+        create: vi.fn().mockResolvedValue({ created_object_id: 321 }),
+        confirm: vi.fn().mockResolvedValue({}),
+      },
+    } as any;
+    const coreResult = await computeRecurringClone(coreApi, params, { dryRun: false });
+
+    // Client fields are wrapped with a per-call random nonce; canonicalize both
+    // before comparison so parity is asserted on the business content, not the
+    // unpredictable sandbox nonce.
+    const normalize = (payload: Record<string, unknown>): Record<string, unknown> => {
+      const clone = JSON.parse(JSON.stringify(payload)) as Record<string, unknown>;
+      const results = clone.results as Array<Record<string, unknown>> | undefined;
+      if (Array.isArray(results)) {
+        for (const row of results) {
+          if (typeof row.client === "string") row.client = canonicalBusinessText(row.client);
+        }
+      }
+      return clone;
+    };
+
+    expect(normalize(coreResult)).toEqual(normalize(toolPayload));
+    expect(coreResult.mode).toBe("EXECUTED");
+    expect(coreResult.created).toBe(1);
   });
 
   it("reports an error instead of silently skipping source invoices without items", async () => {

@@ -1,6 +1,7 @@
 import type { OperationOutcome } from "../operation-outcome.js";
-import type { ExecutionPlanInput } from "../plan-store.js";
+import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
 import type { ApiContext } from "../tools/crud/shared.js";
+import { computeRecurringClone, type RecurringCloneParams } from "../tools/recurring-invoices.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { desandboxAllStrings } from "../external-text-renderer.js";
 import { decodeApiResponseCritical, decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
@@ -27,7 +28,46 @@ function fail<T>(code: string, message: string): OperationOutcome<T> {
   return { ok: false, error: { code, message, retry: "never" }, blockers: [] };
 }
 
-const MUTATION_ACTIONS = new Set<SaleInvoiceMutationAction>(["create", "update", "delete", "confirm", "invalidate", "send"]);
+const MUTATION_ACTIONS = new Set<SaleInvoiceMutationAction>(["create", "update", "delete", "confirm", "invalidate", "send", "recurring"]);
+
+/**
+ * Extract the recurring-clone params from a façade payload. Returns undefined
+ * when a required field (source_month/target_date/target_journal_date) is
+ * missing or the wrong type. Fields are desandboxed at this write boundary.
+ */
+function parseRecurringParams(payload: Record<string, unknown> | undefined): RecurringCloneParams | undefined {
+  if (!payload) return undefined;
+  const p = desandboxAllStrings(payload) as Record<string, unknown>;
+  const source_month = typeof p.source_month === "string" ? p.source_month : undefined;
+  const target_date = typeof p.target_date === "string" ? p.target_date : undefined;
+  const target_journal_date = typeof p.target_journal_date === "string" ? p.target_journal_date : undefined;
+  if (source_month === undefined || target_date === undefined || target_journal_date === undefined) return undefined;
+  const invoice_ids = typeof p.invoice_ids === "string" ? p.invoice_ids : undefined;
+  const auto_confirm = typeof p.auto_confirm === "boolean" ? p.auto_confirm : undefined;
+  return {
+    source_month,
+    target_date,
+    target_journal_date,
+    ...(invoice_ids !== undefined ? { invoice_ids } : {}),
+    ...(auto_confirm !== undefined ? { auto_confirm } : {}),
+  };
+}
+
+/**
+ * The drift-binding fingerprint for a recurring plan. Binds ONLY the reviewed
+ * clone params (source_month/target_date/target_journal_date/invoice_ids) — NOT
+ * an invoice id and NOT auto_confirm — so an execute must target exactly the
+ * reviewed recurring run.
+ */
+function recurringNormalizedArgs(params: RecurringCloneParams): PlanRecord {
+  return {
+    action: "recurring",
+    source_month: params.source_month,
+    target_date: params.target_date,
+    target_journal_date: params.target_journal_date,
+    ...(params.invoice_ids !== undefined ? { invoice_ids: params.invoice_ids } : {}),
+  };
+}
 
 class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
   constructor(
@@ -78,6 +118,7 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
 
   private async prepare(input: SaleInvoicePrepareInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
     if (!MUTATION_ACTIONS.has(input.action)) return fail("invalid_action", `Unknown action "${String(input.action)}".`);
+    if (input.action === "recurring") return this.prepareRecurring(input);
     if (input.action !== "create" && input.id === undefined) {
       return fail("id_required", `action='${input.action}' requires an id.`);
     }
@@ -102,6 +143,31 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     return ok({ mode: "prepare", action: input.action, ...(input.id !== undefined ? { id: input.id } : {}), planHandle, projection });
   }
 
+  private async prepareRecurring(input: SaleInvoicePrepareInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
+    const params = parseRecurringParams(input.payload);
+    if (!params) {
+      return fail("recurring_params_required", "action='recurring' requires payload with source_month (YYYY-MM), target_date and target_journal_date (YYYY-MM-DD).");
+    }
+    // PREVIEW: run the shared clone core with dryRun=true. This is the projection
+    // the operator reviews before approving.
+    const preview = await computeRecurringClone(this.api, params, { dryRun: true });
+    const normalizedArgs = recurringNormalizedArgs(params);
+    const planSnapshot: PlanRecord = { ...normalizedArgs, destructive: false };
+    const planInput: ExecutionPlanInput = {
+      normalizedArgs,
+      sourceIdentities: [],
+      liveSnapshot: planSnapshot,
+      commands: [{ id: "sale-invoice-recurring", category: "sale_invoice_recurring", reviewProjection: planSnapshot }],
+      counts: {},
+      totals: {},
+      exclusions: [],
+      reviews: [],
+      privatePayload: normalizedArgs,
+    };
+    const planHandle = this.runtimeSafetyContext.planStore.issue(SALE_INVOICE_PLAN_DOMAIN, planInput);
+    return ok({ mode: "prepare", action: "recurring", planHandle, projection: preview });
+  }
+
   private async execute(input: SaleInvoiceExecuteInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
     if (!MUTATION_ACTIONS.has(input.action)) return fail("invalid_action", `Unknown action "${String(input.action)}".`);
     // Consume the reviewed plan (consume-once). A missing/replayed handle is a
@@ -124,12 +190,23 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     // id on the same handle). Mirrors the plan_drift binding in the banking
     // reconciliation executor. Rejected with ZERO side effect — before any
     // api.saleInvoices.* call.
-    const boundArgs = { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) };
+    // For recurring, the plan binds the reviewed clone PARAMS (not an invoice id).
+    let recurringParams: RecurringCloneParams | undefined;
+    let boundArgs: PlanRecord;
+    if (input.action === "recurring") {
+      recurringParams = parseRecurringParams(input.payload);
+      if (!recurringParams) {
+        return fail("recurring_params_required", "action='recurring' requires payload with source_month (YYYY-MM), target_date and target_journal_date (YYYY-MM-DD).");
+      }
+      boundArgs = recurringNormalizedArgs(recurringParams);
+    } else {
+      boundArgs = { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) };
+    }
     if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(boundArgs)) {
       return fail("plan_drift", "The reviewed sale-invoice plan no longer matches the requested action/id.");
     }
 
-    if (input.action !== "create" && input.id === undefined) {
+    if (input.action !== "create" && input.action !== "recurring" && input.id === undefined) {
       return fail("id_required", `action='${input.action}' requires an id.`);
     }
 
@@ -140,6 +217,10 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       case "confirm": return this.executeSimple("confirm", input.id!, () => this.api.saleInvoices.confirm(input.id!));
       case "invalidate": return this.executeSimple("invalidate", input.id!, () => this.api.saleInvoices.invalidate(input.id!));
       case "send": return this.executeSend(input);
+      case "recurring": {
+        const result = await computeRecurringClone(this.api, recurringParams!, { dryRun: false });
+        return ok({ mode: "execute", action: "recurring", result });
+      }
       default:
         return fail("invalid_action", `Unknown action "${String(input.action)}".`);
     }

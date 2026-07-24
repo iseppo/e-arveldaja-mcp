@@ -26,21 +26,30 @@ function appendRecurringCloneMarker(notes: string | null | undefined, marker: st
   return notes ? `${notes}\n${marker}` : marker;
 }
 
-export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext): void {
+/** Recurring-clone parameters shared by the standalone tool and the guided-sales façade. */
+export interface RecurringCloneParams {
+  source_month: string;
+  target_date: string;
+  target_journal_date: string;
+  invoice_ids?: string;
+  auto_confirm?: boolean;
+}
 
-  registerTool(server, "create_recurring_sale_invoices",
-    "Clone previous-month sale invoices into DRAFT recurring invoices. dry_run=true previews; invoice numbers are auto-assigned.",
-    {
-      source_month: z.string().regex(MONTH_REGEX, "Expected YYYY-MM").describe("Source month to copy from (YYYY-MM)"),
-      target_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New invoice date (YYYY-MM-DD)"),
-      target_journal_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New turnover date (YYYY-MM-DD)"),
-      invoice_ids: z.string().regex(COMMA_SEPARATED_IDS_REGEX, "Expected comma-separated numeric invoice IDs").optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
-      auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
-      dry_run: z.boolean().optional().describe("Preview without creating invoices (default true)"),
-    },
-    { ...batch, title: "Create Recurring Sale Invoices" },
-    async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm, dry_run }) => {
-      const isDryRun = dry_run !== false;
+/**
+ * Single source of truth for the recurring sale-invoice clone. Clones
+ * previous-month CONFIRMED sale invoices into DRAFT recurring invoices,
+ * dedup-guarded by recurring-clone markers. Returns the MCP payload object
+ * (mode + counts + per-source results, with carried-over client names sandbox
+ * -wrapped). Used by BOTH `create_recurring_sale_invoices` and the
+ * `manage_sale_invoice` action='recurring' entry point.
+ */
+export async function computeRecurringClone(
+  api: ApiContext,
+  params: RecurringCloneParams,
+  options: { dryRun: boolean },
+): Promise<Record<string, unknown>> {
+      const { source_month, target_date, target_journal_date, invoice_ids, auto_confirm } = params;
+      const isDryRun = options.dryRun;
       const allSales = await api.saleInvoices.listAll();
       const sourceFrom = `${source_month}-01`;
       const sourceLastDay = new Date(parseInt(source_month.split("-")[0]!, 10), parseInt(source_month.split("-")[1]!, 10), 0).getDate();
@@ -225,26 +234,43 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
       const wouldSkipExistingCount = results.filter(r => r.status === "would_skip_existing").length;
 
       return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            mode: isDryRun ? "DRY_RUN" : "EXECUTED",
-            source_month,
-            target_date,
-            source_count: sourceInvoices.length,
-            would_create: isDryRun ? wouldCreateCount : undefined,
-            would_skip_existing: isDryRun ? wouldSkipExistingCount : undefined,
-            created: isDryRun ? undefined : createdCount,
-            confirmed: isDryRun ? undefined : confirmedCount,
-            skipped_existing: isDryRun ? undefined : skippedExistingCount,
-            errors: isDryRun ? undefined : createErrorsCount + confirmErrorsCount,
-            create_errors: isDryRun ? undefined : createErrorsCount,
-            confirm_errors: isDryRun ? undefined : confirmErrorsCount,
-            results,
-            ...(isDryRun && { note: "Preview only. Omit dry_run or set dry_run=false to create the invoices." }),
-          }),
-        }],
+        mode: isDryRun ? "DRY_RUN" : "EXECUTED",
+        source_month,
+        target_date,
+        source_count: sourceInvoices.length,
+        would_create: isDryRun ? wouldCreateCount : undefined,
+        would_skip_existing: isDryRun ? wouldSkipExistingCount : undefined,
+        created: isDryRun ? undefined : createdCount,
+        confirmed: isDryRun ? undefined : confirmedCount,
+        skipped_existing: isDryRun ? undefined : skippedExistingCount,
+        errors: isDryRun ? undefined : createErrorsCount + confirmErrorsCount,
+        create_errors: isDryRun ? undefined : createErrorsCount,
+        confirm_errors: isDryRun ? undefined : confirmErrorsCount,
+        results,
+        ...(isDryRun && { note: "Preview only. Omit dry_run or set dry_run=false to create the invoices." }),
       };
+}
+
+export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext): void {
+
+  registerTool(server, "create_recurring_sale_invoices",
+    "Clone previous-month sale invoices into DRAFT recurring invoices. dry_run=true previews; invoice numbers are auto-assigned.",
+    {
+      source_month: z.string().regex(MONTH_REGEX, "Expected YYYY-MM").describe("Source month to copy from (YYYY-MM)"),
+      target_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New invoice date (YYYY-MM-DD)"),
+      target_journal_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New turnover date (YYYY-MM-DD)"),
+      invoice_ids: z.string().regex(COMMA_SEPARATED_IDS_REGEX, "Expected comma-separated numeric invoice IDs").optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
+      auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
+      dry_run: z.boolean().optional().describe("Preview without creating invoices (default true)"),
+    },
+    { ...batch, title: "Create Recurring Sale Invoices" },
+    async ({ source_month, target_date, target_journal_date, invoice_ids, auto_confirm, dry_run }) => {
+      const payload = await computeRecurringClone(
+        api,
+        { source_month, target_date, target_journal_date, invoice_ids, auto_confirm },
+        { dryRun: dry_run !== false },
+      );
+      return { content: [{ type: "text", text: toMcpJson(payload) }] };
     }
   );
 }

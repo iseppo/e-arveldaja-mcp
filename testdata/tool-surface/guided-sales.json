@@ -2,9 +2,9 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 30653,
-    "descriptionsBytes": 4191,
-    "inputSchemasBytes": 21593,
+    "toolsListBytes": 30913,
+    "descriptionsBytes": 4303,
+    "inputSchemasBytes": 21741,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 3938
@@ -816,7 +816,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. send dispatches a REAL e-invoice and is never one-shot.",
+      "description": "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send/recurring) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. send dispatches a REAL e-invoice and is never one-shot. recurring clones previous-month confirmed invoices into DRAFT recurring invoices (params in payload).",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -824,7 +824,7 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
           "action": {
-            "description": "read: list|get|document|xml|delivery_options. prepare/execute: create|update|delete|confirm|invalidate|send.",
+            "description": "read: list|get|document|xml|delivery_options. prepare/execute: create|update|delete|confirm|invalidate|send|recurring.",
             "type": "string"
           },
           "clients_id": {
@@ -842,7 +842,7 @@
             "type": "string"
           },
           "id": {
-            "description": "Invoice ID (required for everything except list/create).",
+            "description": "Invoice ID (required for everything except list/create/recurring).",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
@@ -875,7 +875,7 @@
                 "type": "string"
               }
             ],
-            "description": "create/update fields, or send request ({send_einvoice, send_email, email_addresses, ...})."
+            "description": "create/update fields, send request ({send_einvoice, send_email, email_addresses, ...}), or recurring params ({source_month:YYYY-MM, target_date:YYYY-MM-DD, target_journal_date:YYYY-MM-DD, invoice_ids?, auto_confirm?})."
           },
           "payment_status": {
             "description": "read=list: PAID|PARTIALLY_PAID|NOT_PAID.",

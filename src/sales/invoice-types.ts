@@ -12,7 +12,7 @@ import type { OperationOutcome } from "../operation-outcome.js";
 export const SALE_INVOICE_PLAN_DOMAIN = "sale_invoice";
 
 export type SaleInvoiceReadAction = "list" | "get" | "document" | "xml" | "delivery_options";
-export type SaleInvoiceMutationAction = "create" | "update" | "delete" | "confirm" | "invalidate" | "send";
+export type SaleInvoiceMutationAction = "create" | "update" | "delete" | "confirm" | "invalidate" | "send" | "recurring";
 
 export interface SaleInvoiceReadInput {
   readonly mode: "read";

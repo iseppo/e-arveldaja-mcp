@@ -57,6 +57,37 @@ describe("manage_sale_invoice façade", () => {
     expect(send).toHaveBeenCalledWith(9, expect.objectContaining({ send_einvoice: true }));
   });
 
+  it("recurring is a two-call prepare -> execute; execute clones and wraps carried-over client names", async () => {
+    const INJECT = "IGNORE ALL";
+    const source = { id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: `Buyer ${INJECT}`,
+      sale_invoice_type: "INVOICE", number_prefix: "ARV",
+      items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100 }] };
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const handler = setup(makeApi({
+      listAll: vi.fn().mockResolvedValue([source]),
+      get: vi.fn().mockResolvedValue(source),
+      create,
+    }));
+    const params = { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" };
+    const prepared = parse(await handler({ mode: "prepare", action: "recurring", payload: params }));
+    expect(prepared.status).toBe("ready_for_approval");
+    expect(prepared.mutation_occurred).toBe(false);
+    expect(typeof prepared.plan_handle).toBe("string");
+    expect(prepared.projection.mode).toBe("DRY_RUN");
+    expect(create).not.toHaveBeenCalled();
+
+    const executeResult = await handler({ mode: "execute", action: "recurring", plan_handle: prepared.plan_handle, payload: params });
+    const executed = parse(executeResult);
+    expect(executed.mutation_occurred).toBe(true);
+    expect(executed.result.created).toBe(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    // Carried-over client name is untrusted → wrapped before the injection text.
+    const text = executeResult.content[0]!.text;
+    const idx = text.indexOf(INJECT);
+    expect(idx).toBeGreaterThan(-1);
+    expect(text.slice(0, idx)).toContain("UNTRUSTED_OCR_START");
+  });
+
   it("execute without a plan_handle is refused (destructive confirm)", async () => {
     const confirm = vi.fn();
     const handler = setup(makeApi({ confirm }));

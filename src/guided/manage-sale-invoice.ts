@@ -26,7 +26,7 @@ import type {
 // echoes go through renderExternalEntity (trusted CRUD, not OCR-wrapping).
 
 const READ_ACTIONS = new Set<SaleInvoiceReadAction>(["list", "get", "document", "xml", "delivery_options"]);
-const MUTATION_ACTIONS = new Set<SaleInvoiceMutationAction>(["create", "update", "delete", "confirm", "invalidate", "send"]);
+const MUTATION_ACTIONS = new Set<SaleInvoiceMutationAction>(["create", "update", "delete", "confirm", "invalidate", "send", "recurring"]);
 
 function textResult(payload: Record<string, unknown>, isError = false) {
   return { ...(isError ? { isError: true } : {}), content: [{ type: "text" as const, text: toMcpJson(payload) }] };
@@ -69,13 +69,13 @@ export function registerManageSaleInvoiceTool(
 
   registerTool(server,
     "manage_sale_invoice",
-    "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. send dispatches a REAL e-invoice and is never one-shot.",
+    "Unified sale-invoice entry point. mode='read' (action list/get/document/xml/delivery_options) reads invoices. Mutations use the two-call gate: mode='prepare' (action create/update/delete/confirm/invalidate/send/recurring) returns a plan_handle; after explicit approval mode='execute' with that plan_handle runs it. send dispatches a REAL e-invoice and is never one-shot. recurring clones previous-month confirmed invoices into DRAFT recurring invoices (params in payload).",
     {
       mode: z.enum(["read", "prepare", "execute"]).optional().describe("read (default), prepare (mint plan handle), or execute (consume it)."),
-      action: z.string().optional().describe("read: list|get|document|xml|delivery_options. prepare/execute: create|update|delete|confirm|invalidate|send."),
-      id: coerceId.optional().describe("Invoice ID (required for everything except list/create)."),
+      action: z.string().optional().describe("read: list|get|document|xml|delivery_options. prepare/execute: create|update|delete|confirm|invalidate|send|recurring."),
+      id: coerceId.optional().describe("Invoice ID (required for everything except list/create/recurring)."),
       plan_handle: z.string().optional().describe("Execution-plan handle from mode='prepare'. Required for mode='execute'."),
-      payload: jsonObjectInput.optional().describe("create/update fields, or send request ({send_einvoice, send_email, email_addresses, ...})."),
+      payload: jsonObjectInput.optional().describe("create/update fields, send request ({send_einvoice, send_email, email_addresses, ...}), or recurring params ({source_month:YYYY-MM, target_date:YYYY-MM-DD, target_journal_date:YYYY-MM-DD, invoice_ids?, auto_confirm?})."),
       view: z.enum(["brief", "full"]).optional().describe("read=list: brief (default) or full."),
       page: z.number().int().positive().optional().describe("read=list: page number."),
       date_from: z.string().optional().describe("read=list: revenue date on/after (YYYY-MM-DD)."),

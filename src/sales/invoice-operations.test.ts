@@ -126,6 +126,66 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     expect(confirm).toHaveBeenCalledWith(5);
   });
 
+  it("recurring: prepare returns the dry-run preview + a plan handle without cloning", async () => {
+    const source = { id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: "Acme OU",
+      sale_invoice_type: "INVOICE", number_prefix: "ARV", items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100 }] };
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const listAll = vi.fn().mockResolvedValue([source]);
+    const get = vi.fn().mockResolvedValue(source);
+    const api = makeApi({ listAll, get, create });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" } });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    expect(typeof prepared.value.planHandle).toBe("string");
+    expect(prepared.value.projection.mode).toBe("DRY_RUN");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("recurring: execute with the handle runs the real clone (dryRun=false), invoices created", async () => {
+    const source = { id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: "Acme OU",
+      sale_invoice_type: "INVOICE", number_prefix: "ARV", items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100 }] };
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const api = makeApi({ listAll: vi.fn().mockResolvedValue([source]), get: vi.fn().mockResolvedValue(source), create });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const params = { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" };
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: params });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const executed = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: params });
+    expect(executed.ok).toBe(true);
+    if (!executed.ok || executed.value.mode !== "execute") throw new Error("execute failed");
+    expect((executed.value.result as Record<string, unknown>).created).toBe(1);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("recurring: execute with DIFFERENT params than reviewed → plan_drift, no clone", async () => {
+    const source = { id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: "Acme OU",
+      sale_invoice_type: "INVOICE", number_prefix: "ARV", items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100 }] };
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const api = makeApi({ listAll: vi.fn().mockResolvedValue([source]), get: vi.fn().mockResolvedValue(source), create });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createSaleInvoiceOperations(api, runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: { source_month: "2026-01", target_date: "2026-03-01", target_journal_date: "2026-03-01" } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("recurring: execute without a plan_handle is refused before any clone", async () => {
+    const create = vi.fn();
+    const api = makeApi({ listAll: vi.fn().mockResolvedValue([]), create });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const outcome = await ops.run({ mode: "execute", action: "recurring", planHandle: undefined, payload: { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_handle_required");
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("update strips sandbox markers at the write boundary and blocks confirmed edits", async () => {
     const update = vi.fn().mockResolvedValue({});
     const get = vi.fn().mockResolvedValue({ id: 4, status: "PROJECT" });
