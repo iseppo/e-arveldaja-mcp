@@ -154,11 +154,12 @@ function renderPreview(preview: AccountingDocumentPreview) {
 }
 
 interface DocArgs {
-  mode?: "prepare" | "create";
+  mode?: "prepare" | "create" | "confirm";
   file_ref?: string;
   file_path?: string;
   plan_handle?: string;
   source_sha256?: string;
+  invoice_id?: number;
   supplier_client_id?: number;
   invoice_number?: string;
   invoice_date?: string;
@@ -196,13 +197,14 @@ export function registerProcessAccountingDocumentTool(
 
   registerTool(server,
     "process_accounting_document",
-    "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Use mode='prepare' (default) to preview and get a plan handle; after explicit approval use mode='create' with that plan handle to create the DRAFT invoice and upload the document. Confirmation is a separate, later step. If the supplier is uniquely identifiable it resolves automatically.",
+    "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Use mode='prepare' (default) to preview and get a plan handle; after explicit approval use mode='create' with that plan handle to create the DRAFT invoice and upload the document; then use mode='confirm' with the returned confirm_plan handle and its invoice_id to register (confirm) the draft into the ledger. If the supplier is uniquely identifiable it resolves automatically.",
     {
-      mode: z.enum(["prepare", "create"]).optional().describe("Workflow phase. Defaults to prepare (preview)."),
+      mode: z.enum(["prepare", "create", "confirm"]).optional().describe("Workflow phase. Defaults to prepare (preview)."),
       file_ref: z.string().optional().describe("Opaque Accounting Inbox receipt_input file reference. Provide exactly one of file_ref or file_path."),
       file_path: z.string().optional().describe("Advanced: absolute path / base64 input to the invoice document. Provide exactly one of file_ref or file_path."),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed preview. Consumed once for replay protection when supplied. The booking is bound to the reviewed bytes by source_sha256 (required); plan_handle is optional."),
       source_sha256: z.string().optional().describe("mode='create': the source_sha256 from the reviewed preview; binds the booking to the reviewed bytes."),
+      invoice_id: coerceId.optional().describe("mode='confirm': the invoice id from the create step's confirm_plan."),
       supplier_client_id: coerceId.optional().describe("mode='create': the resolved supplier client ID."),
       invoice_number: z.string().optional().describe("mode='create': invoice number."),
       invoice_date: z.string().optional().describe("mode='create': invoice date (YYYY-MM-DD)."),
@@ -227,6 +229,31 @@ export function registerProcessAccountingDocumentTool(
       const mode = args.mode ?? "prepare";
       if (args.invoice_date && !ISO_DATE_REGEX.test(args.invoice_date)) {
         return textResult({ error: "invoice_date must be YYYY-MM-DD", category: "invalid_date", mutation_occurred: false }, true);
+      }
+
+      // mode === "confirm": the SEPARATE confirm/link step. It consumes the
+      // confirm_plan handle minted by mode='create' and registers the DRAFT
+      // invoice — it operates purely on the reviewed invoice id and needs NO
+      // document, so it routes BEFORE any source capture / snapshot read.
+      if (mode === "confirm") {
+        const missing: string[] = [];
+        if (args.invoice_id === undefined) missing.push("invoice_id");
+        if (args.plan_handle === undefined) missing.push("plan_handle");
+        if (missing.length > 0) {
+          return textResult({ error: `Missing required fields for mode='confirm': ${missing.join(", ")}`, category: "missing_required_fields", mutation_occurred: false }, true);
+        }
+        const outcome = await operations.confirmDraft({ planHandle: args.plan_handle, invoiceId: args.invoice_id! });
+        if (!outcome.ok) {
+          return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
+        }
+        return textResult({
+          result: {
+            confirmed_invoice_id: outcome.value.confirmedInvoiceId,
+            status: outcome.value.status,
+          },
+          note: "Purchase invoice confirmed (registered) into the ledger. This is APPROVAL TWO (confirm).",
+          mutation_occurred: true,
+        });
       }
 
       const source: FileInputSource = {
@@ -377,7 +404,7 @@ export function registerProcessAccountingDocumentTool(
               })),
             }
           : {}),
-        note: "Purchase invoice created as DRAFT and the source document uploaded. This is APPROVAL ONE (create/upload). Confirmation is a SEPARATE step — review, then confirm the invoice using its confirm plan handle below.",
+        note: "Purchase invoice created as DRAFT and the source document uploaded. This is APPROVAL ONE (create/upload). Confirmation is a SEPARATE step — review, then confirm the invoice by calling process_accounting_document with mode='confirm', the invoice_id, and the confirm plan handle below.",
         ...(execution.confirmPlan
           ? { confirm_plan: { plan_handle: execution.confirmPlan.planHandle, invoice_id: execution.confirmPlan.invoiceId } }
           : {}),

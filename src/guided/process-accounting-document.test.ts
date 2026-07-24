@@ -242,4 +242,89 @@ describe("process_accounting_document", () => {
     expect(parse(result).category).toBe("missing_required_fields");
     expect(api.purchaseInvoices.createAndSetTotals ?? (() => {})).toBeDefined();
   });
+
+  // mode='confirm' consumes the confirm plan minted by the create step and
+  // registers the DRAFT purchase invoice — the previously minted-but-never-
+  // consumed ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN handle now has a consumer.
+  function confirmCapableSetup() {
+    return setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn(),
+        createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_001, status: "SAVED" }),
+        confirmWithTotals: vi.fn(),
+        confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+  }
+
+  async function createDraft(handler: Handler, path: string, sha256: string) {
+    return parse(await handler({
+      mode: "create",
+      file_path: path,
+      source_sha256: sha256,
+      supplier_client_id: 4242,
+      invoice_number: "INV-1",
+      invoice_date: "2026-06-15",
+      journal_date: "2026-06-15",
+      term_days: 14,
+      items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10 }],
+      vat_price: 2,
+      gross_price: 12,
+    }));
+  }
+
+  it("confirms the DRAFT invoice via the create step's confirm_plan handle (the confirm domain now has a consumer)", async () => {
+    const { path, sha256 } = writeTempPdf();
+    const { handler, api } = confirmCapableSetup();
+    const created = await createDraft(handler, path, sha256);
+    const planHandle = created.confirm_plan.plan_handle as string;
+    const invoiceId = created.confirm_plan.invoice_id as number;
+
+    const confirmed = parse(await handler({ mode: "confirm", invoice_id: invoiceId, plan_handle: planHandle }));
+    expect(api.purchaseInvoices.confirm).toHaveBeenCalledWith(invoiceId);
+    expect(confirmed.result.confirmed_invoice_id).toBe(invoiceId);
+    expect(confirmed.result.status).toBe("CONFIRMED");
+    expect(confirmed.mutation_occurred).toBe(true);
+  });
+
+  it("rejects a replayed confirm handle (consume-once)", async () => {
+    const { path, sha256 } = writeTempPdf();
+    const { handler, api } = confirmCapableSetup();
+    const created = await createDraft(handler, path, sha256);
+    const planHandle = created.confirm_plan.plan_handle as string;
+    const invoiceId = created.confirm_plan.invoice_id as number;
+
+    const first = parse(await handler({ mode: "confirm", invoice_id: invoiceId, plan_handle: planHandle }));
+    expect(first.mutation_occurred).toBe(true);
+    const replay = await handler({ mode: "confirm", invoice_id: invoiceId, plan_handle: planHandle });
+    expect(replay.isError).toBe(true);
+    expect(parse(replay).category).toMatch(/plan_handle_consumed|plan_handle_invalid/);
+    expect(api.purchaseInvoices.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails plan_drift and does NOT confirm when the invoice_id differs from the reviewed handle", async () => {
+    const { path, sha256 } = writeTempPdf();
+    const { handler, api } = confirmCapableSetup();
+    const created = await createDraft(handler, path, sha256);
+    const planHandle = created.confirm_plan.plan_handle as string;
+
+    const drifted = await handler({ mode: "confirm", invoice_id: 90_999, plan_handle: planHandle });
+    expect(drifted.isError).toBe(true);
+    expect(parse(drifted).category).toBe("plan_drift");
+    expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
+  });
+
+  it("rejects mode='confirm' with no plan_handle (fail-closed, no API call)", async () => {
+    const { handler, api } = confirmCapableSetup();
+    const result = await handler({ mode: "confirm", invoice_id: 90_001 });
+    expect(result.isError).toBe(true);
+    expect(parse(result).mutation_occurred).toBe(false);
+    expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
+  });
 });

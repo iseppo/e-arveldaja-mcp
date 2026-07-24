@@ -7,7 +7,7 @@ import { parseDocument } from "../document-parser.js";
 import { createAccountingWorkflowApi, fixtureAccount, fixtureClient } from "../__fixtures__/accounting-workflow.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
-import { createAccountingDocumentOperations, ACCOUNTING_DOCUMENT_PLAN_DOMAIN } from "./operations.js";
+import { createAccountingDocumentOperations, ACCOUNTING_DOCUMENT_PLAN_DOMAIN, ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN } from "./operations.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
@@ -267,5 +267,73 @@ describe("AccountingDocumentOperations.create", () => {
     expect(replay.ok).toBe(false);
     if (replay.ok) return;
     expect(replay.error.code).toMatch(/plan_handle_consumed|plan_handle_invalid/);
+  });
+});
+
+describe("AccountingDocumentOperations.confirmDraft", () => {
+  function confirmSetup() {
+    const api = createAccountingWorkflowApi({
+      clientRows: [],
+      purchaseInvoiceRows: [],
+      purchaseInvoices: {
+        confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+      },
+    });
+    const runtime = createTestRuntimeSafetyContext();
+    const ops = createAccountingDocumentOperations(api, runtime);
+    return { api, runtime, ops };
+  }
+
+  // Mint the confirm plan exactly as operations.create mints it after a create
+  // (ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN, normalizedArgs { invoice_id }).
+  function mintConfirmPlan(runtime: ReturnType<typeof createTestRuntimeSafetyContext>, invoiceId: number) {
+    return runtime.planStore.issue(ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN, {
+      normalizedArgs: { invoice_id: invoiceId },
+      sourceIdentities: [],
+      liveSnapshot: { invoice_id: invoiceId },
+      commands: [{ id: "accounting-document-confirm", category: "purchase_invoice_confirm", reviewProjection: { invoice_id: invoiceId } }],
+      counts: {}, totals: {}, exclusions: [], reviews: [], privatePayload: { invoice_id: invoiceId },
+    });
+  }
+
+  it("confirms the reviewed invoice via the register API and returns a compact mutation result", async () => {
+    const { api, runtime, ops } = confirmSetup();
+    const handle = mintConfirmPlan(runtime, 90_001);
+    const outcome = await ops.confirmDraft({ planHandle: handle, invoiceId: 90_001 });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(api.purchaseInvoices.confirm).toHaveBeenCalledWith(90_001);
+    expect(outcome.value.confirmedInvoiceId).toBe(90_001);
+    expect(outcome.value.status).toBe("CONFIRMED");
+    expect(outcome.value.mutationOccurred).toBe(true);
+  });
+
+  it("consumes the confirm handle once — a replayed handle fails (mirrors the create replay guard)", async () => {
+    const { runtime, ops } = confirmSetup();
+    const handle = mintConfirmPlan(runtime, 90_001);
+    const first = await ops.confirmDraft({ planHandle: handle, invoiceId: 90_001 });
+    expect(first.ok).toBe(true);
+    const replay = await ops.confirmDraft({ planHandle: handle, invoiceId: 90_001 });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) return;
+    expect(replay.error.code).toMatch(/plan_handle_consumed|plan_handle_invalid/);
+  });
+
+  it("fails plan_drift with NO API call when the invoice_id differs from the reviewed handle", async () => {
+    const { api, runtime, ops } = confirmSetup();
+    const handle = mintConfirmPlan(runtime, 90_001);
+    const outcome = await ops.confirmDraft({ planHandle: handle, invoiceId: 90_002 });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when no plan_handle is supplied (the handle is not approval)", async () => {
+    const { api, ops } = confirmSetup();
+    const outcome = await ops.confirmDraft({ planHandle: undefined, invoiceId: 90_001 });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
   });
 });

@@ -40,11 +40,14 @@ import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { logAudit } from "../audit-log.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
+import { canonicalPlanJson } from "../tools/camt-plan.js";
 import type { CreatePurchaseInvoiceData } from "../types/api.js";
 import type {
+  AccountingDocumentConfirmation,
   AccountingDocumentExecution,
   AccountingDocumentOperations,
   AccountingDocumentPreview,
+  ConfirmAccountingDocumentInput,
   ExecuteAccountingDocumentInput,
   PrepareAccountingDocumentInput,
 } from "./types.js";
@@ -497,6 +500,44 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     } finally {
       await material.cleanup();
     }
+  }
+
+  // Step 3 — the SEPARATE confirm/link step. Consumes the confirm plan minted by
+  // create (ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN) and registers the DRAFT invoice.
+  // Confirm operates purely on the reviewed invoice id: it NEVER re-reads the
+  // source or re-runs extraction. Mirrors the consume-once + plan-drift-binding
+  // template in src/sales/invoice-operations.ts execute().
+  async confirmDraft(input: ConfirmAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentConfirmation>> {
+    // Consume the reviewed confirm plan (consume-once). A missing/replayed/invalid
+    // handle is a HARD fail-closed error — the plan handle is NOT itself approval.
+    if (input.planHandle === undefined) {
+      return fail("plan_handle_required", "mode='confirm' requires the plan_handle from the create step's confirm_plan.", "never");
+    }
+    let storedPlan;
+    try {
+      storedPlan = this.runtimeSafetyContext.planStore.consume(input.planHandle, ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN);
+    } catch (error) {
+      const code = (error as { code?: string }).code ?? "plan_handle_invalid";
+      return fail(code, "The reviewed confirm plan could not be consumed.", "never");
+    }
+
+    // Plan-drift binding: the confirm plan's normalizedArgs is { invoice_id }.
+    // Bind the consumed plan to the requested invoice_id — without this, one
+    // approved create's confirm handle could confirm an arbitrary invoice id.
+    // Rejected with ZERO API side effect BEFORE any register call.
+    if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson({ invoice_id: input.invoiceId })) {
+      return fail("plan_drift", "The reviewed confirm plan no longer matches the requested invoice_id.", "never");
+    }
+
+    // Register via the same API confirm_purchase_invoice uses (PATCH .../register).
+    const result = await this.api.purchaseInvoices.confirm(input.invoiceId);
+    logAudit({
+      tool: "process_accounting_document", action: "CONFIRMED", entity_type: "purchase_invoice",
+      entity_id: input.invoiceId,
+      summary: `Confirmed purchase invoice ${input.invoiceId} from document`,
+      details: {},
+    });
+    return ok({ confirmedInvoiceId: input.invoiceId, status: "CONFIRMED", mutationOccurred: true, result });
   }
 }
 

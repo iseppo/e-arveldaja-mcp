@@ -7,7 +7,7 @@ import type { ExtractionConfidenceSignals, InvoiceExtractionFallback } from "../
 import type { FileInputSnapshot, FileInputSource } from "../file-input-snapshot.js";
 import type { BookingSuggestionCore } from "../tools/pdf-workflow.js";
 import type { DuplicatePostingCandidate, DuplicatePostingScanResult, DuplicatePostingSuspect } from "../bank-posting-duplicate-guard.js";
-import type { PurchaseInvoice } from "../types/api.js";
+import type { ApiResponse, PurchaseInvoice } from "../types/api.js";
 
 // Typed accounting-document operations (Task 13, PR 8B). The interface
 // references NO MCP types — inputs and results are plain typed, UNWRAPPED
@@ -120,7 +120,24 @@ export interface AccountingDocumentExecution {
   };
 }
 
+/** Input for the SEPARATE confirm/link step (Step 3). Confirm operates purely
+ * on the reviewed invoice id — it never re-reads the source or re-extracts. */
+export interface ConfirmAccountingDocumentInput {
+  /** The confirm plan handle minted at create time. Consume-once; NOT approval. */
+  readonly planHandle: string | undefined;
+  readonly invoiceId: number;
+}
+
+export interface AccountingDocumentConfirmation {
+  readonly confirmedInvoiceId: number;
+  readonly status: string;
+  readonly mutationOccurred: true;
+  /** Raw register-endpoint response (UNWRAPPED). */
+  readonly result: ApiResponse;
+}
+
 export interface AccountingDocumentOperations {
   prepare(input: PrepareAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentPreview>>;
   create(input: ExecuteAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentExecution>>;
+  confirmDraft(input: ConfirmAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentConfirmation>>;
 }

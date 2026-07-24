@@ -2,12 +2,12 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 149138,
-    "descriptionsBytes": 19811,
-    "inputSchemasBytes": 93844,
+    "toolsListBytes": 149402,
+    "descriptionsBytes": 19901,
+    "inputSchemasBytes": 94018,
     "largestTool": {
       "name": "process_accounting_document",
-      "bytes": 3674
+      "bytes": 3938
     },
     "serverInstructionsBytes": 857,
     "promptMetadataBytes": 11072,
@@ -5707,7 +5707,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Use mode='prepare' (default) to preview and get a plan handle; after explicit approval use mode='create' with that plan handle to create the DRAFT invoice and upload the document. Confirmation is a separate, later step. If the supplier is uniquely identifiable it resolves automatically.",
+      "description": "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Use mode='prepare' (default) to preview and get a plan handle; after explicit approval use mode='create' with that plan handle to create the DRAFT invoice and upload the document; then use mode='confirm' with the returned confirm_plan handle and its invoice_id to register (confirm) the draft into the ledger. If the supplier is uniquely identifiable it resolves automatically.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -5759,6 +5759,12 @@
             "description": "mode='create': invoice date (YYYY-MM-DD).",
             "type": "string"
           },
+          "invoice_id": {
+            "description": "mode='confirm': the invoice id from the create step's confirm_plan.",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
           "invoice_number": {
             "description": "mode='create': invoice number.",
             "type": "string"
@@ -5793,7 +5799,8 @@
             "description": "Workflow phase. Defaults to prepare (preview).",
             "enum": [
               "prepare",
-              "create"
+              "create",
+              "confirm"
             ],
             "type": "string"
           },
