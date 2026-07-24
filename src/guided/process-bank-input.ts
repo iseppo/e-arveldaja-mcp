@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { isStrictDate } from "../strict-date.js";
 import { batch } from "../annotations.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { type ApiContext, coerceId } from "../tools/crud-tools.js";
@@ -433,8 +434,8 @@ export function registerProcessBankInputTool(
       file_ref: z.string().optional().describe("Opaque Accounting Inbox bank_input file reference. Provide exactly one of file_ref or file_path."),
       file_path: z.string().optional().describe("Advanced: absolute path / base64 input. Provide exactly one of file_ref or file_path."),
       accounts_dimensions_id: coerceId.optional().describe("Optional bank account dimension ID. Omit to let a unique bank account resolve automatically."),
-      date_from: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import entries from this date (YYYY-MM-DD)."),
-      date_to: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import entries up to this date (YYYY-MM-DD)."),
+      date_from: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").optional().describe("Only import entries from this date (YYYY-MM-DD)."),
+      date_to: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").optional().describe("Only import entries up to this date (YYYY-MM-DD)."),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for mode='execute'."),
       fee_account_dimensions_id: z.number().optional().describe("Wise only: account dimension ID for the Wise fee expense account."),
       inter_account_dimension_id: coerceId.optional().describe("Wise only: other bank account dimension ID for inter-account transfers."),

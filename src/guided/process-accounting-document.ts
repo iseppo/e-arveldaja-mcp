@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { isStrictDate } from "../strict-date.js";
 import { batch, create as createAnnotation } from "../annotations.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { type ApiContext, coerceId, jsonObjectArrayInput } from "../tools/crud-tools.js";
@@ -29,7 +30,6 @@ import type { Elicitor } from "../elicitation.js";
 // OCR-sandbox-wrapped at THIS boundary (F-RESOLVER-FACADE-WRAP); the typed op and
 // resolvers stay unwrapped. The compact preview carries NO raw OCR.
 
-const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const INVOICE_DOCUMENT_MAX_FILE_SIZE = 50 * 1024 * 1024;
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];
 
@@ -257,8 +257,10 @@ export function registerProcessAccountingDocumentTool(
     { ...createAnnotation, ...batch, openWorldHint: true, title: "Process Accounting Document" },
     async (args: DocArgs) => {
       const mode = args.mode ?? "prepare";
-      if (args.invoice_date && !ISO_DATE_REGEX.test(args.invoice_date)) {
-        return textResult({ error: "invoice_date must be YYYY-MM-DD", category: "invalid_date", mutation_occurred: false }, true);
+      for (const [key, value] of [["invoice_date", args.invoice_date], ["journal_date", args.journal_date]] as const) {
+        if (value !== undefined && !isStrictDate(value)) {
+          return textResult({ error: `${key} must be a real calendar date in canonical YYYY-MM-DD form`, category: "invalid_date", mutation_occurred: false }, true);
+        }
       }
 
       // mode === "confirm": the SEPARATE confirm/link step. It consumes the
