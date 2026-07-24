@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
-import { TOOL_CATALOG, TOOL_CATALOG_FINGERPRINT } from "./tool-catalog.js";
+import { TOOL_CATALOG, TOOL_CATALOG_FINGERPRINT, toolMeta } from "./tool-catalog.js";
 import { GUIDED_TOOL_NAMES, isToolVisibleForProfile, parseToolProfile, projectActionForProfile, SETUP_PROFILE_CHOICES } from "./tool-profile.js";
 
 describe("tool profiles", () => {
@@ -52,12 +52,29 @@ describe("tool profiles", () => {
 
   it("equals the complete PR0 full surface and matches destructive annotations", async () => {
     const snapshot = JSON.parse(await readFile(new URL("../testdata/tool-surface/full.json", import.meta.url), "utf8"));
-    const tools = snapshot.tools as Array<{ name: string; annotations?: { destructiveHint?: boolean } }>;
+    const tools = snapshot.tools as Array<{ name: string; annotations?: { destructiveHint?: boolean; readOnlyHint?: boolean } }>;
     expect(new Set(TOOL_CATALOG.map(({ name }) => name))).toEqual(new Set(tools.map(({ name }) => name)));
     for (const tool of tools) {
       const meta = TOOL_CATALOG.find(({ name }) => name === tool.name)!;
       expect(meta.risk === "destructive" || meta.risk === "send").toBe(tool.annotations?.destructiveHint === true);
+      // The catalog's read-only-risk classification must agree with the tool's
+      // real MCP readOnlyHint on the measured public surface: a mutating tool
+      // (readOnlyHint false) must never be catalogued read/preview, and a
+      // read/preview tool must carry a read-only hint. This closes the gap where
+      // a mutating façade (continue_accounting_workflow) was risk="preview".
+      expect(meta.risk === "read" || meta.risk === "preview").toBe(tool.annotations?.readOnlyHint === true);
     }
+  });
+
+  it("catalogues continue_accounting_workflow as a mutation, its read-only granular constituents apart", () => {
+    // action='execute_review_action' books a real owner-expense journal, so the
+    // façade must not be read/preview-risk. Its granular constituents only
+    // resolve/prepare (no ledger write) and stay read-only-risk.
+    expect(toolMeta("continue_accounting_workflow").risk).toBe("mutate");
+    expect(toolMeta("resolve_accounting_review_item").risk).toBe("read");
+    expect(toolMeta("prepare_accounting_review_action").risk).toBe("preview");
+    // accounting_inbox (scan/dry_run only) genuinely stays a preview tool.
+    expect(toolMeta("accounting_inbox").risk).toBe("preview");
   });
 
   it("fails closed when a guided action is advanced or unknown", () => {
