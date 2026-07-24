@@ -2,12 +2,12 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 19,
-    "toolsListBytes": 28894,
+    "toolsListBytes": 29035,
     "descriptionsBytes": 3831,
-    "inputSchemasBytes": 20431,
+    "inputSchemasBytes": 20572,
     "largestTool": {
       "name": "process_accounting_document",
-      "bytes": 3938
+      "bytes": 4079
     },
     "serverInstructionsBytes": 857,
     "promptMetadataBytes": 11072,
@@ -602,7 +602,7 @@
             "type": "string"
           },
           "plan_handle": {
-            "description": "Execution-plan handle from the reviewed preview. Consumed once for replay protection when supplied. The booking is bound to the reviewed bytes by source_sha256 (required); plan_handle is optional.",
+            "description": "Execution-plan handle from the reviewed mode='prepare'. REQUIRED for mode='create': every create must follow a prepare, giving mandatory consume-once replay + scope protection. The booking is additionally bound to the reviewed bytes by source_sha256 (also required). (For mode='confirm', pass the confirm_plan handle returned by create.)",
             "type": "string"
           },
           "ref_number": {

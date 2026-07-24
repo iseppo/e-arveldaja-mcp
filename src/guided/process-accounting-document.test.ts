@@ -207,9 +207,12 @@ describe("process_accounting_document", () => {
       },
     });
 
+    const prepared = parse(await handler({ mode: "prepare", file_path: path }));
+    const planHandle = prepared.summary.plan_handle as string;
     const created = parse(await handler({
       mode: "create",
       file_path: path,
+      plan_handle: planHandle,
       source_sha256: sha256,
       supplier_client_id: 4242,
       invoice_number: "INV-1",
@@ -264,9 +267,13 @@ describe("process_accounting_document", () => {
   }
 
   async function createDraft(handler: Handler, path: string, sha256: string) {
+    // create now requires a plan_handle from a prior mode='prepare'.
+    const prepared = parse(await handler({ mode: "prepare", file_path: path }));
+    const planHandle = prepared.summary.plan_handle as string;
     return parse(await handler({
       mode: "create",
       file_path: path,
+      plan_handle: planHandle,
       source_sha256: sha256,
       supplier_client_id: 4242,
       invoice_number: "INV-1",

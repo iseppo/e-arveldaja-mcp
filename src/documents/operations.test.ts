@@ -182,9 +182,19 @@ describe("AccountingDocumentOperations.create", () => {
     grossPrice: 12,
   });
 
+  // create now REQUIRES a plan_handle from a prior mode='prepare'. Mint a valid
+  // in-scope handle so success-path tests reach the booking logic.
+  const mintDocHandle = (runtime: ReturnType<typeof createTestRuntimeSafetyContext>, sha256: string) =>
+    runtime.planStore.issue(ACCOUNTING_DOCUMENT_PLAN_DOMAIN, {
+      normalizedArgs: { source_sha256: sha256 },
+      sourceIdentities: [], liveSnapshot: {},
+      commands: [{ id: "c", category: "purchase_invoice_create" }],
+      counts: {}, totals: {}, exclusions: [], reviews: [], privatePayload: {},
+    });
+
   it("creates a DRAFT invoice, uploads the document, and mints a SECOND confirm plan (never auto-confirmed)", async () => {
-    const { path, sha256, api, ops } = createSetup();
-    const outcome = await ops.create(baseCreateInput(path, sha256));
+    const { path, sha256, api, runtime, ops } = createSetup();
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: mintDocHandle(runtime, sha256) });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     expect(outcome.value.createdInvoiceId).toBe(90_001);
@@ -198,10 +208,11 @@ describe("AccountingDocumentOperations.create", () => {
   });
 
   it("desandboxes sandbox markers out of the invoiceData written to the API (write-boundary canonicalization)", async () => {
-    const { path, sha256, api, ops } = createSetup();
+    const { path, sha256, api, runtime, ops } = createSetup();
     const wrap = (s: string) => wrapUntrustedOcr(s)!;
     const outcome = await ops.create({
       ...baseCreateInput(path, sha256),
+      planHandle: mintDocHandle(runtime, sha256),
       invoiceNumber: wrap("INV-1"),
       refNumber: wrap("REF-9"),
       bankAccountNo: wrap("EE001122"),
@@ -220,8 +231,8 @@ describe("AccountingDocumentOperations.create", () => {
   });
 
   it("carries structured duplicateScan + duplicateCandidate on the execution (no leaky formatted warning string)", async () => {
-    const { path, sha256, ops } = createSetup();
-    const outcome = await ops.create(baseCreateInput(path, sha256));
+    const { path, sha256, runtime, ops } = createSetup();
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: mintDocHandle(runtime, sha256) });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     const execution = outcome.value as unknown as Record<string, unknown>;
@@ -235,12 +246,22 @@ describe("AccountingDocumentOperations.create", () => {
   });
 
   it("rejects a digest mismatch BEFORE any mutation (snapshot binding)", async () => {
-    const { path, api, ops } = createSetup();
-    const outcome = await ops.create({ ...baseCreateInput(path, "0".repeat(64)) });
+    const { path, api, runtime, ops } = createSetup();
+    const outcome = await ops.create({ ...baseCreateInput(path, "0".repeat(64)), planHandle: mintDocHandle(runtime, "0".repeat(64)) });
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.error.code).toBe("digest_mismatch");
     expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("requires a plan_handle for create — a create with no prepared handle is refused before any mutation", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    const outcome = await ops.create(baseCreateInput(path, sha256)); // planHandle: undefined
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_handle_required");
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
   });
 
   it("requires a well-formed source_sha256", async () => {

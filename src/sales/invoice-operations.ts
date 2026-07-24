@@ -9,7 +9,7 @@ import { isRecord } from "../record-utils.js";
 import { resolveSupplierInternal } from "../tools/supplier-resolution.js";
 import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
 import { decodeApiResponseCritical, decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
-import { canonicalPlanJson } from "../tools/camt-plan.js";
+import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
 import { validateSaleInvoiceItemDimensions } from "../account-validation.js";
 import { parseSaleInvoiceItems, tagNotes } from "../tools/crud/shared.js";
 import { logAudit } from "../audit-log.js";
@@ -109,6 +109,75 @@ function parseClientInput(payload: Record<string, unknown> | undefined): Invoice
   };
 }
 
+/** Hard-reject a create payload that carries BOTH `clients_id` AND an inline
+ * `client` object. The documented contract is EITHER/OR — silently dropping the
+ * inline client (and its H13/P17/self-match identity guards) would contradict
+ * it. Returns a failure outcome when both are present, otherwise undefined.
+ * Presence is checked on the RAW payload (a wrapped OCR name is still non-blank),
+ * so no desandbox is needed here. */
+function clientInputConflict(payload: Record<string, unknown> | undefined): OperationOutcome<never> | undefined {
+  const hasClientsId = payload?.clients_id !== undefined && payload?.clients_id !== null;
+  const clientInput = parseClientInput(payload);
+  if (hasClientsId && clientInput !== undefined) {
+    return fail<never>("client_input_conflict", "Provide EITHER clients_id OR an inline client object, not both.");
+  }
+  return undefined;
+}
+
+/**
+ * Canonical drift fingerprint of a create/update/send mutation PAYLOAD, bound
+ * into the plan at prepare AND recomputed at execute so canonicalPlanJson
+ * rejects a changed payload as plan_drift with zero side effect. The payload is
+ * desandboxAllStrings-desandboxed FIRST — the per-call random OCR nonce would
+ * otherwise always drift between prepare and execute. For create the inline
+ * `client` contribution is reduced to IDENTITY-only (name/reg_code/vat_no/iban/
+ * country via parseClientInput) so it agrees with prepareClientPreview's
+ * read-only resolution; the raw `client` object and the non-semantic `view`
+ * field are dropped. Everything else in the payload (clients_id, items,
+ * invoice-level amounts, dates, send flags/recipients) is bound verbatim —
+ * conservatively, a spurious drift is safer than an unbound field.
+ * delete/confirm/invalidate carry no meaningful payload and are NOT routed here
+ * (they stay id-only). stripUndefinedDeep makes the result safe for the plan
+ * store (which rejects `undefined`) and order-insensitive for the comparison.
+ */
+function saleMutationFingerprint(
+  action: "create" | "update" | "send",
+  id: number | undefined,
+  payload: Record<string, unknown> | undefined,
+): PlanRecord {
+  const p = desandboxAllStrings(payload ?? {}) as Record<string, unknown>;
+  const base: Record<string, unknown> = { action, ...(id !== undefined ? { invoice_id: id } : {}) };
+  if (action === "create") {
+    const rest = { ...p };
+    delete rest.client;
+    delete rest.view;
+    const clientInput = parseClientInput(p);
+    return stripUndefinedDeep({
+      ...base,
+      ...rest,
+      ...(clientInput !== undefined ? { client: { ...clientInput } } : {}),
+    }) as PlanRecord;
+  }
+  const rest = { ...p };
+  delete rest.view;
+  return stripUndefinedDeep({ ...base, ...rest }) as PlanRecord;
+}
+
+/** Operator-facing summary of the bound payload fingerprint for the prepare
+ * projection: the list of bound field names plus any bound numeric/boolean
+ * scalars (amounts, flags). String values are intentionally omitted so no
+ * unsandboxed OCR text leaks — the display client name stays wrapped by
+ * prepareClientPreview. */
+function boundPayloadProjection(fp: PlanRecord): Record<string, string | number | boolean> {
+  const keys = Object.keys(fp).filter(k => k !== "action" && k !== "invoice_id");
+  const out: Record<string, string | number | boolean> = { bound_fields: keys.slice().sort().join(", ") };
+  for (const k of keys) {
+    const v = fp[k];
+    if (typeof v === "number" || typeof v === "boolean") out[`bound_${k}`] = v;
+  }
+  return out;
+}
+
 /** Result of the inline customer resolve-or-create. `needs_input` is the P17
  * "create neither" signal — the resolver refused (identity gate / conflict /
  * self-match / unresolved), so the caller must create NEITHER the client NOR
@@ -172,14 +241,28 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     if (input.action !== "create" && input.id === undefined) {
       return fail("id_required", `action='${input.action}' requires an id.`);
     }
+    // Reject clients_id + inline client both present BEFORE issuing a plan.
+    if (input.action === "create") {
+      const conflict = clientInputConflict(input.payload);
+      if (conflict) return conflict;
+    }
+    // Bind the DESANDBOXED payload fingerprint for create/update/send so the
+    // execute-time drift check rejects a changed payload (amounts, line items,
+    // send channel/recipients, inline customer). delete/confirm/invalidate carry
+    // no meaningful payload → id-only, as before.
+    const bindsPayload = input.action === "create" || input.action === "update" || input.action === "send";
+    const normalizedArgs: PlanRecord = bindsPayload
+      ? saleMutationFingerprint(input.action, input.id, input.payload)
+      : { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) };
     const projection: Record<string, string | number | boolean> = {
       action: input.action,
       ...(input.id !== undefined ? { invoice_id: input.id } : {}),
       destructive: input.action === "delete" || input.action === "confirm" || input.action === "invalidate" || input.action === "send",
+      ...(bindsPayload ? boundPayloadProjection(normalizedArgs) : {}),
     };
     const planProjection = projection as unknown as ExecutionPlanInput["liveSnapshot"];
     const planInput: ExecutionPlanInput = {
-      normalizedArgs: { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) },
+      normalizedArgs,
       sourceIdentities: [],
       liveSnapshot: planProjection,
       commands: [{ id: `sale-invoice-${input.action}`, category: `sale_invoice_${input.action}`, reviewProjection: planProjection }],
@@ -251,6 +334,12 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
 
   private async execute(input: SaleInvoiceExecuteInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
     if (!MUTATION_ACTIONS.has(input.action)) return fail("invalid_action", `Unknown action "${String(input.action)}".`);
+    // Reject clients_id + inline client both present BEFORE consuming the plan
+    // or touching any API (defense in depth — prepare already refuses it).
+    if (input.action === "create") {
+      const conflict = clientInputConflict(input.payload);
+      if (conflict) return conflict;
+    }
     // Consume the reviewed plan (consume-once). A missing/replayed handle is a
     // hard failure — the plan handle is not itself approval. EVERY mutation,
     // destructive action AND send passes this gate.
@@ -280,6 +369,10 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
         return fail("recurring_params_required", "action='recurring' requires payload with source_month (YYYY-MM), target_date and target_journal_date (YYYY-MM-DD).");
       }
       boundArgs = recurringNormalizedArgs(recurringParams);
+    } else if (input.action === "create" || input.action === "update" || input.action === "send") {
+      // Recompute the SAME payload fingerprint bound at prepare so a changed
+      // create/update/send payload drift-rejects here, before any api call.
+      boundArgs = saleMutationFingerprint(input.action, input.id, input.payload);
     } else {
       boundArgs = { action: input.action, ...(input.id !== undefined ? { invoice_id: input.id } : {}) };
     }
@@ -371,11 +464,26 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     // Inline resolve-or-create customer: create requires EITHER clients_id OR a
     // client object with a name. When only `client` is present, resolve it (with
     // creation enabled) and use the resolved/created id as clients_id.
+    // Defense in depth — prepare/execute already reject this, but keep the guard
+    // local to the mutation too.
+    const conflict = clientInputConflict(params);
+    if (conflict) return conflict;
     const hasClientsId = params.clients_id !== undefined && params.clients_id !== null;
     const clientInput = parseClientInput(params);
     if (!hasClientsId && clientInput === undefined) {
       return fail("client_required", "create requires either clients_id or a client object with at least { name }.");
     }
+    // Run ALL local parsing + account-dimension validation FIRST so a validation
+    // failure creates NEITHER the inline customer NOR the invoice — resolving-or-
+    // creating the customer before this left orphan master data on a bad item.
+    const items = desandboxAllStrings(parseSaleInvoiceItems(raw.items));
+    const [accounts, accountDimensions] = await Promise.all([
+      this.api.readonly.getAccounts(),
+      this.api.readonly.getAccountDimensions(),
+    ]);
+    const dimErrors = validateSaleInvoiceItemDimensions(items, accounts, accountDimensions);
+    if (dimErrors.length > 0) return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`);
+    // Only after validation passes: resolve-or-create the inline customer.
     let resolvedClientsId: number | undefined;
     if (!hasClientsId && clientInput !== undefined) {
       const resolved = await this.resolveInvoiceClient(clientInput, true);
@@ -388,16 +496,12 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       }
       resolvedClientsId = resolved.clients_id;
     }
-    // Never forward the inline `client` object to the sale-invoice API.
+    // Never forward the inline `client` object to the sale-invoice API. Also
+    // drop `view` so the payload sent to the API exactly matches the surface the
+    // plan fingerprint bound (saleMutationFingerprint drops `view` too).
     delete params.client;
+    delete params.view;
     if (resolvedClientsId !== undefined) params.clients_id = resolvedClientsId;
-    const items = desandboxAllStrings(parseSaleInvoiceItems(raw.items));
-    const [accounts, accountDimensions] = await Promise.all([
-      this.api.readonly.getAccounts(),
-      this.api.readonly.getAccountDimensions(),
-    ]);
-    const dimErrors = validateSaleInvoiceItemDimensions(items, accounts, accountDimensions);
-    if (dimErrors.length > 0) return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`);
     const result = await this.api.saleInvoices.create({
       ...params,
       number_suffix: (params.number_suffix as string | undefined) ?? "",

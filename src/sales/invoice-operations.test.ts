@@ -70,7 +70,7 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     const api = makeApi({ sendEinvoice: send });
     const runtime = createTestRuntimeSafetyContext();
     const ops = createSaleInvoiceOperations(api, runtime);
-    const prepared = await ops.run({ mode: "prepare", action: "send", id: 9 });
+    const prepared = await ops.run({ mode: "prepare", action: "send", id: 9, payload: { send_einvoice: true } });
     expect(prepared.ok).toBe(true);
     if (!prepared.ok || prepared.value.mode !== "prepare") return;
     expect(prepared.value.projection.destructive).toBe(true);
@@ -356,20 +356,143 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     const api = makeApi({ update, get });
     const runtime = createTestRuntimeSafetyContext();
     const ops = createSaleInvoiceOperations(api, runtime);
-    const prepared = await ops.run({ mode: "prepare", action: "update", id: 4 });
-    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    // Payload fingerprint is bound at prepare, so the same payload must be
+    // presented at prepare and execute (a wrapped OCR nonce desandboxes to the
+    // same clean value on both sides).
     const wrapped = "<<UNTRUSTED_OCR_START:abc>>Clean note<<UNTRUSTED_OCR_END:abc>>";
+    const prepared = await ops.run({ mode: "prepare", action: "update", id: 4, payload: { notes: wrapped } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
     await ops.run({ mode: "execute", action: "update", id: 4, planHandle: prepared.value.planHandle, payload: { notes: wrapped } });
     expect(update).toHaveBeenCalledWith(4, expect.objectContaining({ notes: "Clean note" }));
 
     const confirmedGet = vi.fn().mockResolvedValue({ id: 5, status: "CONFIRMED" });
     const confApi = makeApi({ update, get: confirmedGet });
     const ops2 = createSaleInvoiceOperations(confApi, runtime);
-    const prepared2 = await ops2.run({ mode: "prepare", action: "update", id: 5 });
+    const prepared2 = await ops2.run({ mode: "prepare", action: "update", id: 5, payload: { gross_price: 1 } });
     if (!prepared2.ok || prepared2.value.mode !== "prepare") throw new Error("prepare failed");
     const blocked = await ops2.run({ mode: "execute", action: "update", id: 5, planHandle: prepared2.value.planHandle, payload: { gross_price: 1 } });
     expect(blocked.ok).toBe(false);
     if (blocked.ok) return;
     expect(blocked.error.code).toBe("confirmed_record_immutable");
+  });
+
+  // Fix 1 — validation must run BEFORE the inline customer is resolve-or-created.
+  it("Fix1: a bad-dimension item fails validation BEFORE the inline customer is created — no orphan client, no invoice", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const create = vi.fn().mockResolvedValue({ created_object_id: 500 });
+      const clientCreate = vi.fn().mockResolvedValue({ created_object_id: 77 });
+      const clientGet = vi.fn().mockResolvedValue({ id: 77, name: "New Buyer OÜ" });
+      const api = makeApi(
+        { create },
+        { getAccounts: vi.fn().mockResolvedValue([]), getAccountDimensions: vi.fn().mockResolvedValue([]) },
+        { listAll: vi.fn().mockResolvedValue([]), create: clientCreate, get: clientGet },
+      );
+      const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+      // Brand-new resolvable client + an item referencing an unknown sale account (accounts=[]).
+      const payload = { client: { name: "New Buyer OÜ", reg_code: "17133416", country: "EST" }, items: [{ products_id: 1, custom_title: "x", amount: 1, sale_accounts_id: 9999 }] };
+      const prepared = await ops.run({ mode: "prepare", action: "create", payload });
+      if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+      const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload });
+      expect(executed.ok).toBe(false);
+      if (executed.ok) return;
+      expect(executed.error.code).toBe("account_validation_failed");
+      expect(clientCreate).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // Fix 2 — clients_id + inline client is a hard conflict in BOTH paths.
+  it("Fix2: prepare create with BOTH clients_id and inline client is a hard validation error — no plan issued", async () => {
+    const api = makeApi();
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const outcome = await ops.run({ mode: "prepare", action: "create", payload: { clients_id: 9, client: { name: "Acme OÜ" }, items: [] } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("client_input_conflict");
+  });
+
+  it("Fix2: execute create with BOTH clients_id and inline client is rejected — no invoice, no client created", async () => {
+    const create = vi.fn();
+    const clientCreate = vi.fn();
+    const api = makeApi({ create }, {}, { listAll: vi.fn().mockResolvedValue([]), create: clientCreate });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const outcome = await ops.run({ mode: "execute", action: "create", planHandle: "anything", payload: { clients_id: 9, client: { name: "Acme OÜ" }, items: [] } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("client_input_conflict");
+    expect(create).not.toHaveBeenCalled();
+    expect(clientCreate).not.toHaveBeenCalled();
+  });
+
+  // Fix 3 — bind the mutation payload fingerprint into the plan.
+  it("Fix3 update: execute with a DIFFERENT amount than reviewed → plan_drift, no update", async () => {
+    const update = vi.fn();
+    const get = vi.fn().mockResolvedValue({ id: 9, status: "PROJECT" });
+    const api = makeApi({ update, get });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "update", id: 9, payload: { gross_price: 100 } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "update", id: 9, planHandle: prepared.value.planHandle, payload: { gross_price: 200 } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("Fix3 update: UNCHANGED payload still executes (positive control)", async () => {
+    const update = vi.fn().mockResolvedValue({});
+    const get = vi.fn().mockResolvedValue({ id: 9, status: "PROJECT" });
+    const api = makeApi({ update, get });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const payload = { gross_price: 100, vat_price: 20 };
+    const prepared = await ops.run({ mode: "prepare", action: "update", id: 9, payload });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const executed = await ops.run({ mode: "execute", action: "update", id: 9, planHandle: prepared.value.planHandle, payload });
+    expect(executed.ok).toBe(true);
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
+  it("Fix3 send: execute with DIFFERENT send params than reviewed → plan_drift, no send", async () => {
+    const send = vi.fn();
+    const api = makeApi({ sendEinvoice: send });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "send", id: 9, payload: { send_einvoice: true, send_email: false } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "send", id: 9, planHandle: prepared.value.planHandle, payload: { send_einvoice: true, send_email: true, email_addresses: ["x@y.z"] } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("Fix3 send: UNCHANGED send params still execute (positive control)", async () => {
+    const send = vi.fn().mockResolvedValue({ delivered: true });
+    const api = makeApi({ sendEinvoice: send });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const payload = { send_einvoice: true, send_email: true, email_addresses: ["x@y.z"] };
+    const prepared = await ops.run({ mode: "prepare", action: "send", id: 9, payload });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const executed = await ops.run({ mode: "execute", action: "send", id: 9, planHandle: prepared.value.planHandle, payload });
+    expect(executed.ok).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("Fix3 create: execute with a DIFFERENT inline client than reviewed → plan_drift, no invoice, no client", async () => {
+    const create = vi.fn();
+    const clientCreate = vi.fn();
+    const api = makeApi({ create }, {}, { listAll: vi.fn().mockResolvedValue([]), create: clientCreate });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload: { client: { name: "Client A OÜ" }, items: [] } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload: { client: { name: "Client B OÜ" }, items: [] } });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(create).not.toHaveBeenCalled();
+    expect(clientCreate).not.toHaveBeenCalled();
   });
 });

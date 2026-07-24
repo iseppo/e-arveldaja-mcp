@@ -59,7 +59,7 @@ describe("manage_sale_invoice façade", () => {
   it("send is a two-call prepare -> execute over a plan handle (never one-shot)", async () => {
     const send = vi.fn().mockResolvedValue({ delivered: true });
     const handler = setup(makeApi({ sendEinvoice: send }));
-    const prepared = parse(await handler({ mode: "prepare", action: "send", id: 9 }));
+    const prepared = parse(await handler({ mode: "prepare", action: "send", id: 9, payload: { send_einvoice: true } }));
     expect(prepared.status).toBe("ready_for_approval");
     expect(prepared.mutation_occurred).toBe(false);
     expect(typeof prepared.plan_handle).toBe("string");

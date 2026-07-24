@@ -329,15 +329,20 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       return fail("source_sha256_required", "source_sha256 from the reviewed preview is required", "never");
     }
 
-    // Consume the reviewed plan (consume-once). A missing/replayed handle is a
-    // hard failure — the plan handle is not itself approval.
-    if (input.planHandle !== undefined) {
-      try {
-        this.runtimeSafetyContext.planStore.consume(input.planHandle, ACCOUNTING_DOCUMENT_PLAN_DOMAIN);
-      } catch (error) {
-        const code = (error as { code?: string }).code ?? "plan_handle_invalid";
-        return fail(code, "The reviewed execution plan could not be consumed.", "never");
-      }
+    // Consume the reviewed plan (consume-once). The handle is REQUIRED for
+    // create: every create must follow a mode='prepare' in the same scope
+    // (profile + catalog + connection), giving mandatory replay + scope
+    // protection. A missing/replayed/out-of-scope handle is a hard failure —
+    // the handle is not itself approval, and source_sha256 still binds the
+    // reviewed bytes, but a create with no prepared handle is refused outright.
+    if (input.planHandle === undefined) {
+      return fail("plan_handle_required", "mode='create' requires the plan_handle from the reviewed mode='prepare'.", "never");
+    }
+    try {
+      this.runtimeSafetyContext.planStore.consume(input.planHandle, ACCOUNTING_DOCUMENT_PLAN_DOMAIN);
+    } catch (error) {
+      const code = (error as { code?: string }).code ?? "plan_handle_invalid";
+      return fail(code, "The reviewed execution plan could not be consumed.", "never");
     }
 
     const snapshot = await loadSnapshot(input.source, this.runtimeSafetyContext, input.snapshot);
