@@ -14,6 +14,143 @@ export interface DetectDuplicateFilters {
   gross_price?: number;
 }
 
+export interface MissingDocumentsFilters {
+  date_from?: string;
+  date_to?: string;
+}
+
+/** UNWRAPPED core rows — `title` / `description` / `client` are wrapped at output. */
+export interface MissingJournalRow { id?: number; date: string; title?: string; number?: number }
+export interface MissingTransactionRow { id?: number; date: string; amount: number; description?: string }
+export interface MissingInvoiceRow { id?: number; date: string; number?: string; client?: string; gross?: number }
+
+/**
+ * Raw, UNWRAPPED missing-documents core (the exact envelope `find_missing_documents`
+ * emits, minus the wrapping). Counts are the FULL match counts; `items` carry every
+ * matching row so each consumer can slice as it needs. `wrapMissingDocuments` is the
+ * SINGLE site that both `find_missing_documents` and the guided `run_accounting_report`
+ * report='missing_documents' façade use to wrap `title` / `description` / `client`.
+ */
+export interface MissingDocumentsCore {
+  period: { from: string; to: string };
+  manual_journals_without_documents: { count: number; items: MissingJournalRow[] };
+  transactions_without_documents: { count: number; items: MissingTransactionRow[] };
+  purchase_invoices_without_documents: { count: number; items: MissingInvoiceRow[] };
+  sale_invoices_system_pdfs: { count: number; items: MissingInvoiceRow[]; note: string };
+  total_missing: number;
+}
+
+const SALE_INVOICES_SYSTEM_PDF_NOTE =
+  "Confirmed sale invoices have a system-generated PDF available via /pdf_system and are not flagged as missing documents.";
+
+/**
+ * Pure missing-source-document detection core, EXTRACTED from the
+ * `find_missing_documents` handler (behavior-preserving). Returns raw UNWRAPPED
+ * rows; both the tool handler and the guided report façade wrap at MCP output via
+ * `wrapMissingDocuments` — ONE source of truth for both the detection logic AND
+ * the untrusted-field set.
+ */
+export async function computeMissingDocuments(
+  api: ApiContext,
+  { date_from, date_to }: MissingDocumentsFilters,
+): Promise<MissingDocumentsCore> {
+  // Journals without documents
+  const allJournals = await api.journals.listAll();
+  const journalsWithout = allJournals.filter(j => {
+    if (j.is_deleted) return false;
+    if (date_from && j.effective_date < date_from) return false;
+    if (date_to && j.effective_date > date_to) return false;
+    // Manual journals (no operation_type) are most likely to need documents
+    return !j.base_document_files_id && !j.operation_type;
+  });
+
+  // Transactions without documents
+  const allTx = await api.transactions.listAll();
+  const txWithout = allTx.filter(tx => {
+    if (tx.is_deleted) return false;
+    if (date_from && tx.date < date_from) return false;
+    if (date_to && tx.date > date_to) return false;
+    return !tx.uploaded_files_id && !tx.transactions_files_id;
+  });
+
+  // Purchase invoices without documents
+  const allPurchases = await api.purchaseInvoices.listAll();
+  const purchasesWithout = allPurchases.filter((inv: PurchaseInvoice) => {
+    if (date_from && inv.create_date < date_from) return false;
+    if (date_to && inv.create_date > date_to) return false;
+    return !inv.base_document_files_id && inv.status === "CONFIRMED";
+  });
+
+  // Confirmed sale invoices always have a system PDF via /pdf_system
+  const allSales = await api.saleInvoices.listAll();
+  const confirmedSalesWithSystemPdf = allSales.filter((inv: SaleInvoice) => {
+    if (date_from && inv.create_date < date_from) return false;
+    if (date_to && inv.create_date > date_to) return false;
+    return inv.status === "CONFIRMED";
+  });
+
+  return {
+    period: { from: date_from ?? "all", to: date_to ?? "all" },
+    manual_journals_without_documents: {
+      count: journalsWithout.length,
+      items: journalsWithout.map(j => ({ id: j.id, date: j.effective_date, title: j.title, number: j.number })),
+    },
+    transactions_without_documents: {
+      count: txWithout.length,
+      items: txWithout.map(tx => ({ id: tx.id, date: tx.date, amount: tx.amount, description: tx.description ?? undefined })),
+    },
+    purchase_invoices_without_documents: {
+      count: purchasesWithout.length,
+      items: purchasesWithout.map((inv: PurchaseInvoice) => ({ id: inv.id, date: inv.create_date, number: inv.number, client: inv.client_name ?? undefined, gross: inv.gross_price })),
+    },
+    sale_invoices_system_pdfs: {
+      count: confirmedSalesWithSystemPdf.length,
+      items: confirmedSalesWithSystemPdf.map((inv: SaleInvoice) => ({ id: inv.id, date: inv.create_date, number: inv.number, client: inv.client_name ?? undefined, gross: inv.gross_price })),
+      note: SALE_INVOICES_SYSTEM_PDF_NOTE,
+    },
+    total_missing: journalsWithout.length + txWithout.length + purchasesWithout.length,
+  };
+}
+
+/**
+ * Wrap the untrusted `title` / `description` / `client` fields of a
+ * MissingDocumentsCore at MCP output and slice each item list to `limit`.
+ * `limit=Infinity` returns every row. Envelope key order is byte-identical to
+ * the historical `find_missing_documents` output.
+ */
+export function wrapMissingDocuments(core: MissingDocumentsCore, limit = 20): Record<string, unknown> {
+  const slice = <T>(items: readonly T[]): readonly T[] => (limit === Infinity ? items : items.slice(0, limit));
+  return {
+    period: core.period,
+    manual_journals_without_documents: {
+      count: core.manual_journals_without_documents.count,
+      items: slice(core.manual_journals_without_documents.items).map(j => ({
+        id: j.id, date: j.date, title: wrapUntrustedOcr(j.title), number: j.number,
+      })),
+    },
+    transactions_without_documents: {
+      count: core.transactions_without_documents.count,
+      items: slice(core.transactions_without_documents.items).map(tx => ({
+        id: tx.id, date: tx.date, amount: tx.amount, description: wrapUntrustedOcr(tx.description),
+      })),
+    },
+    purchase_invoices_without_documents: {
+      count: core.purchase_invoices_without_documents.count,
+      items: slice(core.purchase_invoices_without_documents.items).map(inv => ({
+        id: inv.id, date: inv.date, number: inv.number, client: wrapUntrustedOcr(inv.client), gross: inv.gross,
+      })),
+    },
+    sale_invoices_system_pdfs: {
+      count: core.sale_invoices_system_pdfs.count,
+      items: slice(core.sale_invoices_system_pdfs.items).map(inv => ({
+        id: inv.id, date: inv.date, number: inv.number, client: wrapUntrustedOcr(inv.client), gross: inv.gross,
+      })),
+      note: core.sale_invoices_system_pdfs.note,
+    },
+    total_missing: core.total_missing,
+  };
+}
+
 /**
  * Pure duplicate-purchase-invoice detection core, EXTRACTED from the
  * `detect_duplicate_purchase_invoice` handler (behavior-preserving). Returns the
@@ -195,73 +332,11 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
     },
     { ...readOnly, title: "Find Missing Documents" },
     async ({ date_from, date_to }) => {
-      // Journals without documents
-      const allJournals = await api.journals.listAll();
-      const journalsWithout = allJournals.filter(j => {
-        if (j.is_deleted) return false;
-        if (date_from && j.effective_date < date_from) return false;
-        if (date_to && j.effective_date > date_to) return false;
-        // Manual journals (no operation_type) are most likely to need documents
-        return !j.base_document_files_id && !j.operation_type;
-      });
-
-      // Transactions without documents
-      const allTx = await api.transactions.listAll();
-      const txWithout = allTx.filter(tx => {
-        if (tx.is_deleted) return false;
-        if (date_from && tx.date < date_from) return false;
-        if (date_to && tx.date > date_to) return false;
-        return !tx.uploaded_files_id && !tx.transactions_files_id;
-      });
-
-      // Purchase invoices without documents
-      const allPurchases = await api.purchaseInvoices.listAll();
-      const purchasesWithout = allPurchases.filter((inv: PurchaseInvoice) => {
-        if (date_from && inv.create_date < date_from) return false;
-        if (date_to && inv.create_date > date_to) return false;
-        return !inv.base_document_files_id && inv.status === "CONFIRMED";
-      });
-
-      // Confirmed sale invoices always have a system PDF via /pdf_system
-      const allSales = await api.saleInvoices.listAll();
-      const confirmedSalesWithSystemPdf = allSales.filter((inv: SaleInvoice) => {
-        if (date_from && inv.create_date < date_from) return false;
-        if (date_to && inv.create_date > date_to) return false;
-        return inv.status === "CONFIRMED";
-      });
-
+      const core = await computeMissingDocuments(api, { date_from, date_to });
       return {
         content: [{
           type: "text",
-          text: toMcpJson({
-            period: { from: date_from ?? "all", to: date_to ?? "all" },
-            manual_journals_without_documents: {
-              count: journalsWithout.length,
-              items: journalsWithout.slice(0, 20).map(j => ({
-                id: j.id, date: j.effective_date, title: wrapUntrustedOcr(j.title), number: j.number,
-              })),
-            },
-            transactions_without_documents: {
-              count: txWithout.length,
-              items: txWithout.slice(0, 20).map(tx => ({
-                id: tx.id, date: tx.date, amount: tx.amount, description: wrapUntrustedOcr(tx.description ?? undefined),
-              })),
-            },
-            purchase_invoices_without_documents: {
-              count: purchasesWithout.length,
-              items: purchasesWithout.slice(0, 20).map((inv: PurchaseInvoice) => ({
-                id: inv.id, date: inv.create_date, number: inv.number, client: wrapUntrustedOcr(inv.client_name ?? undefined), gross: inv.gross_price,
-              })),
-            },
-            sale_invoices_system_pdfs: {
-              count: confirmedSalesWithSystemPdf.length,
-              items: confirmedSalesWithSystemPdf.slice(0, 20).map((inv: SaleInvoice) => ({
-                id: inv.id, date: inv.create_date, number: inv.number, client: wrapUntrustedOcr(inv.client_name ?? undefined), gross: inv.gross_price,
-              })),
-              note: "Confirmed sale invoices have a system-generated PDF available via /pdf_system and are not flagged as missing documents.",
-            },
-            total_missing: journalsWithout.length + txWithout.length + purchasesWithout.length,
-          }),
+          text: toMcpJson(wrapMissingDocuments(core)),
         }],
       };
     }

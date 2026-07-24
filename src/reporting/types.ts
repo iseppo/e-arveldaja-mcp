@@ -1,5 +1,6 @@
 import type { OperationOutcome } from "../operation-outcome.js";
 import type { AccountBalance } from "../tools/financial-statements.js";
+import type { MissingDocumentsCore } from "../tools/document-audit.js";
 
 // Typed accounting-report operations (Task 14, PR 8C). MCP-free: inputs and
 // results are plain typed, UNWRAPPED domain data. The guided façade
@@ -15,7 +16,8 @@ export type AccountingReportType =
   | "balance_sheet"
   | "profit_and_loss"
   | "aging"
-  | "month_end";
+  | "month_end"
+  | "missing_documents";
 
 export interface RunAccountingReportInput {
   readonly report: AccountingReportType;
@@ -130,12 +132,20 @@ export interface MonthEndResult {
   readonly warnings: readonly string[];
 }
 
+/**
+ * Missing-source-document report. Carries the UNWRAPPED MissingDocumentsCore
+ * (shared with the `find_missing_documents` tool) behind the report discriminant;
+ * the guided façade wraps `title` / `description` / `client` at MCP output.
+ */
+export type MissingDocumentsResult = { readonly report: "missing_documents" } & MissingDocumentsCore;
+
 export type AccountingReportResult =
   | TrialBalanceResult
   | BalanceSheetResult
   | ProfitAndLossResult
   | AgingResult
-  | MonthEndResult;
+  | MonthEndResult
+  | MissingDocumentsResult;
 
 export interface ReportingOperations {
   run(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>>;

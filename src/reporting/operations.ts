@@ -5,6 +5,7 @@ import { roundMoney, effectiveGross } from "../money.js";
 import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
 import { computeAllBalances, sumCategory, gatherMonthEndScan } from "../tools/financial-statements.js";
 import { computeAgingBuckets, type AgingInvoiceInput } from "../tools/aging-analysis.js";
+import { computeMissingDocuments } from "../tools/document-audit.js";
 import type {
   AccountingReportResult,
   AgingSide,
@@ -66,6 +67,7 @@ class ReportingOperationsImpl implements ReportingOperations {
       case "profit_and_loss": return this.profitAndLoss(input);
       case "aging": return this.aging(input);
       case "month_end": return this.monthEnd(input);
+      case "missing_documents": return this.missingDocuments(input);
       default:
         return fail("invalid_report", `Unknown report "${String((input as { report?: unknown }).report)}".`);
     }
@@ -242,6 +244,14 @@ class ReportingOperationsImpl implements ReportingOperations {
       },
       warnings,
     });
+  }
+
+  private async missingDocuments(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>> {
+    const core = await computeMissingDocuments(this.api, {
+      ...(input.period?.from !== undefined ? { date_from: input.period.from } : {}),
+      ...(input.period?.to !== undefined ? { date_to: input.period.to } : {}),
+    });
+    return ok({ report: "missing_documents", ...core });
   }
 }
 

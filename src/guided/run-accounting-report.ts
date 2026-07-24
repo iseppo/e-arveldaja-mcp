@@ -6,6 +6,7 @@ import { readOnly } from "../annotations.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { ToolExposureConfig } from "../config.js";
 import { createReportingOperations } from "../reporting/operations.js";
+import { wrapMissingDocuments } from "../tools/document-audit.js";
 import type {
   AccountingReportResult,
   AgingSide,
@@ -123,6 +124,8 @@ function renderReport(value: AccountingReportResult, detail: "compact" | "full")
         summary: value.summary,
         ...(value.warnings.length > 0 ? { warnings: value.warnings } : {}),
       };
+    case "missing_documents":
+      return { report: "missing_documents", ...wrapMissingDocuments(value, detail === "full" ? Infinity : COMPACT_ITEM_CAP) };
   }
 }
 
@@ -144,9 +147,9 @@ export function registerRunAccountingReportTool(
 
   registerTool(server,
     "run_accounting_report",
-    "Unified accounting-report entry point. report='trial_balance' | 'balance_sheet' | 'profit_and_loss' (both need period.from/to via date_from/date_to) | 'aging' (as_of_date) | 'month_end' (month YYYY-MM). Compact by default; detail='full' returns every line.",
+    "Unified accounting-report entry point. report='trial_balance' | 'balance_sheet' | 'profit_and_loss' (both need period.from/to via date_from/date_to) | 'aging' (as_of_date) | 'month_end' (month YYYY-MM) | 'missing_documents' (RPS source-document check; optional date_from/date_to). Compact by default; detail='full' returns every line.",
     {
-      report: z.enum(["trial_balance", "balance_sheet", "profit_and_loss", "aging", "month_end"]).describe("Which report to run."),
+      report: z.enum(["trial_balance", "balance_sheet", "profit_and_loss", "aging", "month_end", "missing_documents"]).describe("Which report to run."),
       date_from: z.string().optional().describe("Period start (YYYY-MM-DD). Required for profit_and_loss; optional for trial_balance."),
       date_to: z.string().optional().describe("Period end / balance date (YYYY-MM-DD)."),
       as_of_date: z.string().optional().describe("aging only: cutoff date (YYYY-MM-DD, default today)."),

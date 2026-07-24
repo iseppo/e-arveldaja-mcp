@@ -2,9 +2,9 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 30331,
-    "descriptionsBytes": 4024,
-    "inputSchemasBytes": 21438,
+    "toolsListBytes": 30429,
+    "descriptionsBytes": 4102,
+    "inputSchemasBytes": 21458,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 3938
@@ -640,7 +640,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Unified accounting-report entry point. report='trial_balance' | 'balance_sheet' | 'profit_and_loss' (both need period.from/to via date_from/date_to) | 'aging' (as_of_date) | 'month_end' (month YYYY-MM). Compact by default; detail='full' returns every line.",
+      "description": "Unified accounting-report entry point. report='trial_balance' | 'balance_sheet' | 'profit_and_loss' (both need period.from/to via date_from/date_to) | 'aging' (as_of_date) | 'month_end' (month YYYY-MM) | 'missing_documents' (RPS source-document check; optional date_from/date_to). Compact by default; detail='full' returns every line.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -678,7 +678,8 @@
               "balance_sheet",
               "profit_and_loss",
               "aging",
-              "month_end"
+              "month_end",
+              "missing_documents"
             ],
             "type": "string"
           }
