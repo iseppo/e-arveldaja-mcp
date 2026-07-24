@@ -22,7 +22,11 @@ import type {
 // assignable from a plain `string`, so every existing caller that passes a raw
 // currency code / ISO date string keeps compiling; the alias documents intent
 // and gives a future tightening hook without a happy-path behaviour change.
-export type CurrencyCode = string & { readonly __brand?: "CurrencyCode" };
+//
+// `CurrencyCode` now has a single canonical home in `../currency-code.ts`
+// (Task 19); it is re-exported here so existing importers keep the same path.
+export type { CurrencyCode } from "../currency-code.js";
+import type { CurrencyCode } from "../currency-code.js";
 export type IsoDate = string & { readonly __brand?: "IsoDate" };
 
 // === Bank transactions ======================================================

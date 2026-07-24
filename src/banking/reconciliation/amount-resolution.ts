@@ -1,5 +1,6 @@
 import type { Transaction } from "../../types/api.js";
 import { roundMoney } from "../../money.js";
+import { toCents, centsEqual, centsWithinTolerance, ONE_CENT } from "../../money-cents.js";
 import { comparableTransactionAmount } from "./match-score.js";
 
 // ---------------------------------------------------------------------------
@@ -36,7 +37,8 @@ function oneSidedEurAmountFailure(code: OneSidedEurAmountErrorCode): OneSidedEur
 function amountsDifferByMoreThanOneCent(left: number, right: number): boolean {
   const maxCentSafeAmount = Number.MAX_SAFE_INTEGER / 100;
   if (Math.abs(left) <= maxCentSafeAmount && Math.abs(right) <= maxCentSafeAmount) {
-    return Math.abs(Math.round(left * 100) - Math.round(right * 100)) > 1;
+    // Exact integer-cent comparison: the ±0.01 EUR tolerance is exactly ±1 cent.
+    return !centsWithinTolerance(toCents(left), toCents(right), ONE_CENT);
   }
   return left !== right;
 }
@@ -119,7 +121,9 @@ export function resolveOneSidedTransferAmount(tx: Transaction): OneSidedEurAmoun
 }
 
 export function hasMeaningfulComparableAmount(tx: Transaction): boolean {
-  return Math.abs(comparableTransactionAmount(tx) - roundMoney(tx.amount)) >= 0.01;
+  // The comparable (base) amount and the nominal amount are each cent-rounded,
+  // so "differs by at least one cent" is exactly "not equal in integer cents".
+  return !centsEqual(toCents(comparableTransactionAmount(tx)), toCents(roundMoney(tx.amount)));
 }
 
 export function transactionCurrency(tx: Transaction): string {

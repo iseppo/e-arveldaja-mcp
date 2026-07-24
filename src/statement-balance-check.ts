@@ -1,6 +1,7 @@
 import type { ApiContext } from "./tools/crud-tools.js";
 import type { Transaction } from "./types/api.js";
 import { roundMoney } from "./money.js";
+import { eurosWithinTolerance } from "./money-cents.js";
 import { listAccountDimensionPostings } from "./account-postings.js";
 import { loadOpeningBalanceJournal } from "./opening-balance-journal.js";
 import { bankTransactionDirection } from "./bank-transaction-direction.js";
@@ -121,8 +122,14 @@ export async function checkStatementClosingBalance(
   // every statement. Return the figures but skip the FX reconciliation warning.
   const currency = input.closing.currency ?? BASE_CURRENCY;
   const reconcilable = currency === BASE_CURRENCY;
+  // Decide the tolerance by EXACT integer cents (±0.10 EUR → ±10 cents) so a
+  // float-epsilon difference like 0.09999999999999998 can never spuriously trip
+  // or clear the check. `difference`/`tolerance` stay euros for emission.
+  const toleranceCents = Math.round(tolerance * 100);
   const withinTolerance =
-    reconcilable && !openingDimensionUnmapped ? Math.abs(difference) <= tolerance : true;
+    reconcilable && !openingDimensionUnmapped
+      ? eurosWithinTolerance(expectedBalance, statementClosing, toleranceCents)
+      : true;
 
   if (!reconcilable) {
     notes.push(

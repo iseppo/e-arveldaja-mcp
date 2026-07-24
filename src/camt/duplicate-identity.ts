@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { roundMoney } from "../money.js";
+import { centsKey } from "../money-cents.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { normalizeCompanyName } from "../company-name.js";
 import type {
@@ -394,7 +395,7 @@ export function buildExistingTransactionDuplicateKey(
     transaction.date,
     transaction.type,
     transaction.cl_currencies_id ?? "",
-    roundMoney(transaction.amount).toFixed(2),
+    centsKey(transaction.amount),
     normalizeBatchDuplicateKeyPart(transaction.ref_number ?? undefined),
     normalizeBatchDuplicateKeyPart(storedBankAccountNo(transaction)),
     normalizeBatchDuplicateKeyPart(transaction.bank_account_name ?? undefined),
@@ -420,7 +421,7 @@ export function buildExistingDuplicateKeysForEntry(entry: ParsedCamtEntry, selec
       entry.date,
       type,
       entry.currency,
-      roundMoney(entry.amount).toFixed(2),
+      centsKey(entry.amount),
       normalizeBatchDuplicateKeyPart(canonicalRefNumber(entry.reference_number).value),
       normalizeBatchDuplicateKeyPart(entry.counterparty_iban),
       normalizeBatchDuplicateKeyPart(entry.counterparty_name),
@@ -479,7 +480,7 @@ function buildPossibleDuplicateCandidateKey(
     date,
     type,
     currency,
-    roundMoney(amount).toFixed(2),
+    centsKey(amount),
   ].join("|");
 }
 
@@ -630,7 +631,7 @@ export function buildBatchDuplicateKey(entry: ParsedCamtEntry): string {
     entry.date,
     entry.direction,
     entry.currency,
-    roundMoney(entry.amount).toFixed(2),
+    centsKey(entry.amount),
     normalizeBatchDuplicateKeyPart(canonicalRefNumber(entry.reference_number).value),
     normalizeBatchDuplicateKeyPart(entry.end_to_end_id),
     normalizeBatchDuplicateKeyPart(entry.counterparty_iban),
