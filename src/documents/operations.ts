@@ -230,6 +230,10 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       bank_account_no: bankAccountNo,
       notes,
       block_on_duplicate: blockOnDuplicate,
+      // Explicit bind: isVatReg already shapes the effective items/totals, but
+      // binding it directly keeps it covered even if a future refactor stops
+      // feeding it into the item defaults.
+      vat_registered: isVatReg,
       commands: ["purchase_invoice_create", "purchase_invoice_upload_document"],
     }) as PlanRecord;
 
