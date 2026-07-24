@@ -2,12 +2,12 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 19,
-    "toolsListBytes": 27785,
+    "toolsListBytes": 27905,
     "descriptionsBytes": 3574,
-    "inputSchemasBytes": 19580,
+    "inputSchemasBytes": 19700,
     "largestTool": {
       "name": "process_accounting_document",
-      "bytes": 3554
+      "bytes": 3674
     },
     "serverInstructionsBytes": 857,
     "promptMetadataBytes": 11072,
@@ -595,7 +595,7 @@
             "type": "string"
           },
           "plan_handle": {
-            "description": "Execution-plan handle from the reviewed preview. Required for mode='create'.",
+            "description": "Execution-plan handle from the reviewed preview. Consumed once for replay protection when supplied. The booking is bound to the reviewed bytes by source_sha256 (required); plan_handle is optional.",
             "type": "string"
           },
           "ref_number": {

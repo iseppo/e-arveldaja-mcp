@@ -2,12 +2,12 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 149018,
+    "toolsListBytes": 149138,
     "descriptionsBytes": 19811,
-    "inputSchemasBytes": 93724,
+    "inputSchemasBytes": 93844,
     "largestTool": {
-      "name": "create_purchase_invoice_from_pdf",
-      "bytes": 3627
+      "name": "process_accounting_document",
+      "bytes": 3674
     },
     "serverInstructionsBytes": 857,
     "promptMetadataBytes": 11072,
@@ -5802,7 +5802,7 @@
             "type": "string"
           },
           "plan_handle": {
-            "description": "Execution-plan handle from the reviewed preview. Required for mode='create'.",
+            "description": "Execution-plan handle from the reviewed preview. Consumed once for replay protection when supplied. The booking is bound to the reviewed bytes by source_sha256 (required); plan_handle is optional.",
             "type": "string"
           },
           "ref_number": {

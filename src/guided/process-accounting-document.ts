@@ -201,7 +201,7 @@ export function registerProcessAccountingDocumentTool(
       mode: z.enum(["prepare", "create"]).optional().describe("Workflow phase. Defaults to prepare (preview)."),
       file_ref: z.string().optional().describe("Opaque Accounting Inbox receipt_input file reference. Provide exactly one of file_ref or file_path."),
       file_path: z.string().optional().describe("Advanced: absolute path / base64 input to the invoice document. Provide exactly one of file_ref or file_path."),
-      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed preview. Required for mode='create'."),
+      plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed preview. Consumed once for replay protection when supplied. The booking is bound to the reviewed bytes by source_sha256 (required); plan_handle is optional."),
       source_sha256: z.string().optional().describe("mode='create': the source_sha256 from the reviewed preview; binds the booking to the reviewed bytes."),
       supplier_client_id: coerceId.optional().describe("mode='create': the resolved supplier client ID."),
       invoice_number: z.string().optional().describe("mode='create': invoice number."),
