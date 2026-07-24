@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 80273,
+    "toolsListBytes": 80676,
     "descriptionsBytes": 10104,
-    "inputSchemasBytes": 49525,
+    "inputSchemasBytes": 49927,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -3310,7 +3310,7 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": false
       },
       "description": "Continue an accounting workflow response, resolve a review item, or prepare an approval action.",
       "execution": {
@@ -3320,11 +3320,12 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
           "action": {
-            "description": "next reads workflow_state_json; resolve_review/prepare_action read review_item_json.",
+            "description": "next reads workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation with plan_handle.",
             "enum": [
               "next",
               "resolve_review",
-              "prepare_action"
+              "prepare_action",
+              "execute_review_action"
             ],
             "type": "string"
           },
@@ -3336,6 +3337,11 @@
           "item_id": {
             "description": "Stable id of the workflow item this continuation answers (from a workflow_action_v2 blocker or page item).",
             "maxLength": 128,
+            "type": "string"
+          },
+          "plan_handle": {
+            "description": "For action='execute_review_action': the consume-once plan handle minted by action='prepare_action' for a server-executed owner-expense continuation. Drift-bound to the reviewed booking params; not itself approval.",
+            "pattern": "^[A-Za-z0-9_-]{43}$",
             "type": "string"
           },
           "review_item_json": {

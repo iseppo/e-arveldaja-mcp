@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { open, opendir, realpath, stat } from "fs/promises";
 import { basename, extname, resolve } from "path";
 import { z } from "zod";
@@ -15,6 +16,9 @@ import { roundMoney } from "../money.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import { jsonObjectInput, parseJsonObject, type ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
+import { bookOwnerExpenseReimbursement, type OwnerExpenseReimbursementParams } from "./estonian-tax.js";
+import { canonicalPlanJson } from "./camt-plan.js";
+import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
 import { camtDuplicateStructuredCorroborators, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
 import { createAccountingOperations } from "../accounting-operations.js";
 import type { ReviewGuidance } from "../estonian-accounting-guidance.js";
@@ -40,6 +44,13 @@ import {
 } from "../resolution/bank-account-resolution.js";
 
 const MIN_AUTO_BOOKING_RULE_MATCH_LENGTH = 3;
+
+// Plan-store domain for the NARROW server-executed owner-expense continuation.
+// continue_accounting_workflow mutates ONLY through this gate: a plan handle minted
+// by action='prepare_action' (owner-expense, params present) and consumed once by
+// action='execute_review_action', canonicalPlanJson drift-bound to the reviewed
+// booking params. No other review type gains a server-exec path.
+const OWNER_EXPENSE_CONTINUATION_DOMAIN = "owner_expense_continuation";
 
 // The review types the resolver knows how to plan an action for. Surfaced as a
 // fixed list on the unsupported-review-type contract so a caller that emitted a
@@ -1939,6 +1950,223 @@ function buildReviewActionResponse(
   };
 }
 
+// --- server-executed owner-expense continuation (plan-gated mutation) --------
+//
+// The ONLY mutating path in continue_accounting_workflow. Everything below is
+// confined to receipt_review items classified owner_paid_expense_reimbursement
+// that additionally carry the reviewed booking params under item.owner_expense.
+// Every OTHER review type stays read-only (planning-only), unchanged.
+
+function isOwnerExpenseReviewItem(reviewItem: Record<string, unknown>): boolean {
+  if (stringAt(reviewItem, "review_type") !== "receipt_review") return false;
+  const item = recordAt(reviewItem, "item");
+  return item !== undefined && stringAt(item, "classification") === "owner_paid_expense_reimbursement";
+}
+
+// Read the reviewed owner-expense booking params from item.owner_expense. Returns
+// undefined when the classification is owner-expense but the concrete booking
+// params have not (yet) been supplied — in that case the legacy read-only planning
+// path is kept (no mint), so a param-less owner-expense item is never a mutation.
+function extractOwnerExpenseBookingParams(reviewItem: Record<string, unknown>): OwnerExpenseReimbursementParams | undefined {
+  const item = recordAt(reviewItem, "item");
+  if (item === undefined) return undefined;
+  const oe = recordAt(item, "owner_expense");
+  if (oe === undefined) return undefined;
+
+  const owner_client_id = numberAt(oe, "owner_client_id");
+  const effective_date = stringAt(oe, "effective_date");
+  const description = stringAt(oe, "description");
+  const net_amount = numberAt(oe, "net_amount");
+  const vat_rate = numberAt(oe, "vat_rate");
+  const expense_account = numberAt(oe, "expense_account");
+  if (
+    owner_client_id === undefined || effective_date === undefined || description === undefined ||
+    net_amount === undefined || vat_rate === undefined || expense_account === undefined
+  ) {
+    return undefined;
+  }
+
+  const modeRaw = stringAt(oe, "vat_deduction_mode");
+  const vat_deduction_mode = modeRaw === "none" || modeRaw === "full" || modeRaw === "partial" ? modeRaw : undefined;
+  const vat_amount = numberAt(oe, "vat_amount");
+  const deductible_vat_amount = numberAt(oe, "deductible_vat_amount");
+  const vat_account = numberAt(oe, "vat_account");
+  const payable_account = numberAt(oe, "payable_account");
+  const document_number = stringAt(oe, "document_number");
+
+  return {
+    owner_client_id,
+    effective_date,
+    description,
+    net_amount,
+    vat_rate,
+    expense_account,
+    ...(vat_amount !== undefined ? { vat_amount } : {}),
+    ...(vat_deduction_mode !== undefined ? { vat_deduction_mode } : {}),
+    ...(deductible_vat_amount !== undefined ? { deductible_vat_amount } : {}),
+    ...(vat_account !== undefined ? { vat_account } : {}),
+    ...(payable_account !== undefined ? { payable_account } : {}),
+    ...(document_number !== undefined ? { document_number } : {}),
+  };
+}
+
+// The drift-binding fingerprint. Free text is desandboxed so prepare and execute
+// derive the SAME canonical args from the SAME reviewed item; any change to the
+// booking params between prepare and execute is caught as plan_drift.
+function ownerExpenseNormalizedArgs(params: OwnerExpenseReimbursementParams): PlanRecord {
+  return {
+    action: "owner_expense_reimbursement",
+    owner_client_id: params.owner_client_id,
+    effective_date: params.effective_date,
+    description: desandboxText(params.description),
+    net_amount: params.net_amount,
+    vat_rate: params.vat_rate,
+    expense_account: params.expense_account,
+    ...(params.vat_amount !== undefined ? { vat_amount: params.vat_amount } : {}),
+    ...(params.vat_deduction_mode !== undefined ? { vat_deduction_mode: params.vat_deduction_mode } : {}),
+    ...(params.deductible_vat_amount !== undefined ? { deductible_vat_amount: params.deductible_vat_amount } : {}),
+    ...(params.vat_account !== undefined ? { vat_account: params.vat_account } : {}),
+    ...(params.payable_account !== undefined ? { payable_account: params.payable_account } : {}),
+    ...(params.document_number !== undefined ? { document_number: desandboxText(params.document_number) } : {}),
+  };
+}
+
+function ownerExpenseError(code: string, message: string): CallToolResult {
+  return {
+    content: [{
+      type: "text",
+      text: toMcpJson({ status: "error", error_code: code, error: message }),
+    }],
+  };
+}
+
+function ownerExpenseNotServerExecutableResponse(): CallToolResult {
+  return {
+    content: [{
+      type: "text",
+      text: toMcpJson({
+        status: "not_server_executable",
+        error: "This review item's action is not server-executable via continue_accounting_workflow. Only owner-paid expense reimbursements can be booked through action='execute_review_action'; prepare and approve every other action with its own visible tool.",
+        supported_server_executable_actions: ["owner_expense_reimbursement"],
+      }),
+    }],
+  };
+}
+
+// action='prepare_action' for a param-bearing owner-expense item: mint a
+// consume-once plan handle bound to the reviewed booking params and return the
+// projection. Books NOTHING. The plan handle is NOT approval.
+function buildOwnerExpenseContinuationPrepareResponse(
+  reviewItem: Record<string, unknown>,
+  params: OwnerExpenseReimbursementParams,
+  runtimeSafetyContext: RuntimeSafetyContext,
+  exposure: ToolExposureConfig,
+): CallToolResult {
+  const resolution = resolveReviewItemPlan(reviewItem, exposure);
+  const normalizedArgs = ownerExpenseNormalizedArgs(params);
+  const snapshot: PlanRecord = { ...normalizedArgs, destructive: false };
+  const planInput: ExecutionPlanInput = {
+    normalizedArgs,
+    sourceIdentities: [],
+    liveSnapshot: snapshot,
+    commands: [{ id: "owner-expense-continuation", category: "owner_expense_reimbursement", reviewProjection: snapshot }],
+    counts: {},
+    totals: {},
+    exclusions: [],
+    reviews: [],
+    privatePayload: normalizedArgs,
+  };
+  const planHandle = runtimeSafetyContext.planStore.issue(OWNER_EXPENSE_CONTINUATION_DOMAIN, planInput);
+
+  return {
+    content: [{
+      type: "text",
+      text: toMcpJson({
+        review_type: "receipt_review",
+        status: "ready_for_approval",
+        recommendation: resolution.recommendation,
+        compliance_basis: resolution.compliance_basis,
+        plan_handle: planHandle,
+        proposed_action: {
+          type: "owner_expense_reimbursement",
+          server_executable: true,
+          execute_via: { tool: "continue_accounting_workflow", action: "execute_review_action" },
+          booking_preview: {
+            owner_client_id: params.owner_client_id,
+            effective_date: params.effective_date,
+            // Description is receipt/OCR-origin: keep it sandbox-wrapped on output.
+            description: sandboxExternalText(desandboxText(params.description)),
+            net_amount: params.net_amount,
+            vat_rate: params.vat_rate,
+            expense_account: params.expense_account,
+            payable_account: params.payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT,
+          },
+          approval_required: true,
+        },
+        next_step_summary: "With approval, call continue_accounting_workflow action='execute_review_action' with this plan_handle to book the owner-paid expense as an owner-payable journal.",
+        assistant_guidance: reviewActionAssistantGuidance,
+      }),
+    }],
+  };
+}
+
+// action='execute_review_action': the plan-gated mutation. Fail-closed on a
+// non-owner-expense item ("not server-executable"), a missing/replayed/expired
+// handle, or plan_drift — all with ZERO side effect BEFORE any api call. Only a
+// consumed, drift-matched handle reaches the shared booking core.
+async function buildOwnerExpenseExecuteResponse(
+  reviewItem: Record<string, unknown>,
+  planHandle: string | undefined,
+  api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Promise<CallToolResult> {
+  // 1. Server-executable ONLY for owner-expense continuations.
+  if (!isOwnerExpenseReviewItem(reviewItem)) {
+    return ownerExpenseNotServerExecutableResponse();
+  }
+  const params = extractOwnerExpenseBookingParams(reviewItem);
+  if (params === undefined) {
+    return ownerExpenseError(
+      "owner_expense_params_invalid",
+      "This owner-expense review item is missing the required booking params under item.owner_expense (owner_client_id, effective_date, description, net_amount, vat_rate, expense_account).",
+    );
+  }
+  // 2. The plan handle is mandatory — it is not itself approval, but the mutation
+  //    is unreachable without a consumed, drift-matched handle.
+  if (planHandle === undefined) {
+    return ownerExpenseError(
+      "plan_handle_required",
+      "action='execute_review_action' requires a plan_handle from a prior action='prepare_action'.",
+    );
+  }
+  // 3. Consume-once. The handle is burned before every validation; a
+  //    missing/replayed/expired/scope-drifted handle fails closed here.
+  let storedPlan;
+  try {
+    storedPlan = runtimeSafetyContext.planStore.consume(planHandle, OWNER_EXPENSE_CONTINUATION_DOMAIN);
+  } catch (error) {
+    const code = (error as { code?: string }).code ?? "plan_handle_invalid";
+    return ownerExpenseError(code, "The reviewed owner-expense execution plan could not be consumed.");
+  }
+  // 4. Drift-bind to the reviewed booking params. Rejected with ZERO side effect,
+  //    before any api call.
+  const boundArgs = ownerExpenseNormalizedArgs(params);
+  if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(boundArgs)) {
+    return ownerExpenseError(
+      "plan_drift",
+      "The reviewed owner-expense plan no longer matches the requested booking params.",
+    );
+  }
+  // 5. Mutation: the shared booking core (same code path as the tool). The core
+  //    echoes expense.description as clean desandboxed text — correct for the
+  //    standalone tool (parity-pinned), but in this guided continuation that text
+  //    is receipt/OCR-origin. Pass the rewrapDescription hook so the core re-wraps
+  //    ONLY the echoed display description as untrusted text (the persisted journal
+  //    title + audit stay clean) — a data-level transform, so we never parse or
+  //    re-serialize a tool-shaped result (which would be internal MCP delegation).
+  return bookOwnerExpenseReimbursement(api, params, { rewrapDescription: sandboxExternalText });
+}
+
 export function registerAccountingInboxTools(
   server: McpServer,
   api: ApiContext,
@@ -1969,8 +2197,9 @@ export function registerAccountingInboxTools(
     "continue_accounting_workflow",
     "Continue an accounting workflow response, resolve a review item, or prepare an approval action.",
     {
-      action: z.enum(["next", "resolve_review", "prepare_action"]).optional().describe("next reads workflow_state_json; resolve_review/prepare_action read review_item_json."),
+      action: z.enum(["next", "resolve_review", "prepare_action", "execute_review_action"]).optional().describe("next reads workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation with plan_handle."),
       workflow_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional().describe("Opaque server-issued workflow handle from a compact workflow_action_v2 response. Carries inert prior workflow state; never approval or mutation authority."),
+      plan_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional().describe("For action='execute_review_action': the consume-once plan handle minted by action='prepare_action' for a server-executed owner-expense continuation. Drift-bound to the reviewed booking params; not itself approval."),
       item_id: z.string().max(128).optional().describe("Stable id of the workflow item this continuation answers (from a workflow_action_v2 blocker or page item)."),
       answer: z.string().max(700).optional().describe("Free-text answer to the current workflow question, for a compact guided continuation. Capped so a whole continuation stays within the 1 KiB budget."),
       workflow_state_json: jsonObjectInput.optional().describe("Previous workflow response; required for action='next'."),
@@ -1978,15 +2207,33 @@ export function registerAccountingInboxTools(
       save_as_rule: z.boolean().optional().describe("For action='prepare_action', prepare save_auto_booking_rule when appropriate."),
       rule_override_json: jsonObjectInput.optional().describe("Optional explicit rule fields for action='prepare_action'."),
     },
-    { ...readOnly, title: "Continue Accounting Workflow" },
-    async ({ action, workflow_state_json, review_item_json, save_as_rule, rule_override_json }) => {
+    // Annotated `mutate` (not readOnly): action='execute_review_action' performs a
+    // real, plan-gated owner-expense booking. next/resolve_review/prepare_action stay
+    // behaviorally read-only for every other review type.
+    { ...mutate, title: "Continue Accounting Workflow" },
+    async ({ action, workflow_state_json, review_item_json, save_as_rule, rule_override_json, plan_handle }) => {
       if (action === "resolve_review") {
         const reviewItem = parseRequiredJsonObject(review_item_json, "review_item_json");
         return buildReviewResolutionResponse(reviewItem, exposure);
       }
 
+      if (action === "execute_review_action") {
+        const reviewItem = parseRequiredJsonObject(review_item_json, "review_item_json");
+        return buildOwnerExpenseExecuteResponse(reviewItem, plan_handle, api, runtimeSafetyContext);
+      }
+
       if (action === "prepare_action") {
         const reviewItem = parseRequiredJsonObject(review_item_json, "review_item_json");
+        // Owner-expense server-executed continuation: when the reviewed booking
+        // params are present, mint a plan handle instead of the read-only planning
+        // projection. A param-less owner-expense item (and every other review type)
+        // keeps the legacy read-only behavior below.
+        if (isOwnerExpenseReviewItem(reviewItem)) {
+          const ownerExpenseParams = extractOwnerExpenseBookingParams(reviewItem);
+          if (ownerExpenseParams !== undefined) {
+            return buildOwnerExpenseContinuationPrepareResponse(reviewItem, ownerExpenseParams, runtimeSafetyContext, exposure);
+          }
+        }
         const ruleOverride = rule_override_json
           ? parseJsonObject(rule_override_json, "rule_override_json")
           : undefined;

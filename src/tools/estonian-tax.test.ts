@@ -5,7 +5,7 @@ import { join } from "path";
 import { z } from "zod";
 import type { Account, Journal, Posting, SaleInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
-import { registerEstonianTaxTools } from "./estonian-tax.js";
+import { registerEstonianTaxTools, bookOwnerExpenseReimbursement } from "./estonian-tax.js";
 import { roundMoney } from "../money.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
@@ -1959,6 +1959,59 @@ describe("create_owner_expense_reimbursement", () => {
     expect(isError(result)).toBe(true);
     const r = result as { content: Array<{ text: string }> };
     expect(r.content[0].text).toContain("Account validation failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: bookOwnerExpenseReimbursement shared-core parity
+// ---------------------------------------------------------------------------
+
+describe("bookOwnerExpenseReimbursement (shared core)", () => {
+  const bookingParams = {
+    owner_client_id: 1,
+    effective_date: "2026-06-01",
+    description: "Office supplies",
+    net_amount: 100,
+    vat_rate: 0.24,
+    vat_deduction_mode: "full" as const,
+    expense_account: 5000,
+  };
+
+  it("produces byte-identical output to the create_owner_expense_reimbursement tool", async () => {
+    // Tool path
+    const toolApi = makeApi([], makeStandardAccounts(), { vatRegistered: true });
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, toolApi);
+    const toolResult = await mock.tools.get("create_owner_expense_reimbursement")!({ ...bookingParams });
+
+    // Core path (separate identical api so the fixed created_object_id matches)
+    const coreApi = makeApi([], makeStandardAccounts(), { vatRegistered: true });
+    const coreResult = await bookOwnerExpenseReimbursement(coreApi, { ...bookingParams });
+
+    const toolText = (toolResult as { content: Array<{ text: string }> }).content[0].text;
+    const coreText = (coreResult as { content: Array<{ text: string }> }).content[0].text;
+    expect(coreText).toBe(toolText);
+    expect(isError(coreResult)).toBe(false);
+
+    // Both booked the same three-leg-equivalent journal via journals.create.
+    const toolCreate = vi.mocked(toolApi.journals.create).mock.calls[0][0];
+    const coreCreate = vi.mocked(coreApi.journals.create).mock.calls[0][0];
+    expect(coreCreate).toEqual(toolCreate);
+  });
+
+  it("core surfaces the same validation errors as the tool", async () => {
+    const coreApi = makeApi([], makeStandardAccounts(), { vatRegistered: false });
+    const result = await bookOwnerExpenseReimbursement(coreApi, {
+      owner_client_id: 1,
+      effective_date: "2026-06-01",
+      description: "Bad",
+      net_amount: -5,
+      vat_rate: 0,
+      expense_account: 5000,
+    });
+    expect(isError(result)).toBe(true);
+    expect((result as { content: Array<{ text: string }> }).content[0].text).toContain("net_amount");
+    expect(vi.mocked(coreApi.journals.create)).not.toHaveBeenCalled();
   });
 });
 

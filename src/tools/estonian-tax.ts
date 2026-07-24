@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
@@ -119,6 +120,270 @@ export function resolveIncomeTaxExpenseAccount(accounts: Account[], override?: n
     .map(a => a.id)
     .sort((x, y) => x - y)[0];
   return candidate ?? INCOME_TAX_EXPENSE_ACCOUNT;
+}
+
+export interface OwnerExpenseReimbursementParams {
+  owner_client_id: number;
+  effective_date: string;
+  description: string;
+  net_amount: number;
+  vat_rate: number;
+  vat_amount?: number;
+  vat_deduction_mode?: "none" | "full" | "partial";
+  deductible_vat_amount?: number;
+  expense_account: number;
+  vat_account?: number;
+  payable_account?: number;
+  document_number?: string;
+}
+
+export interface OwnerExpenseReimbursementOptions {
+  // Transforms ONLY the echoed expense.description in the returned display
+  // payload (the persisted journal title + audit stay the canonicalized clean
+  // text). The standalone tool passes nothing → identity → byte-identical
+  // output; the guided continuation passes sandboxExternalText so a receipt/
+  // OCR-origin description is re-wrapped as untrusted text at its own boundary.
+  rewrapDescription?: (description: string) => string;
+}
+
+// Shared owner-expense booking core. Used by BOTH the create_owner_expense_reimbursement
+// tool (output byte-identical — same code path) AND the plan-gated server-executed
+// owner-expense continuation in continue_accounting_workflow.
+export async function bookOwnerExpenseReimbursement(
+  api: ApiContext,
+  params: OwnerExpenseReimbursementParams,
+  options?: OwnerExpenseReimbursementOptions,
+): Promise<CallToolResult> {
+  let {
+    owner_client_id,
+    effective_date,
+    description,
+    net_amount,
+    vat_rate,
+    vat_amount,
+    vat_deduction_mode,
+    deductible_vat_amount,
+    expense_account,
+    vat_account,
+    payable_account,
+    document_number,
+  } = params;
+  // Canonicalize free-text that will be persisted to the journal + audit log:
+  // a wrapped OCR receipt description/number can round-trip through the LLM
+  // into this booking, so strip markers before any of it reaches the ledger.
+  description = desandboxText(description);
+  document_number = document_number !== undefined ? desandboxText(document_number) : undefined;
+  if (vat_rate > 1) {
+    return toolError({
+      error: `vat_rate=${vat_rate} looks like a percentage. Pass a decimal fraction instead (e.g. 0.24 for 24%).`,
+    });
+  }
+  // A reimbursement books a real expense against a payable to the owner, so
+  // the amounts must be positive. z.number().finite() alone admits 0 and
+  // negatives, which would post an empty or sign-reversed journal (crediting
+  // the expense, debiting the owner-payable) — reject them with a clear error
+  // instead of booking nonsense.
+  if (net_amount <= 0) {
+    return toolError({ error: `net_amount must be greater than 0 (got ${net_amount}). A reimbursement books a positive business expense.` });
+  }
+  if (vat_rate < 0) {
+    return toolError({ error: `vat_rate must not be negative (got ${vat_rate}). Use 0 for no/non-deductible VAT.` });
+  }
+  if (vat_amount !== undefined && vat_amount < 0) {
+    return toolError({ error: `vat_amount must not be negative (got ${vat_amount}).` });
+  }
+  if (deductible_vat_amount !== undefined && deductible_vat_amount < 0) {
+    return toolError({ error: `deductible_vat_amount must not be negative (got ${deductible_vat_amount}).` });
+  }
+  const vatRegistered = await isCompanyVatRegistered(api);
+  const vatAcc = vat_account ?? DEFAULT_VAT_ACCOUNT;
+  const payAcc = payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT;
+  // Round the gross VAT whether it came from vat_rate or was supplied
+  // directly: an unrounded caller vat_amount would otherwise be posted
+  // verbatim while the balance guard below rounds only the sum, letting a
+  // sub-cent-unbalanced journal reach the API.
+  const grossVat = roundMoney(vat_amount ?? net_amount * vat_rate);
+  const accounts = await api.readonly.getAccounts();
+  const expenseAccountRecord = accounts.find(account => account.id === expense_account);
+  const requiresReview = requiresOwnerExpenseVatReview(expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng, description);
+  const configuredMode = getOwnerExpenseVatDeductionModeForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionMode();
+  const configuredRatio = getOwnerExpenseVatDeductionRatioForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionRatio();
+
+  if (vatRegistered && grossVat > 0 && vat_deduction_mode !== undefined && deductible_vat_amount !== undefined) {
+    const differenceFromFull = Math.abs(deductible_vat_amount - grossVat);
+    if (vat_deduction_mode === "none" && deductible_vat_amount > 0.01) {
+      return toolError({
+        error: "deductible_vat_amount conflicts with vat_deduction_mode='none'",
+        hint: "Suggested default: remove deductible_vat_amount or set it to 0 when VAT should be non-deductible.",
+      });
+    }
+    if (vat_deduction_mode === "full" && differenceFromFull >= 0.01) {
+      return toolError({
+        error: "deductible_vat_amount conflicts with vat_deduction_mode='full'",
+        hint: "Suggested default: omit deductible_vat_amount for full deduction, or pass the full VAT amount explicitly.",
+      });
+    }
+    if (vat_deduction_mode === "partial" && (deductible_vat_amount <= 0.01 || differenceFromFull < 0.01)) {
+      return toolError({
+        error: "deductible_vat_amount conflicts with vat_deduction_mode='partial'",
+        hint: "Suggested default: pass only the deductible VAT portion when vat_deduction_mode='partial'.",
+      });
+    }
+  }
+
+  const deductionMode = !vatRegistered || grossVat <= 0
+    ? "none"
+    : vat_deduction_mode
+      ?? (deductible_vat_amount !== undefined
+        ? (Math.abs(deductible_vat_amount - grossVat) < 0.01 ? "full" : "partial")
+        : configuredMode ?? "full");
+
+  if (vatRegistered && grossVat > 0 && requiresReview && vat_deduction_mode === undefined && deductible_vat_amount === undefined && configuredMode === undefined) {
+    const reviewGuidance = buildOwnerExpenseVatReviewGuidance({
+      description,
+      accountName: expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng,
+    });
+    return toolError({
+      error: "VAT deduction needs confirmation for this expense category",
+      hint: reviewGuidance.recommendation,
+      compliance_basis: reviewGuidance.compliance_basis,
+      follow_up_questions: reviewGuidance.follow_up_questions,
+      policy_hint: reviewGuidance.policy_hint,
+      suggestions: [
+        "If this is a standard business receipt with fully deductible VAT, rerun with vat_deduction_mode='full'.",
+        "If this is passenger-car or mixed-use cost, rerun with vat_deduction_mode='partial' and deductible_vat_amount.",
+        "If this is non-deductible VAT, rerun with vat_deduction_mode='none'.",
+      ],
+    });
+  }
+
+  if (deductionMode === "partial" && deductible_vat_amount === undefined && configuredRatio === undefined) {
+    return toolError({
+      error: "deductible_vat_amount is required when vat_deduction_mode=partial",
+      hint: "Suggested default: set deductible_vat_amount explicitly or define a partial ratio in accounting-rules.md when the policy is stable.",
+    });
+  }
+
+  const deductibleVat = !vatRegistered || grossVat <= 0
+    ? 0
+    : deductionMode === "full"
+      ? grossVat
+      : deductionMode === "partial"
+        ? roundMoney(deductible_vat_amount ?? (configuredRatio !== undefined ? grossVat * configuredRatio : 0))
+        : 0;
+
+  if (deductibleVat < 0 || deductibleVat - grossVat > 0.01) {
+    return toolError({
+      error: `deductible_vat_amount must be between 0 and total VAT ${grossVat}`,
+      hint: "Suggested default: keep the VAT non-deductible unless the source document and business-use analysis support deduction.",
+    });
+  }
+
+  // Validate all accounts exist
+  const accountErrors = validateAccounts(accounts, [
+    { id: expense_account, label: "Expense account" },
+    ...(deductibleVat > 0 && vatRegistered ? [{ id: vatAcc, label: "VAT account" }] : []),
+    { id: payAcc, label: "Payable account" },
+  ]);
+  if (accountErrors.length > 0) {
+    return toolError({
+      error: "Account validation failed",
+      details: accountErrors,
+      hint: "Use list_accounts to find correct account numbers.",
+    });
+  }
+
+  const total = roundMoney(net_amount + grossVat);
+  const nonDeductibleVat = roundMoney(grossVat - deductibleVat);
+  const expenseDebit = roundMoney(net_amount + nonDeductibleVat);
+
+  // Defensive: the three postings below must balance to `total`. Rounding
+  // at intermediate steps can drift by 1 cent in pathological VAT-deduction
+  // combinations; refuse to create an unbalanced journal.
+  const totalDebits = roundMoney(expenseDebit + (deductibleVat > 0 && vatRegistered ? deductibleVat : 0));
+  if (totalDebits !== total) {
+    return toolError({
+      error: `Internal imbalance: sum of debits (${totalDebits}) would not equal credits (${total}).`,
+      hint: "This is a rounding edge case in owner-expense reimbursement. Report with net_amount, vat_rate, vat_amount, vat_deduction_mode, deductible_vat_amount values.",
+      details: [
+        `net_amount=${net_amount}`,
+        `grossVat=${grossVat}`,
+        `deductibleVat=${deductibleVat}`,
+        `nonDeductibleVat=${nonDeductibleVat}`,
+        `expenseDebit=${expenseDebit}`,
+        `total=${total}`,
+      ],
+    });
+  }
+
+  const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [
+    { accounts_id: expense_account, type: "D", amount: expenseDebit },
+  ];
+
+  if (deductibleVat > 0 && vatRegistered) {
+    postings.push({ accounts_id: vatAcc, type: "D", amount: deductibleVat });
+  }
+
+  postings.push({ accounts_id: payAcc, type: "C", amount: total });
+
+  const result = await api.journals.create({
+    title: description,
+    effective_date,
+    clients_id: owner_client_id,
+    cl_currencies_id: "EUR",
+    document_number,
+    postings,
+  });
+  logAudit({
+    tool: "create_owner_expense_reimbursement", action: "CREATED", entity_type: "journal",
+    entity_id: result.created_object_id,
+    summary: `Owner expense: ${description}, total ${total} EUR`,
+    details: {
+      effective_date, description, total_net: net_amount, total_vat: grossVat, deductible_vat: deductibleVat, total_gross: total,
+      postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
+    },
+  });
+
+  const suggestions: string[] = [];
+  if (vatRegistered && grossVat > 0 && deductibleVat === grossVat) {
+    suggestions.push("VAT was fully deducted by default. If this expense falls under passenger-car, representation, or mixed-use restrictions, rerun with vat_deduction_mode='partial' or 'none'.");
+  } else if (vatRegistered && grossVat > 0 && deductibleVat === 0) {
+    suggestions.push("VAT was treated as non-deductible. If the receipt supports deduction, rerun with vat_deduction_mode='full' or 'partial' and deductible_vat_amount.");
+  }
+
+  return {
+    content: [{
+      type: "text",
+      text: toMcpJson({
+        expense: {
+          // Only the echoed display description is re-wrapped (identity by
+          // default); the journal title + audit above keep the clean text.
+          description: options?.rewrapDescription ? options.rewrapDescription(description) : description,
+          net: net_amount,
+          vat_rate: vat_amount !== undefined ? "custom" : `${roundMoney(vat_rate * 100)}%`,
+          vat: grossVat,
+          deductible_vat: deductibleVat,
+          non_deductible_vat: nonDeductibleVat,
+          total,
+          vat_registered_company: vatRegistered,
+          vat_deduction_mode: deductionMode,
+          expense_debited: expenseDebit,
+        },
+        journal_entry: {
+          api_response: result,
+          postings: postings.map(p => ({
+            account: p.accounts_id,
+            type: p.type,
+            amount: p.amount,
+          })),
+        },
+        note: vatRegistered
+          ? `Expense booked. Owner debt increased by ${total} EUR on account ${payAcc}.`
+          : `Expense booked. Company is not VAT-registered, so the full gross amount was debited to expense account ${expense_account}. Owner debt increased by ${total} EUR on account ${payAcc}.`,
+        ...(suggestions.length > 0 ? { suggestions } : {}),
+      }),
+    }],
+  };
 }
 
 export function registerEstonianTaxTools(server: McpServer, api: ApiContext): void {
@@ -640,235 +905,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       document_number: z.string().optional().describe("Receipt/document number"),
     },
     { ...create, title: "Book Owner-Paid Expense" },
-    async ({
-      owner_client_id,
-      effective_date,
-      description,
-      net_amount,
-      vat_rate,
-      vat_amount,
-      vat_deduction_mode,
-      deductible_vat_amount,
-      expense_account,
-      vat_account,
-      payable_account,
-      document_number,
-    }) => {
-      // Canonicalize free-text that will be persisted to the journal + audit log:
-      // a wrapped OCR receipt description/number can round-trip through the LLM
-      // into this booking, so strip markers before any of it reaches the ledger.
-      description = desandboxText(description);
-      document_number = document_number !== undefined ? desandboxText(document_number) : undefined;
-      if (vat_rate > 1) {
-        return toolError({
-          error: `vat_rate=${vat_rate} looks like a percentage. Pass a decimal fraction instead (e.g. 0.24 for 24%).`,
-        });
-      }
-      // A reimbursement books a real expense against a payable to the owner, so
-      // the amounts must be positive. z.number().finite() alone admits 0 and
-      // negatives, which would post an empty or sign-reversed journal (crediting
-      // the expense, debiting the owner-payable) — reject them with a clear error
-      // instead of booking nonsense.
-      if (net_amount <= 0) {
-        return toolError({ error: `net_amount must be greater than 0 (got ${net_amount}). A reimbursement books a positive business expense.` });
-      }
-      if (vat_rate < 0) {
-        return toolError({ error: `vat_rate must not be negative (got ${vat_rate}). Use 0 for no/non-deductible VAT.` });
-      }
-      if (vat_amount !== undefined && vat_amount < 0) {
-        return toolError({ error: `vat_amount must not be negative (got ${vat_amount}).` });
-      }
-      if (deductible_vat_amount !== undefined && deductible_vat_amount < 0) {
-        return toolError({ error: `deductible_vat_amount must not be negative (got ${deductible_vat_amount}).` });
-      }
-      const vatRegistered = await isCompanyVatRegistered(api);
-      const vatAcc = vat_account ?? DEFAULT_VAT_ACCOUNT;
-      const payAcc = payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT;
-      // Round the gross VAT whether it came from vat_rate or was supplied
-      // directly: an unrounded caller vat_amount would otherwise be posted
-      // verbatim while the balance guard below rounds only the sum, letting a
-      // sub-cent-unbalanced journal reach the API.
-      const grossVat = roundMoney(vat_amount ?? net_amount * vat_rate);
-      const accounts = await api.readonly.getAccounts();
-      const expenseAccountRecord = accounts.find(account => account.id === expense_account);
-      const requiresReview = requiresOwnerExpenseVatReview(expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng, description);
-      const configuredMode = getOwnerExpenseVatDeductionModeForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionMode();
-      const configuredRatio = getOwnerExpenseVatDeductionRatioForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionRatio();
-
-      if (vatRegistered && grossVat > 0 && vat_deduction_mode !== undefined && deductible_vat_amount !== undefined) {
-        const differenceFromFull = Math.abs(deductible_vat_amount - grossVat);
-        if (vat_deduction_mode === "none" && deductible_vat_amount > 0.01) {
-          return toolError({
-            error: "deductible_vat_amount conflicts with vat_deduction_mode='none'",
-            hint: "Suggested default: remove deductible_vat_amount or set it to 0 when VAT should be non-deductible.",
-          });
-        }
-        if (vat_deduction_mode === "full" && differenceFromFull >= 0.01) {
-          return toolError({
-            error: "deductible_vat_amount conflicts with vat_deduction_mode='full'",
-            hint: "Suggested default: omit deductible_vat_amount for full deduction, or pass the full VAT amount explicitly.",
-          });
-        }
-        if (vat_deduction_mode === "partial" && (deductible_vat_amount <= 0.01 || differenceFromFull < 0.01)) {
-          return toolError({
-            error: "deductible_vat_amount conflicts with vat_deduction_mode='partial'",
-            hint: "Suggested default: pass only the deductible VAT portion when vat_deduction_mode='partial'.",
-          });
-        }
-      }
-
-      const deductionMode = !vatRegistered || grossVat <= 0
-        ? "none"
-        : vat_deduction_mode
-          ?? (deductible_vat_amount !== undefined
-            ? (Math.abs(deductible_vat_amount - grossVat) < 0.01 ? "full" : "partial")
-            : configuredMode ?? "full");
-
-      if (vatRegistered && grossVat > 0 && requiresReview && vat_deduction_mode === undefined && deductible_vat_amount === undefined && configuredMode === undefined) {
-        const reviewGuidance = buildOwnerExpenseVatReviewGuidance({
-          description,
-          accountName: expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng,
-        });
-        return toolError({
-          error: "VAT deduction needs confirmation for this expense category",
-          hint: reviewGuidance.recommendation,
-          compliance_basis: reviewGuidance.compliance_basis,
-          follow_up_questions: reviewGuidance.follow_up_questions,
-          policy_hint: reviewGuidance.policy_hint,
-          suggestions: [
-            "If this is a standard business receipt with fully deductible VAT, rerun with vat_deduction_mode='full'.",
-            "If this is passenger-car or mixed-use cost, rerun with vat_deduction_mode='partial' and deductible_vat_amount.",
-            "If this is non-deductible VAT, rerun with vat_deduction_mode='none'.",
-          ],
-        });
-      }
-
-      if (deductionMode === "partial" && deductible_vat_amount === undefined && configuredRatio === undefined) {
-        return toolError({
-          error: "deductible_vat_amount is required when vat_deduction_mode=partial",
-          hint: "Suggested default: set deductible_vat_amount explicitly or define a partial ratio in accounting-rules.md when the policy is stable.",
-        });
-      }
-
-      const deductibleVat = !vatRegistered || grossVat <= 0
-        ? 0
-        : deductionMode === "full"
-          ? grossVat
-          : deductionMode === "partial"
-            ? roundMoney(deductible_vat_amount ?? (configuredRatio !== undefined ? grossVat * configuredRatio : 0))
-            : 0;
-
-      if (deductibleVat < 0 || deductibleVat - grossVat > 0.01) {
-        return toolError({
-          error: `deductible_vat_amount must be between 0 and total VAT ${grossVat}`,
-          hint: "Suggested default: keep the VAT non-deductible unless the source document and business-use analysis support deduction.",
-        });
-      }
-
-      // Validate all accounts exist
-      const accountErrors = validateAccounts(accounts, [
-        { id: expense_account, label: "Expense account" },
-        ...(deductibleVat > 0 && vatRegistered ? [{ id: vatAcc, label: "VAT account" }] : []),
-        { id: payAcc, label: "Payable account" },
-      ]);
-      if (accountErrors.length > 0) {
-        return toolError({
-          error: "Account validation failed",
-          details: accountErrors,
-          hint: "Use list_accounts to find correct account numbers.",
-        });
-      }
-
-      const total = roundMoney(net_amount + grossVat);
-      const nonDeductibleVat = roundMoney(grossVat - deductibleVat);
-      const expenseDebit = roundMoney(net_amount + nonDeductibleVat);
-
-      // Defensive: the three postings below must balance to `total`. Rounding
-      // at intermediate steps can drift by 1 cent in pathological VAT-deduction
-      // combinations; refuse to create an unbalanced journal.
-      const totalDebits = roundMoney(expenseDebit + (deductibleVat > 0 && vatRegistered ? deductibleVat : 0));
-      if (totalDebits !== total) {
-        return toolError({
-          error: `Internal imbalance: sum of debits (${totalDebits}) would not equal credits (${total}).`,
-          hint: "This is a rounding edge case in owner-expense reimbursement. Report with net_amount, vat_rate, vat_amount, vat_deduction_mode, deductible_vat_amount values.",
-          details: [
-            `net_amount=${net_amount}`,
-            `grossVat=${grossVat}`,
-            `deductibleVat=${deductibleVat}`,
-            `nonDeductibleVat=${nonDeductibleVat}`,
-            `expenseDebit=${expenseDebit}`,
-            `total=${total}`,
-          ],
-        });
-      }
-
-      const postings: Array<{ accounts_id: number; type: "D" | "C"; amount: number }> = [
-        { accounts_id: expense_account, type: "D", amount: expenseDebit },
-      ];
-
-      if (deductibleVat > 0 && vatRegistered) {
-        postings.push({ accounts_id: vatAcc, type: "D", amount: deductibleVat });
-      }
-
-      postings.push({ accounts_id: payAcc, type: "C", amount: total });
-
-      const result = await api.journals.create({
-        title: description,
-        effective_date,
-        clients_id: owner_client_id,
-        cl_currencies_id: "EUR",
-        document_number,
-        postings,
-      });
-      logAudit({
-        tool: "create_owner_expense_reimbursement", action: "CREATED", entity_type: "journal",
-        entity_id: result.created_object_id,
-        summary: `Owner expense: ${description}, total ${total} EUR`,
-        details: {
-          effective_date, description, total_net: net_amount, total_vat: grossVat, deductible_vat: deductibleVat, total_gross: total,
-          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-        },
-      });
-
-      const suggestions: string[] = [];
-      if (vatRegistered && grossVat > 0 && deductibleVat === grossVat) {
-        suggestions.push("VAT was fully deducted by default. If this expense falls under passenger-car, representation, or mixed-use restrictions, rerun with vat_deduction_mode='partial' or 'none'.");
-      } else if (vatRegistered && grossVat > 0 && deductibleVat === 0) {
-        suggestions.push("VAT was treated as non-deductible. If the receipt supports deduction, rerun with vat_deduction_mode='full' or 'partial' and deductible_vat_amount.");
-      }
-
-      return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            expense: {
-              description,
-              net: net_amount,
-              vat_rate: vat_amount !== undefined ? "custom" : `${roundMoney(vat_rate * 100)}%`,
-              vat: grossVat,
-              deductible_vat: deductibleVat,
-              non_deductible_vat: nonDeductibleVat,
-              total,
-              vat_registered_company: vatRegistered,
-              vat_deduction_mode: deductionMode,
-              expense_debited: expenseDebit,
-            },
-            journal_entry: {
-              api_response: result,
-              postings: postings.map(p => ({
-                account: p.accounts_id,
-                type: p.type,
-                amount: p.amount,
-              })),
-            },
-            note: vatRegistered
-              ? `Expense booked. Owner debt increased by ${total} EUR on account ${payAcc}.`
-              : `Expense booked. Company is not VAT-registered, so the full gross amount was debited to expense account ${expense_account}. Owner debt increased by ${total} EUR on account ${payAcc}.`,
-            ...(suggestions.length > 0 ? { suggestions } : {}),
-          }),
-        }],
-      };
-    }
+    async (args) => bookOwnerExpenseReimbursement(api, args),
   );
 
   registerTool(server, "check_vat_registration_threshold",
