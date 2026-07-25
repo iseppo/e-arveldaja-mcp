@@ -2067,7 +2067,7 @@ function sourceIdentityRecord(snapshot: FileInputSnapshot): PlanRecord {
 }
 
 function planErrorResult(category: string, message: string) {
-  return toolError({ error: message, category, mutation_occurred: false });
+  return toolError({ error: message, category, retry: "never", mutation_occurred: false });
 }
 
 function readStoredFingerprint(privatePayload: PlanData): string | undefined {

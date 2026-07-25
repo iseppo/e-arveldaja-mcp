@@ -1,5 +1,6 @@
 import type { Transaction } from "../../types/api.js";
 import { roundMoney } from "../../money.js";
+import { type Cents, centsEqual, toCents } from "../../money-cents.js";
 import { normalizeCompanyName } from "../../company-name.js";
 import { bankTransactionDirection } from "../../bank-transaction-direction.js";
 import { getComparableBaseInvoiceAmount } from "./invoice-index.js";
@@ -43,6 +44,30 @@ export function comparableTransactionAmount(tx: Transaction): number {
   return roundMoney(tx.base_amount ?? tx.amount);
 }
 
+// Scoring compares amounts in exact integer cents, never by float subtraction:
+// `Math.abs(a - b) < 0.01` is inconsistent across magnitudes because the
+// subtraction itself carries representation error (10.00 vs 10.01 differs by
+// 0.00999…, so it passed as "equal" and scored exact_amount; 100.00 vs 100.01
+// differs by 0.01000…, so it did not). A cent off is a real discrepancy at every
+// magnitude, and combined with a ref/client match it could cross the 90-point
+// auto-confirm threshold and settle an invoice against the wrong figure.
+//
+// A non-finite amount cannot participate in a match: `toCents` would throw, and
+// scoring must never be the reason a whole reconcile run dies. Such an amount
+// simply never compares equal, so the candidate scores no amount points.
+function amountCents(value: number): Cents | undefined {
+  return Number.isFinite(value) ? toCents(value) : undefined;
+}
+
+function sameCents(a: Cents | undefined, b: Cents | undefined): boolean {
+  return a !== undefined && b !== undefined && centsEqual(a, b);
+}
+
+/** True when two euro amounts are the SAME to the cent (not "within a cent"). */
+export function sameAmountToTheCent(a: number, b: number): boolean {
+  return sameCents(amountCents(a), amountCents(b));
+}
+
 export function matchScore(
   tx: Transaction,
   invoice: { gross_price?: number; base_gross_price?: number; currency_rate?: number | null; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
@@ -60,10 +85,14 @@ export function matchScore(
   // and bypass the cross-currency distribution guard, booking the wrong figure.
   // When the nominal amounts match but the base amounts meaningfully conflict,
   // flag it so the guard routes it to manual review instead.
-  const nominalMatch = Math.abs(txAmount - invoiceAmount) < 0.01;
-  const baseMatch = Math.abs(baseAmount - baseInvoiceAmount) < 0.01;
-  const txHasMeaningfulBase = Math.abs(baseAmount - txAmount) >= 0.01;
-  const invoiceHasMeaningfulBase = Math.abs(baseInvoiceAmount - invoiceAmount) >= 0.01;
+  const txCents = amountCents(txAmount);
+  const invoiceCents = amountCents(invoiceAmount);
+  const baseCents = amountCents(baseAmount);
+  const baseInvoiceCents = amountCents(baseInvoiceAmount);
+  const nominalMatch = sameCents(txCents, invoiceCents);
+  const baseMatch = sameCents(baseCents, baseInvoiceCents);
+  const txHasMeaningfulBase = !sameCents(baseCents, txCents);
+  const invoiceHasMeaningfulBase = !sameCents(baseInvoiceCents, invoiceCents);
   const conflictingBase = nominalMatch && !baseMatch && (txHasMeaningfulBase || invoiceHasMeaningfulBase);
   if (conflictingBase) {
     confidence += 40;
@@ -71,10 +100,15 @@ export function matchScore(
   } else if (nominalMatch) {
     confidence += 40;
     reasons.push("exact_amount");
-  } else if (Math.abs(baseAmount - baseInvoiceAmount) < 0.01 && baseAmount !== txAmount) {
+  } else if (baseMatch && txHasMeaningfulBase) {
     confidence += 40;
     reasons.push("exact_base_amount");
-  } else if (Math.abs(txAmount - invoiceAmount) < 1) {
+  } else if (
+    txCents !== undefined && invoiceCents !== undefined &&
+    // "Close" is a genuine tolerance (under 1.00 EUR), not an equality test, and
+    // stays exclusive: exactly 1.00 EUR apart is not close.
+    Math.abs((txCents as number) - (invoiceCents as number)) < 100
+  ) {
     confidence += 20;
     reasons.push("close_amount");
   }

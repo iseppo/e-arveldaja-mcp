@@ -569,12 +569,12 @@ describe("camt import tool", () => {
         },
         sample: [expect.objectContaining({
           status: "created",
-          bank_reference: "REF-VOID-1",
+          bank_reference: expect.stringMatching(wrapped("REF-VOID-1")),
         })],
         execution: expect.objectContaining({
           mode: "EXECUTED",
           summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
-          results: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+          results: [expect.objectContaining({ status: "created", bank_reference: expect.stringMatching(wrapped("REF-VOID-1")) })],
           skipped: [],
         }),
       });
@@ -623,7 +623,7 @@ describe("camt import tool", () => {
           summary: expect.objectContaining({ created_count: 0, skipped_count: 1 }),
           results: [],
           skipped: [expect.objectContaining({
-            bank_reference: "REF-VOID-1",
+            bank_reference: expect.stringMatching(wrapped("REF-VOID-1")),
             duplicate_transaction_ids: [901],
           })],
         }),
@@ -659,11 +659,11 @@ describe("camt import tool", () => {
           created_count: 1,
           skipped_count: 0,
           summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
-          sample: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+          sample: [expect.objectContaining({ status: "created", bank_reference: expect.stringMatching(wrapped("REF-VOID-1")) })],
           execution: expect.objectContaining({
             mode: "EXECUTED",
             summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
-            results: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+            results: [expect.objectContaining({ status: "created", bank_reference: expect.stringMatching(wrapped("REF-VOID-1")) })],
             skipped: [],
           }),
         });
@@ -702,11 +702,11 @@ describe("camt import tool", () => {
         created_count: 1,
         skipped_count: 0,
         summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
-        sample: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+        sample: [expect.objectContaining({ status: "created", bank_reference: expect.stringMatching(wrapped("REF-VOID-1")) })],
         execution: expect.objectContaining({
           mode: "EXECUTED",
           summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
-          results: [expect.objectContaining({ status: "created", bank_reference: "REF-VOID-1" })],
+          results: [expect.objectContaining({ status: "created", bank_reference: expect.stringMatching(wrapped("REF-VOID-1")) })],
           skipped: [],
         }),
       });
@@ -845,11 +845,11 @@ describe("camt import tool", () => {
           created_count: 1,
           skipped_count: 0,
           summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
-          sample: [expect.objectContaining({ status: "created", bank_reference: variant.reference })],
+          sample: [expect.objectContaining({ status: "created", bank_reference: expect.stringMatching(wrapped(variant.reference)) })],
           execution: expect.objectContaining({
             mode: "EXECUTED",
             summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
-            results: [expect.objectContaining({ status: "created", bank_reference: variant.reference })],
+            results: [expect.objectContaining({ status: "created", bank_reference: expect.stringMatching(wrapped(variant.reference)) })],
             skipped: [],
           }),
         });
@@ -886,7 +886,7 @@ describe("camt import tool", () => {
         expect(payload).toMatchObject({
           summary: expect.objectContaining({ entry_count: 1, duplicate_count: 0 }),
           entries: [expect.objectContaining({
-            bank_reference: "REF-VOID-1",
+            bank_reference: expect.stringMatching(wrapped("REF-VOID-1")),
             description: expect.stringMatching(wrapped("Test payment")),
           })],
         });
@@ -933,7 +933,7 @@ describe("camt import tool", () => {
           result: {
             summary: expect.objectContaining({ entry_count: 1, duplicate_count: 0 }),
             entries: [expect.objectContaining({
-              bank_reference: "REF-VOID-1",
+              bank_reference: expect.stringMatching(wrapped("REF-VOID-1")),
               description: expect.stringMatching(wrapped("Test payment")),
             })],
           },
@@ -985,11 +985,11 @@ describe("camt import tool", () => {
           created_count: 1,
           skipped_count: 0,
           summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
-          sample: [expect.objectContaining({ status: "would_create", bank_reference: "REF-VOID-1" })],
+          sample: [expect.objectContaining({ status: "would_create", bank_reference: expect.stringMatching(wrapped("REF-VOID-1")) })],
           execution: expect.objectContaining({
             mode: "DRY_RUN",
             summary: expect.objectContaining({ created_count: 1, skipped_count: 0 }),
-            results: [expect.objectContaining({ status: "would_create", bank_reference: "REF-VOID-1" })],
+            results: [expect.objectContaining({ status: "would_create", bank_reference: expect.stringMatching(wrapped("REF-VOID-1")) })],
             skipped: [],
           }),
           workflow: expect.objectContaining({
@@ -1048,13 +1048,13 @@ describe("camt import tool", () => {
             status: "would_create",
             amount: 100,
             counterparty: expect.stringMatching(wrapped("Vendor A OÜ")),
-            bank_reference: "REF-SPLIT-1",
+            bank_reference: expect.stringMatching(wrapped("REF-SPLIT-1")),
           }),
           expect.objectContaining({
             status: "would_create",
             amount: 200,
             counterparty: expect.stringMatching(wrapped("Vendor B OÜ")),
-            bank_reference: "REF-SPLIT-1",
+            bank_reference: expect.stringMatching(wrapped("REF-SPLIT-1")),
           }),
         ],
         execution: expect.objectContaining({
@@ -1236,7 +1236,7 @@ describe("camt import tool", () => {
     expect(payload.sample).toEqual(expect.arrayContaining([
       expect.objectContaining({
         status: "created",
-        bank_reference: "REF-VOID-1",
+        bank_reference: expect.stringMatching(wrapped("REF-VOID-1")),
       }),
     ]));
     expect(payload.execution).toMatchObject({
@@ -1253,7 +1253,7 @@ describe("camt import tool", () => {
       results: expect.arrayContaining([
         expect.objectContaining({
           status: "created",
-          bank_reference: "REF-VOID-1",
+          bank_reference: expect.stringMatching(wrapped("REF-VOID-1")),
         }),
       ]),
       skipped: [],
@@ -1661,7 +1661,7 @@ describe("camt import tool", () => {
     expect(payload.execution.skipped).toEqual([
       expect.objectContaining({
         amount: 10,
-        bank_reference: longBankReference,
+        bank_reference: expect.stringMatching(wrapped(longBankReference)),
         duplicate_transaction_ids: [42],
         reason: "Existing transaction matched by bank reference",
       }),
@@ -1703,7 +1703,7 @@ describe("camt import tool", () => {
     expect(payload.execution.needs_review).toEqual([
       expect.objectContaining({
         amount: 10,
-        bank_reference: "REF-VOID-1",
+        bank_reference: expect.stringMatching(wrapped("REF-VOID-1")),
         existing_transactions: [
           expect.objectContaining({
             id: 42,
@@ -2194,13 +2194,13 @@ describe("camt import tool", () => {
       expect.objectContaining({
         status: "would_create",
         amount: 100,
-        bank_reference: "REF-SPLIT-1",
+        bank_reference: expect.stringMatching(wrapped("REF-SPLIT-1")),
         description: expect.stringMatching(wrapped("Split payment A")),
       }),
       expect.objectContaining({
         status: "would_create",
         amount: 200,
-        bank_reference: "REF-SPLIT-1",
+        bank_reference: expect.stringMatching(wrapped("REF-SPLIT-1")),
         description: expect.stringMatching(wrapped("Split payment B")),
       }),
     ]));
@@ -2288,14 +2288,14 @@ describe("camt import tool", () => {
       expect.objectContaining({
         status: "would_create",
         amount: 200,
-        bank_reference: "REF-SPLIT-1",
+        bank_reference: expect.stringMatching(wrapped("REF-SPLIT-1")),
         description: expect.stringMatching(wrapped("Split payment B")),
       }),
     ]);
     expect(payload.execution.skipped).toEqual([
       expect.objectContaining({
         amount: 100,
-        bank_reference: "REF-SPLIT-1",
+        bank_reference: expect.stringMatching(wrapped("REF-SPLIT-1")),
         duplicate_transaction_ids: [501],
         reason: "Existing transaction matched by bank reference",
       }),
@@ -2356,14 +2356,14 @@ describe("camt import tool", () => {
         status: "would_create",
         amount: 25,
         counterparty: expect.stringMatching(wrapped("Vendor OÜ")),
-        ref_number: "E2E-1",
+        ref_number: expect.stringMatching(wrapped("E2E-1")),
         description: expect.stringMatching(wrapped("Repeated row")),
       }),
       expect.objectContaining({
         status: "would_create",
         amount: 25,
         counterparty: expect.stringMatching(wrapped("Vendor OÜ")),
-        ref_number: "E2E-1",
+        ref_number: expect.stringMatching(wrapped("E2E-1")),
         description: expect.stringMatching(wrapped("Repeated row")),
       }),
     ]);

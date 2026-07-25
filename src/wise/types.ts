@@ -154,6 +154,10 @@ export interface WiseCreatedEntry {
   status: string;
   api_id?: number;
   source_row?: WiseRow;
+  /** Currency this row is booked in, for entries that carry no `source_row`
+   * (fee rows are synthesised, not lifted from a CSV line). Presentation only —
+   * the amount is already the booked figure. */
+  booked_currency?: string;
 }
 
 export interface WiseSkippedEntry {

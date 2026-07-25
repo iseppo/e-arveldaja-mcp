@@ -761,6 +761,56 @@ async function executeInterAccount(
 }
 
 describe("auto_confirm_exact_matches", () => {
+  // The read-only suggest path decodes these two fields fail-closed; the
+  // mutating path read them raw. A malformed payment_status is unsafe in the
+  // dangerous direction — 42 !== "PAID", so an already-settled invoice enters
+  // the open set and can be auto-confirmed a second time.
+  it("refuses to auto-confirm against an invoice with a malformed payment_status", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [
+        { id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", bank_account_name: "Acme OU", ref_number: "RF123" },
+      ],
+      sales: [
+        { id: 10, status: "CONFIRMED", payment_status: 42 as unknown as string, number: "ARV-10", clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF123" },
+      ],
+    });
+
+    // Fails closed the same way the suggest path already did: CriticalFieldError
+    // propagates rather than the row being silently treated as unpaid.
+    await expect(handler({})).rejects.toThrow(/payment_status/);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  // Mirror of the above on the READ-ONLY suggest path. That path had the guard
+  // first, but nothing pinned it — which is exactly how the mutating path came
+  // to drift without it. Both are now held.
+  it("suggest also refuses an invoice with a malformed payment_status", async () => {
+    const handler = setupReconciliationTool({
+      transactions: [
+        { id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", bank_account_name: "Acme OU", ref_number: "RF123" },
+      ],
+      sales: [
+        { id: 10, status: "CONFIRMED", payment_status: 42 as unknown as string, number: "ARV-10", clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF123" },
+      ],
+    });
+
+    await expect(handler({})).rejects.toThrow(/payment_status/);
+  });
+
+  it("still auto-confirms normally when the invoice fields are well-formed", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [
+        { id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", bank_account_name: "Acme OU", ref_number: "RF123" },
+      ],
+      sales: [
+        { id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF123" },
+      ],
+    });
+
+    await executeAutoConfirm(handler, {});
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores VOID transactions", async () => {
     const { handler, api } = setupAutoConfirmTool({
       transactions: [
@@ -2912,6 +2962,45 @@ describe("matchScore", () => {
   it("returns close_amount when amounts are within 1 but not exact", () => {
     const result = matchScore(baseTx, { gross_price: 100.5 }, 100);
     expect(result.reasons).toContain("close_amount");
+  });
+
+  // A cent off is a real discrepancy at every magnitude. Float subtraction made
+  // that magnitude-dependent: 10.00 vs 10.01 differs by 0.00999… and passed the
+  // `< 0.01` test as "equal", while 100.00 vs 100.01 differs by 0.01000… and did
+  // not. The lenient case is the dangerous one — combined with a ref_number and
+  // client_id match it reaches 95 and auto-confirms a 1-cent-off invoice as
+  // fully settled.
+  it.each([
+    [10, 10.01],
+    [100, 100.01],
+    [0.01, 0.02],
+    [1234.56, 1234.57],
+  ])("never scores exact_amount for a one-cent difference (%s vs %s)", (txAmount, invoiceAmount) => {
+    const tx = { ...baseTx, amount: txAmount };
+    const result = matchScore(tx, { gross_price: invoiceAmount }, txAmount);
+    expect(result.reasons).not.toContain("exact_amount");
+    expect(result.reasons).toContain("close_amount");
+  });
+
+  it("does not let a one-cent gap ride a ref+client match over the auto-confirm threshold", () => {
+    const tx = { ...baseTx, amount: 10, ref_number: "RF123", clients_id: 42 };
+    const result = matchScore(tx, { gross_price: 10.01, bank_ref_number: "RF123", clients_id: 42 }, 10);
+    expect(result.reasons).not.toContain("exact_amount");
+    // 20 (close) + 40 (ref) + 15 (client) = 75, under the 90 auto-confirm bar.
+    expect(result.confidence).toBeLessThan(90);
+  });
+
+  it("still scores exact_amount when float-fuzzy inputs land on the same cent", () => {
+    const fuzzy = 0.1 + 0.2; // 0.30000000000000004
+    const result = matchScore({ ...baseTx, amount: fuzzy }, { gross_price: 0.3 }, fuzzy);
+    expect(result.reasons).toContain("exact_amount");
+  });
+
+  it("scores no amount match for a non-finite amount instead of throwing", () => {
+    expect(() => matchScore({ ...baseTx, amount: Number.NaN }, { gross_price: 100 }, Number.NaN)).not.toThrow();
+    const result = matchScore({ ...baseTx, amount: Number.NaN }, { gross_price: 100 }, Number.NaN);
+    expect(result.reasons).not.toContain("exact_amount");
+    expect(result.reasons).not.toContain("close_amount");
   });
 
   it("caps confidence at 100", () => {

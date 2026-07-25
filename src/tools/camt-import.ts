@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import type { OperationFailure } from "../operation-outcome.js";
 import { isStrictDate } from "../strict-date.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { toMcpJson } from "../mcp-json.js";
@@ -40,8 +41,18 @@ interface AdapterResult {
   isError: boolean;
 }
 
-function planErrorPayload(error: { code: string; message: string }): Record<string, unknown> {
-  return { error: error.message, category: error.code, mutation_occurred: false };
+// The operations layer sets `retry` per failure ("never" for a plan rejection,
+// "safe"/"unknown" for an upstream one), so dropping it here discarded a real
+// per-site signal and left every CAMT failure looking equally unretryable.
+function planErrorPayload(
+  error: { code: string; message: string; retry?: OperationFailure["retry"] },
+): Record<string, unknown> {
+  return {
+    error: error.message,
+    category: error.code,
+    ...(error.retry !== undefined ? { retry: error.retry } : {}),
+    mutation_occurred: false,
+  };
 }
 
 export function registerCamtImportTools(

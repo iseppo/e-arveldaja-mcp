@@ -9,6 +9,7 @@ import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtim
 import {
   captureFileInputSnapshot,
   FileInputSnapshotError,
+  fileInputSnapshotRetry,
   type FileInputSnapshot,
   type FileInputSource,
 } from "../file-input-snapshot.js";
@@ -455,13 +456,13 @@ export function registerProcessBankInputTool(
 
       if (mode === "show_details") {
         if (args.operation_handle === undefined) {
-          return textResult({ error: "operation_handle is required for mode='show_details'.", category: "operation_handle_required", mutation_occurred: false }, true);
+          return textResult({ error: "operation_handle is required for mode='show_details'.", category: "operation_handle_required", retry: "never", mutation_occurred: false }, true);
         }
         return pageHandler({ operation_handle: args.operation_handle, ...(args.cursor !== undefined ? { cursor: args.cursor } : {}), ...(args.page_size !== undefined ? { page_size: args.page_size } : {}) });
       }
 
       if (args.date_from && args.date_to && args.date_from > args.date_to) {
-        return textResult({ error: `date_from ${args.date_from} must be on or before date_to ${args.date_to}`, category: "invalid_date_range", mutation_occurred: false }, true);
+        return textResult({ error: `date_from ${args.date_from} must be on or before date_to ${args.date_to}`, category: "invalid_date_range", retry: "never", mutation_occurred: false }, true);
       }
 
       const source: FileInputSource = {
@@ -482,7 +483,7 @@ export function registerProcessBankInputTool(
         });
       } catch (error) {
         if (error instanceof FileInputSnapshotError) {
-          return textResult({ error: error.message, category: error.code, mutation_occurred: false }, true);
+          return textResult({ error: error.message, category: error.code, retry: fileInputSnapshotRetry(error.code), mutation_occurred: false }, true);
         }
         throw error;
       }
@@ -497,6 +498,7 @@ export function registerProcessBankInputTool(
           category: detected.format === "ambiguous" ? "bank_input_ambiguous" : "bank_input_unsupported",
           camt_rejected_field_count: detected.camt_rejected_field_count,
           wise_rejected_field_count: detected.wise_rejected_field_count,
+          retry: "never",
           mutation_occurred: false,
         }, true);
       }

@@ -679,6 +679,66 @@ describe("H14 accumulator and invalidation recovery", () => {
   });
 });
 
+describe("receipt inbox file-reference capacity", () => {
+  // One reference is minted PER FILE, and the store throws at capacity rather
+  // than evicting (so a live approval reference is never silently invalidated).
+  // A folder larger than the cap therefore used to make the whole call throw —
+  // and on the create paths the same call site runs AFTER the mutation, so the
+  // report of which invoices were created would be replaced by an exception.
+  it("still returns the scan when the per-file reference store is exhausted", async () => {
+    const tempDir = createReceiptFolder({
+      "a.pdf": "%PDF-1.4\n",
+      "b.pdf": "%PDF-1.4\n",
+      "c.pdf": "%PDF-1.4\n",
+    });
+    try {
+      // Capacity 1: the directory reference consumes it, leaving none for files.
+      const runtimeSafetyContext = createTestRuntimeSafetyContext({
+        fileReferenceStore: { maxActive: 1 },
+      });
+      const dirRef = runtimeSafetyContext.fileReferenceStore.issue({
+        canonicalPath: tempDir,
+        kind: "directory",
+        operation: FILE_REFERENCE_OPERATIONS.receipt,
+      });
+      const { handler } = setupReceiptTool("receipt_batch", runtimeSafetyContext);
+
+      const result = await handler({ mode: "scan", file_ref: dirRef });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+      const files = payload.result.files as Array<Record<string, unknown>>;
+      expect(files).toHaveLength(3);
+      // The identifying data survives; only the convenience reference is absent.
+      expect(files.every(f => typeof f.display_name === "string")).toBe(true);
+      expect(files.every(f => f.file_ref === undefined)).toBe(true);
+      // A scan runs before any mutation, so an unactionable row must say why
+      // rather than leaving the operator to discover the missing key.
+      expect(payload.result.file_references_unavailable).toBe(3);
+      expect(payload.result.file_references_note).toContain("capacity");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("still issues per-file references when there is room", async () => {
+    const tempDir = createReceiptFolder({ "a.pdf": "%PDF-1.4\n" });
+    try {
+      const runtimeSafetyContext = createTestRuntimeSafetyContext();
+      const dirRef = runtimeSafetyContext.fileReferenceStore.issue({
+        canonicalPath: tempDir,
+        kind: "directory",
+        operation: FILE_REFERENCE_OPERATIONS.receipt,
+      });
+      const { handler } = setupReceiptTool("receipt_batch", runtimeSafetyContext);
+      const result = await handler({ mode: "scan", file_ref: dirRef });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      expect(typeof payload.result.files[0]!.file_ref).toBe("string");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("receipt inbox tool status handling", () => {
   it("receipt_batch scans receipt folders through the merged entry point", async () => {
     const tempDir = createReceiptFolder();

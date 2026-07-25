@@ -574,6 +574,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         amount: fee,
         description: feeDesc,
         status: "would_create",
+        booked_currency: feeCurrency,
       });
       seenWiseIds.add(feeWiseIdTag);
     }
@@ -751,8 +752,16 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           current_object_state: inv,
         });
       } else {
+        // sourceAmount is only a EUR figure when the row was FUNDED in EUR — the
+        // sibling foreign_currency_lock branch establishes that via
+        // isForeignCardPayment, this one asserted it. Without the guard a
+        // USD-funded row is compared against a EUR invoice gross as if the two
+        // were the same unit; whenever the pair rate sits within ~0.1% of 1.0
+        // the difference slips under the 10-cent window and the candidate
+        // proposes overwriting a confirmed invoice's gross_price with a
+        // foreign-currency number relabelled EUR (source_amount_eur, rate 1).
         const eurDiff = roundMoney(invGross - sourceAmount);
-        if (invCurrency === "EUR" && eurDiff !== 0 && Math.abs(eurDiff) < 0.10) {
+        if (sourceCurrency === "EUR" && invCurrency === "EUR" && eurDiff !== 0 && Math.abs(eurDiff) < 0.10) {
           invoiceFixCandidates.push({
             row_index: row.rowIndex,
             wise_id: row.id,

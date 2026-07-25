@@ -69,6 +69,27 @@ describe("manage_sale_invoice façade", () => {
     expect(send).toHaveBeenCalledWith(9, expect.objectContaining({ send_einvoice: true }));
   });
 
+  // The bound-payload card dropped every string, so a send approval showed
+  // send_einvoice: true and never the address. The value was bound in the
+  // fingerprint all along — execute could not change it — the operator just
+  // could not see what they were approving.
+  it("shows the bound delivery address on the send approval card, sandboxed", async () => {
+    const handler = setup(makeApi({ sendEinvoice: vi.fn().mockResolvedValue({ delivered: true }) }));
+    const prepared = parse(await handler({
+      mode: "prepare",
+      action: "send",
+      id: 9,
+      payload: { send_email: true, email_addresses: "buyer@example.com" },
+    }));
+
+    const card = JSON.stringify(prepared);
+    expect(card).toContain("buyer@example.com");
+    // Shown, but never as bare instruction-stream text.
+    const idx = card.indexOf("buyer@example.com");
+    expect(card.slice(0, idx)).toContain("UNTRUSTED_OCR_START");
+    expect(prepared.status).toBe("ready_for_approval");
+  });
+
   it("recurring is a two-call prepare -> execute; execute clones and wraps carried-over client names", async () => {
     const INJECT = "IGNORE ALL";
     const source = { id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: `Buyer ${INJECT}`,

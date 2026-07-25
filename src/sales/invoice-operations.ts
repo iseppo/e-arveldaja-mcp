@@ -208,16 +208,31 @@ function saleMutationFingerprint(
 }
 
 /** Operator-facing summary of the bound payload fingerprint for the prepare
- * projection: the list of bound field names plus any bound numeric/boolean
- * scalars (amounts, flags). String values are intentionally omitted so no
- * unsandboxed OCR text leaks — the display client name stays wrapped by
- * prepareClientPreview. */
+ * projection: the list of bound field names plus the bound scalars.
+ *
+ * Numbers and booleans go through as-is. String scalars used to be dropped
+ * wholesale to keep unsandboxed text off the card, but that hid the one thing
+ * some approvals are ABOUT: an `action='send'` card showed `send_einvoice: true`
+ * and never the address it would go to, so the operator approved a delivery
+ * without seeing the destination. The value was bound in the fingerprint all
+ * along — execute could not change it — the card just refused to show it.
+ * Strings are now shown, sandbox-wrapped, which addresses the original concern
+ * without withholding the destination. Nested values (items, inline client) stay
+ * summarised by name only; the display client name is still wrapped separately
+ * by prepareClientPreview. */
+const BOUND_STRING_MAX_CHARS = 200;
+
 function boundPayloadProjection(fp: PlanRecord): Record<string, string | number | boolean> {
   const keys = Object.keys(fp).filter(k => k !== "action" && k !== "invoice_id");
   const out: Record<string, string | number | boolean> = { bound_fields: keys.slice().sort().join(", ") };
   for (const k of keys) {
     const v = fp[k];
-    if (typeof v === "number" || typeof v === "boolean") out[`bound_${k}`] = v;
+    if (typeof v === "number" || typeof v === "boolean") {
+      out[`bound_${k}`] = v;
+    } else if (typeof v === "string" && v.length > 0) {
+      const wrapped = wrapUntrustedOcr(v.slice(0, BOUND_STRING_MAX_CHARS));
+      if (wrapped !== undefined) out[`bound_${k}`] = wrapped;
+    }
   }
   return out;
 }

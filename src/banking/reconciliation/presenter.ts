@@ -2,6 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { wrapUntrustedOcr } from "../../mcp-json.js";
 import { buildBatchExecutionContract } from "../../batch-execution.js";
 import { toolError } from "../../tool-error.js";
+import type { OperationFailure } from "../../operation-outcome.js";
 import type { PlanExecutionReport } from "../../plan-execution.js";
 import {
   formatDuplicatePostingWarnings,
@@ -37,8 +38,17 @@ import type { ReconFailure } from "./executor.js";
 
 // --- Failure envelopes -------------------------------------------------------
 
-export function reconPlanErrorPayload(category: string, message: string): Record<string, unknown> {
-  return { error: message, category, mutation_occurred: false };
+// `retry` is carried, not guessed: every reconciliation failure that reaches
+// this envelope is a plan-gate rejection (handle required / store error /
+// drift), and the operations layer already types them `retry: "never"` — a
+// caller must re-preview, never repeat the same call. Dropping the field left
+// the consumer unable to tell "do not retry" from "unknown".
+export function reconPlanErrorPayload(
+  category: string,
+  message: string,
+  retry: OperationFailure["retry"] = "never",
+): Record<string, unknown> {
+  return { error: message, category, retry, mutation_occurred: false };
 }
 
 export function reconPlanError(category: string, message: string): CallToolResult {

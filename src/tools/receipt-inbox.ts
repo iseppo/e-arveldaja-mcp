@@ -3,7 +3,7 @@ import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/
 import { z } from "zod";
 import { basename, dirname, join } from "node:path";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
-import { FILE_REFERENCE_OPERATIONS, FileReferenceStoreError } from "../file-reference-store.js";
+import { FILE_REFERENCE_OPERATIONS, FileReferenceStoreError, MAX_ACTIVE_FILE_REFERENCES } from "../file-reference-store.js";
 import { sandboxExternalText } from "../external-text-renderer.js";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
@@ -1113,21 +1113,59 @@ export function registerReceiptInboxTools(
     };
   }
 
+  /**
+   * A PER-FILE reference is a convenience for the follow-up call — never the
+   * record of what happened. The store is capacity-bounded and deliberately
+   * throws instead of evicting, so a live approval reference is never silently
+   * invalidated; but one reference is minted per file, so a folder larger than
+   * the cap exhausts it. `publicReceiptResult` and `publicReceiptManifest` run
+   * AFTER the create mutation, so letting that throw would replace the report of
+   * which invoices were created with an exception — the operator's only record,
+   * lost. Degrade to "this file has no reference" instead, and only for the
+   * capacity case: a malformed path is a bug and must still surface.
+   */
+  function issueReceiptFileRef(canonicalPath: string): string | undefined {
+    try {
+      return runtimeSafetyContext.fileReferenceStore.issue({
+        canonicalPath,
+        kind: "file",
+        operation: FILE_REFERENCE_OPERATIONS.receipt,
+      });
+    } catch (error) {
+      if (error instanceof FileReferenceStoreError && error.code === "file_reference_capacity_exceeded") {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   function publicReceiptScan(scan: Awaited<ReturnType<typeof scanReceiptFolderInternal>>, fileRef: string) {
+    let referencesUnavailable = 0;
+    const files = scan.files.map(({ name, path, ...metadata }) => {
+      const ref = issueReceiptFileRef(path);
+      if (ref === undefined) referencesUnavailable += 1;
+      return {
+        ...metadata,
+        display_name: sandboxExternalText(name),
+        display_path: sandboxExternalText(path),
+        ...(ref !== undefined ? { file_ref: ref } : {}),
+      };
+    });
     return {
       folder_path: sandboxExternalText(scan.folder_path),
       file_ref: fileRef,
       total_candidates: scan.total_candidates,
-      files: scan.files.map(({ name, path, ...metadata }) => ({
-        ...metadata,
-        display_name: sandboxExternalText(name),
-        display_path: sandboxExternalText(path),
-        file_ref: runtimeSafetyContext.fileReferenceStore.issue({
-          canonicalPath: path,
-          kind: "file",
-          operation: FILE_REFERENCE_OPERATIONS.receipt,
-        }),
-      })),
+      files,
+      // Unlike the post-mutation projections, a scan runs before anything is
+      // written, so a silently unactionable row here is just a confusing list.
+      // Say how many and why rather than letting the operator discover it by
+      // reaching for a file_ref that is not there.
+      ...(referencesUnavailable > 0
+        ? {
+            file_references_unavailable: referencesUnavailable,
+            file_references_note: `${referencesUnavailable} file(s) could not be given a file_ref: the reference store is at capacity (${MAX_ACTIVE_FILE_REFERENCES} active). Process this folder in smaller batches, or address the listed files by folder_path.`,
+          }
+        : {}),
       skipped: scan.skipped.map(({ name, reason }) => ({
         display_name: sandboxExternalText(name),
         display_reason: sandboxExternalText(reason),
@@ -1144,25 +1182,23 @@ export function registerReceiptInboxTools(
         ...metadata,
         display_name: sandboxExternalText(name),
         display_path: sandboxExternalText(path),
-        file_ref: runtimeSafetyContext.fileReferenceStore.issue({
-          canonicalPath: path,
-          kind: "file",
-          operation: FILE_REFERENCE_OPERATIONS.receipt,
-        }),
+        ...(() => {
+          const ref = issueReceiptFileRef(path);
+          return ref !== undefined ? { file_ref: ref } : {};
+        })(),
       },
     };
   }
 
   function publicReceiptManifest(files: ReadonlyArray<{ file: ReceiptFileInfo; sha256: string }>) {
-    return files.map(({ file, sha256 }) => ({
-      file_ref: runtimeSafetyContext.fileReferenceStore.issue({
-        canonicalPath: file.path,
-        kind: "file",
-        operation: FILE_REFERENCE_OPERATIONS.receipt,
-      }),
-      display_name: sandboxExternalText(file.name),
-      sha256,
-    }));
+    return files.map(({ file, sha256 }) => {
+      const ref = issueReceiptFileRef(file.path);
+      return {
+        ...(ref !== undefined ? { file_ref: ref } : {}),
+        display_name: sandboxExternalText(file.name),
+        sha256,
+      };
+    });
   }
 
   function publicReceiptSkipped(scan: { skipped: Array<{ name: string; reason: string }> }) {

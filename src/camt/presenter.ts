@@ -48,6 +48,7 @@ export function importPreflightFailurePayload(
       value: wrapUntrustedOcr(issue.value.slice(0, MAX_EXPOSED_VALUE_CHARS)),
       reason: issue.reason,
     })),
+    retry: "never",
     mutation_occurred: false,
   };
 }
@@ -131,15 +132,32 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
     statement_id: wrapUntrustedOcr(projection.statementMetadata.statement_id),
     bank_name: wrapUntrustedOcr(projection.statementMetadata.bank_name),
   };
+  // bank_reference / ref_number are statement text the remitter writes, exactly
+  // like description and counterparty, so they are wrapped on this surface too.
+  // The compact presenter already wrapped them; the full envelope kept them raw
+  // "for byte-compatibility", which is a compatibility preference, not a safety
+  // property — and this is the DEFAULT profile's surface. Identity and dedup run
+  // on the raw upstream entry, never on these fields. A value that round-trips
+  // back through the caller must be desandboxed by the write boundary that
+  // accepts it: that is the boundary's job, not an automatic property of every
+  // write path — `cleanup_camt_possible_duplicate` had to be fixed to do it.
   const sanitizedResults = input.results.map(row => ({
     ...row,
     description: wrapUntrustedOcr(row.description),
     stored_description: wrapUntrustedOcr(row.stored_description),
     counterparty: wrapUntrustedOcr(row.counterparty),
+    bank_reference: wrapUntrustedOcr(row.bank_reference),
+    ref_number: wrapUntrustedOcr(row.ref_number),
+  }));
+  const sanitizedSkipped = projection.skipped.map(row => ({
+    ...row,
+    bank_reference: wrapUntrustedOcr(row.bank_reference),
   }));
   const sanitizedPossibleDuplicates = input.possibleDuplicates.map(duplicate => ({
     ...duplicate,
     counterparty: wrapUntrustedOcr(duplicate.counterparty),
+    bank_reference: wrapUntrustedOcr(duplicate.bank_reference),
+    ref_number: wrapUntrustedOcr(duplicate.ref_number),
     existing_transactions: duplicate.existing_transactions.map(match => ({
       ...match,
       counterparty: wrapUntrustedOcr(match.counterparty ?? undefined),
@@ -188,7 +206,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
       mode,
       summary,
       results: sanitizedResults,
-      skipped: projection.skipped,
+      skipped: sanitizedSkipped,
       errors: [],
       needs_review: sanitizedPossibleDuplicates,
       ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
@@ -196,7 +214,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
     ...(projection.skipped.length > 0 && {
       skipped_summary: {
         count: projection.skipped.length,
-        sample_refs: projection.skipped.slice(0, 10).map(row => row.bank_reference),
+        sample_refs: sanitizedSkipped.slice(0, 10).map(row => row.bank_reference),
       },
     }),
     ...(input.possibleDuplicates.length > 0 && {
@@ -372,8 +390,13 @@ export function renderCamtParsePayload(parsed: CamtParseResult): Record<string, 
       // CAMT free-form fields (RmtInf/Ustrd, Dbtr/Nm, Cdtr/Nm) carry
       // attacker-controllable bytes from a bank statement sent by
       // any counterparty. Treat them like OCR text at MCP output.
+      // The reference fields belong to the same class: AcctSvcrRef / EndToEndId
+      // and RmtInf/Strd/CdtrRefInf/Ref are written by the remitter, not the
+      // bank, and only trimmed on the way in.
       counterparty_name: wrapUntrustedOcr(entry.counterparty_name),
       description: wrapUntrustedOcr(entry.description),
+      bank_reference: wrapUntrustedOcr(entry.bank_reference),
+      reference_number: wrapUntrustedOcr(entry.reference_number),
       ...(entry.duplicate ? { duplicate: true } : { duplicate: undefined }),
       ...(entry.duplicate_transaction_ids.length > 0 ? { duplicate_transaction_ids: entry.duplicate_transaction_ids } : { duplicate_transaction_ids: undefined }),
     })),

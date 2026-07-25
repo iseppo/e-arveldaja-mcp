@@ -131,6 +131,37 @@ describe("renderReceiptBatchCompact — size", () => {
   });
 });
 
+describe("renderReceiptBatchCompact — totals currency", () => {
+  // The currency label used to be voted over EVERY scanned row while the sums
+  // covered only the reliable ones, so rows that contribute nothing to the
+  // figure could still name it. Three USD receipts held for review plus two
+  // booked EUR ones reported the EUR-only sum labelled "USD".
+  it("labels the totals with the currency of the rows actually summed", () => {
+    const usdRows = Array.from({ length: 3 }, (_, i) => ({
+      ...fileResult(100 + i, "needs_review" as ReceiptBatchStatus),
+      extracted: { ...fileResult(100 + i, "needs_review" as ReceiptBatchStatus).extracted!, currency: "USD" },
+    }));
+    const { summary } = renderReceiptBatchCompact(compactInput(makeBatch(2, { extraRows: usdRows })));
+
+    expect(summary.totals?.currency).toBe("EUR");
+    // 2 clean EUR rows at 124 gross each — the USD rows contributed nothing.
+    expect(Number(summary.totals?.gross)).toBe(248);
+    expect((summary.warnings ?? []).some(w => w.code === "mixed_currency_totals")).toBe(false);
+  });
+
+  it("warns when the summed rows themselves do not share a currency", () => {
+    const usdBooked = {
+      ...fileResult(200, "dry_run_preview" as ReceiptBatchStatus),
+      extracted: { ...fileResult(200, "dry_run_preview" as ReceiptBatchStatus).extracted!, currency: "USD" },
+    };
+    const { summary } = renderReceiptBatchCompact(compactInput(makeBatch(2, { extraRows: [usdBooked] })));
+
+    const warning = (summary.warnings ?? []).find(w => w.code === "mixed_currency_totals");
+    expect(warning).toBeDefined();
+    expect(warning!.message).toContain("more than one currency");
+  });
+});
+
 describe("renderReceiptBatchCompact — dry_run", () => {
   it("carries every approval-summary field, ≤3 wrapped samples, and directs create", () => {
     const { summary } = renderReceiptBatchCompact(compactInput(makeBatch(40), { connectionName: "Näidis", fileRef: "REF-abc" }));

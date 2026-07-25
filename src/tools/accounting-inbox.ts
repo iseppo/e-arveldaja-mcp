@@ -2400,8 +2400,15 @@ export function registerAccountingInboxTools(
       const appliedPatch: Partial<Transaction> = {};
       const requestedPatch = patch_missing_fields ?? {};
       for (const field of CAMT_DUPLICATE_PATCH_FIELDS) {
-        const candidateValue = requestedPatch[field];
-        if (typeof candidateValue !== "string" || !candidateValue.trim()) continue;
+        const rawCandidate = requestedPatch[field];
+        if (typeof rawCandidate !== "string" || !rawCandidate.trim()) continue;
+        // These values were handed to the model as sandbox-wrapped review fields
+        // and come back through the caller, so strip the markers before they
+        // reach the ledger — exactly as extractTransactionPatchFields does. Left
+        // wrapped, a ref_number would be stored truncated to the 20-char cap as
+        // "<<UNTRUSTED_OCR_STAR" and break CAMT deduplication on that reference.
+        const candidateValue = desandboxText(rawCandidate);
+        if (!candidateValue.trim()) continue;
 
         const currentValue = keptTransaction[field];
         if (typeof currentValue === "string" && currentValue.trim()) continue;

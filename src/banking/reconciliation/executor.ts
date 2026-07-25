@@ -462,14 +462,22 @@ async function loadExactMatchProjection(
   const total = unconfirmed.length;
   for (let i = 0; i < total; i++) await reportProgress(i, total);
 
+  // Same fail-closed decode as the read-only suggest path above. A raw read is
+  // not merely inconsistent here, it is unsafe in the dangerous direction: a
+  // malformed `payment_status` (e.g. the number 42) is not equal to "PAID", so
+  // an already-settled invoice would enter the open set and could be
+  // auto-confirmed against a transaction a second time. This is the MUTATING
+  // path, so it needs the guard at least as much as the advisory one.
   const allSales = await api.saleInvoices.listAll();
-  const openSales = allSales.filter((inv: SaleInvoice) =>
-    inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
-  );
+  const openSales = allSales.filter((inv: SaleInvoice) => {
+    const critical = decodeInvoiceStatusCritical(inv);
+    return critical.payment_status !== "PAID" && critical.status === "CONFIRMED";
+  });
   const allPurchases = await api.purchaseInvoices.listAll();
-  const openPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-    inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
-  );
+  const openPurchases = allPurchases.filter((inv: PurchaseInvoice) => {
+    const critical = decodeInvoiceStatusCritical(inv);
+    return critical.payment_status !== "PAID" && critical.status === "CONFIRMED";
+  });
 
   const projection = computeExactMatchProjection(unconfirmed, openSales, openPurchases, threshold);
   await enrichExactMatchProjectionWithDuplicateGuard(api, projection, input.blockOnDuplicate === true);

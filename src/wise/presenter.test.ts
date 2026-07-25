@@ -132,3 +132,63 @@ describe("renderWiseImportCompact", () => {
     expect(summary.details?.args.operation_handle).toBe("op-handle-123");
   });
 });
+
+describe("renderWiseImportCompact — totals currency", () => {
+  function foreignCreated(index: number): WiseCreatedEntry {
+    const entry = cleanCreated(index);
+    return {
+      ...entry,
+      source_row: { ...entry.source_row!, sourceCurrency: "USD", targetCurrency: "USD" },
+    };
+  }
+
+  it("labels in_total / out_total when every summed row shares a currency", () => {
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: makeData(3) });
+    expect(summary.totals?.currency).toBe("EUR");
+    expect((summary.warnings ?? []).some(w => w.code === "mixed_currency_totals")).toBe(false);
+  });
+
+  // 100 USD + 50 EUR used to render as an unlabelled in_total of 150 on the
+  // approval card. The ledger is unaffected, but this is the figure the operator
+  // approves against.
+  it("does not label a total that adds up more than one currency, and says so", () => {
+    const data = makeData(2);
+    const mixed = { ...data, created: [...data.created, foreignCreated(99)] };
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: mixed });
+
+    expect(summary.totals?.currency).toBeUndefined();
+    const warning = (summary.warnings ?? []).find(w => w.code === "mixed_currency_totals");
+    expect(warning).toBeDefined();
+    expect(warning!.message).toContain("EUR");
+    expect(warning!.message).toContain("USD");
+  });
+});
+
+describe("renderWiseImportCompact — fee rows vote on the totals currency", () => {
+  // Fee entries are synthesised: they carry no source_row to read a currency
+  // from, yet source_direction "OUT" puts them in out_total. Without their own
+  // booked_currency they were summed silently, unable to change the label or
+  // trigger the mixed warning.
+  it("counts a fee row booked in another currency as a currency disagreement", () => {
+    const data = makeData(2);
+    const feeEntry: WiseCreatedEntry = {
+      wise_id: "FEE:WISE-0",
+      date: "2026-02-01",
+      type: "C",
+      source_direction: "OUT",
+      amount: 1.5,
+      description: "WISE:FEE:WISE-0 fee [source_direction=OUT]",
+      status: "would_create",
+      booked_currency: "USD",
+    };
+    const { summary } = renderWiseImportCompact({
+      mode: "DRY_RUN",
+      data: { ...data, created: [...data.created, feeEntry] },
+    });
+
+    expect(summary.totals?.currency).toBeUndefined();
+    const warning = (summary.warnings ?? []).find(w => w.code === "mixed_currency_totals");
+    expect(warning).toBeDefined();
+    expect(warning!.message).toContain("USD");
+  });
+});

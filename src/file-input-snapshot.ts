@@ -29,6 +29,17 @@ const SAFE_MESSAGES: Readonly<Record<FileInputSnapshotErrorCode, string>> = Obje
   file_input_unavailable: "The file input could not be safely resolved and read.",
 });
 
+/**
+ * Whether repeating the identical call could ever produce a different outcome.
+ * Only `file_input_unavailable` can: the source was not readable this time and
+ * may be next (a transient IO or permission condition). The other three name a
+ * mismatch — changed bytes, a malformed identity, a bad source combination —
+ * that the caller must fix first, so a bare retry is pointless.
+ */
+export function fileInputSnapshotRetry(code: FileInputSnapshotErrorCode): "never" | "unknown" {
+  return code === "file_input_unavailable" ? "unknown" : "never";
+}
+
 export class FileInputSnapshotError extends Error {
   readonly code: FileInputSnapshotErrorCode;
 

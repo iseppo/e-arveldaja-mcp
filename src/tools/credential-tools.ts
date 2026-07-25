@@ -50,7 +50,7 @@ function jsonResponse(payload: Record<string, unknown>): ToolResponse {
 }
 
 function planErrorResult(category: string, message: string): ToolResponse {
-  return toolError({ error: message, category, mutation_occurred: false }) as ToolResponse;
+  return toolError({ error: message, category, retry: "never", mutation_occurred: false }) as ToolResponse;
 }
 
 function storedPrivate(plan: { privatePayload: unknown }): Record<string, unknown> | undefined {

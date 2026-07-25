@@ -204,10 +204,25 @@ function receiptDateRange(dates: ReadonlyArray<string | undefined>): { from?: st
 }
 
 /** Majority-vote receipt currency across the extracted rows, EUR fallback. */
-function reliableReceiptCurrency(results: readonly ReceiptBatchFileResult[]): string {
+/**
+ * The currency LABEL for the reliable totals. It must be voted over exactly the
+ * rows the totals sum over, not over every scanned row: a non-EUR receipt always
+ * lands in `needs_review` and so contributes nothing to the sums, but it used to
+ * carry a vote. Three USD receipts plus two EUR ones therefore labelled a
+ * EUR-only sum as "USD".
+ *
+ * `mixed` is true when the contributing rows genuinely disagree — one scalar
+ * total cannot describe them, and silently picking the plurality would misstate
+ * the figure rather than just its label.
+ */
+function reliableReceiptCurrency(
+  results: readonly ReceiptBatchFileResult[],
+): { currency: string; mixed: boolean } {
   const counts = new Map<string, number>();
   for (const row of results) {
-    const currency = row.extracted?.currency;
+    if (!RELIABLE_STATUSES.has(row.status)) continue;
+    if (row.extracted === undefined) continue;
+    const currency = row.extracted.currency;
     if (typeof currency === "string" && currency.length > 0) {
       counts.set(currency, (counts.get(currency) ?? 0) + 1);
     }
@@ -220,7 +235,7 @@ function reliableReceiptCurrency(results: readonly ReceiptBatchFileResult[]): st
       bestCount = count;
     }
   }
-  return best;
+  return { currency: best, mixed: counts.size > 1 };
 }
 
 function hasOcrIssue(row: ReceiptBatchFileResult): boolean {
@@ -267,7 +282,7 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
   // Reliable financial totals: sum only over successfully processed rows
   // (created / matched / dry_run_preview) that carry structured extracted
   // amounts. Bounded scalars — independent of receipt count.
-  const currency = reliableReceiptCurrency(results);
+  const { currency, mixed: currencyMixed } = reliableReceiptCurrency(results);
   let gross = 0;
   let net = 0;
   let vat = 0;
@@ -296,6 +311,14 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
     warnings.push({
       code: "low_ocr_confidence",
       message: `${ocrIssueCount} receipt(s) had low or partial OCR confidence.`,
+    });
+  }
+  if (currencyMixed) {
+    // The summed rows do not share a currency, so one scalar gross/net/vat is
+    // not a meaningful figure — the label names the most common currency only.
+    warnings.push({
+      code: "mixed_currency_totals",
+      message: `Totals combine receipts in more than one currency and are labelled ${currency}; read the per-receipt amounts instead.`,
     });
   }
 

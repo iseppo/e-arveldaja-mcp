@@ -1737,6 +1737,44 @@ ${entryXml}
     });
   });
 
+  // These fields are handed to the model sandbox-wrapped and come back through
+  // the caller. Written wrapped, ref_number is stored truncated to its 20-char
+  // cap as "<<UNTRUSTED_OCR_STAR" and later CAMT dedup on that reference breaks.
+  it("cleanup_camt_possible_duplicate strips sandbox markers before writing the patch", async () => {
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          const identity = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_name: "Curated supplier",
+          };
+          if (id === 77) {
+            return { id: 77, status: "CONFIRMED", is_deleted: false, bank_ref_number: null, ref_number: "", ...identity };
+          }
+          return { id, status: "PROJECT", is_deleted: false, ...identity };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    const nonce = "a".repeat(32);
+    await handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+      patch_missing_fields: {
+        ref_number: `<<UNTRUSTED_OCR_START:${nonce}>>\nRF123\n<<UNTRUSTED_OCR_END:${nonce}>>`,
+      },
+    });
+
+    expect(api.transactions.update).toHaveBeenCalledWith(77, { ref_number: "RF123" });
+  });
+
   it("cleanup_camt_possible_duplicate refuses to delete a row that is no longer PROJECT", async () => {
     const { handler, api } = setupAccountingInboxTool({
       transactions: {

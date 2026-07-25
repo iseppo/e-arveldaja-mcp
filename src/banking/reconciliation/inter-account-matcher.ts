@@ -1,7 +1,7 @@
 import type { Transaction } from "../../types/api.js";
 import { normalizeCompanyName } from "../../company-name.js";
 import { toUtcDay } from "../../tools/inter-account-utils.js";
-import { comparableTransactionAmount } from "./match-score.js";
+import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
 import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
 
 // ---------------------------------------------------------------------------
@@ -98,8 +98,9 @@ export function getTransferPairCompatibility(
   let confidence = 0;
   const txAComparableAmount = comparableTransactionAmount(txA);
   const txBComparableAmount = comparableTransactionAmount(txB);
-  const nominalAmountsMatch = Math.abs(txA.amount - txB.amount) < 0.01;
-  const comparableAmountsMatch = Math.abs(txAComparableAmount - txBComparableAmount) < 0.01;
+  // Exact integer cents, not float subtraction — see sameAmountToTheCent.
+  const nominalAmountsMatch = sameAmountToTheCent(txA.amount, txB.amount);
+  const comparableAmountsMatch = sameAmountToTheCent(txAComparableAmount, txBComparableAmount);
   const hasMeaningfulComparableAmounts =
     hasMeaningfulComparableAmount(txA) ||
     hasMeaningfulComparableAmount(txB);

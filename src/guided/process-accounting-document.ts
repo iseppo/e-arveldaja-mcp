@@ -9,6 +9,7 @@ import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtim
 import {
   captureFileInputSnapshot,
   FileInputSnapshotError,
+  fileInputSnapshotRetry,
   type FileInputSnapshot,
   type FileInputSource,
 } from "../file-input-snapshot.js";
@@ -260,7 +261,7 @@ export function registerProcessAccountingDocumentTool(
       const mode = args.mode ?? "prepare";
       for (const [key, value] of [["invoice_date", args.invoice_date], ["journal_date", args.journal_date]] as const) {
         if (value !== undefined && !isStrictDate(value)) {
-          return textResult({ error: `${key} must be a real calendar date in canonical YYYY-MM-DD form`, category: "invalid_date", mutation_occurred: false }, true);
+          return textResult({ error: `${key} must be a real calendar date in canonical YYYY-MM-DD form`, category: "invalid_date", retry: "never", mutation_occurred: false }, true);
         }
       }
 
@@ -273,7 +274,7 @@ export function registerProcessAccountingDocumentTool(
         if (args.invoice_id === undefined) missing.push("invoice_id");
         if (args.plan_handle === undefined) missing.push("plan_handle");
         if (missing.length > 0) {
-          return textResult({ error: `Missing required fields for mode='confirm': ${missing.join(", ")}`, category: "missing_required_fields", mutation_occurred: false }, true);
+          return textResult({ error: `Missing required fields for mode='confirm': ${missing.join(", ")}`, category: "missing_required_fields", retry: "never", mutation_occurred: false }, true);
         }
         const outcome = await operations.confirmDraft({ planHandle: args.plan_handle, invoiceId: args.invoice_id! });
         if (!outcome.ok) {
@@ -334,7 +335,7 @@ export function registerProcessAccountingDocumentTool(
         });
       } catch (error) {
         if (error instanceof FileInputSnapshotError) {
-          return textResult({ error: error.message, category: error.code, mutation_occurred: false }, true);
+          return textResult({ error: error.message, category: error.code, retry: fileInputSnapshotRetry(error.code), mutation_occurred: false }, true);
         }
         throw error;
       }
@@ -354,7 +355,7 @@ export function registerProcessAccountingDocumentTool(
           if (args.journal_date === undefined) missingBooking.push("journal_date");
           if (args.term_days === undefined) missingBooking.push("term_days");
           if (missingBooking.length > 0) {
-            return textResult({ error: `Missing required booking fields for mode='prepare' with items: ${missingBooking.join(", ")}`, category: "missing_required_fields", mutation_occurred: false }, true);
+            return textResult({ error: `Missing required booking fields for mode='prepare' with items: ${missingBooking.join(", ")}`, category: "missing_required_fields", retry: "never", mutation_occurred: false }, true);
           }
           booking = {
             supplierClientId: args.supplier_client_id!,
@@ -446,7 +447,7 @@ export function registerProcessAccountingDocumentTool(
       if (args.source_sha256 === undefined) missing.push("source_sha256");
       if (args.plan_handle === undefined) missing.push("plan_handle");
       if (missing.length > 0) {
-        return textResult({ error: `Missing required fields for mode='create': ${missing.join(", ")}`, category: "missing_required_fields", mutation_occurred: false }, true);
+        return textResult({ error: `Missing required fields for mode='create': ${missing.join(", ")}`, category: "missing_required_fields", retry: "never", mutation_occurred: false }, true);
       }
 
       const outcome = await operations.create({

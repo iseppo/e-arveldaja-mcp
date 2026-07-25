@@ -3270,6 +3270,9 @@ describe("wise import tool", () => {
           error: expect.any(String),
           category: "digest_mismatch",
           code: "approval_digest_mismatch",
+          // A digest mismatch is never fixed by repeating the same call — the
+          // caller must re-run the dry run and approve the fresh digest.
+          retry: "never",
           mutation_occurred: false,
           known_object_ids: [],
           affected_cache_names: [],
@@ -5474,5 +5477,63 @@ describe("createdTransactionMatchesApprovedPayload — over-cap ref precondition
     const shortPayload = { ...payload, ref_number: "RF-SHORT", description: "narrative" } as unknown as TransactionCreatePayload;
     const shortStored = { ...boundaryStored, ref_number: "RF-SHORT", description: "narrative" } as typeof boundaryStored;
     expect(createdTransactionMatchesApprovedPayload(shortStored, 8860, shortPayload)).toBe(true);
+  });
+});
+
+describe("wise invoice currency fixes — eur_legacy_autofix funding guard", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+  });
+
+  // sourceAmount is only a EUR figure when the row was FUNDED in EUR. The
+  // sibling foreign_currency_lock branch establishes that; this one asserted it.
+  // A USD-funded row whose pair rate sits near 1.0 slips under the 10-cent
+  // window and would propose rewriting a confirmed EUR invoice's gross_price
+  // with a USD number relabelled EUR (source_amount_eur, rate 1).
+  const eurInvoice = [{
+    id: 810,
+    status: "CONFIRMED",
+    payment_status: "UNPAID",
+    number: "EUR-810",
+    client_name: "Legacy Vendor",
+    create_date: "2026-06-10",
+    cl_currencies_id: "EUR",
+    gross_price: 100,
+  }];
+
+  async function candidatesFor(sourceCurrency: string) {
+    mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({
+      id: `AUTOFIX-${sourceCurrency}`,
+      direction: "OUT",
+      sourceName: "Wise Own Account",
+      targetName: "Legacy Vendor",
+      sourceAmount: "100.05",
+      sourceCurrency,
+      targetAmount: "100.05",
+      targetCurrency: sourceCurrency,
+    })]));
+    const setup = setupWiseTool([], undefined, { purchaseInvoices: eurInvoice });
+    const payload = parseWiseResponse(await setup.handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      execute: false,
+    }));
+    return payload.invoice_currency_fixes;
+  }
+
+  it("does not propose a EUR auto-fix from a USD-funded row", async () => {
+    const fixes = await candidatesFor("USD");
+    // With no candidates at all the whole section is omitted from the payload.
+    expect(fixes?.eur_legacy_autofix ?? 0).toBe(0);
+    expect(fixes?.candidates ?? []).toEqual([]);
+  });
+
+  it("still proposes the auto-fix when the row really was funded in EUR", async () => {
+    const fixes = await candidatesFor("EUR");
+    expect(fixes.eur_legacy_autofix).toBe(1);
+    expect(fixes.candidates).toEqual([
+      expect.objectContaining({ invoice_id: 810, category: "eur_legacy_autofix", source_amount_eur: 100.05 }),
+    ]);
   });
 });

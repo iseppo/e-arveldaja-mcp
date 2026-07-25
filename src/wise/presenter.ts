@@ -58,6 +58,7 @@ export function wisePreflightFailure(rejected: ImportRejectedField[]) {
       value: wrapUntrustedOcr(issue.value.slice(0, MAX_EXPOSED_VALUE_CHARS)),
       reason: issue.reason,
     })),
+    retry: "never",
     mutation_occurred: false,
   });
 }
@@ -67,6 +68,7 @@ export function digestMismatch() {
     error: "The Wise command approval digest does not match the current mutation plan.",
     category: "digest_mismatch",
     code: "approval_digest_mismatch",
+    retry: "never",
     mutation_occurred: false,
     known_object_ids: [],
     affected_cache_names: [],
@@ -81,6 +83,7 @@ export function planStoreErrorResult(error: Pick<PlanStoreError, "code" | "messa
     error: error.message,
     category: error.code,
     code: error.code,
+    retry: "never",
     mutation_occurred: false,
     known_object_ids: [],
     affected_cache_names: [],
@@ -93,6 +96,7 @@ export function planHandleRequiredResult() {
     error: "A reviewed execution-plan handle from the Wise dry run is required to execute. The digest alone cannot execute; re-run the dry run and pass its plan_handle.",
     category: "plan_handle_required",
     code: "plan_handle_required",
+    retry: "never",
     mutation_occurred: false,
     known_object_ids: [],
     affected_cache_names: [],
@@ -106,6 +110,7 @@ export function planDriftResult(detail: string) {
     error: `The reviewed Wise plan no longer matches the re-read source and current ledger: ${detail}`,
     category: "plan_drift",
     code: "plan_drift",
+    retry: "never",
     mutation_occurred: false,
     known_object_ids: [],
     affected_cache_names: [],
@@ -121,6 +126,7 @@ export function ownershipReapprovalRequiredResult() {
     error: "Wise ownership approvals must match the previewed unverified transfer IDs exactly, in the order presented. Extra, missing, or reordered approvals invalidate the plan — re-run the dry run, approve the enumerated IDs only, and use the new plan handle and digest.",
     category: "wise_transfer_ownership_reapproval_required",
     code: "wise_transfer_ownership_reapproval_required",
+    retry: "never",
     mutation_occurred: false,
     known_object_ids: [],
     affected_cache_names: [],
@@ -130,6 +136,7 @@ export function ownershipReapprovalRequiredResult() {
 export function wiseClientNotFoundResult() {
   return toolError({
     error: "Wise client not found — create a client named 'Wise' (or 'TransferWise') before importing with fee rows, otherwise every fee transaction is left unconfirmed and must be cleaned up manually.",
+    retry: "never",
     mutation_occurred: false,
   });
 }
@@ -415,9 +422,26 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     inter_account: data.interAccountResults.length,
     invoice_currency_fixes: data.invoiceFixCandidates.length,
   };
-  const totals = {
+  // A Wise statement can hold rows booked in different currencies, and these are
+  // plain sums of `amount` — 100 USD + 50 EUR became an unlabelled 150 on the
+  // approval card. Label the total when every summed row agrees, and say so
+  // plainly when they do not; the ledger is unaffected either way, but this is
+  // the figure the operator approves against.
+  // Fee rows are synthesised and carry no source_row, but they DO land in
+  // outEntries and in out_total — so they must vote, or a fee booked in a
+  // currency no statement row uses would be added to the total without being
+  // able to change the label or trigger the warning.
+  const totalCurrencies = new Set(
+    [...inEntries, ...outEntries]
+      .map(entry => entry.booked_currency
+        ?? (entry.source_row ? bookedCurrencyForWiseRow(entry.source_row) : undefined))
+      .filter((currency): currency is string => currency !== undefined && currency.length > 0),
+  );
+  const totalsCurrency = totalCurrencies.size === 1 ? [...totalCurrencies][0]! : undefined;
+  const totals: Record<string, number | string> = {
     in_total: roundMoney(inEntries.reduce((sum, entry) => sum + entry.amount, 0)),
     out_total: roundMoney(outEntries.reduce((sum, entry) => sum + entry.amount, 0)),
+    ...(totalsCurrency !== undefined ? { currency: totalsCurrency } : {}),
   };
 
   // Ownership transfers that could not be auto-verified surface as warnings —
@@ -427,6 +451,12 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     code: review.code,
     message: review.reason,
   }));
+  if (totalCurrencies.size > 1) {
+    warnings.push({
+      code: "mixed_currency_totals",
+      message: `in_total / out_total add up rows booked in ${[...totalCurrencies].sort().join(", ")}, so they are not a single-currency figure; read the per-row amounts before approving.`,
+    });
+  }
 
   // Execution errors (indeterminate / failed commands) surface as blockers —
   // never hidden.
