@@ -1,5 +1,6 @@
 import type { InvoiceExtractionFallback } from "./invoice-extraction-fallback.js";
 import { classifyExpenseForVat } from "./estonian-tax-rules.js";
+import { capUntrustedText, wrapUntrustedOcr } from "./mcp-json.js";
 import type {
   ExtractedReceiptFields,
   ReceiptClassification,
@@ -242,6 +243,15 @@ export function buildClassificationReviewGuidance(params: {
   category: TransactionClassificationCategory;
   displayCounterparty: string;
 }): ReviewGuidance | undefined {
+  // The counterparty is bank-statement text a remitter controls (bank_account_name,
+  // falling back to description), and it is interpolated into server-authored prose
+  // that the model reads as guidance. The presenter wraps display_counterparty and
+  // the transaction fields but copies review_guidance through a `...group` spread,
+  // so the sandbox has to be applied here, where untrusted text enters the prose.
+  // Display-only: review_guidance never feeds a plan fingerprint.
+  const displayCounterparty = wrapUntrustedOcr(
+    capUntrustedText(params.displayCounterparty, 200).text,
+  ) ?? params.displayCounterparty;
   switch (params.category) {
     case "tax_payments":
       return {
@@ -251,7 +261,7 @@ export function buildClassificationReviewGuidance(params: {
           BASIS_RPS_SUBSTANCE,
         ],
         follow_up_questions: [
-          `Kas ${params.displayCounterparty} makse on EMTA ettemaksukonto täiendamine või mõni muu maksega seotud liikumine?`,
+          `Kas ${displayCounterparty} makse on EMTA ettemaksukonto täiendamine või mõni muu maksega seotud liikumine?`,
           "Kas EMTA ettemaksukonto väljavõte on e-arveldajasse sisse loetud, et tekiks vastavad maksukulu kanded?",
         ],
       };

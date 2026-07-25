@@ -348,7 +348,13 @@ describe("wise import tool", () => {
     const metadata = toolMetadataText(setupWiseTool([]).options);
 
     expect(metadata).toContain("DRY RUN");
-    expect(metadata).toContain("API type C");
+    // The description is the only Wise contract in tools/list. It previously
+    // stated "every created bank row uses API type C" — the exact behaviour of
+    // the 0.22.0 regression that booked incoming rows backwards, and the
+    // opposite of what the code does. An agent reading back a type "D" incoming
+    // row could have "corrected" it straight back into that regression.
+    expect(metadata).toContain("incoming IN → type D, outgoing OUT → type C");
+    expect(metadata).not.toContain("every created bank row uses API type C");
     expect(metadata).toContain("source_direction");
     expect(metadata).toContain("fee_account_dimensions_id");
     expect(metadata).toContain("inter_account_dimension_id");
@@ -389,6 +395,90 @@ describe("wise import tool", () => {
     expect(payload.results).toEqual(expect.arrayContaining([
       expect.objectContaining({ wise_id: "void-1" }),
     ]));
+  });
+
+  // Within one statement the Wise ID is the identity. Two rows with distinct
+  // Wise IDs are two distinct payments however alike their display fields look;
+  // folding planned rows into the stored-duplicate set silently under-booked
+  // the account.
+  it("books two identical same-day payments to one merchant as two transactions", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      ["p-1", "COMPLETED", "OUT", "2026-02-01 09:00:00", "2026-02-01 09:00:00",
+        "0", "EUR", "0", "EUR",
+        "Seppo OU", "2.5", "EUR", "Coffee Bar", "2.5", "EUR",
+        "1", "", "", "", "General", ""],
+      ["p-2", "COMPLETED", "OUT", "2026-02-01 14:00:00", "2026-02-01 14:00:00",
+        "0", "EUR", "0", "EUR",
+        "Seppo OU", "2.5", "EUR", "Coffee Bar", "2.5", "EUR",
+        "1", "", "", "", "General", ""],
+    ]));
+
+    const { api, handler } = setupWiseTool([]);
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+      execute: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(2);
+    expect(payload.skipped_details).toEqual([]);
+  });
+
+  it("books a payment and its same-day refund from the same counterparty", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      ["pay-1", "COMPLETED", "OUT", "2026-02-01 09:00:00", "2026-02-01 09:00:00",
+        "0", "EUR", "0", "EUR",
+        "Seppo OU", "40", "EUR", "Acme Ltd", "40", "EUR",
+        "1", "", "", "", "General", ""],
+      ["ref-1", "COMPLETED", "IN", "2026-02-01 16:00:00", "2026-02-01 16:00:00",
+        "0", "EUR", "0", "EUR",
+        "Acme Ltd", "40", "EUR", "Seppo OU", "40", "EUR",
+        "1", "", "", "", "General", ""],
+    ]));
+
+    const { api, handler } = setupWiseTool([]);
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+      execute: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(2);
+    expect(payload.skipped_details).toEqual([]);
+    // Direction still drives the API type on the write path.
+    const types = api.transactions.create.mock.calls.map(([payload]: [{ type: string }]) => payload.type);
+    expect(types.sort()).toEqual(["C", "D"]);
+  });
+
+  it("books one fee per row when two unrelated transfers carry an identical fee", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      ["t-1", "COMPLETED", "OUT", "2026-02-03 09:00:00", "2026-02-03 09:00:00",
+        "0.41", "EUR", "0", "EUR",
+        "Seppo OU", "100", "EUR", "Vendor A", "100", "EUR",
+        "1", "", "", "", "General", ""],
+      ["t-2", "COMPLETED", "OUT", "2026-02-03 11:00:00", "2026-02-03 11:00:00",
+        "0.41", "EUR", "0", "EUR",
+        "Seppo OU", "250", "EUR", "Vendor B", "250", "EUR",
+        "1", "", "", "", "General", ""],
+    ]));
+
+    const { api, handler } = setupWiseTool([]);
+    const result = await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+      execute: true,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    // Two transfers + two fees. Wise fees are routinely identical, so the fee
+    // signature (date|amount|EUR|"Wise"||"wise teenustasu") collides by design.
+    expect(api.transactions.create).toHaveBeenCalledTimes(4);
+    expect(payload.skipped_details).toEqual([]);
   });
 
   it("skips legacy duplicates even when existing rows do not contain a WISE id prefix", async () => {

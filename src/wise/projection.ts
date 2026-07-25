@@ -93,7 +93,16 @@ export function transactionCommandExists(
     payload.ref_number,
     stripWisePrefix(payload.description),
   );
+  // Signature fallback for rows imported before descriptions carried a WISE tag.
+  // A row that DOES carry one has an explicit identity, and the exact-tag check
+  // above already handled the matching case — so any other WISE-tagged row is a
+  // different Wise transaction, not evidence that this command already ran.
+  // Without this exclusion the row created moments ago in this same run refuses
+  // its identical-looking sibling (two same-day payments to one merchant, a
+  // payment and its refund, two identical fees) at the execute-time
+  // precondition, after the projection had correctly planned both.
   return live.some(transaction =>
+    !transaction.description?.startsWith("WISE:") &&
     typeof transaction.date === "string" && typeof transaction.amount === "number" &&
     buildWiseTransactionSignature(
       transaction.date,
@@ -330,20 +339,38 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   } = input;
   const accounts_dimensions_id = accountsDimensionsId;
 
-  const existingSignatures = new Set(
-    existingTx.flatMap(tx => (
-      typeof tx.date === "string" && typeof tx.amount === "number"
-        ? [buildWiseTransactionSignature(
-            tx.date,
-            tx.amount,
-            tx.cl_currencies_id ?? "EUR",
-            tx.bank_account_name,
-            tx.ref_number,
-            stripWisePrefix(tx.description),
-          )]
-        : []
-    ))
-  );
+  // Signatures of ALREADY-STORED ledger rows, bucketed by the direction the
+  // importer recorded for them. The signature itself is direction-blind
+  // (stripWisePrefix removes the [source_direction=…] marker), so a same-day
+  // same-amount refund from a counterparty we paid earlier would otherwise be
+  // dropped as a duplicate of that payment. Only the EXPLICIT marker counts:
+  // deriving direction from the legacy `type` would mis-read rows written
+  // during the 0.22.0 forced-"C" window and re-import them (double booking).
+  // An unmarked row buckets as "?" and keeps the previous match-anything
+  // behaviour, so this can never cause a re-import — only prevent a false drop.
+  const markedWiseDirection = (description?: string | null): "IN" | "OUT" | "?" => {
+    const marked = description?.match(/\[source_direction=(IN|OUT)\]\s*$/i)?.[1];
+    return marked === undefined ? "?" : (marked.toUpperCase() as "IN" | "OUT");
+  };
+  const existingSignatureDirections = new Map<string, Set<"IN" | "OUT" | "?">>();
+  for (const tx of existingTx) {
+    if (typeof tx.date !== "string" || typeof tx.amount !== "number") continue;
+    const signature = buildWiseTransactionSignature(
+      tx.date,
+      tx.amount,
+      tx.cl_currencies_id ?? "EUR",
+      tx.bank_account_name,
+      tx.ref_number,
+      stripWisePrefix(tx.description),
+    );
+    const bucket = existingSignatureDirections.get(signature);
+    if (bucket) bucket.add(markedWiseDirection(tx.description));
+    else existingSignatureDirections.set(signature, new Set([markedWiseDirection(tx.description)]));
+  }
+  const alreadyStored = (signature: string, direction: "IN" | "OUT"): boolean => {
+    const bucket = existingSignatureDirections.get(signature);
+    return bucket !== undefined && (bucket.has("?") || bucket.has(direction));
+  };
   // Also check by Wise ID in description
   const seenWiseIds = new Set(
     existingTx
@@ -394,7 +421,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         ))
     );
     const mainAlreadyImported = seenWiseIds.has(wiseIdTag) ||
-      [...mainSignatureCandidates].some(signature => existingSignatures.has(signature));
+      [...mainSignatureCandidates].some(signature => alreadyStored(signature, sourceDirection));
     let mainAvailableForFee = false;
 
     if (mainAlreadyImported) {
@@ -450,10 +477,14 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         status: "would_create",
         source_row: row,
       });
+      // Deliberately NOT feeding this row's signature back into the stored-row
+      // set: within one statement the Wise ID is the identity, and seenWiseIds
+      // already carries it. Two rows with distinct Wise IDs are two distinct
+      // payments however alike they look — two identical card payments to the
+      // same merchant on one day, or a payment and its same-day refund. Folding
+      // planned rows into the duplicate set silently dropped the second one and
+      // under-booked the account.
       seenWiseIds.add(wiseIdTag);
-      for (const signature of mainSignatureCandidates) {
-        existingSignatures.add(signature);
-      }
       mainAvailableForFee = true;
     }
 
@@ -477,7 +508,11 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         undefined,
         stripWisePrefix(feeDesc),
       );
-      if (seenWiseIds.has(feeWiseIdTag) || existingSignatures.has(feeSignature)) {
+      // Fees are always outgoing. The fee signature is date|amount|EUR|"Wise"||
+      // "wise teenustasu" — identical for every same-day, same-amount fee — so
+      // this must only ever match a STORED fee, never another fee planned in
+      // this same run (seenWiseIds keeps those apart by Wise ID).
+      if (seenWiseIds.has(feeWiseIdTag) || alreadyStored(feeSignature, "OUT")) {
         skipped.push({
           wise_id: `FEE:${row.id}`,
           reason: seenWiseIds.has(feeWiseIdTag)
@@ -541,7 +576,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         status: "would_create",
       });
       seenWiseIds.add(feeWiseIdTag);
-      existingSignatures.add(feeSignature);
     }
   }
 

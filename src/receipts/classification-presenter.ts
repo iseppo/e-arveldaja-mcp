@@ -77,7 +77,21 @@ export interface ApplyClassificationsFullInput {
 
 export function renderApplyClassificationsFull(input: ApplyClassificationsFullInput): Record<string, unknown> {
   const { result, classificationsJson } = input;
-  const { mode, dryRun, summary, results } = result;
+  const { mode, dryRun, summary } = result;
+  // `counterparty` is bank-statement text a remitter controls, and `notes`
+  // interpolates it into prose. The analysis renderer already sandboxes the same
+  // value; this envelope returned it raw, so the identical payload reached the
+  // model unfenced through apply / dry_run_apply on the default profile.
+  // The apply path re-fetches transactions by id, so wrapped display text here
+  // never participates in a lookup.
+  // The note entries are server-authored prose and stay unfenced; the one that
+  // interpolates the remitter-controlled counterparty sandboxes it where it
+  // enters the sentence (classification-operations.ts), so clean operator
+  // guidance is not buried in sandbox markers.
+  const results = result.results.map(row => ({
+    ...row,
+    ...(typeof row.counterparty === "string" ? { counterparty: wrapUntrustedOcr(row.counterparty) } : {}),
+  }));
   // P0-2: the dry-run's next step is execute_apply, which REQUIRES the
   // consume-once plan_handle minted here. Echo it into the suggested_args so the
   // reviewed → execute hop carries the binding (a bare classifications_json can

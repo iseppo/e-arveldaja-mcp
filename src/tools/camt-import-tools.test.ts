@@ -2302,7 +2302,7 @@ describe("camt import tool", () => {
     ]);
   });
 
-  it("skips exact duplicate rows within the same file even when AcctSvcrRef is missing", async () => {
+  it("books every leg of a split entry instead of collapsing them as batch duplicates", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
@@ -2344,9 +2344,13 @@ describe("camt import tool", () => {
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
+    // The entry books 50.00 and the parser splits it evenly across its two
+    // TxDtls legs. Collapsing the second leg as a "batch duplicate" used to
+    // book 25.00 against a statement line of 50.00 — a silent 25.00 shortfall.
+    // Legs of one <Ntry> are parts of a split total, so both must survive.
     expect(api.transactions.create).not.toHaveBeenCalled();
-    expect(payload.created_count).toBe(1);
-    expect(payload.skipped_count).toBe(1);
+    expect(payload.created_count).toBe(2);
+    expect(payload.skipped_count).toBe(0);
     expect(payload.sample).toEqual([
       expect.objectContaining({
         status: "would_create",
@@ -2355,10 +2359,62 @@ describe("camt import tool", () => {
         ref_number: "E2E-1",
         description: expect.stringMatching(wrapped("Repeated row")),
       }),
+      expect.objectContaining({
+        status: "would_create",
+        amount: 25,
+        counterparty: expect.stringMatching(wrapped("Vendor OÜ")),
+        ref_number: "E2E-1",
+        description: expect.stringMatching(wrapped("Repeated row")),
+      }),
     ]);
+    expect(payload.execution.skipped).toEqual([]);
+    // The booked total reconciles to the statement entry.
+    expect(payload.sample.reduce((sum: number, row: { amount: number }) => sum + row.amount, 0)).toBe(50);
+  });
+
+  it("still collapses the same standalone entry repeated across the file", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    const repeatedEntry = `
+      <Ntry>
+        <Amt Ccy="EUR">50.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-04</Dt></BookgDt>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><EndToEndId>E2E-1</EndToEndId></Refs>
+            <RltdPties><Cdtr><Nm>Vendor OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>Repeated row</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>`;
+    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-repeated-entry</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>${repeatedEntry}${repeatedEntry}
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`);
+
+    const { api, handler } = setupCamtTool();
+    const result = await handler({
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    // Two SEPARATE single-leg entries are both leg 0, so cross-entry dedup is
+    // untouched by the leg ordinal.
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.created_count).toBe(1);
+    expect(payload.skipped_count).toBe(1);
     expect(payload.execution.skipped).toEqual([
       expect.objectContaining({
-        amount: 25,
+        amount: 50,
         reason: "Duplicate CAMT entry inside current import batch",
       }),
     ]);

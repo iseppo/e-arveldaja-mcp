@@ -14,6 +14,7 @@ import {
 } from "../file-input-snapshot.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { createAccountingDocumentOperations } from "../documents/operations.js";
+import { failureResponsePayload } from "../operation-outcome.js";
 import { formatDuplicatePostingWarnings } from "../bank-posting-duplicate-guard.js";
 import type { AccountingDocumentPreview } from "../documents/types.js";
 import type { Resolution } from "../resolution/types.js";
@@ -276,7 +277,7 @@ export function registerProcessAccountingDocumentTool(
         }
         const outcome = await operations.confirmDraft({ planHandle: args.plan_handle, invoiceId: args.invoice_id! });
         if (!outcome.ok) {
-          return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
+          return textResult(failureResponsePayload(outcome.error), true);
         }
         // Post-register receipt: echo the supplier + gross read back from the
         // registered invoice so APPROVAL TWO names WHO and HOW MUCH, not a bare
@@ -382,7 +383,7 @@ export function registerProcessAccountingDocumentTool(
           ...(args.supplier_client_id !== undefined ? { overrides: { supplier_client_id: args.supplier_client_id } } : {}),
           ...(booking !== undefined ? { booking } : {}),
         });
-        if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
+        if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);
 
         // Capability-aware supplier elicitation: when the supplier is ambiguous
         // and no override was supplied, offer the bounded choice as a form. On an
@@ -473,7 +474,12 @@ export function registerProcessAccountingDocumentTool(
         blockOnDuplicate: args.block_on_duplicate,
       });
       if (!outcome.ok) {
-        return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: outcome.error.code === "document_upload_failed" }, true);
+        // Was a hardcoded allow-list of ONE code. invoice_creation_failed and
+        // invoice_id_missing are equally post-mutation — both are raised only
+        // after the purchase invoice exists — so a failed totals PATCH left a
+        // live draft while this branch reported that nothing was written. The
+        // operation layer now states it, and carries the invoice id with it.
+        return textResult(failureResponsePayload(outcome.error), true);
       }
       const execution = outcome.value;
       // F-RESOLVER-FACADE-WRAP: format the STRUCTURED duplicate scan into

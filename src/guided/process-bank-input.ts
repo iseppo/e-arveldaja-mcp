@@ -46,6 +46,7 @@ import type { ConnectionDefaultsStore } from "../connection-defaults-store.js";
 import type { OperationResultStatus } from "../operation-result-store.js";
 import { createOperationResultPageHandler } from "../operation-result-page.js";
 import { getActiveNoticesForFlow, type ReleaseFlow } from "../server/release-notices.js";
+import { failureResponsePayload } from "../operation-outcome.js";
 
 // GUIDED FAÇADE. `process_bank_input` unifies CAMT.053 and Wise import behind one
 // guided-visible tool. It captures the immutable source ONCE under the unified
@@ -365,13 +366,13 @@ export function registerProcessBankInputTool(
         const outcome = await camtOperations.prepareImport({
           source, accountsDimensionsId, dateFrom: args.date_from, dateTo: args.date_to, snapshot,
         });
-        if (!outcome.ok) return emit({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
+        if (!outcome.ok) return emit(failureResponsePayload(outcome.error), true);
         return emit(renderCamtImportCompact({ mode: "DRY_RUN", data: outcome.value }));
       }
       const outcome = await camtOperations.executeImport({
         source, accountsDimensionsId, dateFrom: args.date_from, dateTo: args.date_to, planHandle: args.plan_handle, snapshot,
       });
-      if (!outcome.ok) return emit({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
+      if (!outcome.ok) return emit(failureResponsePayload(outcome.error), true);
       const operationHandle = issueCamtResultHandle(outcome.value, args.plan_handle);
       return emit(renderCamtImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
     } catch (error) {

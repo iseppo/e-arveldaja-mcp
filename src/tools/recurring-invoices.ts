@@ -135,7 +135,26 @@ export async function computeRecurringClone(
           continue;
         }
 
-        const full = await api.saleInvoices.get(source.id);
+        // This read sits OUTSIDE the create/confirm try below, so a transient
+        // upstream failure here used to throw past the handler and discard the
+        // whole `results` array — including clones already created and
+        // registered earlier in this loop. Those ledger entries would exist
+        // with nothing in the response mentioning them, and the consume-once
+        // plan handle would already be burned. Degrade to a per-row error the
+        // same way the create/confirm failures do.
+        let full: Awaited<ReturnType<typeof api.saleInvoices.get>>;
+        try {
+          full = await api.saleInvoices.get(source.id);
+        } catch (err: unknown) {
+          results.push({
+            source_id: source.id,
+            source_number: source.number,
+            client: wrapUntrustedOcr(source.client_name ?? undefined),
+            status: "error",
+            error: wrapUntrustedOcr(err instanceof Error ? err.message : String(err)),
+          });
+          continue;
+        }
         if (!full.items || full.items.length === 0) {
           results.push({
             source_id: source.id,

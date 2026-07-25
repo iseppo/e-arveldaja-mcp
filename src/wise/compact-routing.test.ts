@@ -93,10 +93,22 @@ describe("Wise compact profile routing", () => {
     await runWithToolProfile("guided", async () => {
       const dry = await call(handler, { ...args, execute: false });
       const planHandle = dry.summary.plan_handle as string;
-      // The compact dry-run summary deliberately omits the digest; the digest is
-      // deterministic across profiles, so recover it from a standard dry run.
-      const digest = await runWithToolProfile("standard", async () =>
-        (await call(handler, { ...args, execute: false })).approved_command_digest);
+      // The guided profile must be able to execute using ONLY what the compact
+      // dry run returned: import_wise_transactions is not registered there, so
+      // if the digest is missing from this summary the Wise statement can never
+      // be booked at all. Take both approval artifacts from next_action.
+      const next = dry.summary.next_action;
+      expect(next.tool).toBe("process_bank_input");
+      expect(next.approval_required).toBe(true);
+      expect(next.args.plan_handle).toBe(planHandle);
+      const digest = next.args.approved_command_digest as string;
+      expect(digest).toMatch(/^[0-9a-f]{64}$/);
+      // This statement was supplied inline (base64), so the source cannot be
+      // echoed into args — the summary has to say so, or the caller pastes an
+      // incomplete call and hits "exactly one of file_ref or file_path".
+      expect(next.args.file_path).toBeUndefined();
+      expect(next.args.file_ref).toBeUndefined();
+      expect(dry.summary.message).toContain("add the same file_path");
       const exec = await call(handler, { ...args, execute: true, plan_handle: planHandle, approved_command_digest: digest });
       expect(exec.summary.contract).toBe("operation_summary_v1");
       expect(exec.summary.status).toBe("completed");

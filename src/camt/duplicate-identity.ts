@@ -628,6 +628,11 @@ export function buildPossibleDuplicateRecommendationNote(
 export function buildBatchDuplicateKey(entry: ParsedCamtEntry): string {
   return [
     normalizeOptionalReference(entry.bank_reference) ?? "",
+    // Legs of one <Ntry> are parts of a split total, not repeats of each other:
+    // an aggregated 150.00 payment carrying three ref-less 50.00 legs must book
+    // 150.00, not 50.00. The ordinal keeps them apart. Separate entries are all
+    // leg 0, so identical standalone rows still dedup exactly as before.
+    String(entry.leg_index ?? 0),
     entry.date,
     entry.direction,
     entry.currency,

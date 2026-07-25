@@ -402,6 +402,7 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
         amount: bookedAmounts[detailIndex] ?? entryAmount.amount,
         currency: entryAmount.currency,
         direction,
+        leg_index: detailIndex,
         original_amount: originalAmount?.amount,
         original_currency: originalAmount?.currency,
         counterparty_name: textAt(party, ["Nm"]),

@@ -258,6 +258,40 @@ describe("receipt batch typed operation", () => {
     expect(spies.confirmWithTotals).not.toHaveBeenCalled();
   });
 
+  it("mintPlanHandles:false previews without consuming plan-store slots", async () => {
+    const { api } = makeApi();
+    const { ops, context } = makeOperationsWithContext(api as never);
+    const before = context.planStore.activeCount;
+
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "dry_run", dryRun: true, mintPlanHandles: false,
+    });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("runBatch failed");
+    // The preview is unchanged — only the unused approval artifacts are gone.
+    expect(outcome.value.results[0]!.status).toBe("dry_run_preview");
+    expect(outcome.value.manifest).toHaveLength(1);
+    expect(outcome.value.planHandles).toBeUndefined();
+    // The store THROWS at capacity rather than evicting, so a summarizing
+    // caller that discards handles must not consume slots at all.
+    expect(context.planStore.activeCount).toBe(before);
+  });
+
+  it("a default dry run still mints one handle per execution effect", async () => {
+    const { api } = makeApi();
+    const { ops, context } = makeOperationsWithContext(api as never);
+    const before = context.planStore.activeCount;
+
+    const outcome = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.planHandles?.create).toBeDefined();
+    expect(outcome.value.planHandles?.create_and_confirm).toBeDefined();
+    expect(context.planStore.activeCount).toBe(before + 2);
+  });
+
   it("create rejects with manifest_mismatch BEFORE any mutation when the folder drifted", async () => {
     const { api, spies } = makeApi();
     const wrongManifest: ReceiptApprovedManifestEntry[] = [{ relative_path: "receipt.pdf", sha256: "0".repeat(64) }];

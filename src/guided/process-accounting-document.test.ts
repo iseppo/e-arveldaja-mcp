@@ -10,6 +10,7 @@ import { createAccountingWorkflowApi, fixtureAccount, fixtureClient } from "../_
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
@@ -75,6 +76,33 @@ describe("process_accounting_document", () => {
     items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10 }],
     vat_price: 2,
     gross_price: 12,
+  });
+
+  it("a booking-binding prepare that resolves to needs_input issues NO plan handle", async () => {
+    const { path } = writeTempPdf();
+    // The supplier list read fails transiently, so the preview's own resolution
+    // falls through to not_found — while computeEffectiveBooking still resolves
+    // the supplier via clients.get and produces a coherent booking projection.
+    // The two genuinely disagree, and the preview says "resolve this before
+    // booking": handing back a usable create credential alongside that is the
+    // gate hole. The projection is still shown for review.
+    const { handler } = setup({
+      clientRows: [supplier()],
+      purchaseInvoiceRows: [],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: {
+        get: vi.fn().mockResolvedValue(supplier()),
+        listAll: vi.fn().mockRejectedValue(new Error("clients.listAll 503")),
+      },
+    });
+
+    const payload = parse(await handler({ mode: "prepare", file_path: path, ...bookingArgs() }));
+
+    expect(payload.summary.status).toBe("needs_input");
+    expect(payload.summary.supplier.status).toBe("needs_input");
+    expect("plan_handle" in payload.summary).toBe(false);
+    // The operator still sees what WOULD be booked — only the credential is withheld.
+    expect(payload.summary.booking_review).toBeDefined();
   });
 
   it("extraction-only prepare returns an 'extracted' preview WITHOUT a plan handle (P0-1: an OCR preview is not create approval), no raw OCR, no delegated tool names", async () => {
@@ -341,6 +369,46 @@ describe("process_accounting_document", () => {
       ...bookingArgs(),
     }));
   }
+
+  it("reports mutation_occurred and the orphaned invoice id when the create fails AFTER the invoice exists", async () => {
+    const { path, sha256 } = writeTempPdf();
+    // InvoiceCreationError is thrown only once the invoice exists — here the
+    // follow-up totals PATCH failed AND automatic invalidation failed too, so
+    // an ACTIVE draft with wrong invoice-level totals remains in e-arveldaja.
+    // The response is the operator's only record: the plan handle is already
+    // burned, so claiming "nothing was written" strands the draft.
+    const creationError = new InvoiceCreationError(
+      "Purchase invoice 90001 was created but follow-up failed: totals rejected. Automatic invalidation also failed: gateway timeout",
+      90_001,
+    );
+    const { handler } = setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        createAndSetTotals: vi.fn().mockRejectedValue(creationError),
+        confirm: vi.fn(),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+
+    const prepared = parse(await handler({ mode: "prepare", file_path: path, ...bookingArgs() }));
+    const failed = parse(await handler({
+      mode: "create",
+      file_path: path,
+      plan_handle: prepared.summary.plan_handle as string,
+      source_sha256: sha256,
+      ...bookingArgs(),
+    }));
+
+    expect(failed.category).toBe("invoice_creation_failed");
+    expect(failed.mutation_occurred).toBe(true);
+    expect(failed.mutated_objects).toEqual([{ type: "purchase_invoice", id: 90_001 }]);
+    // The operation layer's retry signal reaches the caller instead of being dropped.
+    expect(failed.retry).toBe("never");
+  });
 
   it("confirms the DRAFT invoice via the create step's confirm_plan handle (the confirm domain now has a consumer)", async () => {
     const { path, sha256 } = writeTempPdf();

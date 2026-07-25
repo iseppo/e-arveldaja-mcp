@@ -784,6 +784,10 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
           };
           return this.runtimeSafetyContext.planStore.issue(RECEIPT_BATCH_PLAN_DOMAIN, planInput);
         };
+        // A caller that discards planHandles must not consume plan-store slots:
+        // the store throws at capacity instead of evicting, so leaked handles
+        // take the whole approval path down with them until the TTL drains.
+        if (input.mintPlanHandles === false) return finish(results, true);
         return finish(results, true, {
           create: mintHandle("create"),
           create_and_confirm: mintHandle("create_and_confirm"),

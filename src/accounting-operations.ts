@@ -131,6 +131,11 @@ class AccountingOperationsImpl implements AccountingOperations {
       ...(input.transactionDateFrom !== undefined ? { transactionDateFrom: input.transactionDateFrom } : {}),
       ...(input.transactionDateTo !== undefined ? { transactionDateTo: input.transactionDateTo } : {}),
       directoryAccessOptions: {},
+      // The inbox/autopilot consumer reads only summary + results and never
+      // surfaces planHandles, so minting them here would leak two plan-store
+      // slots per folder per scan and eventually deny the approval path.
+      // Approval handles come from an explicit receipt_batch dry run.
+      mintPlanHandles: false,
       ...(identity.invoiceCompanyName !== undefined ? { ownCompanyName: identity.invoiceCompanyName } : {}),
     });
   }

@@ -461,7 +461,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
       : {}),
   }));
 
-  const message = dryRun
+  const baseMessage = dryRun
     ? `Wise dry run would create ${data.created.length} bank transaction(s), skip ${executionSkipped.length}, and report ${executionErrors.length} error(s).`
     : `Wise import created ${data.created.length} bank transaction(s), skipped ${executionSkipped.length}, and reported ${executionErrors.length} error(s).`;
 
@@ -493,6 +493,52 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
       }
     : undefined;
 
+  // The Wise execute gate requires BOTH the plan handle and the exact command
+  // digest. The compact surface is the only Wise path the guided profiles have
+  // (import_wise_transactions is not registered there), so a summary carrying
+  // the handle alone left the operator unable to execute at all: execute
+  // rejected with digest_mismatch and the advised "run a new dry run" produced
+  // another digest-less summary. Emit the execute call in full — the digest is
+  // an approval artifact the caller echoes back, not a secret. The planning
+  // args are repeated verbatim because plan drift binds canonicalPlanningArgs.
+  // A base64 upload cannot have its source echoed back: file_ref is absent and
+  // the payload itself can be megabytes, so the full envelope omits it too and
+  // flags source_resubmission_required instead. next_action.args therefore
+  // carries no source key on that path — but suppressing next_action outright
+  // would leave a base64 statement with no way to reach the digest, i.e. the
+  // very dead end this fix exists to close. Emit it, and say plainly in the
+  // message that the caller must add the statement bytes back. args has no room
+  // for the marker: the input schema rejects unknown keys.
+  const sourceResubmissionRequired = data.source.file_ref === undefined
+    && !(data.source.file_path !== undefined && !data.source.file_path.toLowerCase().startsWith("base64:"));
+  const nextAction = dryRun && data.planHandle !== undefined && data.approvedCommandDigest !== undefined
+    ? {
+        tool: "process_bank_input",
+        args: {
+          mode: "execute",
+          ...(data.source.file_ref !== undefined
+            ? { file_ref: data.source.file_ref }
+            : data.source.file_path !== undefined && !data.source.file_path.toLowerCase().startsWith("base64:")
+              ? { file_path: data.source.file_path }
+              : {}),
+          accounts_dimensions_id: data.accountsDimensionsId,
+          ...(data.args.dateFrom ? { date_from: data.args.dateFrom } : {}),
+          ...(data.args.dateTo ? { date_to: data.args.dateTo } : {}),
+          ...(data.args.feeAccountDimensionsId !== undefined ? { fee_account_dimensions_id: data.args.feeAccountDimensionsId } : {}),
+          ...(data.args.interAccountDimensionId !== undefined ? { inter_account_dimension_id: data.args.interAccountDimensionId } : {}),
+          ...(data.args.confirmOwnTransferIds !== undefined ? { confirm_own_transfer_ids: data.args.confirmOwnTransferIds } : {}),
+          ...(data.args.skipJarTransfers !== undefined ? { skip_jar_transfers: data.args.skipJarTransfers } : {}),
+          plan_handle: data.planHandle,
+          approved_command_digest: data.approvedCommandDigest,
+        },
+        approval_required: true,
+      }
+    : undefined;
+
+  const message = nextAction !== undefined && sourceResubmissionRequired
+    ? `${baseMessage} The statement was supplied inline, so it is not echoed back: add the same file_path (or file_ref) to the next call alongside the approval artifacts.`
+    : baseMessage;
+
   const summary = createOperationSummary({
     status,
     message,
@@ -502,6 +548,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     warnings,
     blockers,
     samples,
+    ...(nextAction ? { next_action: nextAction } : {}),
     ...(dryRun && data.planHandle !== undefined ? { plan_handle: data.planHandle } : {}),
     ...(details ? { details } : {}),
   }, { budget: "batch", measureEnvelope: "summary" });

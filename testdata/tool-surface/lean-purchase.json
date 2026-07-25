@@ -2,8 +2,8 @@
   "profile": "lean-purchase",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 80979,
-    "descriptionsBytes": 10104,
+    "toolsListBytes": 81070,
+    "descriptionsBytes": 10195,
     "inputSchemasBytes": 50230,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
@@ -3127,7 +3127,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Import Wise transaction-history CSV rows. Direct-call contract: DRY RUN by default; execute=true creates rows; every created bank row uses API type C while source_direction preserves IN/OUT flow; fees use separate C transactions; inter-account transfers avoid double-counting confirmed counterpart journals.",
+      "description": "Import Wise transaction-history CSV rows. Direct-call contract: DRY RUN by default; execute=true creates rows; each created bank row carries the API type of its true direction (incoming IN → type D, outgoing OUT → type C) and source_direction records that same flow; fees are separate outgoing (type C) transactions; inter-account transfers avoid double-counting confirmed counterpart journals.",
       "execution": {
         "taskSupport": "forbidden"
       },

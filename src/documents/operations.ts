@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CompactReviewItem, CompactWarning, OperationOutcome } from "../operation-outcome.js";
+import type { CompactReviewItem, CompactWarning, MutatedObject, OperationOutcome } from "../operation-outcome.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
@@ -66,8 +66,23 @@ function ok<T>(value: T): OperationOutcome<T> {
   return { ok: true, value, warnings: [], blockers: [] };
 }
 
-function fail<T>(code: string, message: string, retry: "never" | "safe" | "unknown"): OperationOutcome<T> {
-  return { ok: false, error: { code, message, retry }, blockers: [] };
+function fail<T>(
+  code: string,
+  message: string,
+  retry: "never" | "safe" | "unknown",
+  mutation?: Readonly<{ mutationOccurred: boolean; mutatedObjects?: readonly MutatedObject[] }>,
+): OperationOutcome<T> {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
+      retry,
+      ...(mutation?.mutationOccurred ? { mutationOccurred: true } : {}),
+      ...(mutation?.mutatedObjects !== undefined ? { mutatedObjects: mutation.mutatedObjects } : {}),
+    },
+    blockers: [],
+  };
 }
 
 interface MaterializedSnapshot {
@@ -420,7 +435,20 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
           reviews: [],
           privatePayload: { source_sha256: material.source_sha256 },
         };
-        planHandle = this.runtimeSafetyContext.planStore.issue(ACCOUNTING_DOCUMENT_PLAN_DOMAIN, planInput);
+        // ...but a bound booking is not by itself approval. When the supplier
+        // did not resolve, or a blocker stands, the preview reports
+        // "needs_input" and tells the operator to resolve it BEFORE booking —
+        // so minting here handed back a fully usable create credential attached
+        // to a preview that says it is not ready. (computeEffectiveBooking can
+        // resolve the supplier through clients.get while the preview's own
+        // resolution failed, e.g. a transient clients.listAll error, so the two
+        // genuinely disagree.) The projection is still computed and shown for
+        // review; only the credential is withheld. Mirrors the sale-invoice
+        // façade, which issues no handle on needs_input.
+        const approvable = supplierResolution.status === "resolved" && blockers.length === 0;
+        if (approvable) {
+          planHandle = this.runtimeSafetyContext.planStore.issue(ACCOUNTING_DOCUMENT_PLAN_DOMAIN, planInput);
+        }
       }
 
       const preview: AccountingDocumentPreview = {
@@ -524,12 +552,22 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         result = await this.api.purchaseInvoices.createAndSetTotals(invoiceData, input.vatPrice, input.grossPrice, isVatReg);
       } catch (error: unknown) {
         if (error instanceof InvoiceCreationError) {
-          return fail("invoice_creation_failed", error.message, "never");
+          // Thrown only AFTER the invoice exists (it carries the id). The draft
+          // is still in e-arveldaja — possibly with wrong invoice-level totals,
+          // since automatic invalidation is what failed here.
+          return fail("invoice_creation_failed", error.message, "never", {
+            mutationOccurred: true,
+            mutatedObjects: [{ type: "purchase_invoice", id: error.invoiceId }],
+          });
         }
         throw error;
       }
       if (!result.id) {
-        return fail("invoice_id_missing", "Purchase invoice was created but no invoice ID was returned.", "never");
+        // Same post-mutation shape: the create call returned without an id, so
+        // a record may exist that we cannot name.
+        return fail("invoice_id_missing", "Purchase invoice was created but no invoice ID was returned.", "never", {
+          mutationOccurred: true,
+        });
       }
 
       // APPROVAL ONE (create + upload). Upload failure invalidates the draft.
@@ -541,9 +579,15 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
           await this.api.purchaseInvoices.invalidate(result.id);
         } catch (invalidateError: unknown) {
           const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
-          return fail("document_upload_failed", `Purchase invoice ${result.id} was created but source document upload failed: ${message}. Automatic invalidation also failed: ${invalidateMessage}`, "never");
+          return fail("document_upload_failed", `Purchase invoice ${result.id} was created but source document upload failed: ${message}. Automatic invalidation also failed: ${invalidateMessage}`, "never", {
+            mutationOccurred: true,
+            mutatedObjects: [{ type: "purchase_invoice", id: result.id }],
+          });
         }
-        return fail("document_upload_failed", `Purchase invoice ${result.id} was created but source document upload failed and the draft was invalidated: ${message}`, "never");
+        return fail("document_upload_failed", `Purchase invoice ${result.id} was created but source document upload failed and the draft was invalidated: ${message}`, "never", {
+          mutationOccurred: true,
+          mutatedObjects: [{ type: "purchase_invoice", id: result.id }],
+        });
       }
 
       logAudit({

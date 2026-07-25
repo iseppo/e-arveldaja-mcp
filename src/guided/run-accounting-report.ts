@@ -77,26 +77,41 @@ function renderReport(value: AccountingReportResult, detail: "compact" | "full")
         ...(value.warnings.length > 0 ? { warnings: value.warnings } : {}),
       };
     }
-    case "balance_sheet":
+    // A statement section carries a total but no line count, so a dropped line
+    // is invisible: the reader sees a complete-looking statement whose own lines
+    // do not sum to its own total. Every capped section must say so, the way
+    // trial_balance and the aging buckets already do.
+    case "balance_sheet": {
+      const assets = cap(value.assets.items, detail);
+      const liabilities = cap(value.liabilities.items, detail);
+      const equity = cap(value.equity.items, detail);
+      const truncated = assets.truncated || liabilities.truncated || equity.truncated;
       return {
         report: "balance_sheet",
         date: value.date,
-        assets: { total: value.assets.total, items: cap(value.assets.items, detail).items },
-        liabilities: { total: value.liabilities.total, items: cap(value.liabilities.items, detail).items },
-        equity: { total: value.equity.total, items: cap(value.equity.items, detail).items },
+        assets: { total: value.assets.total, items: assets.items, ...(assets.truncated ? { truncated: true } : {}) },
+        liabilities: { total: value.liabilities.total, items: liabilities.items, ...(liabilities.truncated ? { truncated: true } : {}) },
+        equity: { total: value.equity.total, items: equity.items, ...(equity.truncated ? { truncated: true } : {}) },
         current_year_pl: value.current_year_pl,
         check: value.check,
+        ...(truncated ? { truncated: true, note: "Line list truncated; the section totals still cover every line. Call again with detail='full' for the complete statement." } : {}),
         ...(value.warnings.length > 0 ? { warnings: value.warnings } : {}),
       };
-    case "profit_and_loss":
+    }
+    case "profit_and_loss": {
+      const revenue = cap(value.revenue.items, detail);
+      const expenses = cap(value.expenses.items, detail);
+      const truncated = revenue.truncated || expenses.truncated;
       return {
         report: "profit_and_loss",
         period: value.period,
-        revenue: { total: value.revenue.total, items: cap(value.revenue.items, detail).items },
-        expenses: { total: value.expenses.total, items: cap(value.expenses.items, detail).items },
+        revenue: { total: value.revenue.total, items: revenue.items, ...(revenue.truncated ? { truncated: true } : {}) },
+        expenses: { total: value.expenses.total, items: expenses.items, ...(expenses.truncated ? { truncated: true } : {}) },
         net_profit: value.net_profit,
+        ...(truncated ? { truncated: true, note: "Line list truncated; the section totals still cover every line. Call again with detail='full' for the complete statement." } : {}),
         ...(value.warnings.length > 0 ? { warnings: value.warnings } : {}),
       };
+    }
     case "aging":
       return {
         report: "aging",

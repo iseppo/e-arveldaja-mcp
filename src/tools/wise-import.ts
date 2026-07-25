@@ -106,7 +106,7 @@ export function registerWiseImportTools(
   }
 
   registerTool(server, "import_wise_transactions",
-    "Import Wise transaction-history CSV rows. Direct-call contract: DRY RUN by default; execute=true creates rows; every created bank row uses API type C while source_direction preserves IN/OUT flow; fees use separate C transactions; inter-account transfers avoid double-counting confirmed counterpart journals.",
+    "Import Wise transaction-history CSV rows. Direct-call contract: DRY RUN by default; execute=true creates rows; each created bank row carries the API type of its true direction (incoming IN → type D, outgoing OUT → type C) and source_direction records that same flow; fees are separate outgoing (type C) transactions; inter-account transfers avoid double-counting confirmed counterpart journals.",
     {
       file_path: z.string().optional().describe("Absolute path/base64 Wise CSV input. Provide exactly one of file_path or file_ref."),
       file_ref: z.string().optional().describe("Opaque Accounting Inbox Wise CSV reference. Provide exactly one of file_path or file_ref."),

@@ -37,6 +37,20 @@ export interface ParsedCamtEntry {
   amount: number;
   currency: string;
   direction: "CRDT" | "DBIT";
+  /**
+   * Ordinal of this leg within its own <Ntry> (0 for a single-leg entry).
+   *
+   * A multi-leg entry is SPLIT across its legs by splitBookedAmounts — the legs
+   * are parts of one booked total, never copies of each other. Without this
+   * ordinal the batch duplicate key cannot tell "three 50.00 legs of a 150.00
+   * bulk payment" from "the same 50.00 payment listed three times", and drops
+   * the 2nd and 3rd, under-booking the account. Carrying the ordinal keeps
+   * within-entry legs distinct while identical SEPARATE entries still collide
+   * (both are leg 0 of their own entry), so cross-entry dedup is unchanged.
+   *
+   * Optional so hand-constructed entries keep their current behaviour.
+   */
+  leg_index?: number;
   original_amount?: number;
   original_currency?: string;
   counterparty_name?: string;

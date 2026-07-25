@@ -101,4 +101,37 @@ describe("run_accounting_report façade", () => {
     expect(full.accounts.length).toBe(40);
     expect(full.truncated).toBeUndefined();
   });
+
+  // A statement section carries a total but no line count, so a silently
+  // dropped line produces a complete-looking statement whose own lines do not
+  // sum to its own total — and nothing in the payload says so.
+  it("marks truncation on capped balance-sheet and P&L sections", async () => {
+    const assetAccounts = Array.from({ length: 40 }, (_, i) => ({ id: 1000 + i, name_est: `Vara${i}`, name_eng: `Asset${i}`, balance_type: "D", account_type_est: "Varad" }));
+    const expenseAccounts = Array.from({ length: 40 }, (_, i) => ({ id: 5000 + i, name_est: `Kulu${i}`, name_eng: `Expense${i}`, balance_type: "D", account_type_est: "Kulud" }));
+    const accounts = [...assetAccounts, ...expenseAccounts];
+    const postings = accounts.map(a => ({ accounts_id: a.id, type: "D", amount: 1, is_deleted: false }));
+    const api = makeApi({
+      readonly: { getAccounts: vi.fn().mockResolvedValue(accounts) },
+      journals: { listAll: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([{ id: 1, is_deleted: false, registered: true, effective_date: "2026-06-01", postings }]) },
+    });
+    const handler = setup(api);
+
+    const balance = parse(await handler({ report: "balance_sheet" }));
+    expect(balance.assets.items.length).toBe(25);
+    expect(balance.assets.truncated).toBe(true);
+    expect(balance.truncated).toBe(true);
+    // The total still covers every line — that is exactly why the marker matters.
+    expect(balance.assets.total).toBe(40);
+
+    const pl = parse(await handler({ report: "profit_and_loss", date_from: "2026-01-01", date_to: "2026-12-31" }));
+    expect(pl.expenses.items.length).toBe(25);
+    expect(pl.expenses.truncated).toBe(true);
+    expect(pl.truncated).toBe(true);
+    expect(pl.expenses.total).toBe(40);
+
+    const fullBalance = parse(await handler({ report: "balance_sheet", detail: "full" }));
+    expect(fullBalance.assets.items.length).toBe(40);
+    expect(fullBalance.truncated).toBeUndefined();
+    expect(fullBalance.assets.truncated).toBeUndefined();
+  });
 });

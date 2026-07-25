@@ -12,9 +12,12 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { HttpError } from "../http-client.js";
 // canonicalBusinessText strips the display sandbox to recover the EXECUTABLE
 // business value (M10). It is NOT wrapUntrustedOcr — the operation never wraps
-// for output; the presenter owns all output-time sandboxing. The one place the
-// mutation loop must embed a wrapped error fragment into a note is delegated to
-// the injected `wrapUntrustedText` so this module never imports wrapUntrustedOcr.
+// for output; the presenter owns all output-time sandboxing. Where the mutation
+// loop must embed an untrusted fragment (a remitter-controlled counterparty, an
+// upstream error body) into a note, it sandboxes just that span through the
+// injected `wrapUntrustedText`, so this module never imports wrapUntrustedOcr.
+// Note prose is otherwise server-authored and stays unfenced — a new notes.push
+// that interpolates untrusted text must wrap that span itself.
 import { canonicalBusinessText } from "../mcp-json.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "../tools/purchase-vat-defaults.js";
 import {
@@ -584,7 +587,14 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             reasons: group.reasons,
           });
           if (!supplier?.id && dryRun) {
-            notes.push(`Dry run: transaction ${transaction.id} would require creating a supplier for ${group.display_counterparty}.`);
+            // display_counterparty is remitter-controlled bank-statement text
+            // (bank_account_name, falling back to description) and this is the
+            // only note that puts it into prose. The full apply envelope emitted
+            // the sentence verbatim. Uses the injected wrapper — the same
+            // mechanism the invalidation note below relies on — so this module
+            // still never imports wrapUntrustedOcr, and the surrounding
+            // server-authored text stays free of sandbox markers.
+            notes.push(`Dry run: transaction ${transaction.id} would require creating a supplier for ${wrapUntrustedText(group.display_counterparty) ?? group.display_counterparty}.`);
           }
           if (!supplier?.id && !dryRun) {
             notes.push(`Transaction ${transaction.id} could not resolve a supplier client.`);
@@ -816,8 +826,12 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           partial_mutations: partialMutations.length > 0 ? partialMutations : undefined,
         });
       } catch (error) {
+        // Upstream error bodies are untrusted: this loop calls create/resolve
+        // with values derived from display_counterparty, so a backend validation
+        // error can echo remitter-controlled text back. Same treatment as the
+        // invalidation note above.
         const message = error instanceof Error ? error.message : String(error);
-        notes.push(message);
+        notes.push(wrapUntrustedText(message) ?? message);
         results.push({
           category: group.category,
           counterparty: group.display_counterparty,

@@ -9,6 +9,7 @@ import { coerceId, jsonObjectInput, parseJsonObject } from "../tools/crud-tools.
 import type { ApiContext } from "../tools/crud-tools.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { createSaleInvoiceOperations } from "../sales/invoice-operations.js";
+import { failureResponsePayload } from "../operation-outcome.js";
 import type {
   SaleInvoiceMutationAction,
   SaleInvoiceReadAction,
@@ -139,7 +140,10 @@ export function registerManageSaleInvoiceTool(
         planHandle: args.plan_handle,
         ...(payload !== undefined ? { payload } : {}),
       });
-      if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code, mutation_occurred: false }, true);
+      // The inline-customer rollback codes are raised AFTER a client row exists.
+      // Reporting them as mutation_occurred:false left an active customer in
+      // e-arveldaja with the response denying any write.
+      if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);
       if (outcome.value.mode !== "execute") return textResult({ error: "unexpected", category: "internal" }, true);
       return textResult({ mode: "execute", action, ...(outcome.value.id !== undefined ? { id: outcome.value.id } : {}), result: outcome.value.result, mutation_occurred: true });
     },

@@ -48,6 +48,19 @@ export interface ReceiptBatchRunInput {
   readonly directoryAccessOptions: ReceiptDirectoryAccessOptions;
   /** invoice_company_name from the already-loaded own-company identity. */
   readonly ownCompanyName?: string;
+  /**
+   * Whether this dry run should mint approval handles (default true).
+   *
+   * The plan store holds at most MAX_ACTIVE_EXECUTION_PLANS live plans and
+   * THROWS rather than evicting when full, with a 10-minute TTL. A caller that
+   * summarizes the preview and discards `planHandles` — the Accounting Inbox
+   * autopilot does exactly that — would otherwise burn two slots per detected
+   * receipt folder on every scan, and a handful of scans can fill the store and
+   * make every OTHER approval path fail to mint a handle until the TTL drains.
+   * Handles are only useful to a caller that surfaces them, so such callers set
+   * this false.
+   */
+  readonly mintPlanHandles?: boolean;
   /** P0-3: REQUIRED for create / create_and_confirm. The consume-once handle
    * minted by the matching dry_run for THIS execution effect. A missing /
    * replayed / out-of-scope / expired handle, or one minted for the other effect

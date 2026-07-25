@@ -164,6 +164,11 @@ describe("createAccountingOperations", () => {
       dryRun: true,
       directoryAccessOptions: {},
       ownCompanyName: "Seppo AI OÜ",
+      // The inbox consumer discards planHandles. Minting them here leaked two
+      // plan-store slots per folder per scan, and the store THROWS at capacity
+      // instead of evicting — a few scans took every approval path down until
+      // the 10-minute TTL drained.
+      mintPlanHandles: false,
     }));
     expect(result).toBe(outcome);
   });

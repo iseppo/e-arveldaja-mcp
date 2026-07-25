@@ -618,6 +618,10 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
               `The sale-invoice create failed (${invoiceErrorMessage}) and the compensating deactivation of the newly-created customer (clients_id=${createdClientId}) ALSO failed (${cleanupErrorMessage}). ` +
               `A customer record may remain active. Next action: manually deactivate or delete clients_id=${createdClientId} in e-arveldaja, then retry the invoice.`,
             retry: "unknown",
+            // A client row is very likely still ACTIVE. The façade must not
+            // report this as "nothing was written".
+            mutationOccurred: true,
+            mutatedObjects: [{ type: "client", id: createdClientId }],
           },
           blockers: [],
         };
@@ -632,6 +636,10 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
           message:
             `The sale-invoice create failed (${invoiceErrorMessage}). The newly-created customer (clients_id=${createdClientId}) was rolled back (deactivated), so no orphaned customer remains. Retry the invoice once the create error is resolved.`,
           retry: "safe",
+          // The invoice did not persist, but a deactivated client record DOES
+          // exist. Rolled back is not the same as never written.
+          mutationOccurred: true,
+          mutatedObjects: [{ type: "client", id: createdClientId }],
         },
         blockers: [],
       };
