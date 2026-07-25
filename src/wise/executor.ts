@@ -584,6 +584,9 @@ async function runWiseImport(
               description: command.create_payload.description ?? "",
               status: "created_and_confirmed",
               api_id: apiId,
+              // Fee rows carry no source_row, so this is the only way the
+              // presenter can tell what currency the row was booked in.
+              booked_currency: command.booked_currency,
             });
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -600,6 +603,7 @@ async function runWiseImport(
               description: command.create_payload.description ?? "",
               status: `created (confirm failed: ${errorMessage})`,
               api_id: apiId,
+              booked_currency: command.booked_currency,
             });
           }
           continue;

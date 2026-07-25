@@ -94,6 +94,89 @@ describe("WiseOperations", () => {
     expect(mockedLogAudit).not.toHaveBeenCalled();
   });
 
+  // A fee row is synthesised, so it carries no source_row and the presenter can
+  // only learn its currency from booked_currency. The projection sets it, but
+  // execute SPLICES `created` empty and rebuilds it from its own pushes — so a
+  // presenter-level test proves nothing about the executed card. This goes
+  // through the executor for that reason.
+  it("execute carries the fee row's booked_currency so the executed card can label its totals", async () => {
+    const usdFeeCsv = `${CSV_HEADER}\n${[
+      "WISE-FEE-1", "COMPLETED", "OUT", "2026-01-10 10:00:00", "2026-01-10 10:00:00",
+      "3", "USD", "0", "USD",
+      "MyCo", "100", "EUR",
+      "Acme", "100", "EUR",
+      "1", "inv-1", "", "", "General", "note",
+    ].join(",")}\n`;
+    const { operations } = setup();
+    const source = inline(usdFeeCsv);
+    const input = { ...baseInput(source), feeAccountDimensionsId: 9 };
+    const dry = await operations.prepare(input);
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+
+    const outcome = await operations.execute({
+      ...input,
+      approvedCommandDigest: dry.value.approvedCommandDigest,
+      planHandle: dry.value.planHandle,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+
+    const feeEntry = outcome.value.created.find(entry => entry.wise_id.startsWith("FEE:"));
+    expect(feeEntry).toBeDefined();
+    expect(feeEntry!.source_row).toBeUndefined();
+    // This harness has no transactions.get, so the pre-confirm freshness check
+    // fails and the row comes from the confirm-failed push. Both fee pushes are
+    // covered: the confirmed one is exercised below.
+    expect(feeEntry!.status).toContain("confirm failed");
+    expect(feeEntry!.booked_currency).toBe("USD");
+  });
+
+  it("carries the fee row's booked_currency on the confirmed push too", async () => {
+    const usdFeeCsv = `${CSV_HEADER}\n${[
+      "WISE-FEE-2", "COMPLETED", "OUT", "2026-01-10 10:00:00", "2026-01-10 10:00:00",
+      "3", "USD", "0", "USD",
+      "MyCo", "100", "EUR",
+      "Acme", "100", "EUR",
+      "1", "inv-1", "", "", "General", "note",
+    ].join(",")}\n`;
+    const { api, operations } = setup();
+    const source = inline(usdFeeCsv);
+    const input = { ...baseInput(source), feeAccountDimensionsId: 9 };
+    const dry = await operations.prepare(input);
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+
+    // Let the pre-confirm freshness check pass by echoing back the exact payload
+    // the executor just created, so the fee reaches the created_and_confirmed
+    // push. The row must appear ONLY after the create — surfacing it earlier
+    // changes the re-derived plan and the execute fails closed as plan_drift.
+    const feeCommand = dry.value.commands.find(command => command.wise_id.startsWith("FEE:"));
+    expect(feeCommand).toBeDefined();
+    const live: Array<Record<string, unknown>> = [];
+    let nextId = 9001;
+    api.transactions.create.mockImplementation(async (payload: Record<string, unknown>) => {
+      const id = nextId++;
+      live.push({ id, status: "PROJECT", is_deleted: false, ...payload });
+      return { created_object_id: id };
+    });
+    api.transactions.listAll.mockImplementation(async () => [...live]);
+
+    const outcome = await operations.execute({
+      ...input,
+      approvedCommandDigest: dry.value.approvedCommandDigest,
+      planHandle: dry.value.planHandle,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+
+    const feeEntry = outcome.value.created.find(entry => entry.wise_id.startsWith("FEE:"));
+    expect(feeEntry).toBeDefined();
+    expect(feeEntry!.status).toBe("created_and_confirmed");
+    expect(feeEntry!.source_row).toBeUndefined();
+    expect(feeEntry!.booked_currency).toBe("USD");
+  });
+
   it("execute consumes the reviewed plan, creates the row once, and audits it", async () => {
     const { api, operations } = setup();
     const source = inline(oneRowCsv());
