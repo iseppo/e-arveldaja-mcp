@@ -132,11 +132,12 @@ registered unless the flag is set). They cut the surface for a lean deployment
 without changing the default:
 
 - **`EARVELDAJA_DISABLE_TAX_TOOLS=1`** — do not register the Estonian tax
-  helpers (`prepare_dividend_package`, `create_owner_expense_reimbursement`,
-  `check_tax_free_limits`). The statutory tax-rules advisory layer used by
-  `suggest_booking` is unaffected — only these three tools are unregistered.
-  Use when the deployment never runs dividend/reimbursement/tax-free-limit
-  workflows. Saves ≈1.5k tokens.
+  helpers (`check_vat_registration_threshold`, `prepare_dividend_package`,
+  `create_owner_expense_reimbursement`, `check_tax_free_limits`) and the
+  VAT-threshold prompt. The statutory tax-rules advisory layer used by
+  `suggest_booking` is unaffected — only these four tools are unregistered.
+  Use when the deployment never runs VAT-threshold/dividend/reimbursement/
+  tax-free-limit workflows. Saves ≈1.5k tokens.
 - **`EARVELDAJA_DISABLE_REFERENCE_ADMIN=1`** — do not register the reference-data
   administration tools that create, update, or delete configuration:
   `create/update/delete_bank_account`, `create/update/delete_invoice_series`,
@@ -169,7 +170,7 @@ credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−4),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
-every disable flag set (incl. Lightyear) lands near 80 tools. (The former
+every disable flag set (incl. Lightyear) lands at 86 tools. (The former
 `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)

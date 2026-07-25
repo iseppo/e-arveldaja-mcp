@@ -138,7 +138,7 @@ The tool list is sent into the model's context on every session, so it is a fixe
 - `EARVELDAJA_DISABLE_SALES=1` — drops the sales-invoicing side: the 11 sale-invoice tools, `create_recurring_sale_invoices`, and receivables aging (`compute_receivables_aging`). Payables aging and all purchase-invoice tools stay. Use it for purchase-side-only bookkeeping.
 - `EARVELDAJA_DISABLE_PRODUCTS=1` — drops the product-catalog tools (`list/get/create/update/deactivate/reactivate/delete_product`). Products are chiefly the sale-invoice line-item catalog (purchase items key on `cl_purchase_articles_id`, though they can also carry an optional `products_id`), so a `DISABLE_SALES` deployment usually sets this too. It only removes catalog management — creating either invoice type still works — so the flags stay independent.
 
-A lean purchase-side-only custom deployment with every disable flag set (incl. Lightyear) has 84 tools instead of the standard 125. Conversely, `EARVELDAJA_PROFILE=full` exposes the complete 138-tool catalog.
+A lean purchase-side-only custom deployment with every disable flag set (incl. Lightyear) has 86 tools instead of the standard 127. Conversely, `EARVELDAJA_PROFILE=full` exposes the complete 147-tool catalog.
 
 Confirmed supplier history still wins over local rules for purchase booking defaults.
 
