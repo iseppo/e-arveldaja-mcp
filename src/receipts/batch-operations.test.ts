@@ -192,6 +192,30 @@ function makeOperations(api: never) {
   return createReceiptBatchOperations(api, createTestRuntimeSafetyContext());
 }
 
+// P0-3 drift tests need to reach the SAME runtime safety context the plan handle
+// was minted on (to advance the clock / rescope / read the plan store), so mint
+// and execute must share one context. makeOperations() hides its context, so this
+// variant exposes it.
+function makeOperationsWithContext(api: never) {
+  const context = createTestRuntimeSafetyContext();
+  return { ops: createReceiptBatchOperations(api, context), context };
+}
+
+// P0-3: the plan handle is minted by a dry_run and consumed by the matching
+// create / create_and_confirm on the SAME operation instance (the plan store
+// lives on that instance's runtime safety context). So dry_run and execute must
+// share one `ops` — a fresh makeOperations() would have an empty store.
+type DryRunPlan = {
+  manifest: ReceiptApprovedManifestEntry[];
+  planHandles: { create: string; create_and_confirm: string };
+};
+async function dryRunPlan(ops: ReturnType<typeof makeOperations>, overrides: Partial<typeof baseRun> = {}): Promise<DryRunPlan> {
+  const outcome = await ops.runBatch({ ...baseRun, ...overrides, executionMode: "dry_run", dryRun: true });
+  if (!outcome.ok) throw new Error("dry run failed");
+  if (!outcome.value.planHandles) throw new Error("dry run minted no plan handles");
+  return { manifest: outcome.value.manifest, planHandles: outcome.value.planHandles };
+}
+
 const baseRun = {
   resolvedFolderPath: FOLDER,
   accountsDimensionsId: 100,
@@ -234,12 +258,6 @@ describe("receipt batch typed operation", () => {
     expect(spies.confirmWithTotals).not.toHaveBeenCalled();
   });
 
-  async function dryRunManifest(api: never): Promise<ReceiptApprovedManifestEntry[]> {
-    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
-    if (!outcome.ok) throw new Error("dry run failed");
-    return outcome.value.manifest;
-  }
-
   it("create rejects with manifest_mismatch BEFORE any mutation when the folder drifted", async () => {
     const { api, spies } = makeApi();
     const wrongManifest: ReceiptApprovedManifestEntry[] = [{ relative_path: "receipt.pdf", sha256: "0".repeat(64) }];
@@ -252,9 +270,10 @@ describe("receipt batch typed operation", () => {
 
   it("create (APPROVAL ONE) creates + uploads but never confirms", async () => {
     const { api, spies } = makeApi();
-    const manifest = await dryRunManifest(api);
-    const outcome = await makeOperations(api).runBatch({
-      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest,
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
     });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("runBatch failed");
@@ -267,9 +286,10 @@ describe("receipt batch typed operation", () => {
 
   it("create_and_confirm (APPROVAL TWO) also confirms the created invoice", async () => {
     const { api, spies } = makeApi();
-    const manifest = await dryRunManifest(api);
-    const outcome = await makeOperations(api).runBatch({
-      ...baseRun, executionMode: "create_and_confirm", dryRun: false, approvedManifest: manifest,
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create_and_confirm", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create_and_confirm,
     });
     expect(outcome.ok).toBe(true);
     expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
@@ -280,9 +300,10 @@ describe("receipt batch typed operation", () => {
   it("rolls back (invalidates) the created invoice when the document upload fails", async () => {
     const uploadDocument = vi.fn().mockRejectedValue(new Error("upload boom"));
     const { api, spies } = makeApi({ uploadDocument });
-    const manifest = await dryRunManifest(api);
-    const outcome = await makeOperations(api).runBatch({
-      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest,
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
     });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("runBatch failed");
@@ -294,9 +315,10 @@ describe("receipt batch typed operation", () => {
   it("never auto-retries an ambiguous (network) post-create confirmation failure", async () => {
     const confirmWithTotals = vi.fn().mockRejectedValue(new HttpError("network failure", "network", "PATCH", "/purchase_invoices/555/register"));
     const { api, spies } = makeApi({ confirmWithTotals });
-    const manifest = await dryRunManifest(api);
-    const outcome = await makeOperations(api).runBatch({
-      ...baseRun, executionMode: "create_and_confirm", dryRun: false, approvedManifest: manifest,
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create_and_confirm", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create_and_confirm,
     });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("runBatch failed");
@@ -306,5 +328,216 @@ describe("receipt batch typed operation", () => {
     expect(spies.confirmWithTotals).toHaveBeenCalledTimes(1);
     expect(spies.invalidate).toHaveBeenCalledTimes(1);
     expect(outcome.value.results[0]!.status).toBe("failed");
+  });
+});
+
+// P0-3: the SHA-256 manifest alone only proves the file BYTES are unchanged. It
+// says nothing about the accounting effect the operator reviewed — the bank
+// dimension, the date filters, the create-vs-create_and_confirm mode, the
+// per-file supplier/booking projection, or the live bank transactions the batch
+// intends to link. The consume-once plan handle binds ALL of that. Every case
+// below proves a mutation is refused BEFORE the first API write when any of those
+// drift, plus the replay / scope / expiry lifecycle guards. Each asserts the
+// create/upload/confirm/invalidate API mocks were NEVER called.
+describe("receipt batch typed operation — P0-3 plan-handle drift gate", () => {
+  function expectZeroMutation(spies: ApiSpies): void {
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(spies.uploadDocument).not.toHaveBeenCalled();
+    expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+    expect(spies.invalidate).not.toHaveBeenCalled();
+  }
+
+  it("refuses create with NO plan_handle even when the manifest matches", async () => {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const { manifest } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest,
+      // planHandle deliberately omitted — the SHA-256 manifest is NOT approval.
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_handle_required");
+    expect(outcome.error.code).toBe("plan_handle_required");
+    expectZeroMutation(spies);
+  });
+
+  it("blocks the same manifest booked against a DIFFERENT bank dimension", async () => {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops); // minted at accountsDimensionsId 100
+    const outcome = await ops.runBatch({
+      ...baseRun, accountsDimensionsId: 200, // operator silently re-pointed the bank leg
+      executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_drift");
+    expect(outcome.error.code).toBe("plan_drift");
+    expectZeroMutation(spies);
+  });
+
+  it("blocks the same manifest with a CHANGED transaction date range", async () => {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops); // minted with no transaction-date filter
+    const outcome = await ops.runBatch({
+      ...baseRun, transactionDateFrom: "2026-01-01", transactionDateTo: "2026-01-31",
+      executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_drift");
+    expect(outcome.error.code).toBe("plan_drift");
+    expectZeroMutation(spies);
+  });
+
+  it("blocks a CREATE handle replayed as create_and_confirm (mode escalation)", async () => {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create_and_confirm", dryRun: false,
+      approvedManifest: manifest, planHandle: planHandles.create, // create approval used to auto-confirm
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_drift");
+    expect(outcome.error.code).toBe("plan_drift");
+    expectZeroMutation(spies);
+  });
+
+  it("blocks a CREATE_AND_CONFIRM handle used for a bare create (mode downgrade)", async () => {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false,
+      approvedManifest: manifest, planHandle: planHandles.create_and_confirm,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_drift");
+    expect(outcome.error.code).toBe("plan_drift");
+    expectZeroMutation(spies);
+  });
+
+  it("blocks a CHANGED supplier resolution between dry_run and create", async () => {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops); // reviewed with supplier client id 7
+    // The supplier-resolution rule changed under the operator's feet.
+    vi.mocked(resolveSupplierInternal).mockResolvedValue({
+      found: true, created: false, match_type: "exact_name",
+      client: {
+        id: 9, name: "Different Supplier OU", is_supplier: true, is_client: false,
+        cl_code_country: "EST", is_member: false, send_invoice_to_email: false,
+        send_invoice_to_accounting_email: false, is_deleted: false,
+      },
+    } as never);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_drift");
+    expect(outcome.error.code).toBe("plan_drift");
+    expectZeroMutation(spies);
+  });
+
+  it("blocks a CHANGED booking projection (article/account) between dry_run and create", async () => {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops); // reviewed with article 501 / account 5230
+    vi.mocked(suggestBookingInternal).mockResolvedValue({
+      item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 999, purchase_accounts_id: 6000 },
+      source: "fallback",
+      suggested_purchase_article: { id: 999, name: "Something else" },
+    } as never);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_drift");
+    expect(outcome.error.code).toBe("plan_drift");
+    expectZeroMutation(spies);
+  });
+
+  it("blocks when a live bank transaction the plan intended to link has changed", async () => {
+    const { api, spies } = makeApi();
+    const txListAll = vi.fn();
+    (api as { transactions: { listAll: typeof txListAll } }).transactions.listAll = txListAll;
+    let liveTransactions: unknown[] = [
+      { id: 1, status: "PROJECT", type: "C", amount: 124, base_amount: 124, date: "2026-03-20", accounts_dimensions_id: 100 },
+    ];
+    txListAll.mockImplementation(async () => liveTransactions.map(tx => ({ ...(tx as object) })));
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    // The live bank row moved (amount corrected upstream) after the operator reviewed.
+    liveTransactions = [
+      { id: 1, status: "PROJECT", type: "C", amount: 130, base_amount: 130, date: "2026-03-20", accounts_dimensions_id: 100 },
+    ];
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_drift");
+    expect(outcome.error.code).toBe("plan_drift");
+    expectZeroMutation(spies);
+  });
+
+  it("throws manifest_mismatch (zero mutation) when a receipt file's bytes changed", async () => {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    // A file in the folder was rewritten after approval; the manifest no longer holds.
+    vi.mocked(readFile).mockResolvedValue(Buffer.from("a different receipt pdf") as never);
+    await expect(ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    })).rejects.toMatchObject({ category: "manifest_mismatch" });
+    expectZeroMutation(spies);
+  });
+
+  it("cannot be REPLAYED — a consumed handle is refused with zero further mutation", async () => {
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const first = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(first.ok).toBe(true);
+    const createCallsAfterFirst = spies.createAndSetTotals.mock.calls.length;
+    expect(createCallsAfterFirst).toBe(1);
+    const replay = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(replay.ok).toBe(false);
+    if (replay.ok) throw new Error("expected plan_handle_consumed");
+    expect(replay.error.code).toBe("plan_handle_consumed");
+    // No SECOND create/upload from the replay.
+    expect(spies.createAndSetTotals.mock.calls.length).toBe(createCallsAfterFirst);
+    expect(spies.uploadDocument.mock.calls.length).toBe(1);
+  });
+
+  it("rejects a handle used under a DIFFERENT runtime scope (connection switch)", async () => {
+    const { api, spies } = makeApi();
+    const { ops, context } = makeOperationsWithContext(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    context.setScope({ verifiedCompanyIdentity: "a-different-company" });
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_scope_mismatch");
+    expect(outcome.error.code).toBe("plan_scope_mismatch");
+    expectZeroMutation(spies);
+  });
+
+  it("rejects an EXPIRED handle (past the plan TTL) with zero mutation", async () => {
+    const { api, spies } = makeApi();
+    const { ops, context } = makeOperationsWithContext(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    context.advanceTime(601_000); // > 600_000 ms TTL
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_handle_expired");
+    expect(outcome.error.code).toBe("plan_handle_expired");
+    expectZeroMutation(spies);
   });
 });

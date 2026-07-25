@@ -40,9 +40,10 @@ import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { logAudit } from "../audit-log.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
-import { canonicalPlanJson } from "../tools/camt-plan.js";
+import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
 import type { CreatePurchaseInvoiceData } from "../types/api.js";
 import type {
+  AccountingDocumentBookingFields,
   AccountingDocumentConfirmation,
   AccountingDocumentExecution,
   AccountingDocumentOperations,
@@ -118,11 +119,134 @@ function textItemsWithPageNums(
   ) ?? [];
 }
 
+/** The canonical effective write model shared by prepare (bind) and create
+ * (recompute + compare). Everything here is post-desandbox, post-default,
+ * post-validation — the ACTUAL write model, never the raw caller payload. */
+interface EffectiveBookingModel {
+  readonly fingerprint: PlanRecord;
+  readonly invoiceData: CreatePurchaseInvoiceData;
+  readonly isVatReg: boolean;
+  readonly supplierName: string;
+  readonly currencyCode: string;
+  readonly blockOnDuplicate: boolean;
+  readonly grossAmountEur?: number;
+}
+
 class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
   constructor(
     private readonly api: ApiContext,
     private readonly runtimeSafetyContext: RuntimeSafetyContext,
   ) {}
+
+  // P0-1: compute the canonical effective booking model. Called IDENTICALLY at
+  // prepare (to bind the fingerprint into the plan) and at create (to recompute
+  // fresh and drift-compare) so the plan proves the exact effect the operator
+  // reviewed: supplier canonical name is read from the server, items go through
+  // parse → desandbox → VAT defaults → dimension validation, and every default
+  // (currency, liability account, block_on_duplicate) is applied BEFORE the
+  // fingerprint — an omitted default and its explicit value never drift apart.
+  private async computeEffectiveBooking(
+    booking: AccountingDocumentBookingFields,
+    sourceSha256: string,
+    fileName: string,
+  ): Promise<OperationOutcome<EffectiveBookingModel>> {
+    const supplier = await this.api.clients.get(booking.supplierClientId);
+    const supplierName = desandboxText(supplier.name);
+    const isVatReg = await isCompanyVatRegistered(this.api);
+    const purchaseArticles = await getPurchaseArticlesWithVat(this.api);
+    const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(booking.items));
+    const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
+
+    const [accounts, accountDimensions] = await Promise.all([
+      this.api.readonly.getAccounts(),
+      this.api.readonly.getAccountDimensions(),
+    ]);
+    const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
+    if (dimErrors.length > 0) {
+      return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`, "never");
+    }
+
+    const currencyCode = (booking.currency ?? "EUR").toUpperCase();
+    if (currencyCode !== "EUR" && (booking.currencyRate === undefined || booking.currencyRate === null)) {
+      return fail("currency_rate_required", `currency_rate is required when currency="${currencyCode}".`, "never");
+    }
+
+    // Write-boundary canonicalization of every free-text field (matches the
+    // former inline create logic): only defined strings are desandboxed.
+    const invoiceNumber = desandboxText(booking.invoiceNumber);
+    const refNumber = booking.refNumber === undefined ? undefined : desandboxText(booking.refNumber);
+    const bankAccountNo = booking.bankAccountNo === undefined ? undefined : desandboxText(booking.bankAccountNo);
+    const notes = booking.notes === undefined ? undefined : desandboxText(booking.notes);
+    const liabilityAccountsId = booking.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT;
+    const blockOnDuplicate = booking.blockOnDuplicate === true;
+    // The actual settled EUR gross when known, else the nominal gross only for
+    // an EUR-native invoice — never a guessed conversion.
+    const grossAmountEur = booking.baseGrossPrice ?? (currencyCode === "EUR" ? booking.grossPrice : undefined);
+
+    const invoiceData: CreatePurchaseInvoiceData = {
+      clients_id: booking.supplierClientId,
+      client_name: supplierName,
+      number: invoiceNumber,
+      create_date: booking.invoiceDate,
+      journal_date: booking.journalDate,
+      term_days: booking.termDays,
+      cl_currencies_id: currencyCode,
+      currency_rate: booking.currencyRate,
+      base_net_price: booking.baseNetPrice,
+      base_vat_price: booking.baseVatPrice,
+      base_gross_price: booking.baseGrossPrice,
+      liability_accounts_id: liabilityAccountsId,
+      bank_ref_number: refNumber,
+      bank_account_no: bankAccountNo,
+      notes: tagNotes(notes),
+      items,
+    };
+
+    // Every material write value is bound: source identity, supplier id +
+    // canonical name, number, dates, term, EFFECTIVE items (accounts,
+    // dimensions, VAT config), exact totals, currency/rate/base amounts,
+    // liability account, reference/bank/notes, duplicate policy, and the
+    // create + upload command pair. stripUndefinedDeep sorts keys and drops
+    // undefined so the JSON form is stable for canonicalPlanJson comparison.
+    const fingerprint = stripUndefinedDeep({
+      source_sha256: sourceSha256,
+      file_name: fileName,
+      supplier_client_id: booking.supplierClientId,
+      supplier_name: supplierName,
+      invoice_number: invoiceNumber,
+      invoice_date: booking.invoiceDate,
+      journal_date: booking.journalDate,
+      term_days: booking.termDays,
+      items,
+      vat_price: booking.vatPrice,
+      gross_price: booking.grossPrice,
+      currency: currencyCode,
+      currency_rate: booking.currencyRate,
+      base_net_price: booking.baseNetPrice,
+      base_vat_price: booking.baseVatPrice,
+      base_gross_price: booking.baseGrossPrice,
+      liability_accounts_id: liabilityAccountsId,
+      ref_number: refNumber,
+      bank_account_no: bankAccountNo,
+      notes,
+      block_on_duplicate: blockOnDuplicate,
+      // Explicit bind: isVatReg already shapes the effective items/totals, but
+      // binding it directly keeps it covered even if a future refactor stops
+      // feeding it into the item defaults.
+      vat_registered: isVatReg,
+      commands: ["purchase_invoice_create", "purchase_invoice_upload_document"],
+    }) as PlanRecord;
+
+    return ok({
+      fingerprint,
+      invoiceData,
+      isVatReg,
+      supplierName,
+      currencyCode,
+      blockOnDuplicate,
+      ...(grossAmountEur !== undefined ? { grossAmountEur } : {}),
+    });
+  }
 
   async prepare(input: PrepareAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentPreview>> {
     const snapshot = await loadSnapshot(input.source, this.runtimeSafetyContext, input.snapshot);
@@ -259,36 +383,45 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         warnings.push({ code: "ambiguous_dimension", message: "A historical account maps to more than one dimension; confirm the dimension." });
       }
 
-      // Mint the immutable execution plan the operator reviews before create.
-      const normalizedArgs: PlanRecord = {
-        ...(input.source.file_ref !== undefined ? { file_ref: input.source.file_ref } : {}),
-        ...(input.source.file_ref === undefined && input.source.file_path !== undefined && !input.source.file_path.toLowerCase().startsWith("base64:")
-          ? { file_path: input.source.file_path }
-          : {}),
-        source_sha256: material.source_sha256,
-      };
       const planProjection: PlanData = {
         source_sha256: material.source_sha256,
         supplier_resolved: resolvedClientId !== undefined,
         vat_valid: vatValid,
         candidate_duplicate_risk: Boolean((duplicate as { candidate_duplicate_risk?: unknown }).candidate_duplicate_risk),
+        booking_bound: input.booking !== undefined,
       };
-      const planInput: ExecutionPlanInput = {
-        normalizedArgs,
-        sourceIdentities: [{ ...snapshot.identity } as unknown as PlanRecord],
-        liveSnapshot: planProjection,
-        commands: [{ id: "accounting-document-create", category: "purchase_invoice_create", reviewProjection: planProjection }],
-        counts: { blockers: blockers.length, warnings: warnings.length },
-        totals: {
-          total_net: extracted.total_net ?? 0,
-          total_vat: extracted.total_vat ?? 0,
-          total_gross: extracted.total_gross ?? 0,
-        },
-        exclusions: [],
-        reviews: [],
-        privatePayload: { source_sha256: material.source_sha256 },
-      };
-      const planHandle = this.runtimeSafetyContext.planStore.issue(ACCOUNTING_DOCUMENT_PLAN_DOMAIN, planInput);
+
+      // P0-1: mint the create plan ONLY when the FINAL reviewed booking fields
+      // are supplied. An extraction preview alone is NOT create approval — it
+      // issues NO handle, so a create can never run off a mere OCR preview.
+      // With booking present, the canonical effective model is computed and its
+      // fingerprint becomes the plan's normalizedArgs; create recomputes the
+      // same model fresh and drift-compares before any write.
+      let planHandle: string | undefined;
+      let bookingProjection: PlanData | undefined;
+      if (input.booking !== undefined) {
+        const effective = await this.computeEffectiveBooking(input.booking, material.source_sha256, material.fileName);
+        if (!effective.ok) return effective;
+        bookingProjection = effective.value.fingerprint;
+        const planInput: ExecutionPlanInput = {
+          normalizedArgs: effective.value.fingerprint,
+          sourceIdentities: [{ ...snapshot.identity } as unknown as PlanRecord],
+          liveSnapshot: planProjection,
+          commands: [
+            { id: "accounting-document-create", category: "purchase_invoice_create", reviewProjection: bookingProjection },
+            { id: "accounting-document-upload", category: "purchase_invoice_upload", reviewProjection: { file_name: material.fileName, source_sha256: material.source_sha256 } },
+          ],
+          counts: { blockers: blockers.length, warnings: warnings.length },
+          totals: {
+            ...(input.booking.vatPrice !== undefined ? { vat_price: input.booking.vatPrice } : {}),
+            ...(input.booking.grossPrice !== undefined ? { gross_price: input.booking.grossPrice } : {}),
+          },
+          exclusions: [],
+          reviews: [],
+          privatePayload: { source_sha256: material.source_sha256 },
+        };
+        planHandle = this.runtimeSafetyContext.planStore.issue(ACCOUNTING_DOCUMENT_PLAN_DOMAIN, planInput);
+      }
 
       const preview: AccountingDocumentPreview = {
         extraction: {
@@ -316,7 +449,8 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         blockers,
         warnings,
         planProjection,
-        planHandle,
+        ...(planHandle !== undefined ? { planHandle } : {}),
+        ...(bookingProjection !== undefined ? { bookingProjection } : {}),
       };
       return ok(preview);
     } finally {
@@ -338,8 +472,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     if (input.planHandle === undefined) {
       return fail("plan_handle_required", "mode='create' requires the plan_handle from the reviewed mode='prepare'.", "never");
     }
+    let storedPlan;
     try {
-      this.runtimeSafetyContext.planStore.consume(input.planHandle, ACCOUNTING_DOCUMENT_PLAN_DOMAIN);
+      storedPlan = this.runtimeSafetyContext.planStore.consume(input.planHandle, ACCOUNTING_DOCUMENT_PLAN_DOMAIN);
     } catch (error) {
       const code = (error as { code?: string }).code ?? "plan_handle_invalid";
       return fail(code, "The reviewed execution plan could not be consumed.", "never");
@@ -352,71 +487,37 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     }
     const material = await materializeSnapshot(snapshot);
     try {
-      const supplier = await this.api.clients.get(input.supplierClientId);
-      const supplierName = desandboxText(supplier.name);
-      const isVatReg = await isCompanyVatRegistered(this.api);
-      const purchaseArticles = await getPurchaseArticlesWithVat(this.api);
-      const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(input.items));
-      const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
-
-      const [accounts, accountDimensions] = await Promise.all([
-        this.api.readonly.getAccounts(),
-        this.api.readonly.getAccountDimensions(),
-      ]);
-      const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
-      if (dimErrors.length > 0) {
-        return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`, "never");
+      // P0-1 drift gate: recompute the canonical effective model FRESH (live
+      // supplier name, live VAT defaults, live dimension validation) and
+      // compare it byte-for-byte against the model the operator reviewed at
+      // prepare. ANY material difference — source bytes, supplier, number,
+      // dates, items, accounts, dimensions, VAT config, totals, currency,
+      // rate, base amounts, liability account, references, notes, duplicate
+      // policy — rejects as plan_drift with ZERO API writes.
+      const effective = await this.computeEffectiveBooking(input, material.source_sha256, material.fileName);
+      if (!effective.ok) return effective;
+      if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(effective.value.fingerprint)) {
+        return fail("plan_drift", "The reviewed booking plan no longer matches the requested create model. Re-run mode='prepare' with the final booking fields and review again.", "never");
       }
-
-      const currencyCode = (input.currency ?? "EUR").toUpperCase();
-      if (currencyCode !== "EUR" && (input.currencyRate === undefined || input.currencyRate === null)) {
-        return fail("currency_rate_required", `currency_rate is required when currency="${currencyCode}".`, "never");
-      }
+      const { invoiceData, isVatReg, blockOnDuplicate, grossAmountEur } = effective.value;
+      const supplierName = effective.value.supplierName;
+      const invoiceNumber = invoiceData.number;
+      const items = invoiceData.items;
 
       // Cross-mechanism intake duplicate guard — BEFORE any invoice/document
-      // mutation. EUR figure: the actual settled EUR gross when known, else the
-      // nominal gross only for an EUR-native invoice — never a guessed conversion.
-      const grossAmountEur = input.baseGrossPrice ?? (currencyCode === "EUR" ? input.grossPrice : undefined);
+      // mutation.
       const duplicateScan = await checkIntakeCashDuplicates(this.api, {
         grossAmountEur,
         invoiceDate: input.invoiceDate,
       });
       if (
-        input.blockOnDuplicate === true
+        blockOnDuplicate
         && duplicateScan.scan_available === true
         && !duplicateScan.skipped_no_eur_amount
         && duplicateScan.suspects.length > 0
       ) {
         return fail("possible_duplicate_posting", `Possible duplicate bank posting: journal(s) ${duplicateScan.suspects.map(s => s.journal_id).join(", ")}.`, "never");
       }
-
-      // Write-boundary canonicalization: strip any sandbox markers a wrapped
-      // preview value could have carried into these free-text fields (matches
-      // the sibling create_purchase_invoice_from_pdf desandboxAllStrings up
-      // front). Only defined strings are desandboxed; undefined passes through.
-      const invoiceNumber = desandboxText(input.invoiceNumber);
-      const refNumber = input.refNumber === undefined ? undefined : desandboxText(input.refNumber);
-      const bankAccountNo = input.bankAccountNo === undefined ? undefined : desandboxText(input.bankAccountNo);
-      const notes = input.notes === undefined ? undefined : desandboxText(input.notes);
-
-      const invoiceData: CreatePurchaseInvoiceData = {
-        clients_id: input.supplierClientId,
-        client_name: supplierName,
-        number: invoiceNumber,
-        create_date: input.invoiceDate,
-        journal_date: input.journalDate,
-        term_days: input.termDays,
-        cl_currencies_id: currencyCode,
-        currency_rate: input.currencyRate,
-        base_net_price: input.baseNetPrice,
-        base_vat_price: input.baseVatPrice,
-        base_gross_price: input.baseGrossPrice,
-        liability_accounts_id: input.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT,
-        bank_ref_number: refNumber,
-        bank_account_no: bankAccountNo,
-        notes: tagNotes(notes),
-        items,
-      };
 
       let result;
       try {

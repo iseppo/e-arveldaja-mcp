@@ -30,6 +30,32 @@ export interface AccountingDocumentOverrides {
   readonly notes?: string;
 }
 
+/** The FINAL reviewed booking fields. When supplied to prepare, the server
+ * computes the canonical effective write model (supplier canonical name, items
+ * after parse/desandbox/VAT defaults, defaults applied) and binds its
+ * fingerprint into the create plan. The same shape is required at create so
+ * the fingerprint can be recomputed fresh and drift-compared. */
+export interface AccountingDocumentBookingFields {
+  readonly supplierClientId: number;
+  readonly invoiceNumber: string;
+  readonly invoiceDate: string;
+  readonly journalDate: string;
+  readonly termDays: number;
+  readonly items: unknown;
+  readonly vatPrice?: number;
+  readonly grossPrice?: number;
+  readonly liabilityAccountsId?: number;
+  readonly notes?: string;
+  readonly refNumber?: string;
+  readonly bankAccountNo?: string;
+  readonly currency?: string;
+  readonly currencyRate?: number;
+  readonly baseNetPrice?: number;
+  readonly baseVatPrice?: number;
+  readonly baseGrossPrice?: number;
+  readonly blockOnDuplicate?: boolean;
+}
+
 export interface PrepareAccountingDocumentInput {
   readonly source: FileInputSource;
   /** ADDITIVE (guided façade): an immutable snapshot captured ONCE upstream
@@ -37,6 +63,10 @@ export interface PrepareAccountingDocumentInput {
    * so the op does not read the source a second time. */
   readonly snapshot?: FileInputSnapshot;
   readonly overrides?: AccountingDocumentOverrides;
+  /** FINAL reviewed booking fields. Absent ⇒ extraction-only preview (NO create
+   * plan handle is issued). Present ⇒ the server computes and binds the
+   * canonical effective booking model and issues the create plan handle. */
+  readonly booking?: AccountingDocumentBookingFields;
 }
 
 /** Compact extraction summary — carries NO raw OCR text. */
@@ -74,33 +104,23 @@ export interface AccountingDocumentPreview {
   readonly warnings: readonly CompactWarning[];
   /** Public, review-only plan projection (no private fingerprint). */
   readonly planProjection: PlanData;
-  readonly planHandle: string;
+  /** Present ONLY when the prepare bound the final booking fields — an
+   * extraction-only preview is NOT create approval and mints no handle. */
+  readonly planHandle?: string;
+  /** The canonical effective booking model the plan fingerprint binds —
+   * the exact write model create will execute. Present only with booking. */
+  readonly bookingProjection?: PlanData;
 }
 
-export interface ExecuteAccountingDocumentInput {
+/** Create input: the SAME booking fields the prepare bound (the server
+ * recomputes the canonical effective model from them and drift-compares it
+ * against the consumed plan — the caller JSON is never authoritative). */
+export interface ExecuteAccountingDocumentInput extends AccountingDocumentBookingFields {
   readonly source: FileInputSource;
   readonly snapshot?: FileInputSnapshot;
   readonly planHandle: string | undefined;
   /** SHA-256 the caller echoes from prepare; re-verified against the bytes. */
   readonly sourceSha256: string;
-  readonly supplierClientId: number;
-  readonly invoiceNumber: string;
-  readonly invoiceDate: string;
-  readonly journalDate: string;
-  readonly termDays: number;
-  readonly items: unknown;
-  readonly vatPrice?: number;
-  readonly grossPrice?: number;
-  readonly liabilityAccountsId?: number;
-  readonly notes?: string;
-  readonly refNumber?: string;
-  readonly bankAccountNo?: string;
-  readonly currency?: string;
-  readonly currencyRate?: number;
-  readonly baseNetPrice?: number;
-  readonly baseVatPrice?: number;
-  readonly baseGrossPrice?: number;
-  readonly blockOnDuplicate?: boolean;
 }
 
 export interface AccountingDocumentExecution {

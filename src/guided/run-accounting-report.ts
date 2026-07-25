@@ -6,6 +6,7 @@ import { readOnly } from "../annotations.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { ToolExposureConfig } from "../config.js";
 import { createReportingOperations } from "../reporting/operations.js";
+import { isStrictDate, parseStrictMonth } from "../strict-date.js";
 import { wrapMissingDocuments } from "../tools/document-audit.js";
 import type {
   AccountingReportResult,
@@ -24,8 +25,6 @@ import type {
 // returns every line inline (read-only, bounded — no plan handle, no mutation).
 
 const COMPACT_ITEM_CAP = 25;
-const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-const MONTH_REGEX = /^\d{4}-\d{2}$/;
 
 function textResult(payload: Record<string, unknown>, isError = false) {
   return {
@@ -160,12 +159,15 @@ export function registerRunAccountingReportTool(
     async (args: ReportArgs) => {
       const detail = args.detail ?? "compact";
       for (const [key, value] of [["date_from", args.date_from], ["date_to", args.date_to], ["as_of_date", args.as_of_date]] as const) {
-        if (value !== undefined && !ISO_DATE_REGEX.test(value)) {
-          return textResult({ error: `${key} must be YYYY-MM-DD`, category: "invalid_date" }, true);
+        if (value !== undefined && !isStrictDate(value)) {
+          return textResult({ error: `${key} must be a real calendar date in canonical YYYY-MM-DD form`, category: "invalid_date" }, true);
         }
       }
-      if (args.month !== undefined && !MONTH_REGEX.test(args.month)) {
-        return textResult({ error: "month must be YYYY-MM", category: "invalid_month" }, true);
+      if (args.date_from !== undefined && args.date_to !== undefined && args.date_from > args.date_to) {
+        return textResult({ error: "date_from must not be after date_to", category: "invalid_date" }, true);
+      }
+      if (args.month !== undefined && parseStrictMonth(args.month) === undefined) {
+        return textResult({ error: "month must be a real calendar month in canonical YYYY-MM form", category: "invalid_month" }, true);
       }
       const outcome = await operations.run({
         report: args.report as AccountingReportResult["report"],

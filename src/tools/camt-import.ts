@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { isStrictDate } from "../strict-date.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { toMcpJson } from "../mcp-json.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
@@ -32,7 +33,7 @@ export type { ParsedCamtEntry, CamtParseResult, CamtStatementMetadata } from "..
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 const isoDateString = (description: string) =>
-  z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe(description);
+  z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").describe(description);
 
 interface AdapterResult {
   payload: Record<string, unknown>;

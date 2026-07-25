@@ -64,7 +64,7 @@ afterEach(() => { vi.clearAllMocks(); });
 beforeEach(() => { mockedParseDocument.mockResolvedValue(docWithRegCode()); });
 
 describe("AccountingDocumentOperations.prepare", () => {
-  it("returns a compact preview that carries NO raw OCR text and a plan handle", async () => {
+  it("returns a compact extraction preview with NO raw OCR text and NO create plan handle (P0-1: an OCR preview is not create approval)", async () => {
     const { path } = writeTempPdf();
     const { ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });
     const outcome = await ops.prepare({ source: { file_path: path } });
@@ -73,8 +73,9 @@ describe("AccountingDocumentOperations.prepare", () => {
     const preview = outcome.value;
     // Compact preview omits raw_text entirely.
     expect("raw_text" in preview.extraction.fields).toBe(false);
-    expect(typeof preview.planHandle).toBe("string");
-    expect(preview.planHandle.length).toBeGreaterThan(0);
+    // Extraction-only prepare mints NO create-authorizing handle.
+    expect(preview.planHandle).toBeUndefined();
+    expect(preview.bookingProjection).toBeUndefined();
     expect(preview.extraction.source_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(preview.extraction.page_count).toBe(1);
   });
@@ -151,6 +152,7 @@ describe("AccountingDocumentOperations.create", () => {
       clientRows: [supplier()],
       accounts: [
         fixtureAccount({ id: 5000, name_est: "Teenused" }),
+        fixtureAccount({ id: 5900, name_est: "Muud kulud" }),
         fixtureAccount({ id: 1510, name_est: "Sisendkäibemaks", is_vat_account: true }),
       ],
       clients: { get: vi.fn().mockResolvedValue(supplier()) },
@@ -168,10 +170,7 @@ describe("AccountingDocumentOperations.create", () => {
     return { path, sha256, api, runtime, ops };
   }
 
-  const baseCreateInput = (path: string, sha256: string) => ({
-    source: { file_path: path },
-    planHandle: undefined,
-    sourceSha256: sha256,
+  const bookingFields = () => ({
     supplierClientId: 4242,
     invoiceNumber: "INV-1",
     invoiceDate: "2026-06-15",
@@ -182,19 +181,42 @@ describe("AccountingDocumentOperations.create", () => {
     grossPrice: 12,
   });
 
-  // create now REQUIRES a plan_handle from a prior mode='prepare'. Mint a valid
-  // in-scope handle so success-path tests reach the booking logic.
-  const mintDocHandle = (runtime: ReturnType<typeof createTestRuntimeSafetyContext>, sha256: string) =>
-    runtime.planStore.issue(ACCOUNTING_DOCUMENT_PLAN_DOMAIN, {
-      normalizedArgs: { source_sha256: sha256 },
-      sourceIdentities: [], liveSnapshot: {},
-      commands: [{ id: "c", category: "purchase_invoice_create" }],
-      counts: {}, totals: {}, exclusions: [], reviews: [], privatePayload: {},
-    });
+  const baseCreateInput = (path: string, sha256: string) => ({
+    source: { file_path: path },
+    planHandle: undefined as string | undefined,
+    sourceSha256: sha256,
+    ...bookingFields(),
+  });
 
-  it("creates a DRAFT invoice, uploads the document, and mints a SECOND confirm plan (never auto-confirmed)", async () => {
-    const { path, sha256, api, runtime, ops } = createSetup();
-    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: mintDocHandle(runtime, sha256) });
+  // P0-1: mint the create handle through the REAL prepare (booking-binding
+  // prepare), never a hand-minted minimal plan — the plan must bind the full
+  // canonical effective booking model.
+  async function prepareBookingHandle(
+    ops: ReturnType<typeof createAccountingDocumentOperations>,
+    path: string,
+    booking: Record<string, unknown> = {},
+  ): Promise<string> {
+    const outcome = await ops.prepare({
+      source: { file_path: path },
+      booking: { ...bookingFields(), ...booking },
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error(`prepare failed: ${outcome.error.code}`);
+    expect(typeof outcome.value.planHandle).toBe("string");
+    expect(outcome.value.bookingProjection).toBeDefined();
+    return outcome.value.planHandle!;
+  }
+
+  function expectNoWrites(api: ReturnType<typeof createAccountingWorkflowApi>) {
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+  }
+
+  it("creates a DRAFT invoice via the real prepare→create sequence, uploads the document, and mints a SECOND confirm plan (never auto-confirmed)", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     expect(outcome.value.createdInvoiceId).toBe(90_001);
@@ -208,11 +230,15 @@ describe("AccountingDocumentOperations.create", () => {
   });
 
   it("desandboxes sandbox markers out of the invoiceData written to the API (write-boundary canonicalization)", async () => {
-    const { path, sha256, api, runtime, ops } = createSetup();
+    const { path, sha256, api, ops } = createSetup();
     const wrap = (s: string) => wrapUntrustedOcr(s)!;
+    // Wrapped values at BOTH prepare and create: the fingerprint is computed on
+    // the DESANDBOXED effective model, so a per-call random nonce never drifts.
+    const wrappedFields = { invoiceNumber: wrap("INV-1"), refNumber: wrap("REF-9"), bankAccountNo: wrap("EE001122"), notes: wrap("hello notes") };
+    const handle = await prepareBookingHandle(ops, path, wrappedFields);
     const outcome = await ops.create({
       ...baseCreateInput(path, sha256),
-      planHandle: mintDocHandle(runtime, sha256),
+      planHandle: handle,
       invoiceNumber: wrap("INV-1"),
       refNumber: wrap("REF-9"),
       bankAccountNo: wrap("EE001122"),
@@ -231,8 +257,9 @@ describe("AccountingDocumentOperations.create", () => {
   });
 
   it("carries structured duplicateScan + duplicateCandidate on the execution (no leaky formatted warning string)", async () => {
-    const { path, sha256, runtime, ops } = createSetup();
-    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: mintDocHandle(runtime, sha256) });
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     const execution = outcome.value as unknown as Record<string, unknown>;
@@ -243,15 +270,17 @@ describe("AccountingDocumentOperations.create", () => {
     expect((execution.duplicateCandidate as { direction?: string }).direction).toBe("C");
     // No pre-formatted warning-string field embedding a (possibly raw) journal title.
     expect("warnings" in execution).toBe(false);
+    void api;
   });
 
   it("rejects a digest mismatch BEFORE any mutation (snapshot binding)", async () => {
-    const { path, api, runtime, ops } = createSetup();
-    const outcome = await ops.create({ ...baseCreateInput(path, "0".repeat(64)), planHandle: mintDocHandle(runtime, "0".repeat(64)) });
+    const { path, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    const outcome = await ops.create({ ...baseCreateInput(path, "0".repeat(64)), planHandle: handle });
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.error.code).toBe("digest_mismatch");
-    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expectNoWrites(api);
   });
 
   it("requires a plan_handle for create — a create with no prepared handle is refused before any mutation", async () => {
@@ -260,8 +289,7 @@ describe("AccountingDocumentOperations.create", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.error.code).toBe("plan_handle_required");
-    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
-    expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
+    expectNoWrites(api);
   });
 
   it("requires a well-formed source_sha256", async () => {
@@ -272,22 +300,124 @@ describe("AccountingDocumentOperations.create", () => {
     expect(outcome.error.code).toBe("source_sha256_required");
   });
 
-  it("consumes the reviewed plan once — a replayed plan handle fails", async () => {
-    const { path, sha256, runtime, ops } = createSetup();
-    // Mint a plan under the accounting-document domain, then consume it via create.
-    const handle = runtime.planStore.issue(ACCOUNTING_DOCUMENT_PLAN_DOMAIN, {
-      normalizedArgs: { source_sha256: sha256 },
-      sourceIdentities: [],
-      liveSnapshot: {},
-      commands: [{ id: "c", category: "purchase_invoice_create" }],
-      counts: {}, totals: {}, exclusions: [], reviews: [], privatePayload: {},
-    });
+  it("consumes the reviewed plan once — a replayed plan handle fails with ZERO further writes", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
     const first = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
     expect(first.ok).toBe(true);
+    (api.purchaseInvoices.createAndSetTotals as unknown as { mockClear(): void }).mockClear();
+    (api.purchaseInvoices.uploadDocument as unknown as { mockClear(): void }).mockClear();
     const replay = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
     expect(replay.ok).toBe(false);
     if (replay.ok) return;
     expect(replay.error.code).toMatch(/plan_handle_consumed|plan_handle_invalid/);
+    expectNoWrites(api);
+  });
+
+  // ——— P0-1 drift matrix: every material field is bound; a change between the
+  // reviewed prepare and create rejects as plan_drift with ZERO API writes. ———
+
+  it("prepare file A + execute file B (B's digest, A's handle) → plan_drift, zero mutation", async () => {
+    const { path: pathA, api, ops } = createSetup();
+    const { path: pathB, sha256: shaB } = writeTempPdf("%PDF-1.4 DIFFERENT bytes");
+    const handle = await prepareBookingHandle(ops, pathA);
+    const outcome = await ops.create({ ...baseCreateInput(pathB, shaB), planHandle: handle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expectNoWrites(api);
+  });
+
+  const driftCases: ReadonlyArray<[string, Record<string, unknown>]> = [
+    ["supplier_client_id", { supplierClientId: 9999 }],
+    ["invoice_number", { invoiceNumber: "INV-EVIL" }],
+    ["invoice_date", { invoiceDate: "2026-06-20" }],
+    ["journal_date", { journalDate: "2026-06-20" }],
+    ["item account", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5900, total_net_price: 10 }] }],
+    ["item amount", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 999 }] }],
+    ["vat_price", { vatPrice: 0 }],
+    ["gross_price", { grossPrice: 999 }],
+    ["base_gross_price", { baseGrossPrice: 55 }],
+    ["liability account", { liabilityAccountsId: 2210 }],
+    ["block_on_duplicate", { blockOnDuplicate: true }],
+    ["term_days", { termDays: 30 }],
+    ["notes", { notes: "changed note" }],
+    ["ref_number", { refNumber: "REF-CHANGED" }],
+  ];
+  for (const [label, mutation] of driftCases) {
+    it(`blocks a changed ${label} between prepare and create as plan_drift with zero mutation`, async () => {
+      const { path, sha256, api, ops } = createSetup();
+      const handle = await prepareBookingHandle(ops, path);
+      const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle, ...mutation });
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.error.code).toBe("plan_drift");
+      expectNoWrites(api);
+    });
+  }
+
+  it("does NOT drift when a default is omitted on one side and explicit on the other (canonical default normalization)", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    // Prepare with defaults OMITTED; create with the SAME defaults EXPLICIT.
+    const handle = await prepareBookingHandle(ops, path);
+    const outcome = await ops.create({
+      ...baseCreateInput(path, sha256),
+      planHandle: handle,
+      currency: "EUR",
+      liabilityAccountsId: 2310,
+      blockOnDuplicate: false,
+    });
+    expect(outcome.ok).toBe(true);
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a wrong-domain handle (the confirm domain cannot authorize a create) with zero mutation", async () => {
+    const { path, sha256, api, runtime, ops } = createSetup();
+    const wrongDomain = runtime.planStore.issue(ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN, {
+      normalizedArgs: { invoice_id: 1 },
+      sourceIdentities: [], liveSnapshot: {},
+      commands: [{ id: "c", category: "purchase_invoice_confirm" }],
+      counts: {}, totals: {}, exclusions: [], reviews: [], privatePayload: {},
+    });
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: wrongDomain });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_domain_mismatch");
+    expectNoWrites(api);
+  });
+
+  it("rejects an out-of-scope handle (connection switch after prepare) with zero mutation", async () => {
+    const { path, sha256, api, runtime, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    runtime.setScope({ connectionIndex: 1, connectionGeneration: 1, connectionName: "other-connection" });
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_scope_mismatch");
+    expectNoWrites(api);
+  });
+
+  it("rejects an expired handle with zero mutation", async () => {
+    const { path, sha256, api, runtime, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    runtime.advanceTime(601_000);
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_handle_expired");
+    expectNoWrites(api);
+  });
+
+  it("drifts when the live supplier canonical name changed after prepare (fresh re-derivation, not caller echo)", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    (api.clients.get as unknown as { mockResolvedValue(v: unknown): void })
+      .mockResolvedValue(fixtureClient({ id: 4242, name: "RENAMED OÜ", code: REG_CODE, is_supplier: true }));
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expectNoWrites(api);
   });
 });
 

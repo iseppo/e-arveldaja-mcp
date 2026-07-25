@@ -23,6 +23,17 @@ function buildPublicToolServer(server: McpServer, profile: ToolProfile): McpServ
         const destructive = config.annotations?.destructiveHint === true;
         const catalogDestructive = meta.risk === "destructive" || meta.risk === "send";
         if (destructive !== catalogDestructive) throw new Error(`Tool ${name} destructive-risk metadata mismatch`);
+        // A read-only claim must never disagree with the catalog in the direction
+        // that hides a mutation: a mutating façade catalogued as read/preview (or a
+        // tool annotated readOnly whose catalog risk mutates) would let an approval
+        // policy silently auto-approve a real ledger write. read/preview are the
+        // read-only-hinted risks; mutate, destructive and send are not. An omitted
+        // readOnlyHint makes no claim, so — like the destructive check above — it is
+        // tolerated; only an explicit annotation that contradicts the catalog throws.
+        const catalogReadOnly = meta.risk === "read" || meta.risk === "preview";
+        const declaredReadOnly = config.annotations?.readOnlyHint;
+        if (declaredReadOnly === true && !catalogReadOnly) throw new Error(`Tool ${name} read-only-risk metadata mismatch`);
+        if (declaredReadOnly === false && catalogReadOnly) throw new Error(`Tool ${name} read-only-risk metadata mismatch`);
         if (!isToolVisibleForProfile(name, profile)) return Object.freeze({ enabled: false, disable() {}, enable() {}, remove() {}, update() {} });
         if (state.publicNames.has(name)) throw new Error(`Duplicate public MCP tool name: ${name}`);
         state.publicNames.add(name);

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
+import { isStrictDate } from "../strict-date.js";
 import { batch } from "../annotations.js";
 import { toMcpJson } from "../mcp-json.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
@@ -125,8 +126,8 @@ export function registerWiseImportTools(
         "Execution-plan handle returned by the reviewed dry run. Required for execute=true in addition to approved_command_digest; the digest alone cannot execute."
       ),
       execute: z.boolean().optional().describe("Actually create transactions (default false = dry run)"),
-      date_from: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
-      date_to: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
+      date_from: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").optional().describe("Only import transactions from this date (YYYY-MM-DD)"),
+      date_to: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").optional().describe("Only import transactions up to this date (YYYY-MM-DD)"),
       skip_jar_transfers: z.boolean().optional().describe("Skip Jar (savings pot) transfers — internal movements within Wise (default true)"),
     },
     { ...batch, openWorldHint: true, title: "Import Wise Transactions" },

@@ -37,18 +37,35 @@ describe("workflow_action_v2", () => {
     expect(v2).not.toHaveProperty("recommended_next_action");
   });
 
-  it("issues a workflow_handle that resolves back through the store", () => {
+  it("issues a workflow_handle that resolves back through the store when there is pageable state", () => {
     const runtime = guidedRuntime();
     const envelope = runWithToolProfile("guided", () => buildWorkflowEnvelope({
       summary: "Prepared inbox.",
       recommended_step: { tool: "process_camt053", suggested_args: { mode: "parse", file_path: "/tmp/s.xml" } },
     }));
-    const v2 = runWithToolProfile("guided", () => buildWorkflowActionV2(envelope, runtime.workflowStateStore, { workflow: "accounting_inbox" }));
+    const items = [createPublicWorkflowStateDetail({ item_id: "1", label: "row one" })];
+    const v2 = runWithToolProfile("guided", () => buildWorkflowActionV2(envelope, runtime.workflowStateStore, { workflow: "accounting_inbox", items }));
 
     expect(v2.workflow_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    const stored = runtime.workflowStateStore.inspect(v2.workflow_handle);
+    const stored = runtime.workflowStateStore.inspect(v2.workflow_handle!);
     expect(stored.workflow).toBe("accounting_inbox");
     expect(stored.status).toBe("in_progress");
+  });
+
+  it("mints no workflow_handle and takes no store slot for an item-less response (§12)", () => {
+    const runtime = guidedRuntime();
+    const envelope = runWithToolProfile("guided", () => buildWorkflowEnvelope({
+      summary: "Prepared inbox.",
+      recommended_step: { tool: "process_camt053", suggested_args: { mode: "parse", file_path: "/tmp/s.xml" } },
+    }));
+    // Far more item-less responses than the 128-slot store capacity: none may
+    // consume a slot, so none can trigger workflow_state_capacity_exceeded.
+    for (let i = 0; i < 129; i += 1) {
+      const v2 = runWithToolProfile("guided", () => buildWorkflowActionV2(envelope, runtime.workflowStateStore, { workflow: "accounting_inbox" }));
+      expect(v2.workflow_handle).toBeUndefined();
+      expect(v2.page).toBeUndefined();
+    }
+    expect(runtime.workflowStateStore.activeCount).toBe(0);
   });
 
   it("preserves blockers from needs_review", () => {
@@ -108,7 +125,8 @@ describe("workflow_action_v2", () => {
     expect(v2.blockers).toEqual([]);
     expect(v2.message).toBe("");
     expect(v2.alternative_action_count).toBe(0);
-    expect(v2.workflow_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // A partial envelope carries no pageable items, so it mints no handle (§12).
+    expect(v2.workflow_handle).toBeUndefined();
   });
 
   it("keeps a fail-closed advanced action fail-closed: next_action is the setup fallback", () => {

@@ -78,9 +78,14 @@ export interface ApplyClassificationsFullInput {
 export function renderApplyClassificationsFull(input: ApplyClassificationsFullInput): Record<string, unknown> {
   const { result, classificationsJson } = input;
   const { mode, dryRun, summary, results } = result;
+  // P0-2: the dry-run's next step is execute_apply, which REQUIRES the
+  // consume-once plan_handle minted here. Echo it into the suggested_args so the
+  // reviewed → execute hop carries the binding (a bare classifications_json can
+  // no longer authorize a mutation).
   const workflowArgs = {
     classifications_json: classificationsJson,
-    execute: false,
+    execute: true,
+    ...(result.planHandle !== undefined ? { plan_handle: result.planHandle } : {}),
   };
   const workflowSummary = dryRun
     ? `Classification dry run would create ${summary.dry_run_preview} purchase invoice group(s), skip ${summary.skipped}, and fail ${summary.failed}.`
@@ -101,6 +106,7 @@ export function renderApplyClassificationsFull(input: ApplyClassificationsFullIn
     mode,
     dry_run: dryRun,
     summary,
+    ...(result.planHandle !== undefined ? { plan_handle: result.planHandle } : {}),
     workflow,
     results,
     execution: buildBatchExecutionContract({
@@ -301,6 +307,9 @@ export function renderApplyClassificationsCompact(
         args: {
           mode: "execute_apply",
           classifications_json: input.classificationsJson,
+          // P0-2: the consume-once handle bound to this reviewed effect; without
+          // it execute_apply fails closed (plan_handle_required).
+          ...(result.planHandle !== undefined ? { plan_handle: result.planHandle } : {}),
         },
         approval_required: true,
       }

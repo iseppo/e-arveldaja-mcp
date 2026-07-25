@@ -2,7 +2,9 @@ import type { OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import { isCompanyVatRegistered, safeJsonParse, tagNotes } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
-import type { PurchaseInvoiceItem, Transaction } from "../types/api.js";
+import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
+import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
+import type { Client, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
@@ -61,8 +63,19 @@ import {
 // surfaced as mutation_indeterminate and NEVER retried; a 404 skips while a
 // transient 503/timeout/network is rethrown → group failed.
 
+// P0-2: the execution-plan domain that binds a reviewed dry_run_apply preview to
+// its execute_apply. A consumed handle is scope-bound (connection/company/profile)
+// and consume-once; the fingerprint below proves the FRESH executable effect
+// (which transactions, in which category/apply_mode, resolved to which supplier +
+// booking) equals the reviewed one before the first API write.
+export const BANK_CLASSIFICATION_PLAN_DOMAIN = "bank_classification";
+
 function ok<T>(value: T): OperationOutcome<T> {
   return { ok: true, value, warnings: [], blockers: [] };
+}
+
+function fail<T>(code: string, message: string): OperationOutcome<T> {
+  return { ok: false, error: { code, message, retry: "never" }, blockers: [] };
 }
 
 /** Injected at the MCP boundary so this module never imports wrapUntrustedOcr.
@@ -90,9 +103,15 @@ export interface UnmatchedAnalysisResult {
 
 export interface ApplyClassificationsInput {
   /** The pass-through frozen projection — a string or already-parsed object,
-   * exactly as `apply_transaction_classifications` receives it. */
+   * exactly as `apply_transaction_classifications` receives it. It is a
+   * SELECTION/proposal only: at execute the server re-derives the canonical
+   * effect and rejects any material difference vs the reviewed plan as drift. */
   classificationsJson: unknown;
   execute?: boolean;
+  /** REQUIRED for execute (execute===true). The consume-once handle minted by
+   * the matching dry_run_apply. A missing/replayed/out-of-scope/expired handle
+   * fails closed BEFORE any API write. Ignored on dry run. */
+  planHandle?: string;
 }
 
 export interface ApplyClassificationGroupResult {
@@ -111,6 +130,9 @@ export interface ApplyClassificationsResult {
   dryRun: boolean;
   summary: { applied: number; skipped: number; dry_run_preview: number; failed: number };
   results: ApplyClassificationGroupResult[];
+  /** Minted on dry run only: the consume-once handle the caller must present to
+   * execute_apply. Undefined after an execute. */
+  planHandle?: string;
 }
 
 export interface ClassificationOperations {
@@ -118,13 +140,194 @@ export interface ClassificationOperations {
   applyClassifications(input: ApplyClassificationsInput): Promise<OperationOutcome<ApplyClassificationsResult>>;
 }
 
+/** The outcome of the single per-transaction fetch done in the fingerprint pass,
+ * reused by the mutation loop so a bookable transaction is fetched exactly once
+ * before the post-create freshness re-read. */
+type GatherOutcome =
+  | { readonly kind: "ok"; readonly transaction: Transaction }
+  | { readonly kind: "gone" }
+  | { readonly kind: "deleted" }
+  | { readonly kind: "confirmed" }
+  | { readonly kind: "non_project"; readonly status?: string }
+  | { readonly kind: "error"; readonly error: unknown };
+
 class ClassificationOperationsImpl implements ClassificationOperations {
   constructor(
     private readonly api: ApiContext,
     private readonly runtimeSafetyContext: RuntimeSafetyContext,
     private readonly wrapUntrustedText: WrapUntrustedText,
-  ) {
-    void this.runtimeSafetyContext;
+  ) {}
+
+  /**
+   * P0-2 drift fingerprint. Re-derives — READ-ONLY (execute=false, no supplier
+   * creation, no invoice write) — the exact canonical effect that execute_apply
+   * would produce from the SAME caller-supplied groups + the current live state,
+   * and returns it as a stable canonical record. Bound into the plan at
+   * dry_run_apply and recomputed fresh at execute_apply; any material difference
+   * (added/removed transaction, changed category/apply_mode, a transaction whose
+   * status/amount/currency/date/dimension/client moved, a re-resolved supplier or
+   * booking article/account/dimension/VAT/total) makes canonicalPlanJson differ
+   * and is rejected as plan_drift before the first API write. The caller JSON is
+   * a SELECTION only — it can match the reviewed plan or drift, never re-authorize
+   * a different effect. Both passes call resolveSupplierFromTransaction /
+   * resolveClassificationSuggestion with execute=false so the read-only supplier
+   * identity and server-resolved booking agree across preview and execute.
+   */
+  private async computeApplyFingerprint(
+    groups: ClassifiedTransactionGroupResult[],
+    context: { clients: Client[]; purchaseInvoices: unknown[]; purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>; accounts: unknown[]; isVatRegistered: boolean },
+    cache: Map<number, GatherOutcome>,
+  ): Promise<PlanRecord> {
+    const api = this.api;
+    const groupFingerprints: PlanData[] = [];
+    for (let index = 0; index < groups.length; index++) {
+      const group = groups[index]!;
+      const bookable = group.apply_mode === "purchase_invoice"
+        && shouldProcessExpenseAsPurchaseInvoice(group.category)
+        && group.suggested_booking?.purchase_article_id !== undefined;
+      const txFingerprints: PlanData[] = [];
+      for (const stub of group.transactions) {
+        if (stub.id === undefined) {
+          txFingerprints.push({ id: null, present: false });
+          continue;
+        }
+        // Fetch each transaction exactly ONCE here (the read-only pass); the
+        // mutation loop below reuses this cache instead of re-fetching, so
+        // execute's api.transactions.get count stays the same as before the plan
+        // gate (this pass + the post-create freshness re-read).
+        let transaction: Transaction | undefined;
+        try {
+          transaction = await api.transactions.get(stub.id);
+        } catch (error) {
+          // A confirmed 404 → the transaction is genuinely gone (bind absence so
+          // it drifts from a plan that reviewed it as present). A transient
+          // 503/timeout is NOT swallowed as "gone": it is captured and re-thrown
+          // in the mutation loop so the affected GROUP fails (never a benign
+          // skip), while the fingerprint marks it as an unresolved read so preview
+          // and execute agree deterministically.
+          if (error instanceof HttpError && error.status === 404) {
+            cache.set(stub.id, { kind: "gone" });
+            txFingerprints.push({ id: stub.id, present: false });
+            continue;
+          }
+          cache.set(stub.id, { kind: "error", error });
+          txFingerprints.push({ id: stub.id, present: false, read_error: true });
+          continue;
+        }
+        if (!transaction || transaction.is_deleted) {
+          cache.set(stub.id, { kind: "deleted" });
+          txFingerprints.push({ id: stub.id, present: false, deleted: transaction?.is_deleted === true });
+          continue;
+        }
+        // Fresh live-state binding — a change to any of these between preview and
+        // execute drifts the whole command (invariant: the reviewed aggregate
+        // effect cannot silently change).
+        const liveState: PlanData = {
+          id: transaction.id ?? stub.id,
+          status: transaction.status ?? null,
+          amount: transaction.amount ?? null,
+          base_amount: transaction.base_amount ?? null,
+          currency: (transaction.cl_currencies_id ?? "EUR").toUpperCase(),
+          currency_rate: transaction.currency_rate ?? null,
+          date: transaction.date ?? null,
+          accounts_dimensions_id: transaction.accounts_dimensions_id ?? null,
+          clients_id: transaction.clients_id ?? null,
+        };
+        if (transaction.status === "CONFIRMED") {
+          cache.set(stub.id, { kind: "confirmed" });
+          txFingerprints.push({ ...(liveState as Record<string, PlanData>), booking: null });
+          continue;
+        }
+        if (transaction.status !== "PROJECT") {
+          cache.set(stub.id, { kind: "non_project", status: transaction.status ?? undefined });
+          txFingerprints.push({ ...(liveState as Record<string, PlanData>), booking: null });
+          continue;
+        }
+        cache.set(stub.id, { kind: "ok", transaction });
+        if (!bookable) {
+          txFingerprints.push({ ...(liveState as Record<string, PlanData>), booking: null });
+          continue;
+        }
+        // Server-resolved supplier IDENTITY (read-only — no creation) and booking
+        // projection, mirroring the mutation loop's resolution exactly.
+        const supplierResolution = await resolveSupplierFromTransaction(api, context.clients, transaction, false, group.category);
+        const supplier = supplierResolution.client;
+        const grossAmount = roundMoney(Math.abs(transaction.amount));
+        const transactionGroup: TransactionGroup = {
+          normalized_counterparty: canonicalBusinessText(group.normalized_counterparty),
+          display_counterparty: canonicalBusinessText(group.display_counterparty),
+          transactions: [transaction],
+        };
+        const resolved = await resolveClassificationSuggestion(api, {
+          purchaseInvoices: context.purchaseInvoices,
+          purchaseArticlesWithVat: context.purchaseArticlesWithVat,
+          accounts: context.accounts,
+        } as never, context.clients, transactionGroup, {
+          category: group.category,
+          apply_mode: group.apply_mode,
+          recurring: group.recurring,
+          similar_amounts: group.similar_amounts,
+          reasons: group.reasons,
+        });
+        if (resolved.applyMode !== "purchase_invoice") {
+          txFingerprints.push({ ...(liveState as Record<string, PlanData>), booking: null, apply_mode_resolved: resolved.applyMode });
+          continue;
+        }
+        const article = context.purchaseArticlesWithVat.find(item => item.id === resolved.suggestion.purchase_article_id);
+        const vatConfig = getBookingSuggestionVatConfig({
+          item: {
+            vat_rate_dropdown: resolved.suggestion.vat_rate_dropdown,
+            reversed_vat_id: resolved.suggestion.reversed_vat_id,
+          } as PurchaseInvoiceItem,
+        }) ?? getAutoBookedVatConfig();
+        const netAmount = deriveAutoBookedNetAmount(grossAmount, vatConfig);
+        const purchaseItem = applyPurchaseVatDefaults(
+          context.purchaseArticlesWithVat,
+          {
+            cl_purchase_articles_id: resolved.suggestion.purchase_article_id,
+            purchase_accounts_id: resolved.suggestion.purchase_account_id ?? article?.accounts_id,
+            purchase_accounts_dimensions_id: resolved.suggestion.purchase_account_dimensions_id,
+            custom_title: transaction.description ?? `Auto-booked ${group.category}`,
+            unit_net_price: netAmount,
+            total_net_price: netAmount,
+            amount: 1,
+            ...vatConfig,
+          },
+          context.isVatRegistered,
+        );
+        txFingerprints.push({
+          ...(liveState as Record<string, PlanData>),
+          booking: stripUndefinedDeep({
+            supplier_client_id: supplier?.id ?? null,
+            supplier_name: supplier?.name !== undefined ? canonicalBusinessText(supplier.name) : null,
+            invoice_number: `AUTO-TX-${transaction.id}`,
+            purchase_article_id: resolved.suggestion.purchase_article_id ?? null,
+            purchase_account_id: purchaseItem.purchase_accounts_id ?? null,
+            purchase_account_dimensions_id: purchaseItem.purchase_accounts_dimensions_id ?? null,
+            liability_account_id: resolved.suggestion.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+            vat_rate_dropdown: purchaseItem.vat_rate_dropdown ?? null,
+            vat_accounts_id: purchaseItem.vat_accounts_id ?? null,
+            cl_vat_articles_id: purchaseItem.cl_vat_articles_id ?? null,
+            reversed_vat_id: purchaseItem.reversed_vat_id ?? null,
+            net_amount: netAmount,
+            gross_amount: grossAmount,
+            vat_price: deriveAutoBookedVatPrice(grossAmount, vatConfig),
+          }),
+        });
+      }
+      groupFingerprints.push({
+        category: group.category,
+        apply_mode: group.apply_mode,
+        bookable,
+        transactions: txFingerprints,
+      });
+    }
+    return stripUndefinedDeep({
+      schema: "bank_classification_apply_v1",
+      stop_policy: "stop_group_on_drift",
+      commands: ["purchase_invoice_create", "purchase_invoice_confirm", "transaction_confirm_link"],
+      groups: groupFingerprints,
+    }) as PlanRecord;
   }
 
   async analyzeUnmatched(input: UnmatchedAnalysisInput): Promise<OperationOutcome<UnmatchedAnalysisResult>> {
@@ -238,6 +441,37 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       api.readonly.getAccounts(),
     ]);
     const isVatRegistered = await isCompanyVatRegistered(api);
+    const fingerprintContext = { clients, purchaseInvoices, purchaseArticlesWithVat, accounts, isVatRegistered };
+
+    // Single read-only pass: fetch every transaction ONCE, build the canonical
+    // fingerprint, and cache each fetch so the mutation loop reuses it (no
+    // re-fetch). Both dry_run_apply (mint the plan from this) and execute_apply
+    // (drift-check against the reviewed plan) share this exact computation.
+    const gatherCache = new Map<number, GatherOutcome>();
+    const fingerprint = await this.computeApplyFingerprint(groups, fingerprintContext, gatherCache);
+
+    // P0-2 execute gate: consume the reviewed plan (consume-once, scope-bound)
+    // and compare the FRESH canonical effect. Any material difference vs the
+    // reviewed plan — including a caller who edited classifications_json, or live
+    // state that moved since the preview — is rejected as plan_drift with ZERO
+    // API writes, BEFORE the first mutation. The caller's classifications_json is
+    // never the executable authority; it can only match the plan or drift.
+    if (!dryRun) {
+      if (input.planHandle === undefined) {
+        return fail("plan_handle_required", "execute_apply requires the plan_handle returned by dry_run_apply.");
+      }
+      let storedPlan;
+      try {
+        storedPlan = this.runtimeSafetyContext.planStore.consume(input.planHandle, BANK_CLASSIFICATION_PLAN_DOMAIN);
+      } catch (error) {
+        const code = (error as { code?: string }).code ?? "plan_handle_invalid";
+        return fail(code, "The reviewed classification plan could not be consumed.");
+      }
+      if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(fingerprint)) {
+        return fail("plan_drift", "The classifications no longer match the reviewed dry_run_apply plan (transactions, category, apply_mode, supplier, booking, or live transaction state changed). Re-run dry_run_apply and review again.");
+      }
+    }
+
     const results: ApplyClassificationGroupResult[] = [];
 
     for (let index = 0; index < groups.length; index++) {
@@ -258,33 +492,30 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             notes.push("Skipped a transaction without ID.");
             continue;
           }
-
-          try {
-            const transaction = await api.transactions.get(transactionStub.id);
-            if (transaction.is_deleted) {
-              notes.push(`Transaction ${transactionStub.id} was deleted since classification; skipped.`);
-              continue;
-            }
-            if (transaction.status === "CONFIRMED") {
-              notes.push(`Transaction ${transactionStub.id} was confirmed since classification; skipped.`);
-              continue;
-            }
-            if (transaction.status !== "PROJECT") {
-              notes.push(`Transaction ${transactionStub.id} is no longer bookable (status ${transaction.status ?? "UNKNOWN"}); skipped.`);
-              continue;
-            }
-            freshTransactions.push(transaction);
-          } catch (error) {
-            // Only a confirmed 404 means the transaction is genuinely gone.
-            // A transient 503/timeout/network error must NOT be swallowed as a
-            // benign skip — rethrow so it surfaces as a real group failure and
-            // is counted, instead of silently dropping a valid PROJECT tx.
-            if (error instanceof HttpError && error.status === 404) {
-              notes.push(`Transaction ${transactionStub.id} no longer exists.`);
-            } else {
-              throw error;
-            }
+          // Reuse the fingerprint pass's single fetch (no re-fetch here). The
+          // outcome reproduces the exact skip notes; a captured non-404 read error
+          // is re-thrown so the affected GROUP fails (never a benign skip).
+          const outcome = gatherCache.get(transactionStub.id);
+          if (outcome === undefined || outcome.kind === "gone") {
+            notes.push(`Transaction ${transactionStub.id} no longer exists.`);
+            continue;
           }
+          if (outcome.kind === "deleted") {
+            notes.push(`Transaction ${transactionStub.id} was deleted since classification; skipped.`);
+            continue;
+          }
+          if (outcome.kind === "confirmed") {
+            notes.push(`Transaction ${transactionStub.id} was confirmed since classification; skipped.`);
+            continue;
+          }
+          if (outcome.kind === "non_project") {
+            notes.push(`Transaction ${transactionStub.id} is no longer bookable (status ${outcome.status ?? "UNKNOWN"}); skipped.`);
+            continue;
+          }
+          if (outcome.kind === "error") {
+            throw outcome.error;
+          }
+          freshTransactions.push(outcome.transaction);
         }
 
         if (freshTransactions.length === 0) {
@@ -608,7 +839,32 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     };
     const mode = dryRun ? "DRY_RUN" : "EXECUTED";
 
-    return ok({ mode, dryRun, summary, results });
+    // P0-2 dry_run_apply: mint the consume-once handle bound to the FRESH
+    // canonical effect. execute_apply must present it and recompute an identical
+    // fingerprint. The preview `results` above are the operator's review surface;
+    // the plan fingerprint is the machine-checked binding of that same effect.
+    let planHandle: string | undefined;
+    if (dryRun) {
+      const planInput: ExecutionPlanInput = {
+        normalizedArgs: fingerprint,
+        sourceIdentities: [],
+        liveSnapshot: {
+          groups: groups.length,
+          bookable_groups: (fingerprint.groups as PlanData[] | undefined)?.filter(
+            group => typeof group === "object" && group !== null && !Array.isArray(group) && (group as Record<string, PlanData>).bookable === true,
+          ).length ?? 0,
+        },
+        commands: [{ id: "bank-classification-apply", category: "bank_classification_apply", reviewProjection: { groups: groups.length } }],
+        counts: { groups: groups.length },
+        totals: {},
+        exclusions: [],
+        reviews: [],
+        privatePayload: { schema: "bank_classification_apply_v1" },
+      };
+      planHandle = this.runtimeSafetyContext.planStore.issue(BANK_CLASSIFICATION_PLAN_DOMAIN, planInput);
+    }
+
+    return ok({ mode, dryRun, summary, results, ...(planHandle !== undefined ? { planHandle } : {}) });
   }
 }
 

@@ -33,6 +33,13 @@ export interface RuntimeSafetyContext {
   readonly fileReferenceStore: FileReferenceStore;
   readonly operationResultStore: OperationResultStore;
   readonly workflowStateStore: WorkflowStateStore;
+  // Single shared signer for operation-result-page cursors. Every entrypoint
+  // that pages an operation result — the public get_operation_result_page tool
+  // and each guided façade's mode='show_details' path — MUST sign with this one
+  // secret, so a cursor issued via one entrypoint stays valid at the other
+  // (P3 §14.4). Minting a fresh per-registration secret split the same operation
+  // handle across incompatible cursor spaces.
+  readonly operationResultPageCursorSecret: Uint8Array;
   getActiveScope(): RuntimeSafetyScope;
 }
 
@@ -55,18 +62,20 @@ export function assertRuntimeSafetyContext(value: unknown): asserts value is Run
     throw new Error("A valid runtime safety context is required.");
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  const required = ["serverInstanceId", "planStore", "fileReferenceStore", "operationResultStore", "workflowStateStore", "getActiveScope"] as const;
+  const required = ["serverInstanceId", "planStore", "fileReferenceStore", "operationResultStore", "workflowStateStore", "operationResultPageCursorSecret", "getActiveScope"] as const;
   if (required.some(key => {
     const descriptor = descriptors[key];
     return !descriptor || !("value" in descriptor) || !descriptor.enumerable;
   })) {
     throw new Error("A valid runtime safety context is required.");
   }
+  const cursorSecret = descriptors.operationResultPageCursorSecret!.value;
   if (typeof descriptors.serverInstanceId!.value !== "string" ||
     !(descriptors.planStore!.value instanceof ExecutionPlanStore) ||
     !(descriptors.fileReferenceStore!.value instanceof FileReferenceStore) ||
     !(descriptors.operationResultStore!.value instanceof OperationResultStore) ||
     !(descriptors.workflowStateStore!.value instanceof WorkflowStateStore) ||
+    !(cursorSecret instanceof Uint8Array) || cursorSecret.byteLength !== 32 ||
     typeof descriptors.getActiveScope!.value !== "function") {
     throw new Error("A valid runtime safety context is required.");
   }
@@ -219,5 +228,6 @@ export function createRuntimeSafetyContext(
     ...options.workflowStateStore,
     getActiveScope,
   });
-  return Object.freeze({ serverInstanceId, planStore, fileReferenceStore, operationResultStore, workflowStateStore, getActiveScope });
+  const operationResultPageCursorSecret = randomBytes(32);
+  return Object.freeze({ serverInstanceId, planStore, fileReferenceStore, operationResultStore, workflowStateStore, operationResultPageCursorSecret, getActiveScope });
 }

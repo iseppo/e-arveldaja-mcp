@@ -98,6 +98,25 @@ describe("execution plan page tool", () => {
     runtime.planStore.consume(handle, "test");
     expect((await handler({ plan_handle: handle } as any)).isError).toBe(true);
   });
+  it("enforces the hard budget on the fixed standard/full page instead of emitting an over-budget response (§11)", async () => {
+    const runtime = createTestRuntimeSafetyContext();
+    // 50 commands whose combined review projections exceed the 32 KiB hard
+    // budget. The standard/full pager is fixed-stride (50 per page) and cannot
+    // shrink, so it must surface a structured response_budget_exceeded error.
+    const base = plan(50);
+    const handle = runtime.planStore.issue("test", {
+      ...base,
+      commands: base.commands.map((command, i) => ({ ...command, reviewProjection: { i, text: "x".repeat(1_000) } })),
+    });
+    const handler = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET });
+    const result = await handler({ plan_handle: handle });
+    expect(result.isError).toBe(true);
+    const decoded = parseMcpResponse(result.content[0]!.text) as any;
+    expect(decoded.error.code).toBe("response_budget_exceeded");
+    // The plan is untouched — a budget rejection never consumes it.
+    expect(runtime.planStore.consume(handle, "test").commands).toHaveLength(50);
+  });
+
   it("returns deterministic 50/50/1 pages with totals on every page", async () => {
     const runtime = createTestRuntimeSafetyContext();
     const handle = runtime.planStore.issue("camt_import", plan(101));

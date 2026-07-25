@@ -16,8 +16,13 @@ import { roundMoney } from "../money.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import { jsonObjectInput, parseJsonObject, type ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
-import { bookOwnerExpenseReimbursement, type OwnerExpenseReimbursementParams } from "./estonian-tax.js";
-import { canonicalPlanJson } from "./camt-plan.js";
+import {
+  bookOwnerExpenseFromProjection,
+  computeOwnerExpenseJournalProjection,
+  type OwnerExpenseJournalProjection,
+  type OwnerExpenseReimbursementParams,
+} from "./estonian-tax.js";
+import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
 import { camtDuplicateStructuredCorroborators, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
 import { createAccountingOperations } from "../accounting-operations.js";
@@ -2010,24 +2015,49 @@ function extractOwnerExpenseBookingParams(reviewItem: Record<string, unknown>): 
   };
 }
 
-// The drift-binding fingerprint. Free text is desandboxed so prepare and execute
-// derive the SAME canonical args from the SAME reviewed item; any change to the
-// booking params between prepare and execute is caught as plan_drift.
-function ownerExpenseNormalizedArgs(params: OwnerExpenseReimbursementParams): PlanRecord {
+// The drift-binding fingerprint IS the resolved effective journal projection —
+// post-desandbox, post-default, post-validation: the ACTUAL write model, not the
+// raw caller params. Prepare binds exactly this; execute re-derives it from fresh
+// live state and byte-compares. So a changed VAT deduction mode, payable account,
+// VAT account, or any posting between prepare and execute surfaces as plan_drift
+// with zero mutation, and the operator approves the very journal that gets booked.
+function ownerExpenseProjectionFingerprint(projection: OwnerExpenseJournalProjection): PlanRecord {
+  return stripUndefinedDeep({ action: "owner_expense_reimbursement", ...projection }) as PlanRecord;
+}
+
+// The whole journal, for the approval card. Every material value is shown —
+// journal date, document number, currency, the resolved VAT deduction mode and
+// its deductible/non-deductible split, the VAT/expense/payable accounts, and the
+// full D/C posting list with each posting's purpose — so approval is informed.
+// Receipt/OCR-origin free text (description, document number) stays sandboxed on
+// output; the numeric ledger effect is trusted server-derived data.
+function ownerExpenseBookingPreview(projection: OwnerExpenseJournalProjection): Record<string, unknown> {
+  const p = projection;
   return {
-    action: "owner_expense_reimbursement",
-    owner_client_id: params.owner_client_id,
-    effective_date: params.effective_date,
-    description: desandboxText(params.description),
-    net_amount: params.net_amount,
-    vat_rate: params.vat_rate,
-    expense_account: params.expense_account,
-    ...(params.vat_amount !== undefined ? { vat_amount: params.vat_amount } : {}),
-    ...(params.vat_deduction_mode !== undefined ? { vat_deduction_mode: params.vat_deduction_mode } : {}),
-    ...(params.deductible_vat_amount !== undefined ? { deductible_vat_amount: params.deductible_vat_amount } : {}),
-    ...(params.vat_account !== undefined ? { vat_account: params.vat_account } : {}),
-    ...(params.payable_account !== undefined ? { payable_account: params.payable_account } : {}),
-    ...(params.document_number !== undefined ? { document_number: desandboxText(params.document_number) } : {}),
+    journal_date: p.journal_date,
+    document_number: p.document_number === null ? null : sandboxExternalText(p.document_number),
+    currency: p.currency,
+    owner_client_id: p.owner_client_id,
+    description: sandboxExternalText(p.title),
+    net_amount: p.net_amount,
+    vat_rate: p.vat_rate,
+    vat_amount: p.vat_amount,
+    vat_deduction_mode: p.vat_deduction_mode,
+    deductible_vat_amount: p.deductible_vat_amount,
+    non_deductible_vat_amount: p.non_deductible_vat_amount,
+    vat_account: p.vat_account,
+    expense_account: p.expense_account,
+    expense_debit_amount: p.expense_debit_amount,
+    payable_account: p.payable_account,
+    total: p.total,
+    vat_registered_company: p.vat_registered,
+    postings: p.postings.map(posting => ({
+      side: posting.side,
+      account_id: posting.account_id,
+      dimension_id: posting.dimension_id,
+      amount: posting.amount,
+      purpose: posting.purpose,
+    })),
   };
 }
 
@@ -2053,17 +2083,24 @@ function ownerExpenseNotServerExecutableResponse(): CallToolResult {
   };
 }
 
-// action='prepare_action' for a param-bearing owner-expense item: mint a
-// consume-once plan handle bound to the reviewed booking params and return the
-// projection. Books NOTHING. The plan handle is NOT approval.
-function buildOwnerExpenseContinuationPrepareResponse(
+// action='prepare_action' for a param-bearing owner-expense item: resolve the
+// FULL effective journal from live state, mint a consume-once plan handle bound
+// to that exact projection, and return the whole journal on the approval card.
+// Books NOTHING. The plan handle is NOT approval. If the projection cannot be
+// resolved (e.g. VAT deduction still needs confirmation, or an account is
+// invalid) NO handle is minted — the resolution error is returned instead, so a
+// handle only ever exists for a fully-resolved, reviewable journal.
+async function buildOwnerExpenseContinuationPrepareResponse(
   reviewItem: Record<string, unknown>,
   params: OwnerExpenseReimbursementParams,
+  api: ApiContext,
   runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig,
-): CallToolResult {
+): Promise<CallToolResult> {
+  const projected = await computeOwnerExpenseJournalProjection(api, params);
+  if (!projected.ok) return projected.error;
   const resolution = resolveReviewItemPlan(reviewItem, exposure);
-  const normalizedArgs = ownerExpenseNormalizedArgs(params);
+  const normalizedArgs = ownerExpenseProjectionFingerprint(projected.projection);
   const snapshot: PlanRecord = { ...normalizedArgs, destructive: false };
   const planInput: ExecutionPlanInput = {
     normalizedArgs,
@@ -2091,16 +2128,7 @@ function buildOwnerExpenseContinuationPrepareResponse(
           type: "owner_expense_reimbursement",
           server_executable: true,
           execute_via: { tool: "continue_accounting_workflow", action: "execute_review_action" },
-          booking_preview: {
-            owner_client_id: params.owner_client_id,
-            effective_date: params.effective_date,
-            // Description is receipt/OCR-origin: keep it sandbox-wrapped on output.
-            description: sandboxExternalText(desandboxText(params.description)),
-            net_amount: params.net_amount,
-            vat_rate: params.vat_rate,
-            expense_account: params.expense_account,
-            payable_account: params.payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT,
-          },
+          booking_preview: ownerExpenseBookingPreview(projected.projection),
           approval_required: true,
         },
         next_step_summary: "With approval, call continue_accounting_workflow action='execute_review_action' with this plan_handle to book the owner-paid expense as an owner-payable journal.",
@@ -2148,23 +2176,29 @@ async function buildOwnerExpenseExecuteResponse(
     const code = (error as { code?: string }).code ?? "plan_handle_invalid";
     return ownerExpenseError(code, "The reviewed owner-expense execution plan could not be consumed.");
   }
-  // 4. Drift-bind to the reviewed booking params. Rejected with ZERO side effect,
-  //    before any api call.
-  const boundArgs = ownerExpenseNormalizedArgs(params);
-  if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(boundArgs)) {
+  // 4. Re-derive the FULL effective journal from FRESH live state. A resolution
+  //    failure now (e.g. an account went invalid, VAT registration changed) fails
+  //    closed with its structured error — still ZERO side effect, before any write.
+  const freshProjection = await computeOwnerExpenseJournalProjection(api, params);
+  if (!freshProjection.ok) return freshProjection.error;
+  // 5. Drift-bind to the reviewed projection: the fresh effective journal must be
+  //    byte-identical to the one the operator approved. A changed VAT deduction
+  //    mode, payable/VAT account, posting, or amount re-derives differently and is
+  //    rejected here with ZERO side effect, before any api call.
+  const freshFingerprint = ownerExpenseProjectionFingerprint(freshProjection.projection);
+  if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(freshFingerprint)) {
     return ownerExpenseError(
       "plan_drift",
-      "The reviewed owner-expense plan no longer matches the requested booking params.",
+      "The reviewed owner-expense journal no longer matches the freshly resolved effective booking.",
     );
   }
-  // 5. Mutation: the shared booking core (same code path as the tool). The core
-  //    echoes expense.description as clean desandboxed text — correct for the
-  //    standalone tool (parity-pinned), but in this guided continuation that text
-  //    is receipt/OCR-origin. Pass the rewrapDescription hook so the core re-wraps
-  //    ONLY the echoed display description as untrusted text (the persisted journal
-  //    title + audit stay clean) — a data-level transform, so we never parse or
-  //    re-serialize a tool-shaped result (which would be internal MCP delegation).
-  return bookOwnerExpenseReimbursement(api, params, { rewrapDescription: sandboxExternalText });
+  // 6. Mutation: book the exact drift-matched projection (same code path as the
+  //    standalone tool). bookOwnerExpenseFromProjection echoes expense.description
+  //    as clean desandboxed text — correct for the standalone tool (parity-pinned),
+  //    but here that text is receipt/OCR-origin. Pass the rewrapDescription hook so
+  //    ONLY the echoed display description is re-wrapped as untrusted text (the
+  //    persisted journal title + audit stay clean).
+  return bookOwnerExpenseFromProjection(api, freshProjection.projection, { rewrapDescription: sandboxExternalText });
 }
 
 export function registerAccountingInboxTools(
@@ -2231,7 +2265,7 @@ export function registerAccountingInboxTools(
         if (isOwnerExpenseReviewItem(reviewItem)) {
           const ownerExpenseParams = extractOwnerExpenseBookingParams(reviewItem);
           if (ownerExpenseParams !== undefined) {
-            return buildOwnerExpenseContinuationPrepareResponse(reviewItem, ownerExpenseParams, runtimeSafetyContext, exposure);
+            return buildOwnerExpenseContinuationPrepareResponse(reviewItem, ownerExpenseParams, api, runtimeSafetyContext, exposure);
           }
         }
         const ruleOverride = rule_override_json

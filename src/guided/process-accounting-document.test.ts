@@ -65,14 +65,26 @@ beforeEach(() => mockedParseDocument.mockResolvedValue(docWithRegCode()));
 describe("process_accounting_document", () => {
   const supplier = () => fixtureClient({ id: 4242, name: "ACME OÜ", code: REG_CODE, is_supplier: true });
 
-  it("prepares a compact preview with a plan handle, no raw OCR, and no delegated tool names", async () => {
+  // The final reviewed booking fields shared by the booking-binding prepare and create.
+  const bookingArgs = () => ({
+    supplier_client_id: 4242,
+    invoice_number: "INV-1",
+    invoice_date: "2026-06-15",
+    journal_date: "2026-06-15",
+    term_days: 14,
+    items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10 }],
+    vat_price: 2,
+    gross_price: 12,
+  });
+
+  it("extraction-only prepare returns an 'extracted' preview WITHOUT a plan handle (P0-1: an OCR preview is not create approval), no raw OCR, no delegated tool names", async () => {
     const { path } = writeTempPdf();
     const { handler } = setup({ clientRows: [supplier()], purchaseInvoiceRows: [], clients: { get: vi.fn().mockResolvedValue(supplier()) } });
     const result = await handler({ mode: "prepare", file_path: path });
     expect(result.isError).toBeFalsy();
     const payload = parse(result);
-    expect(payload.summary.status).toBe("ready_for_approval");
-    expect(typeof payload.summary.plan_handle).toBe("string");
+    expect(payload.summary.status).toBe("extracted");
+    expect("plan_handle" in payload.summary).toBe(false);
     expect(payload.summary.supplier.status).toBe("resolved");
     expect(payload.summary.supplier.client_id).toBe(4242);
     const text = result.content[0]!.text;
@@ -82,6 +94,39 @@ describe("process_accounting_document", () => {
     expect(text).not.toContain("resolve_supplier");
     expect(text).not.toContain("create_purchase_invoice_from_pdf");
     expect(text).not.toContain("parseMcpResponse");
+  });
+
+  it("booking-binding prepare returns ready_for_approval with a plan handle and the bound booking_review model", async () => {
+    const { path } = writeTempPdf();
+    const { handler } = setup({
+      clientRows: [supplier()],
+      purchaseInvoiceRows: [],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+    });
+    const result = await handler({ mode: "prepare", file_path: path, ...bookingArgs() });
+    expect(result.isError).toBeFalsy();
+    const payload = parse(result);
+    expect(payload.summary.status).toBe("ready_for_approval");
+    expect(typeof payload.summary.plan_handle).toBe("string");
+    const review = payload.summary.booking_review;
+    expect(review).toBeDefined();
+    // The bound model shows the material values the create will execute.
+    expect(review.supplier_client_id).toBe(4242);
+    expect(review.invoice_number).toBe("INV-1");
+    expect(review.gross_price).toBe(12);
+    expect(review.currency).toBe("EUR");
+    expect(review.liability_accounts_id).toBe(2310);
+    expect(review.block_on_duplicate).toBe(false);
+    expect(Array.isArray(review.items)).toBe(true);
+  });
+
+  it("booking-binding prepare with an incomplete booking set is rejected with missing_required_fields", async () => {
+    const { path } = writeTempPdf();
+    const { handler } = setup({ clientRows: [supplier()], purchaseInvoiceRows: [], clients: { get: vi.fn().mockResolvedValue(supplier()) } });
+    const result = await handler({ mode: "prepare", file_path: path, items: bookingArgs().items });
+    expect(result.isError).toBe(true);
+    expect(parse(result).category).toBe("missing_required_fields");
   });
 
   it("accepts a receipt_input file_ref and rejects a camt_input ref (op-mismatch)", async () => {
@@ -137,7 +182,7 @@ describe("process_accounting_document", () => {
     expect(payload.summary.supplier.status).toBe("needs_input");
   });
 
-  it("runs the two-call prepare -> create path over the same source, then returns a SEPARATE confirm plan", async () => {
+  it("runs the extraction-prepare -> booking-prepare -> create path over the same source, then returns a SEPARATE confirm plan", async () => {
     const { path, sha256 } = writeTempPdf();
     const { handler, api } = setup({
       clientRows: [supplier()],
@@ -152,7 +197,9 @@ describe("process_accounting_document", () => {
         uploadDocument: vi.fn().mockResolvedValue({}),
       },
     });
-    const prepared = parse(await handler({ mode: "prepare", file_path: path }));
+    const extracted = parse(await handler({ mode: "prepare", file_path: path }));
+    expect(extracted.summary.status).toBe("extracted");
+    const prepared = parse(await handler({ mode: "prepare", file_path: path, ...bookingArgs() }));
     const planHandle = prepared.summary.plan_handle as string;
     expect(planHandle).toBeTruthy();
 
@@ -161,20 +208,43 @@ describe("process_accounting_document", () => {
       file_path: path,
       plan_handle: planHandle,
       source_sha256: sha256,
-      supplier_client_id: 4242,
-      invoice_number: "INV-1",
-      invoice_date: "2026-06-15",
-      journal_date: "2026-06-15",
-      term_days: 14,
-      items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10 }],
-      vat_price: 2,
-      gross_price: 12,
+      ...bookingArgs(),
     }));
     expect(created.result.created_invoice_id).toBe(90_001);
     expect(created.result.document_uploaded).toBe(true);
     expect(created.confirm_plan.invoice_id).toBe(90_001);
     // The op created a DRAFT and did NOT confirm.
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+  });
+
+  it("rejects a create whose booking fields drifted from the reviewed booking-prepare (plan_drift, zero mutation)", async () => {
+    const { path, sha256 } = writeTempPdf();
+    const { handler, api } = setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn(),
+        createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_001, status: "SAVED" }),
+        confirmWithTotals: vi.fn(),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+    const prepared = parse(await handler({ mode: "prepare", file_path: path, ...bookingArgs() }));
+    const drifted = await handler({
+      mode: "create",
+      file_path: path,
+      plan_handle: prepared.summary.plan_handle,
+      source_sha256: sha256,
+      ...bookingArgs(),
+      gross_price: 9999,
+    });
+    expect(drifted.isError).toBe(true);
+    expect(parse(drifted).category).toBe("plan_drift");
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
   });
 
   it("wraps a create-path duplicate suspect's journal_title in the surfaced warnings (F-RESOLVER-FACADE-WRAP)", async () => {
@@ -207,21 +277,14 @@ describe("process_accounting_document", () => {
       },
     });
 
-    const prepared = parse(await handler({ mode: "prepare", file_path: path }));
+    const prepared = parse(await handler({ mode: "prepare", file_path: path, ...bookingArgs() }));
     const planHandle = prepared.summary.plan_handle as string;
     const created = parse(await handler({
       mode: "create",
       file_path: path,
       plan_handle: planHandle,
       source_sha256: sha256,
-      supplier_client_id: 4242,
-      invoice_number: "INV-1",
-      invoice_date: "2026-06-15",
-      journal_date: "2026-06-15",
-      term_days: 14,
-      items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10 }],
-      vat_price: 2,
-      gross_price: 12,
+      ...bookingArgs(),
     }));
 
     expect(created.result.created_invoice_id).toBe(90_001);
@@ -267,22 +330,15 @@ describe("process_accounting_document", () => {
   }
 
   async function createDraft(handler: Handler, path: string, sha256: string) {
-    // create now requires a plan_handle from a prior mode='prepare'.
-    const prepared = parse(await handler({ mode: "prepare", file_path: path }));
+    // create requires a plan_handle from a prior BOOKING-BINDING mode='prepare'.
+    const prepared = parse(await handler({ mode: "prepare", file_path: path, ...bookingArgs() }));
     const planHandle = prepared.summary.plan_handle as string;
     return parse(await handler({
       mode: "create",
       file_path: path,
       plan_handle: planHandle,
       source_sha256: sha256,
-      supplier_client_id: 4242,
-      invoice_number: "INV-1",
-      invoice_date: "2026-06-15",
-      journal_date: "2026-06-15",
-      term_days: 14,
-      items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10 }],
-      vat_price: 2,
-      gross_price: 12,
+      ...bookingArgs(),
     }));
   }
 
@@ -391,6 +447,54 @@ describe("process_accounting_document", () => {
     expect(confirmed.result.total_gross).toBe(100);
     expect(confirmed.result.currency).toBe("USD");
     expect(confirmed.result.total_gross_eur).toBe(92.5);
+  });
+
+  function confirmSetupWithReadback(readback: Record<string, unknown>) {
+    return setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockResolvedValue(readback),
+        createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_001, status: "SAVED" }),
+        confirmWithTotals: vi.fn(),
+        confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+  }
+
+  async function confirmWithReadback(readback: Record<string, unknown>) {
+    const { path, sha256 } = writeTempPdf();
+    const { handler } = confirmSetupWithReadback(readback);
+    const created = await createDraft(handler, path, sha256);
+    return parse(await handler({ mode: "confirm", invoice_id: created.confirm_plan.invoice_id, plan_handle: created.confirm_plan.plan_handle }));
+  }
+
+  it("confirm receipt with ONLY a supplier read back never claims the gross is shown (P3 §14.1 branch)", async () => {
+    const confirmed = await confirmWithReadback({ client_name: "Acme OÜ" });
+    expect(confirmed.result.supplier_name).toContain("Acme OÜ");
+    expect("total_gross" in confirmed.result).toBe(false);
+    expect("currency" in confirmed.result).toBe(false);
+    expect(confirmed.note).toContain("the gross could not be read back");
+    expect(confirmed.note).not.toContain("supplier and gross above");
+  });
+
+  it("confirm receipt with ONLY an amount+currency read back never claims the supplier is shown (P3 §14.1 branch)", async () => {
+    const confirmed = await confirmWithReadback({ gross_price: 42.5, cl_currencies_id: "EUR" });
+    expect("supplier_name" in confirmed.result).toBe(false);
+    expect(confirmed.result.total_gross).toBe(42.5);
+    expect(confirmed.result.currency).toBe("EUR");
+    expect(confirmed.note).toContain("the supplier could not be read back");
+  });
+
+  it("confirm receipt suppresses an amount whose currency label is missing — a gross is never surfaced unlabelled (P3 §14.1)", async () => {
+    const confirmed = await confirmWithReadback({ client_name: "Acme OÜ", gross_price: 42.5 });
+    expect("total_gross" in confirmed.result).toBe(false);
+    expect("currency" in confirmed.result).toBe(false);
+    expect(confirmed.result.supplier_name).toContain("Acme OÜ");
   });
 
   it("confirm response is an id-only receipt (no echo keys, no ledger-affecting note) when the read-back is absent", async () => {

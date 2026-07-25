@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { types as utilTypes } from "node:util";
 import { cloneAndFreezePlanData, type PlanData } from "./plan-store.js";
+import { detailItemFitsSinglePage } from "./response-budget.js";
 import type { RuntimeSafetyScope } from "./runtime-safety-context.js";
 import type {
   PublicWorkflowRecord,
@@ -97,7 +98,8 @@ export interface StoredWorkflowState {
 }
 export type WorkflowStateStoreErrorCode =
   | "workflow_state_capacity_exceeded" | "workflow_state_handle_invalid" | "workflow_state_expired"
-  | "workflow_state_scope_mismatch" | "workflow_state_data_invalid" | "workflow_state_handle_collision";
+  | "workflow_state_scope_mismatch" | "workflow_state_data_invalid" | "workflow_state_handle_collision"
+  | "workflow_state_item_too_large";
 
 const MESSAGES: Readonly<Record<WorkflowStateStoreErrorCode, string>> = Object.freeze({
   workflow_state_capacity_exceeded: "The workflow-state store is full. Wait for a state to expire.",
@@ -106,6 +108,7 @@ const MESSAGES: Readonly<Record<WorkflowStateStoreErrorCode, string>> = Object.f
   workflow_state_scope_mismatch: "The workflow-state handle no longer matches the active runtime scope.",
   workflow_state_data_invalid: "The workflow state contains unsafe or oversized data.",
   workflow_state_handle_collision: "Unable to allocate a unique workflow-state handle.",
+  workflow_state_item_too_large: "A single workflow-state detail is too large to page within the response budget.",
 });
 
 const PUBLIC_DETAIL_SCALAR_FIELDS = new Set([
@@ -305,6 +308,12 @@ export class WorkflowStateStore {
     assertPublicProjection(safeInput.items);
     const publicItems = safeInput.items.map(readPublicWorkflowStateDetail);
     const items = cloneAndFreezePlanData(publicItems) as readonly PlanData[];
+    // Refuse any single detail too large to be returned as a one-item page,
+    // before any capacity slot is taken — an oversized item is a structured
+    // error, never an admitted detail no page size could reach.
+    for (const item of items) {
+      if (!detailItemFitsSinglePage(item)) throw new WorkflowStateStoreError("workflow_state_item_too_large");
+    }
     const now = this.#readNow();
     const expiresAt = now + this.#ttlMs;
     if (!Number.isSafeInteger(expiresAt)) invalid();

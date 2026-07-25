@@ -13,7 +13,6 @@ import {
 } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
-import { prepareReceiptBatchSnapshot } from "./receipt-inbox-files.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { HttpError } from "../http-client.js";
@@ -91,14 +90,18 @@ afterEach(() => {
   resetAccountingRulesCache();
 });
 
-// H15: create/create_and_confirm require the exact dry-run manifest. These
-// tests fully mock the filesystem, so derive the manifest from the same mocks
-// (readFile/readdir/stat are persistent mockResolvedValue, so a pre-call
-// snapshot reproduces exactly what the handler will compute).
-async function approvedManifest(folder = "/tmp/receipts") {
-  const snap = await prepareReceiptBatchSnapshot(folder);
-  await snap.cleanup();
-  return snap.manifest;
+// P0-3: create / create_and_confirm now require BOTH the SHA-256 manifest AND
+// the consume-once plan handle minted by the matching dry_run on the same tool
+// handler (its plan store lives on that handler's runtime context). Run a real
+// dry_run through the handler and return the approved manifest + per-effect
+// handles so an execute call can present the one the reviewer approved.
+async function dryRunApproval(
+  handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
+  args: Record<string, unknown>,
+): Promise<{ approved_manifest: unknown; plan_handles: { create: string; create_and_confirm: string } }> {
+  const dry = parseMcpResponse((await handler({ ...args, execution_mode: "dry_run" })).content[0]!.text);
+  if (!dry.approved_manifest || !dry.plan_handles) throw new Error("dry_run did not mint a plan handle");
+  return { approved_manifest: dry.approved_manifest, plan_handles: dry.plan_handles };
 }
 
 describe("process_receipt_batch rollback handling", () => {
@@ -961,11 +964,13 @@ describe("process_receipt_batch rollback handling", () => {
     if (!registration) throw new Error("Tool was not registered");
 
     const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     const result = await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
-      approved_manifest: await approvedManifest(),
+      approved_manifest: approval.approved_manifest,
+      plan_handle: approval.plan_handles.create,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1142,11 +1147,13 @@ describe("process_receipt_batch rollback handling", () => {
     if (!registration) throw new Error("Tool was not registered");
 
     const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     const result = await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
-      approved_manifest: await approvedManifest(),
+      approved_manifest: approval.approved_manifest,
+      plan_handle: approval.plan_handles.create,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1304,11 +1311,13 @@ describe("process_receipt_batch rollback handling", () => {
     if (!registration) throw new Error("Tool was not registered");
 
     const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     const result = await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execution_mode: "create_and_confirm",
-      approved_manifest: await approvedManifest(),
+      approved_manifest: approval.approved_manifest,
+      plan_handle: approval.plan_handles.create_and_confirm,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 
@@ -1462,11 +1471,13 @@ describe("process_receipt_batch rollback handling", () => {
     if (!registration) throw new Error("Tool was not registered");
 
     const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
-      approved_manifest: await approvedManifest(),
+      approved_manifest: approval.approved_manifest,
+      plan_handle: approval.plan_handles.create,
     });
 
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
@@ -1521,7 +1532,13 @@ describe("process_receipt_batch rollback handling", () => {
       raw_text: plainText,
     } as any);
     vi.mocked(hasAutoBookableReceiptFields).mockReturnValue(true);
-    vi.mocked(suggestBookingInternal).mockResolvedValue({
+    // Fresh object per call: applyReverseChargeAutoDetection mutates the
+    // suggestion in place (sets reversed_vat_id / reverse_charge_reason). The
+    // dry_run projection and the create projection each call this once, and in
+    // production suggestBookingInternal returns a new object every time — a
+    // shared mockResolvedValue object would carry the first run's mutation into
+    // the second and suppress the foreign_reverse_charge_default_unverified signal.
+    vi.mocked(suggestBookingInternal).mockImplementation(async () => ({
       item: {
         custom_title: "Claude Max subscription",
         amount: 1,
@@ -1532,7 +1549,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
       source: "fallback",
       suggested_purchase_article: { id: 501, name: "Software" },
-    } as any);
+    } as any));
     vi.mocked(resolveSupplierInternal).mockResolvedValue({
       found: true,
       created: false,
@@ -1603,11 +1620,13 @@ describe("process_receipt_batch rollback handling", () => {
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
     if (!registration) throw new Error("Tool was not registered");
     const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     const result = await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
       execute: true,
-      approved_manifest: await approvedManifest(),
+      approved_manifest: approval.approved_manifest,
+      plan_handle: approval.plan_handles.create,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
 

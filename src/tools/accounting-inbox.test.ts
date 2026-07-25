@@ -3209,6 +3209,187 @@ ${entryXml}
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 
+  // --- P1-2: the approval card must show the WHOLE journal, and the plan must
+  //     bind exactly that resolved projection (not the raw caller params) --------
+
+  // Chart with a VAT account so a VAT-registered owner expense resolves a
+  // deductible-VAT posting; the mock company is VAT-registered by default.
+  const ownerExpenseVatAccounts = [
+    { id: 5000, name_est: "Kulud", name_eng: "Expenses" },
+    { id: 2110, name_est: "Võlg omanikule", name_eng: "Owner payable" },
+    { id: 2115, name_est: "Võlg omanikule 2", name_eng: "Owner payable 2" },
+    { id: 1510, name_est: "Sisendkäibemaks", name_eng: "Input VAT" },
+    { id: 1515, name_est: "Sisendkäibemaks 2", name_eng: "Input VAT 2" },
+  ] as any;
+
+  function ownerExpenseVatSetup() {
+    const server = createMockToolServer();
+    const runtime = createTestRuntimeSafetyContext();
+    const api = createAccountingWorkflowApi({
+      accounts: ownerExpenseVatAccounts,
+      journals: {
+        listAllWithPostings: vi.fn().mockResolvedValue([]),
+        create: vi.fn().mockResolvedValue({ created_object_id: 77 }),
+      } as any,
+    });
+    registerAccountingInboxTools(server, runtime, api, DEFAULT_EXPOSURE);
+    return { handler: getRegisteredToolHandler(server, "continue_accounting_workflow"), api };
+  }
+
+  function vatBookingItem(overrides: Record<string, unknown> = {}) {
+    return ownerExpenseBookingItem({ vat_rate: 0.24, vat_deduction_mode: "full", ...overrides });
+  }
+
+  it("prepare_action booking_preview shows the whole resolved journal (deduction mode, split, accounts, postings)", async () => {
+    const { handler } = ownerExpenseVatSetup();
+    const prepared = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: vatBookingItem(),
+    })).content[0]!.text) as any;
+
+    const preview = prepared.proposed_action.booking_preview;
+    // Every material value the operator approves is present.
+    expect(preview.journal_date).toBe("2026-06-01");
+    expect(preview.currency).toBe("EUR");
+    expect(preview.vat_deduction_mode).toBe("full");
+    expect(preview.vat_amount).toBe(24);
+    expect(preview.deductible_vat_amount).toBe(24);
+    expect(preview.non_deductible_vat_amount).toBe(0);
+    expect(preview.vat_account).toBe(1510);
+    expect(preview.expense_account).toBe(5000);
+    expect(preview.expense_debit_amount).toBe(100);
+    expect(preview.payable_account).toBe(2110);
+    expect(preview.total).toBe(124);
+    // The full D/C posting list with each posting's purpose.
+    expect(preview.postings).toEqual([
+      { side: "D", account_id: 5000, dimension_id: null, amount: 100, purpose: "expense" },
+      { side: "D", account_id: 1510, dimension_id: null, amount: 24, purpose: "deductible_vat" },
+      { side: "C", account_id: 2110, dimension_id: null, amount: 124, purpose: "owner_payable" },
+    ]);
+  });
+
+  it("preview postings and the booked journal are the SAME model", async () => {
+    const { handler, api } = ownerExpenseVatSetup();
+    const prepared = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: vatBookingItem(),
+    })).content[0]!.text) as any;
+    const preview = prepared.proposed_action.booking_preview;
+
+    await handler({
+      action: "execute_review_action",
+      review_item_json: vatBookingItem(),
+      plan_handle: prepared.plan_handle,
+    });
+    const createCall = vi.mocked(api.journals.create).mock.calls[0][0] as any;
+    // Same postings, projected onto the api's accounts_id/type shape.
+    expect(createCall.postings).toEqual(
+      preview.postings.map((p: any) => ({ accounts_id: p.account_id, type: p.side, amount: p.amount })),
+    );
+  });
+
+  it("a changed VAT deduction mode between prepare and execute drifts with ZERO mutation", async () => {
+    const { handler, api } = ownerExpenseVatSetup();
+    const prepared = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: vatBookingItem({ vat_deduction_mode: "full" }),
+    })).content[0]!.text) as any;
+
+    const result = await handler({
+      action: "execute_review_action",
+      // Same everything except the VAT is now non-deductible: a different journal.
+      review_item_json: vatBookingItem({ vat_deduction_mode: "none" }),
+      plan_handle: prepared.plan_handle,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(payload.error_code).toBe("plan_drift");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("a changed payable account between prepare and execute drifts with ZERO mutation", async () => {
+    const { handler, api } = ownerExpenseVatSetup();
+    const prepared = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: vatBookingItem(),
+    })).content[0]!.text) as any;
+
+    const result = await handler({
+      action: "execute_review_action",
+      review_item_json: vatBookingItem({ payable_account: 2115 }),
+      plan_handle: prepared.plan_handle,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(payload.error_code).toBe("plan_drift");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("a changed VAT account between prepare and execute drifts with ZERO mutation", async () => {
+    const { handler, api } = ownerExpenseVatSetup();
+    const prepared = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: vatBookingItem(),
+    })).content[0]!.text) as any;
+
+    const result = await handler({
+      action: "execute_review_action",
+      review_item_json: vatBookingItem({ vat_account: 1515 }),
+      plan_handle: prepared.plan_handle,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(payload.error_code).toBe("plan_drift");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("prepare_action does NOT mint a handle when the projection cannot be resolved (VAT review needed)", async () => {
+    const { handler, api } = ownerExpenseVatSetup();
+    // Passenger-car fuel with VAT but no deduction mode → the core demands review;
+    // no projection resolves, so no plan handle is issued and nothing is booked.
+    const result = await handler({
+      action: "prepare_action",
+      review_item_json: ownerExpenseBookingItem({ description: "Fuel for company car", vat_rate: 0.24 }),
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.error).toBe("VAT deduction needs confirmation for this expense category");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("persisted journal + audit text is desandboxed while the preview/display description stays sandboxed", async () => {
+    const { handler, api } = ownerExpenseVatSetup();
+    const logAuditSpy = vi.mocked(auditLogModule.logAudit);
+    logAuditSpy.mockClear();
+    // A properly nonce-wrapped receipt/OCR description, as it arrives from the
+    // upstream sandbox boundary.
+    const nonce = "deadbeef";
+    const wrapped = `<<UNTRUSTED_OCR_START:${nonce}>>\nOffice chair\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+    const item = ownerExpenseBookingItem({ description: wrapped });
+
+    const prepared = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: item,
+    })).content[0]!.text) as any;
+    // Preview/display description is re-wrapped with a FRESH random nonce (never
+    // the upstream "deadbeef"), so the operator sees it as untrusted text.
+    const preview = prepared.proposed_action.booking_preview.description;
+    expect(preview).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]{32}>>/);
+    expect(preview).not.toContain(nonce);
+    expect(desandboxText(preview)).toContain("Office chair");
+
+    await handler({
+      action: "execute_review_action",
+      review_item_json: item,
+      plan_handle: prepared.plan_handle,
+    });
+    // Persisted journal title + audit are the CLEAN unwrapped business text.
+    const createCall = vi.mocked(api.journals.create).mock.calls[0][0] as any;
+    expect(createCall.title).toBe("Office chair");
+    expect(createCall.title).not.toContain("UNTRUSTED_OCR");
+    const auditEntry = logAuditSpy.mock.calls.at(-1)![0] as any;
+    expect(auditEntry.summary).not.toContain("UNTRUSTED_OCR");
+    expect(auditEntry.summary).toContain("Office chair");
+    expect(auditEntry.details.description).toBe("Office chair");
+  });
+
   it("scan recommended_steps name merged entry points when granular tools are hidden (default)", async () => {
     const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
@@ -3417,20 +3598,20 @@ describe("live accounting-inbox v1/v2 profile emission", () => {
     return { runtime, workflow: payload.workflow };
   }
 
-  it.each(["scan", "dry_run"] as const)("guided %s emits workflow_action_v2 with a resolvable workflow_handle", async (mode) => {
+  it.each(["scan", "dry_run"] as const)("guided %s emits workflow_action_v2, minting no handle for an item-less scan (§12)", async (mode) => {
     for (const profile of ["guided", "guided-sales"] as const) {
       const { runtime, workflow } = await emitWorkflowFor(profile, mode);
       expect(workflow.contract).toBe("workflow_action_v2");
-      expect(workflow.workflow_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
       expect(workflow).not.toHaveProperty("available_actions");
       expect(workflow).not.toHaveProperty("approval_previews");
-      // The live handle resolves back through the same store/scope.
-      const stored = runtime.workflowStateStore.inspect(workflow.workflow_handle);
-      expect(stored.workflow).toBe("accounting_inbox");
-      // Guided page stays LATENT (get_workflow_page not visible in guided yet).
-      if (workflow.page !== undefined) {
-        expect(workflow.page).toMatchObject({ available: false, tool: "get_workflow_page", args: {} });
-      }
+      // This fixture's scan surfaces no pageable needs_review/needs_decision
+      // rows, so §12 mints no workflow handle and takes no store slot — a stream
+      // of item-less guided emits can never fill the workflow-state store. (The
+      // populated-handle round-trip is covered in workflow-action-v2.test.ts and
+      // workflow-response.test.ts.)
+      expect(workflow).not.toHaveProperty("workflow_handle");
+      expect(workflow.page).toBeUndefined();
+      expect(runtime.workflowStateStore.activeCount).toBe(0);
     }
   });
 
@@ -3466,24 +3647,54 @@ describe("live accounting-inbox v1/v2 profile emission", () => {
     const payload = parseMcpResponse(result.content[0]!.text) as any;
     expect(payload.workflow.contract).toBe("workflow_action_v2");
     expect(payload.workflow.blockers).toEqual([]);
-    expect(payload.workflow.workflow_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // No needs_review/needs_decision rows → no pageable items → no handle (§12).
+    expect(payload.workflow).not.toHaveProperty("workflow_handle");
   });
 
-  it("degrades a guided emit to v1 when the workflow-state store is exhausted (no tool error)", async () => {
+  it("takes no store slot for an item-less guided emit even when the store is full (§12)", async () => {
     const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
     const server = createMockToolServer();
     const api = createAccountingWorkflowApi({ bankAccounts: [fixtureBankAccount()], accountDimensions: [fixtureAccountDimension()] });
     const runtime = createTestRuntimeSafetyContext({ scope: { profile: "guided" }, workflowStateStore: { maxActive: 1 } });
-    // Fill the single-slot store so the emit-path issue() throws capacity_exceeded.
+    // Pre-fill the single-slot store. Before §12 an item-less guided emit still
+    // called issue(), hit capacity, and degraded to v1. Now it mints no handle
+    // at all, so it neither consumes the slot nor needs to degrade — it stays on
+    // the compact v2 envelope without a handle, and the store is untouched.
     runtime.workflowStateStore.issue({ workflow: "accounting_inbox", status: "in_progress", items: [] });
     expect(runtime.workflowStateStore.activeCount).toBe(1);
     registerAccountingInboxTools(server, runtime, api, FULL_EXPOSURE);
     const handler = getRegisteredToolHandler(server, "accounting_inbox");
     const result = await runWithToolProfile("guided", () => handler({ mode: "scan", workspace_path: workspace }));
     const payload = parseMcpResponse(result.content[0]!.text) as any;
-    // A store failure degrades to the plain v1 envelope instead of failing the tool.
+    expect(payload.workflow.contract).toBe("workflow_action_v2");
+    expect(payload.workflow).not.toHaveProperty("workflow_handle");
+    expect(runtime.workflowStateStore.activeCount).toBe(1);
+  });
+
+  it("degrades an ITEM-YIELDING guided emit to v1 when the workflow-state store is exhausted (no tool error)", async () => {
+    // Retains coverage of the emit-path capacity degrade (emitWorkflowEnvelope's
+    // try/catch): under §12 this is only reachable when the emit actually carries
+    // pageable rows AND the store is full. Drive an item-bearing emit via a v1
+    // envelope with a needs_review row against a single-slot, pre-filled store, so
+    // buildWorkflowActionV2 reaches store.issue(), which throws capacity_exceeded.
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({ bankAccounts: [fixtureBankAccount()], accountDimensions: [fixtureAccountDimension()] });
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile: "guided" }, workflowStateStore: { maxActive: 1 } });
+    runtime.workflowStateStore.issue({ workflow: "accounting_inbox", status: "in_progress", items: [] });
+    expect(runtime.workflowStateStore.activeCount).toBe(1);
+    registerAccountingInboxTools(server, runtime, api, FULL_EXPOSURE);
+    const handler = getRegisteredToolHandler(server, "continue_accounting_workflow");
+    const result = await runWithToolProfile("guided", () => handler({
+      action: "next",
+      workflow_state_json: '{"workflow":{"contract":"workflow_action_v1","summary":"x","needs_review":[{"item_id":"r1","summary":"Confirm this row"}]}}',
+    }));
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    // A capacity failure degrades to the plain v1 envelope instead of erroring,
+    // and the pre-existing slot is untouched (the failed issue took no slot).
+    expect(result.isError).not.toBe(true);
     expect(payload.workflow.contract).toBe("workflow_action_v1");
     expect(payload.workflow).not.toHaveProperty("workflow_handle");
+    expect(runtime.workflowStateStore.activeCount).toBe(1);
   });
 });

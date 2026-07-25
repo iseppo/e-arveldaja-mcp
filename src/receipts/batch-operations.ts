@@ -1,6 +1,8 @@
 import type { OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
+import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
+import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { reportProgress } from "../progress.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
@@ -97,6 +99,18 @@ import type {
 function ok<T>(value: T): OperationOutcome<T> {
   return { ok: true, value, warnings: [], blockers: [] };
 }
+
+function fail<T>(code: string, message: string): OperationOutcome<T> {
+  return { ok: false, error: { code, message, retry: "never" }, blockers: [] };
+}
+
+// P0-3: the execution-plan domain that binds a reviewed receipt-batch dry run to
+// its create / create_and_confirm. The SHA-256 manifest alone proves only the
+// file BYTES; the plan additionally proves the whole ACCOUNTING effect — the
+// bank dimension, receipt+transaction date filters, execution effect
+// (create vs create_and_confirm), every file's final supplier/booking
+// projection, and the live bank-transaction state the plan intended to link.
+export const RECEIPT_BATCH_PLAN_DOMAIN = "receipt_batch";
 
 // ---------------------------------------------------------------------------
 // Mode resolution
@@ -651,9 +665,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
   constructor(
     private readonly api: ApiContext,
     private readonly runtimeSafetyContext: RuntimeSafetyContext,
-  ) {
-    void this.runtimeSafetyContext;
-  }
+  ) {}
 
   async scan(input: ReceiptScanRunInput): Promise<OperationOutcome<ReceiptScanResult>> {
     const scan = await scanReceiptFolderInternal(
@@ -699,47 +711,176 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         ...(input.transactionDateFrom ? { transaction_date_from: input.transactionDateFrom } : {}),
         ...(input.transactionDateTo ? { transaction_date_to: input.transactionDateTo } : {}),
       });
-      const consumedTransactionIds = new Set<number>();
-      const results: ReceiptBatchFileResult[] = [];
 
-      for (let index = 0; index < snapshot.files.length; index++) {
-        const fileSnapshot = snapshot.files[index]!;
-        await reportProgress(index, snapshot.files.length);
-        results.push(await processSingleReceipt(this.api, context, fileSnapshot, {
-          ownCompanyVat,
-          ownCompanyRegistryCode,
-          bankTransactions,
+      // One per-file pass. In dry_run / projection mode it is side-effect-free
+      // (createAndMaybeMatchPurchaseInvoice returns a preview before any write),
+      // so it doubles as the read-only fingerprint pass at execute.
+      const runLoop = async (
+        executionMode: ReceiptBatchExecutionMode,
+        dryRun: boolean,
+        legacyExecuteCreate: boolean,
+      ): Promise<ReceiptBatchFileResult[]> => {
+        const consumedTransactionIds = new Set<number>();
+        const results: ReceiptBatchFileResult[] = [];
+        for (let index = 0; index < snapshot.files.length; index++) {
+          const fileSnapshot = snapshot.files[index]!;
+          await reportProgress(index, snapshot.files.length);
+          results.push(await processSingleReceipt(this.api, context, fileSnapshot, {
+            ownCompanyVat,
+            ownCompanyRegistryCode,
+            bankTransactions,
+            executionMode,
+            legacyExecuteCreate,
+            dryRun,
+            consumedTransactionIds,
+            previousResults: results,
+          }));
+        }
+        return results;
+      };
+
+      const finish = (results: ReceiptBatchFileResult[], dryRun: boolean, planHandles?: ReceiptBatchResult["planHandles"]): OperationOutcome<ReceiptBatchResult> => {
+        const summary = buildReceiptBatchSummary({
           executionMode: input.executionMode,
           legacyExecuteCreate: input.legacyExecuteCreate,
-          dryRun: input.dryRun,
-          consumedTransactionIds,
-          previousResults: results,
-        }));
+          dryRun,
+          scannedFiles: scan.files.length,
+          skippedInvalidFiles: scan.skipped.length,
+          results,
+        });
+        return ok({
+          mode: dryRun ? "DRY_RUN" : "EXECUTED",
+          executionMode: input.executionMode,
+          scan,
+          results,
+          summary,
+          manifest: snapshot.manifest,
+          snapshotFiles: snapshot.files.map(entry => ({ file: entry.file, sha256: entry.sha256 })),
+          ...(planHandles !== undefined ? { planHandles } : {}),
+        });
+      };
+
+      if (input.dryRun) {
+        // Preview + mint ONE consume-once handle PER execution effect so a
+        // `create` approval can never be replayed as `create_and_confirm`.
+        const results = await runLoop("dry_run", true, false);
+        const mintHandle = (effect: ReceiptBatchExecutionMode): string => {
+          const fingerprint = computeBatchFingerprint(results, input, snapshot, bankTransactions, effect);
+          const planInput: ExecutionPlanInput = {
+            normalizedArgs: fingerprint,
+            sourceIdentities: snapshot.manifest.map(entry => ({ relative_path: entry.relative_path, sha256: entry.sha256 })),
+            liveSnapshot: {
+              accounts_dimensions_id: input.accountsDimensionsId,
+              execution_effect: effect,
+              files: snapshot.manifest.length,
+              bank_transactions: bankTransactions.length,
+            },
+            commands: [{ id: `receipt-batch-${effect}`, category: `receipt_batch_${effect}`, reviewProjection: { execution_effect: effect, files: snapshot.manifest.length } }],
+            counts: { files: snapshot.manifest.length },
+            totals: {},
+            exclusions: [],
+            reviews: [],
+            privatePayload: { schema: "receipt_batch_v1", execution_effect: effect },
+          };
+          return this.runtimeSafetyContext.planStore.issue(RECEIPT_BATCH_PLAN_DOMAIN, planInput);
+        };
+        return finish(results, true, {
+          create: mintHandle("create"),
+          create_and_confirm: mintHandle("create_and_confirm"),
+        });
       }
 
-      const summary = buildReceiptBatchSummary({
-        executionMode: input.executionMode,
-        legacyExecuteCreate: input.legacyExecuteCreate,
-        dryRun: input.dryRun,
-        scannedFiles: scan.files.length,
-        skippedInvalidFiles: scan.skipped.length,
-        results,
-      });
-      const mode = input.dryRun ? "DRY_RUN" : "EXECUTED";
+      // create / create_and_confirm. The manifest was already re-checked in the
+      // snapshot above; now bind the full accounting effect to the reviewed plan.
+      if (input.planHandle === undefined) {
+        return fail("plan_handle_required", `execution_mode='${input.executionMode}' requires the plan_handle returned by the reviewed dry_run.`);
+      }
+      // Read-only projection pass → FRESH canonical fingerprint for the requested
+      // effect. A changed bank dimension, date filter, execution effect, booking
+      // rule, supplier/article/account/dimension, or live bank transaction all
+      // change this fingerprint.
+      const projection = await runLoop("dry_run", true, false);
+      const freshFingerprint = computeBatchFingerprint(projection, input, snapshot, bankTransactions, input.executionMode);
 
-      return ok({
-        mode,
-        executionMode: input.executionMode,
-        scan,
-        results,
-        summary,
-        manifest: snapshot.manifest,
-        snapshotFiles: snapshot.files.map(entry => ({ file: entry.file, sha256: entry.sha256 })),
-      });
+      let storedPlan;
+      try {
+        storedPlan = this.runtimeSafetyContext.planStore.consume(input.planHandle, RECEIPT_BATCH_PLAN_DOMAIN);
+      } catch (error) {
+        const code = (error as { code?: string }).code ?? "plan_handle_invalid";
+        return fail(code, "The reviewed receipt-batch plan could not be consumed.");
+      }
+      if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(freshFingerprint)) {
+        return fail("plan_drift", "The receipt batch no longer matches the reviewed dry_run plan (bank dimension, date filters, execution effect, booking rule, supplier/article/account/dimension, or a live bank transaction changed). Re-run the dry_run and review again.");
+      }
+
+      // Only now mutate. The manifest already bound the file bytes; the plan bound
+      // the accounting effect.
+      const results = await runLoop(input.executionMode, false, input.legacyExecuteCreate);
+      return finish(results, false);
     } finally {
       await snapshot.cleanup();
     }
   }
+}
+
+/**
+ * P0-3 canonical drift fingerprint of a receipt batch. Binds — for ONE execution
+ * effect — the manifest (file bytes), folder identity, bank dimension, every date
+ * filter, the create/upload/confirm/link command list, each file's final
+ * supplier/booking projection, and the live bank-transaction state the plan
+ * intended to link. Recomputed fresh at execute from a read-only projection pass
+ * and compared against the reviewed plan; any material difference is plan_drift.
+ */
+function computeBatchFingerprint(
+  results: ReceiptBatchFileResult[],
+  input: ReceiptBatchRunInput,
+  snapshot: { manifest: { relative_path: string; sha256: string }[] },
+  bankTransactions: Transaction[],
+  effect: ReceiptBatchExecutionMode,
+): PlanRecord {
+  const files: PlanData[] = results.map(result => stripUndefinedDeep({
+    file: result.file.name,
+    classification: result.classification,
+    status: result.status,
+    supplier_client_id: result.supplier_resolution?.client?.id ?? null,
+    supplier_name: result.supplier_resolution?.client?.name
+      ?? result.supplier_resolution?.preview_client?.name
+      ?? null,
+    booking: result.booking_suggestion
+      ? {
+          article_id: result.booking_suggestion.item?.cl_purchase_articles_id ?? null,
+          account_id: result.booking_suggestion.item?.purchase_accounts_id ?? null,
+          dimension_id: result.booking_suggestion.item?.purchase_accounts_dimensions_id ?? null,
+          liability_account_id: result.booking_suggestion.suggested_liability_account_id ?? null,
+          vat_rate_dropdown: result.booking_suggestion.item?.vat_rate_dropdown ?? null,
+          reversed_vat_id: result.booking_suggestion.item?.reversed_vat_id ?? null,
+        }
+      : null,
+  }));
+  const bankTx: PlanData[] = bankTransactions.map(tx => stripUndefinedDeep({
+    id: tx.id ?? null,
+    status: tx.status ?? null,
+    amount: tx.amount ?? null,
+    base_amount: tx.base_amount ?? null,
+    date: tx.date ?? null,
+    accounts_dimensions_id: tx.accounts_dimensions_id ?? null,
+  }));
+  return stripUndefinedDeep({
+    schema: "receipt_batch_v1",
+    execution_effect: effect,
+    folder: input.resolvedFolderPath,
+    accounts_dimensions_id: input.accountsDimensionsId,
+    date_from: input.dateFrom ?? null,
+    date_to: input.dateTo ?? null,
+    transaction_date_from: input.transactionDateFrom ?? null,
+    transaction_date_to: input.transactionDateTo ?? null,
+    commands: effect === "create_and_confirm"
+      ? ["purchase_invoice_create", "purchase_invoice_upload", "purchase_invoice_confirm", "transaction_confirm_link"]
+      : ["purchase_invoice_create", "purchase_invoice_upload"],
+    manifest: snapshot.manifest.map(entry => ({ relative_path: entry.relative_path, sha256: entry.sha256 })),
+    files,
+    bank_transactions: bankTx,
+  }) as PlanRecord;
 }
 
 export function createReceiptBatchOperations(
