@@ -74,10 +74,10 @@ async function assertReceiptDirectoryBinding(binding: BoundReceiptDirectory): Pr
 }
 
 /**
- * Bind the exact directory object, not merely its path string. Linux/macOS
- * descriptor paths keep all enumeration and reads relative to the retained
- * no-follow handle. If descriptor-relative access is unavailable, fail closed:
- * falling back to another pathname lookup would re-open the TOCTOU window.
+ * Bind the exact directory object, not merely its path string. Linux descriptor
+ * paths keep all enumeration and reads relative to the retained no-follow
+ * handle. macOS exposes directory handles under /dev/fd, but Node cannot
+ * traverse them, so Darwin uses the portable opened-object identity checks.
  */
 async function openBoundReceiptDirectory(
   folderPath: string,
@@ -109,17 +109,19 @@ async function openBoundReceiptDirectory(
         // Try the next platform descriptor namespace.
       }
     }
-    // Opaque references require descriptor-relative access: weakening them to
-    // a second pathname lookup would recreate the exact path-retarget race the
-    // reference is meant to close. Direct folder_path calls retain portable
-    // support with an opened-object identity check before/after pathname work.
-    if (!descriptorPath && options.expectedCanonicalPath !== undefined) {
+    // Opaque references normally require descriptor-relative access. Darwin's
+    // /dev/fd directory handles are not traversable in Node (readdir is ENOTDIR),
+    // so use the same before/after identity checks as direct folder_path calls.
+    if (!descriptorPath && options.expectedCanonicalPath !== undefined &&
+      process.platform !== "darwin") {
       throw receiptDirectoryChanged();
     }
 
     const binding = {
       canonicalPath,
-      accessPath: descriptorPath ?? canonicalPath,
+      accessPath: process.platform === "darwin"
+        ? canonicalPath
+        : descriptorPath ?? canonicalPath,
       ...(descriptorPath !== undefined ? { descriptorPath } : {}),
       handle,
     };
