@@ -1,6 +1,6 @@
 {
   "name": "e-arveldaja-mcp",
-  "version": "0.25.2",
+  "version": "0.25.3",
   "description": "MCP server for Estonian e-arveldaja (e-Financials) API",
   "mcpName": "io.github.iseppo/e-arveldaja-mcp",
   "type": "module",
@@ -54,16 +54,16 @@
     "test:integration": "npm run build && vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
-    "@llamaindex/liteparse": "^2.0.4",
+    "@llamaindex/liteparse": "^2.9.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@toon-format/toon": "^2.3.0",
+    "@toon-format/toon": "^4.1.0",
     "dotenv": "^17.4.2",
     "fast-xml-parser": "^5.8.0",
     "fastest-levenshtein": "^1.0.16",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@babel/parser": "^7.29.7",
+    "@babel/parser": "^8.0.4",
     "@types/node": "^26.1.0",
     "tsx": "^4.22.4",
     "typescript": "^7.0.2",

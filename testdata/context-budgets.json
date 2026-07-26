@@ -69,45 +69,45 @@
       "category": "accounting-inbox",
       "itemCount": 1,
       "encoding": "toon",
-      "encodedBytes": 444,
+      "encodedBytes": 389,
       "jsonBytes": 435,
-      "sha256": "a66a5fe4c7b1e411696cfa854291599f66968cdacb10ab647e46194e57be6840"
+      "sha256": "6f0c8f2fc93f8c2a6908e5ebb9b00abf4988c6f10608d1d61d6a1acff9114fe1"
     },
     {
       "name": "accounting-inbox-20",
       "category": "accounting-inbox",
       "itemCount": 20,
       "encoding": "toon",
-      "encodedBytes": 6394,
+      "encodedBytes": 3090,
       "jsonBytes": 6061,
-      "sha256": "cdae7d73412d26a78b16f74d953c97fe065dc5014dbf1b0d0122244e637b31ea"
+      "sha256": "216bf2a8d75a8b3bc11b88d41482f1dc4f5c2525c197efaa400720c9248cd77c"
     },
     {
       "name": "accounting-inbox-100",
       "category": "accounting-inbox",
       "itemCount": 100,
       "encoding": "toon",
-      "encodedBytes": 31563,
+      "encodedBytes": 14579,
       "jsonBytes": 29869,
-      "sha256": "71be3ddd74618e30b925b41f6828135dc9562a4b37b1a9c99dab80df077ed3d0"
+      "sha256": "4e6a265057eec4f4c34358521d9afed25d36134120a7d00bc5905dbb21f68761"
     },
     {
       "name": "plan-page-first",
       "category": "plan-page",
       "itemCount": 50,
       "encoding": "toon",
-      "encodedBytes": 4424,
+      "encodedBytes": 4296,
       "jsonBytes": 6382,
-      "sha256": "74ad6ee921504415bf12310247fa3f8b55287a1ae67d19c3deb9acd5de397ce0"
+      "sha256": "facd0be35ac33841f4749f74541752bcada25358531393f8ab10c7559c059246"
     },
     {
       "name": "plan-page-second",
       "category": "plan-page",
       "itemCount": 50,
       "encoding": "toon",
-      "encodedBytes": 4436,
+      "encodedBytes": 4308,
       "jsonBytes": 6394,
-      "sha256": "1d66878ee85acc91aed511fe8cad4e3bcc96eee849fccdfbd866ba5cc732dee7"
+      "sha256": "68fff79d756871c8df6fe7b333a8dc3a09b35f9d9fbf9868e6c19e435e9904c1"
     },
     {
       "name": "generic-batch-30",

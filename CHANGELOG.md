@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-07-26
+
+### Fixed
+
+- **`extract_pdf_invoice` could crash with `getDocumentParser(...).isComplex is not a function`.** The declared range for `@llamaindex/liteparse` started at `^2.0.4`, but `isComplex` — called on the first parse of every PDF — only exists from 2.2.0. Any install whose tree resolved below that, most often a cached `npx` directory holding an older 2.x that still satisfied the range, crashed on the first document with a bare `TypeError` naming nothing useful. This repo's own lockfile pinned a working version, so neither development nor CI ever reproduced it. The floor now sits at the version the suite is actually exercised against, and the parser is checked at construction so a future mismatch reports the dependency, the required version, and that an npx cache may need clearing instead of failing as a missing method. Present since 0.19.0, not a 0.25.x regression.
+
+### Changed
+
+- **Dependencies updated to current.** `@llamaindex/liteparse` 2.5.0 → 2.9.0, `@toon-format/toon` 2.3.0 → 4.1.0, `@babel/parser` 7 → 8 (dev), plus `tsx` and `vite`. The TOON major shortens the encoding of the response shapes that dominate a session: the 100-item accounting-inbox response drops from 31 563 to 14 579 bytes, the 20-item from 6 394 to 3 090, and the plan pages by 128 each. Under 2.3.0 the accounting-inbox encoding was *larger* than the JSON it replaced (6 394 vs 6 061 bytes) — it now costs half. Response payloads still round-trip byte-for-byte; the encode/decode check in `toMcpJson` and its JSON fallback are unchanged, and the byte baselines in `testdata/context-budgets.json` were regenerated to match.
+
 ## [0.25.2] - 2026-07-26
 
 ### Fixed

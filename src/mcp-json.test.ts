@@ -208,15 +208,19 @@ describe("toMcpJson", () => {
     expect(decode(encoded)).toEqual(source);
   });
 
-  it("falls back to JSON when TOON cannot round-trip sandboxed multiline text", () => {
-    const encoded = toMcpJson({
-      description: "<<UNTRUSTED_OCR_START:abc>>\nManual transaction\n[e-arveldaja-mcp:camt bank_account_no=EE471000001020145685]\n<<UNTRUSTED_OCR_END:abc>>",
-    });
+  it("round-trips sandboxed multiline text byte-for-byte, by whichever encoding survives it", () => {
+    // What matters is fidelity, not which encoder wins: the sandbox nonce
+    // markers and the embedded camt marker must come back exactly, or a
+    // consumer could mistake untrusted OCR text for instructions. This used to
+    // assert the JSON fallback specifically, because @toon-format/toon 2.3.0
+    // could not round-trip an embedded newline here; 2.3.1 quotes it correctly
+    // and toMcpJson's own encode/decode check keeps TOON. Either outcome is
+    // fine — a regression in either encoder still fails the equality below.
+    const description =
+      "<<UNTRUSTED_OCR_START:abc>>\nManual transaction\n[e-arveldaja-mcp:camt bank_account_no=EE471000001020145685]\n<<UNTRUSTED_OCR_END:abc>>";
+    const encoded = toMcpJson({ description });
 
-    expect(encoded.trim().startsWith("{")).toBe(true);
-    expect(parseMcpResponse(encoded)).toEqual({
-      description: "<<UNTRUSTED_OCR_START:abc>>\nManual transaction\n[e-arveldaja-mcp:camt bank_account_no=EE471000001020145685]\n<<UNTRUSTED_OCR_END:abc>>",
-    });
+    expect(parseMcpResponse(encoded)).toEqual({ description });
   });
 
   it("parses a JSON-fallback payload that TOON's decoder would silently garble", () => {

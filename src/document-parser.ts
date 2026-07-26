@@ -160,8 +160,33 @@ export function buildDocumentParserConfig(): Partial<LiteParseConfig> {
 let parser: LiteParse | undefined;
 let ocrDisabledParser: LiteParse | undefined;
 
+/**
+ * Methods this module calls on LiteParse. `isComplex` only exists from
+ * @llamaindex/liteparse 2.2.0 — the declared range used to start at ^2.0.4, so
+ * an install that resolved below 2.2.0 (a cached npx tree, a lockfile pinning
+ * an older 2.x) crashed with a bare "isComplex is not a function" the moment a
+ * PDF was parsed, while this repo's own lockfile pinned a version that worked.
+ * The range now starts at the version we test against; this check turns any
+ * remaining mismatch into an error that names the cause.
+ */
+const REQUIRED_PARSER_METHODS = ["isComplex", "parse"] as const;
+
+function assertParserApi(candidate: LiteParse): LiteParse {
+  const missing = REQUIRED_PARSER_METHODS.filter(
+    method => typeof (candidate as unknown as Record<string, unknown>)[method] !== "function",
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `The installed @llamaindex/liteparse is missing ${missing.join(", ")}. ` +
+      "This build needs @llamaindex/liteparse >= 2.9.0. Reinstall the server so the " +
+      "dependency resolves to a supported version (for an npx install, clear its cache first).",
+    );
+  }
+  return candidate;
+}
+
 export function getDocumentParser(): LiteParse {
-  parser ??= new LiteParse(buildDocumentParserConfig());
+  parser ??= assertParserApi(new LiteParse(buildDocumentParserConfig()));
   return parser;
 }
 
@@ -171,7 +196,9 @@ export function getDocumentParser(): LiteParse {
  * PDFs doesn't reconstruct a fresh LiteParse per file.
  */
 function getOcrDisabledDocumentParser(): LiteParse {
-  ocrDisabledParser ??= new LiteParse({ ...buildDocumentParserConfig(), ocrEnabled: false });
+  ocrDisabledParser ??= assertParserApi(
+    new LiteParse({ ...buildDocumentParserConfig(), ocrEnabled: false }),
+  );
   return ocrDisabledParser;
 }
 

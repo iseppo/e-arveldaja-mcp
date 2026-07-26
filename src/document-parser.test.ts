@@ -330,6 +330,36 @@ describe("document parser", () => {
     const config = buildDocumentParserConfig();
     expect(config.ocrHedgeDelaysMs).toBeUndefined();
   });
+
+  it("names the cause when the installed LiteParse predates isComplex", async () => {
+    // @llamaindex/liteparse gained isComplex in 2.2.0. The declared range once
+    // started at ^2.0.4, so a tree that resolved below that — a cached npx
+    // install, most often — reached a bare "isComplex is not a function" on the
+    // first PDF, with nothing pointing at the dependency.
+    liteParseConstructor.mockImplementationOnce(function OldLiteParse() {
+      return { parse: parseMock };
+    });
+
+    const { analyzeDocumentComplexity } = await import("./document-parser.js");
+
+    await expect(analyzeDocumentComplexity("/tmp/invoice.pdf")).rejects.toThrow(
+      /missing isComplex.*@llamaindex\/liteparse >= 2\.9\.0/s,
+    );
+  });
+
+  it("declares a LiteParse floor that actually has the methods it calls", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const manifest = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    const range = manifest.dependencies["@llamaindex/liteparse"]!;
+
+    // Pinning the floor, not the range syntax: anything below 2.2.0 lacks
+    // isComplex, and 2.9.0 is the version the suite is exercised against.
+    const [, major, minor] = /^\^(\d+)\.(\d+)\./.exec(range) ?? [];
+    expect(Number(major)).toBe(2);
+    expect(Number(minor)).toBeGreaterThanOrEqual(9);
+  });
 });
 
 function complexityPage(overrides: Partial<{
