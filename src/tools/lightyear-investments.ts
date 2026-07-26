@@ -573,9 +573,13 @@ export function classifyTradeIntrinsicReadiness(
     fxFeeCents !== null && fxFeeCents >= 0;
   const hasSafePostingArithmetic = hasSafeMoney && (
     trade.type === "Buy"
-      ? checkedCentArithmetic(eurAmountCents!, tradeFeeCents!) !== null &&
-        checkedCentArithmetic(fxFeeCents!, tradeFeeCents!) !== null &&
-        checkedCentArithmetic(eurAmountCents!, fxFeeCents!, tradeFeeCents!) !== null
+      // A buy posts `eur_amount - trade_fee` to the investment account and
+      // `eur_amount + fx_fee` out of the broker account. Only the first sum is
+      // shared with the sell branch below, which pairs it with `trade_fee +
+      // fx_fee` — a sum a buy never computes, since its two fees are posted as
+      // separate debits rather than combined.
+      ? checkedCentArithmetic(eurAmountCents!, -tradeFeeCents!) !== null &&
+        checkedCentArithmetic(eurAmountCents!, fxFeeCents!) !== null
       : checkedCentArithmetic(eurAmountCents!, -tradeFeeCents!) !== null &&
         checkedCentArithmetic(tradeFeeCents!, fxFeeCents!) !== null
   );
@@ -858,6 +862,22 @@ interface TradeExtractionResult {
   consumedConversionRefs: Set<string>;
 }
 
+/**
+ * The cash that moves through the broker balance in the trade's own currency —
+ * the figure a paired FX conversion is built around.
+ *
+ * Because Lightyear takes the fee out of the gross, the two directions read
+ * different columns: a buy spends the whole gross (shares plus fee), while a sell
+ * receives only the net. Matching a sell on its gross means looking for a
+ * conversion that is larger than the one the statement actually contains, which
+ * left every fee-bearing FX sell unpaired with `invalid_conversion_pair`.
+ */
+function tradeConversionAmountCcy(
+  trade: Pick<AccountStatementRow, "type" | "gross_amount" | "net_amount">,
+): number {
+  return Math.abs(trade.type === "Sell" ? trade.net_amount : trade.gross_amount);
+}
+
 function validateTradeAmounts(row: AccountStatementRow): FxReviewReason | null {
   const gross = Math.abs(row.gross_amount);
   const net = Math.abs(row.net_amount);
@@ -867,7 +887,14 @@ function validateTradeAmounts(row: AccountStatementRow): FxReviewReason | null {
   if (Math.sign(row.gross_amount) !== Math.sign(row.net_amount)) {
     return fxReason("trade_amount_conflict");
   }
-  const expectedNet = row.type === "Buy" ? gross + row.fee : gross - row.fee;
+  // Lightyear reports the fee INSIDE `Gross Amount`, for buys and sells alike:
+  // `Net Amt.` is always `Gross − Fee`. On a buy the gross is the cash that leaves
+  // the broker balance and the net is the share consideration; on a sell the gross
+  // is the consideration and the net is the cash that arrives. Treating a buy as
+  // `gross + fee` rejected every fee-bearing buy with `trade_amount_conflict`
+  // (verified against real statements: 107 fee-bearing buys, all `gross − fee`,
+  // none `gross + fee`).
+  const expectedNet = gross - row.fee;
   if (!isFinitePositive(expectedNet) || !agreesToCent(net, expectedNet)) {
     return fxReason("trade_amount_conflict");
   }
@@ -981,7 +1008,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
       const hasMatchingForeignRow = conversionRows.some(conversionRow =>
         normalizedCurrency(conversionRow.ccy) === tradeCurrency &&
         conversionRow.date.split(/[\sT]/)[0] === orderDatePrefix &&
-        agreesToCent(Math.abs(conversionRow.gross_amount), Math.abs(row.gross_amount))
+        agreesToCent(Math.abs(conversionRow.gross_amount), tradeConversionAmountCcy(row))
       );
       if (hasMatchingForeignRow) shortlisted.push({ ref, rows: conversionRows });
     }
@@ -1542,12 +1569,16 @@ export function collectTradeReservedConversionRefs(
   for (const trade of rows) {
     if (trade.type !== "Buy" && trade.type !== "Sell") continue;
     const day = statementDay(trade.date);
-    const gross = Math.abs(trade.gross_amount);
+    // The conversion is built around the cash that moves in the trade currency:
+    // the gross for a buy and the net for a sell, since the fee sits inside the
+    // gross. Reserving a sell against its gross looked for a conversion the
+    // statement never contains.
+    const conversionAmount = tradeConversionAmountCcy(trade);
     const currency = normalizedCurrency(trade.ccy);
 
-    if (day !== null && isFinitePositive(gross) && currency !== "EUR") {
+    if (day !== null && isFinitePositive(conversionAmount) && currency !== "EUR") {
       const wildcardCurrency = currency === "";
-      const probeIdentity = strictTradeProbeIdentity(day, currency, wildcardCurrency, gross);
+      const probeIdentity = strictTradeProbeIdentity(day, currency, wildcardCurrency, conversionAmount);
       if (processedStrictProbes.has(probeIdentity)) {
         incrementTradeReservationDiagnostic(diagnostics, "strict_cache_hits");
       } else {
@@ -1555,18 +1586,18 @@ export function collectTradeReservedConversionRefs(
         queryTradeReservationIndex(
           indexes.strictH17,
           strictTradeReservationKey(day, wildcardCurrency ? "*" : currency, wildcardCurrency),
-          gross,
-          strictCandidateResidualTolerance(gross, gross),
+          conversionAmount,
+          strictCandidateResidualTolerance(conversionAmount, conversionAmount),
           row => {
             const rowCurrency = normalizedCurrency(row.ccy);
             return statementDay(row.date) === day &&
               rowCurrency !== "" &&
               rowCurrency !== "EUR" &&
               (wildcardCurrency || rowCurrency === currency) &&
-              hasExactCandidateResidual(row.gross_amount, gross);
+              hasExactCandidateResidual(row.gross_amount, conversionAmount);
           },
           reference => reserveAndPruneTradeReference(reference, reserved, indexes.strictH17, indexes.legacyH16),
-          strictTradeReservationBounds(gross),
+          strictTradeReservationBounds(conversionAmount),
           () => incrementTradeReservationDiagnostic(diagnostics, "strict_candidate_visits"),
         );
         processedStrictProbes.add(probeIdentity);
@@ -1575,8 +1606,8 @@ export function collectTradeReservedConversionRefs(
 
     if (validateTradeAmounts(trade) === null && currency !== "EUR") {
       const datePrefix = rawStatementDatePrefix(trade.date);
-      const roundedGross = roundMoney(gross);
-      const probeIdentity = legacyTradeProbeIdentity(datePrefix, currency, gross);
+      const roundedConversionAmount = roundMoney(conversionAmount);
+      const probeIdentity = legacyTradeProbeIdentity(datePrefix, currency, conversionAmount);
       if (processedLegacyProbes.has(probeIdentity)) {
         incrementTradeReservationDiagnostic(diagnostics, "legacy_cache_hits");
       } else {
@@ -1584,11 +1615,11 @@ export function collectTradeReservedConversionRefs(
         queryTradeReservationIndex(
           indexes.legacyH16,
           legacyTradeReservationKey(datePrefix, currency),
-          roundedGross,
+          roundedConversionAmount,
           LEGACY_CENT_MATCH_TOLERANCE,
           row => rawStatementDatePrefix(row.date) === datePrefix &&
             normalizedCurrency(row.ccy) === currency &&
-            agreesToCent(Math.abs(row.gross_amount), gross),
+            agreesToCent(Math.abs(row.gross_amount), conversionAmount),
           reference => reserveAndPruneTradeReference(reference, reserved, indexes.strictH17, indexes.legacyH16),
           undefined,
           () => incrementTradeReservationDiagnostic(diagnostics, "legacy_candidate_visits"),
@@ -2208,17 +2239,25 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
     const postings: LyPosting[] = [];
 
     if (trade.type === "Buy") {
-      const totalFees = roundMoney(trade.fx_fee_eur + tradeFeeEur);
-      const investmentCostEur = roundMoney(trade.eur_amount + tradeFeeEur);
-      const totalCashOutEur = roundMoney(trade.eur_amount + totalFees);
-      if (totalFees > 0) {
-        postings.push({ accounts_id: investment_account, ...investmentDim, type: "D", amount: investmentCostEur });
-        if (trade.fx_fee_eur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: trade.fx_fee_eur });
-        postings.push({ accounts_id: broker_account, ...brokerDim, type: "C", amount: totalCashOutEur });
-      } else {
-        postings.push({ accounts_id: investment_account, ...investmentDim, type: "D", amount: investmentCostEur });
-        postings.push({ accounts_id: broker_account, ...brokerDim, type: "C", amount: investmentCostEur });
-      }
+      // `eur_amount` already contains the trade fee — for an FX buy it is the EUR
+      // conversion leg's net, i.e. the euros that became the trade's gross, and
+      // that gross paid for the shares AND the fee; for a EUR buy it is the gross
+      // itself. So the fee is subtracted out rather than added on: the investment
+      // account carries the share consideration alone.
+      //
+      // The fee is EXPENSED, not capitalised, for three reasons that agree: RTJ 3
+      // expenses transaction costs on financial assets measured at fair value
+      // through profit or loss (which is where exchange-quoted equities land); the
+      // sell path already expenses its own trade fee to the same account; and
+      // Lightyear's capital-gains report relieves cost at a fee-EXCLUSIVE
+      // `Cost Basis (EUR)` (its `Fees (EUR)` column carries only the sell fee), so
+      // capitalising here would strand the fee on the investment account forever.
+      const investmentCostEur = roundMoney(trade.eur_amount - tradeFeeEur);
+      const totalCashOutEur = roundMoney(trade.eur_amount + trade.fx_fee_eur);
+      postings.push({ accounts_id: investment_account, ...investmentDim, type: "D", amount: investmentCostEur });
+      if (trade.fx_fee_eur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: trade.fx_fee_eur });
+      if (tradeFeeEur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: tradeFeeEur });
+      postings.push({ accounts_id: broker_account, ...brokerDim, type: "C", amount: totalCashOutEur });
       const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
       const title = `Lightyear Buy: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo}`;
       const resultRow: TradeResultRow = {
@@ -2763,11 +2802,29 @@ export function registerLightyearTools(
         summary[ticker] = {
           buys: buys.length,
           sells: sells.length,
+          // Same basis as the ledger's investment debit and the portfolio summary:
+          // the share consideration, with the trade fee taken back out of
+          // `eur_amount` rather than added to it. An unresolved fee leaves the
+          // figure fee-inclusive, which is the conservative direction and is
+          // already flagged by `trade_fee_unresolved`.
           total_invested_eur: roundMoney(buys.reduce((s, t) => {
             const convertedFee = tradeFeesInEur.get(t);
-            return s + t.eur_amount + (convertedFee === null || convertedFee === undefined ? 0 : convertedFee);
+            return s + t.eur_amount - (convertedFee === null || convertedFee === undefined ? 0 : convertedFee);
           }, 0)),
-          total_sold_eur: roundMoney(sells.reduce((s, t) => s + t.eur_amount, 0)),
+          // Sells are stated on the same fee-exclusive consideration basis as the
+          // buys above and as `lightyear_portfolio_summary`. `eur_amount` is not
+          // one quantity across currencies: for a EUR sell it is the gross, which
+          // IS the consideration, but for an FX sell it is the euros that arrived,
+          // already net of both the trade fee and the FX fee — so both are added
+          // back. Summing raw `eur_amount` here left this field on the old basis
+          // while its three siblings moved, making the two tools disagree.
+          total_sold_eur: roundMoney(sells.reduce((s, t) => {
+            const convertedFee = tradeFeesInEur.get(t);
+            const tradeFee = convertedFee === null || convertedFee === undefined ? 0 : convertedFee;
+            return s + (normalizedCurrency(t.ccy) === "EUR"
+              ? t.eur_amount
+              : t.eur_amount + t.fx_fee_eur + tradeFee);
+          }, 0)),
         };
       }
       const skippedCashEquivalentSummary: Record<string, { buys: number; sells: number }> = {};
@@ -2952,7 +3009,7 @@ export function registerLightyearTools(
       broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
       gain_loss_account: z.number().optional().describe("Realized gain account, credited on a sell gain (default: auto-detect 'Tulu aktsiatelt ja osadelt', standard 8330)"),
       loss_account: z.number().optional().describe("Realized loss account, debited on a sell loss (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335)"),
-      fee_account: z.number().optional().describe("Account for EXPENSED trade fees — all Sell fees and a Buy's FX-conversion fee (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335). A Buy's trade platform fee is capitalized into the investment cost to match FIFO cost basis and is NOT posted here."),
+      fee_account: z.number().optional().describe("Account for EXPENSED trade fees — every Buy and Sell fee, both the platform fee and the FX-conversion fee (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335). No fee is capitalized into the investment cost: Lightyear's FIFO cost basis is fee-exclusive, and RTJ 3 expenses transaction costs on assets held at fair value through profit or loss."),
       skip_tickers: z.string().optional().describe("Comma-separated tickers to skip (default: BRICEKSP, ICSUSSDP). Pass \"none\" to disable; the empty string is treated as the default."),
       dry_run: z.boolean().optional().describe("Preview without creating entries (default true)"),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for dry_run=false."),
@@ -3459,14 +3516,27 @@ export function registerLightyearTools(
         let averageCost: number | null = null;
 
         if (trade.type === "Buy") {
-          // Investment cost = eur_amount (conversion net) + trade fee.
-          // FX fee is expensed, not part of cost basis (matches Lightyear CG report).
-          proposed.total_cost_eur += trade.eur_amount + convertedTradeFee;
+          // Same basis as the ledger's investment debit: the share consideration
+          // alone. `eur_amount` carries the trade fee inside it, and both fees are
+          // expensed rather than capitalised — see the buy posting builder.
+          proposed.total_cost_eur += trade.eur_amount - convertedTradeFee;
           proposed.quantity += trade.quantity;
           proposed.buy_count++;
         } else {
-          // Sell: remove proportional cost basis using weighted average cost
-          const proceeds = trade.eur_amount - convertedTradeFee;
+          // Sell: remove proportional cost basis using weighted average cost.
+          //
+          // Proceeds are stated on the same fee-exclusive consideration basis as
+          // the cost above (and as Lightyear's own `Proceeds (EUR)`), which is not
+          // one expression for both currencies, because `eur_amount` is not the
+          // same quantity in the two cases. For a EUR sell it is the gross, which
+          // IS the consideration. For an FX sell it is the euros that arrived —
+          // already net of the trade fee, since the conversion is anchored on the
+          // sell's net, and already net of the FX fee — so both are added back.
+          // Subtracting the trade fee here, as this line used to do in both cases,
+          // counted it twice for every FX sell.
+          const proceeds = normalizedCurrency(trade.ccy) === "EUR"
+            ? trade.eur_amount
+            : trade.eur_amount + trade.fx_fee_eur + convertedTradeFee;
           proposed.total_proceeds_eur += proceeds;
           proposed.sell_count++;
 

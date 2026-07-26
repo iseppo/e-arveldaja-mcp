@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 152089,
+    "toolsListBytes": 152185,
     "descriptionsBytes": 20533,
-    "inputSchemasBytes": 96072,
+    "inputSchemasBytes": 96168,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 4718
@@ -5253,7 +5253,7 @@
             "type": "boolean"
           },
           "fee_account": {
-            "description": "Account for EXPENSED trade fees — all Sell fees and a Buy's FX-conversion fee (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335). A Buy's trade platform fee is capitalized into the investment cost to match FIFO cost basis and is NOT posted here.",
+            "description": "Account for EXPENSED trade fees — every Buy and Sell fee, both the platform fee and the FX-conversion fee (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335). No fee is capitalized into the investment cost: Lightyear's FIFO cost basis is fee-exclusive, and RTJ 3 expenses transaction costs on assets held at fair value through profit or loss.",
             "type": "number"
           },
           "file_path": {

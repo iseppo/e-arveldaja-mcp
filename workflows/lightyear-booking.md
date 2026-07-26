@@ -33,7 +33,7 @@ Call `parse_lightyear_statement` for the account statement CSV. The tool's own a
 
 If sales are present, call `parse_lightyear_capital_gains` for the FIFO capital-gains CSV. This tool's own argument is also `file_path`, so pass `capital_gains_path` there: `parse_lightyear_capital_gains { "file_path": "<capital_gains_path>" }`.
 - If no `capital_gains_path` is available, explain that non-cash-equivalent sells will be skipped.
-- Sell gains/losses and expensed trade fees default to the standard securities account pair (name-resolved): realized **gain → 8330** "Tulu aktsiatelt ja osadelt", realized **loss and expensed Buy/Sell fees → 8335** "Kulu aktsiatelt ja osadelt". (A Buy's trade platform fee is capitalized into the investment cost to match FIFO cost basis, not expensed; only the FX conversion fee on a Buy is expensed to 8335.) Only pass `gain_loss_account` / `loss_account` / `fee_account` to override; you no longer need to ask the user for a gain/loss account before booking sells.
+- Sell gains/losses and expensed trade fees default to the standard securities account pair (name-resolved): realized **gain → 8330** "Tulu aktsiatelt ja osadelt", realized **loss and expensed Buy/Sell fees → 8335** "Kulu aktsiatelt ja osadelt". (Every fee is expensed to 8335 — a Buy's trade platform fee as well as its FX conversion fee. Nothing is capitalized into the investment cost: Lightyear's FIFO cost basis is fee-exclusive, so capitalizing would strand the fee on the investment account.) Only pass `gain_loss_account` / `loss_account` / `fee_account` to override; you no longer need to ask the user for a gain/loss account before booking sells.
 
 ### Step 3: Preview portfolio carrying value
 

@@ -175,9 +175,17 @@ function h16Pair(options: {
     tradeReference = "OR-H16",
     conversionReference = "CN-H16",
     tradeFee = "2.00",
-    tradeNet = tradeType === "Buy" ? "1309.80" : "1305.80",
     rates = ["1.15709", "0.86423"],
-    conversionFeeSide = "USD",
+    // Lightyear charges the conversion fee on the SOURCE leg, always: across the
+    // real statement set every one of the 84 fee-bearing EUR->foreign conversions
+    // carries it on the EUR leg and every one of the 28 fee-bearing foreign->EUR
+    // conversions carries it on the foreign leg, with none on the receiving side
+    // in either direction. A buy converts EUR->USD and a sell USD->EUR, so the
+    // realistic default follows the trade direction. This matters to the buy
+    // postings: `eur_amount` is the EUR leg's NET, so `eur_amount + fx_fee_eur`
+    // reconstructs the EUR leg's gross — the cash that truly left — only while the
+    // fee sits on that leg.
+    conversionFeeSide = tradeType === "Buy" ? "EUR" : "USD",
     date = "10/11/2025",
   } = options;
   const eurSign = tradeType === "Buy" ? "-" : "";
@@ -186,10 +194,18 @@ function h16Pair(options: {
   const usdFee = conversionFeeSide === "USD" || conversionFeeSide === "both" ? "4.58" : "0.00";
   const eurGross = eurFee === "0.00" ? "1126.28" : "1130.24";
   const usdGross = usdFee === "0.00" ? "1303.22" : "1307.80";
+  const cents = (value: number): string => (Math.round(value * 100) / 100).toFixed(2);
+  // The conversion is anchored to the cash that actually moves in USD, and
+  // Lightyear takes the trade fee out of the gross. A buy spends that cash, so it
+  // IS the trade's gross; a sell receives it, so it is the trade's net and the
+  // gross sits one fee above. Keeping the conversion rows untouched across both
+  // directions leaves the rate resolution identical.
+  const tradeGross = tradeType === "Buy" ? usdGross : cents(Number(usdGross) + Number(tradeFee));
+  const tradeNet = options.tradeNet ?? cents(Number(tradeGross) - Number(tradeFee));
   return [
     [`${date} 13:40:29`, conversionReference, "", "", "Conversion", "", "EUR", "", `${eurSign}${eurGross}`, rates[0], eurFee, `${eurSign}1126.28`, ""],
     [`${date} 13:40:29`, conversionReference, "", "", "Conversion", "", "USD", "", `${usdSign}${usdGross}`, rates[1], usdFee, `${usdSign}1303.22`, ""],
-    [`${date} 08:51:32`, tradeReference, "AAPL", "US0378331005", tradeType, "10", "USD", "130.78", "1307.80", "", tradeFee, tradeNet, ""],
+    [`${date} 08:51:32`, tradeReference, "AAPL", "US0378331005", tradeType, "10", "USD", "130.78", tradeGross, "", tradeFee, tradeNet, ""],
   ];
 }
 
@@ -585,13 +601,17 @@ describe("lightyear investments tools", () => {
     }));
   });
 
-  it("capitalizes the trade platform fee into the investment cost on a buy (not expensed)", async () => {
-    // EUR buy: gross 1000, trade fee 2.50, no FX conversion fee. The trade fee
-    // belongs in the investment cost basis (the capital-gains report relieves it
-    // on sell); expensing it would strand a 2.50 residual on the investment
-    // account after the position is fully sold.
+  it("expenses the trade platform fee on a buy rather than capitalising it", async () => {
+    // EUR buy in Lightyear's real column convention: gross 1002.50 is the cash
+    // that leaves the balance, trade fee 2.50 is taken out of it, and net 1000.00
+    // is the share consideration. No FX conversion fee.
+    //
+    // The fee is expensed, not capitalised. Lightyear's capital-gains report
+    // relieves cost at a fee-EXCLUSIVE `Cost Basis (EUR)` — its `Fees (EUR)`
+    // column carries only the sell fee — so capitalising 1002.50 here and later
+    // relieving 1000.00 would strand 2.50 on the investment account for good.
     mockedReadFile.mockResolvedValue(buildStatementCsv([
-      ["10/03/2026 11:51:35", "OR-FEEBUY", "VUAA", "IE00BK5BQT80", "Buy", "10.000000000", "EUR", "100.000000000", "1000.00", "", "2.50", "1002.50", ""],
+      ["10/03/2026 11:51:35", "OR-FEEBUY", "VUAA", "IE00BK5BQT80", "Buy", "10.000000000", "EUR", "100.000000000", "1002.50", "", "2.50", "1000.00", ""],
     ]));
 
     const createdPostings: unknown[][] = [];
@@ -611,12 +631,134 @@ describe("lightyear investments tools", () => {
     const payload = parseMcpResponse(result.content[0]!.text) as any;
     expect(payload.created).toBe(1);
     const buyPostings = createdPostings[0]!;
-    // Investment debit includes the trade fee (1000 + 2.50); broker credit is
-    // the full cash out (1002.50); no expense posting for the trade fee.
+    // Investment debit is the share consideration alone (1000.00), the fee is its
+    // own expense, and the broker credit is still the full cash out (1002.50).
     expect(buyPostings).toEqual([
-      { accounts_id: 1550, type: "D", amount: 1002.5 },
+      { accounts_id: 1550, type: "D", amount: 1000 },
+      { accounts_id: 8335, type: "D", amount: 2.5 },
       { accounts_id: 1120, type: "C", amount: 1002.5 },
     ]);
+  });
+
+  it("books a real fee-bearing FX buy exactly as the statement's own cash movement", async () => {
+    // Verbatim rows from a real Lightyear statement (GOOGL, 23/07/2026). They pin
+    // the column convention this tool used to get backwards: the trade's Gross
+    // 113.31 USD is the cash spent and its Net 113.20 is the share consideration,
+    // with the 0.11 fee taken out of the gross — not added on top. Under the old
+    // `net = gross + fee` assumption every fee-bearing buy was rejected outright
+    // with `trade_amount_conflict`.
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["23/07/2026 14:08:47", "OR-HSXV553FZZ", "GOOGL", "US02079K3059", "Buy", "0.354352399", "USD", "319.456000000", "113.31", "", "0.11", "113.20", ""],
+      ["23/07/2026 14:08:47", "CN-52GA4VJ3C7", "USD", "", "Conversion", "", "USD", "", "113.31", "0.87939", "", "113.31", ""],
+      ["23/07/2026 14:08:47", "CN-52GA4VJ3C7", "EUR", "", "Conversion", "", "EUR", "", "-100.00", "1.13715", "0.35", "-99.65", ""],
+    ]));
+
+    const createdPostings: unknown[][] = [];
+    const create = vi.fn(async (payload: any) => {
+      createdPostings.push(payload.postings);
+      return { created_object_id: 7100 + createdPostings.length };
+    });
+
+    const { handler } = setupLightyearTool("book_lightyear_trades", { createImpl: create });
+    const result = await handler({
+      file_path: "/tmp/lightyear.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      dry_run: false,
+    });
+
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(payload.created).toBe(1);
+    expect(payload.skipped).toBe(0);
+    // Exactly the cash the statement describes: 100.00 EUR left the account, 0.35
+    // of it was the FX conversion fee, and the remaining 99.65 became the USD that
+    // bought the shares and paid the 0.11 trade fee (0.10 EUR at the pair's rate).
+    // Both fees are expensed, so the investment account carries the 99.55 share
+    // consideration and the three debits still add up to the 100.00 credit.
+    expect(createdPostings[0]).toEqual([
+      { accounts_id: 1550, type: "D", amount: 99.55 },
+      { accounts_id: 8335, type: "D", amount: 0.35 },
+      { accounts_id: 8335, type: "D", amount: 0.1 },
+      { accounts_id: 1120, type: "C", amount: 100 },
+    ]);
+  });
+
+  // Every row of 13/07/2026 from a real statement, in file order — not a selection.
+  // A fixture that keeps only a sell and its conversion can hide the fact that some
+  // earlier trade claims that conversion first, which is exactly how an earlier
+  // version of these tests came to assert a pairing that never happens.
+  //
+  // The BRK.B sell at 13:41:07 fetched a gross of 2068.16 USD; the 1.04 fee came out
+  // of it and only the 2067.12 net was converted back to EUR — which is precisely
+  // the conversion's own USD gross. Matching the sell on its gross found nothing.
+  const realJuly13Rows = (): string[][] => [
+    ["13/07/2026 14:39:45", "CN-GQXW2XXXAG", "EUR", "", "Conversion", "", "EUR", "", "2971.74", "1.14025", "", "2971.74", ""],
+    ["13/07/2026 14:39:45", "CN-GQXW2XXXAG", "USD", "", "Conversion", "", "USD", "", "-3400.44", "0.87700", "11.90", "-3388.54", ""],
+    ["13/07/2026 14:39:28", "OR-YA8XYV2A24", "AMD", "US0079031078", "Sell", "6.214031818", "USD", "547.390000000", "3401.50", "", "1.06", "3400.44", ""],
+    ["13/07/2026 13:45:19", "CN-ANZLU3KFE8", "EUR", "", "Conversion", "", "EUR", "", "1803.66", "1.14206", "", "1803.66", ""],
+    ["13/07/2026 13:45:19", "CN-ANZLU3KFE8", "USD", "", "Conversion", "", "USD", "", "-2067.12", "0.87561", "7.23", "-2059.89", ""],
+    ["13/07/2026 13:41:07", "OR-FA2LM3FYJQ", "BRK.B", "US0846707026", "Sell", "4.143531051", "USD", "499.130000000", "2068.16", "", "1.04", "2067.12", ""],
+    ["13/07/2026 12:45:32", "WL-FAUYZ7E5X9", "", "", "Withdrawal", "", "EUR", "", "-396.99", "", "", "-396.99", ""],
+    ["13/07/2026 12:44:46", "OR-A48S57WE3G", "BRICEKSP", "IE000GWTNRJ7", "Sell", "396.990000000", "EUR", "1.000000000", "396.99", "", "0.00", "396.99", ""],
+    ["13/07/2026 12:31:08", "OR-RU5XHAEKUL", "BRICEKSP", "IE000GWTNRJ7", "Buy", "396.990000000", "EUR", "1.000000000", "396.99", "", "0.00", "396.99", ""],
+    ["13/07/2026 12:30:39", "OR-8CK4E9JM35", "VVSM", "IE00BMC38736", "Sell", "4.052183888", "EUR", "97.969394028", "396.99", "", "0.00", "396.99", ""],
+  ];
+
+  it("pairs a real fee-bearing FX sell against the cash it actually received", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv(realJuly13Rows()));
+
+    const { handler } = setupLightyearTool("parse_lightyear_statement");
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
+
+    // Paired. Proceeds are stated fee-exclusive, so the 1803.66 EUR that arrived is
+    // reported with the 7.23 USD FX fee and 1.04 USD trade fee added back at the
+    // pair's own rate (6.33 + 0.91) — the sell's 2068.16 USD consideration.
+    expect(payload.trades.by_ticker["BRK.B"].total_sold_eur).toBe(1810.9);
+    expect((payload.warnings ?? []).join("\n")).not.toContain("invalid_conversion_pair");
+    // Absent or zero — a rejected pair would leave its two conversion rows here.
+    expect(payload.unhandled?.count ?? 0).toBe(0);
+  });
+
+  it("still cannot book that sell, because the capital-gains cross-check is on another basis", async () => {
+    // Companion to the pairing test above, kept honest: pairing is necessary but not
+    // sufficient. The capital-gains row below is the real one for this disposal.
+    // Lightyear states `Proceeds (EUR)` as the sell GROSS at the ECB rate
+    // (2068.16 USD -> 1817.04), while the statement delivered 1803.66 EUR at the
+    // dealt rate. The gap exceeds the cross-check tolerance, so the row is skipped.
+    //
+    // That gap is structural and pre-dates the conversion-pairing fix; it is not
+    // something the fix claims to solve. If it is ever addressed, this test should
+    // start failing rather than quietly keep asserting a skip.
+    const statement = buildStatementCsv(realJuly13Rows());
+    const gains = buildCapitalGainsCsv([[
+      "13/07/2026 13:41:07", "BRK.B", "Berkshire Hathaway", "US0846707026", "United States", "equity",
+      "0.91372331128", "4.143531051",
+      "1722.571827425825851481982000000", "1817.044808232594728362410000000", "94.472980806768876880428000000",
+    ]]);
+    // Both reads resolve to the same path under the harness, so the two files can
+    // only be told apart by call order. The call count is asserted below so a
+    // change in the read pattern fails loudly instead of silently swapping them.
+    const reads: string[] = [];
+    mockedReadFile.mockImplementation(async () => {
+      reads.push("read");
+      return (reads.length === 1 ? statement : gains) as any;
+    });
+
+    const { handler } = setupLightyearTool("book_lightyear_trades");
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv",
+      capital_gains_file: "/tmp/gains.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      dry_run: true,
+    })).content[0]!.text) as any;
+
+    expect(reads).toHaveLength(2);
+    const brk = payload.results.find((r: any) => r.reference?.includes("OR-FA2LM3FYJQ"));
+    expect(brk.status).toBe("skipped");
+    // Positively the proceeds cross-check, not a missing conversion pair.
+    expect((payload.warnings ?? []).join("\n")).toContain("outside proceeds tolerance");
+    expect((payload.warnings ?? []).join("\n")).not.toContain("invalid_conversion_pair");
   });
 
   it("skips non-EUR cash-equivalent sells without cost basis to avoid FX drift", async () => {
@@ -1359,6 +1501,19 @@ describe("H17 distribution currency and EUR provenance", () => {
     const collect = (lightyearInvestments as any).collectTradeReservedConversionRefs;
     expect(collect).toBeTypeOf("function");
     expect([...collect(statementRowsForInternalTest(rows as string[][]))].sort()).toEqual(expectedReferences);
+  });
+
+  it("reserves the conversion a fee-bearing sell actually funded, not its gross", () => {
+    // The reservation index answers the same "which conversion belongs to this
+    // trade" question as the pairing in extractTrades, so it reads the same
+    // column: a sell converts the net it received (99.90), never its gross
+    // (100.00). Keyed on the gross, this conversion stayed unreserved and was free
+    // to be mistaken for a distribution's own conversion.
+    const rows = statementRowsForInternalTest([
+      ["22/04/2026", "CN-SELL-FUNDED", "", "", "Conversion", "", "USD", "", "-99.90", "", "0", "-99.90", ""],
+      ["22/04/2026", "OR-SELL-FUNDED", "AMD", "US0079031078", "Sell", "1", "USD", "100", "100.00", "", "0.10", "99.90", ""],
+    ]);
+    expect([...lightyearInvestments.collectTradeReservedConversionRefs(rows as any)]).toEqual(["CN-SELL-FUNDED"]);
   });
 
   it.each([
@@ -3103,7 +3258,7 @@ describe("H16 Lightyear handler provenance", () => {
     expect(statementPayload.trades.by_ticker.AAPL).toEqual({
       buys: 1,
       sells: 0,
-      total_invested_eur: 1128.01,
+      total_invested_eur: 1124.55,
       total_sold_eur: 0,
     });
     expect(statementPayload.warnings).toBeUndefined();
@@ -3117,8 +3272,8 @@ describe("H16 Lightyear handler provenance", () => {
     expect(portfolioPayload.active_holdings[0]).toEqual(expect.objectContaining({
       ticker: "AAPL",
       quantity_held: 10,
-      remaining_cost_eur: 1128.01,
-      avg_cost_per_unit: 112.8,
+      remaining_cost_eur: 1124.55,
+      avg_cost_per_unit: 112.46,
     }));
     expect(portfolioPayload.warnings).toBeUndefined();
   });
@@ -3142,10 +3297,16 @@ describe("H16 Lightyear handler provenance", () => {
 
     expect(payload.created).toBe(1);
     expect(payload.skipped).toBe(0);
+    // These amounts are pinned to the conversion leg: the EUR side of the pair is
+    // gross 1130.24 / fee 3.96 / net 1126.28, so exactly 1130.24 EUR left the
+    // broker balance and 1126.28 of it became USD. The trade fee (1.73 EUR) came
+    // out of that converted USD, so it is subtracted from the investment debit and
+    // expensed alongside the FX fee — the three debits still sum to the credit.
     expect(created[0].postings).toEqual([
-      { accounts_id: 1550, type: "D", amount: 1128.01 },
+      { accounts_id: 1550, type: "D", amount: 1124.55 },
       { accounts_id: 8335, type: "D", amount: 3.96 },
-      { accounts_id: 1120, type: "C", amount: 1131.97 },
+      { accounts_id: 8335, type: "D", amount: 1.73 },
+      { accounts_id: 1120, type: "C", amount: 1130.24 },
     ]);
     expect(vi.mocked(logAudit)).toHaveBeenCalledTimes(1);
   });
@@ -3154,7 +3315,9 @@ describe("H16 Lightyear handler provenance", () => {
     const statement = buildStatementCsv(h16Pair({
       tradeType: "Sell",
       tradeReference: "OR-H16-SELL",
-      tradeNet: "1305.80",
+      // The USD conversion consumes the cash the sell received, so the net is the
+      // conversion's gross (1307.80) and the trade gross sits one fee above it.
+      tradeNet: "1307.80",
       rates: ["", "0.86423"],
     }));
     const gains = buildCapitalGainsCsv([[
@@ -3202,7 +3365,9 @@ describe("H16 Lightyear handler provenance", () => {
       tradeType: "Sell",
       tradeReference: "OR-H16-SELL",
       conversionReference: "CN-H16-SELL",
-      tradeNet: "1305.80",
+      // Sell: the conversion consumes the received cash, so the trade net equals
+      // the conversion gross.
+      tradeNet: "1307.80",
       rates: ["", "0.86423"],
       date: "11/11/2025",
     });
@@ -3215,8 +3380,17 @@ describe("H16 Lightyear handler provenance", () => {
       ticker: "AAPL",
       quantity_held: 0,
       remaining_cost_eur: 0,
-      total_proceeds_eur: 1124.55,
-      realized_gain_loss_eur: -3.46,
+      // Both figures are stated fee-exclusive, matching Lightyear's own report
+      // (`Capital Gains = Proceeds - Cost Basis`, fees broken out separately) and
+      // the ledger, which expenses fees instead of netting them into the gain.
+      // Cost is 1126.28 - 1.73 and proceeds are 1126.28 + 3.96 + 1.73, so the 7.42
+      // is the buy trade fee plus both sell fees. The buy's own FX fee is absent
+      // by design, not by fixture accident: a buy's FX fee is expensed straight to
+      // the fee account and never enters `eur_amount`, so it cannot reach the
+      // weighted-average cost — which leg of the conversion carries it is
+      // irrelevant here.
+      total_proceeds_eur: 1131.97,
+      realized_gain_loss_eur: 7.42,
     }));
     expect(payload.warnings).toBeUndefined();
   });
@@ -3251,7 +3425,10 @@ describe("H16 Lightyear handler provenance", () => {
       const secondForeign = [...rows[1]!]; secondForeign[1] = "CN-H16-SECOND";
       return [rows[0]!, rows[1]!, secondEur, secondForeign, rows[2]!];
     }],
-    ["foreign gross mismatch", "invalid_conversion_pair", (rows: string[][]) => { rows[2]![8] = "1400"; rows[2]![11] = "1402"; return rows; }],
+    // Gross moves away from the conversion's foreign gross while staying
+    // internally coherent (net = gross - fee), so the pair fails to shortlist
+    // rather than tripping the amount validator first.
+    ["foreign gross mismatch", "invalid_conversion_pair", (rows: string[][]) => { rows[2]![8] = "1400"; rows[2]![11] = "1398"; return rows; }],
     ["trade amount mismatch", "trade_amount_conflict", (rows: string[][]) => { rows[2]![11] = "1308.80"; return rows; }],
     ["negative trade fee", "trade_amount_conflict", (rows: string[][]) => { rows[2]![10] = "-2"; return rows; }],
   ])("H16 fails closed for %s", async (_label, code, mutate) => {
@@ -3312,7 +3489,7 @@ describe("H16 Lightyear handler provenance", () => {
 
   it("H16 keeps a valid EUR fee bookable but rejects malformed EUR trade arithmetic", async () => {
     const valid = [
-      ["10/11/2025 08:51:32", "OR-H16-EUR", "AAPL", "US0378331005", "Buy", "10", "EUR", "100", "1000", "", "2", "1002", ""],
+      ["10/11/2025 08:51:32", "OR-H16-EUR", "AAPL", "US0378331005", "Buy", "10", "EUR", "100", "1002", "", "2", "1000", ""],
     ];
     mockedReadFile.mockResolvedValue(buildStatementCsv(valid));
     const validRun = setupLightyearTool("book_lightyear_trades");
@@ -3385,7 +3562,7 @@ describe("H16 Lightyear handler provenance", () => {
     expect(payload.warnings[0]).not.toContain("no matched FX conversion");
   });
 
-  it("H16 statement marks an overflowing proven trade fee for review without adding its nominal amount", async () => {
+  it("H16 statement marks a trade fee larger than its own gross for review without adding its nominal amount", async () => {
     const max = String(Number.MAX_VALUE);
     mockedReadFile.mockResolvedValue(buildStatementCsv([
       ["10/11/2025 13:40:29", "CN-H16-TRADE-FEE", "", "", "Conversion", "", "EUR", "", "-200", "", "0", "-200", ""],
@@ -3396,14 +3573,16 @@ describe("H16 Lightyear handler provenance", () => {
     const result = await handler({ file_path: "/tmp/lightyear.csv" });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
-    expect(payload.trades.by_ticker.AAPL.total_invested_eur).toBe(200);
+    // The fee exceeds its own gross, which the amount validator now rejects before
+    // the conversion pair is ever shortlisted — so the pair stays unconsumed and
+    // none of the astronomic fee reaches the ticker totals.
+    expect(payload.trades.by_ticker.AAPL.total_invested_eur).toBe(0);
     expect(payload.needs_review).toBe(true);
-    expect(payload.warnings).toHaveLength(1);
-    expect(payload.warnings[0]).toContain("<<UNTRUSTED_OCR_START:");
-    expect(payload.warnings[0]).toContain("OR-H16-TRADE-FEE");
-    expect(payload.warnings[0]).toContain("CN-H16-TRADE-FEE");
-    expect(payload.warnings[0]).toContain("FX review [trade_fee_unresolved]");
-    expect(payload.warnings[0]).toContain(H16_MESSAGES.trade_fee_unresolved);
+    const warningText = payload.warnings.join("\n");
+    expect(warningText).toContain("<<UNTRUSTED_OCR_START:");
+    expect(warningText).toContain("OR-H16-TRADE-FEE");
+    expect(warningText).toContain("FX review [trade_amount_conflict]");
+    expect(warningText).toContain(H16_MESSAGES.trade_amount_conflict);
   });
 });
 
@@ -3650,9 +3829,8 @@ describe("M26 intrinsic portfolio outcomes", () => {
     const quantity = options.quantity ?? "1";
     const gross = options.gross ?? "50";
     const fee = options.fee ?? "0";
-    const net = options.net ?? (type === "Buy"
-      ? String(Number(gross) + Number(fee))
-      : String(Number(gross) - Number(fee)));
+    // Lightyear reports the fee inside the gross for both directions.
+    const net = options.net ?? String(Number(gross) - Number(fee));
     return [
       options.date ?? "10/11/2025 08:51:32",
       options.reference,
@@ -3697,7 +3875,14 @@ describe("M26 intrinsic portfolio outcomes", () => {
     ];
   };
 
-  const overflowingTradeFeeRows = (reference = "OR-M26-FEE"): string[][] => {
+  // A fee larger than its own gross. Because Lightyear takes the fee out of the
+  // gross, this is arithmetically impossible rather than merely oversized, and the
+  // amount validator rejects it before any fee conversion is attempted. (A fee that
+  // overflows only after currency conversion is unreachable from a coherent
+  // statement: the converted fee is bounded above by the trade's own EUR gross.
+  // That path is still covered directly against `classifyTradeIntrinsicReadiness`
+  // in the M26 parity cases below.)
+  const impossibleTradeFeeRows = (reference = "OR-M26-FEE"): string[][] => {
     const max = String(Number.MAX_VALUE);
     return [
       ["10/11/2025 13:40:29", "CN-M26-FEE", "", "", "Conversion", "", "EUR", "", "-200", "", "0", "-200", ""],
@@ -3790,14 +3975,14 @@ describe("M26 intrinsic portfolio outcomes", () => {
     ]);
   });
 
-  it("M26 rejects an overflowing converted trade fee before WAC", async () => {
-    const payload = await runPortfolio(overflowingTradeFeeRows());
+  it("M26 rejects a trade fee larger than its own gross before WAC", async () => {
+    const payload = await runPortfolio(impossibleTradeFeeRows());
 
     expect(payload.booked_basis).toEqual([]);
     expect(payload.review_required).toEqual([
       expect.objectContaining({
         status: "review_required",
-        review_reason: { code: "trade_fee_unresolved", message: H16_MESSAGES.trade_fee_unresolved },
+        review_reason: { code: "trade_amount_conflict", message: H16_MESSAGES.trade_amount_conflict },
       }),
     ]);
     expect(payload.previewed).toEqual([]);
@@ -3823,10 +4008,10 @@ describe("M26 intrinsic portfolio outcomes", () => {
     ]);
 
     expect(payload.active_holdings).toEqual([
-      expect.objectContaining({ ticker: "MSFT", quantity_held: 2, remaining_cost_eur: 101, avg_cost_per_unit: 50.5, buys: 1, sells: 0 }),
-      expect.objectContaining({ ticker: "AAPL", quantity_held: 10, remaining_cost_eur: 1128.01, avg_cost_per_unit: 112.8, buys: 1, sells: 0 }),
+      expect.objectContaining({ ticker: "MSFT", quantity_held: 2, remaining_cost_eur: 99, avg_cost_per_unit: 49.5, buys: 1, sells: 0 }),
+      expect.objectContaining({ ticker: "AAPL", quantity_held: 10, remaining_cost_eur: 1124.55, avg_cost_per_unit: 112.46, buys: 1, sells: 0 }),
     ]);
-    expect(payload.totals).toMatchObject({ active_positions: 2, total_remaining_cost_eur: 1229.01, total_realized_gain_loss_eur: 0, closed_positions: 0 });
+    expect(payload.totals).toMatchObject({ active_positions: 2, total_remaining_cost_eur: 1223.55, total_realized_gain_loss_eur: 0, closed_positions: 0 });
     expect(payload.warnings).toBeUndefined();
   });
 
@@ -3903,7 +4088,7 @@ describe("M26 intrinsic portfolio outcomes", () => {
       { rows: [eurTrade({ reference: "OR-PARITY-EUR-M26", ticker: "AAPL", gross: "100", fee: "2" })], bucket: "booked_basis", booking: "would_create" },
       { rows: h16Pair({ tradeReference: "OR-PARITY-USD-M26", conversionReference: "CN-PARITY-USD-M26", rates: ["", "0.86423"] }), bucket: "booked_basis", booking: "would_create" },
       { rows: [unmatchedUsdTrade({ reference: "OR-PARITY-REVIEW-M26", ticker: "AAPL" })], bucket: "review_required", booking: "skipped", code: "invalid_conversion_pair" },
-      { rows: overflowingTradeFeeRows("OR-PARITY-FEE-M26"), bucket: "review_required", booking: "skipped", code: "trade_fee_unresolved" },
+      { rows: impossibleTradeFeeRows("OR-PARITY-FEE-M26"), bucket: "review_required", booking: "skipped", code: "trade_amount_conflict" },
     ];
     for (const scenario of publicCases) {
       const portfolio = await runPortfolio(scenario.rows);
