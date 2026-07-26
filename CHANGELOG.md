@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.25.2] - 2026-07-26
+
 ### Fixed
 
 - **Opaque receipt `file_ref` values never resolved on macOS.** Node exposes a directory handle at `/dev/fd/N` there, but the path is not traversable — `readdir` on it fails with `ENOTDIR` — so every reference reopened against a receipt folder was rejected with `file_reference_path_changed`, making the whole opaque-reference flow unusable on that platform. Directory enumeration now falls back to the canonical pathname on Darwin, guarded by the before/after opened-object identity checks a direct `folder_path` call already relies on. Thanks to @Ozzuke for finding and diagnosing this (#56).
