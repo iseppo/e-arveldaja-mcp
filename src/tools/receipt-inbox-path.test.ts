@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
+import { realpath } from "fs/promises";
 import { win32 } from "path";
 import { parseMcpResponse } from "../mcp-json.js";
 import type { registerReceiptInboxTools as registerReceiptInboxToolsType } from "./receipt-inbox.js";
@@ -82,6 +83,37 @@ describe("receipt inbox folder path validation", () => {
       files: [],
       skipped: [],
     });
+  });
+
+  it("fails closed on macOS too when no descriptor namespace resolves at all", async () => {
+    // The Darwin fallback exists only because /dev/fd is not traversable, not
+    // because it is absent — realpath on it still succeeds there. If it ever
+    // stops resolving, an opaque reference must fail rather than degrade: with
+    // no descriptorPath, readBoundReceiptFile skips its per-file opened-object
+    // verification, leaving the reference checked less than a direct call.
+    setPlatform("darwin");
+    const mockedRealpath = vi.mocked(realpath) as unknown as Mock;
+    const descriptorless = async (path: unknown): Promise<string> => {
+      if (String(path).startsWith("/proc/") || String(path).startsWith("/dev/fd/")) {
+        throw Object.assign(new Error("descriptor namespace unavailable"), { code: "ENOENT" });
+      }
+      return "C:\\Allowed\\Receipts";
+    };
+    const restore = mockedRealpath.getMockImplementation();
+    mockedRealpath.mockImplementation(descriptorless);
+
+    try {
+      await expect(scanReceiptFolderInternal(
+        "C:\\Allowed\\Receipts",
+        undefined,
+        undefined,
+        undefined,
+        { expectedCanonicalPath: "C:\\Allowed\\Receipts" },
+      ))
+        .rejects.toThrow("The referenced filesystem location no longer resolves to the reviewed path.");
+    } finally {
+      mockedRealpath.mockImplementation(restore!);
+    }
   });
 
   it("fails closed on other platforms when descriptor namespaces are unavailable", async () => {

@@ -76,8 +76,13 @@ async function assertReceiptDirectoryBinding(binding: BoundReceiptDirectory): Pr
 /**
  * Bind the exact directory object, not merely its path string. Linux descriptor
  * paths keep all enumeration and reads relative to the retained no-follow
- * handle. macOS exposes directory handles under /dev/fd, but Node cannot
- * traverse them, so Darwin uses the portable opened-object identity checks.
+ * handle. macOS exposes directory handles under /dev/fd but Node cannot
+ * traverse them (readdir is ENOTDIR), so there the enumeration falls back to
+ * the canonical pathname guarded by the opened-object identity checks — the
+ * same guarantee a direct folder_path call already carries. A descriptor path
+ * must still resolve for an opaque reference on every platform; if none does,
+ * fail closed, because a second pathname lookup with no descriptor to verify
+ * against would re-open the TOCTOU window the reference exists to close.
  */
 async function openBoundReceiptDirectory(
   folderPath: string,
@@ -109,11 +114,14 @@ async function openBoundReceiptDirectory(
         // Try the next platform descriptor namespace.
       }
     }
-    // Opaque references normally require descriptor-relative access. Darwin's
-    // /dev/fd directory handles are not traversable in Node (readdir is ENOTDIR),
-    // so use the same before/after identity checks as direct folder_path calls.
-    if (!descriptorPath && options.expectedCanonicalPath !== undefined &&
-      process.platform !== "darwin") {
+    // Opaque references still require a resolvable descriptor path on every
+    // platform, macOS included. Darwin only needs the enumeration below to go
+    // through the pathname; it does NOT need this check relaxed, because
+    // realpath on /dev/fd succeeds there even though readdir does not. Waiving
+    // it would also waive the per-file verification in readBoundReceiptFile,
+    // which is gated on `descriptorPath` being present — an opaque reference
+    // would then be checked strictly less than a direct folder_path call.
+    if (!descriptorPath && options.expectedCanonicalPath !== undefined) {
       throw receiptDirectoryChanged();
     }
 

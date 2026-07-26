@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Opaque receipt `file_ref` values never resolved on macOS.** Node exposes a directory handle at `/dev/fd/N` there, but the path is not traversable — `readdir` on it fails with `ENOTDIR` — so every reference reopened against a receipt folder was rejected with `file_reference_path_changed`, making the whole opaque-reference flow unusable on that platform. Directory enumeration now falls back to the canonical pathname on Darwin, guarded by the before/after opened-object identity checks a direct `folder_path` call already relies on. Thanks to @Ozzuke for finding and diagnosing this (#56).
+
+### Security
+
+- **The macOS fallback no longer waives the descriptor requirement for opaque references.** As contributed, the fix also let an opaque reference proceed on Darwin when *no* descriptor namespace resolved at all. That case is not what the macOS bug needs — `realpath` on `/dev/fd` succeeds there, only `readdir` fails — and it is the one case where `readBoundReceiptFile` skips its per-file opened-object verification, which is gated on a descriptor path being present. An opaque reference would then have been checked strictly less than the direct call it is meant to be stronger than. The requirement is restored on every platform, and a regression test pins that macOS fails closed when no descriptor namespace resolves; the per-file `O_NOFOLLOW` open and canonical-path check are unchanged.
+
 ## [0.25.1] - 2026-07-26
 
 ### Fixed
