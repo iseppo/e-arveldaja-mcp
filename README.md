@@ -1,5 +1,7 @@
 # e-arveldaja MCP Server
 
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.iseppo%2Fe-arveldaja-mcp.svg)](https://mcptoplist.com/server/io.github.iseppo%2Fe-arveldaja-mcp)
+
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
 MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 127 tools on the compatibility-preserving standard profile, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
