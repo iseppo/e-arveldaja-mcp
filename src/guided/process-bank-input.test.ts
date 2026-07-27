@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -131,7 +131,7 @@ describe("process_bank_input", () => {
 
   it("accepts a bank_input file_ref and rejects a camt_input ref passed to the façade", async () => {
     const { handler, runtime } = setup();
-    const dir = await mkdtemp(join(tmpdir(), "bank-facade-"));
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "bank-facade-")));
     const xmlPath = join(dir, "statement.xml");
     await writeFile(xmlPath, fixtureCamtXml(), "utf8");
 

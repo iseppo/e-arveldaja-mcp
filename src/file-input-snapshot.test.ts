@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -161,7 +161,7 @@ describe("captureFileInputSnapshot", () => {
     await writeFile(path, "a,b\n");
     const context = runtime();
     const fileRef = context.fileReferenceStore.issue({
-      canonicalPath: path,
+      canonicalPath: await realpath(path),
       kind: "file",
       operation: FILE_REFERENCE_OPERATIONS.wise,
     });

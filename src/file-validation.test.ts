@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { getAllowedRootsStartupWarning, isPathWithinRoot, resolveFileInput, splitAllowedPaths, validateFilePath } from "./file-validation.js";
-import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, existsSync, readFileSync, rmSync } from "fs";
+import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, existsSync, readFileSync, realpathSync, rmSync } from "fs";
 import { join, win32, extname, resolve } from "path";
 import { tmpdir } from "os";
 
@@ -144,7 +144,7 @@ describe("validateFilePath", () => {
     try {
       const module = await import("./file-validation.js");
       const result = await module.validateFilePath("statement.csv", [".csv"], 1024);
-      expect(result).toBe(resolve(allowedRoot, "statement.csv"));
+      expect(result).toBe(realpathSync(resolve(allowedRoot, "statement.csv")));
     } finally {
       vi.doUnmock("./paths.js");
       vi.resetModules();
