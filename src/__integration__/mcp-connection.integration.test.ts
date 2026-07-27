@@ -221,7 +221,7 @@ describe("MCP Server Integration", () => {
     const afterData = parseMcpResponse((after.content as any)[0].text);
 
     expect(validationMessage).toMatch(/index/i);
-    expect(validationMessage).toMatch(/\bint(?:eger)?\b|safeint/i);
+    expect(validationMessage).toMatch(/\b(?:int(?:eger)?|safeint)\b/i);
     expect(afterData.active).toBe(beforeData.active);
   });
 
