@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Opaque receipt `file_ref` values reopen on real macOS filesystems.** The 0.25.2 hardening assumed `realpath("/dev/fd/N")` returned the receipt directory's canonical pathname on Darwin. Node 24 and 26 instead return a synthetic `/dev/fd/<directory-name>` path while `readdir("/dev/fd/N")` remains `ENOTDIR`, so the descriptor was rejected and every opaque receipt reference failed with `file_reference_path_changed`. A successfully resolved Darwin `/dev/fd/N` now keeps the descriptor requirement without comparing its synthetic spelling to the canonical pathname; enumeration still uses the canonical path guarded by opened-object identity checks.
+
+### Security
+
+- **Per-file receipt binding no longer depends on descriptor `realpath` spelling.** Every opened receipt is now checked by filesystem object identity (`fstat` on the `O_NOFOLLOW` handle versus `stat` on the canonical file path) before its bytes are read. This keeps the per-file check active on Darwin's canonical-path fallback, preserves descriptor-relative access elsewhere, and applies the same opened-object check to direct folder paths.
+
 ## [0.25.3] - 2026-07-26
 
 ### Fixed

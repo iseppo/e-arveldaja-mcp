@@ -53,6 +53,10 @@ function receiptDirectoryChanged(): FileReferenceStoreError {
   return new FileReferenceStoreError("file_reference_path_changed");
 }
 
+function isDarwinDescriptorPath(path: string): boolean {
+  return process.platform === "darwin" && path.startsWith("/dev/fd/");
+}
+
 async function assertReceiptDirectoryBinding(binding: BoundReceiptDirectory): Promise<void> {
   try {
     const [openedInfo, currentInfo] = await Promise.all([
@@ -63,9 +67,16 @@ async function assertReceiptDirectoryBinding(binding: BoundReceiptDirectory): Pr
       !sameFilesystemObject(openedInfo, currentInfo)) {
       throw receiptDirectoryChanged();
     }
-    if (binding.descriptorPath !== undefined &&
-      await realpath(binding.descriptorPath) !== binding.canonicalPath) {
-      throw receiptDirectoryChanged();
+    if (binding.descriptorPath !== undefined) {
+      const descriptorRealPath = await realpath(binding.descriptorPath);
+      // Darwin exposes the retained fd as /dev/fd/<directory-name>, not as the
+      // directory's canonical pathname. The handle-vs-path stat check above is
+      // the opened-object identity proof there; realpath only proves that the
+      // descriptor namespace remains available.
+      if (descriptorRealPath !== binding.canonicalPath &&
+        !isDarwinDescriptorPath(binding.descriptorPath)) {
+        throw receiptDirectoryChanged();
+      }
     }
   } catch (error) {
     if (error instanceof FileReferenceStoreError) throw error;
@@ -106,7 +117,8 @@ async function openBoundReceiptDirectory(
     let descriptorPath: string | undefined;
     for (const candidate of [`/proc/self/fd/${handle.fd}`, `/dev/fd/${handle.fd}`]) {
       try {
-        if (await realpath(candidate) === canonicalPath) {
+        const descriptorRealPath = await realpath(candidate);
+        if (descriptorRealPath === canonicalPath || isDarwinDescriptorPath(candidate)) {
           descriptorPath = candidate;
           break;
         }
@@ -114,13 +126,11 @@ async function openBoundReceiptDirectory(
         // Try the next platform descriptor namespace.
       }
     }
-    // Opaque references still require a resolvable descriptor path on every
-    // platform, macOS included. Darwin only needs the enumeration below to go
-    // through the pathname; it does NOT need this check relaxed, because
-    // realpath on /dev/fd succeeds there even though readdir does not. Waiving
-    // it would also waive the per-file verification in readBoundReceiptFile,
-    // which is gated on `descriptorPath` being present — an opaque reference
-    // would then be checked strictly less than a direct folder_path call.
+    // Opaque references require a resolvable descriptor namespace on every
+    // platform, macOS included. Darwin's /dev/fd realpath has a synthetic
+    // spelling, but resolving the exact retained fd is sufficient because the
+    // opened directory and every opened child are independently identity-
+    // checked against their canonical paths.
     if (!descriptorPath && options.expectedCanonicalPath !== undefined) {
       throw receiptDirectoryChanged();
     }
@@ -288,25 +298,11 @@ async function readBoundReceiptFile(
   try {
     handle = await open(candidatePath, constants.O_RDONLY | constants.O_NOFOLLOW);
     const openedInfo = await handle.stat();
-    if (!openedInfo.isFile() || openedInfo.size > MAX_RECEIPT_SIZE) {
+    const currentInfo = await stat(file.path);
+    if (!openedInfo.isFile() || !currentInfo.isFile() ||
+      openedInfo.size > MAX_RECEIPT_SIZE ||
+      !sameFilesystemObject(openedInfo, currentInfo)) {
       throw receiptDirectoryChanged();
-    }
-
-    if (binding.descriptorPath !== undefined) {
-      let openedCanonicalPath: string | undefined;
-      for (const descriptorPath of [`/proc/self/fd/${handle.fd}`, `/dev/fd/${handle.fd}`]) {
-        try {
-          openedCanonicalPath = await realpath(descriptorPath);
-          break;
-        } catch {
-          // Try the next platform descriptor namespace.
-        }
-      }
-      const roots = getAllowedRoots();
-      if (openedCanonicalPath !== file.path ||
-        !roots.some(root => isPathWithinRoot(openedCanonicalPath, root))) {
-        throw receiptDirectoryChanged();
-      }
     }
 
     const bytes = await handle.readFile();

@@ -34,6 +34,8 @@ vi.mock("fs/promises", async (importOriginal) => {
         stat: vi.fn().mockResolvedValue({
           isDirectory: () => !isFile,
           isFile: () => isFile,
+          dev: 1,
+          ino: isFile ? 3 : 2,
           size: isFile ? 512 : 0,
         }),
         readFile: vi.fn().mockImplementation(() => readFileMock(path)),
@@ -124,11 +126,14 @@ describe("process_receipt_batch rollback handling", () => {
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true } as any;
+        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       }
 
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-03-20T10:00:00.000Z"),
       } as any;
@@ -280,8 +285,8 @@ describe("process_receipt_batch rollback handling", () => {
     vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([{ name: "receipt.pdf", isFile: () => true }] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
-      return { isDirectory: () => false, size: 512, mtime: new Date("2026-07-15T10:00:00.000Z") } as any;
+      if (String(path) === "/tmp/receipts") return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
+      return { isDirectory: () => false, isFile: () => true, dev: 1, ino: 3, size: 512, mtime: new Date("2026-07-15T10:00:00.000Z") } as any;
     });
     vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
     vi.mocked(resolveFilePath).mockImplementation((path) => path);
@@ -358,11 +363,14 @@ describe("process_receipt_batch rollback handling", () => {
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true } as any;
+        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       }
 
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-03-20T10:00:00.000Z"),
       } as any;
@@ -515,11 +523,14 @@ describe("process_receipt_batch rollback handling", () => {
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true } as any;
+        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       }
 
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-03-20T10:00:00.000Z"),
       } as any;
@@ -693,11 +704,14 @@ describe("process_receipt_batch rollback handling", () => {
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true } as any;
+        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       }
 
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-03-20T10:00:00.000Z"),
       } as any;
@@ -837,11 +851,14 @@ describe("process_receipt_batch rollback handling", () => {
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true } as any;
+        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       }
 
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-03-20T10:00:00.000Z"),
       } as any;
@@ -1020,11 +1037,14 @@ describe("process_receipt_batch rollback handling", () => {
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true } as any;
+        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       }
 
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-03-20T10:00:00.000Z"),
       } as any;
@@ -1182,11 +1202,14 @@ describe("process_receipt_batch rollback handling", () => {
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true } as any;
+        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       }
 
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-03-20T10:00:00.000Z"),
       } as any;
@@ -1342,11 +1365,14 @@ describe("process_receipt_batch rollback handling", () => {
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
       if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true } as any;
+        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       }
 
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-03-20T10:00:00.000Z"),
       } as any;
@@ -1498,9 +1524,12 @@ describe("process_receipt_batch rollback handling", () => {
       { name: "anthropic.pdf", isFile: () => true },
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
+      if (String(path) === "/tmp/receipts") return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-04-20T10:00:00.000Z"),
       } as any;
@@ -1653,9 +1682,12 @@ describe("process_receipt_batch rollback handling", () => {
       { name: "receipt.pdf", isFile: () => true },
     ] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
+      if (String(path) === "/tmp/receipts") return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
       return {
         isDirectory: () => false,
+        isFile: () => true,
+        dev: 1,
+        ino: 3,
         size: 512,
         mtime: new Date("2026-04-20T10:00:00.000Z"),
       } as any;
@@ -1738,8 +1770,8 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
     vi.mocked(realpath).mockImplementation(receiptRealpath as any);
     vi.mocked(readdir).mockResolvedValue([{ name: "receipt.pdf", isFile: () => true }] as any);
     vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") return { isDirectory: () => true } as any;
-      return { isDirectory: () => false, size: 512, mtime: new Date("2026-07-15T10:00:00.000Z") } as any;
+      if (String(path) === "/tmp/receipts") return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
+      return { isDirectory: () => false, isFile: () => true, dev: 1, ino: 3, size: 512, mtime: new Date("2026-07-15T10:00:00.000Z") } as any;
     });
     vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
     vi.mocked(resolveFilePath).mockImplementation((path) => path);
