@@ -10,7 +10,11 @@
 
 ### Changed
 
-- **Dependencies updated to current.** `@llamaindex/liteparse` 2.5.0 → 2.9.0, `@toon-format/toon` 2.3.0 → 4.1.0, `@babel/parser` 7 → 8 (dev), plus `tsx` and `vite`. The TOON major shortens the encoding of the response shapes that dominate a session: the 100-item accounting-inbox response drops from 31 563 to 14 579 bytes, the 20-item from 6 394 to 3 090, and the plan pages by 128 each. Under 2.3.0 the accounting-inbox encoding was *larger* than the JSON it replaced (6 394 vs 6 061 bytes) — it now costs half. Response payloads still round-trip byte-for-byte; the encode/decode check in `toMcpJson` and its JSON fallback are unchanged, and the byte baselines in `testdata/context-budgets.json` were regenerated to match.
+- **Dependencies updated to current.** `@modelcontextprotocol/sdk` 1.29.0 → 1.30.0, `@llamaindex/liteparse` 2.5.0 → 2.9.0, `@toon-format/toon` 2.3.0 → 4.1.0, `@babel/parser` 7 → 8 (dev), plus `tsx` and `vite`. The TOON major shortens the encoding of the response shapes that dominate a session: the 100-item accounting-inbox response drops from 31 563 to 14 579 bytes, the 20-item from 6 394 to 3 090, and the plan pages by 128 each. Under 2.3.0 the accounting-inbox encoding was *larger* than the JSON it replaced (6 394 vs 6 061 bytes) — it now costs half. Response payloads still round-trip byte-for-byte; the encode/decode check in `toMcpJson` and its JSON fallback are unchanged, and the byte baselines in `testdata/context-budgets.json` were regenerated to match.
+
+### Security
+
+- **Closed a moderate advisory in a transitive dependency.** `@hono/node-server` below 2.0.5 has a path-traversal issue in `serve-static` on Windows via an encoded backslash (GHSA-frvp-7c67-39w9), and it reached this package through the MCP SDK. It was not exploitable here — the server runs on `StdioServerTransport` only, so the HTTP static-file path is never loaded — and the advisory could not be cleared locally: `npm audit fix --force` proposed *downgrading* the SDK to 1.24.3, and the fixed hono is a major beyond the range the SDK itself declared. SDK 1.30.0 moves to `@hono/node-server` 2.x, so the tree is now clean (`npm audit`: 0 vulnerabilities) without pinning anything out of range.
 
 ## [0.25.2] - 2026-07-26
 
