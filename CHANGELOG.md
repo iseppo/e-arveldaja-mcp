@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.25.5] - 2026-08-20
+
 ### Changed
 
 - **Dependencies updated to current.** `@llamaindex/liteparse` 2.9.0 → 2.13.1, `fast-xml-parser` 5.10.1 → 5.11.0, `@toon-format/toon` 4.1.0 → 4.1.1, plus dev tooling (`tsx`, `vite`, `vitest`, `@types/node`). Declared floors raised to the tested versions per the dependency-floor policy. `npm audit` remains at zero known vulnerabilities.
