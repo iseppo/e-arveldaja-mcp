@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.25.4] - 2026-08-14
+
+### Security
+
+- **Updated vulnerable transitive dependencies.** The locked dependency tree now resolves `fast-uri` 3.1.5, `hono` 4.13.2, and `nanoid` 3.3.18, addressing the host-confusion, request-processing, and zero-size generator denial-of-service advisories reported by `npm audit`. No direct dependency ranges changed, and the refreshed tree reports zero known vulnerabilities.
+
 ## [0.25.3] - 2026-07-26
 
 ### Fixed
