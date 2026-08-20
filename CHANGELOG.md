@@ -2,15 +2,15 @@
 
 ## [Unreleased]
 
-### Changed
-
-- **Dependencies updated to current.** `@llamaindex/liteparse` 2.9.0 → 2.13.1, `fast-xml-parser` 5.10.1 → 5.11.0, `@toon-format/toon` 4.1.0 → 4.1.1, plus dev tooling (`tsx`, `vite`, `vitest`, `@types/node`). Declared floors raised to the tested versions per the dependency-floor policy. `npm audit` remains at zero known vulnerabilities.
-
-## [0.25.4] - 2026-08-14
+## [0.25.4] - 2026-08-20
 
 ### Security
 
-- **Updated vulnerable transitive dependencies.** The locked dependency tree now resolves `fast-uri` 3.1.5, `hono` 4.13.2, and `nanoid` 3.3.18, addressing the host-confusion, request-processing, and zero-size generator denial-of-service advisories reported by `npm audit`. No direct dependency ranges changed, and the refreshed tree reports zero known vulnerabilities.
+- **Updated vulnerable transitive dependencies.** The locked dependency tree now resolves `fast-uri` 3.1.5, `hono` 4.13.2, and `nanoid` 3.3.18, addressing the host-confusion, request-processing, and zero-size generator denial-of-service advisories reported by `npm audit`. The refreshed tree reports zero known vulnerabilities.
+
+### Changed
+
+- **Dependencies updated to current.** `@llamaindex/liteparse` 2.9.0 → 2.13.1, `fast-xml-parser` 5.10.1 → 5.11.0, `@toon-format/toon` 4.1.0 → 4.1.1, plus dev tooling (`tsx`, `vite`, `vitest`, `@types/node`). Declared floors raised to the tested versions per the dependency-floor policy. `npm audit` remains at zero known vulnerabilities.
 
 ## [0.25.3] - 2026-07-26
 
