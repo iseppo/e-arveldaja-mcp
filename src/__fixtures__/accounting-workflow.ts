@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { mkdtempSync, writeFileSync } from "fs";
-import { mkdir, mkdtemp, writeFile } from "fs/promises";
+import { mkdtempSync, realpathSync, writeFileSync } from "fs";
+import { mkdir, mkdtemp, realpath, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { vi } from "vitest";
@@ -309,9 +309,9 @@ export function createReceiptFolder(files: Record<string, string> = { "receipt.p
   for (const [name, contents] of Object.entries(files)) {
     writeFileSync(join(root, name), contents, "utf-8");
   }
-  return root;
+  return realpathSync(root);
 }
 
 async function mkdirTemp(prefix: string): Promise<string> {
-  return mkdtemp(join(tmpdir(), prefix));
+  return realpath(await mkdtemp(join(tmpdir(), prefix)));
 }

@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -32,7 +32,7 @@ function docWithRegCode(): Awaited<ReturnType<typeof parseDocument>> {
 
 const tempDirs: string[] = [];
 function writeTempPdf(contents = "%PDF-1.4 fixture"): { path: string; sha256: string } {
-  const dir = mkdtempSync(join(tmpdir(), "doc-facade-")); tempDirs.push(dir);
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "doc-facade-"))); tempDirs.push(dir);
   const path = join(dir, "invoice.pdf"); writeFileSync(path, contents);
   return { path, sha256: createHash("sha256").update(Buffer.from(contents)).digest("hex") };
 }

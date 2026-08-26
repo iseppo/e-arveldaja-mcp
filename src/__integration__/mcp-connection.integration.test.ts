@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -208,22 +208,20 @@ describe("MCP Server Integration", () => {
     const before = await client.callTool({ name: "list_connections", arguments: {} });
     const beforeData = parseMcpResponse((before.content as any)[0].text);
 
-    let sawValidationFailure = false;
+    let validationMessage = "";
     try {
       const result = await client.callTool({ name: "switch_connection", arguments: { index: 0.5 } });
-      const resultData = parseMcpResponse((result.content as any)[0].text);
       expect(result.isError).toBe(true);
-      expect(String((resultData as { error?: unknown }).error ?? JSON.stringify(resultData))).toMatch(/integer/i);
-      sawValidationFailure = true;
+      validationMessage = String((result.content as any)[0]?.text ?? "");
     } catch (error) {
-      expect(String(error)).toMatch(/integer/i);
-      sawValidationFailure = true;
+      validationMessage = String(error);
     }
 
     const after = await client.callTool({ name: "list_connections", arguments: {} });
     const afterData = parseMcpResponse((after.content as any)[0].text);
 
-    expect(sawValidationFailure).toBe(true);
+    expect(validationMessage).toMatch(/index/i);
+    expect(validationMessage).toMatch(/\b(?:int(?:eger)?|safeint)\b/i);
     expect(afterData.active).toBe(beforeData.active);
   });
 
@@ -390,9 +388,11 @@ describe("MCP Server Setup Mode", () => {
   let client: Client;
   let transport: StdioClientTransport;
   let tempDir: string;
+  let canonicalTempDir: string;
 
   beforeAll(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "earveldaja-mcp-setup-"));
+    canonicalTempDir = realpathSync(tempDir);
     transport = createTransport({
       cwd: tempDir,
       env: buildTransportEnv({
@@ -451,7 +451,7 @@ describe("MCP Server Setup Mode", () => {
     expect(data.active).toBeNull();
     expect(data.total).toBe(0);
     expect(data.setup_required).toBe(true);
-    expect(data.working_directory).toBe(tempDir);
+    expect(data.working_directory).toBe(canonicalTempDir);
     expect(data.hint).toContain("get_setup_instructions");
   });
 
@@ -461,7 +461,7 @@ describe("MCP Server Setup Mode", () => {
 
     expect(setup.isError).toBeFalsy();
     expect(setupData.mode).toBe("setup");
-    expect(setupData.working_directory).toBe(tempDir);
+    expect(setupData.working_directory).toBe(canonicalTempDir);
     expect(setupData.credential_file_pattern).toBe("apikey*.txt");
     expect(setupData.credential_file_env_var).toBe("EARVELDAJA_API_KEY_FILE");
     expect(setupData.env_vars).toEqual(expect.arrayContaining([
@@ -478,7 +478,7 @@ describe("MCP Server Setup Mode", () => {
     expect(blockedData.hint).toContain("get_setup_instructions");
     expect(blockedData.blocked_tool).toBe("get_vat_info");
     expect(blockedData.blocked_api_method).toBe("readonly.getVatInfo");
-    expect(blockedData.working_directory).toBe(tempDir);
+    expect(blockedData.working_directory).toBe(canonicalTempDir);
   });
 
   it("falls back cleanly when interactive credential prompting is unavailable", async () => {
@@ -507,7 +507,7 @@ describe("MCP Server Setup Mode", () => {
     expect(data.error).toContain("setup mode");
     expect(data.blocked_resource).toBe("earveldaja://accounts");
     expect(data.blocked_api_method).toBe("readonly.getAccounts");
-    expect(data.working_directory).toBe(tempDir);
+    expect(data.working_directory).toBe(canonicalTempDir);
   });
 
   it("still allows local offline tools in setup mode", async () => {
