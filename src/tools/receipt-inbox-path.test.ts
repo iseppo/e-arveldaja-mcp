@@ -12,6 +12,11 @@ vi.mock("fs/promises", () => ({
       (String(path).startsWith("/dev/fd/") && process.platform !== "darwin")) {
       throw Object.assign(new Error("descriptor namespace unavailable"), { code: "ENOENT" });
     }
+    if (String(path).startsWith("/dev/fd/")) {
+      // Real Darwin returns a synthetic descriptor pathname rather than the
+      // canonical directory pathname.
+      return "/dev/fd/Receipts";
+    }
     return "C:\\Allowed\\Receipts";
   }),
   stat: vi.fn().mockResolvedValue({ isDirectory: () => true, dev: 1, ino: 2 }),
@@ -86,11 +91,9 @@ describe("receipt inbox folder path validation", () => {
   });
 
   it("fails closed on macOS too when no descriptor namespace resolves at all", async () => {
-    // The Darwin fallback exists only because /dev/fd is not traversable, not
-    // because it is absent — realpath on it still succeeds there. If it ever
-    // stops resolving, an opaque reference must fail rather than degrade: with
-    // no descriptorPath, readBoundReceiptFile skips its per-file opened-object
-    // verification, leaving the reference checked less than a direct call.
+    // The Darwin fallback exists because /dev/fd is not traversable, not
+    // because it is absent. If it ever stops resolving, an opaque reference
+    // must fail rather than silently lose its retained-descriptor binding.
     setPlatform("darwin");
     const mockedRealpath = vi.mocked(realpath) as unknown as Mock;
     const descriptorless = async (path: unknown): Promise<string> => {

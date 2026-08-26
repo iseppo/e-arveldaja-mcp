@@ -35,6 +35,8 @@ vi.mock("fs/promises", async (importOriginal) => {
         stat: vi.fn().mockResolvedValue({
           isDirectory: () => !isFile,
           isFile: () => isFile,
+          dev: 1,
+          ino: isFile ? 3 : 2,
           size: isFile ? 512 : 0,
         }),
         readFile: vi.fn().mockImplementation(() => readFileMock(path)),
@@ -91,9 +93,14 @@ function primeFilesystem(): void {
   vi.mocked(realpath).mockImplementation(receiptRealpath as never);
   vi.mocked(readdir).mockResolvedValue([{ name: "receipt.pdf", isFile: () => true }] as never);
   vi.mocked(stat).mockImplementation(async (path) => {
-    if (String(path) === FOLDER) return { isDirectory: () => true } as never;
+    if (String(path) === FOLDER) {
+      return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as never;
+    }
     return {
       isDirectory: () => false,
+      isFile: () => true,
+      dev: 1,
+      ino: 3,
       size: 512,
       mtime: new Date("2026-03-20T10:00:00.000Z"),
     } as never;

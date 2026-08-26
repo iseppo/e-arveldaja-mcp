@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
@@ -890,6 +890,32 @@ describe("receipt inbox tool status handling", () => {
       rmSync(replacementPath, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform === "darwin")(
+    "reopens and snapshots an opaque receipt path with the real Darwin descriptor filesystem",
+    async () => {
+      const folder = createReceiptFolder({ "receipt.pdf": "%PDF-1.4\nDARWIN" });
+      const canonicalFolder = realpathSync(folder);
+      let snapshot: Awaited<ReturnType<typeof prepareReceiptBatchSnapshot>> | undefined;
+
+      try {
+        snapshot = await prepareReceiptBatchSnapshot(
+          canonicalFolder,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { expectedCanonicalPath: canonicalFolder },
+        );
+
+        expect(snapshot.scan.files.map(file => file.name)).toEqual(["receipt.pdf"]);
+        expect(snapshot.files[0]!.bytes.toString()).toBe("%PDF-1.4\nDARWIN");
+      } finally {
+        await snapshot?.cleanup();
+        rmSync(folder, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("never snapshots outside bytes when a validated receipt child becomes a symlink", async () => {
     const folder = createReceiptFolder({ "receipt.pdf": "%PDF-1.4\nORIGINAL" });
