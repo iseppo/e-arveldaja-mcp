@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 130,
-    "toolsListBytes": 125409,
+    "toolsListBytes": 125352,
     "descriptionsBytes": 16208,
-    "inputSchemasBytes": 77888,
+    "inputSchemasBytes": 77831,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -2516,23 +2516,15 @@
                 "type": "boolean"
               },
               "current_gross_price": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "number",
+                  "null"
                 ]
               },
               "current_vat_price": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "number",
+                  "null"
                 ]
               },
               "invoice_id": {
@@ -2804,15 +2796,11 @@
             "type": "string"
           },
           "invoice_company_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Company name shown on invoices (pass null to clear)"
+            "description": "Company name shown on invoices (pass null to clear)",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "invoice_email_body": {
             "description": "Default body for invoice emails",

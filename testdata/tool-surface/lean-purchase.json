@@ -2,9 +2,9 @@
   "profile": "lean-purchase",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 81070,
+    "toolsListBytes": 81032,
     "descriptionsBytes": 10195,
-    "inputSchemasBytes": 50230,
+    "inputSchemasBytes": 50192,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -1648,23 +1648,15 @@
                 "type": "boolean"
               },
               "current_gross_price": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "number",
+                  "null"
                 ]
               },
               "current_vat_price": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "number",
+                  "null"
                 ]
               },
               "invoice_id": {

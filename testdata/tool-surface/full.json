@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 152185,
+    "toolsListBytes": 152128,
     "descriptionsBytes": 20533,
-    "inputSchemasBytes": 96168,
+    "inputSchemasBytes": 96111,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 4718
@@ -2516,23 +2516,15 @@
                 "type": "boolean"
               },
               "current_gross_price": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "number",
+                  "null"
                 ]
               },
               "current_vat_price": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "number",
+                  "null"
                 ]
               },
               "invoice_id": {
@@ -2804,15 +2796,11 @@
             "type": "string"
           },
           "invoice_company_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Company name shown on invoices (pass null to clear)"
+            "description": "Company name shown on invoices (pass null to clear)",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "invoice_email_body": {
             "description": "Default body for invoice emails",
