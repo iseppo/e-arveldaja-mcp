@@ -138,22 +138,69 @@ describe("checkReceiptLedger", () => {
     });
   });
 
-  it("flags a bank leg posted on the wrong side", () => {
+  it("accepts a legacy incoming row stored as type C when the journal debits the bank (verified live)", () => {
+    // Imported rows may carry type "C" for money in; the journal's own bank
+    // posting decides the direction, and the contra leg must oppose it.
+    const result = checkReceiptLedger({
+      tx: makeTransaction({ type: "C" }),
+      invoices: [SALE_INVOICE],
+      journals: [makeRegistrationJournal({
+        postings: [
+          { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "D", amount: 1488 },
+          { accounts_id: RECEIVABLE_ACCOUNT_ID, accounts_dimensions_id: null, type: "C", amount: 1488 },
+        ],
+      })],
+    });
+
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("flags a bank leg that is missing or split across both sides", () => {
+    const missing = checkReceiptLedger({
+      tx: makeTransaction(),
+      invoices: [SALE_INVOICE],
+      journals: [makeRegistrationJournal({
+        postings: [
+          { accounts_id: 9999, accounts_dimensions_id: null, type: "D", amount: 1488 },
+          { accounts_id: RECEIVABLE_ACCOUNT_ID, type: "C", amount: 1488 },
+        ],
+      })],
+    });
+    expect(missing).toMatchObject({
+      ok: false,
+      code: "ledger_posting_mismatch",
+      details: { leg: "bank", expected_amount: 1488, posted_amount: 0, posted_types: [] },
+    });
+
+    const split = checkReceiptLedger({
+      tx: makeTransaction(),
+      invoices: [SALE_INVOICE],
+      journals: [makeRegistrationJournal({
+        postings: [
+          { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "D", amount: 1488 },
+          { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "C", amount: 1488 },
+          { accounts_id: RECEIVABLE_ACCOUNT_ID, type: "C", amount: 1488 },
+        ],
+      })],
+    });
+    expect(split).toMatchObject({ ok: false, code: "ledger_posting_mismatch", details: { leg: "bank" } });
+  });
+
+  it("flags a contra leg on the same side as the bank leg", () => {
     const result = checkReceiptLedger({
       tx: makeTransaction(),
       invoices: [SALE_INVOICE],
       journals: [makeRegistrationJournal({
         postings: [
-          { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "C", amount: 1488 },
+          { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "D", amount: 1488 },
           { accounts_id: RECEIVABLE_ACCOUNT_ID, type: "D", amount: 1488 },
         ],
       })],
     });
-
     expect(result).toMatchObject({
       ok: false,
       code: "ledger_posting_mismatch",
-      details: { leg: "bank", expected_amount: 1488, posted_amount: 0, expected_type: "D" },
+      details: { leg: "invoice", expected_type: "C", posted_amount: 0 },
     });
   });
 

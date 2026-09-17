@@ -151,22 +151,26 @@ export function checkReceiptLedger(input: {
     };
   }
 
-  // Cash side follows the stored direction: type "D" = money in = bank debited.
-  const bankDirection: "D" | "C" = tx.type === "D" ? "D" : "C";
-  const contraDirection: "D" | "C" = bankDirection === "D" ? "C" : "D";
+  // The stored transaction `type` is NOT a reliable direction: historically
+  // imported rows carry "C" for incoming payments too (verified live — the
+  // EIS receipt is type "C" with a Dr bank posting; see the direction notes in
+  // CLAUDE.md). The bank leg is therefore identified by account + dimension
+  // only, and its posted side defines the direction the contra leg must
+  // oppose. A bank leg split across both sides is unusable and fails.
   const expected = eurMagnitude(tx);
   const postings = livePostings(journal);
   const unverified: string[] = [];
+  let contraDirection: "D" | "C" | undefined;
 
   if (tx.accounts_id == null) {
     unverified.push("bank_leg: transaction record carries no accounts_id");
   } else {
     const bankPostings = postings.filter(p =>
       p.accounts_id === tx.accounts_id
-      && (tx.accounts_dimensions_id == null || p.accounts_dimensions_id === tx.accounts_dimensions_id)
-      && p.type === bankDirection);
+      && (tx.accounts_dimensions_id == null || p.accounts_dimensions_id === tx.accounts_dimensions_id));
+    const bankSides = [...new Set(bankPostings.map(p => p.type).filter((t): t is "D" | "C" => t === "D" || t === "C"))];
     const bankTotal = sumPostings(bankPostings);
-    if (Math.abs(bankTotal - expected) > RECEIPT_LEDGER_AMOUNT_TOLERANCE) {
+    if (bankSides.length !== 1 || Math.abs(bankTotal - expected) > RECEIPT_LEDGER_AMOUNT_TOLERANCE) {
       return {
         ok: false,
         code: "ledger_posting_mismatch",
@@ -177,10 +181,11 @@ export function checkReceiptLedger(input: {
           posted_amount: bankTotal,
           expected_accounts_id: tx.accounts_id,
           expected_accounts_dimensions_id: tx.accounts_dimensions_id ?? null,
-          expected_type: bankDirection,
+          posted_types: bankSides,
         },
       };
     }
+    contraDirection = bankSides[0] === "D" ? "C" : "D";
   }
 
   // The contra leg answers for the INVOICE rows only. A transaction that also
@@ -198,7 +203,7 @@ export function checkReceiptLedger(input: {
   } else {
     const contraPostings = postings.filter(p =>
       ledgerAccountIds.includes(p.accounts_id)
-      && p.type === contraDirection);
+      && (contraDirection === undefined || p.type === contraDirection));
     const contraTotal = sumPostings(contraPostings);
     if (Math.abs(contraTotal - contraExpected) > RECEIPT_LEDGER_AMOUNT_TOLERANCE) {
       return {
@@ -210,7 +215,7 @@ export function checkReceiptLedger(input: {
           expected_amount: contraExpected,
           posted_amount: contraTotal,
           expected_accounts_ids: ledgerAccountIds,
-          expected_type: contraDirection,
+          expected_type: contraDirection ?? null,
         },
       };
     }
