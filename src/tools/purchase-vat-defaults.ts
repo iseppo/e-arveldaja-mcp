@@ -140,16 +140,26 @@ export async function getPurchaseArticlesWithVat(api: ApiContext): Promise<Purch
   return await api.readonly.getPurchaseArticles() as PurchaseArticleWithVat[];
 }
 
+/**
+ * Structural item defaults the API requires on every PATCH/POST row but does
+ * not echo back on GET: `cl_fringe_benefits_id` (NOT NULL in the API schema;
+ * 1 = no fringe benefit) and `amount` (1). A `null` counts as missing so an
+ * item read back from the API can be re-sent unchanged.
+ */
+export function applyPurchaseItemStructuralDefaults(item: PurchaseInvoiceItem): PurchaseInvoiceItem {
+  return {
+    ...item,
+    cl_fringe_benefits_id: item.cl_fringe_benefits_id ?? 1,
+    amount: item.amount ?? 1,
+  } as PurchaseInvoiceItem;
+}
+
 export function applyPurchaseVatDefaults(
   purchaseArticles: PurchaseArticleWithVat[],
   item: PurchaseInvoiceItem,
   isVatRegistered: boolean,
 ): PurchaseInvoiceItem {
-  const merged = {
-    cl_fringe_benefits_id: 1,
-    amount: 1,
-    ...item,
-  } as PurchaseInvoiceItem;
+  const merged = applyPurchaseItemStructuralDefaults(item);
 
   if (!isVatRegistered) {
     delete merged.vat_accounts_id;

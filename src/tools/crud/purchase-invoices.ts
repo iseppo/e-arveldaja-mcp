@@ -10,12 +10,13 @@ import { toolResponse } from "../../tool-response.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import {
+  applyPurchaseItemStructuralDefaults,
   applyPurchaseVatDefaults,
   getPurchaseArticlesWithVat,
   validateNonVatItem,
 } from "../purchase-vat-defaults.js";
 import { validateItemDimensions } from "../../account-validation.js";
-import type { CreatePurchaseInvoiceData } from "../../types/api.js";
+import type { CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../../types/api.js";
 import {
   PurchaseInvoiceTotalsCorrectionError,
   type PurchaseInvoiceTotalsCorrectionPreview,
@@ -222,6 +223,15 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       // verbatim would persist them again. desandboxAllStrings is a no-op on the
       // common (already-clean) path.
       parsed.items = desandboxAllStrings(current.items.map(item => ({ ...item })));
+    }
+    // PATCH replaces the whole item list and the API's NOT NULL constraint on
+    // cl_fringe_benefits_id is enforced on every row it receives — yet the API
+    // GET omits the field, and create_purchase_invoice defaults it to 1. Apply
+    // the same structural defaults here so an item list that was accepted on
+    // create (or read back from the API) is accepted on update instead of
+    // surfacing as a raw 500 (GitHub #62).
+    if (Array.isArray(parsed.items)) {
+      parsed.items = parsed.items.map(item => applyPurchaseItemStructuralDefaults(item as PurchaseInvoiceItem));
     }
     const result = await api.purchaseInvoices.update(id, parsed);
     logAudit({

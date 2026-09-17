@@ -60,6 +60,13 @@
           "format": "string"
         },
         {
+          "name": "EARVELDAJA_DEFAULT_CONNECTION",
+          "description": "Connection a freshly started server activates when several are configured: an index or the exact connection name shown by list_connections. Default: index 0. An unknown value fails startup instead of silently using index 0.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
           "name": "EARVELDAJA_LOG_FILE",
           "description": "Absolute path to a regular file. When set, everything the server writes to stderr is also appended to this file (mode 0o600). Off by default. Cross-platform. Useful when the MCP host swallows stderr. Pipes, devices, sockets, /dev/stdout, and /proc/self/fd/* are refused so the tee cannot corrupt the MCP stdio transport.",
           "isRequired": false,

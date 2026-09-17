@@ -1701,7 +1701,7 @@ describe("update_* post-confirmation audit lock", () => {
     expect(updateMock).toHaveBeenCalledTimes(1);
     const patch = updateMock.mock.calls[0]![1] as Record<string, unknown>;
     expect(patch.notes).toBe("updated note");
-    expect(patch.items).toEqual(existingItems);
+    expect(patch.items).toEqual(existingItems.map(item => ({ ...item, cl_fringe_benefits_id: 1, amount: 1 })));
   });
 
   it("update_purchase_invoice keeps caller-supplied items when provided", async () => {
@@ -1717,7 +1717,59 @@ describe("update_* post-confirmation audit lock", () => {
     await handler({ id: 7, data: { items: callerItems } });
 
     const patch = updateMock.mock.calls[0]![1] as Record<string, unknown>;
-    expect(patch.items).toEqual(callerItems);
+    expect(patch.items).toEqual(callerItems.map(item => ({ ...item, cl_fringe_benefits_id: 1, amount: 1 })));
+  });
+
+  // GitHub #62: create_purchase_invoice defaults cl_fringe_benefits_id (NOT NULL
+  // in the API) but update did not, so the create payload 500'd on update.
+  it("update_purchase_invoice defaults cl_fringe_benefits_id/amount on caller items like create does", async () => {
+    const updateMock = vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" });
+    const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", items: [] }),
+        update: updateMock,
+      },
+    });
+
+    await handler({
+      id: 7,
+      data: {
+        custom_title: "edited",
+        items: [
+          { custom_title: "Defaults", cl_purchase_articles_id: 66, purchase_accounts_id: 7910, total_net_price: 90 },
+          { custom_title: "Explicit", cl_purchase_articles_id: 66, purchase_accounts_id: 7910, total_net_price: 10, cl_fringe_benefits_id: 2, amount: 3 },
+        ],
+      },
+    });
+
+    const patch = updateMock.mock.calls[0]![1] as { items: Array<Record<string, unknown>> };
+    expect(patch.items[0]).toMatchObject({ cl_fringe_benefits_id: 1, amount: 1, total_net_price: 90 });
+    expect(patch.items[1]).toMatchObject({ cl_fringe_benefits_id: 2, amount: 3 });
+  });
+
+  it("update_purchase_invoice fills cl_fringe_benefits_id on re-sent items the API GET returned without it", async () => {
+    const updateMock = vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" });
+    const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: {
+        get: vi.fn().mockResolvedValue({
+          id: 7,
+          status: "PROJECT",
+          items: [
+            { id: 1, custom_title: "Absent", total_net_price: 100, amount: 2 },
+            { id: 2, custom_title: "Null", total_net_price: 5, amount: 1, cl_fringe_benefits_id: null },
+          ],
+        }),
+        update: updateMock,
+      },
+    });
+
+    await handler({ id: 7, data: '{"notes":"header only"}' });
+
+    const patch = updateMock.mock.calls[0]![1] as { items: Array<Record<string, unknown>> };
+    expect(patch.items).toEqual([
+      { id: 1, custom_title: "Absent", total_net_price: 100, amount: 2, cl_fringe_benefits_id: 1 },
+      { id: 2, custom_title: "Null", total_net_price: 5, amount: 1, cl_fringe_benefits_id: 1 },
+    ]);
   });
 });
 
@@ -1846,8 +1898,8 @@ describe("H04 confirmed accounting record update boundaries", () => {
 
   it("H04 confirmed purchase notes clone the current item array and every item object", async () => {
     const currentItems = [
-      { custom_title: "Hosting", total_net_price: 10 },
-      { custom_title: "Support", total_net_price: 20 },
+      { custom_title: "Hosting", total_net_price: 10, amount: 1, cl_fringe_benefits_id: 1 },
+      { custom_title: "Support", total_net_price: 20, amount: 1, cl_fringe_benefits_id: 1 },
     ];
     const update = vi.fn().mockResolvedValue({ id: 7, status: "CONFIRMED" });
     const { handler } = getCrudToolHarness("update_purchase_invoice", {
@@ -1944,7 +1996,7 @@ describe("H04 confirmed accounting record update boundaries", () => {
   it("H04 draft purchase invoice forwards journal date and caller items exactly", async () => {
     const patch = {
       journal_date: "2026-07-15",
-      items: [{ custom_title: "Hosting", total_net_price: 10 }],
+      items: [{ custom_title: "Hosting", total_net_price: 10, amount: 2, cl_fringe_benefits_id: 1 }],
     };
     const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
       purchaseInvoices: {

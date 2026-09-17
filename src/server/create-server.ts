@@ -29,6 +29,7 @@ import type { ApiContext } from "../tools/crud-tools.js";
 import { createElicitor } from "../elicitation.js";
 import { persistCredentialImportViaPlan } from "../tools/credential-tools.js";
 import { toolError } from "../tool-error.js";
+import { z } from "zod";
 import { toMcpJson } from "../mcp-json.js";
 import { setLogger, log } from "../logger.js";
 import {
@@ -47,6 +48,8 @@ import {
   ConnectionSwitchInterruptedError,
   captureSnapshot,
   assertSnapshotCurrent,
+  resolveDefaultConnectionIndex,
+  buildConnectionMismatchPayload,
 } from "../connection-safety.js";
 import { createInvocationStorage, createScopedApiContext } from "../runtime/invocation-scope.js";
 import { createConnectionState } from "../runtime/connection-manager.js";
@@ -189,6 +192,15 @@ function reportStartupCredentialImportOutcome(outcome: StartupCredentialImportOu
   }
 }
 
+const CONNECTION_GUARD_SCHEMA = z.union([z.number().int(), z.string()]).optional().describe(
+  "Expected connection (index or name from list_connections). Refused before any API request if it is not the active connection.",
+);
+
+/** True for the zod raw-shape form of `inputSchema` (a plain object of field schemas). */
+function isPlainRawShape(schema: unknown): schema is Record<string, unknown> {
+  return typeof schema === "object" && schema !== null && !Array.isArray(schema) && !("_def" in schema) && !("_zod" in schema);
+}
+
 export interface McpBootstrapOptions {
   /** Explicit configs bypass environment and filesystem discovery; [] selects setup mode. */
   configs?: readonly NamedConfig[];
@@ -241,19 +253,27 @@ export async function createMcpServer(
   // switch_connection. The name + source-path disclosure is already in
   // list_connections output; surfacing it at startup makes drift visible
   // without requiring the operator to probe.
+  const setupInfo = options.setupInfo ?? getCredentialSetupInfo();
+  const connectionNames = Object.freeze(allConfigs.map(config => config.name));
+  // The active connection lives only in this process. An MCP host that
+  // respawns the server (crash, idle timeout, reconnect) therefore silently
+  // lands back on the default — EARVELDAJA_DEFAULT_CONNECTION lets an operator
+  // pin which company that is, and an unknown value fails startup rather than
+  // falling back to index 0 (GitHub #61).
+  const connectionState = createConnectionState(
+    resolveDefaultConnectionIndex(connectionNames, process.env.EARVELDAJA_DEFAULT_CONNECTION),
+  );
   if (shouldConnect && allConfigs.length > 0) {
     log(
       "info",
       `Loaded ${allConfigs.length} connection(s): ` +
       allConfigs
         .map((c, i) => `[${i}] ${c.name}${c.filePath ? ` (${c.filePath})` : ""}`)
-        .join("; "),
+        .join("; ") +
+      `. Active at startup: [${connectionState.activeIndex}] ${allConfigs[connectionState.activeIndex]!.name}.`,
     );
   }
 
-  const setupInfo = options.setupInfo ?? getCredentialSetupInfo();
-  const connectionNames = Object.freeze(allConfigs.map(config => config.name));
-  const connectionState = createConnectionState();
   initAccountingRulesConnection(() => ({
     name: allConfigs[connectionState.activeIndex]?.name ?? "setup",
     stableIdentity: allConfigs[connectionState.activeIndex]
@@ -325,12 +345,27 @@ export async function createMcpServer(
         return (...toolArgs: unknown[]) => {
           const toolName = typeof toolArgs[0] === "string" ? toolArgs[0] : "unknown_tool";
           const toolSpec = (toolArgs[1] && typeof toolArgs[1] === "object")
-            ? toolArgs[1] as { annotations?: { readOnlyHint?: boolean } }
+            ? toolArgs[1] as { annotations?: { readOnlyHint?: boolean }; inputSchema?: unknown }
             : undefined;
           const isReadOnly = toolSpec?.annotations?.readOnlyHint === true;
+          // Multi-connection servers expose an optional `connection` guard on
+          // every non-readonly tool (except switch_connection itself): the
+          // call is refused before any API request when the argument does not
+          // name the active connection. Single-connection servers keep their
+          // schemas unchanged, so the tool-surface contract pins do not move.
+          const guardConnection = !isReadOnly
+            && toolName !== "switch_connection"
+            && connectionNames.length > 1
+            && isPlainRawShape(toolSpec?.inputSchema);
+          if (guardConnection) {
+            toolSpec!.inputSchema = {
+              ...(toolSpec!.inputSchema as Record<string, unknown>),
+              connection: CONNECTION_GUARD_SCHEMA,
+            };
+          }
           const lastIdx = toolArgs.length - 1;
           if (lastIdx >= 0 && typeof toolArgs[lastIdx] === "function") {
-            toolArgs[lastIdx] = wrapToolHandler(toolName, isReadOnly, toolArgs[lastIdx] as any);
+            toolArgs[lastIdx] = wrapToolHandler(toolName, isReadOnly, guardConnection, toolArgs[lastIdx] as any);
           }
           return (target.registerTool as any)(...toolArgs);
         };
@@ -352,10 +387,22 @@ export async function createMcpServer(
   const server = options.wrapServer?.(scopedServer) ?? scopedServer;
   const publicServer = createPublicToolRegistrar(server, toolProfile);
 
-  function wrapToolHandler<T extends (...args: any[]) => any>(toolName: string, isReadOnly: boolean, handler: T): T {
+  function wrapToolHandler<T extends (...args: any[]) => any>(toolName: string, isReadOnly: boolean, guardConnection: boolean, handler: T): T {
     return (async (...args: unknown[]) => {
       const snapshot = captureSnapshot(connectionState, { toolName, isReadOnly });
       const extra = args.length >= 2 ? args[1] as any : undefined;
+      if (guardConnection && args[0] && typeof args[0] === "object") {
+        const params = args[0] as Record<string, unknown>;
+        const expected = params.connection;
+        // Strip the guard argument so handlers that forward their params to
+        // the API never see it.
+        delete params.connection;
+        const mismatch = buildConnectionMismatchPayload(expected, snapshot.index, connectionNames);
+        if (mismatch) {
+          log("warning", `Tool "${toolName}" refused: ${mismatch.error}`);
+          return toolError(mismatch);
+        }
+      }
       const trackMutation = !isReadOnly && !setupMode;
       // Register the in-flight mutation synchronously *before* any awaitable
       // work. A microtask-scheduled switch_connection between snapshot

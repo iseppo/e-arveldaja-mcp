@@ -36,6 +36,11 @@ Set `EARVELDAJA_SERVER=demo` for the demo API (default: `live`).
 Place multiple `apikey*.txt` files (e.g. `apikey.txt`, `apikey (1).txt`) next to the project.
 Use `list_connections` to see all available accounts and `switch_connection` to switch between them.
 Switching clears all cached data to prevent cross-company data leaks.
+The active connection is in-process state: a server respawned by the MCP host starts on
+`EARVELDAJA_DEFAULT_CONNECTION` (index or name; default 0, unknown values fail startup).
+With 2+ connections every non-readonly tool gains an optional `connection` argument
+(index or name); a mismatch with the active connection is refused (`connection_mismatch`)
+before any API request. Pass it on every write in multi-company sessions (GitHub #61).
 
 **NEVER commit `.env` or `apikey.txt` to git.** The `.gitignore` is configured to exclude them.
 
@@ -118,6 +123,10 @@ The guided surface is sized for routing clarity, not token cost (per-tool measur
   (→ `continue_accounting_workflow`). Default: hidden — the merged tools keep
   routing to the same handlers internally, so no functionality is lost.
   `reconcile_inter_account_transfers` is never gated (no merged execute mode).
+- **`EARVELDAJA_DEFAULT_CONNECTION=<index|name>`** — connection a freshly started
+  server activates (default: index 0). An unknown index/name fails startup rather
+  than silently using index 0. Pair with the per-call `connection` guard argument
+  that multi-connection servers add to non-readonly tools.
 - **`EARVELDAJA_EXPOSE_SETUP_TOOLS=1`** — also register the credential-management
   tools (`import_apikey_credentials`, `list_stored_credentials`,
   `remove_stored_credentials`) when the server already has configured

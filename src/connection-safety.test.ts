@@ -5,6 +5,8 @@ import {
   captureSnapshot,
   assertSnapshotCurrent,
   buildSwitchBlockedPayload,
+  resolveDefaultConnectionIndex,
+  buildConnectionMismatchPayload,
 } from "./connection-safety.js";
 
 describe("captureSnapshot", () => {
@@ -168,5 +170,44 @@ describe("buildSwitchBlockedPayload", () => {
     const payload = buildSwitchBlockedPayload([snap], undefined, { now });
     expect(payload!.hint).toMatch(/cancel the MCP client request/);
     expect(payload!.hint).not.toMatch(/over 2 minutes/);
+  });
+});
+
+describe("resolveDefaultConnectionIndex", () => {
+  const names = ["alpha", "beta"];
+  it("defaults to index 0 when unset or blank", () => {
+    expect(resolveDefaultConnectionIndex(names, undefined)).toBe(0);
+    expect(resolveDefaultConnectionIndex(names, "  ")).toBe(0);
+    expect(resolveDefaultConnectionIndex([], "anything")).toBe(0);
+  });
+  it("accepts an index or an exact name", () => {
+    expect(resolveDefaultConnectionIndex(names, "1")).toBe(1);
+    expect(resolveDefaultConnectionIndex(names, " beta ")).toBe(1);
+    expect(resolveDefaultConnectionIndex(names, "alpha")).toBe(0);
+  });
+  it("throws on an out-of-range index or unknown name", () => {
+    expect(() => resolveDefaultConnectionIndex(names, "2")).toThrow(/Valid indexes: 0-1/);
+    expect(() => resolveDefaultConnectionIndex(names, "gamma")).toThrow(/"gamma" does not match/);
+  });
+});
+
+describe("buildConnectionMismatchPayload", () => {
+  const names = ["alpha", "beta"];
+  it("is null when no guard argument was given or it matches", () => {
+    expect(buildConnectionMismatchPayload(undefined, 1, names)).toBeNull();
+    expect(buildConnectionMismatchPayload(null, 1, names)).toBeNull();
+    expect(buildConnectionMismatchPayload(1, 1, names)).toBeNull();
+    expect(buildConnectionMismatchPayload("1", 1, names)).toBeNull();
+    expect(buildConnectionMismatchPayload("beta", 1, names)).toBeNull();
+  });
+  it("returns a structured refusal naming both sides on a mismatch", () => {
+    const payload = buildConnectionMismatchPayload("alpha", 1, names);
+    expect(payload).toMatchObject({
+      category: "connection_mismatch",
+      expected_connection: "alpha",
+      active_connection: { index: 1, name: "beta" },
+    });
+    expect(buildConnectionMismatchPayload(0, 1, names)?.expected_connection).toBe(0);
+    expect(buildConnectionMismatchPayload("", 1, names)?.category).toBe("connection_mismatch");
   });
 });

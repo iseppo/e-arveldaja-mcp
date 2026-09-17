@@ -131,3 +131,68 @@ export function buildSwitchBlockedPayload(
       : "If an in-flight tool is stuck, cancel the MCP client request instead of forcing the switch.",
   };
 }
+
+/**
+ * Resolve the connection a freshly started server should activate.
+ * `raw` is the `EARVELDAJA_DEFAULT_CONNECTION` value: a connection index or
+ * the exact connection name shown by `list_connections`. Unset/blank means
+ * index 0 (the historical behaviour). Anything that does not name a configured
+ * connection throws, because silently falling back to index 0 is exactly the
+ * wrong-company hazard the variable exists to remove (GitHub #61).
+ */
+export function resolveDefaultConnectionIndex(
+  connectionNames: readonly string[],
+  raw: string | undefined,
+): number {
+  const value = raw?.trim();
+  if (!value) return 0;
+  if (connectionNames.length === 0) return 0;
+  const byName = connectionNames.indexOf(value);
+  if (byName !== -1) return byName;
+  if (/^\d+$/.test(value)) {
+    const index = Number(value);
+    if (index < connectionNames.length) return index;
+  }
+  throw new Error(
+    `EARVELDAJA_DEFAULT_CONNECTION="${value}" does not match a configured connection. ` +
+    `Valid indexes: 0-${connectionNames.length - 1}; names: ${connectionNames.map(name => `"${name}"`).join(", ")}.`
+  );
+}
+
+export interface ConnectionMismatchPayload {
+  category: "connection_mismatch";
+  error: string;
+  expected_connection: string | number;
+  active_connection: { index: number; name: string };
+  next_action: string;
+}
+
+/**
+ * Check a tool call's optional `connection` guard argument against the
+ * connection the call is pinned to. Accepts the index (number or numeric
+ * string) or the exact connection name. Returns null when they match, or a
+ * structured refusal when they do not — the caller must return it BEFORE any
+ * API request so nothing lands in the wrong company's books.
+ */
+export function buildConnectionMismatchPayload(
+  expected: unknown,
+  activeIndex: number,
+  connectionNames: readonly string[],
+): ConnectionMismatchPayload | null {
+  if (expected === undefined || expected === null) return null;
+  const activeName = connectionNames[activeIndex] ?? `connection:${activeIndex}`;
+  const matches =
+    (typeof expected === "number" && expected === activeIndex) ||
+    (typeof expected === "string" && (expected === activeName || (/^\d+$/.test(expected.trim()) && Number(expected) === activeIndex)));
+  if (matches) return null;
+  const shown = typeof expected === "number" ? expected : String(expected);
+  return {
+    category: "connection_mismatch",
+    error:
+      `Refused: the call expects connection ${JSON.stringify(shown)} but the active connection is [${activeIndex}] "${activeName}". ` +
+      `No API request was made.`,
+    expected_connection: shown,
+    active_connection: { index: activeIndex, name: activeName },
+    next_action: "Call switch_connection with the intended index (or list_connections to see the indexes), then retry with the same connection argument.",
+  };
+}

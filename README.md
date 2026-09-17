@@ -93,7 +93,7 @@ You can also import manually at any time by asking your AI assistant:
 
 > "Import my API key from apikey.txt"
 
-For multiple companies, place multiple files (`apikey.txt`, `apikey-company2.txt`, etc.) and use `list_connections` / `switch_connection` to switch between them.
+For multiple companies, place multiple files (`apikey.txt`, `apikey-company2.txt`, etc.) and use `list_connections` / `switch_connection` to switch between them. Set `EARVELDAJA_DEFAULT_CONNECTION=<index or name>` to choose which company a freshly started server uses (default: index 0), and pass the optional `connection` argument on writes to have the server refuse any call aimed at a company that is not active.
 
 ### 3. Optional: define company-specific accounting rules
 
@@ -372,7 +372,7 @@ curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.ise
 - **Large datasets need date filters.** The server loads up to 200 pages of data per query. Companies with thousands of invoices or transactions should narrow reporting and reconciliation tools with date ranges — otherwise the tool will ask you to.
 - **Caching.** API responses are cached for 2–5 minutes and reference data for up to 10 minutes. The server automatically invalidates caches when you create, update, or delete records through MCP tools. Changes made directly in the e-arveldaja web UI are not visible until the cache expires; call `clear_cache` or pass `fresh: true` to balance/reporting tools when you need the next read to fetch current upstream data.
 - **EUR by default.** All amounts are EUR unless a different currency is specified.
-- **Multi-company.** Place multiple `apikey*.txt` files and use `list_connections` / `switch_connection`. Switching clears the previous and target connections' cached data, so one company's records are never served to another.
+- **Multi-company.** Place multiple `apikey*.txt` files and use `list_connections` / `switch_connection`. Switching clears the previous and target connections' cached data, so one company's records are never served to another. The active connection is per server process: if your MCP host restarts the server, it comes back on `EARVELDAJA_DEFAULT_CONNECTION` (index or name; default index 0, unknown values fail startup). With several connections configured, every non-readonly tool accepts an optional `connection` argument (index or name); a call whose value is not the active connection is refused with `connection_mismatch` before any API request, so you can pin the target company on each write instead of relying on an earlier `switch_connection`.
 - **Node.js 18+** required.
 - **File access scope.** By default, file-reading tools can access supported files under the working directory and `/tmp`. Set `EARVELDAJA_ALLOWED_PATHS` (colon-separated) to allow additional directories, or `EARVELDAJA_ALLOW_HOME=true` to allow the entire home directory.
 - **Human-editable local accounting rules.** `accounting-rules.md` lets you store company-specific booking defaults and annual-report overrides in Markdown instead of code or JSON.

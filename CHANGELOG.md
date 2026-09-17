@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`update_purchase_invoice` no longer 500s when items omit `cl_fringe_benefits_id`** ([#62](https://github.com/iseppo/e-arveldaja-mcp/issues/62)). `create_purchase_invoice` defaulted the field to 1 (no fringe benefit) but `update_purchase_invoice` sent items through verbatim, so the very payload that created an invoice failed on update with a raw `null value in column "cl_fringe_benefits_id" ... violates not-null constraint` from the API. The API GET also omits the field, so even header-only updates (which re-send the existing lines) were exposed. Update now applies the same structural item defaults as create (`cl_fringe_benefits_id` → 1, `amount` → 1, explicit values kept) to caller-supplied and re-sent items alike.
+
+### Added
+
+- **Wrong-company write protection for multi-connection servers** ([#61](https://github.com/iseppo/e-arveldaja-mcp/issues/61)). The active connection lives only in the server process, so an MCP host that respawns the server (crash, idle timeout, reconnect) silently starts it back on the default connection — and a write intended for company B lands in company A's books. Two defences:
+  - **`EARVELDAJA_DEFAULT_CONNECTION`** (index or exact connection name) pins which connection a fresh process starts on; an unknown value fails startup instead of falling back to index 0. The startup log line now also names the active connection.
+  - **Optional `connection` argument on every non-readonly tool** when more than one connection is configured (index, numeric string, or name as shown by `list_connections`). A call whose `connection` does not name the active connection is refused with a structured `connection_mismatch` error *before any API request*, so callers can assert the target company on every write instead of trusting session state. Single-connection servers keep their schemas unchanged (the tool-surface contract pins are untouched); `switch_connection` and read-only tools never carry the argument.
+
 ## [0.25.6] - 2026-09-03
 
 ### Fixed

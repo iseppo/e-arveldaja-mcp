@@ -10,8 +10,8 @@ import { clearConnectionCaches } from "../cache-control.js";
  * is bumped on every switch so any in-flight snapshot captured against the old
  * connection is detectably stale.
  */
-export function createConnectionState(): ConnectionState {
-  return { activeIndex: 0, generation: 0 };
+export function createConnectionState(activeIndex = 0): ConnectionState {
+  return { activeIndex, generation: 0 };
 }
 
 /**
