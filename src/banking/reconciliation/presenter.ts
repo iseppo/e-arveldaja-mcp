@@ -23,9 +23,11 @@ import {
   type ReconciliationReviewCommand,
 } from "../../tools/bank-reconciliation-plan.js";
 import type {
+  ExactConfirmLedgerChecks,
   ExactMatchProjection,
   InterAccountMatchResult,
   ReconciliationSuggestions,
+  ThirdPartyPayerReview,
 } from "./types.js";
 import type { ReconFailure } from "./executor.js";
 
@@ -102,6 +104,17 @@ export function exactMatchReviewCommands(projection: ExactMatchProjection): Reco
   return commands;
 }
 
+/** Third-party-payer review rows for MCP output. Only `invoice_number` is
+ * untrusted free text; ids, amounts, reason and next_action are ours. */
+export function renderThirdPartyPayerReviews(
+  reviews: readonly ThirdPartyPayerReview[],
+): Array<Record<string, unknown>> {
+  return reviews.map(row => ({
+    ...row,
+    invoice_number: wrapUntrustedOcr(row.invoice_number) ?? "",
+  }));
+}
+
 // --- Suggest FULL envelope ---------------------------------------------------
 
 // Wrap every untrusted free-text field on a RAW suggest match row at MCP output.
@@ -153,6 +166,7 @@ export function renderExactMatchPayload(input: {
   projection: ExactMatchProjection;
   planHandle?: string;
   executionReport?: PlanExecutionReport;
+  ledgerChecks?: ExactConfirmLedgerChecks;
 }): Record<string, unknown> {
   const { projection, mode } = input;
   const dryRun = mode === "DRY_RUN";
@@ -192,15 +206,32 @@ export function renderExactMatchPayload(input: {
       }
     }
   }
+  // A broken post-confirm ledger invariant is an ERROR on a batch that
+  // otherwise reports success: the money moved, but the receipt is filed in the
+  // wrong sub-ledger. It must never be hidden under `auto_confirmed`.
+  for (const failure of input.ledgerChecks?.failures ?? []) {
+    errors.push({
+      transaction_id: failure.transaction_id,
+      reason: `Post-confirm ledger check ${failure.code} for transaction ${failure.transaction_id}`
+        + `${failure.journal_id !== undefined ? ` (journal ${failure.journal_id})` : ""}`
+        + ". The transaction IS confirmed; invalidate_transaction it, then confirm_transaction with reassign_client_to_invoice: true.",
+    });
+  }
+
+  const thirdPartyPayerReviews = renderThirdPartyPayerReviews(projection.thirdPartyPayerReviews);
 
   const autoConfirmed = dryRun ? projection.confirms.length : results.filter(row => row.status === "confirmed").length;
   const summary = {
     total_unconfirmed: projection.totalUnconfirmed,
     auto_confirmed: autoConfirmed,
     skipped: projection.skipped.length,
+    third_party_payer_reviews: thirdPartyPayerReviews.length,
     error_count: errors.length,
   };
-  const duplicateWarnings = reconDuplicateWarnings(projection);
+  const duplicateWarnings = [
+    ...reconDuplicateWarnings(projection),
+    ...(input.ledgerChecks?.warnings ?? []),
+  ];
 
   return {
     mode,
@@ -210,11 +241,14 @@ export function renderExactMatchPayload(input: {
     skipped: summary.skipped,
     results,
     errors,
+    third_party_payer_reviews: thirdPartyPayerReviews,
+    ...(input.ledgerChecks !== undefined ? { ledger_checks: input.ledgerChecks } : {}),
     execution: buildBatchExecutionContract({
       mode,
       summary,
       results,
       errors,
+      needs_review: thirdPartyPayerReviews,
       ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
     }),
     ...(duplicateWarnings.length > 0 ? { warnings: duplicateWarnings } : {}),
@@ -431,6 +465,7 @@ export interface ExactMatchCompactInput {
   /** Execute only: an operation-result handle bound to the consumed recon plan. */
   readonly operationHandle?: string;
   readonly connectionName?: string;
+  readonly ledgerChecks?: ExactConfirmLedgerChecks;
 }
 
 /** Scalar-only per-confirm details for the operation-result store. Free-form
@@ -460,7 +495,11 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
     ? projection.confirms.length
     : projection.confirms.filter(descriptor => completedIds.has(reconInvoiceConfirmCommandId(descriptor.transactionId))).length;
   const notCompleted = dryRun ? 0 : projection.confirms.length - confirmedCount;
-  const errorCount = projection.skipped.length + notCompleted;
+  const ledgerFailures = input.ledgerChecks?.failures ?? [];
+  // Confirms that never ran, versus confirms that ran and left a wrong ledger:
+  // both are errors, but only the former means "did not complete".
+  const incompleteCount = projection.skipped.length + notCompleted;
+  const errorCount = incompleteCount + ledgerFailures.length;
   const duplicateCount =
     projection.confirms.filter(descriptor => (descriptor.possibleDuplicatePostings?.length ?? 0) > 0).length
     + projection.blockedDuplicateSuspects.length;
@@ -469,6 +508,7 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
     total_unconfirmed: projection.totalUnconfirmed,
     [dryRun ? "would_confirm" : "confirmed"]: confirmedCount,
     skipped: projection.skipped.length,
+    third_party_payer_reviews: projection.thirdPartyPayerReviews.length,
     blocked_duplicates: projection.blockedDuplicateSuspects.length,
     duplicates: duplicateCount,
     errors: errorCount,
@@ -489,16 +529,41 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
   if (projection.duplicateScanNote !== undefined) {
     warnings.push({ code: "duplicate_scan_unavailable", message: projection.duplicateScanNote });
   }
+  for (const review of projection.thirdPartyPayerReviews.slice(0, 3)) {
+    warnings.push({
+      item_id: String(review.transaction_id),
+      code: review.reason,
+      message: `Payer client ${review.transaction_clients_id ?? "none"} does not match ${review.invoice_type} `
+        + `#${review.invoice_id} client ${review.invoice_clients_id ?? "none"}; withheld from the confirm batch. `
+        + review.next_action,
+    });
+  }
+  for (const warning of input.ledgerChecks?.warnings ?? []) {
+    warnings.push({ code: "ledger_check_unavailable", message: warning });
+  }
 
   // Execution errors (indeterminate / failed confirms) surface as blockers —
   // never hidden.
   const blockers: CompactReviewItem[] = [];
-  if (!dryRun && errorCount > 0) {
+  // A confirmed transaction whose registration journal broke the receipt
+  // invariant is the most severe outcome here: the mutation happened AND the
+  // ledger is wrong, so it is listed before the generic incomplete-batch row.
+  for (const failure of ledgerFailures.slice(0, 3)) {
+    blockers.push({
+      item_id: String(failure.transaction_id),
+      code: failure.code,
+      message: `Transaction ${failure.transaction_id} IS confirmed but its registration journal failed the receipt `
+        + `ledger check (${failure.code}). Run invalidate_transaction ${failure.transaction_id}, then `
+        + "confirm_transaction with reassign_client_to_invoice: true.",
+      severity: "blocker",
+    });
+  }
+  if (!dryRun && incompleteCount > 0) {
     const stop = input.executionReport?.stop_reason as { command_id?: unknown; category?: unknown } | undefined;
     blockers.push({
       item_id: typeof stop?.command_id === "string" ? stop.command_id : "reconcile-exact",
       code: typeof stop?.category === "string" ? stop.category : "confirm_incomplete",
-      message: `${errorCount} exact-match confirm(s) did not complete. Re-preview before retrying; a prior plan is not approval.`,
+      message: `${incompleteCount} exact-match confirm(s) did not complete. Re-preview before retrying; a prior plan is not approval.`,
       severity: "blocker",
     });
   }

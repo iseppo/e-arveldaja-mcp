@@ -140,6 +140,27 @@ function renderReport(value: AccountingReportResult, detail: "compact" | "full")
       };
     case "missing_documents":
       return { report: "missing_documents", ...wrapMissingDocuments(value, detail === "full" ? Infinity : COMPACT_ITEM_CAP) };
+    case "receipt_client_alignment": {
+      const { items, truncated } = cap(value.mismatches, detail);
+      return {
+        report: "receipt_client_alignment",
+        window: value.window,
+        scanned: value.scanned,
+        invoice_linked: value.invoice_linked,
+        aligned_count: value.aligned_count,
+        invoice_client_missing: value.invoice_client_missing,
+        mismatch_count: value.mismatches.length,
+        mismatches: items.map(row => ({
+          ...row,
+          bank_account_name: wrapUntrustedOcr(row.bank_account_name) ?? row.bank_account_name,
+          transaction_client: { ...row.transaction_client, name: wrapUntrustedOcr(row.transaction_client.name) ?? row.transaction_client.name },
+          invoice_client: { ...row.invoice_client, name: wrapUntrustedOcr(row.invoice_client.name) ?? row.invoice_client.name },
+        })),
+        ...(truncated ? { truncated: true, note: "Mismatch list truncated; mismatch_count is the full total. Call again with detail='full' for every row." } : {}),
+        ...(value.journal_not_found.length > 0 ? { journal_not_found: value.journal_not_found } : {}),
+        ...(value.warnings.length > 0 ? { warnings: value.warnings } : {}),
+      };
+    }
   }
 }
 
@@ -161,9 +182,9 @@ export function registerRunAccountingReportTool(
 
   registerTool(server,
     "run_accounting_report",
-    "Unified accounting-report entry point. report='trial_balance' | 'balance_sheet' | 'profit_and_loss' (both need period.from/to via date_from/date_to) | 'aging' (as_of_date) | 'month_end' (month YYYY-MM) | 'missing_documents' (RPS source-document check; optional date_from/date_to). Compact by default; detail='full' returns every line.",
+    "Unified accounting-report entry point. report='trial_balance' | 'balance_sheet' | 'profit_and_loss' (both need period.from/to via date_from/date_to) | 'aging' (as_of_date) | 'month_end' (month YYYY-MM) | 'missing_documents' (RPS source-document check; optional date_from/date_to) | 'receipt_client_alignment' (read-only audit: confirmed bank receipts whose payer client differs from the linked invoice's client, so the receivable/payable leg sits in the wrong client sub-ledger; date_from/date_to optional, defaults to the last 12 months). Compact by default; detail='full' returns every line.",
     {
-      report: z.enum(["trial_balance", "balance_sheet", "profit_and_loss", "aging", "month_end", "missing_documents"]).describe("Which report to run."),
+      report: z.enum(["trial_balance", "balance_sheet", "profit_and_loss", "aging", "month_end", "missing_documents", "receipt_client_alignment"]).describe("Which report to run."),
       date_from: z.string().optional().describe("Period start (YYYY-MM-DD). Required for profit_and_loss; optional for trial_balance."),
       date_to: z.string().optional().describe("Period end / balance date (YYYY-MM-DD)."),
       as_of_date: z.string().optional().describe("aging only: cutoff date (YYYY-MM-DD, default today)."),

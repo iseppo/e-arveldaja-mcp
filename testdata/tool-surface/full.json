@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 152128,
-    "descriptionsBytes": 20533,
-    "inputSchemasBytes": 96111,
+    "toolsListBytes": 153248,
+    "descriptionsBytes": 21149,
+    "inputSchemasBytes": 96615,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 4718
@@ -1517,7 +1517,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Confirm a bank transaction by providing distribution rows. If the transaction has no clients_id (common for CAMT imports), pass clients_id — otherwise the API rejects with 'buyer or supplier is missing'. For invoice distributions, clients_id is auto-resolved from the invoice.",
+      "description": "Confirm a bank transaction by providing distribution rows. If the transaction has no clients_id (common for CAMT imports), pass clients_id — otherwise the API rejects with 'buyer or supplier is missing'. For invoice distributions, clients_id is auto-resolved from the invoice. A transaction whose client differs from the linked invoice's client is refused (linked_invoice_client_mismatch) because the journal takes its client from the transaction; approve the swap with reassign_client_to_invoice. After an invoice-linked confirm the resulting registration journal is re-read and checked against the invoice client and both postings.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1553,6 +1553,10 @@
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
+          },
+          "reassign_client_to_invoice": {
+            "description": "Explicit approval to replace a differing payer client on the transaction with the linked invoice's client before confirming (default false). Use when a third party paid someone else's invoice: without it the confirm is refused, because the journal's client comes from the transaction and the receivable/payable leg would land in the payer's sub-ledger. bank_account_name (the real payer's name) is never changed.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -5851,7 +5855,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Unified accounting-report entry point. report='trial_balance' | 'balance_sheet' | 'profit_and_loss' (both need period.from/to via date_from/date_to) | 'aging' (as_of_date) | 'month_end' (month YYYY-MM) | 'missing_documents' (RPS source-document check; optional date_from/date_to). Compact by default; detail='full' returns every line.",
+      "description": "Unified accounting-report entry point. report='trial_balance' | 'balance_sheet' | 'profit_and_loss' (both need period.from/to via date_from/date_to) | 'aging' (as_of_date) | 'month_end' (month YYYY-MM) | 'missing_documents' (RPS source-document check; optional date_from/date_to) | 'receipt_client_alignment' (read-only audit: confirmed bank receipts whose payer client differs from the linked invoice's client, so the receivable/payable leg sits in the wrong client sub-ledger; date_from/date_to optional, defaults to the last 12 months). Compact by default; detail='full' returns every line.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -5890,7 +5894,8 @@
               "profit_and_loss",
               "aging",
               "month_end",
-              "missing_documents"
+              "missing_documents",
+              "receipt_client_alignment"
             ],
             "type": "string"
           }

@@ -164,7 +164,7 @@ export function registerBankReconciliationTools(
           return reconPlanError(outcome.error.code, outcome.error.message);
         }
         const outcome = await operations.executeExactConfirm({ minConfidence: min_confidence, blockOnDuplicate: block_on_duplicate, planHandle: plan_handle });
-        if (outcome.ok) return response(renderExactMatchPayload({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport }));
+        if (outcome.ok) return response(renderExactMatchPayload({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport, ledgerChecks: outcome.value.ledgerChecks }));
         return reconPlanError(outcome.error.code, outcome.error.message);
       } catch (error) {
         if (error instanceof ReconciliationOperationFailedError) return renderReconFailure(error.failure);
@@ -257,7 +257,7 @@ export function registerBankReconciliationTools(
                 plan_handle,
                 outcome.value.executionReport,
               );
-              return compactResponse(renderExactMatchCompact({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport, operationHandle, connectionName }));
+              return compactResponse(renderExactMatchCompact({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport, ledgerChecks: outcome.value.ledgerChecks, operationHandle, connectionName }));
             }
             case "inter_account_dry_run": {
               const outcome = await operations.prepareInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id });
@@ -351,7 +351,7 @@ export function registerBankReconciliationTools(
           case "execute_auto_confirm": {
             const outcome = await operations.executeExactConfirm({ minConfidence: min_confidence, blockOnDuplicate: block_on_duplicate, planHandle: plan_handle });
             result = outcome.ok
-              ? renderExactMatchPayload({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport })
+              ? renderExactMatchPayload({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport, ledgerChecks: outcome.value.ledgerChecks })
               : reconPlanErrorPayload(outcome.error.code, outcome.error.message);
             break;
           }

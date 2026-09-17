@@ -24,6 +24,7 @@ import { registerTransactionTools } from "./crud/transactions.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
+import { LinkedInvoiceClientMismatchError } from "../api/transactions.api.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
 import {
   PurchaseInvoicesApi,
@@ -3042,5 +3043,214 @@ describe("P17 create_client legal-entity identity gate", () => {
     const { handler } = getCrudToolHarness("create_client", { clients: { create } });
     await handler({ name: "Nonprofit Foreign LLC", is_client: false, is_supplier: true, is_physical_entity: false, cl_code_country: "USA", foreign_identity_attested: true });
     expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("confirm_transaction receipt-client alignment", () => {
+  const SALE_DISTRIBUTION = [{ related_table: "sale_invoices", related_id: 77, amount: 1488 }];
+  const PAYER_CLIENT = 2309260;
+  const INVOICE_CLIENT = 2327264;
+
+  function registrationJournal(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 28013080,
+      clients_id: INVOICE_CLIENT,
+      title: "Laekumine nr 1, LHV",
+      effective_date: "2026-09-10",
+      operation_type: "TRANSACTION",
+      operations_id: 1,
+      registered: true,
+      postings: [
+        { accounts_id: 1020, accounts_dimensions_id: 500, type: "D", amount: 1488 },
+        { accounts_id: 1210, type: "C", amount: 1488 },
+      ],
+      ...overrides,
+    };
+  }
+
+  function confirmedTransaction(clientsId: number) {
+    return {
+      id: 1,
+      accounts_id: 1020,
+      accounts_dimensions_id: 500,
+      type: "D",
+      amount: 1488,
+      cl_currencies_id: "EUR",
+      date: "2026-09-10",
+      status: "CONFIRMED",
+      clients_id: clientsId,
+      items: [{ accounts_id: 1020, relation_table: "sale_invoices", relation_id: 77, amount: 1488 }],
+    };
+  }
+
+  function alignmentHarness(overrides: {
+    journals?: unknown[];
+    listAllJournals?: ReturnType<typeof vi.fn>;
+    txAfter?: unknown;
+    confirm?: ReturnType<typeof vi.fn>;
+  } = {}) {
+    return getCrudToolHarness("confirm_transaction", {
+      transactions: {
+        get: vi.fn()
+          .mockResolvedValueOnce(confirmedTransaction(PAYER_CLIENT))
+          .mockResolvedValue(overrides.txAfter ?? confirmedTransaction(INVOICE_CLIENT)),
+        update: vi.fn().mockResolvedValue({}),
+        confirm: overrides.confirm ?? vi.fn().mockResolvedValue({ code: 200, messages: [] }),
+      },
+      saleInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 77, clients_id: INVOICE_CLIENT, receivable_accounts_id: 1210 }),
+      },
+      journals: {
+        listAll: overrides.listAllJournals
+          ?? vi.fn().mockResolvedValue(overrides.journals ?? [registrationJournal()]),
+        get: vi.fn().mockResolvedValue(registrationJournal()),
+      },
+    });
+  }
+
+  beforeEach(() => vi.mocked(logAudit).mockClear());
+
+  it("returns the linked-invoice client mismatch as a structured tool error", async () => {
+    const mismatch = new LinkedInvoiceClientMismatchError({
+      transactionId: 1,
+      transactionClientsId: PAYER_CLIENT,
+      invoiceTable: "sale_invoices",
+      invoiceId: 77,
+      invoiceClientsId: INVOICE_CLIENT,
+    });
+    const { api, handler } = getCrudToolHarness("confirm_transaction", {
+      transactions: {
+        get: vi.fn().mockResolvedValue(confirmedTransaction(PAYER_CLIENT)),
+        confirm: vi.fn().mockRejectedValue(mismatch),
+      },
+    });
+
+    const result = await handler({ id: 1, distributions: SALE_DISTRIBUTION }) as {
+      isError?: boolean; content: Array<{ text: string }>;
+    };
+
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      category: "linked_invoice_client_mismatch",
+      transaction_id: 1,
+      transaction_clients_id: PAYER_CLIENT,
+      invoice_table: "sale_invoices",
+      invoice_id: 77,
+      invoice_clients_id: INVOICE_CLIENT,
+    });
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
+  });
+
+  it("passes the reassignment approval through and audits the client change", async () => {
+    const { api, handler } = alignmentHarness();
+
+    const result = await handler({
+      id: 1,
+      distributions: SALE_DISTRIBUTION,
+      reassign_client_to_invoice: true,
+    }) as { isError?: boolean; content: Array<{ text: string }> };
+
+    expect(result.isError).toBeUndefined();
+    expect(api.transactions.confirm).toHaveBeenCalledWith(1, [
+      { related_table: "sale_invoices", related_id: 77, amount: 1488 },
+    ], { reassignClientToInvoice: true });
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "confirm_transaction",
+      details: expect.objectContaining({
+        clients_id_before: PAYER_CLIENT,
+        clients_id_after: INVOICE_CLIENT,
+        ledger_check: "ok",
+      }),
+    }));
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      ok: true,
+      action: "confirmed",
+      clients_id_before: PAYER_CLIENT,
+      clients_id_after: INVOICE_CLIENT,
+      registration_journal_id: 28013080,
+    });
+  });
+
+  it("omits the client-change audit fields when the ids were already equal", async () => {
+    const { handler } = getCrudToolHarness("confirm_transaction", {
+      transactions: {
+        get: vi.fn().mockResolvedValue(confirmedTransaction(INVOICE_CLIENT)),
+        confirm: vi.fn().mockResolvedValue({ code: 200, messages: [] }),
+      },
+      saleInvoices: {
+        get: vi.fn().mockResolvedValue({ id: 77, clients_id: INVOICE_CLIENT, receivable_accounts_id: 1210 }),
+      },
+      journals: {
+        listAll: vi.fn().mockResolvedValue([registrationJournal()]),
+        get: vi.fn().mockResolvedValue(registrationJournal()),
+      },
+    });
+
+    await handler({ id: 1, distributions: SALE_DISTRIBUTION, reassign_client_to_invoice: true });
+
+    const details = vi.mocked(logAudit).mock.calls[0]![0].details as Record<string, unknown>;
+    expect(details).not.toHaveProperty("clients_id_before");
+    expect(details).not.toHaveProperty("clients_id_after");
+  });
+
+  it("reports a wrong-client ledger entry as a committed mutation that needs reversing", async () => {
+    const { handler } = alignmentHarness({
+      journals: [registrationJournal({ clients_id: PAYER_CLIENT })],
+      txAfter: confirmedTransaction(PAYER_CLIENT),
+    });
+
+    const result = await handler({ id: 1, distributions: SALE_DISTRIBUTION }) as {
+      isError?: boolean; content: Array<{ text: string }>;
+    };
+
+    expect(result.isError).toBe(true);
+    const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      category: "ledger_client_mismatch",
+      mutation_occurred: true,
+      transaction_id: 1,
+      journal_id: 28013080,
+      transaction_clients_id: PAYER_CLIENT,
+      invoice_clients_id: INVOICE_CLIENT,
+      next_action: "invalidate_transaction 1, then confirm_transaction again with reassign_client_to_invoice: true",
+    });
+    expect(payload.error).toContain("IS confirmed");
+    // The confirm itself is still audited — the mutation did happen.
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({
+      action: "CONFIRMED",
+      details: expect.objectContaining({ ledger_check: "ledger_client_mismatch" }),
+    }));
+  });
+
+  it("reports a missing registration journal after a committed confirm", async () => {
+    const { handler } = alignmentHarness({ journals: [] });
+
+    const result = await handler({ id: 1, distributions: SALE_DISTRIBUTION }) as {
+      isError?: boolean; content: Array<{ text: string }>;
+    };
+
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      category: "registration_journal_not_found",
+      mutation_occurred: true,
+      transaction_id: 1,
+    });
+  });
+
+  it("warns instead of failing when the ledger check itself cannot run", async () => {
+    const { handler } = alignmentHarness({
+      listAllJournals: vi.fn().mockRejectedValue(new HttpError("fetch failed", "network", "GET", "/journals")),
+    });
+
+    const result = await handler({ id: 1, distributions: SALE_DISTRIBUTION }) as {
+      isError?: boolean; content: Array<{ text: string }>;
+    };
+
+    expect(result.isError).toBeUndefined();
+    const payload = parseMcpResponse(result.content[0]!.text) as { ok: boolean; warnings: string[] };
+    expect(payload.ok).toBe(true);
+    expect(payload.warnings[0]).toContain("IS confirmed");
+    expect(payload.warnings[0]).toContain("could not run");
   });
 });

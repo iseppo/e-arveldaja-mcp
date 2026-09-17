@@ -9,7 +9,11 @@ import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { HttpError } from "../../http-client.js";
 import { MutationIndeterminateError, isMutationIndeterminate } from "../../mutation-outcome.js";
-import { getNormalizedNetworkCause } from "../../api/transactions.api.js";
+import { getNormalizedNetworkCause, LinkedInvoiceClientMismatchError } from "../../api/transactions.api.js";
+import {
+  verifyInvoiceReceiptLedger,
+  type ReceiptLedgerCheckResult,
+} from "../../banking/receipt-ledger-check.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
 import { createBankTransaction } from "../../bank-transaction-create.js";
@@ -297,7 +301,11 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     "Confirm a bank transaction by providing distribution rows. " +
     "If the transaction has no clients_id (common for CAMT imports), pass clients_id — " +
     "otherwise the API rejects with 'buyer or supplier is missing'. " +
-    "For invoice distributions, clients_id is auto-resolved from the invoice.",
+    "For invoice distributions, clients_id is auto-resolved from the invoice. " +
+    "A transaction whose client differs from the linked invoice's client is refused " +
+    "(linked_invoice_client_mismatch) because the journal takes its client from the transaction; " +
+    "approve the swap with reassign_client_to_invoice. After an invoice-linked confirm the resulting " +
+    "registration journal is re-read and checked against the invoice client and both postings.",
     {
     id: coerceId.describe("Transaction ID"),
       distributions: jsonObjectArrayInput.optional().describe(
@@ -307,7 +315,13 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       "pass the dimension ID (e.g. 1360 has one sub-account per person); the API rejects dimensioned postings without it."
     ),
     clients_id: coerceId.optional().describe("Client ID to set on the transaction before confirming (required when transaction has no clients_id and distribution is against accounts, not invoices)"),
-  }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions, clients_id }) => {
+    reassign_client_to_invoice: z.boolean().optional().describe(
+      "Explicit approval to replace a differing payer client on the transaction with the linked invoice's client " +
+      "before confirming (default false). Use when a third party paid someone else's invoice: without it the confirm " +
+      "is refused, because the journal's client comes from the transaction and the receivable/payable leg would land " +
+      "in the payer's sub-ledger. bank_account_name (the real payer's name) is never changed."
+    ),
+  }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions, clients_id, reassign_client_to_invoice }) => {
     const dist = distributions ? parseTransactionDistributions(distributions) : undefined;
     if (dist && dist.some(d => d.related_table === "accounts")) {
       const [accounts, accountDimensions] = await Promise.all([
@@ -318,6 +332,13 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       if (dimensionErrors.length > 0) {
         return toolError({ error: "Account validation failed", details: dimensionErrors });
       }
+    }
+
+    // The reassign path replaces the payer client on the transaction, so record
+    // where it started for the audit trail.
+    let clientsIdBefore: number | null | undefined;
+    if (reassign_client_to_invoice === true) {
+      clientsIdBefore = (await api.transactions.get(id)).clients_id ?? null;
     }
 
     let clientsIdWasSet = false;
@@ -331,7 +352,11 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
 
     let result: Awaited<ReturnType<typeof api.transactions.confirm>>;
     try {
-      result = await api.transactions.confirm(id, dist);
+      // Only pass options on the opt-in path so the default call shape stays
+      // exactly what it was.
+      result = reassign_client_to_invoice === true
+        ? await api.transactions.confirm(id, dist, { reassignClientToInvoice: true })
+        : await api.transactions.confirm(id, dist);
     } catch (error) {
       if (clientsIdWasSet && !isMutationIndeterminate(error)) {
         try {
@@ -370,19 +395,95 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
           throw cleanupError;
         }
       }
+      // Refused before the register call — no mutation happened, so this is a
+      // structured tool error the caller can act on, not a thrown failure.
+      if (error instanceof LinkedInvoiceClientMismatchError) return toolError(error);
       throw error;
     }
+
+    // Post-confirm receipt invariant: the register call returns no journal id,
+    // so the only way to know the receipt landed in the right client sub-ledger
+    // is to re-read the ledger. Never fails the confirm — the mutation already
+    // committed; a check that cannot run becomes a warning.
+    const hadInvoiceDistribution = dist?.some(d =>
+      (d.related_table === "sale_invoices" || d.related_table === "purchase_invoices") && !!d.related_id) ?? false;
+    let ledgerCheck: ReceiptLedgerCheckResult | undefined;
+    let clientsIdAfter: number | null | undefined;
+    const warnings: string[] = [];
+    if (hadInvoiceDistribution || reassign_client_to_invoice === true) {
+      try {
+        if (reassign_client_to_invoice === true) {
+          clientsIdAfter = (await api.transactions.get(id)).clients_id ?? null;
+        }
+        if (hadInvoiceDistribution) {
+          ledgerCheck = await verifyInvoiceReceiptLedger(api, id);
+        }
+      } catch {
+        // The upstream error text is untrusted and adds nothing actionable here;
+        // the transaction id is what the operator needs to follow up on.
+        warnings.push(
+          `Transaction ${id} IS confirmed, but the post-confirm ledger check could not run. ` +
+          `Re-read transaction ${id} and its registration journal to verify the receipt was booked under the ` +
+          `linked invoice's client.`
+        );
+      }
+    }
+    const clientsIdChanged = clientsIdAfter !== undefined && clientsIdBefore !== clientsIdAfter;
+
     logAudit({
       tool: "confirm_transaction", action: "CONFIRMED", entity_type: "transaction", entity_id: id,
       summary: `Confirmed transaction ${id}`,
-      details: { distributions: dist?.map(d => ({ related_table: d.related_table, related_id: d.related_id, related_sub_id: d.related_sub_id, amount: d.amount })) },
+      details: {
+        distributions: dist?.map(d => ({ related_table: d.related_table, related_id: d.related_id, related_sub_id: d.related_sub_id, amount: d.amount })),
+        ...(clientsIdChanged ? { clients_id_before: clientsIdBefore ?? null, clients_id_after: clientsIdAfter } : {}),
+        ...(ledgerCheck ? { ledger_check: ledgerCheck.ok ? "ok" : ledgerCheck.code } : {}),
+      },
     });
+
+    if (ledgerCheck && ledgerCheck.ok === false) {
+      const details = ledgerCheck.details;
+      return toolError({
+        error: `Transaction ${id} IS confirmed, but the resulting ledger entry failed the receipt check ` +
+          `(${ledgerCheck.code}). The mutation is committed — reverse it before retrying.`,
+        category: ledgerCheck.code,
+        mutation_occurred: true,
+        transaction_id: id,
+        ...(typeof details.journal_id === "number" ? { journal_id: details.journal_id } : {}),
+        transaction_clients_id: details.transaction_clients_id,
+        invoice_clients_id: details.invoice_clients_id,
+        details,
+        next_action: `invalidate_transaction ${id}, then confirm_transaction again with reassign_client_to_invoice: true`,
+      });
+    }
+    if (ledgerCheck?.ok === true) {
+      if (ledgerCheck.skipped === "no_invoice_distribution") {
+        warnings.push(
+          `Transaction ${id} IS confirmed, but the post-confirm ledger check was skipped: the re-read ` +
+          `transaction carries no invoice item, so the registration journal's client could not be verified.`
+        );
+      }
+      for (const note of ledgerCheck.unverified ?? []) {
+        warnings.push(`Post-confirm ledger check could not verify ${note}.`);
+      }
+    }
+
     return toolResponse({
       action: "confirmed",
       entity: "transaction",
       id,
       message: `Confirmed transaction ${id}.`,
       raw: result,
+      ...(warnings.length > 0 ? { warnings } : {}),
+      ...(clientsIdChanged || (ledgerCheck?.ok === true && ledgerCheck.journal_id !== undefined)
+        ? {
+          extra: {
+            ...(clientsIdChanged ? { clients_id_before: clientsIdBefore ?? null, clients_id_after: clientsIdAfter } : {}),
+            ...(ledgerCheck?.ok === true && ledgerCheck.journal_id !== undefined
+              ? { registration_journal_id: ledgerCheck.journal_id }
+              : {}),
+          },
+        }
+        : {}),
     });
   });
 

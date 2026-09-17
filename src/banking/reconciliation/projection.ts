@@ -46,6 +46,17 @@ export function exactMatchFingerprint(projection: ExactMatchProjection, threshol
       },
     ]),
     skipped: projection.skipped.map(row => ({ transaction_id: row.transaction_id, reason: row.reason })),
+    // A changed third-party-payer review set is plan drift: the reviewed page
+    // told the operator which payments were withheld from the confirm batch,
+    // and a row appearing or disappearing changes what execute would do.
+    third_party_payer_reviews: projection.thirdPartyPayerReviews.map(row => ({
+      transaction_id: row.transaction_id,
+      invoice_type: row.invoice_type,
+      invoice_id: row.invoice_id,
+      transaction_clients_id: row.transaction_clients_id,
+      invoice_clients_id: row.invoice_clients_id,
+      reason: row.reason,
+    })),
   });
 }
 

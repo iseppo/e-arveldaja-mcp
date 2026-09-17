@@ -110,6 +110,8 @@ Only do this when a `distribution` key is present.
 - JSON strings are legacy compatibility only; prefer passing the top-level array directly.
 - Only confirm one explicitly approved match at a time; do not auto-confirm ambiguous transactions.
 - When `result.matches` shows two or more candidates tied at the same top confidence for one transaction, skip auto-confirmation and ask the user which candidate is correct, mirroring the inter-account ambiguity handling.
+- **Third-party payer.** When a match carries `manual_review_required`, or the exact-confirm plan lists it under `third_party_payer_reviews`, the transaction's client (the bank payer) differs from the invoice's client. e-arveldaja books the receipt under the transaction's client, so a plain confirm would leave the invoice client's receivable open. Show both clients and ask the user whether this payment settles that invoice; if yes, call `confirm_transaction` with the same `distributions` and `reassign_client_to_invoice: true` (the bank payer name is kept). A confirm without that flag is refused with `linked_invoice_client_mismatch`; never work around it by editing the invoice's client.
+- After any invoice-linked confirm, read the tool's `ledger_check`/`warnings`: a `ledger_client_mismatch` or `registration_journal_not_found` result means the transaction IS confirmed but booked wrongly; follow its `next_action` (invalidate, then confirm again with `reassign_client_to_invoice: true`). `run_accounting_report` with `report: "receipt_client_alignment"` lists all existing mismatches.
 
 ### Single transaction mode
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { TransactionsApi } from "./transactions.api.js";
+import { LinkedInvoiceClientMismatchError, TransactionsApi } from "./transactions.api.js";
 import { cache } from "./base-resource.js";
 import type { HttpClient } from "../http-client.js";
 import { HttpError } from "../http-client.js";
@@ -578,5 +578,169 @@ describe("TransactionsApi.invalidate", () => {
     expect(patchCalls).toEqual([{ path: "/transactions/7/invalidate", body: {} }]);
     expect(cache.get("test:/journals:list:page=1")).toBeUndefined();
     expect(cache.get("test:/transactions:list:page=1")).toBeUndefined();
+  });
+});
+
+describe("TransactionsApi.confirm linked-invoice client guard", () => {
+  beforeEach(() => cache.invalidate());
+
+  function makeMismatchClient(txId: number, options: { patchHandler?: (call: PatchCall) => unknown } = {}) {
+    // Live EIS shape: the payer (Rahandusministeerium) is not the invoice's
+    // client (EIS), so the journal would land in the payer's sub-ledger.
+    return makeClient({
+      getById: (path) => {
+        if (path === `/transactions/${txId}`) return { id: txId, clients_id: 2309260 };
+        if (path === "/sale_invoices/77") return { id: 77, clients_id: 2327264 };
+        return undefined;
+      },
+      patchHandler: options.patchHandler,
+    });
+  }
+
+  const saleDistribution = [{ related_table: "sale_invoices", related_id: 77, amount: 1488 }];
+
+  it("refuses to register when the payer differs from the linked invoice's client", async () => {
+    const { client, patchCalls } = makeMismatchClient(20);
+    const api = new TransactionsApi(client);
+
+    const outcome = api.confirm(20, saleDistribution);
+    await expect(outcome).rejects.toBeInstanceOf(LinkedInvoiceClientMismatchError);
+    await expect(outcome).rejects.toMatchObject({
+      name: "LinkedInvoiceClientMismatchError",
+      category: "linked_invoice_client_mismatch",
+      transaction_id: 20,
+      transaction_clients_id: 2309260,
+      invoice_table: "sale_invoices",
+      invoice_id: 77,
+      invoice_clients_id: 2327264,
+      next_action: expect.stringContaining("reassign_client_to_invoice: true"),
+    });
+
+    // Refused before any mutation — no client update, no register call.
+    expect(patchCalls).toEqual([]);
+  });
+
+  it("exposes the guard fields as enumerable own properties for toolError", () => {
+    const error = new LinkedInvoiceClientMismatchError({
+      transactionId: 20,
+      transactionClientsId: 2309260,
+      invoiceTable: "sale_invoices",
+      invoiceId: 77,
+      invoiceClientsId: 2327264,
+    });
+
+    expect(Object.keys(error).sort()).toEqual([
+      "category",
+      "invoice_clients_id",
+      "invoice_id",
+      "invoice_table",
+      "name",
+      "next_action",
+      "transaction_clients_id",
+      "transaction_id",
+    ]);
+  });
+
+  it("reassigns the transaction to the invoice client before registering when approved", async () => {
+    const { client, patchCalls } = makeMismatchClient(21);
+    const api = new TransactionsApi(client);
+
+    await api.confirm(21, saleDistribution, { reassignClientToInvoice: true });
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/21", body: { clients_id: 2327264 } },
+      { path: "/transactions/21/register", body: saleDistribution },
+    ]);
+    // Only the client moves — the payer's name on the statement row is untouched.
+    expect(Object.keys(patchCalls[0]!.body as Record<string, unknown>)).toEqual(["clients_id"]);
+  });
+
+  it("restores the original payer client when the register call fails after reassignment", async () => {
+    const { client, patchCalls } = makeMismatchClient(22, {
+      patchHandler: ({ path }) => {
+        if (path === "/transactions/22/register") throw new Error("upstream rejected register");
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(22, saleDistribution, { reassignClientToInvoice: true }))
+      .rejects.toThrow("upstream rejected register");
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/22", body: { clients_id: 2327264 } },
+      { path: "/transactions/22/register", body: expect.any(Array) },
+      { path: "/transactions/22", body: { clients_id: 2309260 } },
+    ]);
+  });
+
+  it("makes no update call when the transaction already carries the invoice client", async () => {
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/23") return { id: 23, clients_id: 2327264 };
+        if (path === "/sale_invoices/77") return { id: 77, clients_id: 2327264 };
+        return undefined;
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await api.confirm(23, saleDistribution, { reassignClientToInvoice: true });
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/23/register", body: saleDistribution },
+    ]);
+  });
+
+  it("does not block when the linked invoices disagree about the client", async () => {
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/24") return { id: 24, clients_id: 2309260 };
+        if (path === "/sale_invoices/77") return { id: 77, clients_id: 2327264 };
+        if (path === "/sale_invoices/78") return { id: 78, clients_id: 999 };
+        return undefined;
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await api.confirm(24, [
+      { related_table: "sale_invoices", related_id: 77, amount: 1000 },
+      { related_table: "sale_invoices", related_id: 78, amount: 488 },
+    ]);
+
+    // One journal has one client, so a split-client distribution has no
+    // satisfiable expectation — it must not be refused.
+    expect(patchCalls).toEqual([
+      { path: "/transactions/24/register", body: expect.any(Array) },
+    ]);
+  });
+
+  it("does not block when the linked invoice carries no client of its own", async () => {
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/25") return { id: 25, clients_id: 2309260 };
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: null };
+        return undefined;
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await api.confirm(25, [{ related_table: "purchase_invoices", related_id: 88, amount: 25 }]);
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/25/register", body: expect.any(Array) },
+    ]);
+  });
+
+  it("leaves an account-only distribution unguarded and unread", async () => {
+    const { client, patchCalls } = makeClient({
+      getById: (path) => (path === "/transactions/26" ? { id: 26, clients_id: 2309260 } : undefined),
+    });
+    const api = new TransactionsApi(client);
+
+    await api.confirm(26, [{ related_table: "accounts", related_id: 5120, amount: 25 }]);
+
+    expect(patchCalls).toEqual([
+      { path: "/transactions/26/register", body: expect.any(Array) },
+    ]);
   });
 });

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { logAudit } from "../audit-log.js";
 import {
   BANK_CLASSIFICATION_PLAN_DOMAIN,
   createClassificationOperations,
@@ -9,6 +10,8 @@ import {
   type AccountingWorkflowApiOptions,
 } from "../__fixtures__/accounting-workflow.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+
+vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
 function makeOperations(apiOptions: AccountingWorkflowApiOptions = {}) {
   const api = createAccountingWorkflowApi(apiOptions);
@@ -318,6 +321,63 @@ describe("classification operations — P0-2 plan binding", () => {
     expect(outcome.value.mode).toBe("EXECUTED");
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
     expect(outcome.value.results[0]!.status).toBe("applied");
+  });
+
+  it("books the auto-created supplier invoice with an explicit client reassignment", async () => {
+    // The invoice is created for the rule-resolved supplier while the
+    // transaction's client came from bank counterparty resolution; without the
+    // opt-in the confirm would be refused as a linked-invoice client mismatch.
+    // The transaction's client (99) is not in the client list, so the supplier
+    // resolves by counterparty name to client 7 — the invoice's client.
+    const thirdPartyTx = { ...SAAS_TX, clients_id: 99 };
+    const group = saasGroup({ transactions: [thirdPartyTx] });
+    const { operations, api } = makeSaasOperations(thirdPartyTx, {
+      clientRows: [{ ...SAAS_CLIENT, id: 8, name: "OpenAI" }],
+      purchaseInvoiceRows: [{ ...SAAS_HISTORY_ROWS[0]!, clients_id: 8 }],
+    });
+    const handle = await dryRunHandle(operations, [group]);
+    vi.mocked(logAudit).mockClear();
+
+    const outcome = await operations.applyClassifications({
+      classificationsJson: { groups: [group] },
+      execute: true,
+      planHandle: handle,
+    });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.results[0]!.status).toBe("applied");
+    expect(api.transactions.confirm).toHaveBeenCalledWith(
+      42,
+      [expect.objectContaining({ related_table: "purchase_invoices" })],
+      { reassignClientToInvoice: true },
+    );
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({
+      entity_type: "transaction",
+      action: "CONFIRMED",
+      details: expect.objectContaining({ client_reassigned_to_invoice: true }),
+    }));
+    expect(outcome.value.results[0]!.notes).toEqual(
+      expect.arrayContaining([expect.stringMatching(/^Transaction 42: payer client \d+ replaced by supplier client \d+ /)]),
+    );
+  });
+
+  it("leaves the reassignment flag off the audit entry when the clients already match", async () => {
+    const { operations } = makeSaasOperations();
+    const handle = await dryRunHandle(operations, [saasGroup()]);
+    vi.mocked(logAudit).mockClear();
+
+    await operations.applyClassifications({
+      classificationsJson: { groups: [saasGroup()] },
+      execute: true,
+      planHandle: handle,
+    });
+
+    const confirmEntry = vi.mocked(logAudit).mock.calls
+      .map(([entry]) => entry)
+      .find(entry => entry.entity_type === "transaction" && entry.action === "CONFIRMED");
+    expect(confirmEntry).toBeDefined();
+    expect(confirmEntry!.details).not.toHaveProperty("client_reassigned_to_invoice");
   });
 
   it("execute_apply without a plan handle is refused with zero writes", async () => {

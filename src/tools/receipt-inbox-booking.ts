@@ -376,20 +376,36 @@ export async function createAndMaybeMatchPurchaseInvoice(
     try {
       const freshMatch = await api.transactions.get(matchedCandidate.transaction_id);
       if (isProjectTransaction(freshMatch)) {
+        // The invoice was just created from the receipt for its own supplier,
+        // while the matched transaction's client came from bank counterparty
+        // resolution. The supplier owns the payable sub-ledger, so this
+        // plan-approved flow moves the transaction to it rather than refusing.
+        const clientReassignedToInvoice =
+          freshMatch.clients_id != null && freshMatch.clients_id !== createdInvoice.clients_id;
         await api.transactions.confirm(matchedCandidate.transaction_id, [{
           related_table: "purchase_invoices",
           related_id: createdInvoice.id,
           amount: createdInvoice.base_gross_price ?? createdInvoice.gross_price ?? matchedCandidate.amount,
-        }]);
+        }], { reassignClientToInvoice: true });
         logAudit({
           tool: "process_receipt_batch", action: "CONFIRMED", entity_type: "transaction",
           entity_id: matchedCandidate.transaction_id,
           summary: `Receipt batch: confirmed transaction ${matchedCandidate.transaction_id} against invoice ${createdInvoice.id}`,
-          details: { amount: matchedCandidate.amount, invoice_id: createdInvoice.id },
+          details: {
+            amount: matchedCandidate.amount,
+            invoice_id: createdInvoice.id,
+            ...(clientReassignedToInvoice ? { client_reassigned_to_invoice: true } : {}),
+          },
         });
         consumedTransactionIds.add(matchedCandidate.transaction_id);
         linked = true;
         notes.push(`Linked transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}.`);
+        if (clientReassignedToInvoice) {
+          notes.push(
+            `Transaction ${matchedCandidate.transaction_id}: payer client ${freshMatch.clients_id} replaced by supplier client `
+            + `${createdInvoice.clients_id} so the payable is booked under the invoice's supplier (bank payer name kept).`
+          );
+        }
       } else {
         notes.push(`Matched transaction ${matchedCandidate.transaction_id} is no longer bookable (status ${freshMatch.status ?? "UNKNOWN"}); invoice was created without bank link.`);
       }

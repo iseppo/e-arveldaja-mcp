@@ -1,6 +1,7 @@
 import type { OperationOutcome } from "../operation-outcome.js";
 import type { AccountBalance } from "../tools/financial-statements.js";
 import type { MissingDocumentsCore } from "../tools/document-audit.js";
+import type { ReceiptClientAlignmentCore } from "./receipt-client-alignment.js";
 
 // Typed accounting-report operations (Task 14, PR 8C). MCP-free: inputs and
 // results are plain typed, UNWRAPPED domain data. The guided façade
@@ -17,7 +18,8 @@ export type AccountingReportType =
   | "profit_and_loss"
   | "aging"
   | "month_end"
-  | "missing_documents";
+  | "missing_documents"
+  | "receipt_client_alignment";
 
 export interface RunAccountingReportInput {
   readonly report: AccountingReportType;
@@ -139,13 +141,25 @@ export interface MonthEndResult {
  */
 export type MissingDocumentsResult = { readonly report: "missing_documents" } & MissingDocumentsCore;
 
+/**
+ * Invoice-receipt client-alignment audit. Carries the UNWRAPPED
+ * ReceiptClientAlignmentCore behind the report discriminant; the guided façade
+ * wraps the client names and `bank_account_name` at MCP output.
+ */
+export type ReceiptClientAlignmentReportResult = {
+  readonly report: "receipt_client_alignment";
+  /** The audited transaction-date range; `defaulted` marks the 12-month fallback. */
+  readonly window: { from: string; to: string; defaulted: boolean };
+} & ReceiptClientAlignmentCore;
+
 export type AccountingReportResult =
   | TrialBalanceResult
   | BalanceSheetResult
   | ProfitAndLossResult
   | AgingResult
   | MonthEndResult
-  | MissingDocumentsResult;
+  | MissingDocumentsResult
+  | ReceiptClientAlignmentReportResult;
 
 export interface ReportingOperations {
   run(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>>;

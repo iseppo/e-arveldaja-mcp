@@ -774,17 +774,27 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             continue;
           }
 
+          // The invoice was just created for the rule-resolved supplier, while the
+          // transaction's client came from CAMT counterparty resolution. The
+          // supplier owns the payable sub-ledger, so this plan-approved flow
+          // moves the transaction to it rather than refusing the confirm.
+          const clientReassignedToInvoice =
+            freshTransaction.clients_id != null && freshTransaction.clients_id !== supplierId;
           try {
             await api.transactions.confirm(transaction.id!, [{
               related_table: "purchase_invoices",
               related_id: invoiceId,
               amount: transaction.amount,
-            }]);
+            }], { reassignClientToInvoice: true });
             logAudit({
               tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
               entity_id: transaction.id!,
               summary: `Auto-confirmed transaction ${transaction.id} against invoice ${invoiceId}`,
-              details: { amount: transaction.amount, invoice_id: invoiceId },
+              details: {
+                amount: transaction.amount,
+                invoice_id: invoiceId,
+                ...(clientReassignedToInvoice ? { client_reassigned_to_invoice: true } : {}),
+              },
             });
           } catch (error) {
             recordPostCreateFailure(
@@ -796,6 +806,12 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             continue;
           }
 
+          if (clientReassignedToInvoice) {
+            notes.push(
+              `Transaction ${transaction.id}: payer client ${freshTransaction.clients_id} replaced by supplier client ${supplierId} `
+              + `so the payable is booked under the invoice's supplier (bank payer name kept).`
+            );
+          }
           linkedTransactionIds.push(transaction.id!);
         }
 

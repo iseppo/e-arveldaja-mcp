@@ -520,6 +520,10 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     expect(result.status).toBe("matched");
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm.mock.calls[0]![1][0].amount).toBe(100);
+    // The invoice was created from the receipt for its own supplier, while the
+    // matched transaction's client came from bank counterparty resolution — the
+    // confirm must carry the reassignment approval or it would be refused.
+    expect(api.transactions.confirm.mock.calls[0]![2]).toEqual({ reassignClientToInvoice: true });
   });
 
   it("uploads the exact immutable receipt snapshot bytes", async () => {

@@ -154,6 +154,18 @@ export interface TransactionItem {
   base_amount?: number;
   currency_rate?: number | null;
   cl_currencies_id?: string;
+  // Undocumented in the OpenAPI spec but returned live by GET /transactions/{id}
+  // for an invoice-linked item: the LINKED INVOICE's own client and identity.
+  // `clients_id` here is the invoice's client, which is NOT necessarily the
+  // transaction's payer (`Transaction.clients_id`) — see
+  // src/reporting/receipt-client-alignment.ts.
+  clients_id?: number | null;
+  client_name?: string | null;
+  item_number?: string | null;
+  item_type?: string | null;
+  item_date?: string | null;
+  item_sum?: number | null;
+  journals_title?: string | null;
 }
 
 export interface Transaction {

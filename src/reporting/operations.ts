@@ -1,11 +1,12 @@
 import type { OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud/shared.js";
-import type { PurchaseInvoice, SaleInvoice } from "../types/api.js";
+import type { PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
 import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
 import { computeAllBalances, sumCategory, gatherMonthEndScan } from "../tools/financial-statements.js";
 import { computeAgingBuckets, type AgingInvoiceInput } from "../tools/aging-analysis.js";
 import { computeMissingDocuments } from "../tools/document-audit.js";
+import { computeReceiptClientAlignment } from "./receipt-client-alignment.js";
 import type {
   AccountingReportResult,
   AgingSide,
@@ -49,6 +50,16 @@ function computeAgingSide(invoices: readonly AgingInvoiceInput[], today: string,
   };
 }
 
+/** Default audit window when the caller gives no `date_from`. */
+const RECEIPT_ALIGNMENT_WINDOW_MONTHS = 12;
+/** Same per-record fan-out concurrency journals.listAllWithPostings uses. */
+const RECEIPT_ALIGNMENT_BATCH_SIZE = 5;
+
+function shiftMonths(date: string, months: number): string {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(Date.UTC(year!, month! - 1 + months, day!)).toISOString().split("T")[0]!;
+}
+
 function getMonthLastDay(month: string): number {
   const [year, monthNumber] = month.split("-").map(Number);
   return new Date(Date.UTC(year!, monthNumber!, 0)).getUTCDate();
@@ -68,6 +79,7 @@ class ReportingOperationsImpl implements ReportingOperations {
       case "aging": return this.aging(input);
       case "month_end": return this.monthEnd(input);
       case "missing_documents": return this.missingDocuments(input);
+      case "receipt_client_alignment": return this.receiptClientAlignment(input);
       default:
         return fail("invalid_report", `Unknown report "${String((input as { report?: unknown }).report)}".`);
     }
@@ -252,6 +264,47 @@ class ReportingOperationsImpl implements ReportingOperations {
       ...(input.period?.to !== undefined ? { date_to: input.period.to } : {}),
     });
     return ok({ report: "missing_documents", ...core });
+  }
+
+  // Read-only audit: reads transactions, journals and the cached client list,
+  // then defers every judgement to the pure core. No mutating API method is
+  // reachable from here.
+  private async receiptClientAlignment(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>> {
+    const to = input.period?.to ?? new Date().toISOString().split("T")[0]!;
+    const defaulted = input.period?.from === undefined;
+    const from = input.period?.from ?? shiftMonths(to, -RECEIPT_ALIGNMENT_WINDOW_MONTHS);
+
+    // The invoice link lives in `items[]`, which ONLY GET /transactions/{id}
+    // returns — a list row never carries it. So the list is narrowed
+    // server-side to the confirmed rows in the window and each one is then read
+    // individually. Journals need no postings here (only id / clients_id /
+    // operation fields), and a registration journal's effective_date is the
+    // transaction date, so one plain listAll over the same window is enough.
+    const [listed, journals, allClients] = await Promise.all([
+      this.api.transactions.listAll({ status: "CONFIRMED", start_date: from, end_date: to }),
+      this.api.journals.listAll({ start_date: from, end_date: to }),
+      this.api.clients.listAllCached(120),
+    ]);
+
+    const confirmed = listed.filter(tx => tx.id != null && tx.status === "CONFIRMED" && !tx.is_deleted);
+    const transactions: Transaction[] = [];
+    for (let i = 0; i < confirmed.length; i += RECEIPT_ALIGNMENT_BATCH_SIZE) {
+      const batch = confirmed.slice(i, i + RECEIPT_ALIGNMENT_BATCH_SIZE);
+      transactions.push(...await Promise.all(batch.map(tx => this.api.transactions.get(tx.id!))));
+    }
+
+    const clientNames = new Map<number, string>();
+    for (const client of allClients) if (client.id !== undefined) clientNames.set(client.id, client.name);
+    const core = computeReceiptClientAlignment({ transactions, journals, clientNames, enableSales: this.enableSales });
+    return ok({
+      report: "receipt_client_alignment",
+      window: { from, to, defaulted },
+      ...core,
+      warnings: [
+        ...(defaulted ? [`No date_from given; audited the ${RECEIPT_ALIGNMENT_WINDOW_MONTHS} months ending ${to}. Pass date_from/date_to for another window.`] : []),
+        ...core.warnings,
+      ],
+    });
   }
 }
 

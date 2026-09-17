@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 81032,
-    "descriptionsBytes": 10195,
-    "inputSchemasBytes": 50192,
+    "toolsListBytes": 81866,
+    "descriptionsBytes": 10552,
+    "inputSchemasBytes": 50669,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 3627
@@ -1111,7 +1111,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Confirm a bank transaction by providing distribution rows. If the transaction has no clients_id (common for CAMT imports), pass clients_id — otherwise the API rejects with 'buyer or supplier is missing'. For invoice distributions, clients_id is auto-resolved from the invoice.",
+      "description": "Confirm a bank transaction by providing distribution rows. If the transaction has no clients_id (common for CAMT imports), pass clients_id — otherwise the API rejects with 'buyer or supplier is missing'. For invoice distributions, clients_id is auto-resolved from the invoice. A transaction whose client differs from the linked invoice's client is refused (linked_invoice_client_mismatch) because the journal takes its client from the transaction; approve the swap with reassign_client_to_invoice. After an invoice-linked confirm the resulting registration journal is re-read and checked against the invoice client and both postings.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1147,6 +1147,10 @@
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
+          },
+          "reassign_client_to_invoice": {
+            "description": "Explicit approval to replace a differing payer client on the transaction with the linked invoice's client before confirming (default false). Use when a third party paid someone else's invoice: without it the confirm is refused, because the journal's client comes from the transaction and the receivable/payable leg would land in the payer's sub-ledger. bank_account_name (the real payer's name) is never changed.",
+            "type": "boolean"
           }
         },
         "required": [

@@ -7,12 +7,56 @@ import type {
 } from "../../bank-posting-duplicate-guard.js";
 import type { OperationOutcome } from "../../operation-outcome.js";
 import type { OneSidedEurAmountErrorCode } from "./amount-resolution.js";
+import type {
+  ReceiptLedgerFailureCode,
+  ReceiptLedgerFailureDetails,
+} from "../receipt-ledger-check.js";
 
 // ---------------------------------------------------------------------------
 // Interfaces for the reconciliation typed operations. PURE type-only module.
 // ---------------------------------------------------------------------------
 
 // --- Exact-match confirm projection ------------------------------------------
+
+export type ExactConfirmClientResolution = "unchanged" | "set_missing";
+
+export type ThirdPartyPayerReviewReason = "third_party_payer" | "invoice_client_missing";
+
+/** A unique exact match whose payer client cannot be reconciled with the
+ * invoice's client, so it is reviewed instead of confirmed. `invoice_number` is
+ * RAW domain text — the presenter is the sole sandbox site. */
+export interface ThirdPartyPayerReview {
+  transaction_id: number;
+  date?: string;
+  amount: number;
+  currency: string;
+  invoice_type: "sale_invoice" | "purchase_invoice";
+  invoice_id: number;
+  invoice_number: string;
+  transaction_clients_id: number | null;
+  invoice_clients_id: number | null;
+  confidence: number;
+  reason: ThirdPartyPayerReviewReason;
+  next_action: string;
+}
+
+/** One failed post-confirm receipt-ledger invariant. The confirm ALREADY
+ * mutated, so this is reported as an execution error, never as a skip. */
+export interface ExactConfirmLedgerCheckFailure {
+  transaction_id: number;
+  journal_id?: number;
+  code: ReceiptLedgerFailureCode;
+  details: ReceiptLedgerFailureDetails;
+}
+
+export interface ExactConfirmLedgerChecks {
+  checked: number;
+  ok: number;
+  failures: ExactConfirmLedgerCheckFailure[];
+  /** The ledger re-read itself failed (e.g. network). Advisory — a check that
+   * could not run never turns a completed confirm into a failure. */
+  warnings?: string[];
+}
 
 export interface ExactConfirmDescriptor {
   transactionId: number;
@@ -26,6 +70,15 @@ export interface ExactConfirmDescriptor {
   invoiceNumber: string;
   invoiceClientsId: number | null;
   confidence: number;
+  /** How the confirm reconciles the transaction's client with the invoice's.
+   * "set_missing": the transaction carries no client, so the invoice's is
+   * copied onto it before registering. "unchanged": it already carries the
+   * invoice's client. A DIFFERING payer is never auto-confirmed — it leaves
+   * `confirms` entirely and becomes a ThirdPartyPayerReview, because
+   * journal.clients_id is copied from the transaction and would file the
+   * receivable/payable leg in the payer's sub-ledger. */
+  clientResolution: ExactConfirmClientResolution;
+  /** Derived view of `clientResolution` === "set_missing". */
   needsClientUpdate: boolean;
   // Cash-leg identity for the cross-mechanism duplicate guard (Task 3). The
   // dimension resolves to a bank account via resolveBankDimensions; direction
@@ -51,6 +104,10 @@ export interface ExactMatchProjection {
   totalUnconfirmed: number;
   confirms: ExactConfirmDescriptor[];
   skipped: Array<{ transaction_id?: number; reason: string }>;
+  /** Unique exact matches partitioned OUT of `confirms` because the payer is
+   * not the invoice client (or the invoice has no client). The invoice key is
+   * still consumed, so no second transaction can claim the same invoice. */
+  thirdPartyPayerReviews: ThirdPartyPayerReview[];
   // Populated by enrichExactMatchProjectionWithDuplicateGuard (Task 3).
   blockedDuplicateSuspects: BlockedDuplicateSuspect[];
   duplicateScanNote?: string;
@@ -237,6 +294,7 @@ export interface ExactConfirmExecution {
   projection: ExactMatchProjection;
   executionReport: PlanExecutionReport;
   threshold: number;
+  ledgerChecks: ExactConfirmLedgerChecks;
 }
 
 export interface InterAccountInput {

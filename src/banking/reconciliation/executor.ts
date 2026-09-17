@@ -8,6 +8,7 @@ import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { logAudit } from "../../audit-log.js";
 import { reportProgress } from "../../progress.js";
 import { MutationIndeterminateError } from "../../mutation-outcome.js";
+import { LinkedInvoiceClientMismatchError } from "../../api/transactions.api.js";
 import { PlanStoreError, type PlanRecord } from "../../plan-store.js";
 import { isRecord } from "../../record-utils.js";
 import { BookingGuard, type InterAccountResolution } from "../../booking-guard.js";
@@ -48,16 +49,24 @@ import {
 } from "./inter-account-matcher.js";
 import { computeExactMatchProjection } from "./duplicate-policy.js";
 import {
+  checkReceiptLedger,
+  invoiceLinksFromTransaction,
+  type LinkedReceiptInvoice,
+} from "../receipt-ledger-check.js";
+import {
   exactMatchFingerprint,
   buildInterAccountPlanCommandProjections,
   interAccountFingerprint,
 } from "./projection.js";
 import { exactMatchReviewCommands } from "./presenter.js";
+import type { PlanExecutionReport } from "../../plan-execution.js";
 import type {
   BlockedDuplicateSuspect,
   ExactConfirmExecution,
   ExactConfirmExecutionInput,
   ExactConfirmInput,
+  ExactConfirmLedgerCheckFailure,
+  ExactConfirmLedgerChecks,
   ExactConfirmPreview,
   ExactMatchProjection,
   InterAccountConfirmAction,
@@ -232,6 +241,23 @@ export async function runSuggestMatches(
           possibleDuplicatePostings = scan.suspects;
         }
       }
+      // Every reason this row needs a human before it is confirmed. They are
+      // joined into the ONE manual_review_required field rather than each
+      // assignment overwriting the last, so a row carrying several problems
+      // (a third-party payer on a partially-paid invoice) reports all of them.
+      const manualReviewNotes: string[] = [];
+      if (tx.clients_id != null && bestMatch.clients_id != null && bestMatch.clients_id !== tx.clients_id) {
+        manualReviewNotes.push(
+          `Payer client ${tx.clients_id} differs from the matched ${bestMatch.type}'s client ${bestMatch.clients_id}; `
+          + "confirming as-is files the receipt in the payer's sub-ledger. "
+          + "Confirm with reassign_client_to_invoice: true or match manually.");
+      }
+      if (bestMatch.partially_paid_warning) {
+        manualReviewNotes.push("Invoice is PARTIALLY_PAID; verify the remaining open balance before confirming.");
+      }
+      if (crossCurrency) {
+        manualReviewNotes.push("Cross-currency match: tx amount is in a different currency than the invoice gross. Compute the correct distribution amount manually before confirming.");
+      }
       // RAW domain strings — the presenter is the sole sandbox site and wraps
       // every free-text field (description/bank_account_name/ref_number,
       // best_match.number/client_name/ref_number, possible_duplicate_postings)
@@ -264,11 +290,8 @@ export async function runSuggestMatches(
         ...(possibleDuplicatePostings && block_on_duplicate === true
           ? { duplicate_blocked: true }
           : {}),
-        ...(bestMatch.partially_paid_warning
-          ? { manual_review_required: "Invoice is PARTIALLY_PAID; verify the remaining open balance before confirming." }
-          : {}),
-        ...(crossCurrency
-          ? { manual_review_required: "Cross-currency match: tx amount is in a different currency than the invoice gross. Compute the correct distribution amount manually before confirming." }
+        ...(manualReviewNotes.length > 0
+          ? { manual_review_required: manualReviewNotes.join(" ") }
           : {}),
       });
       const matchCurrency = transactionCurrency(tx);
@@ -383,10 +406,11 @@ function issueExactMatchPlan(
       total_unconfirmed: projection.totalUnconfirmed,
       would_confirm: projection.confirms.length,
       skipped: projection.skipped.length,
+      third_party_payer_reviews: projection.thirdPartyPayerReviews.length,
     },
     totals: {},
     exclusions: projection.skipped.map(row => stripUndefinedDeep({ transaction_id: row.transaction_id, reason: row.reason })),
-    reviews: [],
+    reviews: projection.thirdPartyPayerReviews.map(row => stripUndefinedDeep({ ...row })),
   });
   return runtimeSafetyContext.planStore.issue(BANK_RECONCILIATION_PLAN_DOMAIN, planInput);
 }
@@ -444,12 +468,126 @@ function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjecti
           return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: descriptor.transactionId, outcome: "confirmed" }] };
         } catch (err) {
           if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
+          // A differing payer leaves `confirms` as a third-party-payer review,
+          // so the api guard should never fire here. Mapped anyway: if the
+          // ledger changed between projection and mutate, the reason the
+          // register was refused must reach the report, not a generic failure.
+          if (err instanceof LinkedInvoiceClientMismatchError) {
+            return { outcome: "failed", error_code: "linked_invoice_client_mismatch", mutation_occurred: false };
+          }
           return { outcome: "failed", error_code: "confirm_failed", mutation_occurred: false };
         }
       },
     });
   }
   return commands;
+}
+
+/**
+ * Post-confirm receipt-ledger invariant for the exact-match batch (section D).
+ *
+ * The register call returns no journal id and copies `journal.clients_id` from
+ * the TRANSACTION, so a confirm that "succeeded" can still have filed the
+ * receivable/payable leg under the wrong client. This runs ONE journals read
+ * after every command has executed (`transactions.confirm` already invalidates
+ * the `/journals` cache, so the read is fresh) and asserts the invariant for
+ * each transaction that actually completed its confirm.
+ *
+ * Fail-safe: the confirms are already committed, so a ledger read that throws
+ * becomes a warning, never a failure of the batch.
+ */
+async function runPostConfirmLedgerChecks(
+  api: ApiContext,
+  projection: ExactMatchProjection,
+  executionReport: PlanExecutionReport,
+): Promise<ExactConfirmLedgerChecks> {
+  const completedIds = new Set(executionReport.command_partitions.completed.map(item => item.command_id));
+  const confirmed = projection.confirms.filter(
+    descriptor => completedIds.has(reconInvoiceConfirmCommandId(descriptor.transactionId)));
+  if (confirmed.length === 0) return { checked: 0, ok: 0, failures: [] };
+
+  const failures: ExactConfirmLedgerCheckFailure[] = [];
+  // No cause text is carried on any of these warnings: an upstream body would
+  // be untrusted here, and the presenter is the only module allowed to sandbox.
+  const warnings: string[] = [];
+  let checked = 0;
+  let ok = 0;
+
+  let journals;
+  try {
+    journals = await api.journals.listAllWithPostings();
+  } catch {
+    return {
+      checked: 0,
+      ok: 0,
+      failures: [],
+      warnings: ["Post-confirm receipt-ledger verification could not be completed because the ledger read failed. "
+        + "The confirmations above are done; verify the registration journals with list_journals."],
+    };
+  }
+
+  for (const descriptor of confirmed) {
+    // Scoped per transaction: one unreadable invoice must not cancel the
+    // verification of every other confirm in the batch.
+    try {
+      const tx = await api.transactions.get(descriptor.transactionId);
+      // The confirmed transaction's own items are what the ledger recorded. A
+      // transaction that carries no invoice link has no invoice client to
+      // compare against, so there is nothing to assert.
+      const links = invoiceLinksFromTransaction(tx);
+      if (links.length === 0) continue;
+      // Counted from here on: this transaction has an invoice leg, so its check
+      // was attempted whether or not the reads below succeed.
+      checked += 1;
+      const invoices: LinkedReceiptInvoice[] = [];
+      for (const link of links) {
+        if (link.table === "sale_invoices") {
+          const invoice = await api.saleInvoices.get(link.id);
+          invoices.push({
+            table: "sale_invoices",
+            id: link.id,
+            amount: link.amount,
+            clients_id: invoice?.clients_id ?? null,
+            ledger_accounts_id: invoice?.receivable_accounts_id ?? null,
+          });
+        } else {
+          const invoice = await api.purchaseInvoices.get(link.id);
+          invoices.push({
+            table: "purchase_invoices",
+            id: link.id,
+            amount: link.amount,
+            clients_id: invoice?.clients_id ?? null,
+            ledger_accounts_id: invoice?.liability_accounts_id ?? null,
+          });
+        }
+      }
+
+      const result = checkReceiptLedger({ tx, invoices, journals });
+      if (result.ok) {
+        ok += 1;
+        continue;
+      }
+      failures.push({
+        transaction_id: descriptor.transactionId,
+        ...(typeof result.details.journal_id === "number" ? { journal_id: result.details.journal_id } : {}),
+        code: result.code,
+        details: result.details,
+      });
+      logAudit({
+        tool: "auto_confirm_exact_matches",
+        action: "LEDGER_CHECK_FAILED",
+        entity_type: "transaction",
+        entity_id: descriptor.transactionId,
+        summary: `Post-confirm receipt-ledger check failed for transaction ${descriptor.transactionId}: ${result.code}`,
+        details: result.details,
+      });
+    } catch {
+      warnings.push(
+        `Post-confirm receipt-ledger verification could not be completed for transaction ${descriptor.transactionId}. `
+        + "It IS confirmed; verify its registration journal with list_journals.");
+    }
+  }
+  return { checked, ok, failures, ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
 async function loadExactMatchProjection(
@@ -522,7 +660,8 @@ export async function executeExactConfirm(
   }
 
   const executionReport = await executeReconciliationCommands(buildExactMatchCommands(api, projection));
-  return { ok: true, data: { projection, executionReport, threshold } };
+  const ledgerChecks = await runPostConfirmLedgerChecks(api, projection, executionReport);
+  return { ok: true, data: { projection, executionReport, threshold, ledgerChecks } };
 }
 
 // === Inter-account transfers =================================================

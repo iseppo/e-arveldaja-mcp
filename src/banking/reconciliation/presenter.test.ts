@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   renderSuggestCompact,
   renderExactMatchCompact,
+  renderExactMatchPayload,
   renderInterAccountCompact,
 } from "./presenter.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../../response-budget.js";
@@ -10,6 +11,7 @@ import { reconInvoiceConfirmCommandId } from "../../tools/bank-reconciliation-pl
 import type { PlanExecutionReport } from "../../plan-execution.js";
 import type {
   ExactConfirmDescriptor,
+  ExactConfirmLedgerChecks,
   ExactMatchProjection,
   InterAccountMatchResult,
   PairResult,
@@ -75,6 +77,7 @@ function confirmDescriptor(index: number, extra: Partial<ExactConfirmDescriptor>
     invoiceNumber: `OST-${index}`,
     invoiceClientsId: 5,
     confidence: 99,
+    clientResolution: "unchanged",
     needsClientUpdate: false,
     accountsDimensionsId: 7,
     direction: "C",
@@ -88,10 +91,44 @@ function makeExactProjection(rows: number, extra: Partial<ExactMatchProjection> 
     totalUnconfirmed: rows,
     confirms: Array.from({ length: rows }, (_, index) => confirmDescriptor(index)),
     skipped: [],
+    thirdPartyPayerReviews: [],
     blockedDuplicateSuspects: [],
     ...extra,
   };
 }
+
+const thirdPartyReview = {
+  transaction_id: 1210,
+  date: "2026-09-10",
+  amount: 1488,
+  currency: "EUR",
+  invoice_type: "sale_invoice" as const,
+  invoice_id: 77,
+  invoice_number: "ARV-<77>",
+  transaction_clients_id: 2309260,
+  invoice_clients_id: 2327264,
+  confidence: 95,
+  reason: "third_party_payer" as const,
+  next_action: "Review the payer",
+};
+
+const ledgerChecks: ExactConfirmLedgerChecks = {
+  checked: 1,
+  ok: 0,
+  failures: [{
+    transaction_id: 1,
+    journal_id: 28013080,
+    code: "ledger_client_mismatch",
+    details: {
+      transaction_id: 1,
+      transaction_clients_id: 2309260,
+      invoice_clients_id: 2327264,
+      invoice_table: "sale_invoices",
+      invoice_id: 77,
+      journal_id: 28013080,
+    },
+  }],
+};
 
 function executionReport(completedTxIds: number[], stopTxId?: number): PlanExecutionReport {
   return {
@@ -283,6 +320,79 @@ describe("renderExactMatchCompact", () => {
     expect(summary.counts?.blocked_duplicates).toBe(1);
     expect(summary.counts?.duplicates).toBe(1);
     expect(summary.warnings?.some(w => w.code === "blocked_duplicate_suspect")).toBe(true);
+  });
+
+  it("surfaces third-party-payer reviews as counted warnings, not as confirms", () => {
+    const projection = makeExactProjection(0, { thirdPartyPayerReviews: [thirdPartyReview] });
+    const { summary } = renderExactMatchCompact({ mode: "DRY_RUN", projection, planHandle: "P" });
+    expect(summary.counts?.third_party_payer_reviews).toBe(1);
+    expect(summary.counts?.would_confirm).toBe(0);
+    const warning = summary.warnings?.find(w => w.code === "third_party_payer");
+    expect(warning?.item_id).toBe("1210");
+    expect(warning?.message).toContain("2327264");
+  });
+
+  it("reports a broken post-confirm ledger invariant as a blocker on an otherwise clean execute", () => {
+    const projection = makeExactProjection(1);
+    const { summary } = renderExactMatchCompact({
+      mode: "EXECUTED",
+      projection,
+      executionReport: executionReport([0]),
+      ledgerChecks,
+      operationHandle: "op-led",
+    });
+    expect(summary.counts?.confirmed).toBe(1);
+    expect(summary.counts?.errors).toBe(1);
+    expect(summary.status).toBe("partial");
+    const blocker = summary.blockers?.find(b => b.code === "ledger_client_mismatch");
+    expect(blocker?.severity).toBe("blocker");
+    expect(blocker?.message).toContain("IS confirmed");
+    // The generic "did not complete" blocker must NOT fire: the confirm ran.
+    expect(summary.blockers?.some(b => b.code === "confirm_incomplete")).toBe(false);
+  });
+});
+
+describe("renderExactMatchPayload", () => {
+  it("renders third-party-payer reviews with a wrapped invoice number and counts them in the summary", () => {
+    const projection = makeExactProjection(0, { thirdPartyPayerReviews: [thirdPartyReview] });
+    const payload = renderExactMatchPayload({ mode: "DRY_RUN", projection, planHandle: "P" });
+    const reviews = payload.third_party_payer_reviews as Array<Record<string, unknown>>;
+    expect(reviews).toHaveLength(1);
+    expect(String(reviews[0]!.invoice_number)).toMatch(OCR);
+    expect(reviews[0]!.reason).toBe("third_party_payer");
+    expect((payload.summary as Record<string, unknown>).third_party_payer_reviews).toBe(1);
+    expect(payload.results).toEqual([]);
+    // The reviewed rows also reach the batch contract's needs_review slot.
+    expect(((payload.execution as Record<string, unknown>).needs_review as unknown[])).toHaveLength(1);
+  });
+
+  it("reports ledger-check failures as errors alongside the confirmed result", () => {
+    const projection = makeExactProjection(1);
+    const payload = renderExactMatchPayload({
+      mode: "EXECUTED",
+      projection,
+      executionReport: executionReport([0]),
+      ledgerChecks,
+    });
+    expect((payload.results as Array<Record<string, unknown>>)[0]!.status).toBe("confirmed");
+    const errors = payload.errors as Array<Record<string, unknown>>;
+    expect(errors).toHaveLength(1);
+    expect(String(errors[0]!.reason)).toContain("ledger_client_mismatch");
+    expect(String(errors[0]!.reason)).toContain("journal 28013080");
+    expect((payload.summary as Record<string, unknown>).error_count).toBe(1);
+    expect(payload.ledger_checks).toBe(ledgerChecks);
+  });
+
+  it("surfaces an unavailable ledger check as a warning, not an error", () => {
+    const projection = makeExactProjection(1);
+    const payload = renderExactMatchPayload({
+      mode: "EXECUTED",
+      projection,
+      executionReport: executionReport([0]),
+      ledgerChecks: { checked: 0, ok: 0, failures: [], warnings: ["ledger read failed"] },
+    });
+    expect(payload.errors).toEqual([]);
+    expect(payload.warnings).toEqual(["ledger read failed"]);
   });
 });
 
