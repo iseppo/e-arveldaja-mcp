@@ -6,6 +6,14 @@
 
 - **`update_purchase_invoice` no longer 500s when items omit `cl_fringe_benefits_id`** ([#62](https://github.com/iseppo/e-arveldaja-mcp/issues/62)). `create_purchase_invoice` defaulted the field to 1 (no fringe benefit) but `update_purchase_invoice` sent items through verbatim, so the very payload that created an invoice failed on update with a raw `null value in column "cl_fringe_benefits_id" ... violates not-null constraint` from the API. The API GET also omits the field, so even header-only updates (which re-send the existing lines) were exposed. Update now applies the same structural item defaults as create (`cl_fringe_benefits_id` → 1, `amount` → 1, explicit values kept) to caller-supplied and re-sent items alike.
 
+### Changed
+
+- **Dependencies updated to current.** `@llamaindex/liteparse` 2.14.3 → 2.14.6, `zod` 4.5.4 → 4.6.5, plus dev tooling (`@babel/parser` 8.0.5, `@types/node` 26.6.1, `vite` 8.3.0). Declared floors raised to the tested versions per the dependency-floor policy. The eight `testdata/tool-surface/*.json` contract pins are byte-identical under zod 4.6, so no tool schema changed. `vitest` stays on 4.1.11: vitest 5 requires Node ≥ 22.12 while CI still runs the unit tests on Node 20. `@modelcontextprotocol/sdk` 1.30.0 is still the latest release.
+
+### Security
+
+- **Cleared a moderate advisory in a transitive dependency.** `hono` below 4.13.5 (reached only through `@modelcontextprotocol/sdk`'s HTTP transport, which this stdio-only server never loads) had a `toSSG()` path-escape, a `parseBody()` nesting DoS and a query-parser fragment issue (GHSA-gqvv-2mrq-wpjv, GHSA-g6gw-c38x-mqfc, GHSA-crvj-82cr-hjcx). The locked tree now resolves `hono` 4.13.8; `npm audit` reports zero known vulnerabilities.
+
 ### Added
 
 - **Wrong-company write protection for multi-connection servers** ([#61](https://github.com/iseppo/e-arveldaja-mcp/issues/61)). The active connection lives only in the server process, so an MCP host that respawns the server (crash, idle timeout, reconnect) silently starts it back on the default connection — and a write intended for company B lands in company A's books. Two defences:
