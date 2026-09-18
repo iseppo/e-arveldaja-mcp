@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.25.7] - 2026-09-18
+
 ### Fixed
 
 - **`update_purchase_invoice` no longer 500s when items omit `cl_fringe_benefits_id`** ([#62](https://github.com/iseppo/e-arveldaja-mcp/issues/62)). `create_purchase_invoice` defaulted the field to 1 (no fringe benefit) but `update_purchase_invoice` sent items through verbatim, so the very payload that created an invoice failed on update with a raw `null value in column "cl_fringe_benefits_id" ... violates not-null constraint` from the API. The API GET also omits the field, so even header-only updates (which re-send the existing lines) were exposed. Update now applies the same structural item defaults as create (`cl_fringe_benefits_id` → 1, `amount` → 1, explicit values kept) to caller-supplied and re-sent items alike.
